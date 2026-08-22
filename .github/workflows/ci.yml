@@ -98,17 +98,21 @@ jobs:
           # macOS: cargo lists many test binaries in parallel and hits EAGAIN.
           # Raise nofile and serialize package test runs so listing is sequential.
           jobs=""
+          extra=""
           if [ "${{ runner.os }}" = "macOS" ]; then
             ulimit -n 65536 || true
             jobs="--jobs 1"
+            # Listing ~1500 compiler unit tests otherwise EAGAIN (EMFILE).
+            extra="-- --test-threads=1"
+            export RUST_TEST_THREADS=1
           fi
           n=0
-          until cargo test --workspace --lib --tests --bins $jobs ${{ matrix.features.flags }}; do
+          until cargo test --workspace --lib --tests --bins $jobs ${{ matrix.features.flags }} $extra; do
             n=$((n + 1))
             if [ "$n" -ge 5 ]; then
               exit 1
             fi
-            sleep 3
+            sleep 5
           done
 
       - name: Language harness (`coil test`)

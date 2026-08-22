@@ -323,7 +323,9 @@ fn licm_float_expression_chain(ops: &mut Vec<IlOp>) -> bool {
 
 /// Hoist a pure invariant stack expression (tuple/array/dict, int arith, concat,
 /// `len`) into a preheader temp. DIV/MOD/calls stay in the loop (they can trap
-/// or have effects).
+/// or have effects). `ArrayLen` stays in the loop when the body can grow or
+/// rebind an array (`ArrayPush`, `MakeArray`, calls) — inlined `Vec::push` is
+/// not a LICM barrier, and hoisting `len(a)` makes `while len(a) < n` hang.
 fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>) -> bool {
     let info = sp::analyze(ops);
     let mut loops = find_natural_loops(ops);
@@ -333,8 +335,11 @@ fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>) -> bool {
             continue;
         }
         let stored = slots_stored_in_loop(ops, &lp);
+        let allow_array_len = !loop_may_change_array_length(ops, &lp);
         for start in lp.body_start()..lp.latch {
-            let Some((end, chain)) = collect_invariant_expr(ops, start, lp.latch, &stored) else {
+            let Some((end, chain)) =
+                collect_invariant_expr(ops, start, lp.latch, &stored, allow_array_len)
+            else {
                 continue;
             };
             let temp = max_slot_used(ops).saturating_add(1);
@@ -363,6 +368,7 @@ fn collect_invariant_expr(
     start: usize,
     latch: usize,
     stored: &HashSet<u32>,
+    allow_array_len: bool,
 ) -> Option<(usize, Vec<IlOp>)> {
     let mut end = start;
     let mut height = 0i32;
@@ -370,7 +376,7 @@ fn collect_invariant_expr(
     let mut last_good: Option<(usize, Vec<IlOp>)> = None;
     while end < latch {
         let op = &ops[end];
-        if !is_pure_invariant_op(op, stored) {
+        if !is_pure_invariant_op(op, stored, allow_array_len) {
             break;
         }
         let Some(delta) = sp::stack_delta(op) else {
@@ -389,7 +395,7 @@ fn collect_invariant_expr(
     last_good
 }
 
-fn is_pure_invariant_op(op: &IlOp, stored: &HashSet<u32>) -> bool {
+fn is_pure_invariant_op(op: &IlOp, stored: &HashSet<u32>, allow_array_len: bool) -> bool {
     match op {
         IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } => true,
         IlOp::Load { slot, .. } => !stored.contains(slot),
@@ -404,9 +410,8 @@ fn is_pure_invariant_op(op: &IlOp, stored: &HashSet<u32>) -> bool {
                 && !stored.contains(&(*b as u32))
         }
         IlOp::Byte { byte, .. } => match *byte.bytecode() {
-            Instruction::MakeDict | Instruction::FORMAT | Instruction::STRINGIFY | Instruction::ArrayLen => {
-                true
-            }
+            Instruction::MakeDict | Instruction::FORMAT | Instruction::STRINGIFY => true,
+            Instruction::ArrayLen => allow_array_len,
             Instruction::ADD
             | Instruction::SUB
             | Instruction::MUL
@@ -731,6 +736,41 @@ pub(super) fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
         });
     }
     out
+}
+
+/// True when the loop can change some array's length or identity. `ArrayPush`
+/// is not a general LICM barrier (inlined `Vec::push`), but `len` is not
+/// invariant in that case.
+fn loop_may_change_array_length(ops: &[IlOp], lp: &NaturalLoop) -> bool {
+    for i in lp.header..=lp.latch {
+        match &ops[i] {
+            IlOp::MakeArray { .. } | IlOp::HostInvoke { .. } | IlOp::Entry { .. } => return true,
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::ArrayPush
+                        | Instruction::HostInvoke
+                        | Instruction::CALL
+                        | Instruction::MakeArray
+                        | Instruction::FfiInvoke
+                ) =>
+            {
+                return true;
+            }
+            other
+                if other.as_encode_byte().is_some_and(|b| {
+                    matches!(
+                        *b.bytecode(),
+                        Instruction::ArrayPush | Instruction::MakeArray
+                    )
+                }) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub(super) fn loop_has_barrier(ops: &[IlOp], lp: &NaturalLoop) -> bool {
@@ -1925,6 +1965,35 @@ mod tests {
             matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen)
         });
         assert!(!in_body, "ArrayLen must leave the loop body");
+    }
+
+    #[test]
+    fn does_not_hoist_array_len_when_loop_pushes() {
+        // Inlined `Vec::push` is ArrayPush, not HostInvoke, so the loop is not a
+        // general LICM barrier — but `len(a)` still changes each iteration.
+        let mut ops = vec![
+            IlOp::MakeArray {
+                arity: 0,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 0, loc: loc() },
+        ];
+        ops.extend(counted_header());
+        ops.extend([
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::byte(Byte::new(Instruction::ArrayLen)),
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::byte(Byte::new(Instruction::ArrayPush)),
+            IlOp::Pop { loc: loc() },
+        ]);
+        ops.extend(counted_latch());
+        licm(&mut ops);
+        let in_body = body_between_header_and_latch(&ops).iter().any(|op| {
+            matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen)
+        });
+        assert!(in_body, "ArrayLen of a growing array must stay in the loop");
     }
 
     #[test]
