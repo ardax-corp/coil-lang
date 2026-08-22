@@ -930,9 +930,11 @@ pub struct Compiler {
     current_function_qualified: Option<String>,
     /// `functions` map key for the active function (overload-aware).
     current_function_table_key: Option<String>,
-    /// Bytecode span `(start, end)` per function for tiny inlining.
+    /// Peel/unroll spans for the module currently being compiled.
     fn_bytecode_spans: HashMap<String, (usize, usize)>,
-    /// Module namespace that defined each [`Self::fn_bytecode_spans`] key.
+    /// Callee spans kept across files for tiny-inline (COI-125).
+    fn_inline_spans: HashMap<String, (usize, usize)>,
+    /// Module namespace that defined each [`Self::fn_inline_spans`] key.
     fn_defining_module: HashMap<String, String>,
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
@@ -1036,6 +1038,7 @@ impl Default for Compiler {
             current_function_qualified: None,
             current_function_table_key: None,
             fn_bytecode_spans: HashMap::new(),
+            fn_inline_spans: HashMap::new(),
             fn_defining_module: HashMap::new(),
             fn_debug_locals: HashMap::new(),
             suppress_match_fusion_barrier: false,

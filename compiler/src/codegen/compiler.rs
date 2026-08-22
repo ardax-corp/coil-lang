@@ -1174,7 +1174,17 @@ impl Compiler {
     fn record_fn_span(&mut self, key: String, start: usize, end: usize) {
         self.fn_defining_module
             .insert(key.clone(), self.namespace.clone());
+        self.fn_inline_spans.insert(key.clone(), (start, end));
         self.fn_bytecode_spans.insert(key, (start, end));
+    }
+
+    fn resolve_inline_span(&self, fqn: &str) -> Option<(usize, usize, bool)> {
+        let &(start, end) = self.fn_inline_spans.get(fqn)?;
+        if end > start {
+            Some((start, end, false))
+        } else {
+            self.resolve_fn_span(fqn)
+        }
     }
 
     fn callee_is_cross_module(&self, fqn: &str) -> bool {
@@ -1203,7 +1213,7 @@ impl Compiler {
         bytecode: &mut Vec<Byte>,
     ) -> bool {
         // Incomplete self-bodies are not safe to tiny-inline (missing else/rest).
-        let Some((start, end, provisional)) = self.resolve_fn_span(fqn) else {
+        let Some((start, end, provisional)) = self.resolve_inline_span(fqn) else {
             return false;
         };
         if provisional {
@@ -15324,11 +15334,10 @@ impl Compiler {
         self.force_niche_option = false;
         self.compiling_pair_mode = false;
         self.pair_value_context = false;
-        // Keep callee IL spans across `compile_module` so later files can
-        // tiny-inline small helpers (COI-125). Reset only on a fresh buffer
-        // (same rule as the shared constant/string pools).
+        // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
+        self.fn_bytecode_spans.clear();
         if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
-            self.fn_bytecode_spans.clear();
+            self.fn_inline_spans.clear();
             self.fn_defining_module.clear();
             self.fn_debug_locals.clear();
         }
