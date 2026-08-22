@@ -5,7 +5,7 @@
 //! Coil has no `#[inline]` / `#[no_inline]` attrs yet; [`CallInfo`] carries
 //! those bits for when they exist and for tests.
 
-use crate::il::{EntryKind, IlOp, Label};
+use crate::il::{EntryKind, IlOp};
 use common::Instruction;
 
 /// Thresholds for [`should_inline_function`].
@@ -17,6 +17,10 @@ pub struct InlineCostOptions {
     pub hot_call_threshold: usize,
     /// Relaxed budget when [`CallInfo::force_inline`].
     pub cold_call_threshold: usize,
+    /// Copy callee IL from a previously compiled module (COI-125).
+    pub inline_across_modules: bool,
+    /// Stricter budget than [`Self::max_inline_cost`] for cross-module copies.
+    pub max_cross_module_inline_cost: usize,
 }
 
 impl Default for InlineCostOptions {
@@ -25,12 +29,14 @@ impl Default for InlineCostOptions {
             max_inline_cost: 100,
             hot_call_threshold: 50,
             cold_call_threshold: 200,
+            inline_across_modules: true,
+            max_cross_module_inline_cost: 50,
         }
     }
 }
 
 /// Call-site facts for the inliner.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct CallInfo {
     pub recursive: bool,
     pub hot: bool,
@@ -38,6 +44,23 @@ pub struct CallInfo {
     pub force_inline: bool,
     /// Language `#[no_inline]` once it exists.
     pub no_inline: bool,
+    /// Callee body was compiled under a different module namespace.
+    pub cross_module: bool,
+    /// Inherent `pub` method, or a free function (module `fn` has no `pub`).
+    pub visible: bool,
+}
+
+impl Default for CallInfo {
+    fn default() -> Self {
+        Self {
+            recursive: false,
+            hot: false,
+            force_inline: false,
+            no_inline: false,
+            cross_module: false,
+            visible: true,
+        }
+    }
 }
 
 /// Weighted size of a callee body. Calls cost more than arithmetic.
@@ -53,11 +76,7 @@ pub fn estimate_inline_cost(ops: &[IlOp]) -> usize {
 }
 
 fn op_weight(op: &IlOp) -> usize {
-    if is_callish(op) {
-        25
-    } else {
-        1
-    }
+    if is_callish(op) { 25 } else { 1 }
 }
 
 fn is_callish(op: &IlOp) -> bool {
@@ -88,8 +107,16 @@ pub fn should_inline_function(cost: usize, call: &CallInfo, opts: &InlineCostOpt
     if call.recursive {
         return false;
     }
+    if !call.visible {
+        return false;
+    }
+    if call.cross_module && !opts.inline_across_modules {
+        return false;
+    }
     let limit = if call.force_inline {
         opts.cold_call_threshold
+    } else if call.cross_module {
+        opts.max_cross_module_inline_cost
     } else if call.hot {
         opts.hot_call_threshold
     } else {
@@ -111,7 +138,10 @@ mod tests {
     #[test]
     fn estimate_counts_calls_heavier() {
         let arith = vec![
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Bin {
                 op: Instruction::ADD,
@@ -147,5 +177,15 @@ mod tests {
         call.hot = true;
         assert!(!should_inline_function(60, &call, &opts));
         assert!(should_inline_function(40, &call, &opts));
+        call.hot = false;
+        call.cross_module = true;
+        assert!(should_inline_function(50, &call, &opts));
+        assert!(!should_inline_function(51, &call, &opts));
+        let mut off = opts.clone();
+        off.inline_across_modules = false;
+        assert!(!should_inline_function(3, &call, &off));
+        call.cross_module = false;
+        call.visible = false;
+        assert!(!should_inline_function(3, &call, &opts));
     }
 }

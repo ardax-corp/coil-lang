@@ -16965,6 +16965,12 @@ impl Checker {
         }
     }
 
+    /// Whether `fqn` (`Owner::method`) is an inherent method, and its visibility.
+    pub fn inherent_method_visibility(&self, fqn: &str) -> Option<Visibility> {
+        let (owner, method) = fqn.rsplit_once("::")?;
+        self.methods.get(owner)?.get(method).map(|(vis, _)| *vis)
+    }
+
     /// Number of *user-defined* trait dict slots expected by a generic
     /// function.  Returns 0 for non-generic functions or functions whose
     /// constraints are all built-in classes (Num / Ord / Eq / Show).

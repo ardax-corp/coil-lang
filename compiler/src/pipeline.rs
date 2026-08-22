@@ -972,6 +972,10 @@ impl Pipeline {
         // the prologue on the second call). See
         // `Compiler::compile_module` for the operand
         // adjustment details.
+        //
+        // Callee IL spans stay on the shared `Compiler` so a later
+        // file can tiny-inline small helpers from a dependency
+        // without archive-level metadata (COI-125).
         let bytecode = self
             .compiler_lazy_mut()
             .compile_module(namespace.as_str(), &mut ast);

@@ -926,6 +926,10 @@ use string::{format, to_bytes};
         let methods = c.methods.get("Foo").unwrap();
         let (vis, _) = methods.get("hidden").unwrap();
         assert_eq!(*vis, Visibility::Private);
+        assert_eq!(
+            c.inherent_method_visibility("Foo::hidden"),
+            Some(Visibility::Private)
+        );
     }
 
     #[test]
@@ -937,6 +941,10 @@ use string::{format, to_bytes};
         let methods = c.methods.get("Foo").unwrap();
         let (vis, _) = methods.get("visible").unwrap();
         assert_eq!(*vis, Visibility::Public);
+        assert_eq!(
+            c.inherent_method_visibility("Foo::visible"),
+            Some(Visibility::Public)
+        );
     }
 
     // ---- Instantiation ----

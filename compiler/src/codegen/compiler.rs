@@ -1171,6 +1171,41 @@ impl Compiler {
         }
     }
 
+    fn record_fn_span(&mut self, key: String, start: usize, end: usize) {
+        self.fn_defining_module
+            .insert(key.clone(), self.namespace.clone());
+        self.fn_inline_spans.insert(key.clone(), (start, end));
+        self.fn_bytecode_spans.insert(key, (start, end));
+    }
+
+    fn resolve_inline_span(&self, fqn: &str) -> Option<(usize, usize, bool)> {
+        let &(start, end) = self.fn_inline_spans.get(fqn)?;
+        if end > start {
+            Some((start, end, false))
+        } else {
+            self.resolve_fn_span(fqn)
+        }
+    }
+
+    fn callee_is_cross_module(&self, fqn: &str) -> bool {
+        let def = self
+            .fn_defining_module
+            .get(fqn)
+            .or_else(|| self.fn_defining_module.get(strip_overload_key(fqn)));
+        match def {
+            Some(module) => module != &self.namespace,
+            None => false,
+        }
+    }
+
+    /// Free module functions are importable; inherent methods need `pub`.
+    fn callee_is_visible_for_inline(&self, lookup: &str) -> bool {
+        match self.checker.inherent_method_visibility(lookup) {
+            Some(parser::ast::Visibility::Private) => false,
+            Some(parser::ast::Visibility::Public) | None => true,
+        }
+    }
+
     fn try_inline_direct_call_into(
         &mut self,
         fqn: &str,
@@ -1178,7 +1213,7 @@ impl Compiler {
         bytecode: &mut Vec<Byte>,
     ) -> bool {
         // Incomplete self-bodies are not safe to tiny-inline (missing else/rest).
-        let Some((start, end, provisional)) = self.resolve_fn_span(fqn) else {
+        let Some((start, end, provisional)) = self.resolve_inline_span(fqn) else {
             return false;
         };
         if provisional {
@@ -1196,9 +1231,9 @@ impl Compiler {
         let cost = super::inline_cost::estimate_inline_cost(&ops);
         let site = super::inline_cost::CallInfo {
             recursive,
-            hot: false,
-            force_inline: false,
-            no_inline: false,
+            cross_module: self.callee_is_cross_module(fqn),
+            visible: self.callee_is_visible_for_inline(&lookup),
+            ..Default::default()
         };
         if !super::inline_cost::should_inline_function(cost, &site, &self.inline_cost) {
             return false;
@@ -5883,8 +5918,7 @@ impl Compiler {
         self.bytecode.push_return();
 
         let body_end = self.bytecode.len();
-        self.fn_bytecode_spans
-            .insert(spec_name.clone(), (body_start, body_end));
+        self.record_fn_span(spec_name.clone(), body_start, body_end);
         let entry = self.fn_entry_labels.get(&spec_name).copied();
         self.bytecode
             .record_func_with_sp(spec_name, entry, body_start, body_end, entry_sp);
@@ -10370,8 +10404,7 @@ impl Compiler {
                 let body_start = self.bytecode.len();
                 // Provisional span so self-recursive peels can see the opening
                 // predicate while the body is still streaming into `self.bytecode`.
-                self.fn_bytecode_spans
-                    .insert(table_key.clone(), (body_start, body_start));
+                self.record_fn_span(table_key.clone(), body_start, body_start);
                 let body_op_start = self.bytecode.ops().len();
                 let prev_field_keys = std::mem::take(&mut self.field_key_slots);
                 self.emit_field_key_prologue(body);
@@ -10399,8 +10432,7 @@ impl Compiler {
                 self.current_function_table_key = prev_fn_table_key;
                 self.field_key_slots = prev_field_keys;
                 let body_end = self.bytecode.len();
-                self.fn_bytecode_spans
-                    .insert(table_key.clone(), (body_start, body_end));
+                self.record_fn_span(table_key.clone(), body_start, body_end);
                 let entry = self.fn_entry_labels.get(&table_key).copied();
                 self.bytecode
                     .record_func_with_sp(table_key.clone(), entry, body_start, body_end, entry_sp);
@@ -15302,13 +15334,16 @@ impl Compiler {
         self.force_niche_option = false;
         self.compiling_pair_mode = false;
         self.pair_value_context = false;
+        // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
         self.fn_bytecode_spans.clear();
+        if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
+            self.fn_inline_spans.clear();
+            self.fn_defining_module.clear();
+            self.fn_debug_locals.clear();
+        }
         // `use` aliases are per-module; leftovers from a prior
         // `compile_module` would otherwise redirect bare names.
         self.aliases.clear();
-        if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
-            self.fn_debug_locals.clear();
-        }
         self.loop_stack.clear();
         self.loop_bbs.clear();
         // Constant pool is shared across multi-file `compile_module`

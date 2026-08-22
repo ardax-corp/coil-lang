@@ -3683,6 +3683,109 @@ fn run() -> int { return add(1, 2); }
         );
     }
 
+    fn count_calls(bc: &[Byte]) -> usize {
+        use common::Instruction;
+        bc.iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
+            .count()
+    }
+
+    fn compile_util_then_entry(util: &str, entry: &str, tweak: impl FnOnce(&mut Compiler)) -> Vec<Byte> {
+        let mut ast_util = Pratt::default().parse(util).expect("parse util");
+        let mut ast_entry = Pratt::default().parse(entry).expect("parse entry");
+        let mut compiler = Compiler::default();
+        tweak(&mut compiler);
+        let _ = compiler.compile_module("util", &mut ast_util);
+        let _ = compiler.compile_module("", &mut ast_entry);
+        let errors: Vec<_> = compiler
+            .messages
+            .iter()
+            .filter(|m| *m.kind() == reporting::MessageKind::ERROR)
+            .map(|m| m.message().to_string())
+            .collect();
+        assert!(errors.is_empty(), "compile errors: {errors:?}");
+        compiler.finalize_bytecode();
+        compiler.bytecode_vec()
+    }
+
+    #[test]
+    fn cross_module_tiny_add_is_inlined() {
+        let util = "fn add(int a, int b) -> int { return a + b; }";
+        let entry = "use util::add;\nfn run() -> int { return add(1, 2); }";
+        let inlined = compile_util_then_entry(util, entry, |_| {});
+        let kept = compile_util_then_entry(util, entry, |c| {
+            c.inline_cost.inline_across_modules = false;
+        });
+        assert!(
+            count_calls(&kept) > count_calls(&inlined),
+            "cross-module tiny add should inline; inlined={:?} kept={:?}",
+            inlined.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+            kept.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn cross_module_large_fn_keeps_call() {
+        let util = "fn bulky(int a, int b) -> int {\n\
+             let t0 = a + b;\n\
+             let t1 = t0 + a;\n\
+             let t2 = t1 + b;\n\
+             let t3 = t2 + a;\n\
+             let t4 = t3 + b;\n\
+             let t5 = t4 + a;\n\
+             let t6 = t5 + b;\n\
+             let t7 = t6 + a;\n\
+             let t8 = t7 + b;\n\
+             let t9 = t8 + a;\n\
+             let t10 = t9 + b;\n\
+             let t11 = t10 + a;\n\
+             return t11;\n\
+         }";
+        let entry = "use util::bulky;\nfn run() -> int { return bulky(1, 2); }";
+        let default_bc = compile_util_then_entry(util, entry, |_| {});
+        let disabled = compile_util_then_entry(util, entry, |c| {
+            c.inline_cost.inline_across_modules = false;
+        });
+        assert_eq!(
+            count_calls(&default_bc),
+            count_calls(&disabled),
+            "cost > max_cross_module_inline_cost should keep CALL; opcodes={:?}",
+            default_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn cross_module_does_not_inline_private_method() {
+        let util = "class Box { n: int, }\n\
+             impl Box {\n\
+               fn secret() -> int { return 2; }\n\
+               pub fn shown() -> int { return 1; }\n\
+             }";
+        let mut ast = Pratt::default().parse(util).expect("parse util");
+        let mut compiler = Compiler::default();
+        let _ = compiler.compile_module("util", &mut ast);
+        let secret = compiler
+            .checker()
+            .inherent_method_visibility("util::Box::secret")
+            .or_else(|| compiler.checker().inherent_method_visibility("Box::secret"));
+        let shown = compiler
+            .checker()
+            .inherent_method_visibility("util::Box::shown")
+            .or_else(|| compiler.checker().inherent_method_visibility("Box::shown"));
+        assert_eq!(secret, Some(parser::ast::Visibility::Private));
+        assert_eq!(shown, Some(parser::ast::Visibility::Public));
+
+        let opts = crate::codegen::inline_cost::InlineCostOptions::default();
+        let mut call = crate::codegen::inline_cost::CallInfo {
+            cross_module: true,
+            visible: secret == Some(parser::ast::Visibility::Public),
+            ..Default::default()
+        };
+        assert!(!crate::codegen::inline_cost::should_inline_function(3, &call, &opts));
+        call.visible = shown == Some(parser::ast::Visibility::Public);
+        assert!(crate::codegen::inline_cost::should_inline_function(3, &call, &opts));
+    }
+
     #[test]
     fn is_tiny_inline_il_rejects_jump_span() {
         use crate::il::{IlJumpKind, IlOp, Label};
