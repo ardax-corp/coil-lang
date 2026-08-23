@@ -3,10 +3,17 @@
 //! `None ⊂ Basic ⊂ Standard ⊂ Aggressive` on enable flags. `Size` and `Debug`
 //! are independent axes (code size vs. preserving named slots / debug shape).
 
+use std::fmt;
+use std::str::FromStr;
+
 use super::OptimizeOptions;
 
 /// Compiler optimization level. Default is [`Self::Standard`] (current pipeline).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// Wired through [`crate::Pipeline::set_opt_level`]. Canonical names serialize
+/// as lowercase strings (`"standard"`) for config files.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum OptLevel {
     /// Algebraic / const-fold peeps only.
     None,
@@ -24,18 +31,9 @@ pub enum OptLevel {
 }
 
 impl OptLevel {
-    /// Parse CLI tokens: `none`/`0`, `basic`/`1`, `standard`/`2`,
-    /// `aggressive`/`3`, `size`/`s`, `debug`/`g`.
+    /// Parse CLI / config tokens, including `-O2` / `O2` / `2` / `standard`.
     pub fn parse(name: &str) -> Result<Self, ()> {
-        Ok(match name {
-            "none" | "0" | "n" => Self::None,
-            "basic" | "1" => Self::Basic,
-            "standard" | "2" => Self::Standard,
-            "aggressive" | "3" => Self::Aggressive,
-            "size" | "s" => Self::Size,
-            "debug" | "g" => Self::Debug,
-            _ => return Err(()),
-        })
+        name.parse()
     }
 
     /// `OptimizeOptions` for this level.
@@ -73,6 +71,42 @@ impl OptLevel {
 
     pub fn inline_across_modules(self) -> bool {
         matches!(self, Self::Standard | Self::Aggressive | Self::Size)
+    }
+}
+
+impl FromStr for OptLevel {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let t = s.trim();
+        let t = t
+            .strip_prefix("-O")
+            .or_else(|| t.strip_prefix("-o"))
+            .or_else(|| t.strip_prefix('O'))
+            .unwrap_or(t)
+            .trim();
+        Ok(match t.to_ascii_lowercase().as_str() {
+            "none" | "0" | "n" => Self::None,
+            "basic" | "1" => Self::Basic,
+            "standard" | "2" => Self::Standard,
+            "aggressive" | "3" => Self::Aggressive,
+            "size" | "s" => Self::Size,
+            "debug" | "g" => Self::Debug,
+            _ => return Err(()),
+        })
+    }
+}
+
+impl fmt::Display for OptLevel {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::None => "none",
+            Self::Basic => "basic",
+            Self::Standard => "standard",
+            Self::Aggressive => "aggressive",
+            Self::Size => "size",
+            Self::Debug => "debug",
+        })
     }
 }
 
@@ -188,6 +222,16 @@ mod tests {
         assert_eq!(OptLevel::parse("g").unwrap(), OptLevel::Debug);
         assert!(OptLevel::parse("fast").is_err());
         assert_eq!(OptLevel::default(), OptLevel::Standard);
+        assert_eq!(OptLevel::parse("-O2").unwrap(), OptLevel::Standard);
+        assert_eq!(OptLevel::parse("-O0").unwrap(), OptLevel::None);
+        assert_eq!(OptLevel::parse("-Os").unwrap(), OptLevel::Size);
+        assert_eq!(OptLevel::parse("-Og").unwrap(), OptLevel::Debug);
+        assert_eq!(OptLevel::parse("O3").unwrap(), OptLevel::Aggressive);
+        assert_eq!(OptLevel::Standard.to_string(), "standard");
+        let json = serde_json::to_string(&OptLevel::Standard).unwrap();
+        assert_eq!(json, "\"standard\"");
+        let back: OptLevel = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, OptLevel::Standard);
     }
 
     #[test]
