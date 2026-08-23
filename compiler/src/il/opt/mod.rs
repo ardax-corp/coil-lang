@@ -315,6 +315,7 @@ fn optimize_once_at(
         // LICM still seeds at 0; entry_sp plumbing is mem_fwd-critical today.
         let _ = entry_sp;
         stats::run_named_pass(ops, collect, "licm", g, |ops| {
+            super::licm::set_pgo_prioritize_hot_licm(opts.pgo_prioritize_hot_loops);
             super::licm::licm(ops);
             0
         });

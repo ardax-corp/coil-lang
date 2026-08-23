@@ -1,5 +1,6 @@
 //! Loop-invariant code motion for Known-SP natural loops.
 
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use common::{DebugLoc, Instruction};
@@ -7,6 +8,15 @@ use common::{DebugLoc, Instruction};
 use super::bounds;
 use super::op::{IlJumpKind, IlOp, Label};
 use super::sp;
+
+thread_local! {
+    static PREFER_HOT: Cell<bool> = const { Cell::new(true) };
+}
+
+/// Prefer hotter loop headers when a PGO profile is loaded (COI-191).
+pub fn set_pgo_prioritize_hot_licm(on: bool) {
+    PREFER_HOT.with(|c| c.set(on));
+}
 
 /// Hoist loop-invariant producers out of Known-SP natural loops: Const/Load,
 /// BinSlot*, tuple/array/dict construction, non-trapping int arith, FORMAT
@@ -51,8 +61,7 @@ pub fn licm(ops: &mut Vec<IlOp>) {
 /// further out — reusing `t` is what avoids leaving a `LOAD new; STORE t` copy.
 fn licm_cast_hoist_triple(ops: &mut Vec<IlOp>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = find_natural_loops(ops);
-    loops.sort_by_key(|l| std::cmp::Reverse(l.header));
+    let mut loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
@@ -122,8 +131,7 @@ pub(super) fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> 
 /// whether anything was rewritten.
 fn licm_cast_int_to_float(ops: &mut Vec<IlOp>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = find_natural_loops(ops);
-    loops.sort_by_key(|l| std::cmp::Reverse(l.header));
+    let mut loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
@@ -209,10 +217,7 @@ fn is_cast_int_to_float(op: &IlOp) -> bool {
 
 fn licm_stack_producers(ops: &mut Vec<IlOp>) {
     let info = sp::analyze(ops);
-    let loops = find_natural_loops(ops);
-    // Process innermost-first (later header index first) so index shifts stay local.
-    let mut loops = loops;
-    loops.sort_by_key(|l| std::cmp::Reverse(l.header));
+    let loops = ordered_loops(ops);
 
     for lp in loops {
         if !info.sp_before(lp.header).is_known() {
@@ -282,8 +287,7 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>) {
 /// into a temp slot, so the loop gets a fresh stack value on every iteration.
 fn licm_float_expression_chain(ops: &mut Vec<IlOp>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = find_natural_loops(ops);
-    loops.sort_by_key(|loop_| std::cmp::Reverse(loop_.header));
+    let mut loops = ordered_loops(ops);
 
     for lp in loops {
         if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp) {
@@ -328,8 +332,7 @@ fn licm_float_expression_chain(ops: &mut Vec<IlOp>) -> bool {
 /// not a LICM barrier, and hoisting `len(a)` makes `while len(a) < n` hang.
 fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = find_natural_loops(ops);
-    loops.sort_by_key(|loop_| std::cmp::Reverse(loop_.header));
+    let mut loops = ordered_loops(ops);
     for lp in loops {
         if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp) {
             continue;
@@ -548,8 +551,7 @@ fn is_float_arith(instruction: Instruction) -> bool {
 /// into preheader temps. Returns true when a transform was applied.
 fn licm_string_keys(ops: &mut Vec<IlOp>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = find_natural_loops(ops);
-    loops.sort_by_key(|l| std::cmp::Reverse(l.header));
+    let mut loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
@@ -703,6 +705,22 @@ impl NaturalLoop {
     pub(super) fn body_start(&self) -> usize {
         self.header + 1
     }
+}
+
+fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
+    let mut loops = find_natural_loops(ops);
+    let prefer = PREFER_HOT.with(|c| c.get());
+    if prefer {
+        if let Some(p) = crate::profile::current_profile() {
+            loops.sort_by_key(|l| {
+                let heat = p.block_counts.get(&(l.header as u32)).copied().unwrap_or(0);
+                (std::cmp::Reverse(heat), std::cmp::Reverse(l.header))
+            });
+            return loops;
+        }
+    }
+    loops.sort_by_key(|l| std::cmp::Reverse(l.header));
+    loops
 }
 
 pub(super) fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
