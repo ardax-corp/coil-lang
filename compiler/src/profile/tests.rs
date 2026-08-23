@@ -86,6 +86,20 @@ fn profile_round_trip_json_and_hits() {
 }
 
 #[test]
+fn profile_binary_round_trip_and_optional_timestamp() {
+    let mut p = ProfileData::new();
+    p.hit_function("main");
+    assert!(p.timestamp > 0);
+    let bytes = p.to_binary().expect("encode");
+    let q = ProfileData::from_binary(&bytes).expect("decode");
+    assert_eq!(q.function_counts.get("main"), Some(&1));
+    assert_eq!(q.timestamp, p.timestamp);
+    let old = "{\"version\":1,\"function_counts\":{},\"block_counts\":{},\"branch_counts\":{}}";
+    let r = ProfileData::from_json(old).expect("legacy json");
+    assert_eq!(r.timestamp, 0);
+}
+
+#[test]
 fn load_rejects_wrong_version_and_empty() {
     match ProfileData::from_json("{\"version\":99}") {
         Err(LoadError::Version { found: 99, expected: PROFILE_VERSION }) => {}

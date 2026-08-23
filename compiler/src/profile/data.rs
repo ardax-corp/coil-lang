@@ -1,20 +1,24 @@
-//! Versioned PGO profile (COI-132).
+//! Versioned PGO profile (COI-132 / COI-180).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bump when the JSON schema changes. Loaders refuse a newer version and
 /// ignore a mismatched older file by returning [`LoadError::Version`].
 pub const PROFILE_VERSION: u32 = 1;
 
 /// Runtime counts keyed by function name, block id, and branch site id.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ProfileData {
     pub version: u32,
     pub function_counts: BTreeMap<String, u64>,
     pub block_counts: BTreeMap<u32, u64>,
     /// `(taken, not_taken)` for a conditional jump site id.
     pub branch_counts: BTreeMap<u32, (u64, u64)>,
+    /// Unix seconds when the profile was created or last written.
+    #[serde(default)]
+    pub timestamp: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +31,7 @@ impl ProfileData {
     pub fn new() -> Self {
         Self {
             version: PROFILE_VERSION,
+            timestamp: unix_secs(),
             ..Self::default()
         }
     }
@@ -88,8 +93,8 @@ impl ProfileData {
             let _ = write!(branches, "\"{k}\":[{t},{n}]");
         }
         format!(
-            "{{\"version\":{},\"function_counts\":{{{fns}}},\"block_counts\":{{{blocks}}},\"branch_counts\":{{{branches}}}}}",
-            self.version
+            "{{\"version\":{},\"function_counts\":{{{fns}}},\"block_counts\":{{{blocks}}},\"branch_counts\":{{{branches}}},\"timestamp\":{}}}",
+            self.version, self.timestamp
         )
     }
 
@@ -118,12 +123,45 @@ impl ProfileData {
         if let Some(obj) = json_object_field(s, "branch_counts") {
             parse_branch_map(obj, &mut data.branch_counts)?;
         }
+        data.timestamp = json_u64_field(s, "timestamp").unwrap_or(0);
+        Ok(data)
+    }
+
+    /// bincode blob (COI-180).
+    pub fn to_binary(&self) -> Result<Vec<u8>, LoadError> {
+        bincode::serialize(self).map_err(|e| LoadError::Parse(e.to_string()))
+    }
+
+    pub fn from_binary(bytes: &[u8]) -> Result<Self, LoadError> {
+        let data: Self =
+            bincode::deserialize(bytes).map_err(|e| LoadError::Parse(e.to_string()))?;
+        if data.version != PROFILE_VERSION {
+            return Err(LoadError::Version {
+                found: data.version,
+                expected: PROFILE_VERSION,
+            });
+        }
         Ok(data)
     }
 }
 
+fn unix_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 fn json_escape(s: &str) -> String {
     s.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn json_u64_field(s: &str, key: &str) -> Option<u64> {
+    let pat = format!("\"{key}\":");
+    let i = s.find(&pat)?;
+    let rest = s[i + pat.len()..].trim_start();
+    let n: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    n.parse().ok()
 }
 
 fn json_u32_field(s: &str, key: &str) -> Option<u32> {
