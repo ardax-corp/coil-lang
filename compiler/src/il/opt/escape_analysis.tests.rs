@@ -46,6 +46,7 @@ fn isolated() -> OptimizeOptions {
         ssa_gvn: false,
         escape_analysis: true,
                 branch_optimization: false,
+                block_reordering: false,
     }
 }
 

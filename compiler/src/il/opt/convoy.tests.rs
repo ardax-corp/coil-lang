@@ -1752,6 +1752,7 @@
                 ssa_gvn: false,
                 escape_analysis: false,
                 branch_optimization: false,
+                block_reordering: false,
             },
             3,
             &mut Vec::new(),
