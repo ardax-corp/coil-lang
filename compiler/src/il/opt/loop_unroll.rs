@@ -32,21 +32,17 @@ pub fn unroll_loops_pgo(ops: &mut Vec<IlOp>, factor: usize, prefer_hot: bool) ->
     if factor == 0 || ops.len() < 6 {
         return 0;
     }
-    let profile = if prefer_hot {
-        crate::profile::current_profile()
-    } else {
-        None
-    };
     let mut unrolled = 0usize;
     loop {
         let Some(info) = find_unrollable_loops(ops)
             .into_iter()
             .filter(|lp| lp.trips as usize <= factor)
             .max_by_key(|lp| {
-                let heat = profile
-                    .as_ref()
-                    .and_then(|p| p.block_counts.get(&(lp.header as u32)).copied())
-                    .unwrap_or(0);
+                let heat = if prefer_hot {
+                    crate::profile::block_heat_current(ops, lp.header)
+                } else {
+                    0
+                };
                 (heat, lp.header)
             })
         else {

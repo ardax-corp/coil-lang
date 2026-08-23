@@ -152,6 +152,7 @@ impl IlModule {
             .saturating_add(1);
 
         crate::profile::begin_pgo_module();
+        let instrumenting = crate::profile::pgo_instrumenting();
         for body in &mut self.funcs {
             crate::profile::next_pgo_function(&body.meta.name);
             opt::optimize_at_with_labels(
@@ -161,15 +162,17 @@ impl IlModule {
                 pool,
                 &mut next_label,
             );
+            if instrumenting {
+                // Counters sit on cleanup mid-IR; skip CFG-rewriting decision opts.
+                crate::profile::instrument_for_pgo_named_mut(&mut body.ops, &body.meta.name);
+                continue;
+            }
             super::gvn::cfg_gvn_with(&mut body.ops, per.ssa_gvn);
             if run_seek_back_edge {
                 opt::seek_normalize_back_edges(&mut body.ops, body.meta.entry_sp);
             }
             if run_slot_promote_tell {
                 opt::slot_promote_at(&mut body.ops, body.meta.entry_sp);
-            }
-            if crate::profile::pgo_instrumenting() {
-                crate::profile::instrument_for_pgo_named_mut(&mut body.ops, &body.meta.name);
             }
         }
 

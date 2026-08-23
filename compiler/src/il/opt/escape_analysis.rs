@@ -95,17 +95,10 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
 
 fn allocate_on_stack_pgo(ops: &mut Vec<IlOp>, info: &EscapeInfo, prefer_hot: bool) {
     let mut sites: Vec<&AllocSite> = info.stack_allocatable().collect();
-    if prefer_hot {
-        if let Some(p) = crate::profile::current_profile() {
-            sites.sort_by_key(|s| {
-                std::cmp::Reverse(
-                    p.block_counts
-                        .get(&(s.make_idx as u32))
-                        .copied()
-                        .unwrap_or(0),
-                )
-            });
-        }
+    if prefer_hot && crate::profile::current_profile().is_some() {
+        sites.sort_by_key(|s| {
+            std::cmp::Reverse(crate::profile::block_heat_current(ops, s.make_idx))
+        });
     }
     if sites.is_empty() {
         return;

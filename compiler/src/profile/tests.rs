@@ -82,7 +82,131 @@ fn profile_round_trip_json_and_hits() {
     assert_eq!(q.function_counts.get("main"), Some(&2));
     assert_eq!(q.block_counts.get(&0), Some(&1));
     assert_eq!(q.branch_counts.get(&0), Some(&(1, 1)));
-    assert!(json.contains("\"version\":1"));
+    assert!(json.contains("\"version\":2"));
+}
+
+#[test]
+fn prepare_ignores_fn_on_checksum_mismatch() {
+    begin_pgo_module();
+    next_pgo_function("main");
+    let ops = terminating_then();
+    let map = heat::instrument_map_for(&ops, "main");
+    let good = fn_shape_checksum(&ops, &map, "main");
+    let mut profile = ProfileData::new();
+    profile.fn_checksums.insert("main".into(), good ^ 1);
+    profile.block_counts.insert(0, 99);
+    profile.branch_counts.insert(0, (1, 100));
+    set_current_profile(Some(profile));
+    prepare_function_profile(&ops);
+    assert!(fn_profile_ignored());
+    assert_eq!(block_heat_current(&ops, 0), 0);
+    let bp = branch_profile(&ops, &current_profile().unwrap());
+    assert!(bp.taken.is_empty() && bp.not_taken.is_empty());
+    set_current_profile(None);
+    begin_pgo_module();
+}
+
+#[test]
+fn prepare_caches_map_when_checksum_matches() {
+    begin_pgo_module();
+    next_pgo_function("main");
+    let ops = terminating_then();
+    let map = heat::instrument_map_for(&ops, "main");
+    let good = fn_shape_checksum(&ops, &map, "main");
+    let mut profile = ProfileData::new();
+    profile.fn_checksums.insert("main".into(), good);
+    profile.block_counts.insert(0, 42);
+    set_current_profile(Some(profile));
+    prepare_function_profile(&ops);
+    assert!(!fn_profile_ignored());
+    assert!(cached_instrument_map().is_some());
+    assert_eq!(block_heat_current(&ops, 0), 42);
+    set_current_profile(None);
+    begin_pgo_module();
+}
+
+#[test]
+fn instrument_path_skips_branch_layout() {
+    use crate::il::opt::{optimize, OptimizeOptions};
+    set_pgo_instrument(true);
+    begin_pgo_module();
+    next_pgo_function("main");
+    let mut ops = terminating_then();
+    optimize(&mut ops, &OptimizeOptions::default(), &mut Vec::new());
+    let inverted = ops.iter().any(|op| {
+        matches!(
+            op,
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                ..
+            }
+        )
+    });
+    assert!(
+        !inverted,
+        "pgo-instrument must not run layout after cleanup"
+    );
+    set_pgo_instrument(false);
+    begin_pgo_module();
+}
+
+#[test]
+fn instrument_dump_use_profile_layout_smoke() {
+    use crate::il::opt::{optimize, OptimizeOptions};
+
+    // Phase A: instrument compile records checksums on cleanup IR.
+    set_pgo_instrument(true);
+    begin_pgo_module();
+    next_pgo_function("main");
+    let mut inst = terminating_then();
+    optimize(&mut inst, &OptimizeOptions::default(), &mut Vec::new());
+    let map = instrument_for_pgo(&inst);
+    let cs = fn_shape_checksum(&inst, &map, "main");
+    let mut keys = std::collections::BTreeMap::new();
+    keys.insert(0, 20);
+    let mut blocks = std::collections::BTreeMap::new();
+    blocks.insert(0, 20);
+    let mut branches = std::collections::BTreeMap::new();
+    // Hot fall-through (not-taken).
+    branches.insert(0, (1, 100));
+    let mut profile = profile_from_runtime(&keys, blocks, branches);
+    profile.fn_checksums.insert("main".into(), cs);
+    set_pgo_instrument(false);
+
+    // Phase B: use-profile keeps hot fall-through (no invert).
+    begin_pgo_module();
+    next_pgo_function("main");
+    set_current_profile(Some(profile));
+    let mut use_ops = terminating_then();
+    optimize(&mut use_ops, &OptimizeOptions::default(), &mut Vec::new());
+    let inverted = use_ops.iter().any(|op| {
+        matches!(
+            op,
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                ..
+            }
+        )
+    });
+    assert!(!inverted, "hot fall-through must not invert under use-profile");
+
+    // Without profile, heuristic still inverts.
+    set_current_profile(None);
+    begin_pgo_module();
+    next_pgo_function("main");
+    let mut cold = terminating_then();
+    optimize(&mut cold, &OptimizeOptions::default(), &mut Vec::new());
+    let inverted_cold = cold.iter().any(|op| {
+        matches!(
+            op,
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                ..
+            }
+        )
+    });
+    assert!(inverted_cold, "no profile → layout may invert");
+    begin_pgo_module();
 }
 
 #[test]

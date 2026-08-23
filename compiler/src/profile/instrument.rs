@@ -45,6 +45,8 @@ pub fn instrument_for_pgo_named(ops: &[IlOp], fn_name: &str) -> InstrumentMap {
             map.branches.push(i);
         }
     }
+    let cs = super::fn_shape_checksum(ops, &map, fn_name);
+    super::record_fn_checksum(fn_name, cs);
     super::record_instrument_map(map.clone());
     map
 }
@@ -112,6 +114,10 @@ fn hit_ops(native_id: i32, packed: i32, loc: DebugLoc) -> [IlOp; 5] {
         IlOp::HostInvoke { arity: 1, loc },
         IlOp::Pop { loc },
     ]
+}
+
+pub(crate) fn block_leaders_pub(ops: &[IlOp]) -> Vec<usize> {
+    block_leaders(ops)
 }
 
 fn block_leaders(ops: &[IlOp]) -> Vec<usize> {

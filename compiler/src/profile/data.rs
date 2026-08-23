@@ -5,9 +5,9 @@ use std::fmt::Write as _;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-/// Bump when the JSON schema changes. Loaders refuse a newer version and
-/// ignore a mismatched older file by returning [`LoadError::Version`].
-pub const PROFILE_VERSION: u32 = 1;
+/// Bump when the JSON/binary schema changes incompatibly. Loaders refuse a
+/// newer version; older JSON (v1) is still accepted with empty `fn_checksums`.
+pub const PROFILE_VERSION: u32 = 2;
 
 /// Runtime counts keyed by function name, block id, and branch site id.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -20,6 +20,9 @@ pub struct ProfileData {
     /// Unix seconds when the profile was created or last written.
     #[serde(default)]
     pub timestamp: u64,
+    /// Cleanup mid-IR shape fingerprints; missing entries skip matching.
+    #[serde(default)]
+    pub fn_checksums: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -106,8 +109,15 @@ impl ProfileData {
             }
             let _ = write!(branches, "\"{k}\":[{t},{n}]");
         }
+        let mut checksums = String::new();
+        for (i, (k, v)) in self.fn_checksums.iter().enumerate() {
+            if i > 0 {
+                checksums.push(',');
+            }
+            let _ = write!(checksums, "\"{}\":{}", json_escape(k), v);
+        }
         format!(
-            "{{\"version\":{},\"function_counts\":{{{fns}}},\"block_counts\":{{{blocks}}},\"branch_counts\":{{{branches}}},\"timestamp\":{}}}",
+            "{{\"version\":{},\"function_counts\":{{{fns}}},\"block_counts\":{{{blocks}}},\"branch_counts\":{{{branches}}},\"timestamp\":{},\"fn_checksums\":{{{checksums}}}}}",
             self.version, self.timestamp
         )
     }
@@ -118,14 +128,14 @@ impl ProfileData {
             return Err(LoadError::Parse("empty profile".into()));
         }
         let version = json_u32_field(s, "version").unwrap_or(0);
-        if version != PROFILE_VERSION {
+        if version == 0 || version > PROFILE_VERSION {
             return Err(LoadError::Version {
                 found: version,
                 expected: PROFILE_VERSION,
             });
         }
         let mut data = ProfileData {
-            version,
+            version: PROFILE_VERSION,
             ..Self::default()
         };
         if let Some(obj) = json_object_field(s, "function_counts") {
@@ -138,6 +148,9 @@ impl ProfileData {
             parse_branch_map(obj, &mut data.branch_counts)?;
         }
         data.timestamp = json_u64_field(s, "timestamp").unwrap_or(0);
+        if let Some(obj) = json_object_field(s, "fn_checksums") {
+            parse_string_u64_map(obj, &mut data.fn_checksums)?;
+        }
         Ok(data)
     }
 
@@ -149,7 +162,7 @@ impl ProfileData {
     pub fn from_binary(bytes: &[u8]) -> Result<Self, LoadError> {
         let data: Self =
             bincode::deserialize(bytes).map_err(|e| LoadError::Parse(e.to_string()))?;
-        if data.version != PROFILE_VERSION {
+        if data.version == 0 || data.version > PROFILE_VERSION {
             return Err(LoadError::Version {
                 found: data.version,
                 expected: PROFILE_VERSION,

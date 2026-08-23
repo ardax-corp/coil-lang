@@ -710,14 +710,12 @@ impl NaturalLoop {
 fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
     let mut loops = find_natural_loops(ops);
     let prefer = PREFER_HOT.with(|c| c.get());
-    if prefer {
-        if let Some(p) = crate::profile::current_profile() {
-            loops.sort_by_key(|l| {
-                let heat = p.block_counts.get(&(l.header as u32)).copied().unwrap_or(0);
-                (std::cmp::Reverse(heat), std::cmp::Reverse(l.header))
-            });
-            return loops;
-        }
+    if prefer && crate::profile::current_profile().is_some() {
+        loops.sort_by_key(|l| {
+            let heat = crate::profile::block_heat_current(ops, l.header);
+            (std::cmp::Reverse(heat), std::cmp::Reverse(l.header))
+        });
+        return loops;
     }
     loops.sort_by_key(|l| std::cmp::Reverse(l.header));
     loops

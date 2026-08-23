@@ -254,6 +254,22 @@ fn optimize_once_at(
     pool: &mut Vec<u64>,
     next_label: &mut u32,
 ) {
+    let entry_tell = cleanup_once_at(ops, opts, entry_sp, pool);
+    // Instrument compile: counters describe cleanup mid-IR only.
+    if crate::profile::pgo_instrumenting() {
+        return;
+    }
+    crate::profile::prepare_function_profile(ops);
+    decision_once_at(ops, opts, entry_sp, entry_tell, next_label);
+}
+
+/// Profile-agnostic cleanup: peeps that normalize shape without layout/heat.
+fn cleanup_once_at(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    entry_sp: i32,
+    pool: &mut Vec<u64>,
+) -> u32 {
     let collect = opts.collect_stats;
     let g = stats::PassKind::Generic;
     if opts.jump_thread {
@@ -311,8 +327,20 @@ fn optimize_once_at(
             0
         });
     }
+    entry_tell
+}
+
+/// Profile-sensitive mid opts; branch layout and block reorder stay last.
+fn decision_once_at(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    entry_sp: i32,
+    entry_tell: u32,
+    next_label: &mut u32,
+) {
+    let collect = opts.collect_stats;
+    let g = stats::PassKind::Generic;
     if opts.licm {
-        // LICM still seeds at 0; entry_sp plumbing is mem_fwd-critical today.
         let _ = entry_sp;
         stats::run_named_pass(ops, collect, "licm", g, |ops| {
             super::licm::set_pgo_prioritize_hot_licm(opts.pgo_prioritize_hot_loops);
@@ -393,7 +421,7 @@ fn optimize_once_at(
             0
         });
     }
-    // Last: the convoy passes match on JMP-to-join shapes this would remove.
+    // Last among shape rewrites: convoy passes match JMP-to-join shapes.
     if opts.invert_guard_branch {
         stats::run_named_pass(ops, collect, "invert_guard_branch", g, |ops| {
             invert_branch_over_jump(ops);
