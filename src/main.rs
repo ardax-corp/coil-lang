@@ -4,7 +4,7 @@ use std::process::exit;
 
 use coil_cli::{LoadErr, dispatch_helper, try_load_archive};
 use common::{ARCHIVE_VERSION, ArchivedProgram, Byte, ProgramDebug, format_archive_version};
-use compiler::Pipeline;
+use compiler::{OptLevel, Pipeline};
 use machine::Machine;
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 use rkyv::rancor::Error;
@@ -64,6 +64,7 @@ struct CliArgs {
     log_json: bool,
     log_lsp: bool,
     include_tests: bool,
+    opt_level: OptLevel,
 }
 
 fn print_help() {
@@ -97,6 +98,7 @@ fn print_help() {
          \x20 --check-native        With `package`, fail if required shared libraries are missing\n\
          \x20 --strip-debug         With `package`, omit debug line table from embedded archive\n\
          \x20 --include-tests      Compile harness tests into the archive (default: omit)\n\
+         \x20 -O, --opt-level <l>  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
          \x20 --fail-fast          With `test`, stop after the first failed case\n\
          \x20 --fn <pat>           With `dissect`, filter functions by FQN substring / trailing name\n\
          \x20 --il                 With `dissect`, also print pre-opt stack IL\n\
@@ -131,6 +133,8 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
     let mut runner: Option<PathBuf> = None;
     let mut positionals: Vec<String> = Vec::new();
     let mut output: Option<String> = None;
+    let mut opt_level = OptLevel::Standard;
+    let mut opt_level_set = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -201,9 +205,57 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
                 }
                 output = Some(path.clone());
             }
+            "--opt-level" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err("missing value after --opt-level");
+                };
+                if val.starts_with('-') {
+                    return Err("missing value after --opt-level");
+                }
+                if opt_level_set {
+                    return Err("duplicate -O/--opt-level flag");
+                }
+                opt_level = OptLevel::parse(val).map_err(|_| "invalid --opt-level (expected none|basic|standard|aggressive|size|debug or 0|1|2|3|s|g)")?;
+                opt_level_set = true;
+            }
+            s if s.starts_with("--opt-level=") => {
+                let val = s.strip_prefix("--opt-level=").unwrap();
+                if val.is_empty() {
+                    return Err("missing value after --opt-level");
+                }
+                if opt_level_set {
+                    return Err("duplicate -O/--opt-level flag");
+                }
+                opt_level = OptLevel::parse(val).map_err(|_| "invalid --opt-level (expected none|basic|standard|aggressive|size|debug or 0|1|2|3|s|g)")?;
+                opt_level_set = true;
+            }
+            "-O" => {
+                i += 1;
+                let Some(val) = args.get(i) else {
+                    return Err("missing value after -O");
+                };
+                if val.starts_with('-') && OptLevel::parse(val.trim_start_matches('-')).is_err() {
+                    return Err("missing value after -O");
+                }
+                let token = val.strip_prefix("-O").unwrap_or(val);
+                if opt_level_set {
+                    return Err("duplicate -O/--opt-level flag");
+                }
+                opt_level = OptLevel::parse(token).map_err(|_| "invalid -O level (expected 0|1|2|3|s|g or none|basic|standard|aggressive|size|debug)")?;
+                opt_level_set = true;
+            }
+            s if s.starts_with("-O") && s.len() > 2 => {
+                let token = &s[2..];
+                if opt_level_set {
+                    return Err("duplicate -O/--opt-level flag");
+                }
+                opt_level = OptLevel::parse(token).map_err(|_| "invalid -O level (expected 0|1|2|3|s|g or none|basic|standard|aggressive|size|debug)")?;
+                opt_level_set = true;
+            }
             s if s.starts_with('-') => {
                 return Err(
-                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, or a command/file)",
+                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, or a command/file)",
                 );
             }
             _ => positionals.push(arg.clone()),
@@ -599,6 +651,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
         log_json,
         log_lsp,
         include_tests,
+        opt_level,
     })
 }
 
@@ -1058,6 +1111,7 @@ fn run_test_suite(
     config: ReportConfig,
     root: &Path,
     fail_fast: bool,
+    opt_level: OptLevel,
 ) -> Result<(usize, usize), String> {
     let files = collect_test_files(root)?;
 
@@ -1080,6 +1134,7 @@ fn run_test_suite(
             Pipeline::with_reporter(config.clone(), writer_for(format))
         };
         pipeline.set_include_tests(true);
+        pipeline.set_opt_level(opt_level);
 
         // catch_unwind isolates a compiler ICE from aborting the whole
         // harness under panic=unwind. Release builds use panic=abort, so
@@ -1203,10 +1258,10 @@ fn run_test_suite(
     Ok((passed, failed))
 }
 
-fn cmd_test(config: ReportConfig, path: Option<String>, fail_fast: bool) {
+fn cmd_test(config: ReportConfig, path: Option<String>, fail_fast: bool, opt_level: OptLevel) {
     let root = path.unwrap_or_else(|| TESTS_DIR.to_string());
     let tests_dir = Path::new(&root);
-    let (passed, failed) = match run_test_suite(config.clone(), tests_dir, fail_fast) {
+    let (passed, failed) = match run_test_suite(config.clone(), tests_dir, fail_fast, opt_level) {
         Ok(counts) => counts,
         Err(msg) => {
             let format = config.format;
@@ -1258,7 +1313,7 @@ fn main() {
     };
 
     match cli.command {
-        Command::Test { path, fail_fast } => cmd_test(config, path, fail_fast),
+        Command::Test { path, fail_fast } => cmd_test(config, path, fail_fast, cli.opt_level),
         Command::Dissect { .. } => dispatch_helper("dissect"),
         Command::Debug { .. } => dispatch_helper("debug"),
         Command::Fmt => dispatch_helper("fmt"),
@@ -1269,6 +1324,7 @@ fn main() {
             if cli.include_tests {
                 pipeline.set_include_tests(true);
             }
+            pipeline.set_opt_level(cli.opt_level);
             match command {
                 Command::BuildAndRun { filename } => {
                     let filename = resolve_entry_filename(&mut pipeline, &filename);
@@ -1613,6 +1669,24 @@ mod tests {
         let cli = parse_args(&args(&["--include-tests", "examples/fib.hy"])).unwrap();
         assert!(cli.include_tests);
         assert!(matches!(cli.command, Command::BuildAndRun { .. }));
+        assert_eq!(cli.opt_level, OptLevel::Standard);
+    }
+
+    #[test]
+    fn parse_opt_level_flags() {
+        let cli = parse_args(&args(&["-O0", "examples/fib.hy"])).unwrap();
+        assert_eq!(cli.opt_level, OptLevel::None);
+        let cli = parse_args(&args(&["-O", "2", "examples/fib.hy"])).unwrap();
+        assert_eq!(cli.opt_level, OptLevel::Standard);
+        let cli = parse_args(&args(&["--opt-level", "aggressive", "compile", "a.hy"])).unwrap();
+        assert_eq!(cli.opt_level, OptLevel::Aggressive);
+        let cli = parse_args(&args(&["--opt-level=size", "a.hy"])).unwrap();
+        assert_eq!(cli.opt_level, OptLevel::Size);
+        let cli = parse_args(&args(&["-Og", "a.hy"])).unwrap();
+        assert_eq!(cli.opt_level, OptLevel::Debug);
+        assert!(parse_args(&args(&["-O9", "a.hy"])).is_err());
+        assert!(parse_args(&args(&["-O2", "-O0", "a.hy"])).is_err());
+        assert!(parse_args(&args(&["--opt-level"])).is_err());
     }
 
     fn unique_tmp(label: &str) -> PathBuf {
@@ -1893,7 +1967,7 @@ use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  writ
         std::fs::write(pos.join("ok.hy"), "test(\"ok\") {\n  assert(true)?;\n}\n").unwrap();
 
         let (passed, failed) =
-            run_test_suite(ReportConfig::default(), &root, false).expect("suite runs");
+            run_test_suite(ReportConfig::default(), &root, false, OptLevel::Standard).expect("suite runs");
         assert_eq!(passed, 2, "bad compile_fail + positive ok");
         assert_eq!(failed, 1, "unexpected_ok under compile_fail must fail");
 
@@ -1920,7 +1994,7 @@ use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  writ
         .unwrap();
 
         let (passed, failed) =
-            run_test_suite(ReportConfig::default(), &root, true).expect("suite runs");
+            run_test_suite(ReportConfig::default(), &root, true, OptLevel::Standard).expect("suite runs");
         assert_eq!(failed, 1, "a_ok should fail (unexpected compile success)");
         assert_eq!(passed, 0, "fail-fast must not reach z_bad");
 

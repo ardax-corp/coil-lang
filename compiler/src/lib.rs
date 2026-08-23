@@ -8,7 +8,7 @@ mod dissect;
 // the IL stays crate-private.
 pub(crate) mod il;
 pub use il::tell;
-pub use il::{BoundsStats, CanonStats, last_bounds_stats, last_canon_stats};
+pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
 mod manifest;
 mod monomorphize;
 mod pipeline;

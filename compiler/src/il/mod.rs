@@ -18,13 +18,14 @@ mod licm;
 mod lower;
 mod module;
 mod op;
-mod opt;
+pub(crate) mod opt;
 mod sp;
 pub mod tell;
 mod treeshake;
 
 pub use bounds::{BoundsStats, last_bounds_stats};
 pub use canon::{CanonStats, last_canon_stats};
+pub use opt::OptLevel;
 
 pub use builder::{IlBuilder, IlError};
 pub use codebuf::CodeBuf;

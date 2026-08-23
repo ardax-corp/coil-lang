@@ -958,6 +958,9 @@ pub struct Compiler {
     /// Operand-stack capacity for the VM (from recursion-depth analysis).
     operand_stack_slots: u32,
 
+    /// IL optimization preset (COI-127).
+    opt_options: crate::il::opt::OptimizeOptions,
+
     /// Cost budgets for tiny-inline (COI-124).
     pub inline_cost: inline_cost::InlineCostOptions,
 
@@ -1049,6 +1052,7 @@ impl Default for Compiler {
             loop_par_sites: crate::typechecking::LoopParSites::new(),
             loop_par_helpers: 0,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
+            opt_options: crate::il::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
             retain_cursor_il: false,
             cursor_il: None,

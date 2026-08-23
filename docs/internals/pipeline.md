@@ -15,6 +15,21 @@ How a `.hy` program becomes running bytecode on the VM.
 AST + HM → Stack IL (labels) → IL opts → lower/fuse-select → Vec<Byte> → .hyc → VM
 ```
 
+## Optimization levels
+
+`Pipeline::set_opt_level` / CLI `-O` / `--opt-level` select an [`OptLevel`](../../compiler/src/il/opt/opt_level.rs) preset that fills `OptimizeOptions` (and tiny-inline budgets). Default is **Standard** — the same pass set as before this flag existed.
+
+| Level | CLI | IL passes |
+|-------|-----|-----------|
+| None | `-O0`, `none` | algebraic / const-fold only |
+| Basic | `-O1`, `basic` | None + jump threading, DCE, copy/mem forwarding |
+| Standard | `-O2`, `standard` (default) | all currently-on production passes |
+| Aggressive | `-O3`, `aggressive` | Standard + `seek_back_edge` and a larger inline budget |
+| Size | `-Os`, `size` | Standard without loop unroll or shared-return cloning |
+| Debug | `-Og`, `debug` | Basic only (no slot promotion, escape SROA, unroll, or GVN) |
+
+`None ⊂ Basic ⊂ Standard ⊂ Aggressive` on enable flags. Size and Debug are independent axes.
+
 The IL is **compile-time only**; the VM implements the representation-boundary and numeric-chain opcodes and archive minor 5 records them.
 
 ## Cache and rebuild

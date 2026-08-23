@@ -3,7 +3,7 @@
 use super::op::IlOp;
 
 /// Options for [`optimize`].
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OptimizeOptions {
     /// Collapse `JMP L` where `L` begins with `JMP L2` into `JMP L2`.
     pub jump_thread: bool,
@@ -247,6 +247,9 @@ pub(crate) fn emitting_range_to_raw(
         }),
     )
 }
+
+mod opt_level;
+pub use opt_level::OptLevel;
 
 mod cfg;
 mod convoy;

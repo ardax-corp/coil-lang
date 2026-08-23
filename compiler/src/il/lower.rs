@@ -124,7 +124,7 @@ pub fn lower_with_funcs(ops: &[IlOp], funcs: &[IlFunc], pool: &mut Vec<u64>) -> 
 ///
 /// Pipeline: per-body opts/GVN → concat → whole-buffer multi_op → single lower.
 pub fn lower_module(module: &mut super::IlModule, pool: &mut Vec<u64>) -> Lowered {
-    lower_module_inner(module, pool, false)
+    lower_module_inner(module, pool, false, &opt::OptimizeOptions::default())
 }
 
 /// Like [`lower_module`], optionally retaining the post-opt pre-fuse op stream.
@@ -132,10 +132,11 @@ pub(crate) fn lower_module_inner(
     module: &mut super::IlModule,
     pool: &mut Vec<u64>,
     capture_ops: bool,
+    opts: &opt::OptimizeOptions,
 ) -> Lowered {
     super::bounds::reset_bounds_stats();
     super::canon::reset_canon_stats();
-    let flat = module.optimize_and_flatten(&opt::OptimizeOptions::default(), pool);
+    let flat = module.optimize_and_flatten(opts, pool);
     let mut lowered = lower_optimized(&flat, pool);
     if capture_ops {
         lowered.pre_fuse_ops = Some(flat);
@@ -2282,11 +2283,21 @@ mod tests {
         ];
         let mut pool = Vec::new();
         let mut module = crate::il::IlModule::from_flat(&ops, &[]);
-        let plain = lower_module_inner(&mut module, &mut pool, false);
+        let plain = lower_module_inner(
+            &mut module,
+            &mut pool,
+            false,
+            &crate::il::opt::OptimizeOptions::default(),
+        );
         assert!(plain.pre_fuse_ops.is_none());
 
         let mut module = crate::il::IlModule::from_flat(&ops, &[]);
-        let captured = lower_module_inner(&mut module, &mut pool, true);
+        let captured = lower_module_inner(
+            &mut module,
+            &mut pool,
+            true,
+            &crate::il::opt::OptimizeOptions::default(),
+        );
         let snap = captured
             .pre_fuse_ops
             .as_ref()

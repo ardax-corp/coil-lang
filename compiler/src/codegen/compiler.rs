@@ -216,6 +216,17 @@ impl Compiler {
         self.include_tests
     }
 
+    /// Apply an [`crate::OptLevel`] preset to IL opts and tiny-inline budgets.
+    pub fn set_opt_level(&mut self, level: crate::OptLevel) {
+        self.opt_options = level.options();
+        self.inline_cost.max_inline_cost = level.inline_max_cost();
+        self.inline_cost.inline_across_modules = level.inline_across_modules();
+        if !level.inline_across_modules() {
+            self.inline_cost.max_cross_module_inline_cost = 0;
+        }
+        self.bytecode.set_opt_options(self.opt_options.clone());
+    }
+
     pub fn intern_constant(&mut self, value: u64) -> u32 {
         let idx = self.constants.len() as u32;
         self.constants.push(value);
@@ -15624,6 +15635,7 @@ impl Compiler {
             None
         };
 
+        self.bytecode.set_opt_options(self.opt_options.clone());
         let mut lowered = if self.retain_cursor_il {
             self.bytecode.lower_in_place_capturing(&mut self.constants)
         } else {
