@@ -106,9 +106,9 @@ fn print_help() {
          \x20 -O, --opt-level <l>  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
          \x20 --opt-stats          Print IL optimization counters after compile (stderr)\n\
          \x20 --opt-stats-json     Print the same counters as one JSON object (stderr)\n\
-         \x20 --pgo-instrument     Record IL profile site ids (function / block / branch)\n\
+         \x20 --pgo-instrument     Insert pgo_hit counters at function/block/branch sites\n\
          \x20 --pgo-use-profile <f>  Apply a JSON profile to layout and inlining\n\
-         \x20 --pgo-generate-profile <f>  Write the current/empty profile JSON\n\
+         \x20 --pgo-generate-profile <f>  Write runtime or current profile JSON\n\
          \x20 --fail-fast          With `test`, stop after the first failed case\n\
          \x20 --fn <pat>           With `dissect`, filter functions by FQN substring / trailing name\n\
          \x20 --il                 With `dissect`, also print pre-opt stack IL\n\
@@ -836,9 +836,22 @@ fn write_pgo_profile(path: Option<&str>) {
     let Some(path) = path else {
         return;
     };
-    let json = compiler::current_profile()
-        .unwrap_or_else(compiler::ProfileData::new)
-        .to_json();
+    let snap = machine::pgo::snapshot();
+    let json = if snap.function_keys.is_empty()
+        && snap.block_counts.is_empty()
+        && snap.branch_counts.is_empty()
+    {
+        compiler::current_profile()
+            .unwrap_or_else(compiler::ProfileData::new)
+            .to_json()
+    } else {
+        compiler::profile_from_runtime(
+            &snap.function_keys,
+            snap.block_counts,
+            snap.branch_counts,
+        )
+        .to_json()
+    };
     if let Err(e) = std::fs::write(path, json) {
         eprintln!("warning: failed to write PGO profile `{path}`: {e}");
     }
@@ -1483,6 +1496,10 @@ fn main() {
                 pipeline.set_collect_opt_stats(true);
             }
             apply_pgo_use(&mut pipeline, cli.pgo_use_profile.as_deref());
+            if cli.pgo_instrument {
+                machine::pgo::reset();
+                pipeline.set_pgo_instrument(true);
+            }
             match command {
                 Command::BuildAndRun { filename } => {
                     let filename = resolve_entry_filename(&mut pipeline, &filename);
