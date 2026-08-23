@@ -357,7 +357,7 @@ fn optimize_once_at(
     // element slots are eligible for promotion.
     if opts.escape_analysis {
         stats::run_named_pass(ops, collect, "escape_analysis", g, |ops| {
-            escape_analysis::escape_analysis(ops);
+            escape_analysis::escape_analysis_pgo(ops, opts.pgo_prioritize_hot_loops);
             0
         });
     }
