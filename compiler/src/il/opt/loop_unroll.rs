@@ -23,16 +23,32 @@ pub struct LoopInfo {
 
 /// Unroll every eligible loop whose trip count is ≤ `factor` (and ≤ 8).
 pub fn unroll_loops(ops: &mut Vec<IlOp>, factor: usize) -> usize {
+    unroll_loops_pgo(ops, factor, false)
+}
+
+/// Like [`unroll_loops`], preferring hotter headers when `prefer_hot` and a profile is loaded.
+pub fn unroll_loops_pgo(ops: &mut Vec<IlOp>, factor: usize, prefer_hot: bool) -> usize {
     let factor = factor.min(MAX_UNROLL_TRIPS as usize);
     if factor == 0 || ops.len() < 6 {
         return 0;
     }
+    let profile = if prefer_hot {
+        crate::profile::current_profile()
+    } else {
+        None
+    };
     let mut unrolled = 0usize;
     loop {
         let Some(info) = find_unrollable_loops(ops)
             .into_iter()
             .filter(|lp| lp.trips as usize <= factor)
-            .max_by_key(|lp| lp.header)
+            .max_by_key(|lp| {
+                let heat = profile
+                    .as_ref()
+                    .and_then(|p| p.block_counts.get(&(lp.header as u32)).copied())
+                    .unwrap_or(0);
+                (heat, lp.header)
+            })
         else {
             return unrolled;
         };
