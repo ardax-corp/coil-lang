@@ -222,6 +222,7 @@ pub(crate) fn optimize_at_with_labels(
     pool: &mut Vec<u64>,
     next_label: &mut u32,
 ) {
+    let _ = crate::profile::instrument_for_pgo(ops);
     if opts.iterative_optimization {
         let round = optimize_iteratively_at(
             ops,
@@ -394,7 +395,13 @@ fn optimize_once_at(
             collect,
             "branch_optimization",
             stats::PassKind::Branch,
-            |ops| branch_opt::optimize_branches_at(ops, None, entry_sp, next_label),
+            |ops| {
+                let profile = crate::profile::current_profile();
+                let bp = profile
+                    .as_ref()
+                    .map(|p| crate::profile::branch_profile(ops, p));
+                branch_opt::optimize_branches_at(ops, bp.as_ref(), entry_sp, next_label)
+            },
         );
     }
     if opts.block_reordering {
@@ -403,7 +410,13 @@ fn optimize_once_at(
             collect,
             "block_reordering",
             stats::PassKind::BlockOrder,
-            |ops| block_order::reorder_basic_blocks(ops, None),
+            |ops| {
+                let profile = crate::profile::current_profile();
+                let bp = profile
+                    .as_ref()
+                    .map(|p| crate::profile::branch_profile(ops, p));
+                block_order::reorder_basic_blocks(ops, bp.as_ref())
+            },
         );
     }
     // After every slot-tracking pass: promotion leaves a slot defined only by
@@ -495,6 +508,7 @@ pub(crate) use stats::note_function_inlined;
 #[allow(unused_imports)]
 pub use branch_opt::{BranchProfile, optimize_branches};
 pub(crate) use branch_opt::max_code_label;
+pub(crate) use block_order::reorder_basic_blocks;
 
 mod cfg;
 mod convoy;

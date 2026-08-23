@@ -38,6 +38,8 @@ Iterative optimization (COI-130) is **off** by default (`iterative_optimization`
 
 Optimization statistics (COI-131) are **off** by default (`collect_stats` / CLI `--opt-stats` and `--opt-stats-json`). When enabled, each named IL pass records ops added/removed, load/store eliminations, unrolls, branch layouts, and block moves; tiny-inline sites increment `functions_inlined`. Human text or a single JSON object is printed to stderr after a source compile. Collection clones the op buffer only while the flag is on.
 
+Profile-guided optimization (COI-132) is optional. `--pgo-use-profile=<file>` loads versioned JSON (`function_counts`, `block_counts`, `branch_counts`). A newer `version` is refused and compilation continues with heuristics; a missing file is ignored. The profile feeds branch layout and block reordering, and skips tiny-inline of functions whose recorded count is zero. `--pgo-instrument` records the IL site map. `--pgo-generate-profile=<file>` writes the current profile or an empty versioned template.
+
 The IL is **compile-time only**; the VM implements the representation-boundary and numeric-chain opcodes and archive minor 5 records them.
 
 ## Cache and rebuild

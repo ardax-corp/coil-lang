@@ -67,6 +67,9 @@ struct CliArgs {
     opt_level: OptLevel,
     opt_stats: bool,
     opt_stats_json: bool,
+    pgo_instrument: bool,
+    pgo_use_profile: Option<String>,
+    pgo_generate_profile: Option<String>,
 }
 
 fn print_help() {
@@ -103,6 +106,9 @@ fn print_help() {
          \x20 -O, --opt-level <l>  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
          \x20 --opt-stats          Print IL optimization counters after compile (stderr)\n\
          \x20 --opt-stats-json     Print the same counters as one JSON object (stderr)\n\
+         \x20 --pgo-instrument     Record IL profile site ids (function / block / branch)\n\
+         \x20 --pgo-use-profile <f>  Apply a JSON profile to layout and inlining\n\
+         \x20 --pgo-generate-profile <f>  Write the current/empty profile JSON\n\
          \x20 --fail-fast          With `test`, stop after the first failed case\n\
          \x20 --fn <pat>           With `dissect`, filter functions by FQN substring / trailing name\n\
          \x20 --il                 With `dissect`, also print pre-opt stack IL\n\
@@ -141,6 +147,9 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
     let mut opt_level_set = false;
     let mut opt_stats = false;
     let mut opt_stats_json = false;
+    let mut pgo_instrument = false;
+    let mut pgo_use_profile: Option<String> = None;
+    let mut pgo_generate_profile: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -153,6 +162,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
             "--include-tests" => include_tests = true,
             "--opt-stats" => opt_stats = true,
             "--opt-stats-json" => opt_stats_json = true,
+            "--pgo-instrument" => pgo_instrument = true,
             "--check-native" => check_native = true,
             "--strip-debug" => strip_debug = true,
             "--il" => show_il = true,
@@ -261,9 +271,55 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
                 opt_level = OptLevel::parse(token).map_err(|_| "invalid -O level (expected 0|1|2|3|s|g or none|basic|standard|aggressive|size|debug)")?;
                 opt_level_set = true;
             }
+            "--pgo-use-profile" => {
+                i += 1;
+                let Some(path) = args.get(i) else {
+                    return Err("missing path after --pgo-use-profile");
+                };
+                if path.starts_with('-') {
+                    return Err("missing path after --pgo-use-profile");
+                }
+                if pgo_use_profile.is_some() {
+                    return Err("duplicate --pgo-use-profile flag");
+                }
+                pgo_use_profile = Some(path.clone());
+            }
+            s if s.starts_with("--pgo-use-profile=") => {
+                let path = s.strip_prefix("--pgo-use-profile=").unwrap();
+                if path.is_empty() {
+                    return Err("missing path after --pgo-use-profile");
+                }
+                if pgo_use_profile.is_some() {
+                    return Err("duplicate --pgo-use-profile flag");
+                }
+                pgo_use_profile = Some(path.to_string());
+            }
+            "--pgo-generate-profile" => {
+                i += 1;
+                let Some(path) = args.get(i) else {
+                    return Err("missing path after --pgo-generate-profile");
+                };
+                if path.starts_with('-') {
+                    return Err("missing path after --pgo-generate-profile");
+                }
+                if pgo_generate_profile.is_some() {
+                    return Err("duplicate --pgo-generate-profile flag");
+                }
+                pgo_generate_profile = Some(path.clone());
+            }
+            s if s.starts_with("--pgo-generate-profile=") => {
+                let path = s.strip_prefix("--pgo-generate-profile=").unwrap();
+                if path.is_empty() {
+                    return Err("missing path after --pgo-generate-profile");
+                }
+                if pgo_generate_profile.is_some() {
+                    return Err("duplicate --pgo-generate-profile flag");
+                }
+                pgo_generate_profile = Some(path.to_string());
+            }
             s if s.starts_with('-') => {
                 return Err(
-                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --opt-stats, --opt-stats-json, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, or a command/file)",
+                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --opt-stats, --opt-stats-json, --pgo-instrument, --pgo-use-profile, --pgo-generate-profile, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, or a command/file)",
                 );
             }
             _ => positionals.push(arg.clone()),
@@ -669,6 +725,19 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
         return Err("--opt-stats and --opt-stats-json require compiling source");
     }
 
+    if (pgo_instrument || pgo_use_profile.is_some() || pgo_generate_profile.is_some())
+        && matches!(
+            command,
+            Command::Run { .. }
+                | Command::Test { .. }
+                | Command::Fmt
+                | Command::Lsp
+                | Command::Debug { .. }
+        )
+    {
+        return Err("PGO flags require compiling source");
+    }
+
     Ok(CliArgs {
         command,
         log_json,
@@ -677,6 +746,9 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
         opt_level,
         opt_stats,
         opt_stats_json,
+        pgo_instrument,
+        pgo_use_profile,
+        pgo_generate_profile,
     })
 }
 
@@ -733,6 +805,42 @@ fn print_opt_stats(text: bool, json: bool) {
     }
     if json {
         eprintln!("{}", stats.format_json());
+    }
+}
+
+fn apply_pgo_use(pipeline: &mut Pipeline, path: Option<&str>) {
+    let Some(path) = path else {
+        return;
+    };
+    match std::fs::read_to_string(path) {
+        Ok(s) => match compiler::ProfileData::from_json(&s) {
+            Ok(p) => pipeline.set_pgo_profile(Some(p)),
+            Err(compiler::LoadError::Version { found, expected }) => {
+                eprintln!(
+                    "warning: PGO profile version {found} != {expected}; using heuristics"
+                );
+                pipeline.set_pgo_profile(None);
+            }
+            Err(compiler::LoadError::Parse(msg)) => {
+                eprintln!("warning: PGO profile parse error ({msg}); using heuristics");
+                pipeline.set_pgo_profile(None);
+            }
+        },
+        Err(_) => {
+            eprintln!("warning: PGO profile `{path}` not found; using heuristics");
+        }
+    }
+}
+
+fn write_pgo_profile(path: Option<&str>) {
+    let Some(path) = path else {
+        return;
+    };
+    let json = compiler::current_profile()
+        .unwrap_or_else(compiler::ProfileData::new)
+        .to_json();
+    if let Err(e) = std::fs::write(path, json) {
+        eprintln!("warning: failed to write PGO profile `{path}`: {e}");
     }
 }
 
@@ -1374,10 +1482,17 @@ fn main() {
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);
             }
+            apply_pgo_use(&mut pipeline, cli.pgo_use_profile.as_deref());
             match command {
                 Command::BuildAndRun { filename } => {
                     let filename = resolve_entry_filename(&mut pipeline, &filename);
-                    cmd_build_and_run(&mut pipeline, &filename, cli.opt_stats, cli.opt_stats_json)
+                    cmd_build_and_run(
+                        &mut pipeline,
+                        &filename,
+                        cli.opt_stats,
+                        cli.opt_stats_json,
+                    );
+                    write_pgo_profile(cli.pgo_generate_profile.as_deref());
                 }
                 Command::Compile { filename, output } => {
                     let filename = resolve_entry_filename(&mut pipeline, &filename);
@@ -1387,7 +1502,8 @@ fn main() {
                         &output,
                         cli.opt_stats,
                         cli.opt_stats_json,
-                    )
+                    );
+                    write_pgo_profile(cli.pgo_generate_profile.as_deref());
                 }
                 Command::Run { archive } => cmd_run(&mut pipeline, &archive),
                 Command::Package {
@@ -1406,6 +1522,7 @@ fn main() {
                         strip_debug,
                     );
                     print_opt_stats(cli.opt_stats, cli.opt_stats_json);
+                    write_pgo_profile(cli.pgo_generate_profile.as_deref());
                 }
                 Command::Test { .. }
                 | Command::Dissect { .. }
@@ -1757,6 +1874,23 @@ mod tests {
         assert!(cli.opt_stats && cli.opt_stats_json);
         assert!(parse_args(&args(&["test", "--opt-stats"])).is_err());
         assert!(parse_args(&args(&["run", "out.hyc", "--opt-stats-json"])).is_err());
+    }
+
+    #[test]
+    fn parse_pgo_flags() {
+        let cli = parse_args(&args(&["--pgo-instrument", "compile", "a.hy"])).unwrap();
+        assert!(cli.pgo_instrument);
+        let cli = parse_args(&args(&["--pgo-use-profile=p.json", "a.hy"])).unwrap();
+        assert_eq!(cli.pgo_use_profile.as_deref(), Some("p.json"));
+        let cli = parse_args(&args(&[
+            "--pgo-generate-profile",
+            "out.json",
+            "compile",
+            "a.hy",
+        ]))
+        .unwrap();
+        assert_eq!(cli.pgo_generate_profile.as_deref(), Some("out.json"));
+        assert!(parse_args(&args(&["test", "--pgo-instrument"])).is_err());
     }
 
     fn unique_tmp(label: &str) -> PathBuf {
