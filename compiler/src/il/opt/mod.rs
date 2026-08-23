@@ -1,7 +1,5 @@
 //! IL optimization passes unlocked by symbolic labels.
 
-
-
 use super::op::IlOp;
 
 /// Options for [`optimize`].
@@ -55,6 +53,8 @@ pub struct OptimizeOptions {
     pub invariant_store_elim: bool,
     /// SSA-style global CSE of pure binops whose result already lives in a slot.
     pub ssa_gvn: bool,
+    /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
+    pub escape_analysis: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -84,6 +84,7 @@ impl Default for OptimizeOptions {
             loop_unroll_factor: 8,
             invariant_store_elim: true,
             ssa_gvn: true,
+            escape_analysis: true,
         }
     }
 }
@@ -97,7 +98,12 @@ pub fn optimize(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, pool: &mut Vec<u64>
 }
 
 /// Like [`optimize`], seeding SP analysis at `entry_sp` for the op buffer.
-pub fn optimize_at(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, entry_sp: i32, pool: &mut Vec<u64>) {
+pub fn optimize_at(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    entry_sp: i32,
+    pool: &mut Vec<u64>,
+) {
     if opts.jump_thread {
         jump_thread(ops);
     }
@@ -142,6 +148,11 @@ pub fn optimize_at(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, entry_sp: i32, p
     }
     if opts.ssa_gvn {
         super::gvn_ssa::ssa_gvn(ops);
+    }
+    // After GVN so scalarized loads can CSE; before slot_promote so new
+    // element slots are eligible for promotion.
+    if opts.escape_analysis {
+        escape_analysis::escape_analysis(ops);
     }
     // After LICM so hoisted `LOAD temp; STORE local` copies become aliases.
     if opts.slot_promote {
@@ -240,14 +251,15 @@ pub(crate) fn emitting_range_to_raw(
 mod cfg;
 mod convoy;
 mod dce;
+mod escape_analysis;
 mod invariant_store_elim;
 mod loop_unroll;
 mod slot_promote;
 
-use cfg::{eliminate_dead_blocks, invert_branch_over_jump, jump_thread};
-use dce::{copy_prop, dead_store_at, mem_fwd, stack_dce};
-use convoy::{bin_join_convoy, clone_shared_return, return_convoy};
-use slot_promote::slot_promote;
 pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
+use cfg::{eliminate_dead_blocks, invert_branch_over_jump, jump_thread};
 pub(crate) use convoy::multi_op_join_convoy;
+use convoy::{bin_join_convoy, clone_shared_return, return_convoy};
+use dce::{copy_prop, dead_store_at, mem_fwd, stack_dce};
+use slot_promote::slot_promote;
 pub(crate) use slot_promote::{seek_normalize_back_edges, slot_promote_at};

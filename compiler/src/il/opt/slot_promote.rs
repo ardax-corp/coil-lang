@@ -2177,6 +2177,7 @@ mod tell {
                 loop_unroll_factor: 8,
                 invariant_store_elim: false,
                 ssa_gvn: false,
+                escape_analysis: false,
             }
         }
 
