@@ -401,6 +401,8 @@ mod tests {
                 escape_analysis: false,
                 branch_optimization: false,
                 block_reordering: false,
+                iterative_optimization: false,
+                max_optimization_iterations: 10,
             },
             &mut Vec::new(),
         );
@@ -463,6 +465,8 @@ mod tests {
             escape_analysis: false,
                 branch_optimization: false,
                 block_reordering: false,
+                iterative_optimization: false,
+                max_optimization_iterations: 10,
         }
     }
 
