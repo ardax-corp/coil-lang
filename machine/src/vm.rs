@@ -218,6 +218,14 @@ macro_rules! unary {
     };
 }
 
+#[inline(always)]
+fn set_jump_target(ip: &mut usize, target: usize, code_len: usize) {
+    // Lowering may target `code.len()` as “fall out of the loop” (next `while`
+    // check exits without fetching).
+    promise!(target <= code_len);
+    *ip = target;
+}
+
 // type External = fn(&[Value]) -> Value;
 
 type OutputSink = Box<dyn IoWrite + Send>;
@@ -2082,8 +2090,9 @@ impl<const S: usize> Machine<S> {
         let mut ip: usize = start_ip;
         let mut sp = self.frames.get_mut().get();
         let stack_cap = self.stack.capacity();
+        let code_len = code.len();
 
-        while ip < code.len() {
+        while ip < code_len {
             #[cfg(any(test, feature = "debugger"))]
             if unlikely(self.debug.is_some())
                 && let Some(reason) = self.debug_check_stop_at(ip)
@@ -2106,7 +2115,7 @@ impl<const S: usize> Machine<S> {
             });
 
             // SAFETY: loop condition guarantees `ip < code.len()`.
-            promise!(ip < code.len());
+            promise!(ip < code_len);
             let opcode = unsafe { code.get_unchecked(ip) };
             ip += 1;
 
@@ -2217,7 +2226,7 @@ impl<const S: usize> Machine<S> {
                         promise!(pool_idx < constants.len());
                         let target = opcode.jump_if_match_target(constants);
                         self.stack.pop();
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 Instruction::PairToHeap => {
@@ -2479,16 +2488,16 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::JMP => {
-                    ip = opcode.operand_u32() as usize;
+                    set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
                 }
                 Instruction::JMPF => {
                     if !self.stack.pop().as_bool() {
-                        ip = opcode.operand_u32() as usize;
+                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
                     }
                 }
                 Instruction::JMPT => {
                     if self.stack.pop().as_bool() {
-                        ip = opcode.operand_u32() as usize;
+                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
                     }
                 }
                 Instruction::CALL => {
@@ -2514,7 +2523,7 @@ impl<const S: usize> Machine<S> {
                             |frame| frame.set(callee_sp),
                         );
                         sp = callee_sp;
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     } else {
                         self.frames.rewrite_top_and_push(
                             |caller| caller.seek(ip + 1),
@@ -2535,7 +2544,7 @@ impl<const S: usize> Machine<S> {
                     // not past the args. Using `callee_sp + arity` would make
                     // subsequent LOAD/BinSlotImm read the wrong slots.
                     sp = callee_sp;
-                    ip = target;
+                    set_jump_target(&mut ip, target, code_len);
                 }
                 Instruction::CastIntToFloat => {
                     let v = self.stack.pop().as_int() as f64;
@@ -2659,7 +2668,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::CmpJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 // Fused `LOAD slot; CONST imm; <cond>; JMPF/JMPT` without stack traffic.
@@ -2691,7 +2700,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::BinSlotImmJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 Instruction::LogNotJmpf | Instruction::LogNotJmpt => {
@@ -2704,7 +2713,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let val = self.stack.pop();
                     if (val.as_int() == 0) == matches!(*bc, Instruction::LogNotJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 // Fused `BinSlotSlot; JMPF/JMPT` — pool packs (target<<32)|b.
@@ -2737,7 +2746,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::BinSlotSlotJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 // Fused `LOAD src; CONST imm; <op>; STORE dest` — pool packs (dest<<32)|imm.
@@ -3320,7 +3329,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::BinSlotSlotConstJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 Instruction::HALT => {
@@ -3647,14 +3656,14 @@ impl<const S: usize> Machine<S> {
                                 };
                                 self.stack.push(value);
                             }
-                            ip = target_offset;
+                            set_jump_target(&mut ip, target_offset, code_len);
                         }
                     }
                 }
                 Instruction::Unpack => {
                     // Pops enum scrutinee; pushes payload in declaration order
                     // (stack/locals overlap — see STORE).
-                    let _arity = opcode.operand_u32() as usize;
+                    let arity = opcode.operand_u32() as usize;
 
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().raw() as u64;
@@ -3667,7 +3676,9 @@ impl<const S: usize> Machine<S> {
 
                     if let Some(enum_ref) = obj_enum {
                         let enum_ref = enum_ref.as_ref();
-                        for member in &enum_ref.payload {
+                        promise!(arity == enum_ref.payload.len());
+                        for i in 0..arity {
+                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
                             let value = match member {
                                 Member::Value(v) => *v,
                                 Member::Object(o) => Value::from(o.addr()),
@@ -3690,16 +3701,13 @@ impl<const S: usize> Machine<S> {
 
                     if let Some(enum_ref) = obj_enum {
                         let enum_ref = enum_ref.as_ref();
-                        if let Some(member) = enum_ref.payload.get(field_index) {
-                            let value = match member {
-                                Member::Value(v) => *v,
-                                Member::Object(o) => Value::from(o.addr()),
-                            };
-                            self.stack.push(value);
-                        } else {
-                            // OOB field index — keep stack balanced.
-                            self.stack.push(Value::default());
-                        }
+                        promise!(field_index < enum_ref.payload.len());
+                        let member = unsafe { enum_ref.payload.get_unchecked(field_index) };
+                        let value = match member {
+                            Member::Value(v) => *v,
+                            Member::Object(o) => Value::from(o.addr()),
+                        };
+                        self.stack.push(value);
                     } else {
                         // Non-enum receiver (e.g. class Instance misrouted
                         // through LoadField). Push a sentinel so the pop
@@ -3713,7 +3721,7 @@ impl<const S: usize> Machine<S> {
                     // `tell` so subsequent LOAD/StorePop see the written slots.
                     let operands = opcode.operand_u32();
                     let slot_offset = (operands & 0xFFFF) as usize;
-                    let _arity = (operands >> 16) as usize;
+                    let arity = (operands >> 16) as usize;
 
                     let slot = sp + slot_offset;
                     promise!(slot < self.stack.tell());
@@ -3727,14 +3735,16 @@ impl<const S: usize> Machine<S> {
 
                     if let Some(enum_ref) = obj_enum {
                         let enum_ref = enum_ref.as_ref();
-                        for (i, member) in enum_ref.payload.iter().enumerate() {
+                        promise!(arity == enum_ref.payload.len());
+                        for i in 0..arity {
+                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
                             let value = match member {
                                 Member::Value(v) => *v,
                                 Member::Object(o) => Value::from(o.addr()),
                             };
                             self.stack[slot + i] = value;
                         }
-                        let end = slot + enum_ref.payload.len();
+                        let end = slot + arity;
                         if self.stack.tell() < end {
                             self.stack.seek(end);
                         }
@@ -3984,7 +3994,7 @@ impl<const S: usize> Machine<S> {
                         self.frames
                             .setup_current_and_advance(|frame| frame.set(callee_sp));
                         sp = callee_sp;
-                        ip = entry as usize;
+                        set_jump_target(&mut ip, entry as usize, code_len);
                         continue;
                     }
 
@@ -4054,7 +4064,7 @@ impl<const S: usize> Machine<S> {
                     self.frames
                         .setup_current_and_advance(|frame| frame.set(callee_sp));
                     sp = callee_sp;
-                    ip = target;
+                    set_jump_target(&mut ip, target, code_len);
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):

@@ -1062,25 +1062,33 @@
         assert_eq!(vm.pop().as_int(), 42);
     }
 
+    /// Malformed bytecode: OOB `LoadField` trips `promise!` in debug builds.
+    #[cfg(debug_assertions)]
     #[test]
-    fn load_field_out_of_bounds_pushes_default() {
+    #[should_panic]
+    fn load_field_out_of_bounds_debug_asserts() {
         let mut vm = Machine::<4>::default();
         vm.run(&[
-            // Build enum (tag=0, arity=2) with payload [42, 99].
             const_int(99),
             const_int(42),
             make_enum(0, 2),
-            // LoadField(5): field_index 5 is past arity=2.
-            // Pop enum, push Value::default() so Access stays balanced.
             load_field(5),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(
-            vm.tell(),
-            1,
-            "out-of-bounds LoadField should leave a default value"
-        );
-        assert_eq!(vm.pop(), Value::default());
+    }
+
+    #[cfg(not(debug_assertions))]
+    #[test]
+    fn load_field_out_of_bounds_release_uses_unchecked() {
+        let mut vm = Machine::<4>::default();
+        vm.run(&[
+            const_int(99),
+            const_int(42),
+            make_enum(0, 2),
+            load_field(5),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.tell(), 1);
     }
 
     /// `BinSlotSlot` applies an int binary op between two locals.
