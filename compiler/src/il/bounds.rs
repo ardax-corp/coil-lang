@@ -4,8 +4,8 @@
 //! `0 <= i < len` proofs for in-body `Index` / `StoreIndex` when the bound is the
 //! array's length (or a fill-loop-equal `n`), hoists invariant
 //! `LOAD; ArrayLen; STORE` triples into the preheader, and rewrites proven sites
-//! to `IndexUnchecked` / `StoreIndexUnchecked`. Fail-closed: unknown or
-//! mutation-sensitive paths stay checked.
+//! to `IndexUnchecked` / `StoreIndexUnchecked` (unit `+1` or invariant stride
+//! `+slot`). Fail-closed: unknown or mutation-sensitive paths stay checked.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -558,21 +558,160 @@ fn header_lt_bound(ops: &[IlOp], lp: &NaturalLoop) -> Option<(u32, u32)> {
     None
 }
 
+/// Last `StorePop` to `slot` strictly before `before`, if any.
+fn last_store_pop_before(ops: &[IlOp], before: usize, slot: u32) -> Option<usize> {
+    for i in (0..before).rev() {
+        if let IlOp::StorePop { slot: s, .. } = &ops[i]
+            && *s == slot
+        {
+            return Some(i);
+        }
+        if let IlOp::Byte { byte, .. } = &ops[i]
+            && matches!(
+                *byte.bytecode(),
+                Instruction::STORE | Instruction::StorePop
+            )
+        {
+            for k in 0..byte.load_store_count() {
+                if byte.load_store_slot_at(k) == slot {
+                    return None;
+                }
+            }
+        }
+    }
+    None
+}
+
+/// `slot` is known `>= 0` on entry to the loop at `header`.
+fn slot_nonneg_before(ops: &[IlOp], header: usize, slot: u32) -> bool {
+    let Some(i) = last_store_pop_before(ops, header, slot) else {
+        return false;
+    };
+    if i > 0
+        && let IlOp::Const { imm, .. } = &ops[i - 1]
+    {
+        return *imm >= 0;
+    }
+    // `k = p + p` (nsieve inner-loop entry).
+    if i >= 3
+        && matches!(&ops[i - 1], IlOp::Bin { op: Instruction::ADD, .. })
+        && let IlOp::Load { slot: a, .. } = &ops[i - 2]
+        && let IlOp::Load { slot: b, .. } = &ops[i - 3]
+        && a == b
+    {
+        return slot_nonneg_before(ops, i - 3, *a);
+    }
+    // `x = a + b` with both summands non-negative.
+    if i >= 3
+        && matches!(&ops[i - 1], IlOp::Bin { op: Instruction::ADD, .. })
+        && let IlOp::Load { slot: a, .. } = &ops[i - 2]
+        && let IlOp::Load { slot: b, .. } = &ops[i - 3]
+    {
+        return slot_nonneg_before(ops, i - 3, *a) && slot_nonneg_before(ops, i - 3, *b);
+    }
+    if i >= 1
+        && let IlOp::BinSlotImm {
+            op,
+            slot: src,
+            imm,
+            ..
+        } = &ops[i - 1]
+        && *op == Instruction::ADD as u8
+        && *src as u32 == slot
+        && *imm >= 0
+    {
+        return slot_nonneg_before(ops, i - 1, slot);
+    }
+    false
+}
+
+/// Stride slot is strictly positive on loop entry (`p >= 1` for `k += p`).
+fn slot_positive_before(ops: &[IlOp], header: usize, slot: u32) -> bool {
+    let Some(i) = last_store_pop_before(ops, header, slot) else {
+        return false;
+    };
+    if i > 0
+        && let IlOp::Const { imm, .. } = &ops[i - 1]
+    {
+        return *imm > 0;
+    }
+    if i >= 1
+        && let IlOp::BinSlotImm {
+            op,
+            slot: src,
+            imm,
+            ..
+        } = &ops[i - 1]
+        && *op == Instruction::ADD as u8
+        && *src as u32 == slot
+        && *imm > 0
+    {
+        return slot_positive_before(ops, i - 1, slot);
+    }
+    false
+}
+
+fn index_init_nonneg(ops: &[IlOp], header: usize, index_slot: u32) -> bool {
+    slot_nonneg_before(ops, header, index_slot)
+}
+
+/// `LOAD idx; LOAD stride; ADD` or `LOAD stride; LOAD idx; ADD` immediately
+/// before `store_i`.
+fn stride_add_before_store(ops: &[IlOp], store_i: usize, index_slot: u32) -> Option<u32> {
+    if store_i >= 3
+        && matches!(&ops[store_i - 1], IlOp::Bin { op: Instruction::ADD, .. })
+    {
+        let IlOp::Load { slot: a, .. } = &ops[store_i - 2] else {
+            return None;
+        };
+        let IlOp::Load { slot: b, .. } = &ops[store_i - 3] else {
+            return None;
+        };
+        if *a == index_slot && *b != index_slot {
+            return Some(*b);
+        }
+        if *b == index_slot && *a != index_slot {
+            return Some(*a);
+        }
+        return None;
+    }
+    if store_i >= 1
+        && let IlOp::BinSlotSlot {
+            op,
+            a,
+            b,
+            ..
+        } = &ops[store_i - 1]
+        && *op == Instruction::ADD as u8
+    {
+        let a = *a as u32;
+        let b = *b as u32;
+        if a == index_slot && b != index_slot {
+            return Some(b);
+        }
+        if b == index_slot && a != index_slot {
+            return Some(a);
+        }
+    }
+    None
+}
+
 fn index_is_counted(ops: &[IlOp], lp: &NaturalLoop, index_slot: u32) -> bool {
-    // Every store to index_slot must be `index + positive_const`.
-    let mut saw_inc = false;
+    // Every store to index_slot must be unit `+k` or invariant stride `+slot`.
+    let stored = slots_stored_in_loop(ops, lp);
+    let mut saw_step = false;
     let mut i = lp.body_start();
     while i < lp.latch {
         if let IlOp::StorePop { slot, .. } = &ops[i]
             && *slot == index_slot
         {
-            // Look back for LOAD index; CONST k>0; ADD  or BinSlotImm ADD.
+            // Unit: LOAD index; CONST k>0; ADD.
             if i >= 3
                 && matches!(&ops[i - 1], IlOp::Bin { op: Instruction::ADD, .. })
                 && matches!(&ops[i - 2], IlOp::Const { imm, .. } if *imm > 0)
                 && matches!(&ops[i - 3], IlOp::Load { slot: s, .. } if *s == index_slot)
             {
-                saw_inc = true;
+                saw_step = true;
                 i += 1;
                 continue;
             }
@@ -587,48 +726,26 @@ fn index_is_counted(ops: &[IlOp], lp: &NaturalLoop, index_slot: u32) -> bool {
                 && *src as u32 == index_slot
                 && *imm > 0
             {
-                saw_inc = true;
+                saw_step = true;
                 i += 1;
                 continue;
             }
-            // Unknown store to index — fail closed.
+            if let Some(stride) = stride_add_before_store(ops, i, index_slot) {
+                if stored.contains(&stride)
+                    || stride == index_slot
+                    || !slot_positive_before(ops, lp.header, stride)
+                {
+                    return false;
+                }
+                saw_step = true;
+                i += 1;
+                continue;
+            }
             return false;
         }
         i += 1;
     }
-    saw_inc
-}
-
-fn index_init_nonneg(ops: &[IlOp], header: usize, index_slot: u32) -> bool {
-    // Walk backwards for the last store to index_slot before the header.
-    for i in (0..header).rev() {
-        match &ops[i] {
-            IlOp::StorePop { slot, .. } if *slot == index_slot => {
-                if i > 0
-                    && let IlOp::Const { imm, .. } = &ops[i - 1]
-                {
-                    return *imm >= 0;
-                }
-                // LOAD other; STORE index — unknown.
-                return false;
-            }
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::STORE | Instruction::StorePop
-                ) =>
-            {
-                for k in 0..byte.load_store_count() {
-                    if byte.load_store_slot_at(k) == index_slot {
-                        return false;
-                    }
-                }
-            }
-            _ => {}
-        }
-    }
-    // Param / unset — fail closed (could be negative).
-    false
+    saw_step
 }
 
 /// Arrays filled by a dominating `while i < n { arr.push(...); i++ }` from empty.
@@ -2602,6 +2719,117 @@ mod tests {
         assert!(
             stats.proven_index >= 1,
             "Index after fill with GT header should be proven; stats={stats:?}"
+        );
+    }
+
+    /// Inner `while k < n { flags[k] = 0; k = k + p }` with stride induction.
+    #[test]
+    fn stride_loop_rewrites_store_index() {
+        reset_bounds_stats();
+        let mut ops = vec![
+            IlOp::Const { imm: 8, loc: loc() },
+            IlOp::StorePop { slot: 0, loc: loc() },
+            IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(0)),
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc: loc(),
+            },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::byte(Byte::new(Instruction::ArrayPush)),
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Const { imm: 2, loc: loc() },
+            IlOp::StorePop { slot: 4, loc: loc() },
+            IlOp::Load { slot: 4, loc: loc() },
+            IlOp::Load { slot: 4, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 5, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(2),
+                loc: loc(),
+            },
+            IlOp::Label(Label(2)),
+            IlOp::Load { slot: 5, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(3),
+                loc: loc(),
+            },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 6, loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Load { slot: 5, loc: loc() },
+            IlOp::Load { slot: 6, loc: loc() },
+            IlOp::byte(Byte::new(Instruction::StoreIndex)),
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 5, loc: loc() },
+            IlOp::Load { slot: 4, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 5, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(2),
+                loc: loc(),
+            },
+            IlOp::Label(Label(3)),
+            IlOp::Halt { loc: loc() },
+        ];
+        loop_bounds(&mut ops);
+        let stats = last_bounds_stats();
+        assert!(
+            stats.proven_store_index >= 1,
+            "stride StoreIndex should rewrite; stats={stats:?}"
+        );
+        assert!(
+            ops.iter().any(|op| {
+                matches!(
+                    op,
+                    IlOp::Byte { byte, .. }
+                        if *byte.bytecode() == Instruction::StoreIndexUnchecked
+                )
+            }),
+            "expected StoreIndexUnchecked in IL"
         );
     }
 }

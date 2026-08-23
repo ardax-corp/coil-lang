@@ -365,7 +365,7 @@ fn perf_nsieve_proves_fill_bounded_index() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/nsieve.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "nsieve", bc.len());
-    // Proven p-loop Index becomes IndexUnchecked; stride StoreIndex stays checked.
+    // Proven p-loop Index and stride StoreIndex both rewrite to unchecked.
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::Index),
         0,
@@ -375,19 +375,23 @@ fn perf_nsieve_proves_fill_bounded_index() {
         count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked) >= 1,
         "nsieve should emit IndexUnchecked for proven p-loop read"
     );
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndex),
+        0,
+        "nsieve stride StoreIndex should rewrite to StoreIndexUnchecked"
+    );
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::StoreIndex) >= 1,
-        "nsieve should keep checked StoreIndex for stride write"
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndexUnchecked) >= 1,
+        "nsieve should emit StoreIndexUnchecked for proven stride write"
     );
     let stats = compiler::last_bounds_stats();
     assert!(
         stats.proven_index >= 1,
         "nsieve p-loop Index after fill-to-n should be proven; stats={stats:?}"
     );
-    // Inner k = p+p / k += p is not a unit +1 counted form — stay checked.
     assert!(
-        stats.checked_store_index >= 1,
-        "nsieve StoreIndex on stride induction should stay checked; stats={stats:?}"
+        stats.proven_store_index >= 1,
+        "nsieve stride StoreIndex should be proven; stats={stats:?}"
     );
 }
 
@@ -1250,11 +1254,14 @@ fn perf_phase0_nsieve_shape_inventory() {
         "fill/p/k loop guards: {h:?}"
     );
     assert!(h.index_unchecked >= 1, "nsieve proven Index unchecked: {h:?}");
-    assert!(h.store_index >= 1, "nsieve keeps checked StoreIndex: {h:?}");
+    assert!(
+        h.store_index_unchecked >= 1,
+        "nsieve proven stride StoreIndex unchecked: {h:?}"
+    );
 
-    // Proven p-loop read is unchecked; stride write stays a checked gap.
+    // Proven p-loop read and stride write are both unchecked.
     assert_eq!(g.index, 0, "nsieve proven Index should not count as gap: {g:?}");
-    assert_eq!(g.store_index, 1, "nsieve StoreIndex gap row: {g:?}");
+    assert_eq!(g.store_index, 0, "nsieve stride StoreIndex should not count as gap: {g:?}");
     assert_eq!(
         g.slot_move_copy, 0,
         "nsieve slot-move should stay 0: {g:?}"
@@ -1410,14 +1417,19 @@ fn aot_p2_nsieve_index_shape_inventory() {
         inner_end - inner_start
     );
 
-    // `flags[p]` read rewrites to IndexUnchecked; `flags[k] = 0` stays StoreIndex.
+    // `flags[p]` read rewrites to IndexUnchecked; `flags[k] = 0` to StoreIndexUnchecked.
     assert_eq!(index, 0, "nsieve Index count changed");
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked),
         1,
         "nsieve IndexUnchecked count changed"
     );
-    assert_eq!(store_index, 1, "nsieve StoreIndex count changed");
+    assert_eq!(store_index, 0, "nsieve checked StoreIndex count changed");
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndexUnchecked),
+        1,
+        "nsieve StoreIndexUnchecked count changed"
+    );
     assert!(
         shape.load_ops <= 5,
         "nsieve residual LOAD regressed: {shape:?}"
