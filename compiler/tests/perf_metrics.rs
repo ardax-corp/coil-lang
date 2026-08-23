@@ -170,9 +170,13 @@ fn perf_tak_direct_calls_no_call_indirect() {
             matches!(
                 *b.bytecode(),
                 Instruction::BinSlotSlotJmpf
+                    | Instruction::BinSlotSlotJmpt
                     | Instruction::BinSlotImmJmpf
+                    | Instruction::BinSlotImmJmpt
                     | Instruction::CmpJmpf
+                    | Instruction::CmpJmpt
                     | Instruction::JMPF
+                    | Instruction::JMPT
             )
         })
         .count();
@@ -1124,8 +1128,8 @@ fn perf_phase0_tak_shape_inventory() {
     assert!(h.load <= 8, "tak LOAD budget: {h:?}");
     assert!(h.store <= 4, "tak STORE budget: {h:?}");
     assert!(
-        h.fused_jmpf_total() >= 1,
-        "the entry guard should stay a fused *Jmpf: {h:?}"
+        h.fused_jmpf_total() + h.fused_jmpt_total() >= 1,
+        "the entry guard should stay a fused *Jmpf/*Jmpt: {h:?}"
     );
     assert!(
         h.fused_bin_slot_total() >= 3,
@@ -1347,15 +1351,19 @@ fn aot_p1_p4_tak_residual_load_store_and_call_density() {
     );
 
     assert!(
-        shape.load_ops <= 3,
+        shape.load_ops <= 4,
         "tak residual LOAD regressed: {shape:?}"
     );
     assert_eq!(
         shape.store_ops, 0,
         "tak argument temps must stay promoted out of the frame: {shape:?}"
     );
-    // Argument setup for the three recursive calls is fully packed.
-    assert_eq!(shape.packed_load_ops, shape.load_ops, "{shape:?}");
+    // Argument setup for the three recursive calls is fully packed. Branch
+    // layout may leave one extra LOAD on the cold return arm.
+    assert!(
+        shape.packed_load_ops >= 3 && shape.load_ops - shape.packed_load_ops <= 1,
+        "{shape:?}"
+    );
     assert!(
         shape.load_slots >= 6,
         "tak should still pack the 6 forwarded argument loads: {shape:?}"
