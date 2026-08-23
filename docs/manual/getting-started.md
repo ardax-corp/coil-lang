@@ -105,6 +105,7 @@ The default CLI invocation compiles `examples/fib.hy` to bytecode, serializes it
 |------------|---------|
 | `coil [<file.hy>]` | Compile to `out.hyc` (cached) and run; omit the file to use `[entry].file` from `coil.toml` |
 | `coil compile [<file.hy>] [-o path]` | Compile only; default output is `out.hyc`; omit the file to use `[entry].file` |
+| `coil -O0` … `-O3` / `-Os` / `-Og` | Optimization preset (`none`/`basic`/`standard`/`aggressive`/`size`/`debug`); default `-O2` |
 | `coil run <file.hyc>` | Execute a previously compiled archive |
 | `coil package <file.hy> [-o path]` | Build a **single executable** for this OS/arch (embeds `.hyc` into `coil-embed` by default); always requires an explicit `.hy` path (does not read `[entry].file`) |
 | `coil test [path] [--fail-fast]` | Compile and run every `.hy` under `[path]` (default `./tests`) |
