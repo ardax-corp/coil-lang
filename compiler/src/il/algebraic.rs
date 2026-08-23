@@ -1213,6 +1213,7 @@ mod tests {
                 invariant_store_elim: false,
                 ssa_gvn: false,
                 escape_analysis: false,
+                branch_optimization: false,
             },
             &mut pool,
         );

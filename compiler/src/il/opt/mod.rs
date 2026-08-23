@@ -55,6 +55,10 @@ pub struct OptimizeOptions {
     pub ssa_gvn: bool,
     /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
     pub escape_analysis: bool,
+    /// Heuristic / profile-guided branch layout (COI-128).
+    /// Default **off**: moving a then-arm is not yet SP-safe on fused
+    /// production IL (`examples/fib.hy`). Tests call the pass directly.
+    pub branch_optimization: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -85,6 +89,7 @@ impl Default for OptimizeOptions {
             invariant_store_elim: true,
             ssa_gvn: true,
             escape_analysis: true,
+            branch_optimization: false,
         }
     }
 }
@@ -175,6 +180,9 @@ pub fn optimize_at(
     if opts.invert_guard_branch {
         invert_branch_over_jump(ops);
     }
+    if opts.branch_optimization {
+        branch_opt::optimize_branches(ops, None);
+    }
     // After every slot-tracking pass: promotion leaves a slot defined only by
     // the push that lands on it, which earlier passes would not see.
     // Seek-normalize first so loop headers join at a Known cursor.
@@ -248,8 +256,11 @@ pub(crate) fn emitting_range_to_raw(
     )
 }
 
+mod branch_opt;
 mod opt_level;
 pub use opt_level::OptLevel;
+#[allow(unused_imports)]
+pub use branch_opt::{BranchProfile, optimize_branches};
 
 mod cfg;
 mod convoy;

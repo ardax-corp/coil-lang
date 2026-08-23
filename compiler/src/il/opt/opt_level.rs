@@ -101,6 +101,7 @@ fn all_off() -> OptimizeOptions {
         invariant_store_elim: false,
         ssa_gvn: false,
         escape_analysis: false,
+        branch_optimization: false,
     }
 }
 
@@ -149,6 +150,7 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.invariant_store_elim,
         o.ssa_gvn,
         o.escape_analysis,
+        o.branch_optimization,
     ]
 }
 

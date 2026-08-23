@@ -30,6 +30,8 @@ AST + HM → Stack IL (labels) → IL opts → lower/fuse-select → Vec<Byte> �
 
 `None ⊂ Basic ⊂ Standard ⊂ Aggressive` on enable flags. Size and Debug are independent axes.
 
+Branch layout (COI-128) lives behind `OptimizeOptions::branch_optimization` (**off** by default). When enabled, a terminating then-arm after `JMPF` is treated as cold and moved off the fall-through unless a profile says that edge is hot. Production stays fail-closed until the rewrite is SP-safe on fused IL.
+
 The IL is **compile-time only**; the VM implements the representation-boundary and numeric-chain opcodes and archive minor 5 records them.
 
 ## Cache and rebuild
