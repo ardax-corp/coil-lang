@@ -74,6 +74,8 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
+    /// IL / inliner preset (COI-127). Default [`crate::OptLevel::Standard`].
+    opt_level: crate::OptLevel,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
     compiler: std::cell::OnceCell<Compiler>,
@@ -213,6 +215,7 @@ impl Pipeline {
             for (name, id) in &self.pending_native_ids {
                 c.register_native_id(name, *id);
             }
+            c.set_opt_level(self.opt_level);
             c
         })
     }
@@ -405,6 +408,7 @@ impl Pipeline {
             source_cache: Vec::new(),
             overlays: HashMap::new(),
             include_tests: false,
+            opt_level: crate::OptLevel::Standard,
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
@@ -1312,6 +1316,18 @@ impl Pipeline {
         self.include_tests
     }
 
+    /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].
+    pub fn set_opt_level(&mut self, level: crate::OptLevel) {
+        self.opt_level = level;
+        if self.compiler.get().is_some() {
+            self.compiler_lazy_mut().set_opt_level(level);
+        }
+    }
+
+    pub fn opt_level(&self) -> crate::OptLevel {
+        self.opt_level
+    }
+
     /// Borrow host-registered native function metadata.
     pub fn natives(&self) -> &[NativeDecl] {
         &self.natives
@@ -1792,5 +1808,29 @@ fn main() { add(1, 2); }
         let report = pipeline.diff_il_tell_against_bytecode(&bytecode, &pool, &ranges, &seeds);
         assert!(report.mismatches.is_empty(), "{:?}", report.mismatches);
         assert!(report.checked > 0);
+    }
+
+    #[test]
+    fn compile_src_succeeds_at_every_opt_level() {
+        use crate::OptLevel;
+        let src = r#"
+fn add(int a, int b) -> int { return a + b; }
+fn main() { add(1, 2); }
+"#;
+        for level in [
+            OptLevel::None,
+            OptLevel::Basic,
+            OptLevel::Standard,
+            OptLevel::Aggressive,
+            OptLevel::Size,
+            OptLevel::Debug,
+        ] {
+            let mut pipeline = Pipeline::new();
+            pipeline.set_opt_level(level);
+            assert_eq!(pipeline.opt_level(), level);
+            pipeline
+                .compile_src(src)
+                .unwrap_or_else(|_| panic!("{level:?} should compile"));
+        }
     }
 }

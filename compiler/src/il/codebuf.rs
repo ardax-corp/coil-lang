@@ -18,6 +18,8 @@ pub struct CodeBuf {
     entry_at_offset: HashMap<usize, Label>,
     /// Per-function spans recorded at function finalize (flat buffer).
     funcs: Vec<IlFunc>,
+    /// IL opt preset used at [`Self::lower_in_place`].
+    opt_options: super::opt::OptimizeOptions,
 }
 
 // Public IL API retained for opts/tests, peephole, and recovery paths.
@@ -25,6 +27,10 @@ pub struct CodeBuf {
 impl CodeBuf {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn set_opt_options(&mut self, opts: super::opt::OptimizeOptions) {
+        self.opt_options = opts;
     }
 
     pub fn il(&self) -> &IlBuilder {
@@ -479,7 +485,7 @@ impl CodeBuf {
     fn lower_in_place_inner(&mut self, pool: &mut Vec<u64>, capture_ops: bool) -> Lowered {
         let mut module = IlModule::from_flat(self.il.ops(), &self.funcs)
             .with_entries(self.entry_at_offset.clone());
-        let lowered = lower_module_inner(&mut module, pool, capture_ops);
+        let lowered = lower_module_inner(&mut module, pool, capture_ops, &self.opt_options);
         self.lowered = Some(lowered.bytecode.clone());
         self.lowered_locs = Some(lowered.debug_locs.clone());
         lowered
