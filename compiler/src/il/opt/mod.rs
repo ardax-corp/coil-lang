@@ -59,6 +59,9 @@ pub struct OptimizeOptions {
     /// Default **off**: moving a then-arm is not yet SP-safe on fused
     /// production IL (`examples/fib.hy`). Tests call the pass directly.
     pub branch_optimization: bool,
+    /// Sink jump-only terminating blocks to the end (COI-129). Fall-through
+    /// chains stay adjacent; branch labels are not rewritten.
+    pub block_reordering: bool,
 }
 
 impl Default for OptimizeOptions {
@@ -90,6 +93,7 @@ impl Default for OptimizeOptions {
             ssa_gvn: true,
             escape_analysis: true,
             branch_optimization: false,
+            block_reordering: true,
         }
     }
 }
@@ -183,6 +187,9 @@ pub fn optimize_at(
     if opts.branch_optimization {
         branch_opt::optimize_branches(ops, None);
     }
+    if opts.block_reordering {
+        block_order::reorder_basic_blocks(ops, None);
+    }
     // After every slot-tracking pass: promotion leaves a slot defined only by
     // the push that lands on it, which earlier passes would not see.
     // Seek-normalize first so loop headers join at a Known cursor.
@@ -256,6 +263,7 @@ pub(crate) fn emitting_range_to_raw(
     )
 }
 
+mod block_order;
 mod branch_opt;
 mod opt_level;
 pub use opt_level::OptLevel;

@@ -32,6 +32,8 @@ AST + HM → Stack IL (labels) → IL opts → lower/fuse-select → Vec<Byte> �
 
 Branch layout (COI-128) lives behind `OptimizeOptions::branch_optimization` (**off** by default). When enabled, a terminating then-arm after `JMPF` is treated as cold and moved off the fall-through unless a profile says that edge is hot. Production stays fail-closed until the rewrite is SP-safe on fused IL.
 
+Basic-block reordering (COI-129) is **on** by default (`block_reordering`). It only sinks jump-only terminating blocks that are not fall-through successors and are not unconditional-jump joins, so labels and branch polarity stay put.
+
 The IL is **compile-time only**; the VM implements the representation-boundary and numeric-chain opcodes and archive minor 5 records them.
 
 ## Cache and rebuild

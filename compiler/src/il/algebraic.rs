@@ -1214,6 +1214,7 @@ mod tests {
                 ssa_gvn: false,
                 escape_analysis: false,
                 branch_optimization: false,
+                block_reordering: false,
             },
             &mut pool,
         );

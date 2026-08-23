@@ -102,6 +102,7 @@ fn all_off() -> OptimizeOptions {
         ssa_gvn: false,
         escape_analysis: false,
         branch_optimization: false,
+        block_reordering: false,
     }
 }
 
@@ -151,6 +152,7 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.ssa_gvn,
         o.escape_analysis,
         o.branch_optimization,
+        o.block_reordering,
     ]
 }
 
