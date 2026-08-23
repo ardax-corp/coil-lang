@@ -325,6 +325,12 @@ pub enum Instruction {
     LogNotJmpt,
     BinSlotSlotJmpt,
     BinSlotSlotConstJmpt,
+
+    /// Bounds-proofed [`Self::Index`]: compiler guarantees `0 <= index < len` for
+    /// the addressed array/tuple. UB in release on violation.
+    IndexUnchecked,
+    /// Bounds-proofed [`Self::StoreIndex`]: same guarantee as [`Self::IndexUnchecked`].
+    StoreIndexUnchecked,
 }
 
 impl From<u8> for Instruction {
@@ -476,6 +482,8 @@ impl Instruction {
             Self::LogNotJmpt => "LogNotJmpt",
             Self::BinSlotSlotJmpt => "BinSlotSlotJmpt",
             Self::BinSlotSlotConstJmpt => "BinSlotSlotConstJmpt",
+            Self::IndexUnchecked => "IndexUnchecked",
+            Self::StoreIndexUnchecked => "StoreIndexUnchecked",
         }
     }
 }
@@ -591,7 +599,10 @@ impl Byte {
 
     pub fn constant(&self, pool: &[u64]) -> u64 {
         if self.operands & Self::POOL_FLAG != 0 {
-            pool[(self.operands & !Self::POOL_FLAG) as usize]
+            let idx = (self.operands & !Self::POOL_FLAG) as usize;
+            crate::promise!(idx < pool.len());
+            // SAFETY: promise! guarantees idx < pool.len().
+            unsafe { *pool.get_unchecked(idx) }
         } else {
             self.operands as i32 as i64 as u64
         }
@@ -599,7 +610,10 @@ impl Byte {
 
     /// JumpIfMatch target from pool (index in lower 16 bits of `operands`).
     pub fn jump_if_match_target(&self, pool: &[u64]) -> usize {
-        pool[(self.operands & 0xFFFF) as usize] as usize
+        let idx = (self.operands & 0xFFFF) as usize;
+        crate::promise!(idx < pool.len());
+        // SAFETY: promise! guarantees idx < pool.len().
+        unsafe { *pool.get_unchecked(idx) as usize }
     }
 
     pub fn with_bin_slot_imm(mut self, op: u8, slot: u8, imm: i16) -> Self {
@@ -934,7 +948,9 @@ impl ArchivedByte {
     pub fn constant(&self, pool: &[u64]) -> u64 {
         let op: u32 = self.operands.into();
         if op & Self::POOL_FLAG != 0 {
-            pool[(op & !Self::POOL_FLAG) as usize]
+            let idx = (op & !Self::POOL_FLAG) as usize;
+            crate::promise!(idx < pool.len());
+            unsafe { *pool.get_unchecked(idx) }
         } else {
             op as i32 as i64 as u64
         }
@@ -947,7 +963,9 @@ impl ArchivedByte {
 
     pub fn jump_if_match_target(&self, pool: &[u64]) -> usize {
         let op: u32 = self.operands.into();
-        pool[(op & 0xFFFF) as usize] as usize
+        let idx = (op & 0xFFFF) as usize;
+        crate::promise!(idx < pool.len());
+        unsafe { *pool.get_unchecked(idx) as usize }
     }
 
     pub fn bin_slot_imm_parts(&self) -> (u8, usize, i64) {
@@ -1276,7 +1294,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::BinSlotSlotConstJmpt as u8;
+        let last = Instruction::StoreIndexUnchecked as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

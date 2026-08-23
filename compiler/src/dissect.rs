@@ -421,6 +421,7 @@ fn format_il_op(op: &IlOp) -> String {
         IlOp::Dup { .. } => "DUPLICATE".to_string(),
         IlOp::Pop { .. } => "POP".to_string(),
         IlOp::Index { .. } => "Index".to_string(),
+        IlOp::IndexUnchecked { .. } => "IndexUnchecked".to_string(),
         IlOp::MakeTuple { arity, .. } => format!("MakeTuple arity={arity}"),
         IlOp::MakeArray { arity, .. } => format!("MakeArray arity={arity}"),
         IlOp::MakeEnum { tag, arity, .. } => format!("MakeEnum tag={tag} arity={arity}"),

@@ -2169,9 +2169,12 @@ i = i + 1; \
         let has_len = bc
             .iter()
             .any(|b| matches!(b.bytecode(), Instruction::ArrayLen));
-        let has_index = bc
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::Index));
+        let has_index = bc.iter().any(|b| {
+            matches!(
+                b.bytecode(),
+                Instruction::Index | Instruction::IndexUnchecked
+            )
+        });
         let jmp = bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::JMP))

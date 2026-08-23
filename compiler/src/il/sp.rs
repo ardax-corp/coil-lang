@@ -60,7 +60,9 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
             | IlOp::ConstPool { .. }
             | IlOp::String { .. }
             | IlOp::Dup { .. } => Some(1),
-        IlOp::StorePop { .. } | IlOp::Pop { .. } | IlOp::Index { .. } => Some(-1),
+        IlOp::StorePop { .. } | IlOp::Pop { .. } | IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => {
+            Some(-1)
+        }
         IlOp::MakeTuple { arity, .. } | IlOp::MakeArray { arity, .. } => Some(1 - *arity as i32),
         IlOp::MakeEnum { arity, .. } => Some(1 - *arity as i32),
         IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } | IlOp::LoadField { .. } => Some(0),
@@ -184,7 +186,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::HALT | Instruction::NOOP => Some(0),
         Instruction::JMP => Some(0),
         Instruction::JMPF | Instruction::JMPT => Some(-1),
-        Instruction::Index => Some(-1),
+        Instruction::Index | Instruction::IndexUnchecked => Some(-1),
         Instruction::BoxValue | Instruction::UnboxValue | Instruction::LoadField => Some(0),
         Instruction::OptionNicheToHeap
         | Instruction::HeapOptionToNiche => Some(0),
@@ -223,7 +225,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         // ArrayLen: pop array, push length (net 0).
         Instruction::ArrayLen => Some(0),
         // StoreIndex: pop value+index+target, push value (−2).
-        Instruction::StoreIndex => Some(-2),
+        Instruction::StoreIndex | Instruction::StoreIndexUnchecked => Some(-2),
         // ArrayPush: pop value+array, push array (−1).
         Instruction::ArrayPush => Some(-1),
         // Fail closed for the remaining long tail (FFI, …).

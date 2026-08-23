@@ -2,17 +2,15 @@
 //!
 //! Identifies counted loops (`0..n` / `0..len`) with an invariant array, tallies
 //! `0 <= i < len` proofs for in-body `Index` / `StoreIndex` when the bound is the
-//! array's length (or a fill-loop-equal `n`), and hoists invariant
-//! `LOAD; ArrayLen; STORE` triples into the preheader. Fail-closed: unknown or
-//! mutation-sensitive paths stay checked. **`Index` is never rewritten**
-//! (COI-85: no `IndexUnchecked`). No new opcodes.
+//! array's length (or a fill-loop-equal `n`), hoists invariant
+//! `LOAD; ArrayLen; STORE` triples into the preheader, and rewrites proven sites
+//! to `IndexUnchecked` / `StoreIndexUnchecked`. Fail-closed: unknown or
+//! mutation-sensitive paths stay checked.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use common::Instruction;
-#[cfg(test)]
-use common::Byte;
+use common::{Byte, Instruction};
 
 use super::op::{IlJumpKind, IlOp, Label};
 use super::sp;
@@ -80,7 +78,7 @@ pub fn loop_bounds(ops: &mut Vec<IlOp>) {
         }
     }
 
-    analyze_index_proofs(ops, &mut stats);
+    rewrite_proven_index_ops(ops, &mut stats);
     LAST_STATS.with(|c| {
         let mut acc = c.borrow_mut();
         acc.array_len_hoists = acc.array_len_hoists.saturating_add(stats.array_len_hoists);
@@ -736,11 +734,10 @@ fn array_starts_empty(ops: &[IlOp], header: usize, arr_slot: u32) -> bool {
     false
 }
 
-fn analyze_index_proofs(ops: &[IlOp], stats: &mut BoundsStats) {
+fn rewrite_proven_index_ops(ops: &mut [IlOp], stats: &mut BoundsStats) {
     let len_of = array_len_defs(ops);
     let counted = detect_counted_loops(ops, &len_of);
     if counted.is_empty() {
-        // Still count all Index/StoreIndex as checked when no counted loops.
         for op in ops {
             if matches!(op, IlOp::Index { .. }) {
                 stats.checked_index += 1;
@@ -751,13 +748,16 @@ fn analyze_index_proofs(ops: &[IlOp], stats: &mut BoundsStats) {
         return;
     }
 
-    // Simulate stack slots as Option: Some(slot) means value is a LOAD of that slot.
+    let mut to_uncheck_index = Vec::new();
+    let mut to_uncheck_store = Vec::new();
+
     for (i, op) in ops.iter().enumerate() {
         let in_loop = counted.iter().find(|c| i >= c.lp.header && i <= c.lp.latch);
         if matches!(op, IlOp::Index { .. }) {
             if let Some(cl) = in_loop
                 && index_at_proven(ops, i, cl)
             {
+                to_uncheck_index.push(i);
                 stats.proven_index += 1;
             } else {
                 stats.checked_index += 1;
@@ -766,10 +766,22 @@ fn analyze_index_proofs(ops: &[IlOp], stats: &mut BoundsStats) {
             if let Some(cl) = in_loop
                 && store_index_at_proven(ops, i, cl)
             {
+                to_uncheck_store.push(i);
                 stats.proven_store_index += 1;
             } else {
                 stats.checked_store_index += 1;
             }
+        }
+    }
+
+    for i in to_uncheck_index {
+        if let IlOp::Index { loc } = ops[i] {
+            ops[i] = IlOp::IndexUnchecked { loc };
+        }
+    }
+    for i in to_uncheck_store {
+        if let IlOp::Byte { byte, .. } = &mut ops[i] {
+            *byte = Byte::new(Instruction::StoreIndexUnchecked);
         }
     }
 }
@@ -814,9 +826,9 @@ fn store_index_at_proven(ops: &[IlOp], store_op: usize, cl: &CountedLoop) -> boo
 ///
 /// When the length is invariant, the `LOAD a; ArrayLen; STORE t` triple codegen
 /// leaves in the loop header moves to the preheader, as does the `CONST; STORE`
-/// pair behind a constant addressing operand. **No bounds check is ever
-/// removed**: `Index` / `StoreIndex` keep their in-VM range test. Driven from
-/// [`crate::il::licm`]; refused shapes are in `docs/internals/limitations.md`.
+/// pair behind a constant addressing operand. Proven `Index` / `StoreIndex`
+/// rewrite to unchecked opcodes. Driven from [`crate::il::licm`]; refused shapes
+/// are in `docs/internals/limitations.md`.
 mod hoist {
     use common::Instruction;
 
@@ -1131,10 +1143,10 @@ mod hoist {
     /// Stack operands an addressing op consumes: 2 for `Index`, 3 for `StoreIndex`.
     fn indexing_operands(op: &IlOp) -> Option<usize> {
         match op {
-            IlOp::Index { .. } => Some(2),
+            IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => Some(2),
             other => match other.as_encode_byte().map(|b| *b.bytecode()) {
-                Some(Instruction::Index) => Some(2),
-                Some(Instruction::StoreIndex) => Some(3),
+                Some(Instruction::Index) | Some(Instruction::IndexUnchecked) => Some(2),
+                Some(Instruction::StoreIndex) | Some(Instruction::StoreIndexUnchecked) => Some(3),
                 _ => None,
             },
         }

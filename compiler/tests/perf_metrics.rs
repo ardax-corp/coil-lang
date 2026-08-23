@@ -365,14 +365,19 @@ fn perf_nsieve_proves_fill_bounded_index() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/nsieve.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "nsieve", bc.len());
-    // No UncheckedIndex opcode: Index/StoreIndex remain; proofs are counters.
+    // Proven p-loop Index becomes IndexUnchecked; stride StoreIndex stays checked.
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::Index),
+        0,
+        "nsieve p-loop Index should rewrite to IndexUnchecked"
+    );
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::Index) >= 1,
-        "nsieve should keep checked Index"
+        count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked) >= 1,
+        "nsieve should emit IndexUnchecked for proven p-loop read"
     );
     assert!(
         count_opcodes_in(&bc, start, end, Instruction::StoreIndex) >= 1,
-        "nsieve should keep checked StoreIndex"
+        "nsieve should keep checked StoreIndex for stride write"
     );
     let stats = compiler::last_bounds_stats();
     assert!(
@@ -677,7 +682,9 @@ struct OpcodeHealth {
     /// Residual unfused float binary ops (ADDF/SUBF/MULF/DIVF/MODF).
     float_arith: usize,
     index: usize,
+    index_unchecked: usize,
     store_index: usize,
+    store_index_unchecked: usize,
     packed_load_n2: usize,
     packed_load_n3: usize,
 }
@@ -841,7 +848,9 @@ fn inventory_health(body: &[Byte]) -> OpcodeHealth {
             Instruction::JMPF => h.jmpf += 1,
             Instruction::JMPT => h.jmpt += 1,
             Instruction::Index => h.index += 1,
+            Instruction::IndexUnchecked => h.index_unchecked += 1,
             Instruction::StoreIndex => h.store_index += 1,
+            Instruction::StoreIndexUnchecked => h.store_index_unchecked += 1,
             op if is_float_arith(op) => h.float_arith += 1,
             _ => {}
         }
@@ -1240,11 +1249,11 @@ fn perf_phase0_nsieve_shape_inventory() {
         h.fused_jmpf_total() + h.jmpf >= 3,
         "fill/p/k loop guards: {h:?}"
     );
-    assert!(h.index >= 1, "nsieve keeps Index: {h:?}");
-    assert!(h.store_index >= 1, "nsieve keeps StoreIndex: {h:?}");
+    assert!(h.index_unchecked >= 1, "nsieve proven Index unchecked: {h:?}");
+    assert!(h.store_index >= 1, "nsieve keeps checked StoreIndex: {h:?}");
 
-    // Index / StoreIndex fast-path candidate family (roadmap §2).
-    assert_eq!(g.index, 1, "nsieve Index gap row: {g:?}");
+    // Proven p-loop read is unchecked; stride write stays a checked gap.
+    assert_eq!(g.index, 0, "nsieve proven Index should not count as gap: {g:?}");
     assert_eq!(g.store_index, 1, "nsieve StoreIndex gap row: {g:?}");
     assert_eq!(
         g.slot_move_copy, 0,
@@ -1401,8 +1410,13 @@ fn aot_p2_nsieve_index_shape_inventory() {
         inner_end - inner_start
     );
 
-    // `flags[p]` read and `flags[k] = 0` write — one site each in source.
-    assert_eq!(index, 1, "nsieve Index count changed");
+    // `flags[p]` read rewrites to IndexUnchecked; `flags[k] = 0` stays StoreIndex.
+    assert_eq!(index, 0, "nsieve Index count changed");
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked),
+        1,
+        "nsieve IndexUnchecked count changed"
+    );
     assert_eq!(store_index, 1, "nsieve StoreIndex count changed");
     assert!(
         shape.load_ops <= 5,
@@ -1456,12 +1470,14 @@ fn aot_p2_len_loop_hoists_invariant_array_len() {
             "{name} must not recompute len(v) every iteration"
         );
         assert_eq!(
-            count_opcodes_in(&bc, start, end, Instruction::Index),
+            count_opcodes_in(&bc, start, end, Instruction::Index)
+                + count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked),
             index,
             "{name} Index count changed"
         );
         assert_eq!(
-            count_opcodes_in(&bc, start, end, Instruction::StoreIndex),
+            count_opcodes_in(&bc, start, end, Instruction::StoreIndex)
+                + count_opcodes_in(&bc, start, end, Instruction::StoreIndexUnchecked),
             store_index,
             "{name} StoreIndex count changed"
         );

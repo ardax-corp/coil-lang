@@ -82,6 +82,10 @@ pub enum IlOp {
     Index {
         loc: DebugLoc,
     },
+    /// Bounds-proofed `Index` (see [`Instruction::IndexUnchecked`]).
+    IndexUnchecked {
+        loc: DebugLoc,
+    },
     /// `MakeTuple` — pop `arity` values, push tuple.
     MakeTuple {
         arity: u32,
@@ -260,6 +264,7 @@ impl IlOp {
             Instruction::DUPLICATE => Self::Dup { loc },
             Instruction::POP => Self::Pop { loc },
             Instruction::Index => Self::Index { loc },
+            Instruction::IndexUnchecked => Self::IndexUnchecked { loc },
             Instruction::MakeTuple => Self::MakeTuple {
                 arity: byte.operand_u32(),
                 loc,
@@ -343,6 +348,7 @@ impl IlOp {
             IlOp::Dup { .. } => Byte::new(Instruction::DUPLICATE),
             IlOp::Pop { .. } => Byte::new(Instruction::POP),
             IlOp::Index { .. } => Byte::new(Instruction::Index),
+            IlOp::IndexUnchecked { .. } => Byte::new(Instruction::IndexUnchecked),
             IlOp::MakeTuple { arity, .. } => {
                 Byte::new(Instruction::MakeTuple).with_operand_u32(*arity)
             }
@@ -425,6 +431,7 @@ impl IlOp {
             | IlOp::Dup { loc }
             | IlOp::Pop { loc }
             | IlOp::Index { loc }
+            | IlOp::IndexUnchecked { loc }
             | IlOp::MakeTuple { loc, .. }
             | IlOp::MakeArray { loc, .. }
             | IlOp::MakeEnum { loc, .. }
@@ -462,6 +469,7 @@ impl IlOp {
             | IlOp::Dup { loc: l }
             | IlOp::Pop { loc: l }
             | IlOp::Index { loc: l }
+            | IlOp::IndexUnchecked { loc: l }
             | IlOp::MakeTuple { loc: l, .. }
             | IlOp::MakeArray { loc: l, .. }
             | IlOp::MakeEnum { loc: l, .. }
@@ -503,6 +511,7 @@ impl IlOp {
             IlOp::Dup { .. } => Some(Instruction::DUPLICATE),
             IlOp::Pop { .. } => Some(Instruction::POP),
             IlOp::Index { .. } => Some(Instruction::Index),
+            IlOp::IndexUnchecked { .. } => Some(Instruction::IndexUnchecked),
             IlOp::MakeTuple { .. } => Some(Instruction::MakeTuple),
             IlOp::MakeArray { .. } => Some(Instruction::MakeArray),
             IlOp::MakeEnum { .. } => Some(Instruction::MakeEnum),

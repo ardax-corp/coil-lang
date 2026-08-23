@@ -324,16 +324,29 @@ fn slot_stored_elsewhere(ops: &[IlOp], make_idx: usize, slot: u32) -> bool {
 }
 
 fn is_index(op: &IlOp) -> bool {
-    matches!(op, IlOp::Index { .. })
-        || op
-            .as_plain_byte()
-            .is_some_and(|b| *b.bytecode() == Instruction::Index)
+    matches!(op, IlOp::Index { .. } | IlOp::IndexUnchecked { .. })
+        || op.as_plain_byte().is_some_and(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::Index | Instruction::IndexUnchecked
+            )
+        })
 }
 
 fn is_store_index(op: &IlOp) -> bool {
-    op.as_plain_byte()
-        .is_some_and(|b| *b.bytecode() == Instruction::StoreIndex)
-        || matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::StoreIndex)
+    op.as_plain_byte().is_some_and(|b| {
+        matches!(
+            *b.bytecode(),
+            Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+        )
+    }) || matches!(
+        op,
+        IlOp::Byte { byte, .. }
+            if matches!(
+                *byte.bytecode(),
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            )
+    )
 }
 
 fn is_array_len(op: &IlOp) -> bool {
