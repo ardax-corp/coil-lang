@@ -74,7 +74,7 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
-    /// IL / inliner preset (COI-127). Default [`crate::OptLevel::Standard`].
+    /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
