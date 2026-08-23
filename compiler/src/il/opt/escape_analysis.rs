@@ -90,7 +90,23 @@ pub fn is_stack_allocatable(site: &AllocSite) -> bool {
 
 /// Scalarize every stack-allocatable `MakeArray` into consecutive locals.
 pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
-    let sites: Vec<&AllocSite> = info.stack_allocatable().collect();
+    allocate_on_stack_pgo(ops, info, true);
+}
+
+fn allocate_on_stack_pgo(ops: &mut Vec<IlOp>, info: &EscapeInfo, prefer_hot: bool) {
+    let mut sites: Vec<&AllocSite> = info.stack_allocatable().collect();
+    if prefer_hot {
+        if let Some(p) = crate::profile::current_profile() {
+            sites.sort_by_key(|s| {
+                std::cmp::Reverse(
+                    p.block_counts
+                        .get(&(s.make_idx as u32))
+                        .copied()
+                        .unwrap_or(0),
+                )
+            });
+        }
+    }
     if sites.is_empty() {
         return;
     }
@@ -168,8 +184,12 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
 
 /// Analyze then scalarize. No-op when every `MakeArray` escapes.
 pub fn escape_analysis(ops: &mut Vec<IlOp>) {
+    escape_analysis_pgo(ops, true);
+}
+
+pub fn escape_analysis_pgo(ops: &mut Vec<IlOp>, prefer_hot: bool) {
     let info = analyze_escapes(ops);
-    allocate_on_stack(ops, &info);
+    allocate_on_stack_pgo(ops, &info, prefer_hot);
 }
 
 enum LocalUse {
