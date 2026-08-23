@@ -232,3 +232,40 @@ fn isolated_optimize_off_leaves_make_array() {
     optimize(&mut ops, &opts, &mut Vec::new());
     assert!(has_make_array(&ops));
 }
+
+#[test]
+fn keeps_heap_when_elements_are_computed() {
+    // Zip/broadcast results are MakeArray of ADDs — fail-closed, stay heap.
+    let mut ops = vec![
+        IlOp::Const { imm: 1, loc: loc() },
+        IlOp::Const { imm: 3, loc: loc() },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 2, loc: loc() },
+        IlOp::Const { imm: 4, loc: loc() },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc: loc(),
+        },
+        IlOp::MakeArray {
+            arity: 2,
+            loc: loc(),
+        },
+        IlOp::StorePop {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Index { loc: loc() },
+        IlOp::Return { loc: loc() },
+    ];
+    assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
+    escape_analysis(&mut ops);
+    assert!(has_make_array(&ops));
+}

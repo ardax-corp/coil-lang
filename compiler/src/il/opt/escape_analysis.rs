@@ -1,9 +1,11 @@
 //! Fail-closed escape analysis for `MakeArray` → frame-slot scalarization.
 //!
 //! Heap arrays that never leave the function (no return, call, host, field
-//! store, or `ArrayPush`) are rewritten to consecutive locals. Those slots are
-//! already GC roots, so the rewrite stays GC-compatible. Anything we cannot
-//! prove stays a heap `MakeArray`. Named class SROA is out of scope.
+//! store, or `ArrayPush`) are rewritten to consecutive locals **when every
+//! element is an immediate** (`Const` / pool / string). Computed elements
+//! (zip/broadcast `ADD`s, etc.) stay heap — exploding those miscompiled
+//! `examples/vec_array.hy`. Those slots are already GC roots. Named class
+//! SROA is out of scope.
 
 use common::Instruction;
 
@@ -51,7 +53,7 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
                 make_idx: i,
                 arity: *arity,
                 store_slot: *slot,
-                escaped: false,
+                escaped: !makearray_elems_are_immediate(ops, i, *arity),
             });
             id = id.saturating_add(1);
             i += 2;
@@ -67,6 +69,10 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
             continue;
         }
         if slots.iter().filter(|s| **s == a.store_slot).count() > 1 {
+            a.escaped = true;
+            continue;
+        }
+        if slot_has_opaque_use(ops, a.store_slot, a.make_idx) {
             a.escaped = true;
             continue;
         }
@@ -244,6 +250,47 @@ fn classify_local_use(ops: &[IlOp], load_idx: usize, arity: u32) -> Option<Local
         });
     }
     None
+}
+
+fn makearray_elems_are_immediate(ops: &[IlOp], make_idx: usize, arity: u32) -> bool {
+    let n = arity as usize;
+    if make_idx < n {
+        return false;
+    }
+    ops[make_idx - n..make_idx].iter().all(|op| {
+        matches!(
+            op,
+            IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. }
+        )
+    })
+}
+
+fn slot_has_opaque_use(ops: &[IlOp], slot: u32, make_idx: usize) -> bool {
+    for (i, op) in ops.iter().enumerate() {
+        if i == make_idx || i == make_idx + 1 {
+            continue;
+        }
+        match op {
+            IlOp::Load { slot: s, .. } if *s == slot => {}
+            IlOp::BinSlotImm { slot: s, .. } if *s as u32 == slot => return true,
+            IlOp::BinSlotSlot { a, b, .. } if *a as u32 == slot || *b as u32 == slot => {
+                return true;
+            }
+            IlOp::LoadReturnSlot { slot: s, .. } if *s == slot => return true,
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::LOAD | Instruction::STORE | Instruction::StorePop
+                ) =>
+            {
+                if (0..byte.load_store_count()).any(|k| byte.load_store_slot_at(k) == slot) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn slot_stored_elsewhere(ops: &[IlOp], make_idx: usize, slot: u32) -> bool {
