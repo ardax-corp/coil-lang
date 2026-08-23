@@ -103,6 +103,8 @@ fn all_off() -> OptimizeOptions {
         escape_analysis: false,
         branch_optimization: false,
         block_reordering: false,
+        iterative_optimization: false,
+        max_optimization_iterations: 10,
     }
 }
 
@@ -153,6 +155,7 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.escape_analysis,
         o.branch_optimization,
         o.block_reordering,
+        o.iterative_optimization,
     ]
 }
 

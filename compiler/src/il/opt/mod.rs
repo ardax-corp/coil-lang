@@ -62,6 +62,12 @@ pub struct OptimizeOptions {
     /// Sink jump-only terminating blocks to the end (COI-129). Fall-through
     /// chains stay adjacent; branch labels are not rewritten.
     pub block_reordering: bool,
+    /// Re-run the pass pipeline until a round is a no-op, or
+    /// [`Self::max_optimization_iterations`] (COI-130). Default **off**.
+    pub iterative_optimization: bool,
+    /// Cap on full pipeline rounds when [`Self::iterative_optimization`] is on.
+    /// Clamped to `1..=10` at run time.
+    pub max_optimization_iterations: usize,
 }
 
 impl Default for OptimizeOptions {
@@ -94,7 +100,92 @@ impl Default for OptimizeOptions {
             escape_analysis: true,
             branch_optimization: false,
             block_reordering: true,
+            iterative_optimization: false,
+            max_optimization_iterations: 10,
         }
+    }
+}
+
+/// One pipeline round: whether the op buffer changed, and its length.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PassStats {
+    pub changed: bool,
+    pub ops_before: usize,
+    pub ops_after: usize,
+}
+
+/// Result of [`optimize_iteratively`]: round count and whether a no-op round
+/// was observed before the iteration cap.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OptimizationStats {
+    pub iterations: usize,
+    pub converged: bool,
+    pub hit_iteration_limit: bool,
+    pub passes: Vec<PassStats>,
+}
+
+/// Run the current pipeline once. Ignores [`OptimizeOptions::iterative_optimization`].
+pub fn run_optimization_pass(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    pool: &mut Vec<u64>,
+) -> PassStats {
+    run_optimization_pass_at(ops, opts, 0, pool)
+}
+
+fn run_optimization_pass_at(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    entry_sp: i32,
+    pool: &mut Vec<u64>,
+) -> PassStats {
+    let before = ops.clone();
+    optimize_once_at(ops, opts, entry_sp, pool);
+    PassStats {
+        changed: *ops != before,
+        ops_before: before.len(),
+        ops_after: ops.len(),
+    }
+}
+
+/// Repeat [`run_optimization_pass`] until a round is a no-op or `max_iterations`
+/// (clamped to `1..=10`) is reached.
+pub fn optimize_iteratively(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    pool: &mut Vec<u64>,
+    max_iterations: usize,
+) -> OptimizationStats {
+    optimize_iteratively_at(ops, opts, 0, pool, max_iterations)
+}
+
+fn optimize_iteratively_at(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    entry_sp: i32,
+    pool: &mut Vec<u64>,
+    max_iterations: usize,
+) -> OptimizationStats {
+    let cap = max_iterations.clamp(1, 10);
+    let mut passes = Vec::new();
+    for i in 1..=cap {
+        let stats = run_optimization_pass_at(ops, opts, entry_sp, pool);
+        let changed = stats.changed;
+        passes.push(stats);
+        if !changed {
+            return OptimizationStats {
+                iterations: i,
+                converged: true,
+                hit_iteration_limit: false,
+                passes,
+            };
+        }
+    }
+    OptimizationStats {
+        iterations: cap,
+        converged: false,
+        hit_iteration_limit: true,
+        passes,
     }
 }
 
@@ -108,6 +199,25 @@ pub fn optimize(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, pool: &mut Vec<u64>
 
 /// Like [`optimize`], seeding SP analysis at `entry_sp` for the op buffer.
 pub fn optimize_at(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    entry_sp: i32,
+    pool: &mut Vec<u64>,
+) {
+    if opts.iterative_optimization {
+        let _ = optimize_iteratively_at(
+            ops,
+            opts,
+            entry_sp,
+            pool,
+            opts.max_optimization_iterations,
+        );
+        return;
+    }
+    optimize_once_at(ops, opts, entry_sp, pool);
+}
+
+fn optimize_once_at(
     ops: &mut Vec<IlOp>,
     opts: &OptimizeOptions,
     entry_sp: i32,
@@ -285,3 +395,7 @@ use convoy::{bin_join_convoy, clone_shared_return, return_convoy};
 use dce::{copy_prop, dead_store_at, mem_fwd, stack_dce};
 use slot_promote::slot_promote;
 pub(crate) use slot_promote::{seek_normalize_back_edges, slot_promote_at};
+
+#[cfg(test)]
+#[path = "mod.tests.rs"]
+mod iterative_opt_tests;

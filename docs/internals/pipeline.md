@@ -34,6 +34,8 @@ Branch layout (COI-128) lives behind `OptimizeOptions::branch_optimization` (**o
 
 Basic-block reordering (COI-129) is **on** by default (`block_reordering`). It only sinks jump-only terminating blocks that are not fall-through successors and are not unconditional-jump joins, so labels and branch polarity stay put.
 
+Iterative optimization (COI-130) is **off** by default (`iterative_optimization`). When enabled, the full IL pass pipeline re-runs until a round is a no-op or `max_optimization_iterations` (default 10, clamped to 1..=10). That lets late rewrites such as `invert_guard_branch` expose DCE for a later round without changing one-shot production behavior.
+
 The IL is **compile-time only**; the VM implements the representation-boundary and numeric-chain opcodes and archive minor 5 records them.
 
 ## Cache and rebuild

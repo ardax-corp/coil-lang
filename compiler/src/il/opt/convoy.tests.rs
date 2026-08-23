@@ -1753,6 +1753,8 @@
                 escape_analysis: false,
                 branch_optimization: false,
                 block_reordering: false,
+                iterative_optimization: false,
+                max_optimization_iterations: 10,
             },
             3,
             &mut Vec::new(),
