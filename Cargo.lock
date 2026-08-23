@@ -489,6 +489,8 @@ dependencies = [
  "rcgen",
  "reporting",
  "rkyv",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
