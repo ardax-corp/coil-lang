@@ -258,9 +258,12 @@
         );
     }
 
-    /// Underfull stacks keep the pre-`top_window` truncate: `n = arity.min(tell)`.
+    /// Compiler-emitted MakeTuple always has `tell >= arity`; underfull stacks
+    /// trip `promise!` in debug builds.
     #[test]
-    fn make_tuple_truncates_when_stack_short() {
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn make_tuple_underfull_stack_debug_asserts() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             const_int(99),
@@ -268,21 +271,6 @@
             Byte::new(Instruction::MakeTuple).with_operand_u32(3),
             Byte::new(Instruction::HALT),
         ]);
-
-        let addr = vm.pop().raw() as u64;
-        match vm.heap().find_object_by_addr(addr) {
-            Some(Object::Tuple(gc)) => {
-                assert_eq!(
-                    gc.as_ref().elements.len(),
-                    2,
-                    "must take only what is on the stack"
-                );
-                assert_eq!(gc.as_ref().elements[0].as_int(), 99);
-                assert_eq!(gc.as_ref().elements[1].as_int(), 42);
-            }
-            _ => panic!("underfull MakeTuple must still allocate"),
-        }
-        assert_eq!(vm.tell(), 0, "operand window must be fully consumed");
     }
 
     /// `MakeEnum` stores its payload top-first and tags each arg as immediate
@@ -539,6 +527,23 @@
     }
 
     /// Docs contract: `Index` never panics — too-large / negative / non-array
+    /// targets yield the integer `-1`. `IndexUnchecked` skips the range test
+    /// (compiler proof only; UB in release on violation).
+    #[test]
+    fn index_unchecked_reads_in_bounds_element() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            const_int(1),
+            Byte::new(Instruction::IndexUnchecked),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 6);
+    }
+
+    /// Docs contract: checked `Index` never panics — too-large / negative / non-array
     /// targets yield the integer `-1` (COI-85 keeps the check in-VM).
     #[test]
     fn index_oob_and_non_array_yield_minus_one() {
@@ -1265,9 +1270,9 @@
         // longer on the stack. After POP, the enum is
         // unreachable — the next GC cycle should free it.
         let n: usize = 200;
-        let mut bytecode: Vec<Byte> = Vec::with_capacity(n * 2 + 4);
-        bytecode.push(const_int(0));
+        let mut bytecode: Vec<Byte> = Vec::with_capacity(n * 3 + 2);
         for _ in 0..n {
+            bytecode.push(const_int(0));
             bytecode.push(make_enum(0, 1));
             bytecode.push(Byte::new(Instruction::POP));
         }
@@ -3090,7 +3095,10 @@
     }
 
     #[test]
-    fn jump_if_match_on_empty_stack_is_noop() {
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn jump_if_match_on_empty_stack_debug_asserts() {
         let mut vm = Machine::<2>::default();
         vm.run_with_pool(
             &[
@@ -3102,7 +3110,6 @@
             &[],
             0,
         );
-        assert_eq!(vm.pop().as_int(), 3);
     }
 
     #[test]
@@ -3176,13 +3183,15 @@
     }
 
     #[test]
-    fn done_coro_empty_stack_pushes_false() {
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic]
+    fn done_coro_empty_stack_debug_asserts() {
         let mut vm = Machine::<2>::default();
         vm.run(&[
             Byte::new(Instruction::DoneCoro),
             Byte::new(Instruction::HALT),
         ]);
-        assert!(!vm.pop().as_bool());
     }
 
     #[test]
@@ -3521,7 +3530,7 @@
 
     #[test]
     #[cfg(debug_assertions)]
-    #[should_panic(expected = "StoreStatic slot 99 out of bounds")]
+    #[should_panic(expected = "slot < self.statics.len()")]
     fn store_static_out_of_range_debug_asserts() {
         let code = [
             Byte::new(Instruction::CONST).with_operand_u32(7),
