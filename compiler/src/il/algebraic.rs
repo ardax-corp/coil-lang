@@ -1210,6 +1210,7 @@ mod tests {
                 seek_back_edge: false,
                 loop_unroll: false,
                 loop_unroll_factor: 8,
+                pgo_prioritize_hot_loops: false,
                 invariant_store_elim: false,
                 ssa_gvn: false,
                 escape_analysis: false,

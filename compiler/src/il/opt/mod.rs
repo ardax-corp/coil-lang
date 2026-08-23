@@ -49,6 +49,8 @@ pub struct OptimizeOptions {
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
     pub loop_unroll_factor: usize,
+    /// When a PGO profile is loaded, unroll hotter loops first (COI-190).
+    pub pgo_prioritize_hot_loops: bool,
     /// Sink or drop loop stores of an invariant value that is not read in the loop.
     pub invariant_store_elim: bool,
     /// SSA-style global CSE of pure binops whose result already lives in a slot.
@@ -97,6 +99,7 @@ impl Default for OptimizeOptions {
             seek_back_edge: false,
             loop_unroll: true,
             loop_unroll_factor: 8,
+            pgo_prioritize_hot_loops: true,
             invariant_store_elim: true,
             ssa_gvn: true,
             escape_analysis: true,
@@ -328,7 +331,13 @@ fn optimize_once_at(
             collect,
             "loop_unroll",
             stats::PassKind::Unroll,
-            |ops| loop_unroll::unroll_loops(ops, opts.loop_unroll_factor),
+            |ops| {
+                loop_unroll::unroll_loops_pgo(
+                    ops,
+                    opts.loop_unroll_factor,
+                    opts.pgo_prioritize_hot_loops,
+                )
+            },
         );
     }
     if opts.invariant_store_elim {
