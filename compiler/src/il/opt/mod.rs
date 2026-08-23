@@ -119,6 +119,8 @@ pub struct PassStats {
 
 /// Result of [`optimize_iteratively`]: round count and whether a no-op round
 /// was observed before the iteration cap.
+///
+/// Per-pass counters (COI-176) live on [`OptStats`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OptimizationStats {
     pub iterations: usize,
