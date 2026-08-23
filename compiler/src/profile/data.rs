@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Bump when the JSON schema changes. Loaders refuse a newer version and
@@ -25,6 +26,19 @@ pub struct ProfileData {
 pub enum LoadError {
     Version { found: u32, expected: u32 },
     Parse(String),
+    Io(String),
+}
+
+impl std::fmt::Display for LoadError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Version { found, expected } => {
+                write!(f, "profile version {found} != {expected}")
+            }
+            Self::Parse(msg) => write!(f, "profile parse error: {msg}"),
+            Self::Io(msg) => write!(f, "profile io error: {msg}"),
+        }
+    }
 }
 
 impl ProfileData {
@@ -142,6 +156,29 @@ impl ProfileData {
             });
         }
         Ok(data)
+    }
+
+    fn io_err(path: &Path, err: std::io::Error) -> LoadError {
+        LoadError::Io(format!("{}: {err}", path.display()))
+    }
+
+    pub fn to_json_file(&self, path: &Path) -> Result<(), LoadError> {
+        std::fs::write(path, self.to_json()).map_err(|e| Self::io_err(path, e))
+    }
+
+    pub fn from_json_file(path: &Path) -> Result<Self, LoadError> {
+        let s = std::fs::read_to_string(path).map_err(|e| Self::io_err(path, e))?;
+        Self::from_json(&s)
+    }
+
+    pub fn to_binary_file(&self, path: &Path) -> Result<(), LoadError> {
+        let bytes = self.to_binary()?;
+        std::fs::write(path, bytes).map_err(|e| Self::io_err(path, e))
+    }
+
+    pub fn from_binary_file(path: &Path) -> Result<Self, LoadError> {
+        let bytes = std::fs::read(path).map_err(|e| Self::io_err(path, e))?;
+        Self::from_binary(&bytes)
     }
 }
 

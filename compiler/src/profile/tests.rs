@@ -100,6 +100,28 @@ fn profile_binary_round_trip_and_optional_timestamp() {
 }
 
 #[test]
+fn profile_json_and_binary_files_round_trip() {
+    let dir = std::env::temp_dir().join(format!("coil-pgo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let json_path = dir.join("p.json");
+    let bin_path = dir.join("p.bin");
+    let mut p = ProfileData::new();
+    p.hit_function("main");
+    p.to_json_file(&json_path).unwrap();
+    p.to_binary_file(&bin_path).unwrap();
+    let j = ProfileData::from_json_file(&json_path).unwrap();
+    let b = ProfileData::from_binary_file(&bin_path).unwrap();
+    assert_eq!(j.function_counts.get("main"), Some(&1));
+    assert_eq!(b.function_counts.get("main"), Some(&1));
+    let missing = dir.join("nope.json");
+    assert!(matches!(
+        ProfileData::from_json_file(&missing),
+        Err(LoadError::Io(_))
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn load_rejects_wrong_version_and_empty() {
     match ProfileData::from_json("{\"version\":99}") {
         Err(LoadError::Version { found: 99, expected: PROFILE_VERSION }) => {}

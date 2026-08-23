@@ -825,6 +825,10 @@ fn apply_pgo_use(pipeline: &mut Pipeline, path: Option<&str>) {
                 eprintln!("warning: PGO profile parse error ({msg}); using heuristics");
                 pipeline.set_pgo_profile(None);
             }
+            Err(compiler::LoadError::Io(msg)) => {
+                eprintln!("warning: PGO profile io error ({msg}); using heuristics");
+                pipeline.set_pgo_profile(None);
+            }
         },
         Err(_) => {
             eprintln!("warning: PGO profile `{path}` not found; using heuristics");
