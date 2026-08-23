@@ -20,15 +20,15 @@ pub(crate) enum PassKind {
 }
 
 /// One named pass that mutated the buffer (aggregated by name).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PassHit {
     pub name: String,
     pub applied: usize,
     pub ops_delta: i64,
 }
 
-/// Counters from IL opts (and tiny-inline when compiling).
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// Counters from IL opts (and tiny-inline when compiling). COI-176 `OptimizationStats`.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OptStats {
     pub ops_eliminated: usize,
     pub ops_added: usize,
@@ -44,16 +44,41 @@ pub struct OptStats {
 
 impl OptStats {
     fn add_pass(&mut self, name: &'static str, ops_delta: i64) {
+        self.merge_pass(name, 1, ops_delta);
+    }
+
+    fn merge_pass(&mut self, name: &str, applied: usize, ops_delta: i64) {
         if let Some(hit) = self.passes.iter_mut().find(|p| p.name == name) {
-            hit.applied += 1;
+            hit.applied += applied;
             hit.ops_delta += ops_delta;
             return;
         }
         self.passes.push(PassHit {
             name: name.to_string(),
-            applied: 1,
+            applied,
             ops_delta,
         });
+    }
+
+    /// Fold `other` into `self` (COI-176).
+    pub fn accumulate(&mut self, other: &Self) {
+        self.ops_eliminated += other.ops_eliminated;
+        self.ops_added += other.ops_added;
+        self.functions_inlined += other.functions_inlined;
+        self.loops_unrolled += other.loops_unrolled;
+        self.loads_eliminated += other.loads_eliminated;
+        self.stores_eliminated += other.stores_eliminated;
+        self.branches_optimized += other.branches_optimized;
+        self.blocks_reordered += other.blocks_reordered;
+        self.iterations += other.iterations;
+        for hit in &other.passes {
+            self.merge_pass(&hit.name, hit.applied, hit.ops_delta);
+        }
+    }
+
+    /// Alias for [`Self::accumulate`].
+    pub fn add(&mut self, other: &Self) {
+        self.accumulate(other);
     }
 
     /// Human-readable report for `--opt-stats`.
@@ -201,4 +226,54 @@ pub(crate) fn run_named_pass(
         }
         s.add_pass(name, delta);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulate_sums_counters_and_merges_passes() {
+        let mut a = OptStats {
+            ops_eliminated: 2,
+            functions_inlined: 1,
+            iterations: 1,
+            passes: vec![PassHit {
+                name: "dce".into(),
+                applied: 1,
+                ops_delta: -2,
+            }],
+            ..OptStats::default()
+        };
+        let b = OptStats {
+            ops_eliminated: 3,
+            loops_unrolled: 1,
+            iterations: 2,
+            passes: vec![
+                PassHit {
+                    name: "dce".into(),
+                    applied: 1,
+                    ops_delta: -1,
+                },
+                PassHit {
+                    name: "unroll".into(),
+                    applied: 1,
+                    ops_delta: 8,
+                },
+            ],
+            ..OptStats::default()
+        };
+        a.add(&b);
+        assert_eq!(a.ops_eliminated, 5);
+        assert_eq!(a.functions_inlined, 1);
+        assert_eq!(a.loops_unrolled, 1);
+        assert_eq!(a.iterations, 3);
+        assert_eq!(a.passes.len(), 2);
+        assert_eq!(a.passes[0].applied, 2);
+        assert_eq!(a.passes[0].ops_delta, -3);
+        let json = serde_json::to_string(&a).unwrap();
+        assert!(json.contains("\"ops_eliminated\":5"));
+        let round: OptStats = serde_json::from_str(&json).unwrap();
+        assert_eq!(round, a);
+    }
 }
