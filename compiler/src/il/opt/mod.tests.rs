@@ -127,3 +127,72 @@ fn run_optimization_pass_matches_a_single_optimize() {
     assert!(a == b, "single pass and optimize() should match");
     assert_eq!(entry_target(&a), Some(2));
 }
+
+#[test]
+fn stats_collect_stack_dce_and_format() {
+    begin_opt_stats();
+    let mut ops = vec![
+        c(1),
+        IlOp::Dup { loc: loc() },
+        IlOp::Pop { loc: loc() },
+        ret(),
+    ];
+    let mut opts = OptLevel::None.options();
+    opts.stack_dce = true;
+    opts.collect_stats = true;
+    optimize(&mut ops, &opts, &mut Vec::new());
+    let stats = last_opt_stats();
+    assert_eq!(stats.iterations, 1);
+    assert!(stats.ops_eliminated >= 2);
+    assert!(
+        stats.passes.iter().any(|p| p.name == "stack_dce" && p.applied >= 1),
+        "{:?}",
+        stats.passes
+    );
+    let text = stats.format_text();
+    assert!(text.contains("ops eliminated"));
+    assert!(text.contains("stack_dce"));
+    let json = stats.format_json();
+    assert!(json.contains("\"ops_eliminated\""));
+    assert!(json.contains("stack_dce"));
+}
+
+#[test]
+fn stats_aggregate_across_iterative_rounds() {
+    begin_opt_stats();
+    let mut ops = jmp_chain();
+    let mut opts = jump_thread_opts();
+    opts.collect_stats = true;
+    opts.iterative_optimization = true;
+    opts.max_optimization_iterations = 10;
+    optimize(&mut ops, &opts, &mut Vec::new());
+    let stats = last_opt_stats();
+    assert!(stats.iterations >= 2);
+    let threaded = stats
+        .passes
+        .iter()
+        .find(|p| p.name == "jump_thread")
+        .expect("jump_thread recorded");
+    assert!(
+        threaded.applied >= 2,
+        "expected aggregated jump_thread hits, got {:?}",
+        stats.passes
+    );
+}
+
+#[test]
+fn stats_off_does_not_record() {
+    begin_opt_stats();
+    let mut ops = vec![
+        c(1),
+        IlOp::Dup { loc: loc() },
+        IlOp::Pop { loc: loc() },
+        ret(),
+    ];
+    let mut opts = OptLevel::None.options();
+    opts.stack_dce = true;
+    opts.collect_stats = false;
+    optimize(&mut ops, &opts, &mut Vec::new());
+    let stats = last_opt_stats();
+    assert_eq!(stats, OptStats::default());
+}

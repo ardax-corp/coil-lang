@@ -65,6 +65,8 @@ struct CliArgs {
     log_lsp: bool,
     include_tests: bool,
     opt_level: OptLevel,
+    opt_stats: bool,
+    opt_stats_json: bool,
 }
 
 fn print_help() {
@@ -99,6 +101,8 @@ fn print_help() {
          \x20 --strip-debug         With `package`, omit debug line table from embedded archive\n\
          \x20 --include-tests      Compile harness tests into the archive (default: omit)\n\
          \x20 -O, --opt-level <l>  none/0, basic/1, standard/2 (default), aggressive/3, size/s, debug/g\n\
+         \x20 --opt-stats          Print IL optimization counters after compile (stderr)\n\
+         \x20 --opt-stats-json     Print the same counters as one JSON object (stderr)\n\
          \x20 --fail-fast          With `test`, stop after the first failed case\n\
          \x20 --fn <pat>           With `dissect`, filter functions by FQN substring / trailing name\n\
          \x20 --il                 With `dissect`, also print pre-opt stack IL\n\
@@ -135,6 +139,8 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
     let mut output: Option<String> = None;
     let mut opt_level = OptLevel::Standard;
     let mut opt_level_set = false;
+    let mut opt_stats = false;
+    let mut opt_stats_json = false;
 
     let mut i = 1;
     while i < args.len() {
@@ -145,6 +151,8 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
             "--stdio" => {}
             "--fail-fast" => fail_fast = true,
             "--include-tests" => include_tests = true,
+            "--opt-stats" => opt_stats = true,
+            "--opt-stats-json" => opt_stats_json = true,
             "--check-native" => check_native = true,
             "--strip-debug" => strip_debug = true,
             "--il" => show_il = true,
@@ -255,7 +263,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
             }
             s if s.starts_with('-') => {
                 return Err(
-                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, or a command/file)",
+                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --opt-stats, --opt-stats-json, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, or a command/file)",
                 );
             }
             _ => positionals.push(arg.clone()),
@@ -272,6 +280,8 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
             if output.is_some()
                 || fail_fast
                 || include_tests
+                || opt_stats
+                || opt_stats_json
                 || log_json
                 || log_lsp
                 || check_native
@@ -646,12 +656,27 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
         _ => return Err("too many arguments"),
     };
 
+    if (opt_stats || opt_stats_json)
+        && matches!(
+            command,
+            Command::Run { .. }
+                | Command::Test { .. }
+                | Command::Fmt
+                | Command::Lsp
+                | Command::Debug { .. }
+        )
+    {
+        return Err("--opt-stats and --opt-stats-json require compiling source");
+    }
+
     Ok(CliArgs {
         command,
         log_json,
         log_lsp,
         include_tests,
         opt_level,
+        opt_stats,
+        opt_stats_json,
     })
 }
 
@@ -695,6 +720,19 @@ fn resolve_entry_filename(pipeline: &mut Pipeline, filename: &str) -> String {
             ErrorCode::MissingInputFile,
             "missing input file or command (pass a .hy file, or set `[entry].file` in coil.toml)",
         ),
+    }
+}
+
+fn print_opt_stats(text: bool, json: bool) {
+    if !text && !json {
+        return;
+    }
+    let stats = compiler::last_opt_stats();
+    if text {
+        eprint!("{}", stats.format_text());
+    }
+    if json {
+        eprintln!("{}", stats.format_json());
     }
 }
 
@@ -922,7 +960,7 @@ pub(crate) fn execute_archive(
     machine.panicked()
 }
 
-fn cmd_build_and_run(pipeline: &mut Pipeline, filename: &str) {
+fn cmd_build_and_run(pipeline: &mut Pipeline, filename: &str, opt_stats: bool, opt_stats_json: bool) {
     let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
         Err(()) => {
@@ -930,6 +968,7 @@ fn cmd_build_and_run(pipeline: &mut Pipeline, filename: &str) {
             exit(1);
         }
     };
+    print_opt_stats(opt_stats, opt_stats_json);
 
     let strings = pipeline.strings().to_vec();
     let static_slots = pipeline.static_slot_count();
@@ -959,8 +998,15 @@ fn cmd_build_and_run(pipeline: &mut Pipeline, filename: &str) {
     }
 }
 
-fn cmd_compile(pipeline: &mut Pipeline, filename: &str, output: &str) {
+fn cmd_compile(
+    pipeline: &mut Pipeline,
+    filename: &str,
+    output: &str,
+    opt_stats: bool,
+    opt_stats_json: bool,
+) {
     compile_to_archive(pipeline, filename, output);
+    print_opt_stats(opt_stats, opt_stats_json);
     if let Err(e) = pipeline.finish_reporting() {
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
@@ -1325,14 +1371,23 @@ fn main() {
                 pipeline.set_include_tests(true);
             }
             pipeline.set_opt_level(cli.opt_level);
+            if cli.opt_stats || cli.opt_stats_json {
+                pipeline.set_collect_opt_stats(true);
+            }
             match command {
                 Command::BuildAndRun { filename } => {
                     let filename = resolve_entry_filename(&mut pipeline, &filename);
-                    cmd_build_and_run(&mut pipeline, &filename)
+                    cmd_build_and_run(&mut pipeline, &filename, cli.opt_stats, cli.opt_stats_json)
                 }
                 Command::Compile { filename, output } => {
                     let filename = resolve_entry_filename(&mut pipeline, &filename);
-                    cmd_compile(&mut pipeline, &filename, &output)
+                    cmd_compile(
+                        &mut pipeline,
+                        &filename,
+                        &output,
+                        cli.opt_stats,
+                        cli.opt_stats_json,
+                    )
                 }
                 Command::Run { archive } => cmd_run(&mut pipeline, &archive),
                 Command::Package {
@@ -1341,14 +1396,17 @@ fn main() {
                     runner,
                     check_native,
                     strip_debug,
-                } => cmd_package(
-                    &mut pipeline,
-                    &filename,
-                    &output,
-                    runner.as_deref(),
-                    check_native,
-                    strip_debug,
-                ),
+                } => {
+                    cmd_package(
+                        &mut pipeline,
+                        &filename,
+                        &output,
+                        runner.as_deref(),
+                        check_native,
+                        strip_debug,
+                    );
+                    print_opt_stats(cli.opt_stats, cli.opt_stats_json);
+                }
                 Command::Test { .. }
                 | Command::Dissect { .. }
                 | Command::Debug { .. }
@@ -1687,6 +1745,18 @@ mod tests {
         assert!(parse_args(&args(&["-O9", "a.hy"])).is_err());
         assert!(parse_args(&args(&["-O2", "-O0", "a.hy"])).is_err());
         assert!(parse_args(&args(&["--opt-level"])).is_err());
+    }
+
+    #[test]
+    fn parse_opt_stats_flags() {
+        let cli = parse_args(&args(&["--opt-stats", "compile", "a.hy"])).unwrap();
+        assert!(cli.opt_stats && !cli.opt_stats_json);
+        let cli = parse_args(&args(&["--opt-stats-json", "a.hy"])).unwrap();
+        assert!(cli.opt_stats_json && !cli.opt_stats);
+        let cli = parse_args(&args(&["--opt-stats", "--opt-stats-json", "compile", "a.hy"])).unwrap();
+        assert!(cli.opt_stats && cli.opt_stats_json);
+        assert!(parse_args(&args(&["test", "--opt-stats"])).is_err());
+        assert!(parse_args(&args(&["run", "out.hyc", "--opt-stats-json"])).is_err());
     }
 
     fn unique_tmp(label: &str) -> PathBuf {

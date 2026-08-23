@@ -22,20 +22,22 @@ pub struct LoopInfo {
 }
 
 /// Unroll every eligible loop whose trip count is ≤ `factor` (and ≤ 8).
-pub fn unroll_loops(ops: &mut Vec<IlOp>, factor: usize) {
+pub fn unroll_loops(ops: &mut Vec<IlOp>, factor: usize) -> usize {
     let factor = factor.min(MAX_UNROLL_TRIPS as usize);
     if factor == 0 || ops.len() < 6 {
-        return;
+        return 0;
     }
+    let mut unrolled = 0usize;
     loop {
         let Some(info) = find_unrollable_loops(ops)
             .into_iter()
             .filter(|lp| lp.trips as usize <= factor)
             .max_by_key(|lp| lp.header)
         else {
-            return;
+            return unrolled;
         };
         unroll_loop(ops, &info);
+        unrolled += 1;
     }
 }
 

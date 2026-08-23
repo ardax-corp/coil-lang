@@ -36,6 +36,8 @@ Basic-block reordering (COI-129) is **on** by default (`block_reordering`). It o
 
 Iterative optimization (COI-130) is **off** by default (`iterative_optimization`). When enabled, the full IL pass pipeline re-runs until a round is a no-op or `max_optimization_iterations` (default 10, clamped to 1..=10). That lets late rewrites such as `invert_guard_branch` expose DCE for a later round without changing one-shot production behavior.
 
+Optimization statistics (COI-131) are **off** by default (`collect_stats` / CLI `--opt-stats` and `--opt-stats-json`). When enabled, each named IL pass records ops added/removed, load/store eliminations, unrolls, branch layouts, and block moves; tiny-inline sites increment `functions_inlined`. Human text or a single JSON object is printed to stderr after a source compile. Collection clones the op buffer only while the flag is on.
+
 The IL is **compile-time only**; the VM implements the representation-boundary and numeric-chain opcodes and archive minor 5 records them.
 
 ## Cache and rebuild

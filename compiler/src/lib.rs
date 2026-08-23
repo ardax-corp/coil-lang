@@ -9,6 +9,7 @@ mod dissect;
 pub(crate) mod il;
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
+pub use il::opt::{OptStats, last_opt_stats};
 mod manifest;
 mod monomorphize;
 mod pipeline;
