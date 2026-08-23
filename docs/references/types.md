@@ -216,7 +216,7 @@ Statics: `Vec::new`, `Vec::with_capacity`, `Vec::from`. Methods: `push`, `pop`,
 | Tuple | OOB literal → diagnostic | — |
 | Non-aggregate | Error | — |
 
-`Index` is never rewritten to an unchecked form ([COI-85](https://linear.app/ardax/issue/COI-85)). Prefer `i < len(a)` in loops. Details: [Arrays and Vec](arrays.md#out-of-range-index).
+Proven counted-loop `Index` / `StoreIndex` rewrite to unchecked opcodes ([COI-85](https://linear.app/ardax/issue/COI-85)). Dynamic indices stay checked. Prefer `i < len(a)` in loops. Details: [Arrays and Vec](arrays.md#out-of-range-index).
 
 ---
 

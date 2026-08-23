@@ -132,32 +132,30 @@ What neither slice does yet (see
 
 ### 2. Loop range and bounds analysis
 
-Priority: high (first slice landed).
+Priority: high (first slice landed; unchecked opcodes + stride induction follow-up landed).
 
-`Index` and `StoreIndex` still perform runtime object lookup and signed bounds
-checks in `machine/src/vm.rs`, and that has not changed: the landed slice is
-proof-only and touches no VM handler.
+Proven counted-loop sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
+(archive minor 12). Unit `+1` loops (`while i < len(a)`) and invariant stride
+loops (`k = k + p` with positive invariant `p`) share the same length-invariance
+proof. Dynamic indices and unproven stride steps keep checked `Index` /
+`StoreIndex`.
 
 `il::bounds.rs` proves **length invariance** per natural loop instead of
-per-index bounds. `StoreIndex` overwrites an element in place, so a loop that
-writes `a[i]` still has an invariant `len(a)`; `ArrayPush`, a call, a host
-native or any unmodelled op refuses the region. Two invariant materializations
-move to the preheader on that proof — the `LOAD a; ArrayLen; STORE t` triple
-codegen leaves in the header of `while i < len(a)`, and the `CONST imm; STORE t`
-pair that materializes a constant addressing operand in `a[i] = 0`. `nsieve`'s
-sieve loop went from 8 words per iteration to 6 (545.6k → 469.9k dispatches);
-`examples/perf/vec_scan.hy`, the `while i < len(v)` scan/fill shape, from 6.58M
-to 5.01M. Safety comes from the cursor: the preheader store floors it at
-`t + 1`, and every in-loop stack height staying at or above the header's proves
-no in-loop push can reach `t`.
+relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
+place, so a loop that writes `a[i]` still has an invariant `len(a)`; `ArrayPush`,
+a call, a host native or any unmodelled op refuses the region. Two invariant
+materializations move to the preheader on that proof — the `LOAD a; ArrayLen;
+STORE t` triple codegen leaves in the header of `while i < len(a)`, and the
+`CONST imm; STORE t` pair that materializes a constant addressing operand in
+`a[i] = 0`. `nsieve`'s sieve loop went from 8 words per iteration to 6 (545.6k
+→ 469.9k dispatches); `examples/perf/vec_scan.hy`, the `while i < len(v)`
+scan/fill shape, from 6.58M to 5.01M. Safety comes from the cursor: the
+preheader store floors it at `t + 1`, and every in-loop stack height staying at
+or above the header's proves no in-loop push can reach `t`.
 
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):
 
-- **`0 <= i < len` is not proven at all.** Induction-variable detection was
-  deliberately left out because nothing consumes the fact: without an unchecked
-  addressing form the proof cannot change a single emitted word. Pair it with
-  that opcode decision, not with this pass.
 - **Loops that call a helper on `b[i]`.** Most stdlib `while i < len(b)` loops do,
   and a call could `push` to the array through another reference. Wiring the
   existing purity/effect summaries into the barrier test is the widest available
