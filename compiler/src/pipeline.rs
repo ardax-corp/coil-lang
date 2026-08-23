@@ -1342,6 +1342,11 @@ impl Pipeline {
         }
     }
 
+    /// Load a PGO profile for layout and inlining (COI-132). `None` clears it.
+    pub fn set_pgo_profile(&mut self, profile: Option<crate::ProfileData>) {
+        crate::profile::set_current_profile(profile);
+    }
+
     fn begin_compile_opt_stats(&mut self) {
         if self.collect_opt_stats {
             crate::il::opt::begin_opt_stats();
