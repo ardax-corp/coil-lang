@@ -18,6 +18,7 @@ pub mod io_reactor;
 pub mod math_libm;
 mod memory;
 mod opcode;
+pub mod pgo;
 pub mod packed_la;
 pub mod reactor;
 pub mod value_eq;
@@ -37,7 +38,7 @@ pub use env::ENV_WIRING;
 pub use ffi::*;
 pub use fs::FS_WIRING;
 pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING};
-pub use host_natives::{build_standard_host_natives, wire_standard_host_natives};
+pub use host_natives::{build_standard_host_natives, wire_standard_host_natives, PGO_HIT_NATIVE};
 pub use memory::*;
 pub use opcode::*;
 pub use packed_la::{

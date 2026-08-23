@@ -13,7 +13,8 @@ pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_st
 pub use il::opt::{OptStats, last_opt_stats};
 pub use profile::{
     InstrumentMap, LoadError, ProfileData, PROFILE_VERSION, current_profile, instrument_for_pgo,
-    last_instrument_map, optimize_with_profile, set_current_profile,
+    instrument_for_pgo_mut, last_instrument_map, optimize_with_profile, profile_from_runtime,
+    set_current_profile, set_pgo_instrument,
 };
 mod manifest;
 mod monomorphize;

@@ -49,7 +49,27 @@ pub fn build_standard_host_natives(
     push_math_libm(&mut out, &mut register_id);
     // Append-only after math_libm: Vec helpers.
     push_wiring(&mut out, &mut register_id, VEC_WIRING, "vec");
+    push_pgo_hit(&mut out, &mut register_id);
     out
+}
+
+/// Registry name for profile-counter HostInvoke (append-only after vec).
+pub const PGO_HIT_NATIVE: &str = "pgo_hit";
+
+fn push_pgo_hit(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let sig = FfiSignature::from_parts(
+        PGO_HIT_NATIVE.to_string(),
+        vec![FfiType::Int],
+        FfiType::Int,
+    )
+    .expect("pgo_hit signature");
+    let id = out.len();
+    register_id(PGO_HIT_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |_heap, args| {
+        let packed = args.first().map(|v| v.as_int()).unwrap_or(0);
+        crate::pgo::hit(packed);
+        Ok(Some(Value::from(0i64)))
+    })));
 }
 
 /// Register each native on `machine` (same order as [`build_standard_host_natives`]).
@@ -851,5 +871,12 @@ mod tests {
             !matches!(at, Err(crate::ffi::FfiError::ArityMismatch { .. })),
             "1+MAX args must pass the arity gate: {at:?}"
         );
+    }
+
+    #[test]
+    fn pgo_hit_is_appended_after_vec_helpers() {
+        let mut names = Vec::new();
+        build_standard_host_natives(|name, _id| names.push(name.to_string()));
+        assert_eq!(names.last().map(String::as_str), Some(PGO_HIT_NATIVE));
     }
 }

@@ -151,7 +151,9 @@ impl IlModule {
             .unwrap_or(0)
             .saturating_add(1);
 
+        crate::profile::begin_pgo_module();
         for body in &mut self.funcs {
+            crate::profile::next_pgo_function(&body.meta.name);
             opt::optimize_at_with_labels(
                 &mut body.ops,
                 &per,
@@ -165,6 +167,9 @@ impl IlModule {
             }
             if run_slot_promote_tell {
                 opt::slot_promote_at(&mut body.ops, body.meta.entry_sp);
+            }
+            if crate::profile::pgo_instrumenting() {
+                crate::profile::instrument_for_pgo_named_mut(&mut body.ops, &body.meta.name);
             }
         }
 

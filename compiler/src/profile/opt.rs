@@ -15,7 +15,8 @@ pub fn branch_profile(ops: &[IlOp], profile: &ProfileData) -> BranchProfile {
 pub fn branch_profile_from_map(map: &InstrumentMap, profile: &ProfileData) -> BranchProfile {
     let mut bp = BranchProfile::default();
     for (id, &idx) in map.branches.iter().enumerate() {
-        if let Some(&(taken, not_taken)) = profile.branch_counts.get(&(id as u32)) {
+        let key = super::current_fn_index().saturating_mul(super::SITE_STRIDE) + id as u32;
+        if let Some(&(taken, not_taken)) = profile.branch_counts.get(&key) {
             bp.taken.insert(idx, taken.min(u32::MAX as u64) as u32);
             bp.not_taken
                 .insert(idx, not_taken.min(u32::MAX as u64) as u32);
