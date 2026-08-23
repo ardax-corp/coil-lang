@@ -222,7 +222,6 @@ pub(crate) fn optimize_at_with_labels(
     pool: &mut Vec<u64>,
     next_label: &mut u32,
 ) {
-    let _ = crate::profile::instrument_for_pgo(ops);
     if opts.iterative_optimization {
         let round = optimize_iteratively_at(
             ops,

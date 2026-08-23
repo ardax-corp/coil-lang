@@ -46,8 +46,8 @@ fn terminating_then() -> Vec<IlOp> {
 
 #[test]
 fn instrument_records_function_block_and_branch_sites() {
-    let mut ops = terminating_then();
-    let map = instrument_for_pgo_mut(&mut ops);
+    let ops = terminating_then();
+    let map = instrument_for_pgo(&ops);
     assert_eq!(map.functions.len(), 1);
     assert!(map.blocks.len() >= 2, "then-arm and join are separate blocks");
     assert_eq!(map.branches.len(), 1);
@@ -58,6 +58,15 @@ fn instrument_records_function_block_and_branch_sites() {
             ..
         }
     ));
+}
+
+#[test]
+fn instrument_inserts_hostinvoke_counters() {
+    let mut ops = terminating_then();
+    let before = ops.len();
+    let _ = instrument_for_pgo_mut(&mut ops);
+    assert!(ops.len() > before);
+    assert!(ops.iter().any(|op| matches!(op, IlOp::HostInvoke { .. })));
 }
 
 #[test]
@@ -94,6 +103,7 @@ fn missing_profile_is_not_cold() {
 
 #[test]
 fn optimize_with_profile_keeps_hot_fallthrough() {
+    begin_pgo_module();
     let mut cold = terminating_then();
     optimize_with_profile(&mut cold, &ProfileData::new());
     let inverted_without = cold.iter().any(|op| {
@@ -144,4 +154,15 @@ fn jmp_only_buffer_instruments_without_branches() {
     let map = instrument_for_pgo(&ops);
     assert!(map.branches.is_empty());
     assert!(!map.blocks.is_empty());
+}
+
+#[test]
+fn profile_from_runtime_maps_function_keys() {
+    begin_pgo_module();
+    next_pgo_function("main");
+    let mut keys = std::collections::BTreeMap::new();
+    keys.insert(0, 9);
+    let p = profile_from_runtime(&keys, Default::default(), Default::default());
+    assert_eq!(p.function_counts.get("main"), Some(&9));
+    begin_pgo_module();
 }
