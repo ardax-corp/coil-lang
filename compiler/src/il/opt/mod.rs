@@ -56,8 +56,8 @@ pub struct OptimizeOptions {
     /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
     pub escape_analysis: bool,
     /// Heuristic / profile-guided branch layout (COI-128).
-    /// Default **off**: moving a then-arm is not yet SP-safe on fused
-    /// production IL (`examples/fib.hy`). Tests call the pass directly.
+    /// Default **on**: invert only Known-SP terminating then-arms, and mint
+    /// labels from a module-wide watermark so ids cannot collide across funcs.
     pub branch_optimization: bool,
     /// Sink jump-only terminating blocks to the end (COI-129). Fall-through
     /// chains stay adjacent; branch labels are not rewritten.
@@ -98,7 +98,7 @@ impl Default for OptimizeOptions {
             invariant_store_elim: true,
             ssa_gvn: true,
             escape_analysis: true,
-            branch_optimization: false,
+            branch_optimization: true,
             block_reordering: true,
             iterative_optimization: false,
             max_optimization_iterations: 10,
@@ -130,7 +130,8 @@ pub fn run_optimization_pass(
     opts: &OptimizeOptions,
     pool: &mut Vec<u64>,
 ) -> PassStats {
-    run_optimization_pass_at(ops, opts, 0, pool)
+    let mut next = branch_opt::next_fresh_label(ops);
+    run_optimization_pass_at(ops, opts, 0, pool, &mut next)
 }
 
 fn run_optimization_pass_at(
@@ -138,9 +139,10 @@ fn run_optimization_pass_at(
     opts: &OptimizeOptions,
     entry_sp: i32,
     pool: &mut Vec<u64>,
+    next_label: &mut u32,
 ) -> PassStats {
     let before = ops.clone();
-    optimize_once_at(ops, opts, entry_sp, pool);
+    optimize_once_at(ops, opts, entry_sp, pool, next_label);
     PassStats {
         changed: *ops != before,
         ops_before: before.len(),
@@ -156,7 +158,8 @@ pub fn optimize_iteratively(
     pool: &mut Vec<u64>,
     max_iterations: usize,
 ) -> OptimizationStats {
-    optimize_iteratively_at(ops, opts, 0, pool, max_iterations)
+    let mut next = branch_opt::next_fresh_label(ops);
+    optimize_iteratively_at(ops, opts, 0, pool, max_iterations, &mut next)
 }
 
 fn optimize_iteratively_at(
@@ -165,11 +168,12 @@ fn optimize_iteratively_at(
     entry_sp: i32,
     pool: &mut Vec<u64>,
     max_iterations: usize,
+    next_label: &mut u32,
 ) -> OptimizationStats {
     let cap = max_iterations.clamp(1, 10);
     let mut passes = Vec::new();
     for i in 1..=cap {
-        let stats = run_optimization_pass_at(ops, opts, entry_sp, pool);
+        let stats = run_optimization_pass_at(ops, opts, entry_sp, pool, next_label);
         let changed = stats.changed;
         passes.push(stats);
         if !changed {
@@ -204,6 +208,17 @@ pub fn optimize_at(
     entry_sp: i32,
     pool: &mut Vec<u64>,
 ) {
+    let mut next = branch_opt::next_fresh_label(ops);
+    optimize_at_with_labels(ops, opts, entry_sp, pool, &mut next);
+}
+
+pub(crate) fn optimize_at_with_labels(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    entry_sp: i32,
+    pool: &mut Vec<u64>,
+    next_label: &mut u32,
+) {
     if opts.iterative_optimization {
         let _ = optimize_iteratively_at(
             ops,
@@ -211,10 +226,11 @@ pub fn optimize_at(
             entry_sp,
             pool,
             opts.max_optimization_iterations,
+            next_label,
         );
         return;
     }
-    optimize_once_at(ops, opts, entry_sp, pool);
+    optimize_once_at(ops, opts, entry_sp, pool, next_label);
 }
 
 fn optimize_once_at(
@@ -222,6 +238,7 @@ fn optimize_once_at(
     opts: &OptimizeOptions,
     entry_sp: i32,
     pool: &mut Vec<u64>,
+    next_label: &mut u32,
 ) {
     if opts.jump_thread {
         jump_thread(ops);
@@ -295,7 +312,7 @@ fn optimize_once_at(
         invert_branch_over_jump(ops);
     }
     if opts.branch_optimization {
-        branch_opt::optimize_branches(ops, None);
+        branch_opt::optimize_branches_at(ops, None, entry_sp, next_label);
     }
     if opts.block_reordering {
         block_order::reorder_basic_blocks(ops, None);
@@ -379,6 +396,7 @@ mod opt_level;
 pub use opt_level::OptLevel;
 #[allow(unused_imports)]
 pub use branch_opt::{BranchProfile, optimize_branches};
+pub(crate) use branch_opt::max_code_label;
 
 mod cfg;
 mod convoy;

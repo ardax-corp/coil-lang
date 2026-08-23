@@ -8,7 +8,10 @@
 
 use std::collections::HashMap;
 
+use common::Instruction;
+
 use super::super::op::{IlJumpKind, IlOp, Label};
+use super::super::sp::{self, Sp};
 
 /// Edge counts for conditional jumps, keyed by the jump's op index *before*
 /// this pass mutates the buffer. Missing keys fall back to heuristics.
@@ -18,19 +21,55 @@ pub struct BranchProfile {
     pub not_taken: HashMap<usize, u32>,
 }
 
+/// Highest label id bound or targeted by `ops` (jumps and calls), or `0`.
+pub(crate) fn max_code_label(ops: &[IlOp]) -> u32 {
+    ops.iter().filter_map(code_label_id).max().unwrap_or(0)
+}
+
+/// Next id that does not collide with any label or jump/call target in `ops`.
+pub(crate) fn next_fresh_label(ops: &[IlOp]) -> u32 {
+    max_code_label(ops).saturating_add(1)
+}
+
+fn code_label_id(op: &IlOp) -> Option<u32> {
+    match op {
+        IlOp::Label(Label(id)) => Some(*id),
+        IlOp::Jump { target, .. } | IlOp::Entry { target, .. } => Some(target.0),
+        _ => None,
+    }
+}
+
 /// Reorder cold terminating arms off the fall-through of `JMPF`/`JMPT`.
 pub fn optimize_branches(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) {
+    let mut next = next_fresh_label(ops);
+    optimize_branches_at(ops, profile, 0, &mut next);
+}
+
+/// Like [`optimize_branches`], seeding SP at `entry_sp` and minting labels
+/// from `next_label` (bumped to at least [`next_fresh_label`]).
+pub(crate) fn optimize_branches_at(
+    ops: &mut Vec<IlOp>,
+    profile: Option<&BranchProfile>,
+    entry_sp: i32,
+    next_label: &mut u32,
+) {
+    *next_label = (*next_label).max(next_fresh_label(ops));
     let mut guard = 0usize;
     while guard < ops.len() {
         guard += 1;
-        if !invert_one_cold_fallthrough(ops, profile) {
+        if !invert_one_cold_fallthrough(ops, profile, entry_sp, next_label) {
             break;
         }
     }
     merge_cold_blocks(ops);
 }
 
-fn invert_one_cold_fallthrough(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) -> bool {
+fn invert_one_cold_fallthrough(
+    ops: &mut Vec<IlOp>,
+    profile: Option<&BranchProfile>,
+    entry_sp: i32,
+    next_label: &mut u32,
+) -> bool {
     let targets = label_index(ops);
     for i in 0..ops.len() {
         let IlOp::Jump {
@@ -63,7 +102,12 @@ fn invert_one_cold_fallthrough(ops: &mut Vec<IlOp>, profile: Option<&BranchProfi
         if profile_forbids_invert(profile, i, kind) {
             continue;
         }
-        let fresh = Label(next_label_id(ops));
+        if !fallthrough_is_sp_safe(ops, i, lab_i, entry_sp) {
+            continue;
+        }
+        *next_label = (*next_label).max(next_fresh_label(ops));
+        let fresh = Label(*next_label);
+        *next_label = next_label.saturating_add(1);
         let mut out = Vec::with_capacity(ops.len() + 2);
         out.extend_from_slice(&ops[..i]);
         let inverted = match kind {
@@ -168,16 +212,39 @@ fn label_index(ops: &[IlOp]) -> HashMap<u32, usize> {
     map
 }
 
-fn next_label_id(ops: &[IlOp]) -> u32 {
-    ops.iter()
-        .filter_map(|op| match op {
-            IlOp::Label(Label(id)) => Some(*id),
-            IlOp::Jump { target, .. } => Some(target.0),
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0)
-        .saturating_add(1)
+fn fallthrough_is_sp_safe(ops: &[IlOp], jump_i: usize, lab_i: usize, entry_sp: i32) -> bool {
+    let info = sp::analyze_at(ops, entry_sp);
+    let Sp::Known(h) = info.sp_before(jump_i) else {
+        return false;
+    };
+    if h < 1 {
+        return false;
+    }
+    let after = h - 1;
+    let Sp::Known(h_else) = info.sp_before(lab_i) else {
+        return false;
+    };
+    if h_else != after {
+        return false;
+    }
+    let mut h_arm = after;
+    for op in &ops[jump_i + 1..lab_i] {
+        if is_seek(op) {
+            return false;
+        }
+        let Some(d) = sp::stack_delta(op) else {
+            return false;
+        };
+        h_arm += d;
+        if h_arm < 0 {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_seek(op: &IlOp) -> bool {
+    matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek)
 }
 
 /// Collapse adjacent empty cold labels (size-oriented). Currently a no-op
@@ -278,14 +345,14 @@ mod tests {
 
     #[test]
     fn profile_hot_fallthrough_keeps_layout() {
-        let mut ops = vec![jmpf(1), c(1), ret(), label(1), c(2), ret()];
+        let mut ops = vec![c(0), jmpf(1), c(1), ret(), label(1), c(2), ret()];
         let mut profile = BranchProfile::default();
-        profile.not_taken.insert(0, 100);
-        profile.taken.insert(0, 1);
+        profile.not_taken.insert(1, 100);
+        profile.taken.insert(1, 1);
         optimize_branches(&mut ops, Some(&profile));
         assert!(
             matches!(
-                ops[0],
+                ops[1],
                 IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
                     target: Label(1),
@@ -298,13 +365,13 @@ mod tests {
 
     #[test]
     fn profile_cold_fallthrough_inverts() {
-        let mut ops = vec![jmpf(1), c(1), ret(), label(1), c(2), ret()];
+        let mut ops = vec![c(0), jmpf(1), c(1), ret(), label(1), c(2), ret()];
         let mut profile = BranchProfile::default();
-        profile.not_taken.insert(0, 1);
-        profile.taken.insert(0, 99);
+        profile.not_taken.insert(1, 1);
+        profile.taken.insert(1, 99);
         optimize_branches(&mut ops, Some(&profile));
         assert!(matches!(
-            ops[0],
+            ops[1],
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfTrue,
                 ..
@@ -331,7 +398,7 @@ mod tests {
 
     #[test]
     fn control_flow_still_returns_on_both_arms() {
-        let mut ops = vec![jmpf(1), ret(), label(1), ret()];
+        let mut ops = vec![c(0), jmpf(1), c(1), ret(), label(1), c(2), ret()];
         optimize_branches(&mut ops, None);
         let returns = ops
             .iter()
@@ -339,7 +406,7 @@ mod tests {
             .count();
         assert_eq!(returns, 2);
         assert!(matches!(
-            ops[0],
+            ops[1],
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfTrue,
                 ..
@@ -357,14 +424,42 @@ mod tests {
 
     #[test]
     fn jmpt_cold_fallthrough_inverts_to_jmpf() {
-        let mut ops = vec![jmpt(1), ret(), label(1), c(2), ret()];
+        let mut ops = vec![c(0), jmpt(1), c(1), ret(), label(1), c(2), ret()];
         optimize_branches(&mut ops, None);
         assert!(matches!(
-            ops[0],
+            ops[1],
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfFalse,
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn refuses_when_cond_jump_has_empty_stack() {
+        let mut ops = vec![jmpf(1), c(1), ret(), label(1), c(2), ret()];
+        let before = ops.clone();
+        optimize_branches(&mut ops, None);
+        assert!(ops == before);
+    }
+
+    #[test]
+    fn fresh_label_respects_caller_watermark() {
+        let mut ops = vec![c(0), jmpf(1), c(1), ret(), label(1), c(2), ret()];
+        let mut next = 40;
+        optimize_branches_at(&mut ops, None, 0, &mut next);
+        let target = ops
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfTrue,
+                    target,
+                    ..
+                } => Some(target.0),
+                _ => None,
+            })
+            .expect("inverted JMPT");
+        assert_eq!(target, 40);
+        assert_eq!(next, 41);
     }
 }
