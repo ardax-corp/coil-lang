@@ -52,16 +52,19 @@ pub(crate) fn optimize_branches_at(
     profile: Option<&BranchProfile>,
     entry_sp: i32,
     next_label: &mut u32,
-) {
+) -> usize {
     *next_label = (*next_label).max(next_fresh_label(ops));
+    let mut applied = 0usize;
     let mut guard = 0usize;
     while guard < ops.len() {
         guard += 1;
         if !invert_one_cold_fallthrough(ops, profile, entry_sp, next_label) {
             break;
         }
+        applied += 1;
     }
     merge_cold_blocks(ops);
+    applied
 }
 
 fn invert_one_cold_fallthrough(

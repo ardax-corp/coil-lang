@@ -420,6 +420,7 @@ mod tests {
                 block_reordering: false,
                 iterative_optimization: false,
                 max_optimization_iterations: 10,
+                collect_stats: false,
             },
             &mut Vec::new(),
         );
@@ -484,6 +485,7 @@ mod tests {
                 block_reordering: false,
                 iterative_optimization: false,
                 max_optimization_iterations: 10,
+                collect_stats: false,
         }
     }
 

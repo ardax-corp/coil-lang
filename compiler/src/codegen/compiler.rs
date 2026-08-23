@@ -227,6 +227,12 @@ impl Compiler {
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
+    /// Enable or disable IL opt-stat collection (COI-131).
+    pub fn set_collect_opt_stats(&mut self, on: bool) {
+        self.opt_options.collect_stats = on;
+        self.bytecode.set_opt_options(self.opt_options.clone());
+    }
+
     pub fn intern_constant(&mut self, value: u64) -> u32 {
         let idx = self.constants.len() as u32;
         self.constants.push(value);
@@ -1284,6 +1290,7 @@ impl Compiler {
             let result = self.alloc_temp_slot();
             self.bytecode.push_store_pop(result);
             bytecode.push_load(result);
+            crate::il::opt::note_function_inlined();
             return true;
         }
         let slice = self.bytecode.code_slice_bytes(start, end);
@@ -1291,9 +1298,11 @@ impl Compiler {
             && let Some(expanded) = Self::expand_fused_return_for_inline(&slice[0], &temps)
         {
             bytecode.push(expanded);
+            crate::il::opt::note_function_inlined();
             return true;
         }
         if slice.len() == 1 && Self::expand_bin_return_for_inline(&slice[0], &temps, bytecode) {
+            crate::il::opt::note_function_inlined();
             return true;
         }
         for byte in &slice {
@@ -1334,6 +1343,7 @@ impl Compiler {
                 bytecode.push(*byte);
             }
         }
+        crate::il::opt::note_function_inlined();
         true
     }
 

@@ -76,6 +76,8 @@ pub struct Pipeline {
     include_tests: bool,
     /// IL / inliner preset (COI-127). Default [`crate::OptLevel::Standard`].
     opt_level: crate::OptLevel,
+    /// Collect IL opt counters for `--opt-stats` (COI-131).
+    collect_opt_stats: bool,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
     compiler: std::cell::OnceCell<Compiler>,
@@ -216,6 +218,7 @@ impl Pipeline {
                 c.register_native_id(name, *id);
             }
             c.set_opt_level(self.opt_level);
+            c.set_collect_opt_stats(self.collect_opt_stats);
             c
         })
     }
@@ -409,6 +412,7 @@ impl Pipeline {
             overlays: HashMap::new(),
             include_tests: false,
             opt_level: crate::OptLevel::Standard,
+            collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
             sink,
@@ -1004,6 +1008,7 @@ impl Pipeline {
         // namespace) — see `compile_file`.
         let entry = PathBuf::from(&filename);
         self.entry_file = Some(entry.clone());
+        self.begin_compile_opt_stats();
         self.enqueue_file(entry);
 
         // Discovery pass: walk the dependency graph
@@ -1104,6 +1109,7 @@ impl Pipeline {
         self.worklist.clear();
         self.module_deps.clear();
         self.entry_file = None;
+        self.begin_compile_opt_stats();
 
         // Discover disk modules (`io/sync.hy` in coil-stdlib, …) referenced by `use`
         // before compiling the in-memory entry — same dependency order as
@@ -1209,6 +1215,7 @@ impl Pipeline {
         self.worklist.clear();
         self.module_deps.clear();
         self.entry_file = Some(entry.clone());
+        self.begin_compile_opt_stats();
         self.enqueue_file(entry);
 
         // Discovery + dependency-ordered compile (see `compile`).
@@ -1261,6 +1268,7 @@ impl Pipeline {
         self.worklist.clear();
         self.module_deps.clear();
         self.entry_file = Some(entry.clone());
+        self.begin_compile_opt_stats();
         self.enqueue_file(entry);
 
         self.discover_all();
@@ -1320,7 +1328,24 @@ impl Pipeline {
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_level = level;
         if self.compiler.get().is_some() {
+            let collect = self.collect_opt_stats;
             self.compiler_lazy_mut().set_opt_level(level);
+            self.compiler_lazy_mut().set_collect_opt_stats(collect);
+        }
+    }
+
+    /// Collect IL optimization counters (COI-131). Off by default.
+    pub fn set_collect_opt_stats(&mut self, on: bool) {
+        self.collect_opt_stats = on;
+        if self.compiler.get().is_some() {
+            self.compiler_lazy_mut().set_collect_opt_stats(on);
+        }
+    }
+
+    fn begin_compile_opt_stats(&mut self) {
+        if self.collect_opt_stats {
+            crate::il::opt::begin_opt_stats();
+            self.compiler_lazy_mut().set_collect_opt_stats(true);
         }
     }
 
@@ -1832,5 +1857,24 @@ fn main() { add(1, 2); }
                 .compile_src(src)
                 .unwrap_or_else(|_| panic!("{level:?} should compile"));
         }
+    }
+
+    #[test]
+    fn compile_src_collects_opt_stats_and_inlines() {
+        let src = r#"
+fn add(int a, int b) -> int { return a + b; }
+fn main() { add(1, 2); }
+"#;
+        let mut pipeline = Pipeline::new();
+        pipeline.set_collect_opt_stats(true);
+        pipeline.compile_src(src).expect("compile");
+        let stats = crate::last_opt_stats();
+        assert_eq!(stats.iterations, 1);
+        assert!(
+            stats.functions_inlined >= 1,
+            "tiny add should inline; stats={stats:?}"
+        );
+        let json = stats.format_json();
+        assert!(json.contains("\"functions_inlined\""));
     }
 }

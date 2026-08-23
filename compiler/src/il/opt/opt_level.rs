@@ -105,6 +105,7 @@ fn all_off() -> OptimizeOptions {
         block_reordering: false,
         iterative_optimization: false,
         max_optimization_iterations: 10,
+        collect_stats: false,
     }
 }
 

@@ -91,16 +91,23 @@ pub fn reorder_ops(ops: &[IlOp], graph: &BlockGraph, order: &[usize]) -> Vec<IlO
 }
 
 /// Relayout `ops`. No-op when the order is already canonical.
-pub fn reorder_basic_blocks(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) {
+/// Returns how many blocks moved from their original index.
+pub fn reorder_basic_blocks(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) -> usize {
     let graph = build_block_graph(ops);
     let order = compute_block_order(&graph, ops, profile);
     if order.windows(2).all(|w| w[1] == w[0] + 1) && order.first() == Some(&0) {
-        return;
+        return 0;
     }
     if order.len() != graph.blocks.len() {
-        return;
+        return 0;
     }
+    let moved = order
+        .iter()
+        .enumerate()
+        .filter(|(i, b)| *i != **b)
+        .count();
     *ops = reorder_ops(ops, &graph, &order);
+    moved
 }
 
 fn fallthrough_flags(ops: &[IlOp], blocks: &[(usize, usize)]) -> Vec<bool> {
