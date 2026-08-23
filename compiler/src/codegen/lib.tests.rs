@@ -753,13 +753,15 @@ use string::{format, to_bytes};
         let has_log_not_jmpf = bc
             .iter()
             .any(|b| matches!(b.bytecode(), Instruction::LogNotJmpf));
-        let has_bin_slot_jmpf = bc.iter().any(|b| {
-            matches!(b.bytecode(), Instruction::BinSlotImmJmpf)
-                && b.bin_slot_imm_jmpf_parts().0 == Instruction::BITAND as u8
+        let has_bin_slot_jmp = bc.iter().any(|b| {
+            matches!(
+                b.bytecode(),
+                Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt
+            ) && b.bin_slot_imm_jmpf_parts().0 == Instruction::BITAND as u8
         });
         assert!(
-            !has_log_not_jmpf && has_bin_slot_jmpf,
-            "expected BinSlotImmJmpf(BITAND) without LogNotJmpf; opcodes: {:?}",
+            !has_log_not_jmpf && has_bin_slot_jmp,
+            "expected BinSlotImmJmpf/Jmpt(BITAND) without LogNotJmpf; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -1510,14 +1512,18 @@ fn main() {
             bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
         );
         assert!(
-            bc.iter()
-                .any(|b| *b.bytecode() == Instruction::BinSlotImmJmpf),
-            "expected fused n <= 2 guard"
+            bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt
+            )),
+            "expected fused n <= 2 guard (Jmpf or inverted Jmpt)"
         );
         assert!(
-            bc.iter()
-                .any(|b| *b.bytecode() == Instruction::ConstReturnImm),
-            "expected fused base-case ConstReturnImm"
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::ConstReturnImm
+                    || *b.bytecode() == Instruction::CONST
+            }),
+            "expected fused base-case ConstReturnImm (or CONST before RETURN after layout invert)"
         );
     }
 
@@ -1533,35 +1539,26 @@ fn main() {
              } \
              fn main() { return fib(10); }",
         );
-        // Walk fib's body: after the base ConstReturnImm, the two recursive
-        // CALLs must be adjacent to arg prep with no STORE between them, and
-        // the join must be BinReturn.
-        let base = bc
-            .iter()
-            .position(|b| *b.bytecode() == Instruction::ConstReturnImm)
-            .expect("fused base return");
-        let body = &bc[base + 1..];
-        let call_pos: Vec<usize> = body
+        // Recursive arms must stack across CALL (no STORE between them) and
+        // join with BinReturn. Branch layout may park the base case after
+        // the hot path, so do not assume ConstReturnImm precedes the CALLs.
+        let call_pos: Vec<usize> = bc
             .iter()
             .enumerate()
             .filter(|(_, b)| *b.bytecode() == Instruction::CALL)
             .map(|(i, _)| i)
             .collect();
+        let pair = call_pos.windows(2).find(|w| {
+            let (c0, c1) = (w[0], w[1]);
+            !(c0 + 1..c1).any(|i| *bc[i].bytecode() == Instruction::STORE)
+                && bc[c1 + 1..]
+                    .iter()
+                    .any(|b| *b.bytecode() == Instruction::BinReturn)
+        });
         assert!(
-            call_pos.len() >= 2,
-            "expected two recursive CALLs; ops={:?}",
-            body.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
-        );
-        let (c0, c1) = (call_pos[0], call_pos[1]);
-        assert!(
-            !(c0 + 1..c1).any(|i| *body[i].bytecode() == Instruction::STORE),
-            "STORE between fib arms regresses stack-across-CALL"
-        );
-        assert!(
-            body[c1 + 1..]
-                .iter()
-                .any(|b| *b.bytecode() == Instruction::BinReturn),
-            "expected BinReturn after stacked fib calls"
+            pair.is_some(),
+            "expected two stacked recursive CALLs then BinReturn; ops={:?}",
+            bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
         );
     }
 
@@ -1839,10 +1836,13 @@ fn main() {
              }",
         );
         assert!(
-            bc.iter()
-                .any(|b| *b.bytecode() == Instruction::BinSlotSlotJmpf
-                    && b.bin_slot_slot_jmpf_parts().0 == Instruction::AND as u8),
-            "expected BinSlotSlotJmpf(AND) for a && b; opcodes: {:?}",
+            bc.iter().any(|b| {
+                matches!(
+                    *b.bytecode(),
+                    Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt
+                ) && b.bin_slot_slot_jmpf_parts().0 == Instruction::AND as u8
+            }),
+            "expected BinSlotSlotJmpf/Jmpt(AND) for a && b; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -4166,9 +4166,13 @@ fn run() -> int { return add(1, 2); }
                 matches!(
                     b.bytecode(),
                     Instruction::JMPF
+                        | Instruction::JMPT
                         | Instruction::CmpJmpf
+                        | Instruction::CmpJmpt
                         | Instruction::BinSlotImmJmpf
+                        | Instruction::BinSlotImmJmpt
                         | Instruction::BinSlotSlotJmpf
+                        | Instruction::BinSlotSlotJmpt
                 )
             })
             .map(|(i, _)| i)

@@ -140,8 +140,25 @@ impl IlModule {
             return ops;
         }
 
+        let mut next_label = self
+            .funcs
+            .iter()
+            .map(|b| opt::max_code_label(&b.ops))
+            .chain(std::iter::once(opt::max_code_label(&self.prologue)))
+            .chain(self.glue.iter().map(|g| opt::max_code_label(g)))
+            .chain(std::iter::once(opt::max_code_label(&self.epilogue)))
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+
         for body in &mut self.funcs {
-            opt::optimize_at(&mut body.ops, &per, body.meta.entry_sp as i32, pool);
+            opt::optimize_at_with_labels(
+                &mut body.ops,
+                &per,
+                body.meta.entry_sp as i32,
+                pool,
+                &mut next_label,
+            );
             super::gvn::cfg_gvn_with(&mut body.ops, per.ssa_gvn);
             if run_seek_back_edge {
                 opt::seek_normalize_back_edges(&mut body.ops, body.meta.entry_sp);
