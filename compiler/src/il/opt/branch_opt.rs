@@ -1,0 +1,370 @@
+//! Heuristic / profile-guided branch layout (COI-128).
+//!
+//! Keeps the likely successor as fall-through. Without a profile, a
+//! terminating then-arm after `JMPF` is treated as cold (error / early
+//! return) and moved off the fall-through. Semantics stay identical:
+//! only the sense of the branch and the linear order of a single-entry
+//! cold region change.
+
+use std::collections::HashMap;
+
+use super::super::op::{IlJumpKind, IlOp, Label};
+
+/// Edge counts for conditional jumps, keyed by the jump's op index *before*
+/// this pass mutates the buffer. Missing keys fall back to heuristics.
+#[derive(Clone, Debug, Default)]
+pub struct BranchProfile {
+    pub taken: HashMap<usize, u32>,
+    pub not_taken: HashMap<usize, u32>,
+}
+
+/// Reorder cold terminating arms off the fall-through of `JMPF`/`JMPT`.
+pub fn optimize_branches(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) {
+    let mut guard = 0usize;
+    while guard < ops.len() {
+        guard += 1;
+        if !invert_one_cold_fallthrough(ops, profile) {
+            break;
+        }
+    }
+    merge_cold_blocks(ops);
+}
+
+fn invert_one_cold_fallthrough(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) -> bool {
+    let targets = label_index(ops);
+    for i in 0..ops.len() {
+        let IlOp::Jump {
+            kind,
+            target,
+            loc,
+        } = ops[i]
+        else {
+            continue;
+        };
+        if !matches!(kind, IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue) {
+            continue;
+        }
+        let Some(&lab_i) = targets.get(&target.0) else {
+            continue;
+        };
+        if lab_i <= i + 1 {
+            continue;
+        }
+        let cold = &ops[i + 1..lab_i];
+        if cold.is_empty() || !is_cold_region(cold) {
+            continue;
+        }
+        if region_defines_labels(cold) {
+            continue;
+        }
+        if !suffix_cannot_fall_into_moved_cold(&ops[lab_i..]) {
+            continue;
+        }
+        if profile_forbids_invert(profile, i, kind) {
+            continue;
+        }
+        let fresh = Label(next_label_id(ops));
+        let mut out = Vec::with_capacity(ops.len() + 2);
+        out.extend_from_slice(&ops[..i]);
+        let inverted = match kind {
+            IlJumpKind::JumpIfFalse => IlJumpKind::JumpIfTrue,
+            IlJumpKind::JumpIfTrue => IlJumpKind::JumpIfFalse,
+            _ => unreachable!(),
+        };
+        out.push(IlOp::Jump {
+            kind: inverted,
+            target: fresh,
+            loc,
+        });
+        out.extend_from_slice(&ops[lab_i..]);
+        out.push(IlOp::Label(fresh));
+        out.extend_from_slice(cold);
+        *ops = out;
+        return true;
+    }
+    false
+}
+
+fn profile_forbids_invert(
+    profile: Option<&BranchProfile>,
+    jump_idx: usize,
+    kind: IlJumpKind,
+) -> bool {
+    let Some(p) = profile else {
+        return false;
+    };
+    let taken = p.taken.get(&jump_idx).copied().unwrap_or(0);
+    let not_taken = p.not_taken.get(&jump_idx).copied().unwrap_or(0);
+    if taken == 0 && not_taken == 0 {
+        return false;
+    }
+    // Fall-through is the not-taken edge. Invert only when that edge is colder.
+    match kind {
+        IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue => not_taken >= taken,
+        _ => true,
+    }
+}
+
+fn is_cold_region(ops: &[IlOp]) -> bool {
+    if ops.iter().any(|op| matches!(op, IlOp::Label(_))) {
+        return false;
+    }
+    if ops.iter().any(is_jump) {
+        return false;
+    }
+    matches!(ops.last(), Some(op) if is_terminator(op))
+}
+
+fn region_defines_labels(ops: &[IlOp]) -> bool {
+    ops.iter().any(|op| matches!(op, IlOp::Label(_)))
+}
+
+fn suffix_cannot_fall_into_moved_cold(suffix: &[IlOp]) -> bool {
+    let mut last_real = None;
+    for op in suffix {
+        if matches!(op, IlOp::Label(_)) {
+            continue;
+        }
+        last_real = Some(op);
+    }
+    match last_real {
+        Some(op) => is_terminator(op) || is_uncond_jmp(op),
+        None => false,
+    }
+}
+
+fn is_terminator(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Return { .. }
+            | IlOp::Halt { .. }
+            | IlOp::LoadReturnSlot { .. }
+            | IlOp::ConstReturnImm { .. }
+            | IlOp::BinReturn { .. }
+    )
+}
+
+fn is_uncond_jmp(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Jump {
+            kind: IlJumpKind::Unconditional,
+            ..
+        }
+    )
+}
+
+fn is_jump(op: &IlOp) -> bool {
+    matches!(op, IlOp::Jump { .. })
+}
+
+fn label_index(ops: &[IlOp]) -> HashMap<u32, usize> {
+    let mut map = HashMap::new();
+    for (i, op) in ops.iter().enumerate() {
+        if let IlOp::Label(Label(id)) = op {
+            map.insert(*id, i);
+        }
+    }
+    map
+}
+
+fn next_label_id(ops: &[IlOp]) -> u32 {
+    ops.iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(id)) => Some(*id),
+            IlOp::Jump { target, .. } => Some(target.0),
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+        .saturating_add(1)
+}
+
+/// Collapse adjacent empty cold labels (size-oriented). Currently a no-op
+/// placeholder so COI-129 can grow layout merging without a second hook.
+pub fn merge_cold_blocks(ops: &mut [IlOp]) {
+    let _ = ops;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::il::op::IlOp;
+    use common::DebugLoc;
+    use std::collections::HashSet;
+
+    fn used_labels(ops: &[IlOp]) -> HashSet<u32> {
+        let mut s = HashSet::new();
+        for op in ops {
+            if let IlOp::Jump { target, .. } = op {
+                s.insert(target.0);
+            }
+        }
+        s
+    }
+
+    fn loc() -> DebugLoc {
+        DebugLoc::unknown()
+    }
+
+    fn jmpf(id: u32) -> IlOp {
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(id),
+            loc: loc(),
+        }
+    }
+
+    fn jmpt(id: u32) -> IlOp {
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfTrue,
+            target: Label(id),
+            loc: loc(),
+        }
+    }
+
+    fn label(id: u32) -> IlOp {
+        IlOp::Label(Label(id))
+    }
+
+    fn ret() -> IlOp {
+        IlOp::Return { loc: loc() }
+    }
+
+    fn c(n: i32) -> IlOp {
+        IlOp::Const {
+            imm: n,
+            loc: loc(),
+        }
+    }
+
+    #[test]
+    fn heuristic_moves_return_off_jmpf_fallthrough() {
+        let mut ops = vec![
+            c(0),
+            jmpf(1),
+            c(1),
+            ret(),
+            label(1),
+            c(2),
+            ret(),
+        ];
+        optimize_branches(&mut ops, None);
+        assert!(
+            matches!(
+                ops[1],
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfTrue,
+                    ..
+                }
+            ),
+            "expected JMPT to cold, got jump or other",
+        );
+        assert!(matches!(ops[2], IlOp::Label(Label(1))));
+        assert!(matches!(ops[3], IlOp::Const { imm: 2, .. }));
+        assert!(matches!(ops[4], IlOp::Return { .. }));
+        assert!(matches!(ops.last(), Some(IlOp::Return { .. })));
+        let jumps: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Jump { kind, target, .. } => Some((*kind, target.0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(jumps.len(), 1);
+        assert_eq!(jumps[0].0, IlJumpKind::JumpIfTrue);
+        assert!(used_labels(&ops).contains(&jumps[0].1));
+    }
+
+    #[test]
+    fn profile_hot_fallthrough_keeps_layout() {
+        let mut ops = vec![jmpf(1), c(1), ret(), label(1), c(2), ret()];
+        let mut profile = BranchProfile::default();
+        profile.not_taken.insert(0, 100);
+        profile.taken.insert(0, 1);
+        optimize_branches(&mut ops, Some(&profile));
+        assert!(
+            matches!(
+                ops[0],
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: Label(1),
+                    ..
+                }
+            ),
+            "profile says fall-through is hot; leave JMPF"
+        );
+    }
+
+    #[test]
+    fn profile_cold_fallthrough_inverts() {
+        let mut ops = vec![jmpf(1), c(1), ret(), label(1), c(2), ret()];
+        let mut profile = BranchProfile::default();
+        profile.not_taken.insert(0, 1);
+        profile.taken.insert(0, 99);
+        optimize_branches(&mut ops, Some(&profile));
+        assert!(matches!(
+            ops[0],
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn refuses_when_then_arm_has_internal_jump() {
+        let mut ops = vec![
+            jmpf(1),
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(1),
+                loc: loc(),
+            },
+            label(1),
+            ret(),
+        ];
+        let before = ops.clone();
+        optimize_branches(&mut ops, None);
+        assert!(ops == before);
+    }
+
+    #[test]
+    fn control_flow_still_returns_on_both_arms() {
+        let mut ops = vec![jmpf(1), ret(), label(1), ret()];
+        optimize_branches(&mut ops, None);
+        let returns = ops
+            .iter()
+            .filter(|op| matches!(op, IlOp::Return { .. }))
+            .count();
+        assert_eq!(returns, 2);
+        assert!(matches!(
+            ops[0],
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn merge_cold_blocks_is_a_stable_no_op() {
+        let mut ops = vec![ret(), ret()];
+        let before = ops.clone();
+        merge_cold_blocks(&mut ops);
+        assert!(ops == before);
+    }
+
+    #[test]
+    fn jmpt_cold_fallthrough_inverts_to_jmpf() {
+        let mut ops = vec![jmpt(1), ret(), label(1), c(2), ret()];
+        optimize_branches(&mut ops, None);
+        assert!(matches!(
+            ops[0],
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                ..
+            }
+        ));
+    }
+}
