@@ -530,6 +530,40 @@
     /// targets yield the integer `-1`. `IndexUnchecked` skips the range test
     /// (compiler proof only; UB in release on violation).
     #[test]
+    fn index_pin_reads_after_array_pin() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            load(0),
+            Byte::new(Instruction::ArrayPin).with_operand_u32(0),
+            const_int(1),
+            Byte::new(Instruction::IndexPin).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 6);
+    }
+
+    #[test]
+    fn index_pin_unchecked_reads_in_bounds_element() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            load(0),
+            Byte::new(Instruction::ArrayPin).with_operand_u32(0),
+            const_int(1),
+            Byte::new(Instruction::IndexPinUnchecked).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 6);
+    }
+
+    #[test]
     fn index_unchecked_reads_in_bounds_element() {
         let mut vm = Machine::<8>::default();
         vm.run(&[

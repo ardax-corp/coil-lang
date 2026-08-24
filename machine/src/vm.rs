@@ -1,6 +1,7 @@
 //! Bytecode interpreter: dispatch loop, automatic GC, and FFI.
 
 use std::{
+    collections::HashMap,
     ffi::c_void,
     fmt::Write as FmtWrite,
     io::{self, Write as IoWrite},
@@ -260,6 +261,8 @@ pub struct Machine<const S: usize> {
     heap: Heap,
     stack: Stack<Value>,
     frames: ArrayVec<Frame, S>,
+    /// Per-frame pinned arrays for `ArrayPin` / `IndexPin*` (GC roots).
+    frame_pins: ArrayVec<HashMap<u32, Object>, S>,
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
@@ -337,11 +340,14 @@ impl<const S: usize> Machine<S> {
     pub fn with_operand_capacity(operand_slots: usize) -> Self {
         let mut frames = ArrayVec::default();
         frames.consume();
+        let mut frame_pins = ArrayVec::default();
+        frame_pins.consume();
         let worker_cap = crate::thread::WorkerCap::new();
         let reactor = crate::reactor::Reactor::new(worker_cap.max());
         let cap = operand_slots.clamp(1, crate::MAX_OPERAND_STACK_SLOTS);
         Self {
             frames,
+            frame_pins,
             heap: Heap::default(),
             stack: Stack::with_capacity(cap),
             output: None,
@@ -518,6 +524,8 @@ impl<const S: usize> Machine<S> {
         self.stack = Stack::with_capacity(self.stack.capacity());
         self.frames = ArrayVec::default();
         self.frames.consume();
+        self.frame_pins = ArrayVec::default();
+        self.frame_pins.consume();
         self.panicked = false;
         self.pending_ffi = None;
         self.pending_io = None;
@@ -722,6 +730,50 @@ impl<const S: usize> Machine<S> {
     /// Delegates to [`Heap::find_object_by_addr`] (O(1) addr index).
     fn find_object_by_addr(heap: &Heap, addr: u64) -> Option<Object> {
         heap.find_object_by_addr(addr)
+    }
+
+    fn pop_call_frame(&mut self) -> usize {
+        self.frame_pins.pop();
+        self.frames.pop().get()
+    }
+
+    fn push_pin_frame(&mut self) {
+        self.frame_pins
+            .rewrite_top_and_push(|_| {}, |pins| pins.clear());
+    }
+
+    fn current_pins_mut(&mut self) -> &mut HashMap<u32, Object> {
+        self.frame_pins.get_mut()
+    }
+
+    fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Value {
+        let len = elements.len();
+        if unchecked {
+            let idx = index as usize;
+            promise!(index >= 0);
+            promise!(idx < len);
+            unsafe { *elements.get_unchecked(idx) }
+        } else if index >= 0 && (index as usize) < len {
+            unsafe { *elements.get_unchecked(index as usize) }
+        } else {
+            Value::from(-1_i64)
+        }
+    }
+
+    fn write_indexed(elements: &mut [Value], index: i64, value: Value, unchecked: bool) {
+        let len = elements.len();
+        if unchecked {
+            let idx = index as usize;
+            promise!(index >= 0);
+            promise!(idx < len);
+            unsafe {
+                *elements.get_unchecked_mut(idx) = value;
+            }
+        } else if index >= 0 && (index as usize) < len {
+            unsafe {
+                *elements.get_unchecked_mut(index as usize) = value;
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -934,6 +986,11 @@ impl<const S: usize> Machine<S> {
             if let Object::Coroutine(gc) = obj {
                 roots.push(gc.as_ptr() as u64);
                 Self::root_coroutine_saved_stack(&self.heap, gc.as_ref(), &mut roots);
+            }
+        }
+        for pins in self.frame_pins.iter() {
+            for obj in pins.values() {
+                roots.push(obj.addr());
             }
         }
         roots
@@ -1637,6 +1694,7 @@ impl<const S: usize> Machine<S> {
 
         self.stack.seek(parent_ctx.base_sp);
         while self.frames.len() > parent_ctx.frame_depth {
+            self.frame_pins.pop();
             self.frames.pop();
         }
         if self.resume_stack.len() > parent_entry_idx + 1 {
@@ -1701,6 +1759,7 @@ impl<const S: usize> Machine<S> {
 
         self.stack.seek(base_sp);
         while self.frames.len() > frame_depth {
+            self.frame_pins.pop();
             self.frames.pop();
         }
 
@@ -1960,6 +2019,7 @@ impl<const S: usize> Machine<S> {
             f.seek(0);
             f.set(callee_sp);
         });
+        self.push_pin_frame();
         // Capture only when RETURN reaches this frame depth (the
         // call_function entry), not when inner CALLs return.
         self.nested_frame_depths.push(self.frames.len());
@@ -1992,7 +2052,7 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
-        let _ = self.frames.pop();
+        let _ = self.pop_call_frame();
         self.stack.seek(saved_sp);
         self.nested_depth -= 1;
         let _ = self.nested_frame_depths.pop();
@@ -2124,7 +2184,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::StoreIndexUnchecked as u8);
+            promise!(*bc as u8 <= Instruction::StoreIndexPinUnchecked as u8);
 
             match bc {
                 Instruction::POP => {
@@ -2267,7 +2327,7 @@ impl<const S: usize> Machine<S> {
                     {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(payload);
                     self.stack.push(tag);
@@ -2524,6 +2584,7 @@ impl<const S: usize> Machine<S> {
                         );
                         sp = callee_sp;
                         set_jump_target(&mut ip, target, code_len);
+                        self.push_pin_frame();
                     } else {
                         self.frames.rewrite_top_and_push(
                             |caller| caller.seek(ip + 1),
@@ -2592,7 +2653,7 @@ impl<const S: usize> Machine<S> {
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -2857,7 +2918,7 @@ impl<const S: usize> Machine<S> {
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -2867,7 +2928,7 @@ impl<const S: usize> Machine<S> {
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -2921,7 +2982,7 @@ impl<const S: usize> Machine<S> {
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -3422,6 +3483,14 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(addr));
                     self.maybe_gc_after_alloc();
                 }
+                Instruction::ArrayPin => {
+                    let slot = opcode.operand_u32();
+                    let arr_val = self.stack.pop();
+                    let addr = arr_val.raw() as u64;
+                    if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) {
+                        self.current_pins_mut().insert(slot, Object::Array(gc));
+                    }
+                }
                 Instruction::Index | Instruction::IndexUnchecked => {
                     let index_val = self.stack.pop();
                     let target_val = self.stack.pop();
@@ -3457,6 +3526,21 @@ impl<const S: usize> Machine<S> {
                             } else {
                                 Value::from(-1_i64)
                             }
+                        }
+                        _ => Value::from(-1_i64),
+                    };
+                    self.stack.push(result);
+                }
+                Instruction::IndexPin | Instruction::IndexPinUnchecked => {
+                    let slot = opcode.operand_u32();
+                    let index = self.stack.pop().as_int();
+                    let unchecked = matches!(*bc, Instruction::IndexPinUnchecked);
+                    let result = match self.current_pins_mut().get(&slot) {
+                        Some(Object::Array(gc)) => {
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                        }
+                        Some(Object::Tuple(gc)) => {
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
                         _ => Value::from(-1_i64),
                     };
@@ -3554,6 +3638,18 @@ impl<const S: usize> Machine<S> {
                                 *arr.elements.get_unchecked_mut(index as usize) = value;
                             }
                         }
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked => {
+                    let slot = opcode.operand_u32();
+                    let value = self.stack.pop();
+                    let index = self.stack.pop().as_int();
+                    let unchecked = matches!(*bc, Instruction::StoreIndexPinUnchecked);
+                    if let Some(Object::Array(mut gc)) = self.current_pins_mut().get(&slot).copied()
+                    {
+                        let arr = gc.as_mut();
+                        Self::write_indexed(&mut arr.elements, index, value, unchecked);
                     }
                     self.stack.push(value);
                 }

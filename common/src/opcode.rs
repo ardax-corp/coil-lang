@@ -331,6 +331,18 @@ pub enum Instruction {
     IndexUnchecked,
     /// Bounds-proofed [`Self::StoreIndex`]: same guarantee as [`Self::IndexUnchecked`].
     StoreIndexUnchecked,
+
+    /// Resolve a stack-top array once and cache it in the current frame pin table
+    /// (operand: array frame slot). Stack-neutral after `LOAD arr`.
+    ArrayPin,
+    /// Index through a pinned array (operand: slot); pops index only.
+    IndexPin,
+    /// Bounds-proofed [`Self::IndexPin`].
+    IndexPinUnchecked,
+    /// Store through a pinned array (operand: slot); pops value and index.
+    StoreIndexPin,
+    /// Bounds-proofed [`Self::StoreIndexPin`].
+    StoreIndexPinUnchecked,
 }
 
 impl From<u8> for Instruction {
@@ -484,6 +496,11 @@ impl Instruction {
             Self::BinSlotSlotConstJmpt => "BinSlotSlotConstJmpt",
             Self::IndexUnchecked => "IndexUnchecked",
             Self::StoreIndexUnchecked => "StoreIndexUnchecked",
+            Self::ArrayPin => "ArrayPin",
+            Self::IndexPin => "IndexPin",
+            Self::IndexPinUnchecked => "IndexPinUnchecked",
+            Self::StoreIndexPin => "StoreIndexPin",
+            Self::StoreIndexPinUnchecked => "StoreIndexPinUnchecked",
         }
     }
 }
@@ -1294,7 +1311,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::StoreIndexUnchecked as u8;
+        let last = Instruction::StoreIndexPinUnchecked as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
