@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use super::func::IlFunc;
-use super::op::{IlOp, Label};
+use super::op::{EntryKind, IlOp, Label};
 use super::opt::{self, OptimizeOptions};
 
 /// One function's owned IL ops (labels inclusive at span edges).
@@ -102,25 +102,58 @@ impl IlModule {
 
     /// Concatenate prologue / bodies / glue / epilogue into one op stream.
     ///
-    /// Each function body (and its trailing glue) keeps a private label namespace
-    /// during per-func opts; remap on concat so lower never binds a jump to another
-    /// function's label with the same numeric id.
-    pub fn to_flat(&self) -> Vec<IlOp> {
+    /// Function bodies (and trailing glue) keep a private label namespace during
+    /// per-func opts; remap on concat so lower never binds a jump to another
+    /// function's label with the same numeric id. Prologue/epilogue are copied
+    /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
+    pub fn to_flat(&self) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
         let mut out = Vec::new();
-        let mut next_label = 0u32;
+        let mut next_label = opt::max_code_label(&self.prologue).saturating_add(1);
         let mut prior_labels = HashMap::new();
-        out.extend(self.prologue.iter().cloned());
+        let mut func_label_maps = Vec::new();
+        let mut segment_ranges: Vec<(usize, usize)> = Vec::new();
+        if !self.prologue.is_empty() {
+            let start = out.len();
+            out.extend(self.prologue.iter().cloned());
+            segment_ranges.push((start, out.len()));
+        }
         for (i, body) in self.funcs.iter().enumerate() {
+            let start = out.len();
             let mut chunk = body.ops.clone();
             if let Some(g) = self.glue.get(i) {
                 chunk.extend(g.iter().cloned());
             }
             let (chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
+            func_label_maps.push(map.clone());
             merge_remap_labels(&mut prior_labels, map);
             out.extend(chunk);
+            segment_ranges.push((start, out.len()));
         }
-        out.extend(self.epilogue.iter().cloned());
-        out
+        if !self.epilogue.is_empty() {
+            let start = out.len();
+            out.extend(self.epilogue.iter().cloned());
+            segment_ranges.push((start, out.len()));
+        }
+        let flat_label_ids: std::collections::HashSet<u32> =
+            prior_labels.values().copied().collect();
+        for (idx, (start, end)) in segment_ranges.iter().copied().enumerate() {
+            let is_prologue = idx == 0 && !self.prologue.is_empty();
+            if is_prologue {
+                remap_cross_function_targets(&mut out[start..end], &prior_labels);
+            } else {
+                remap_cross_function_jump_targets(
+                    &mut out[start..end],
+                    &prior_labels,
+                    &flat_label_ids,
+                );
+                remap_cross_function_entry_call_targets(
+                    &mut out[start..end],
+                    &prior_labels,
+                    &flat_label_ids,
+                );
+            }
+        }
+        (out, prior_labels, func_label_maps)
     }
 
     /// Per-func opts (excluding multi_op) + CFG GVN on each body, then
@@ -128,7 +161,11 @@ impl IlModule {
     ///
     /// `pool` is the module const pool (`f64` / boxed int bits) for algebraic
     /// float identity / const-fold peeps (may push folded float results).
-    pub fn optimize_and_flatten(&mut self, opts: &OptimizeOptions, pool: &mut Vec<u64>) -> Vec<IlOp> {
+    pub fn optimize_and_flatten(
+        &mut self,
+        opts: &OptimizeOptions,
+        pool: &mut Vec<u64>,
+    ) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
         let mut per = opts.clone();
         let run_multi = per.multi_op_join_convoy;
         per.multi_op_join_convoy = false;
@@ -144,9 +181,9 @@ impl IlModule {
         per.seek_back_edge = false;
 
         if self.funcs.is_empty() {
-            let mut ops = self.to_flat();
+            let (mut ops, remap, func_maps) = self.to_flat();
             opt::optimize(&mut ops, opts, pool);
-            return ops;
+            return (ops, remap, func_maps);
         }
 
         let mut next_label = self
@@ -185,20 +222,96 @@ impl IlModule {
             }
         }
 
-        let mut flat = self.to_flat();
+        let (mut flat, remap, func_maps) = self.to_flat();
         if run_multi {
             opt::multi_op_join_convoy(&mut flat);
         }
         if run_invert {
             opt::invert_guard_branch(&mut flat);
         }
-        flat
+        (flat, remap, func_maps)
     }
 }
 
 fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
     for (old, new) in local {
         prior.entry(old).or_insert(new);
+    }
+}
+
+/// Patch cross-function `Jump`/`Entry` targets; keep intra-segment labels local.
+fn remap_cross_function_targets(ops: &mut [IlOp], prior: &HashMap<u32, u32>) {
+    let flat_label_ids: std::collections::HashSet<u32> = prior.values().copied().collect();
+    remap_cross_function_entry_call_targets(ops, prior, &flat_label_ids);
+    remap_cross_function_jump_targets(ops, prior, &flat_label_ids);
+}
+
+fn remap_cross_function_entry_targets(ops: &mut [IlOp], prior: &HashMap<u32, u32>) {
+    let flat_label_ids: std::collections::HashSet<u32> = prior.values().copied().collect();
+    remap_cross_function_entry_call_targets(ops, prior, &flat_label_ids);
+}
+
+fn remap_cross_function_entry_call_targets(
+    ops: &mut [IlOp],
+    prior: &HashMap<u32, u32>,
+    flat_label_ids: &std::collections::HashSet<u32>,
+) {
+    use std::collections::HashSet;
+
+    let local: HashSet<u32> = ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    for op in ops.iter_mut() {
+        if let IlOp::Entry {
+            kind: EntryKind::Call,
+            target,
+            ..
+        } = op
+        {
+            if flat_label_ids.contains(&target.0) {
+                continue;
+            }
+            if let Some(&new_id) = prior.get(&target.0) {
+                if new_id != target.0 && !local.contains(&new_id) {
+                    target.0 = new_id;
+                }
+            }
+        }
+    }
+}
+
+fn remap_cross_function_jump_targets(
+    ops: &mut [IlOp],
+    prior: &HashMap<u32, u32>,
+    flat_label_ids: &std::collections::HashSet<u32>,
+) {
+    use std::collections::HashSet;
+
+    let local: HashSet<u32> = ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    for op in ops.iter_mut() {
+        if let IlOp::Jump { target, .. } = op {
+            if local.contains(&target.0) {
+                continue;
+            }
+            if flat_label_ids.contains(&target.0) {
+                continue;
+            }
+            if let Some(&new_id) = prior.get(&target.0) {
+                if new_id != target.0 && !local.contains(&new_id) {
+                    target.0 = new_id;
+                }
+            }
+        }
     }
 }
 
@@ -241,7 +354,7 @@ mod tests {
         assert_eq!(m.funcs.len(), 1);
         assert_eq!(m.funcs[0].ops.len(), 2);
         assert_eq!(m.epilogue.len(), 1);
-        assert_eq!(m.to_flat().len(), ops.len());
+        assert_eq!(m.to_flat().0.len(), ops.len());
     }
 
     #[test]
@@ -264,7 +377,7 @@ mod tests {
         assert_eq!(m.glue[0].len(), 2);
         assert!(matches!(m.glue[0][0], IlOp::Dup { .. }));
         assert_eq!(m.epilogue.len(), 1);
-        assert_eq!(m.to_flat().len(), ops.len());
+        assert_eq!(m.to_flat().0.len(), ops.len());
     }
 
     #[test]
@@ -295,7 +408,7 @@ mod tests {
                 IlOp::Return { loc },
             ],
         });
-        let flat = m.to_flat();
+        let (flat, _, _) = m.to_flat();
         let mut label_ids = Vec::new();
         for op in &flat {
             if let IlOp::Label(Label(id)) = op {
@@ -330,7 +443,7 @@ mod tests {
                 IlOp::Return { loc },
             ],
         });
-        let flat = m.to_flat();
+        let (flat, _, _) = m.to_flat();
         let callee_label = flat
             .iter()
             .find_map(|op| match op {
@@ -391,7 +504,7 @@ mod tests {
             ],
             ..IlModule::default()
         };
-        let flat = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
+        let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
         assert!(!flat.iter().any(|op| matches!(op, IlOp::Dup { .. })));
         assert!(flat.iter().any(
             |op| matches!(op, IlOp::ConstReturnImm { .. }) || matches!(op, IlOp::Return { .. })
@@ -410,7 +523,7 @@ mod tests {
         ];
         let funcs = vec![IlFunc::new("f", None, 2, 6)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let flat = m.optimize_and_flatten(
+        let (flat, _, _) = m.optimize_and_flatten(
             &OptimizeOptions {
                 multi_op_join_convoy: false,
                 ..OptimizeOptions::default()
@@ -462,7 +575,7 @@ mod tests {
 
         let funcs = vec![IlFunc::new("f", None, 1, body_emit_end)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let flat = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
+        let (flat, _, _) = m.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
         let loads = flat
             .iter()
             .filter(|op| matches!(op, IlOp::Load { .. }))
@@ -498,7 +611,7 @@ mod tests {
         let emit_end = ops.iter().filter(|op| op.emits_code()).count();
         let funcs = vec![IlFunc::new("f", None, 0, emit_end)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let flat = m.optimize_and_flatten(
+        let (flat, _, _) = m.optimize_and_flatten(
             &OptimizeOptions {
                 jump_thread: false,
                 dead_block: false,
@@ -612,7 +725,7 @@ mod tests {
         let emit_end = ops.iter().filter(|op| op.emits_code()).count();
         let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 2)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let flat = m.optimize_and_flatten(&seek_promote_opts(false), &mut Vec::new());
+        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(false), &mut Vec::new());
         assert!(!flat.iter().any(is_seek));
         let stores = flat
             .iter()
@@ -629,7 +742,7 @@ mod tests {
         let emit_end = ops.iter().filter(|op| op.emits_code()).count();
         let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 2)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let flat = m.optimize_and_flatten(&seek_promote_opts(true), &mut Vec::new());
+        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(true), &mut Vec::new());
         assert!(
             flat.windows(2).any(|w| {
                 is_seek(&w[0])

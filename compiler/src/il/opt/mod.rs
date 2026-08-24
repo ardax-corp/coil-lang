@@ -501,7 +501,8 @@ pub fn optimize_per_func(
     }
 
     let mut module = super::IlModule::from_flat(ops, funcs);
-    *ops = module.optimize_and_flatten(opts, pool);
+    let (optimized, _, _) = module.optimize_and_flatten(opts, pool);
+    *ops = optimized;
 }
 
 /// Map inclusive-exclusive emitting indices to a raw op range, including

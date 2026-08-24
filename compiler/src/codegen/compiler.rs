@@ -15690,8 +15690,44 @@ impl Compiler {
         };
         // Prefer entry labels: IL opts (dead_block) shift emitting indices
         // before fuse, so raw `functions` / `test_cases` PCs are stale.
+        // Per-function chunk remaps avoid collisions in the cumulative map.
+        let func_label_maps = &lowered.func_label_maps;
+        let funcs = self.bytecode.funcs();
+        let flat_label = |func_idx: usize, emit_id: u32| -> u32 {
+            func_label_maps
+                .get(func_idx)
+                .and_then(|m| m.get(&emit_id).copied())
+                .unwrap_or(emit_id)
+        };
+        let func_idx_for_pre = |pre: usize| -> Option<usize> {
+            funcs
+                .iter()
+                .position(|f| pre >= f.code_start && pre < f.code_end)
+        };
+        let func_idx_for_name = |name: &str| -> Option<usize> {
+            funcs.iter().position(|f| f.name == name)
+        };
+        let resolve_fn_label_pc = |name: &str, emit_id: u32| -> Option<usize> {
+            let idx = func_idx_for_name(name)?;
+            let flat_id = flat_label(idx, emit_id);
+            lowered.label_pcs.get(&flat_id).copied()
+        };
         let resolve_entry = |pre: usize| -> usize {
             if let Some(label) = self.bytecode.entry_label_for_offset(pre) {
+                if let Some(idx) = func_idx_for_pre(pre) {
+                    let flat_id = flat_label(idx, label.0);
+                    if let Some(pc) = lowered.label_pcs.get(&flat_id).copied() {
+                        return pc;
+                    }
+                }
+                let global_flat = lowered
+                    .label_remap
+                    .get(&label.0)
+                    .copied()
+                    .unwrap_or(label.0);
+                if let Some(pc) = lowered.label_pcs.get(&global_flat).copied() {
+                    return pc;
+                }
                 if let Some(&pc) = lowered.label_pcs.get(&label.0) {
                     return pc;
                 }
@@ -15700,7 +15736,7 @@ impl Compiler {
         };
         for (name, offset) in self.functions.iter_mut() {
             if let Some(label) = self.fn_entry_labels.get(name) {
-                if let Some(&pc) = lowered.label_pcs.get(&label.0) {
+                if let Some(pc) = resolve_fn_label_pc(name, label.0) {
                     *offset = pc;
                     continue;
                 }
