@@ -87,7 +87,7 @@ titles can oversell.
 | **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. Dup-CSE re-expanded before lower for fuse-select. |
 | **`ssa_gvn`** (`gvn_ssa.rs`) | Virtual `Phi(block,slot)` VNs; redundant pure `Const`/`Load`+`Bin` → `Load` when value already in a slot | **Not rename.** `DIV`/`MOD`/`DIVF`/`MODF` excluded. Also runs inside per-body `cfg_gvn_with` when enabled. |
 | **`escape_analysis`** | Immediate-only `MakeArray` (arity ≤ 32) → consecutive frame slots | Fail-closed on escape. Computed elements stay heap. **Not** named-local class SROA (COI-84). |
-| **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists to preheader | **`Index` stays checked** — no `IndexUnchecked` (COI-85). `LEQ`/`GEQ` headers are **not** length proofs (COI-93). |
+| **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists to preheader | **`Index` stays checked** — no `IndexUnchecked` (COI-85). `LEQ`/`GEQ` headers are **not** length proofs (COI-85 / COI-98). |
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
 | **`seek_back_edge`** | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Default off** on `Standard`. COI-97 measured fuse loss on mandelbrot; outer-loop Seek splits `FloatChainStore`. **`Aggressive` / `-O3` turns it on** — production `Standard` stays off until re-measured. |
@@ -197,7 +197,7 @@ What is still open (full refusal table in
   deliberately left out because nothing consumes the fact: without an unchecked
   addressing form the proof cannot change a single emitted word. `loop_unroll`
   may accept `LEQ` for **trip count** — that meaning is separate from bounds
-  Index proofs (COI-98 / COI-93). Pair in-bounds work with an opcode decision,
+  Index proofs (COI-85 / COI-98). Pair in-bounds work with an opcode decision,
   not with this pass alone.
 - **Loops that call a helper on `b[i]`.** Most stdlib `while i < len(b)` loops do,
   and a call could `push` to the array through another reference. Wiring the
