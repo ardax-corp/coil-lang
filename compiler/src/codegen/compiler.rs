@@ -15428,13 +15428,14 @@ impl Compiler {
         } else {
             HashSet::new()
         };
+        self.pure_fns = crate::typechecking::analyze_pure_fns(ast);
         if auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
-            let pure = crate::typechecking::analyze_pure_fns(ast);
-            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, &pure);
+            let pure = &self.pure_fns;
+            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
             self.par_spec_args =
                 crate::typechecking::collect_par_specialization_args(ast, &self.par_shapes);
-            self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &pure);
+            self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
         } else {
             self.par_shapes.clear();
             self.par_spec_args.clear();
@@ -15659,6 +15660,15 @@ impl Compiler {
             None
         };
 
+        let label_callees = self
+            .fn_entry_labels
+            .iter()
+            .map(|(name, label)| (label.0, name.clone()))
+            .collect();
+        self.opt_options.pure_call_ctx = Some(crate::il::PureCallCtx {
+            pure_fns: self.pure_fns.clone(),
+            label_callees,
+        });
         self.bytecode.set_opt_options(self.opt_options.clone());
         let mut lowered = if self.retain_cursor_il {
             self.bytecode.lower_in_place_capturing(&mut self.constants)
@@ -15707,6 +15717,10 @@ impl Compiler {
         self.setup_entry_offset = resolve_entry(self.setup_entry_offset as usize) as u32;
 
         self.debug_locs = lowered.debug_locs;
+
+        self.operand_stack_slots = self
+            .operand_stack_slots
+            .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
 
         debug_assert_eq!(
             self.debug_locs.len(),

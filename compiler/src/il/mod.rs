@@ -18,12 +18,14 @@ mod licm;
 mod lower;
 mod module;
 mod op;
+mod pure_call;
 pub(crate) mod opt;
 mod sp;
 pub mod tell;
 mod treeshake;
 
 pub use bounds::{BoundsStats, last_bounds_stats};
+pub use pure_call::PureCallCtx;
 pub use canon::{CanonStats, last_canon_stats};
 pub use opt::OptLevel;
 

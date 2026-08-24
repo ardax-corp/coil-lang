@@ -60,9 +60,10 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
             | IlOp::ConstPool { .. }
             | IlOp::String { .. }
             | IlOp::Dup { .. } => Some(1),
-        IlOp::StorePop { .. } | IlOp::Pop { .. } | IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => {
-            Some(-1)
-        }
+        IlOp::StorePop { .. } | IlOp::Pop { .. } | IlOp::ArrayPin { .. } => Some(-1),
+        IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => Some(-1),
+        IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. } => Some(0),
+        IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => Some(-1),
         IlOp::MakeTuple { arity, .. } | IlOp::MakeArray { arity, .. } => Some(1 - *arity as i32),
         IlOp::MakeEnum { arity, .. } => Some(1 - *arity as i32),
         IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } | IlOp::LoadField { .. } => Some(0),
@@ -187,6 +188,9 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::JMP => Some(0),
         Instruction::JMPF | Instruction::JMPT => Some(-1),
         Instruction::Index | Instruction::IndexUnchecked => Some(-1),
+        Instruction::ArrayPin => Some(-1),
+        Instruction::IndexPin | Instruction::IndexPinUnchecked => Some(0),
+        Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked => Some(-1),
         Instruction::BoxValue | Instruction::UnboxValue | Instruction::LoadField => Some(0),
         Instruction::OptionNicheToHeap
         | Instruction::HeapOptionToNiche => Some(0),

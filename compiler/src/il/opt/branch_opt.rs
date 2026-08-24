@@ -39,6 +39,66 @@ fn code_label_id(op: &IlOp) -> Option<u32> {
     }
 }
 
+#[inline]
+fn remap_label_target(id: u32, local: &HashMap<u32, u32>, prior: &HashMap<u32, u32>) -> u32 {
+    local
+        .get(&id)
+        .or_else(|| prior.get(&id))
+        .copied()
+        .unwrap_or(id)
+}
+
+/// Remap labels in `ops` into a fresh id space starting at `*next_label`.
+///
+/// Jump/Entry targets that refer to labels bound in earlier concatenated chunks
+/// are resolved via `prior_labels` (cross-function `Entry{Call}` sites).
+pub(crate) fn remap_label_space(
+    ops: &[IlOp],
+    next_label: &mut u32,
+    prior_labels: &HashMap<u32, u32>,
+) -> (Vec<IlOp>, HashMap<u32, u32>) {
+    if ops.is_empty() {
+        return (Vec::new(), HashMap::new());
+    }
+    let mut map = HashMap::<u32, u32>::new();
+    for op in ops {
+        if let IlOp::Label(Label(id)) = op {
+            map.entry(*id).or_insert_with(|| {
+                let n = *next_label;
+                *next_label = next_label.saturating_add(1);
+                n
+            });
+        }
+    }
+    if map.is_empty() && prior_labels.is_empty() {
+        return (ops.to_vec(), map);
+    }
+    let remapped = ops
+        .iter()
+        .map(|op| match op {
+            IlOp::Label(Label(id)) => IlOp::Label(Label(map[id])),
+            IlOp::Jump { kind, target, loc } => IlOp::Jump {
+                kind: *kind,
+                target: Label(remap_label_target(target.0, &map, prior_labels)),
+                loc: *loc,
+            },
+            IlOp::Entry {
+                kind,
+                arity,
+                target,
+                loc,
+            } => IlOp::Entry {
+                kind: *kind,
+                arity: *arity,
+                target: Label(remap_label_target(target.0, &map, prior_labels)),
+                loc: *loc,
+            },
+            other => other.clone(),
+        })
+        .collect();
+    (remapped, map)
+}
+
 /// Reorder cold terminating arms off the fall-through of `JMPF`/`JMPT`.
 pub fn optimize_branches(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) {
     let mut next = next_fresh_label(ops);

@@ -135,10 +135,13 @@ What neither slice does yet (see
 Priority: high (first slice landed; unchecked opcodes + stride induction follow-up landed).
 
 Proven counted-loop sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
-(archive minor 12). Unit `+1` loops (`while i < len(a)`) and invariant stride
-loops (`k = k + p` with positive invariant `p`) share the same length-invariance
-proof. Dynamic indices and unproven stride steps keep checked `Index` /
-`StoreIndex`.
+(archive minor 12), then eligible loops pin the array and rewrite to
+`IndexPinUnchecked` / `StoreIndexPinUnchecked` (archive minor 13) so the VM
+skips per-index `find_object_by_addr`. Unit `+1` loops (`while i < len(a)`) and
+invariant stride loops (`k = k + p` with positive invariant `p`) share the
+same length-invariance proof. Pure user helper calls on `b[i]` no longer block
+that proof ([COI-99](https://linear.app/ardax/issue/COI-99)). Dynamic indices
+and unproven stride steps keep checked `Index` / `StoreIndex`.
 
 `il::bounds.rs` proves **length invariance** per natural loop instead of
 relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
@@ -156,13 +159,9 @@ or above the header's proves no in-loop push can reach `t`.
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):
 
-- **Loops that call a helper on `b[i]`.** Most stdlib `while i < len(b)` loops do,
-  and a call could `push` to the array through another reference. Wiring the
-  existing purity/effect summaries into the barrier test is the widest available
-  win here.
-- **The `find_object_by_addr` lookup per `Index`.** Hoisting the resolved array
-  means keeping a heap address live across a GC point in IL; the length hoists
-  precisely because it is an `int`.
+- **Impure calls in counted loops.** Pure user helpers on `b[i]` no longer block
+  length hoists or array pins; impure calls, host natives, and unmodelled ops
+  still refuse the region.
 
 ### 3. Allocation and GC fast paths
 
@@ -255,7 +254,7 @@ existing opcode; fits append-only opcode ABI.
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
 | `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle=1` (`tr`→`zr`); IL opts refused overlapping live ranges | ~2.56M dispatches/run (LOAD+STORE latch) | **needs more proof** (or defer pending benches) | Largest residual dispatch count, but mandelbrot-heavy; tak/numeric/nsieve have 0 latch shuffles. Needs universality proof (more loop-carried programs) before an append-only `MoveSlot` / rename op. Overlapping ranges may still need SSA rename rather than a 1-op shuffle. |
-| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **needs more proof** | Align with roadmap §2: diagnostics and bounds proofs first; opcode only after proof-only analysis shows a universal safe fast path. |
+| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **done** | `il::bounds` proofs + `IndexPin*` (minor 13) on proven loops |
 | Unary slot / float `BinSlotImm` / packing holes | 0 on mandelbrot/tak/numeric/nsieve | — | **defer** | Zero evidence on the hot matrix. |
 | Slot move (non-latch) | numeric `slot_move` ≤3 (format/host temp) | low | **defer** | Not loop-carried; format-path noise, not a fuse candidate. |
 

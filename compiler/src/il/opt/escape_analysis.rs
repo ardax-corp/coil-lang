@@ -337,14 +337,20 @@ fn is_store_index(op: &IlOp) -> bool {
     op.as_plain_byte().is_some_and(|b| {
         matches!(
             *b.bytecode(),
-            Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            Instruction::StoreIndex
+                | Instruction::StoreIndexUnchecked
+                | Instruction::StoreIndexPin
+                | Instruction::StoreIndexPinUnchecked
         )
     }) || matches!(
         op,
         IlOp::Byte { byte, .. }
             if matches!(
                 *byte.bytecode(),
-                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+                Instruction::StoreIndex
+                | Instruction::StoreIndexUnchecked
+                | Instruction::StoreIndexPin
+                | Instruction::StoreIndexPinUnchecked
             )
     )
 }

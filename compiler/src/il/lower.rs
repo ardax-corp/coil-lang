@@ -136,6 +136,7 @@ pub(crate) fn lower_module_inner(
 ) -> Lowered {
     super::bounds::reset_bounds_stats();
     super::canon::reset_canon_stats();
+    super::pure_call::set_pure_call_ctx(opts.pure_call_ctx.clone());
     let flat = module.optimize_and_flatten(opts, pool);
     let mut lowered = lower_optimized(&flat, pool);
     if capture_ops {

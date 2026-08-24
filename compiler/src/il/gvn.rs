@@ -383,6 +383,9 @@ fn is_get_field_barrier(op: &IlOp) -> bool {
                 | Instruction::FORMAT
                 | Instruction::FfiInvoke
                 | Instruction::StoreIndex
+                | Instruction::StoreIndexUnchecked
+                | Instruction::StoreIndexPin
+                | Instruction::StoreIndexPinUnchecked
                 | Instruction::ArrayPush
         )
     )

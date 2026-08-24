@@ -2172,7 +2172,10 @@ i = i + 1; \
         let has_index = bc.iter().any(|b| {
             matches!(
                 b.bytecode(),
-                Instruction::Index | Instruction::IndexUnchecked
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
             )
         });
         let jmp = bc

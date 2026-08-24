@@ -32,6 +32,10 @@ pub struct BoundsStats {
     pub proven_store_index: u32,
     /// `StoreIndex` sites left checked.
     pub checked_store_index: u32,
+    /// `ArrayPin` materializations moved to a preheader.
+    pub array_pin_hoists: u32,
+    /// `Index` / `StoreIndex` sites rewritten to pinned forms.
+    pub index_pin_rewrites: u32,
 }
 
 impl BoundsStats {
@@ -42,6 +46,8 @@ impl BoundsStats {
             checked_index: 0,
             proven_store_index: 0,
             checked_store_index: 0,
+            array_pin_hoists: 0,
+            index_pin_rewrites: 0,
         }
     }
 }
@@ -79,6 +85,7 @@ pub fn loop_bounds(ops: &mut Vec<IlOp>) {
     }
 
     rewrite_proven_index_ops(ops, &mut stats);
+    rewrite_array_pins(ops, &mut stats);
     LAST_STATS.with(|c| {
         let mut acc = c.borrow_mut();
         acc.array_len_hoists = acc.array_len_hoists.saturating_add(stats.array_len_hoists);
@@ -90,6 +97,10 @@ pub fn loop_bounds(ops: &mut Vec<IlOp>) {
         acc.checked_store_index = acc
             .checked_store_index
             .saturating_add(stats.checked_store_index);
+        acc.array_pin_hoists = acc.array_pin_hoists.saturating_add(stats.array_pin_hoists);
+        acc.index_pin_rewrites = acc
+            .index_pin_rewrites
+            .saturating_add(stats.index_pin_rewrites);
     });
 }
 
@@ -106,13 +117,28 @@ impl NaturalLoop {
     }
 }
 
-fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
-    let mut label_at: HashMap<u32, usize> = HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
-            label_at.insert(*id, i);
+/// IL is module-flat; labels reuse per function. Scope lookups to the function
+/// containing `idx` (ops since the previous `Return`).
+fn il_function_start(ops: &[IlOp], idx: usize) -> usize {
+    for i in (0..idx).rev() {
+        if matches!(ops[i], IlOp::Return { .. }) {
+            return i + 1;
         }
     }
+    0
+}
+
+fn resolve_label_before(ops: &[IlOp], before: usize, target: Label) -> Option<usize> {
+    let start = il_function_start(ops, before);
+    for i in (start..before).rev() {
+        if matches!(&ops[i], IlOp::Label(l) if *l == target) {
+            return Some(i);
+        }
+    }
+    None
+}
+
+fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
     let mut out = Vec::new();
     for (i, op) in ops.iter().enumerate() {
         let IlOp::Jump {
@@ -123,7 +149,7 @@ fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
         else {
             continue;
         };
-        let Some(&h) = label_at.get(&target.0) else {
+        let Some(h) = resolve_label_before(ops, i, *target) else {
             continue;
         };
         if h >= i {
@@ -243,54 +269,26 @@ fn array_length_sensitive(ops: &[IlOp], lp: &NaturalLoop, arr_slot: u32) -> bool
             // Conservative: any push may extend an array reachable here.
             return true;
         }
-        match op {
-            IlOp::HostInvoke { .. }
-            | IlOp::MakeArray { .. }
-            | IlOp::Entry { .. }
-            | IlOp::Print { .. } => return true,
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::HostInvoke
-                        | Instruction::CALL
-                        | Instruction::MakeArray
-                        | Instruction::PRINT
-                        | Instruction::FfiInvoke
-                        | Instruction::FORMAT
-                ) =>
-            {
-                return true;
-            }
-            _ => {}
+        if matches!(op, IlOp::MakeArray { .. } | IlOp::Print { .. }) {
+            return true;
+        }
+        if super::pure_call::op_blocks_length_proof(op) {
+            return true;
+        }
+        if matches!(op, IlOp::Byte { byte, .. }
+            if matches!(
+                *byte.bytecode(),
+                Instruction::MakeArray | Instruction::FORMAT
+            ))
+        {
+            return true;
         }
     }
     false
 }
 
 fn loop_has_hard_barrier(ops: &[IlOp], lp: &NaturalLoop) -> bool {
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
-            IlOp::HostInvoke { .. } | IlOp::Print { .. } | IlOp::Entry { .. } => return true,
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfMatch { .. },
-                ..
-            } => return true,
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::HostInvoke
-                        | Instruction::PRINT
-                        | Instruction::CALL
-                        | Instruction::FORMAT
-                        | Instruction::FfiInvoke
-                ) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
+    (lp.header..=lp.latch).any(|i| super::pure_call::op_blocks_length_proof(&ops[i]))
 }
 
 /// Hoist one `LOAD arr; ArrayLen; STORE len` when `arr` is length-invariant.
@@ -326,9 +324,12 @@ fn hoist_array_len(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) -> bool {
         let triple: Vec<IlOp> = ops[idx..idx + 3].to_vec();
         ops.drain(idx..idx + 3);
         let header_label = lp.header_label;
+        let fn_start = il_function_start(ops, lp.header);
         let Some(lp2) = find_natural_loops(ops)
             .into_iter()
-            .find(|l| l.header_label == header_label)
+            .find(|l| {
+                l.header_label == header_label && il_function_start(ops, l.header) == fn_start
+            })
         else {
             return false;
         };
@@ -339,29 +340,53 @@ fn hoist_array_len(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) -> bool {
     false
 }
 
+fn fresh_preheader_label(ops: &[IlOp]) -> Label {
+    let mut id = ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(n)) => Some(*n),
+            _ => None,
+        })
+        .max()
+        .map(|m| m.saturating_add(1))
+        .unwrap_or(0);
+    while ops
+        .iter()
+        .any(|op| matches!(op, IlOp::Label(Label(n)) if *n == id))
+    {
+        id = id.saturating_add(1);
+    }
+    Label(id)
+}
+
 fn insert_preheader_ops(ops: &mut Vec<IlOp>, lp: &NaturalLoop, materialize: Vec<IlOp>) {
     if materialize.is_empty() {
         return;
     }
-    let pre = Label(
-        ops.iter()
-            .filter_map(|op| {
-                if let IlOp::Label(Label(id)) = op {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .max()
-            .unwrap_or(0)
-            .wrapping_add(1),
-    );
+    let pre = fresh_preheader_label(ops);
+    let duplicate_labels: std::collections::HashSet<u32> = {
+        let mut counts = std::collections::HashMap::<u32, usize>::new();
+        for op in ops.iter() {
+            if let IlOp::Label(Label(id)) = op {
+                *counts.entry(*id).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .filter(|(_, c)| *c > 1)
+            .map(|(id, _)| id)
+            .collect()
+    };
+    let fn_start = il_function_start(ops, lp.header);
     for (i, op) in ops.iter_mut().enumerate() {
         if i == lp.latch {
             continue;
         }
+        if i < fn_start || i > lp.latch {
+            continue;
+        }
         if let IlOp::Jump { target, .. } = op
-            && *target == lp.header_label
+            && (*target == lp.header_label || duplicate_labels.contains(&target.0))
         {
             *target = pre;
         }
@@ -851,6 +876,141 @@ fn array_starts_empty(ops: &[IlOp], header: usize, arr_slot: u32) -> bool {
     false
 }
 
+/// Pin invariant arrays and rewrite in-loop `Index` / `StoreIndex` to pinned forms.
+fn rewrite_array_pins(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) {
+    enum PinSite {
+        Read { unchecked: bool },
+        Write { unchecked: bool },
+    }
+
+    fn is_index_read_site(op: &IlOp) -> bool {
+        matches!(op, IlOp::Index { .. } | IlOp::IndexUnchecked { .. })
+    }
+
+    fn is_store_write_site(op: &IlOp) -> bool {
+        matches!(
+            op,
+            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. }
+        ) || op.as_encode_byte().is_some_and(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            )
+        })
+    }
+
+    let len_of = array_len_defs(ops);
+    let counted = detect_counted_loops(ops, &len_of);
+    for cl in &counted {
+        for &arr in &cl.len_arrays {
+            if array_length_sensitive(ops, &cl.lp, arr) {
+                continue;
+            }
+            let mut sites = Vec::new();
+            for i in cl.lp.header..=cl.lp.latch {
+                if is_index_read_site(&ops[i])
+                    && index_at_proven(ops, i, cl)
+                    && index_loads_arr(ops, i) == Some(arr)
+                {
+                    let unchecked = matches!(ops[i], IlOp::IndexUnchecked { .. });
+                    sites.push((i, PinSite::Read { unchecked }));
+                } else if is_store_write_site(&ops[i])
+                    && store_index_at_proven(ops, i, cl)
+                    && store_loads_arr(ops, i) == Some(arr)
+                {
+                    let unchecked = ops[i].as_encode_byte().is_some_and(|b| {
+                        *b.bytecode() == Instruction::StoreIndexUnchecked
+                    }) || matches!(ops[i], IlOp::StoreIndexPinUnchecked { .. });
+                    sites.push((i, PinSite::Write { unchecked }));
+                }
+            }
+            if sites.is_empty() {
+                continue;
+            }
+            sites.sort_by_key(|(i, _)| std::cmp::Reverse(*i));
+            for (i, site) in sites {
+                match site {
+                    PinSite::Read { unchecked } => {
+                        let idx_slot = match &ops[i - 1] {
+                            IlOp::Load { slot, .. } => *slot,
+                            _ => continue,
+                        };
+                        let loc = ops[i].loc();
+                        ops[i - 2] = IlOp::Load { slot: idx_slot, loc };
+                        ops[i - 1] = if unchecked {
+                            IlOp::IndexPinUnchecked { slot: arr, loc }
+                        } else {
+                            IlOp::IndexPin { slot: arr, loc }
+                        };
+                        ops.remove(i);
+                        stats.index_pin_rewrites += 1;
+                    }
+                    PinSite::Write { unchecked } => {
+                        let idx_slot = match &ops[i - 2] {
+                            IlOp::Load { slot, .. } => *slot,
+                            _ => continue,
+                        };
+                        let loc = ops[i].loc();
+                        let value_op = ops[i - 1].clone();
+                        ops[i - 3] = IlOp::Load { slot: idx_slot, loc };
+                        ops[i - 2] = if matches!(&value_op, IlOp::Load { slot: s, .. } if *s == idx_slot) {
+                            IlOp::Dup { loc }
+                        } else {
+                            value_op
+                        };
+                        ops[i - 1] = if unchecked {
+                            IlOp::StoreIndexPinUnchecked { slot: arr, loc }
+                        } else {
+                            IlOp::StoreIndexPin { slot: arr, loc }
+                        };
+                        ops.remove(i);
+                        stats.index_pin_rewrites += 1;
+                    }
+                }
+            }
+            let header_label = cl.lp.header_label;
+            let loc = ops
+                .iter()
+                .find(|op| matches!(op, IlOp::Label(l) if *l == header_label))
+                .map(|op| op.loc())
+                .unwrap_or_else(common::DebugLoc::unknown);
+            let fn_start = il_function_start(ops, cl.lp.header);
+            let Some(lp) = find_natural_loops(ops)
+                .into_iter()
+                .find(|l| {
+                    l.header_label == header_label
+                        && il_function_start(ops, l.header) == fn_start
+                })
+            else {
+                continue;
+            };
+            insert_preheader_ops(
+                ops,
+                &lp,
+                vec![
+                    IlOp::Load { slot: arr, loc },
+                    IlOp::ArrayPin { slot: arr, loc },
+                ],
+            );
+            stats.array_pin_hoists += 1;
+        }
+    }
+}
+
+fn index_loads_arr(ops: &[IlOp], index_op: usize) -> Option<u32> {
+    match &ops.get(index_op.checked_sub(2)?)? {
+        IlOp::Load { slot, .. } => Some(*slot),
+        _ => None,
+    }
+}
+
+fn store_loads_arr(ops: &[IlOp], store_op: usize) -> Option<u32> {
+    match &ops.get(store_op.checked_sub(3)?)? {
+        IlOp::Load { slot, .. } => Some(*slot),
+        _ => None,
+    }
+}
+
 fn rewrite_proven_index_ops(ops: &mut [IlOp], stats: &mut BoundsStats) {
     let len_of = array_len_defs(ops);
     let counted = detect_counted_loops(ops, &len_of);
@@ -996,6 +1156,7 @@ mod hoist {
     /// What the analysis found for one natural loop.
     #[derive(Clone, Debug)]
     pub(super) struct LoopArrayFacts {
+        pub header: usize,
         pub header_label: Label,
         /// `Index` sites addressing an invariant array slot.
         pub index_sites: usize,
@@ -1015,6 +1176,7 @@ mod hoist {
             .iter()
             .map(|lp| {
                 let mut facts = LoopArrayFacts {
+                    header: lp.header,
                     header_label: lp.header_label,
                     index_sites: 0,
                     store_index_sites: 0,
@@ -1091,7 +1253,7 @@ mod hoist {
             for (at, len, dest, is_len) in candidates.into_iter().flatten() {
                 let Some(lp) = find_natural_loops(ops)
                     .into_iter()
-                    .find(|l| l.header_label == f.header_label)
+                    .find(|l| l.header == f.header)
                 else {
                     continue;
                 };
@@ -1151,9 +1313,13 @@ mod hoist {
         let run: Vec<IlOp> = ops[at..at + len].to_vec();
         ops.drain(at..at + len);
         let header_label = lp.header_label;
+        let fn_start = super::il_function_start(ops, lp.header);
         let Some(lp2) = find_natural_loops(ops)
             .into_iter()
-            .find(|l| l.header_label == header_label)
+            .find(|l| {
+                l.header_label == header_label
+                    && super::il_function_start(ops, l.header) == fn_start
+            })
         else {
             // Re-insert rather than leave the loop without its definition.
             ops.splice(at..at, run);
@@ -1261,9 +1427,15 @@ mod hoist {
     fn indexing_operands(op: &IlOp) -> Option<usize> {
         match op {
             IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => Some(2),
+            IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. } => Some(1),
+            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => Some(2),
             other => match other.as_encode_byte().map(|b| *b.bytecode()) {
                 Some(Instruction::Index) | Some(Instruction::IndexUnchecked) => Some(2),
+                Some(Instruction::IndexPin) | Some(Instruction::IndexPinUnchecked) => Some(1),
                 Some(Instruction::StoreIndex) | Some(Instruction::StoreIndexUnchecked) => Some(3),
+                Some(Instruction::StoreIndexPin) | Some(Instruction::StoreIndexPinUnchecked) => {
+                    Some(2)
+                }
                 _ => None,
             },
         }
@@ -2622,6 +2794,168 @@ mod tests {
         assert!(stats.array_len_hoists >= 1, "{stats:?}");
     }
 
+    #[test]
+    fn pure_call_in_loop_allows_array_len_hoist() {
+        use super::super::pure_call::{PureCallCtx, set_pure_call_ctx};
+        use crate::il::op::{EntryKind, IlJumpKind};
+        use std::collections::{HashMap, HashSet};
+
+        reset_bounds_stats();
+        let mut ctx = PureCallCtx::default();
+        ctx.pure_fns.insert("sq".into());
+        ctx.label_callees.insert(9, "sq".into());
+        set_pure_call_ctx(Some(ctx));
+
+        let mut ops = vec![
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            array_len_op(),
+            IlOp::StorePop { slot: 4, loc: loc() },
+            IlOp::Load { slot: 3, loc: loc() },
+            IlOp::Load { slot: 4, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc: loc(),
+            },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Index { loc: loc() },
+            IlOp::Entry {
+                kind: EntryKind::Call,
+                arity: 1,
+                target: Label(9),
+                loc: loc(),
+            },
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Halt { loc: loc() },
+        ];
+        loop_bounds(&mut ops);
+        set_pure_call_ctx(None);
+        assert!(
+            last_bounds_stats().array_len_hoists >= 1,
+            "pure helper call must not block ArrayLen hoist"
+        );
+    }
+
+    #[test]
+    fn array_pin_rewrites_proven_index_sites() {
+        reset_bounds_stats();
+        let mut ops = vec![
+            IlOp::Const { imm: 4, loc: loc() },
+            IlOp::StorePop { slot: 0, loc: loc() },
+            IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(0)),
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc: loc(),
+            },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::byte(Byte::new(Instruction::ArrayPush)),
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(2),
+                loc: loc(),
+            },
+            IlOp::Label(Label(2)),
+            IlOp::Load { slot: 3, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(3),
+                loc: loc(),
+            },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Load { slot: 3, loc: loc() },
+            IlOp::Index { loc: loc() },
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 3, loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(2),
+                loc: loc(),
+            },
+            IlOp::Label(Label(3)),
+            IlOp::Halt { loc: loc() },
+        ];
+        loop_bounds(&mut ops);
+        let stats = last_bounds_stats();
+        assert!(stats.array_pin_hoists >= 1, "stats={stats:?}");
+        assert!(stats.index_pin_rewrites >= 1, "stats={stats:?}");
+        assert!(
+            ops.iter().any(|op| matches!(op, IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. })),
+            "expected IndexPin in IL"
+        );
+    }
+
     /// Post-canon header `Load bound; Load index; GT; JMPF` still resolves
     /// `(index, bound)` and proves Index under a fill-equal length.
     #[test]
@@ -2823,13 +3157,79 @@ mod tests {
         );
         assert!(
             ops.iter().any(|op| {
-                matches!(
-                    op,
-                    IlOp::Byte { byte, .. }
-                        if *byte.bytecode() == Instruction::StoreIndexUnchecked
-                )
+                matches!(op, IlOp::StoreIndexPinUnchecked { .. })
             }),
-            "expected StoreIndexUnchecked in IL"
+            "expected StoreIndexPinUnchecked in IL"
         );
+    }
+
+    #[test]
+    fn insert_preheader_redirect_only_within_function() {
+        use crate::il::op::IlJumpKind;
+
+        let mut ops = vec![
+            IlOp::Return { loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(10),
+                loc: loc(),
+            },
+            IlOp::Label(Label(10)),
+            IlOp::Load {
+                slot: 1,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(10),
+                loc: loc(),
+            },
+            IlOp::Return { loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(10),
+                loc: loc(),
+            },
+            IlOp::Label(Label(10)),
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(10),
+                loc: loc(),
+            },
+            IlOp::Return { loc: loc() },
+        ];
+        let lp = NaturalLoop {
+            header: 2,
+            latch: 4,
+            header_label: Label(10),
+        };
+        insert_preheader_ops(
+            &mut ops,
+            &lp,
+            vec![IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            }],
+        );
+        let fill_entry = match &ops[1] {
+            IlOp::Jump { target, .. } => *target,
+            _ => panic!("expected fill entry jmp"),
+        };
+        assert_ne!(fill_entry, Label(10), "fill entry must target preheader");
+        let scan_entry = ops
+            .iter()
+            .enumerate()
+            .find(|(i, op)| {
+                *i > 5
+                    && matches!(
+                        op,
+                        IlOp::Jump {
+                            target: Label(10),
+                            ..
+                        }
+                    )
+            })
+            .expect("scan entry jmp");
+        assert_eq!(scan_entry.0, 7, "scan entry jmp index after fill preheader insert");
     }
 }

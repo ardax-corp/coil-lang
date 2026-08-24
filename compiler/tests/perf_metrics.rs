@@ -48,6 +48,40 @@ fn count_opcodes_in(bytecode: &[Byte], start: usize, end: usize, op: Instruction
         .count()
 }
 
+fn is_index_read(op: &Instruction) -> bool {
+    matches!(
+        *op,
+        Instruction::Index
+            | Instruction::IndexUnchecked
+            | Instruction::IndexPin
+            | Instruction::IndexPinUnchecked
+    )
+}
+
+fn is_store_index_write(op: &Instruction) -> bool {
+    matches!(
+        *op,
+        Instruction::StoreIndex
+            | Instruction::StoreIndexUnchecked
+            | Instruction::StoreIndexPin
+            | Instruction::StoreIndexPinUnchecked
+    )
+}
+
+fn count_index_reads_in(bytecode: &[Byte], start: usize, end: usize) -> usize {
+    bytecode[start..end]
+        .iter()
+        .filter(|b| is_index_read(b.bytecode()))
+        .count()
+}
+
+fn count_store_index_writes_in(bytecode: &[Byte], start: usize, end: usize) -> usize {
+    bytecode[start..end]
+        .iter()
+        .filter(|b| is_store_index_write(b.bytecode()))
+        .count()
+}
+
 /// Residual `LOAD`/`STORE` shape in a PC range.
 ///
 /// `*_ops` counts instruction words, `*_slots` the slots they move (a packed
@@ -134,7 +168,10 @@ fn run_dispatch(
     pipeline: &Pipeline,
 ) -> u64 {
     reset_dispatch_count();
-    let mut machine = Machine::<256>::default();
+    let operand_slots = pipeline
+        .operand_stack_slots()
+        .max(machine::DEFAULT_OPERAND_STACK_SLOTS as u32) as usize;
+    let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
     // write_all / stdout path needs host natives (print opcode retired).
     pipeline.wire_host_natives(&mut machine);
     machine.run_raw(&bytecode, &constants, &strings, static_slots);
@@ -365,24 +402,38 @@ fn perf_nsieve_proves_fill_bounded_index() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/nsieve.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "nsieve", bc.len());
-    // Proven p-loop Index and stride StoreIndex both rewrite to unchecked.
+    // Proven p-loop Index and stride StoreIndex rewrite to pinned unchecked forms.
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::Index),
         0,
-        "nsieve p-loop Index should rewrite to IndexUnchecked"
+        "nsieve p-loop Index should rewrite away"
+    );
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked),
+        0,
+        "nsieve p-loop Index should rewrite to IndexPinUnchecked"
     );
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked) >= 1,
-        "nsieve should emit IndexUnchecked for proven p-loop read"
+        count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked) >= 1,
+        "nsieve should emit IndexPinUnchecked for proven p-loop read"
     );
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::StoreIndex),
         0,
-        "nsieve stride StoreIndex should rewrite to StoreIndexUnchecked"
+        "nsieve stride StoreIndex should rewrite away"
+    );
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndexUnchecked),
+        0,
+        "nsieve stride StoreIndex should rewrite to StoreIndexPinUnchecked"
     );
     assert!(
-        count_opcodes_in(&bc, start, end, Instruction::StoreIndexUnchecked) >= 1,
-        "nsieve should emit StoreIndexUnchecked for proven stride write"
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndexPinUnchecked) >= 1,
+        "nsieve should emit StoreIndexPinUnchecked for proven stride write"
+    );
+    assert!(
+        count_opcodes_in(&bc, start, end, Instruction::ArrayPin) >= 1,
+        "nsieve should pin flags in loop preheaders"
     );
     let stats = compiler::last_bounds_stats();
     assert!(
@@ -392,6 +443,14 @@ fn perf_nsieve_proves_fill_bounded_index() {
     assert!(
         stats.proven_store_index >= 1,
         "nsieve stride StoreIndex should be proven; stats={stats:?}"
+    );
+    assert!(
+        stats.array_pin_hoists >= 1,
+        "nsieve should hoist ArrayPin; stats={stats:?}"
+    );
+    assert!(
+        stats.index_pin_rewrites >= 1,
+        "nsieve should rewrite index sites to pins; stats={stats:?}"
     );
 }
 
@@ -687,8 +746,11 @@ struct OpcodeHealth {
     float_arith: usize,
     index: usize,
     index_unchecked: usize,
+    index_pin_unchecked: usize,
     store_index: usize,
     store_index_unchecked: usize,
+    store_index_pin_unchecked: usize,
+    array_pin: usize,
     packed_load_n2: usize,
     packed_load_n3: usize,
 }
@@ -853,8 +915,11 @@ fn inventory_health(body: &[Byte]) -> OpcodeHealth {
             Instruction::JMPT => h.jmpt += 1,
             Instruction::Index => h.index += 1,
             Instruction::IndexUnchecked => h.index_unchecked += 1,
+            Instruction::IndexPinUnchecked => h.index_pin_unchecked += 1,
             Instruction::StoreIndex => h.store_index += 1,
             Instruction::StoreIndexUnchecked => h.store_index_unchecked += 1,
+            Instruction::StoreIndexPinUnchecked => h.store_index_pin_unchecked += 1,
+            Instruction::ArrayPin => h.array_pin += 1,
             op if is_float_arith(op) => h.float_arith += 1,
             _ => {}
         }
@@ -1253,11 +1318,12 @@ fn perf_phase0_nsieve_shape_inventory() {
         h.fused_jmpf_total() + h.jmpf >= 3,
         "fill/p/k loop guards: {h:?}"
     );
-    assert!(h.index_unchecked >= 1, "nsieve proven Index unchecked: {h:?}");
+    assert!(h.index_pin_unchecked >= 1, "nsieve proven Index pin: {h:?}");
     assert!(
-        h.store_index_unchecked >= 1,
-        "nsieve proven stride StoreIndex unchecked: {h:?}"
+        h.store_index_pin_unchecked >= 1,
+        "nsieve proven stride StoreIndex pin: {h:?}"
     );
+    assert!(h.array_pin >= 1, "nsieve should hoist ArrayPin: {h:?}");
 
     // Proven p-loop read and stride write are both unchecked.
     assert_eq!(g.index, 0, "nsieve proven Index should not count as gap: {g:?}");
@@ -1417,21 +1483,35 @@ fn aot_p2_nsieve_index_shape_inventory() {
         inner_end - inner_start
     );
 
-    // `flags[p]` read rewrites to IndexUnchecked; `flags[k] = 0` to StoreIndexUnchecked.
+    // `flags[p]` read rewrites to IndexPinUnchecked; `flags[k] = 0` to StoreIndexPinUnchecked.
     assert_eq!(index, 0, "nsieve Index count changed");
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked),
-        1,
+        0,
         "nsieve IndexUnchecked count changed"
+    );
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked),
+        1,
+        "nsieve IndexPinUnchecked count changed"
     );
     assert_eq!(store_index, 0, "nsieve checked StoreIndex count changed");
     assert_eq!(
         count_opcodes_in(&bc, start, end, Instruction::StoreIndexUnchecked),
-        1,
+        0,
         "nsieve StoreIndexUnchecked count changed"
     );
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::StoreIndexPinUnchecked),
+        1,
+        "nsieve StoreIndexPinUnchecked count changed"
+    );
     assert!(
-        shape.load_ops <= 5,
+        count_opcodes_in(&bc, start, end, Instruction::ArrayPin) >= 1,
+        "nsieve should hoist ArrayPin"
+    );
+    assert!(
+        shape.load_ops <= 7,
         "nsieve residual LOAD regressed: {shape:?}"
     );
     assert!(
@@ -1482,16 +1562,14 @@ fn aot_p2_len_loop_hoists_invariant_array_len() {
             "{name} must not recompute len(v) every iteration"
         );
         assert_eq!(
-            count_opcodes_in(&bc, start, end, Instruction::Index)
-                + count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked),
+            count_index_reads_in(&bc, start, end),
             index,
-            "{name} Index count changed"
+            "{name} index-read count changed"
         );
         assert_eq!(
-            count_opcodes_in(&bc, start, end, Instruction::StoreIndex)
-                + count_opcodes_in(&bc, start, end, Instruction::StoreIndexUnchecked),
+            count_store_index_writes_in(&bc, start, end),
             store_index,
-            "{name} StoreIndex count changed"
+            "{name} store-index count changed"
         );
     }
 }
