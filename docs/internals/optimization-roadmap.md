@@ -74,6 +74,37 @@ Source-ordered float work on the interpreter path (no FMA / reassociation):
 Next AOT priorities below remain the main gap vs Lua on `mandelbrot` /
 `tak` / `nsieve` / `binary_trees`.
 
+## Landed since register-win harvest (ceiling contract)
+
+Late-August IL work is **on `main`** under [`OptLevel`](../../compiler/src/il/opt/opt_level.rs)
+(`Standard` = default production). This is what actually ships — not a textbook
+pass list. Ceilings from the Aug investigation batch still bind; Linear Done
+titles can oversell.
+
+| Area | What landed | Ceiling (do not overshoot in docs or code) |
+|------|-------------|--------------------------------------------|
+| **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, escape, unroll, GVN). |
+| **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. Dup-CSE re-expanded before lower for fuse-select. |
+| **`ssa_gvn`** (`gvn_ssa.rs`) | Virtual `Phi(block,slot)` VNs; redundant pure `Const`/`Load`+`Bin` → `Load` when value already in a slot | **Not rename.** `DIV`/`MOD`/`DIVF`/`MODF` excluded. Also runs inside per-body `cfg_gvn_with` when enabled. |
+| **`escape_analysis`** | Immediate-only `MakeArray` (arity ≤ 32) → consecutive frame slots | Fail-closed on escape. Computed elements stay heap. **Not** named-local class SROA (COI-84). |
+| **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists to preheader | **`Index` stays checked** — no `IndexUnchecked` (COI-85). `LEQ`/`GEQ` headers are **not** length proofs (COI-85 / COI-98). |
+| **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
+| **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
+| **`seek_back_edge`** | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Default off** on `Standard`. COI-97 measured fuse loss on mandelbrot; outer-loop Seek splits `FloatChainStore`. **`Aggressive` / `-O3` turns it on** — production `Standard` stays off until re-measured. |
+| **PGO** | `--pgo-instrument` / `--pgo-use-profile` two-phase plumbing | Compile-time only. Decision opts may prioritize hot loops when a profile is loaded. **Not proven** on the benchmark matrix (measurement suite still open). |
+| **`iterative_optimization`** | Fixpoint re-runs of the IL pipeline | **Default off** (COI-130). |
+| **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
+| **Branch layout / block reorder** | Profile/heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
+
+**Still open (not done):** length invariance across **pure** helper calls inside
+`while i < len(b)` loops — [COI-99](https://linear.app/ardax/issue/COI-99).
+Still no `IndexUnchecked`. Inlining / predicate peel / direct `new Class(args).field`
+scalar replacement live in **codegen**, not `il/opt` (self-recursive peel refused,
+COI-86). No JIT — Cranelift section below remains a feasibility sketch.
+
+Pass headers in `compiler/src/il/**` are the source of truth when this table
+and Linear disagree.
+
 ## AOT priorities
 
 ### 1. Local slot promotion and SSA-like values
@@ -82,8 +113,15 @@ Priority: highest. **Status: Phases 1–4 of register-win harvest landed**
 (`perf/register-wins-harvest`; docs ledger in § Opcode candidate ledger below).
 
 The shared operand/local stack still makes repeated `LOAD` / `STORE` traffic
-expensive. `gvn.rs` explicitly has no SSA slot rename, and the new
-cursor-safe copy propagation in `opt/dce.rs` is intentionally straight-line.
+expensive. Two GVN layers share the **COI-82 ceiling** — no real SSA slot rename:
+
+- **`cfg_gvn`** (`gvn.rs`) — intra-block CSE plus identical-tail join-sink when
+  SP-in agrees at the join; effectful ops are barriers.
+- **`ssa_gvn`** (`gvn_ssa.rs`) — virtual `Phi(block,slot)` value numbers; only
+  rewrites a redundant pure `Const`/`Load`+`Bin` tail back to `Load` when that
+  value already lives in a slot (`DIV`/`MOD` excluded). **Not rename.**
+
+Copy propagation in `opt/dce.rs` stays straight-line and tell-safe only.
 
 **Landed (Phases 1–4, IL-only — no new opcodes):**
 
@@ -98,9 +136,9 @@ cursor-safe copy propagation in `opt/dce.rs` is intentionally straight-line.
 - fuse windows intact across mandelbrot / tak / numeric / nsieve.
 
 Still deferred for a later SSA-like slice: overlapping live-range φ shuffles
-(mandelbrot `tr`→`zr`), full rename across disagreeing joins, and operand-stack
-retention across calls. Measure residual candidates against the ledger before
-appending opcodes.
+(mandelbrot `tr`→`zr`), **real** rename across disagreeing joins, and operand-stack
+retention across calls. `ssa_gvn` does not deliver that slice — see landed table
+above. Measure residual candidates against the ledger before appending opcodes.
 
 A second, narrower slice sits at the end of the pipeline: `slot_promote_at`
 uses `tell` as the whole safety proof — a `STORE t` reached with the cursor at
@@ -119,11 +157,12 @@ What neither slice does yet (see
 - **Real slot liveness.** Without it, promotion must leave every slot with a
   visible def, which rules out `CALL` operand runs (the callee frame base is
   `tell - arity`) and any store whose slot is still read.
-- **Cursor normalization at loop back edges (COI-97, won't-do in production).**
+- **Cursor normalization at loop back edges (COI-97, won't-do on `Standard`).**
   Innermost mandelbrot has no tell-proven self-stores. A `Seek` on an *outer*
   latch drops `cr`'s store and splits `FloatChainStore`. Prototype lives behind
-  `seek_back_edge` (default off); tests use a synthetic raising loop because
-  mandelbrot does not hit the profitable shape.
+  `seek_back_edge` (**default off** on `Standard`; `Aggressive` / `-O3` turns it
+  on). Tests use a synthetic raising loop because mandelbrot does not hit the
+  profitable shape.
 - **Scheduling.** `mandelbrot`'s `tr → zr` copy cannot coalesce because `zr` is
   read between the def and the copy; sinking the def past that read is the fix.
 - **`Bin(slot, TOS)` operand shapes.** `mandelbrot`'s remaining `LOAD 5` / `LOAD
@@ -156,8 +195,10 @@ What is still open (full refusal table in
 
 - **`0 <= i < len` is not proven at all.** Induction-variable detection was
   deliberately left out because nothing consumes the fact: without an unchecked
-  addressing form the proof cannot change a single emitted word. Pair it with
-  that opcode decision, not with this pass.
+  addressing form the proof cannot change a single emitted word. `loop_unroll`
+  may accept `LEQ` for **trip count** — that meaning is separate from bounds
+  Index proofs (COI-85 / COI-98). Pair in-bounds work with an opcode decision,
+  not with this pass alone.
 - **Loops that call a helper on `b[i]`.** Most stdlib `while i < len(b)` loops do,
   and a call could `push` to the array through another reference. Wiring the
   existing purity/effect summaries into the barrier test is the widest available
@@ -257,7 +298,7 @@ existing opcode; fits append-only opcode ABI.
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
 | `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle=1` (`tr`→`zr`); IL opts refused overlapping live ranges | ~2.56M dispatches/run (LOAD+STORE latch) | **needs more proof** (or defer pending benches) | Largest residual dispatch count, but mandelbrot-heavy; tak/numeric/nsieve have 0 latch shuffles. Needs universality proof (more loop-carried programs) before an append-only `MoveSlot` / rename op. Overlapping ranges may still need SSA rename rather than a 1-op shuffle. |
-| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **needs more proof** | Align with roadmap §2: diagnostics and bounds proofs first; opcode only after proof-only analysis shows a universal safe fast path. |
+| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **needs more proof** | Align with roadmap §2: diagnostics and bounds proofs first; opcode only after proof-only analysis shows a universal safe fast path. **`ssa_gvn` / escape / unroll do not remove Index checks today.** |
 | Unary slot / float `BinSlotImm` / packing holes | 0 on mandelbrot/tak/numeric/nsieve | — | **defer** | Zero evidence on the hot matrix. |
 | Slot move (non-latch) | numeric `slot_move` ≤3 (format/host temp) | low | **defer** | Not loop-carried; format-path noise, not a fuse candidate. |
 
