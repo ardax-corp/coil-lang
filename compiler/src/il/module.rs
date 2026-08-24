@@ -101,14 +101,23 @@ impl IlModule {
     }
 
     /// Concatenate prologue / bodies / glue / epilogue into one op stream.
+    ///
+    /// Each function body (and its trailing glue) keeps a private label namespace
+    /// during per-func opts; remap on concat so lower never binds a jump to another
+    /// function's label with the same numeric id.
     pub fn to_flat(&self) -> Vec<IlOp> {
         let mut out = Vec::new();
+        let mut next_label = 0u32;
+        let mut prior_labels = HashMap::new();
         out.extend(self.prologue.iter().cloned());
         for (i, body) in self.funcs.iter().enumerate() {
-            out.extend(body.ops.iter().cloned());
+            let mut chunk = body.ops.clone();
             if let Some(g) = self.glue.get(i) {
-                out.extend(g.iter().cloned());
+                chunk.extend(g.iter().cloned());
             }
+            let (chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
+            merge_remap_labels(&mut prior_labels, map);
+            out.extend(chunk);
         }
         out.extend(self.epilogue.iter().cloned());
         out
@@ -187,10 +196,16 @@ impl IlModule {
     }
 }
 
+fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
+    for (old, new) in local {
+        prior.entry(old).or_insert(new);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::il::op::{IlJumpKind, IlOp, Label};
+    use crate::il::op::{EntryKind, IlJumpKind, IlOp, Label};
     use common::{Byte, DebugLoc, Instruction};
 
     fn loc() -> DebugLoc {
@@ -250,6 +265,90 @@ mod tests {
         assert!(matches!(m.glue[0][0], IlOp::Dup { .. }));
         assert_eq!(m.epilogue.len(), 1);
         assert_eq!(m.to_flat().len(), ops.len());
+    }
+
+    #[test]
+    fn to_flat_gives_each_function_a_distinct_label_namespace() {
+        let loc = loc();
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("a", None, 0, 3),
+            ops: vec![
+                IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: Label(0),
+                    loc,
+                },
+                IlOp::Label(Label(0)),
+                IlOp::Return { loc },
+            ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("b", None, 0, 3),
+            ops: vec![
+                IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: Label(0),
+                    loc,
+                },
+                IlOp::Label(Label(0)),
+                IlOp::Return { loc },
+            ],
+        });
+        let flat = m.to_flat();
+        let mut label_ids = Vec::new();
+        for op in &flat {
+            if let IlOp::Label(Label(id)) = op {
+                label_ids.push(*id);
+            }
+        }
+        assert_eq!(
+            label_ids.len(),
+            label_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            "flat IL must not reuse label ids across functions: {label_ids:?}"
+        );
+    }
+
+    #[test]
+    fn to_flat_remaps_cross_function_entry_call_targets() {
+        let loc = loc();
+        let callee_entry = Label(10);
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("callee", Some(callee_entry), 0, 2),
+            ops: vec![IlOp::Label(callee_entry), IlOp::Return { loc }],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("caller", None, 0, 2),
+            ops: vec![
+                IlOp::Entry {
+                    kind: EntryKind::Call,
+                    arity: 1,
+                    target: callee_entry,
+                    loc,
+                },
+                IlOp::Return { loc },
+            ],
+        });
+        let flat = m.to_flat();
+        let callee_label = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Label(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .expect("callee entry label");
+        let entry_target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .expect("caller Entry");
+        assert_eq!(
+            entry_target, callee_label,
+            "cross-function Entry must use the remapped callee entry label"
+        );
     }
 
     #[test]
@@ -430,6 +529,7 @@ mod tests {
                 iterative_optimization: false,
                 max_optimization_iterations: 10,
                 collect_stats: false,
+                pure_call_ctx: None,
             },
             &mut Vec::new(),
         );
@@ -496,6 +596,7 @@ mod tests {
                 iterative_optimization: false,
                 max_optimization_iterations: 10,
                 collect_stats: false,
+                pure_call_ctx: None,
         }
     }
 
