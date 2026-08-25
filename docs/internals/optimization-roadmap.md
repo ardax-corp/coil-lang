@@ -184,7 +184,7 @@ indices and unproven stride steps keep checked `Index` / `StoreIndex`.
 `il::bounds.rs` proves **length invariance** per natural loop instead of
 relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
 place, so a loop that writes `a[i]` still has an invariant `len(a)`; `ArrayPush`,
-a call, a host native or any unmodelled op refuses the region. Two invariant
+an impure call, a host native or any unmodelled op refuses the region. Two invariant
 materializations move to the preheader on that proof — the `LOAD a; ArrayLen;
 STORE t` triple codegen leaves in the header of `while i < len(a)`, and the
 `CONST imm; STORE t` pair that materializes a constant addressing operand in
