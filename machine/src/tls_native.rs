@@ -20,19 +20,19 @@ use crate::io::IoErrorTag;
 use crate::io_handle::NativeHandle;
 use crate::memory::{Heap, ObjStream, StreamKind};
 
-/// `err_out` value meaning success (not an [`IoErrorTag`] discriminant).
+/// `err_out` NULL / empty means success (`tls.h`).
 pub const ABI_OK: i32 = -1;
 
 type ClientEnableFn = unsafe extern "C" fn(
     i64,
     *const c_char,
-    i32,
+    i64,
     *const c_char,
     *const c_char,
     i64,
     *const c_char,
-    *mut i32,
-) -> *mut c_void;
+    *mut *const c_char,
+) -> i64;
 type ServerEnableFn = unsafe extern "C" fn(
     i64,
     *const c_char,
@@ -40,13 +40,13 @@ type ServerEnableFn = unsafe extern "C" fn(
     i64,
     *const c_char,
     *const c_char,
-    *mut i32,
-) -> *mut c_void;
-type ReadFn = unsafe extern "C" fn(*mut c_void, i64, *mut u8, usize, *mut i32) -> isize;
-type WriteFn = unsafe extern "C" fn(*mut c_void, i64, *const u8, usize, *mut i32) -> isize;
-type AlpnFn = unsafe extern "C" fn(*mut c_void, *mut u8, usize) -> isize;
-type DisableFn = unsafe extern "C" fn(*mut c_void, i64, *mut i32) -> i32;
-type FreeFn = unsafe extern "C" fn(*mut c_void);
+    *mut *const c_char,
+) -> i64;
+type ReadFn = unsafe extern "C" fn(i64, i64, *mut u8, i64, *mut *const c_char) -> i64;
+type WriteFn = unsafe extern "C" fn(i64, i64, *const u8, i64, *mut *const c_char) -> i64;
+type AlpnFn = unsafe extern "C" fn(i64, *mut u8, i64) -> i64;
+type DisableFn = unsafe extern "C" fn(i64, i64, *mut *const c_char);
+type FreeFn = unsafe extern "C" fn(i64);
 
 /// Resolved `coil_tls_*` function pointers plus the owning library.
 pub struct TlsNativeAbi {
@@ -130,12 +130,12 @@ impl TlsNativeAbi {
             Ok(s) => s,
             Err(e) => return NativeEnable::Failed(e),
         };
-        let mut err = ABI_OK;
+        let mut err: *const c_char = ptr::null();
         let ptr = unsafe {
             (self.client_enable)(
                 fd,
                 host.as_ptr(),
-                i32::from(verify),
+                i64::from(verify),
                 opt_ptr(&ca_pem),
                 opt_ptr(&ca_path),
                 timeout_ms,
@@ -172,7 +172,7 @@ impl TlsNativeAbi {
             Ok(s) => s,
             Err(e) => return NativeEnable::Failed(e),
         };
-        let mut err = ABI_OK;
+        let mut err: *const c_char = ptr::null();
         let ptr = unsafe {
             (self.server_enable)(
                 fd,
@@ -222,29 +222,42 @@ pub enum NativeEnable {
     Failed(IoErrorTag),
 }
 
-fn session_from_enable(abi: Arc<TlsNativeAbi>, ptr: *mut c_void, err: i32) -> NativeEnable {
+fn tag_from_err_out(err: *const c_char) -> Option<IoErrorTag> {
+    if err.is_null() {
+        return None;
+    }
+    let name = unsafe { std::ffi::CStr::from_ptr(err) }
+        .to_str()
+        .unwrap_or("");
+    if name.is_empty() {
+        None
+    } else {
+        Some(IoErrorTag::from_abi_name(name))
+    }
+}
+
+fn session_from_enable(abi: Arc<TlsNativeAbi>, ptr: i64, err: *const c_char) -> NativeEnable {
     let keep = |abi: Arc<TlsNativeAbi>| {
-        NonNull::new(ptr).map(|p| NativeTlsSession {
+        NonNull::new(ptr as *mut c_void).map(|p| NativeTlsSession {
             ptr: Some(p),
             abi,
             wants_write: Cell::new(false),
         })
     };
-    if err == ABI_OK {
-        return keep(abi)
+    match tag_from_err_out(err) {
+        None => keep(abi)
             .map(NativeEnable::Ready)
-            .unwrap_or(NativeEnable::Failed(IoErrorTag::Other));
-    }
-    let tag = IoErrorTag::from_abi(err);
-    if tag == IoErrorTag::WouldBlock {
-        return keep(abi)
+            .unwrap_or(NativeEnable::Failed(IoErrorTag::Other)),
+        Some(IoErrorTag::WouldBlock) => keep(abi)
             .map(NativeEnable::WouldBlock)
-            .unwrap_or(NativeEnable::Failed(IoErrorTag::WouldBlock));
+            .unwrap_or(NativeEnable::Failed(IoErrorTag::WouldBlock)),
+        Some(tag) => {
+            if ptr != 0 {
+                unsafe { (abi.free)(ptr) };
+            }
+            NativeEnable::Failed(tag)
+        }
     }
-    if !ptr.is_null() {
-        unsafe { (abi.free)(ptr) };
-    }
-    NativeEnable::Failed(tag)
 }
 
 /// Opaque session living in dloaded `libtls`.
@@ -260,15 +273,17 @@ unsafe impl Send for NativeTlsSession {}
 unsafe impl Sync for NativeTlsSession {}
 
 impl NativeTlsSession {
-    fn raw(&self) -> *mut c_void {
+    fn raw_i64(&self) -> i64 {
+        self.ptr.map(|p| p.as_ptr() as i64).unwrap_or(0)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_ptr(&self) -> *mut c_void {
         self.ptr.map(NonNull::as_ptr).unwrap_or(ptr::null_mut())
     }
 
-    fn take_ptr(&mut self) -> *mut c_void {
-        self.ptr
-            .take()
-            .map(NonNull::as_ptr)
-            .unwrap_or(ptr::null_mut())
+    fn take_i64(&mut self) -> i64 {
+        self.ptr.take().map(|p| p.as_ptr() as i64).unwrap_or(0)
     }
 
     /// Handshake/IO park interest: true → wait writable (ClientHello / flush).
@@ -281,14 +296,13 @@ impl NativeTlsSession {
     }
 
     pub fn read(&self, fd: i64, buf: &mut [u8]) -> Result<Option<usize>, IoErrorTag> {
-        let ptr = self.raw();
-        if ptr.is_null() {
+        let ptr = self.raw_i64();
+        if ptr == 0 {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        let mut err = ABI_OK;
-        let n = unsafe { (self.abi.read)(ptr, fd, buf.as_mut_ptr(), buf.len(), &mut err) };
-        if err != ABI_OK {
-            let tag = IoErrorTag::from_abi(err);
+        let mut err: *const c_char = ptr::null();
+        let n = unsafe { (self.abi.read)(ptr, fd, buf.as_mut_ptr(), buf.len() as i64, &mut err) };
+        if let Some(tag) = tag_from_err_out(err) {
             if tag == IoErrorTag::WouldBlock {
                 self.wants_write.set(false);
             }
@@ -298,21 +312,25 @@ impl NativeTlsSession {
             return Err(IoErrorTag::Other);
         }
         if n == 0 {
-            Ok(None)
+            // Empty-buffer probe: success means handshake can proceed / is done.
+            if buf.is_empty() {
+                Ok(Some(0))
+            } else {
+                Ok(None)
+            }
         } else {
             Ok(Some(n as usize))
         }
     }
 
     pub fn write(&self, fd: i64, buf: &[u8]) -> Result<usize, IoErrorTag> {
-        let ptr = self.raw();
-        if ptr.is_null() {
+        let ptr = self.raw_i64();
+        if ptr == 0 {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        let mut err = ABI_OK;
-        let n = unsafe { (self.abi.write)(ptr, fd, buf.as_ptr(), buf.len(), &mut err) };
-        if err != ABI_OK {
-            let tag = IoErrorTag::from_abi(err);
+        let mut err: *const c_char = ptr::null();
+        let n = unsafe { (self.abi.write)(ptr, fd, buf.as_ptr(), buf.len() as i64, &mut err) };
+        if let Some(tag) = tag_from_err_out(err) {
             if tag == IoErrorTag::WouldBlock {
                 self.wants_write.set(true);
             }
@@ -325,28 +343,43 @@ impl NativeTlsSession {
     }
 
     pub fn alpn_protocol(&self) -> String {
-        let ptr = self.raw();
-        if ptr.is_null() {
+        let ptr = self.raw_i64();
+        if ptr == 0 {
             return String::new();
         }
-        let mut buf = [0u8; 256];
-        let n = unsafe { (self.abi.alpn)(ptr, buf.as_mut_ptr(), buf.len()) };
+        let n = unsafe { (self.abi.alpn)(ptr, ptr::null_mut(), 0) };
+        if n <= 0 {
+            return String::new();
+        }
+        let mut buf = vec![0u8; n as usize];
+        let n = unsafe { (self.abi.alpn)(ptr, buf.as_mut_ptr(), buf.len() as i64) };
         if n <= 0 {
             return String::new();
         }
         String::from_utf8_lossy(&buf[..n as usize]).into_owned()
     }
 
-    /// `close_notify` only. [`Drop`] calls `coil_tls_free`.
+    /// One non-blocking handshake pump. `Ok` means rustls is past handshake.
+    pub fn handshake_step(&self, fd: i64) -> Result<(), IoErrorTag> {
+        match self.write(fd, &[]) {
+            Ok(_) => Ok(()),
+            Err(IoErrorTag::WouldBlock) => match self.read(fd, &mut []) {
+                Ok(_) => Ok(()),
+                Err(e) => Err(e),
+            },
+            Err(e) => Err(e),
+        }
+    }
+
     pub fn disable(&self, fd: i64) -> Result<(), IoErrorTag> {
-        let ptr = self.raw();
-        if ptr.is_null() {
+        let ptr = self.raw_i64();
+        if ptr == 0 {
             return Ok(());
         }
-        let mut err = ABI_OK;
+        let mut err: *const c_char = ptr::null();
         unsafe { (self.abi.disable)(ptr, fd, &mut err) };
-        if err != ABI_OK {
-            Err(IoErrorTag::from_abi(err))
+        if let Some(tag) = tag_from_err_out(err) {
+            Err(tag)
         } else {
             Ok(())
         }
@@ -355,8 +388,8 @@ impl NativeTlsSession {
 
 impl Drop for NativeTlsSession {
     fn drop(&mut self) {
-        let ptr = self.take_ptr();
-        if !ptr.is_null() {
+        let ptr = self.take_i64();
+        if ptr != 0 {
             unsafe { (self.abi.free)(ptr) };
         }
     }
@@ -378,6 +411,12 @@ impl TlsSessionSlot {
     pub fn wants_write(&self) -> bool {
         match self {
             Self::Native(n) => n.wants_write(),
+        }
+    }
+
+    pub fn handshake_step(&self, fd: i64) -> Result<(), IoErrorTag> {
+        match self {
+            Self::Native(n) => n.handshake_step(fd),
         }
     }
 
@@ -410,15 +449,12 @@ pub fn slot_write(
     }
 }
 
-/// Best-effort `coil_tls_disable` (close_notify), then drop frees the slot.
-pub fn drop_slot(handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
-    match slot {
-        TlsSessionSlot::Native(n) => {
-            if let Some(h) = handle {
-                let _ = n.disable(h.tls_abi_fd());
-            }
-        }
-    }
+/// Free the native session (`coil_tls_free`). close_notify is leftover `tls_*_disable`.
+///
+/// Stream close / GC must not call `coil_tls_disable`: coil-tls currently frees
+/// inside disable (`tls.h`), so a following Drop `free` would double-free.
+pub fn drop_slot(_handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
+    drop(slot);
 }
 
 /// Attach a native session to a TCP stream (`kind` stays Tcp on failure).
@@ -638,27 +674,27 @@ mod tests {
     }
 
     unsafe fn stub_set_would_block_reads(abi: &TlsNativeAbi, session: *mut c_void, n: i32) {
-        let f: unsafe extern "C" fn(*mut c_void, i32) =
+        let f: unsafe extern "C" fn(i64, i32) =
             unsafe { stub_sym(abi, b"coil_tls_stub_set_would_block_reads\0") };
-        unsafe { f(session, n) };
+        unsafe { f(session as i64, n) };
     }
 
     unsafe fn stub_read_calls(abi: &TlsNativeAbi, session: *mut c_void) -> i32 {
-        let f: unsafe extern "C" fn(*mut c_void) -> i32 =
+        let f: unsafe extern "C" fn(i64) -> i32 =
             unsafe { stub_sym(abi, b"coil_tls_stub_read_calls\0") };
-        unsafe { f(session) }
+        unsafe { f(session as i64) }
     }
 
     unsafe fn stub_write_calls(abi: &TlsNativeAbi, session: *mut c_void) -> i32 {
-        let f: unsafe extern "C" fn(*mut c_void) -> i32 =
+        let f: unsafe extern "C" fn(i64) -> i32 =
             unsafe { stub_sym(abi, b"coil_tls_stub_write_calls\0") };
-        unsafe { f(session) }
+        unsafe { f(session as i64) }
     }
 
     unsafe fn stub_disable_calls(abi: &TlsNativeAbi, session: *mut c_void) -> i32 {
-        let f: unsafe extern "C" fn(*mut c_void) -> i32 =
+        let f: unsafe extern "C" fn(i64) -> i32 =
             unsafe { stub_sym(abi, b"coil_tls_stub_disable_calls\0") };
-        unsafe { f(session) }
+        unsafe { f(session as i64) }
     }
 
     unsafe fn stub_set_next_enable_err(abi: &TlsNativeAbi, err: i32) {
@@ -714,7 +750,7 @@ mod tests {
 
     fn native_ptr(heap: &mut Heap, stream: Value) -> *mut c_void {
         with_stream_mut(heap, stream, |s| match s.tls.as_ref() {
-            Some(TlsSessionSlot::Native(n)) => n.raw(),
+            Some(TlsSessionSlot::Native(n)) => n.test_ptr(),
             _ => ptr::null_mut(),
         })
         .expect("stream")
@@ -831,13 +867,13 @@ mod tests {
         assert_eq!(proto, "h2");
 
         let ptr = native_ptr(&mut heap, stream);
-        type SetWrites = unsafe extern "C" fn(*mut c_void, i32);
+        type SetWrites = unsafe extern "C" fn(i64, i32);
         let set_w: libloading::Symbol<SetWrites> = unsafe {
             abi.library()
                 .get(b"coil_tls_stub_set_would_block_writes\0")
                 .expect("hook")
         };
-        unsafe { set_w(ptr, 1) };
+        unsafe { set_w(ptr as i64, 1) };
         let out = make_byte_array(&mut heap, b"xyz");
         let err = stream_write(&mut heap, stream, out).unwrap_err();
         assert_eq!(err, IoErrorTag::WouldBlock);
@@ -956,7 +992,7 @@ mod tests {
             NativeEnable::Failed(IoErrorTag::Handshake)
         ));
         assert_eq!(unsafe { stub_live_sessions(&abi) }, live0);
-        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
 
         let err = attach_enable_outcome(&mut heap, stream, outcome).unwrap_err();
         assert_eq!(err, IoErrorTag::Handshake);
@@ -965,7 +1001,7 @@ mod tests {
             StreamKind::Tcp
         );
         assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
-        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
         drop(server);
     }
 
@@ -978,7 +1014,7 @@ mod tests {
         let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let session = expect_ready(abi.client_enable(-1, "localhost", false, None, None, 0, ""));
-        let ptr = session.raw();
+        let ptr = session.test_ptr();
         let live = unsafe { stub_live_sessions(&abi) };
         let frees = unsafe { stub_free_calls(&abi) };
         session.disable(-1).expect("close_notify");
@@ -1149,5 +1185,257 @@ mod tests {
         assert_eq!(err, IoErrorTag::InvalidInput);
         reset_preferred();
         let _ = std::fs::remove_file(path);
+    }
+
+    fn real_libtls_path() -> Option<PathBuf> {
+        if let Ok(p) = std::env::var("COIL_TLS_NATIVE") {
+            let pb = PathBuf::from(&p);
+            if pb.is_file() {
+                return Some(pb);
+            }
+            let so = pb.join(platform_shared_lib_filename("tls"));
+            if so.is_file() {
+                return Some(so);
+            }
+        }
+        let root = workspace_root();
+        let candidates = [
+            PathBuf::from("/tmp/coil-tls/native/libtls.so"),
+            PathBuf::from("/tmp/coil-tls/native/target/release/libtls.so"),
+            root.join("../coil-tls/native/libtls.so"),
+            root.join("../coil-tls/native/target/release/libtls.so"),
+        ];
+        candidates.into_iter().find(|p| p.is_file())
+    }
+
+    fn load_real_libtls() -> Option<Arc<TlsNativeAbi>> {
+        TlsNativeAbi::load_path(&real_libtls_path()?).ok()
+    }
+
+    fn test_server_pem() -> (String, String) {
+        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
+        let cert = std::fs::read_to_string(dir.join("cert.pem")).expect("cert.pem");
+        let key = std::fs::read_to_string(dir.join("key.pem")).expect("key.pem");
+        (cert, key)
+    }
+
+    fn client_enable_opts_full(heap: &mut Heap, timeout_ms: i64, alpn: &str) -> Value {
+        use crate::memory::ObjInstance;
+        let (obj, mut gc) = heap.alloc(ObjInstance::default(), Object::Instance);
+        let inst = gc.as_mut();
+        let intern = |h: &mut Heap, n: &str| h.intern(n.to_string());
+        inst.set(intern(heap, "verify"), Member::Value(Value::from(false)));
+        inst.set(intern(heap, "ca_pem"), alloc_option_none_member(heap));
+        inst.set(intern(heap, "ca_path"), alloc_option_none_member(heap));
+        inst.set(
+            intern(heap, "timeout_ms"),
+            Member::Value(Value::from(timeout_ms)),
+        );
+        inst.set(intern(heap, "alpn"), alloc_string_member(heap, alpn));
+        Value::from(obj.addr())
+    }
+
+    fn server_enable_opts_full(
+        heap: &mut Heap,
+        cert_pem: &str,
+        key_pem: &str,
+        timeout_ms: i64,
+        alpn: &str,
+    ) -> Value {
+        use crate::memory::ObjInstance;
+        let (obj, mut gc) = heap.alloc(ObjInstance::default(), Object::Instance);
+        let inst = gc.as_mut();
+        let intern = |h: &mut Heap, n: &str| h.intern(n.to_string());
+        inst.set(
+            intern(heap, "cert_pem"),
+            alloc_string_member(heap, cert_pem),
+        );
+        inst.set(intern(heap, "key_pem"), alloc_string_member(heap, key_pem));
+        inst.set(
+            intern(heap, "timeout_ms"),
+            Member::Value(Value::from(timeout_ms)),
+        );
+        inst.set(intern(heap, "client_ca_pem"), alloc_string_member(heap, ""));
+        inst.set(intern(heap, "alpn"), alloc_string_member(heap, alpn));
+        Value::from(obj.addr())
+    }
+
+    /// coil-tls `coil_tls_disable` also frees; leftover Drop would double-free.
+    fn leak_tls_slot(heap: &mut Heap, stream: Value) {
+        let _ = with_stream_mut(heap, stream, |s| {
+            if let Some(slot) = s.tls.take() {
+                std::mem::forget(slot);
+            }
+            s.kind = StreamKind::Tcp;
+        });
+    }
+
+    #[test]
+    fn leftover_abi_real_libtls_enable_would_block_keeps_session() {
+        let Some(abi) = load_real_libtls() else {
+            eprintln!("skip: real libtls.so not found (set COIL_TLS_NATIVE)");
+            return;
+        };
+        let _guard = stub_lock();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let hold = std::thread::spawn(move || {
+            let Ok((sock, _)) = listener.accept() else {
+                return;
+            };
+            std::thread::sleep(Duration::from_millis(300));
+            drop(sock);
+        });
+        let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        client.set_nonblocking(true).ok();
+        let handle = NativeHandle::Tcp(client);
+        let fd = handle.tls_abi_fd();
+        let outcome = abi.client_enable(fd, "127.0.0.1", false, None, None, 0, "");
+        assert!(
+            matches!(outcome, NativeEnable::WouldBlock(_)),
+            "leftover must decode coil-tls string err_out as WouldBlock"
+        );
+        drop(outcome);
+        drop(handle);
+        let _ = hold.join();
+    }
+
+    /// COI-116: leftover client+server enable on a TCP pair with HostState bound.
+    #[test]
+    fn leftover_server_client_enable_with_host_state_bound() {
+        let Some(abi) = load_real_libtls() else {
+            eprintln!("skip: real libtls.so not found (set COIL_TLS_NATIVE)");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi);
+        let (cert_pem, key_pem) = test_server_pem();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let reactor = crate::reactor::Reactor::new(1);
+        let server_reactor = std::sync::Arc::clone(&reactor);
+        let server = std::thread::spawn(move || {
+            let mut vm = crate::Machine::<64>::default();
+            vm.set_reactor(std::sync::Arc::clone(&server_reactor));
+            let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+            let mut heap = Heap::default();
+            ready_tx.send(()).ok();
+            let Ok((sock, _)) = listener.accept() else {
+                panic!("accept");
+            };
+            let s =
+                alloc_stream(&mut heap, NativeHandle::Tcp(sock), StreamKind::Tcp).expect("stream");
+            let opts = server_enable_opts_full(&mut heap, &cert_pem, &key_pem, 5000, "h2");
+            let s = crate::tls::tls_server_enable(&mut heap, s, opts).expect("server enable");
+            let proto = crate::tls::tls_alpn_protocol(&mut heap, s).expect("alpn");
+            let name = crate::io::value_as_string(&heap, proto).expect("alpn string");
+            leak_tls_slot(&mut heap, s);
+            name
+        });
+        ready_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("ready");
+        let mut vm = crate::Machine::<64>::default();
+        vm.set_reactor(std::sync::Arc::clone(&reactor));
+        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        let mut heap = Heap::default();
+        let s = crate::io::tcp_connect(&mut heap, "localhost", port as i64).expect("tcp");
+        let opts = client_enable_opts_full(&mut heap, 5000, "h2");
+        let s =
+            crate::tls::tls_client_enable(&mut heap, s, "localhost", opts).expect("client enable");
+        let proto = crate::tls::tls_alpn_protocol(&mut heap, s).expect("alpn");
+        let client_alpn = crate::io::value_as_string(&heap, proto).expect("alpn string");
+        leak_tls_slot(&mut heap, s);
+        let server_alpn = server.join().expect("server");
+        reactor.shutdown();
+        reset_preferred();
+        assert_eq!(client_alpn, "h2");
+        assert_eq!(server_alpn, "h2");
+    }
+
+    /// COI-116: leftover handshake parks must not `help_once` CPU jobs.
+    #[test]
+    fn leftover_handshake_wait_does_not_help_steal_cpu_jobs() {
+        use crate::ffi::Natives;
+        use crate::reactor::{Job, Reactor};
+        use crate::thread::{HostStateGuard, JoinState, ThreadProgram};
+        use common::{Byte, Instruction, ProgramDebug};
+
+        let Some(abi) = load_real_libtls() else {
+            eprintln!("skip: real libtls.so not found (set COIL_TLS_NATIVE)");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi);
+
+        fn const_job(reactor: &std::sync::Arc<Reactor>, imm: i32) -> std::sync::Arc<JoinState> {
+            let state = std::sync::Arc::new(JoinState::new());
+            let code = vec![
+                Byte::new(Instruction::CONST).with_value_u32(imm as u32),
+                Byte::new(Instruction::RETURN),
+            ];
+            let program = std::sync::Arc::new(ThreadProgram {
+                code: std::sync::Arc::new(code),
+                constants: std::sync::Arc::new(Vec::new()),
+                strings: std::sync::Arc::new(Vec::new()),
+                static_slot_count: 0,
+                debug: ProgramDebug::default(),
+                operand_stack_slots: crate::DEFAULT_OPERAND_STACK_SLOTS as u32,
+            });
+            reactor.submit(Job {
+                entry: 0,
+                args: Vec::new(),
+                state: std::sync::Arc::clone(&state),
+                program,
+                natives: Natives::new(),
+                shared_print: None,
+                live_threads: crate::thread::new_live_thread_registry(),
+                reactor: std::sync::Arc::clone(reactor),
+                io_reactor: crate::io_reactor::IoReactor::new(),
+            });
+            state
+        }
+
+        let reactor = Reactor::new(1);
+        let warmup = const_job(&reactor, 0);
+        let _ = reactor.wait_join(&warmup);
+        reactor.shutdown();
+
+        let pending = const_job(&reactor, 99);
+        assert!(
+            pending.try_take_result().is_none(),
+            "job must sit in injector after shutdown"
+        );
+
+        let mut vm = crate::Machine::<64>::default();
+        vm.set_reactor(std::sync::Arc::clone(&reactor));
+        let _hs = HostStateGuard::enter(&mut vm);
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let peer = std::thread::spawn(move || {
+            let _ = listener.accept();
+            std::thread::sleep(Duration::from_millis(150));
+        });
+        let mut heap = Heap::default();
+        let s = crate::io::tcp_connect(&mut heap, "127.0.0.1", port as i64).expect("tcp");
+        let opts = client_enable_opts_full(&mut heap, 100, "");
+        let _ = crate::tls::tls_client_enable(&mut heap, s, "127.0.0.1", opts);
+        leak_tls_slot(&mut heap, s);
+        let _ = peer.join();
+
+        assert!(
+            pending.try_take_result().is_none(),
+            "TLS handshake wait must not help-steal CPU jobs (COI-116)"
+        );
+        reactor.help_once();
+        assert_eq!(
+            pending.try_take_result().expect("helped job"),
+            Ok(crate::thread::PortableValue::Immediate(99))
+        );
+        reset_preferred();
     }
 }
