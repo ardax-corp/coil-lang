@@ -2,11 +2,14 @@
 //!
 //! Bodies resolve dloaded `coil_tls_*` ([`crate::tls_native::preferred`] /
 //! FFI search paths), call enable once, [`attach_enable_outcome`], then park
-//! WouldBlock on [`reactor_wait_fd_no_help`] (COI-116). Handshake continues
-//! on stream read/write — never call enable again, never free a WouldBlock
-//! session. `coil_tls_disable` is close_notify; `coil_tls_free` is Drop.
+//! WouldBlock on [`reactor_wait_fd_no_help`] and pump via empty read/write
+//! until handshake completes (COI-116). Never call enable again, never free a
+//! WouldBlock session. `coil_tls_disable` is close_notify; `coil_tls_free`
+//! is Drop.
 //!
 //! Ids reserved; do not reorder; do not bump `ARCHIVE_VERSION`.
+
+use std::time::Instant;
 
 use common::Value;
 
@@ -41,9 +44,14 @@ fn member_as_value(member: &Member) -> Result<Value, IoErrorTag> {
     }
 }
 
-/// Decode `Option<string>` from a heap enum (`None` = 0, `Some` = 1).
+/// Decode `Option<string>`. Coil niches heap `Option<string>` as null/`0` = None
+/// and a string pointer = Some; leftover tests may still box a `None`/`Some` enum.
 fn value_as_option_string(heap: &Heap, v: Value) -> Result<Option<String>, IoErrorTag> {
+    if v.raw().is_null() {
+        return Ok(None);
+    }
     match heap.find_object_by_addr(v.raw() as u64) {
+        Some(Object::String(_)) => Ok(Some(value_as_string(heap, v)?)),
         Some(Object::Enum(gc)) => {
             let e = gc.as_ref();
             match e.tag {
@@ -197,6 +205,53 @@ fn park_enable_would_block(
     reactor_wait_fd_no_help(wait, interest, duration_from_timeout_ms(timeout_ms))
 }
 
+fn remaining_timeout_ms(deadline: Option<Instant>) -> Result<i64, IoErrorTag> {
+    match deadline {
+        None => Ok(0),
+        Some(end) => {
+            let now = Instant::now();
+            if now >= end {
+                return Err(IoErrorTag::TimedOut);
+            }
+            let ms = end.saturating_duration_since(now).as_millis() as i64;
+            Ok(ms.max(1))
+        }
+    }
+}
+
+fn pump_enable_handshake(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
+    with_stream_mut(heap, stream, |s| -> Result<(), IoErrorTag> {
+        if s.closed || s.handle.is_none() {
+            return Err(IoErrorTag::AlreadyClosed);
+        }
+        let fd = s.handle.as_ref().unwrap().tls_abi_fd();
+        let tls = s.tls.as_ref().ok_or(IoErrorTag::Other)?;
+        tls.handshake_step(fd)
+    })?
+}
+
+/// Finish handshake on the attached session: park without help-steal (COI-116),
+/// then pump via empty read/write. Do not call enable again.
+fn complete_enable_handshake(
+    heap: &mut Heap,
+    stream: Value,
+    timeout_ms: i64,
+) -> Result<Value, IoErrorTag> {
+    let deadline = duration_from_timeout_ms(timeout_ms).map(|d| Instant::now() + d);
+    loop {
+        let remain = remaining_timeout_ms(deadline)?;
+        match park_enable_would_block(heap, stream, remain) {
+            Ok(()) | Err(IoErrorTag::WouldBlock) => {}
+            Err(e) => return Err(e),
+        }
+        match pump_enable_handshake(heap, stream) {
+            Ok(()) => return Ok(stream),
+            Err(IoErrorTag::WouldBlock) => continue,
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 fn finish_enable(
     heap: &mut Heap,
     stream: Value,
@@ -205,14 +260,7 @@ fn finish_enable(
 ) -> Result<Value, IoErrorTag> {
     match attach_enable_outcome(heap, stream, outcome) {
         Ok(()) => Ok(stream),
-        Err(IoErrorTag::WouldBlock) => {
-            // Attached; handshake continues on read/write. Park so the peer
-            // can run (COI-116) instead of returning WouldBlock to coil-http.
-            match park_enable_would_block(heap, stream, timeout_ms) {
-                Ok(()) | Err(IoErrorTag::WouldBlock) => Ok(stream),
-                Err(e) => Err(e),
-            }
-        }
+        Err(IoErrorTag::WouldBlock) => complete_enable_handshake(heap, stream, timeout_ms),
         Err(e) => Err(e),
     }
 }

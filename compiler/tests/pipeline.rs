@@ -7069,6 +7069,23 @@ fn io_tls_leftover_client_enable_typechecks() {
     check_ok("use io::__tls::{alpn_protocol};\nfn main() {}\n");
 }
 
+/// COI-116 leftover client+server enable across Coil threads (typecheck only;
+/// running needs libtls on [ffi] search_paths).
+#[test]
+fn example_tls_thread_loopback_typechecks() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join("examples/tls_thread_loopback.hy");
+    let mut pipeline = Pipeline::new();
+    assert!(
+        pipeline.compile_src_from_file(full.to_str().unwrap()).is_ok(),
+        "expected typecheck Ok for {}, messages={:?}",
+        full.display(),
+        pipeline.messages()
+    );
+}
+
 /// HostInvoke + leftover `io::__tls::client`: enable on non-TCP → InvalidInput.
 #[test]
 fn tls_client_enable_non_tcp_is_err_via_host_invoke() {

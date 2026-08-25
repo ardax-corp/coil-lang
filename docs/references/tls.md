@@ -36,7 +36,9 @@ coil-http consumes this package the same way (`roots` / `[dependencies]`). Hands
 
 ## Leftover HostInvoke (`io::__tls`)
 
-coil-tls re-exports leftover enable as `tls::client::enable(Stream, host, opts) -> Stream`. Internally it imports `use io::__tls::client::{enable}` (and the matching server / `alpn_protocol` leftovers). Bodies stay dload+attach_enable_outcome+park (no rustls in coil-lang). Do not import `io::__tls` from application code — use the package.
+coil-tls re-exports leftover enable as `tls::client::enable(Stream, host, opts) -> Stream`. Internally it imports `use io::__tls::client::{enable}` (and the matching server / `alpn_protocol` leftovers). Bodies stay dload + `attach_enable_outcome` + park + empty read/write until Ready (no rustls in coil-lang). WouldBlock enable keeps the session; do not retry `enable`. Do not import `io::__tls` from application code — use the package.
+
+`examples/tls_thread_loopback.hy` is the leftover client+server enable regression (COI-116): server `enable` in `thread::spawn`, client `enable` on the root, ALPN `h2`. Needs `libtls` on `[ffi] search_paths`.
 
 ## Migrating from virtual `io::net::tls`
 

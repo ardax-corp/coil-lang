@@ -127,6 +127,24 @@ impl IoErrorTag {
             _ => Self::Other,
         }
     }
+
+    /// Map a `coil_tls_*` `err_out` name (`tls.h`: NUL-terminated tag, NULL = ok).
+    pub fn from_abi_name(name: &str) -> Self {
+        match name {
+            "WouldBlock" => Self::WouldBlock,
+            "NotFound" => Self::NotFound,
+            "PermissionDenied" => Self::PermissionDenied,
+            "AlreadyClosed" => Self::AlreadyClosed,
+            "InvalidInput" => Self::InvalidInput,
+            "NotADirectory" => Self::NotADirectory,
+            "AlreadyExists" => Self::AlreadyExists,
+            "TimedOut" => Self::TimedOut,
+            "Truncated" => Self::Truncated,
+            "Certificate" => Self::Certificate,
+            "Handshake" => Self::Handshake,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// Allocate `Result::Ok(payload)` on the heap.
@@ -1776,6 +1794,32 @@ mod tests {
         let client = tcp_connect(&mut heap, "localhost", port).expect("localhost connect");
         stream_close(&mut heap, client).ok();
         let _ = accept.join();
+    }
+
+    #[test]
+    fn from_abi_name_matches_tls_h_tags() {
+        assert_eq!(
+            IoErrorTag::from_abi_name("WouldBlock"),
+            IoErrorTag::WouldBlock
+        );
+        assert_eq!(
+            IoErrorTag::from_abi_name("Certificate"),
+            IoErrorTag::Certificate
+        );
+        assert_eq!(
+            IoErrorTag::from_abi_name("Handshake"),
+            IoErrorTag::Handshake
+        );
+        assert_eq!(IoErrorTag::from_abi_name("TimedOut"), IoErrorTag::TimedOut);
+        assert_eq!(IoErrorTag::from_abi_name("not-a-tag"), IoErrorTag::Other);
+        assert_eq!(
+            IoErrorTag::from_abi_name("WouldBlock"),
+            IoErrorTag::from_abi(0)
+        );
+        assert_eq!(
+            IoErrorTag::from_abi_name("Handshake"),
+            IoErrorTag::from_abi(11)
+        );
     }
 
     #[test]
