@@ -31,10 +31,7 @@ pub fn build_standard_host_natives(
 ) -> Vec<Arc<dyn NativeFn>> {
     let mut out: Vec<Arc<dyn NativeFn>> = Vec::new();
     push_io_natives(&mut out, &mut register_id);
-    // TLS / crypto HostInvoke ids reserved; do not reorder; userland extract
-    // will stub these. See `reserved_hostinvoke`.
-    #[cfg(not(feature = "tls"))]
-    crate::reserved_hostinvoke::push_tls_stream_stubs(&mut out, &mut register_id);
+    // TLS leftover + crypto HostInvoke ids reserved; do not reorder.
     push_wiring(&mut out, &mut register_id, FS_WIRING, "fs");
     #[cfg(feature = "time")]
     push_wiring(&mut out, &mut register_id, TIME_WIRING, "time");
@@ -49,10 +46,7 @@ pub fn build_standard_host_natives(
     // Append-only: keep prior HostInvoke ids stable across ARCHIVE_MINOR bumps.
     push_io_wait_ready(&mut out, &mut register_id);
     push_io_write_from(&mut out, &mut register_id);
-    #[cfg(feature = "tls")]
     push_tls_alpn_protocol(&mut out, &mut register_id);
-    #[cfg(not(feature = "tls"))]
-    crate::reserved_hostinvoke::push_tls_alpn_stub(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, GC_WIRING, "gc");
     push_math_libm(&mut out, &mut register_id);
     // Append-only after math_libm: Vec helpers.
@@ -224,10 +218,9 @@ fn push_io_write_from(
     })));
 }
 
-/// Read negotiated ALPN on a TLS stream (`io::net::tls::alpn_protocol`).
+/// Read negotiated ALPN on a TLS stream (leftover HostInvoke).
 ///
-/// Id reserved; do not reorder; userland extract will stub this.
-#[cfg(feature = "tls")]
+/// Id reserved; do not reorder.
 fn push_tls_alpn_protocol(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
@@ -275,14 +268,10 @@ enum IoKind {
     UdpSendTo,
     UdpRecvFrom,
     UdpLocalPort,
-    // Ids reserved; do not reorder; userland extract will stub these.
-    #[cfg(feature = "tls")]
+    // Ids reserved; do not reorder. Leftover bodies dload+attach (not rustls).
     TlsClientEnable,
-    #[cfg(feature = "tls")]
     TlsClientDisable,
-    #[cfg(feature = "tls")]
     TlsServerEnable,
-    #[cfg(feature = "tls")]
     TlsServerDisable,
 }
 
@@ -314,14 +303,10 @@ impl IoKind {
             Self::UdpSendTo,
             Self::UdpRecvFrom,
             Self::UdpLocalPort,
-            // Ids reserved; do not reorder; userland extract will stub these.
-            #[cfg(feature = "tls")]
+            // Ids reserved; do not reorder. Leftover bodies dload+attach (not rustls).
             Self::TlsClientEnable,
-            #[cfg(feature = "tls")]
             Self::TlsClientDisable,
-            #[cfg(feature = "tls")]
             Self::TlsServerEnable,
-            #[cfg(feature = "tls")]
             Self::TlsServerDisable,
         ]
     }
@@ -353,13 +338,9 @@ impl IoKind {
             Self::UdpSendTo => "udp_send_to",
             Self::UdpRecvFrom => "udp_recv_from",
             Self::UdpLocalPort => "udp_local_port",
-            #[cfg(feature = "tls")]
             Self::TlsClientEnable => "tls_client_enable",
-            #[cfg(feature = "tls")]
             Self::TlsClientDisable => "tls_client_disable",
-            #[cfg(feature = "tls")]
             Self::TlsServerEnable => "tls_server_enable",
-            #[cfg(feature = "tls")]
             Self::TlsServerDisable => "tls_server_disable",
         }
     }
@@ -386,12 +367,8 @@ impl IoKind {
             | Self::UdpBind
             | Self::UdpConnect
             | Self::UdpRecvFrom => 2,
-            Self::TcpConnectTimeout => 3,
-            #[cfg(feature = "tls")]
-            Self::TlsClientEnable => 3,
-            #[cfg(feature = "tls")]
+            Self::TcpConnectTimeout | Self::TlsClientEnable => 3,
             Self::TlsClientDisable | Self::TlsServerDisable => 1,
-            #[cfg(feature = "tls")]
             Self::TlsServerEnable => 2,
             Self::UdpSendTo => 4,
         }
@@ -407,7 +384,6 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
         tcp_set_nodelay, tcp_shutdown, to_bytes, udp_bind, udp_connect, udp_local_port,
         udp_recv_from, udp_send_to, value_as_string,
     };
-    #[cfg(feature = "tls")]
     use crate::tls::{
         tls_client_disable, tls_client_enable, tls_server_disable, tls_server_enable,
     };
@@ -566,7 +542,6 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
                                 let r = udp_local_port(heap, args[0]).map(Value::from);
                                 as_result_value(heap, r)
                             }
-                            #[cfg(feature = "tls")]
                             IoKind::TlsClientEnable => {
                                 let host = match value_as_string(heap, args[1]) {
                                     Ok(s) => s,
@@ -577,17 +552,14 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
                                 let r = tls_client_enable(heap, args[0], &host, args[2]);
                                 as_result_value(heap, r)
                             }
-                            #[cfg(feature = "tls")]
                             IoKind::TlsClientDisable => {
                                 let r = tls_client_disable(heap, args[0]);
                                 as_result_value(heap, r)
                             }
-                            #[cfg(feature = "tls")]
                             IoKind::TlsServerEnable => {
                                 let r = tls_server_enable(heap, args[0], args[1]);
                                 as_result_value(heap, r)
                             }
-                            #[cfg(feature = "tls")]
                             IoKind::TlsServerDisable => {
                                 let r = tls_server_disable(heap, args[0]);
                                 as_result_value(heap, r)
@@ -840,14 +812,11 @@ mod tests {
         let sig = natives[write_from].signature();
         assert_eq!(sig.args, vec![FfiType::Int, FfiType::Int, FfiType::Int]);
         assert_eq!(sig.ret, FfiType::Int);
-        #[cfg(feature = "tls")]
-        {
-            let alpn = registrations
-                .iter()
-                .position(|(name, _)| name == "tls_alpn_protocol")
-                .expect("tls_alpn_protocol");
-            assert_eq!(alpn, write_from + 1);
-        }
+        let alpn = registrations
+            .iter()
+            .position(|(name, _)| name == "tls_alpn_protocol")
+            .expect("tls_alpn_protocol");
+        assert_eq!(alpn, write_from + 1);
     }
 
     /// Auto-par specializations spawn N-ary recursive calls; the host native
