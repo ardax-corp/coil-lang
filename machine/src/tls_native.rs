@@ -20,9 +20,6 @@ use crate::io::IoErrorTag;
 use crate::io_handle::NativeHandle;
 use crate::memory::{Heap, ObjStream, StreamKind};
 
-/// `err_out` NULL / empty means success (`tls.h`).
-pub const ABI_OK: i32 = -1;
-
 type ClientEnableFn = unsafe extern "C" fn(
     i64,
     *const c_char,
@@ -575,6 +572,8 @@ mod tests {
         alloc_stream, reactor_wait_fd_no_help, stream_close, stream_read, stream_write,
         with_stream_mut,
     };
+
+    const ABI_OK: i32 = -1;
     use crate::io_reactor::Interest;
     use crate::memory::{Heap, Member, ObjArray, Object};
     use common::Value;
@@ -1026,14 +1025,6 @@ mod tests {
         assert_eq!(unsafe { stub_free_calls(&abi) }, frees + 1);
     }
 
-    fn alloc_option_none_member(heap: &mut Heap) -> Member {
-        let none = crate::io::alloc_option_none(heap);
-        match heap.find_object_by_addr(none.raw() as u64) {
-            Some(obj) => Member::Object(obj),
-            None => Member::Value(none),
-        }
-    }
-
     fn alloc_string_member(heap: &mut Heap, s: &str) -> Member {
         let gc = heap.intern(s.to_string());
         Member::Object(Object::String(gc))
@@ -1047,9 +1038,9 @@ mod tests {
         let k_verify = intern(heap, "verify");
         inst.set(k_verify, Member::Value(Value::from(false)));
         let k_ca_pem = intern(heap, "ca_pem");
-        inst.set(k_ca_pem, alloc_option_none_member(heap));
+        inst.set(k_ca_pem, Member::Value(Value::from(0i64)));
         let k_ca_path = intern(heap, "ca_path");
-        inst.set(k_ca_path, alloc_option_none_member(heap));
+        inst.set(k_ca_path, Member::Value(Value::from(0i64)));
         let k_timeout = intern(heap, "timeout_ms");
         inst.set(k_timeout, Member::Value(Value::from(25i64)));
         let k_alpn = intern(heap, "alpn");
@@ -1225,8 +1216,8 @@ mod tests {
         let inst = gc.as_mut();
         let intern = |h: &mut Heap, n: &str| h.intern(n.to_string());
         inst.set(intern(heap, "verify"), Member::Value(Value::from(false)));
-        inst.set(intern(heap, "ca_pem"), alloc_option_none_member(heap));
-        inst.set(intern(heap, "ca_path"), alloc_option_none_member(heap));
+        inst.set(intern(heap, "ca_pem"), Member::Value(Value::from(0i64)));
+        inst.set(intern(heap, "ca_path"), Member::Value(Value::from(0i64)));
         inst.set(
             intern(heap, "timeout_ms"),
             Member::Value(Value::from(timeout_ms)),

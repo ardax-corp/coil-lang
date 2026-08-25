@@ -44,9 +44,14 @@ fn member_as_value(member: &Member) -> Result<Value, IoErrorTag> {
     }
 }
 
-/// Decode `Option<string>` from a heap enum (`None` = 0, `Some` = 1).
+/// Decode `Option<string>`. Coil niches heap `Option<string>` as null/`0` = None
+/// and a string pointer = Some; leftover tests may still box a `None`/`Some` enum.
 fn value_as_option_string(heap: &Heap, v: Value) -> Result<Option<String>, IoErrorTag> {
+    if v.raw().is_null() {
+        return Ok(None);
+    }
     match heap.find_object_by_addr(v.raw() as u64) {
+        Some(Object::String(_)) => Ok(Some(value_as_string(heap, v)?)),
         Some(Object::Enum(gc)) => {
             let e = gc.as_ref();
             match e.tag {
