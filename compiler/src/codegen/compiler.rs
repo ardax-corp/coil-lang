@@ -9925,6 +9925,7 @@ impl Compiler {
         }
 
         self.bind_function_entry("main".to_string());
+        let body_start = self.bytecode.len();
 
         let prev_vars = std::mem::take(&mut self.context.variables);
         self.context.variables = Interner::default();
@@ -9995,6 +9996,11 @@ impl Compiler {
 
         bb.finalize()
             .expect("BlockBuilder::finalize: virtual test main labels bound");
+        let body_end = self.bytecode.len();
+        self.record_fn_span("main".to_string(), body_start, body_end);
+        let entry = self.fn_entry_labels.get("main").copied();
+        self.bytecode
+            .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
         self.context.variables = prev_vars;
     }
 
@@ -12542,6 +12548,19 @@ impl Compiler {
                     // Test cases are typed as unit / Result<(), string> — zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
+
+                let body_end = self.bytecode.len();
+                // Flatten remaps per IlFunc; unrecorded tests share the epilogue
+                // and collide with ArrayPin labels in earlier bodies.
+                self.record_fn_span(fn_name.clone(), offset as usize, body_end);
+                let entry = self.fn_entry_labels.get(&fn_name).copied();
+                self.bytecode.record_func_with_sp(
+                    fn_name.clone(),
+                    entry,
+                    offset as usize,
+                    body_end,
+                    0,
+                );
 
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;

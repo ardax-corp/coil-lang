@@ -223,10 +223,16 @@ test("two") { assert(true)?; }
         );
 
         let main_bc = &bc[main_off..];
-        let calls_in_main = main_bc
+        let call_targets: Vec<u32> = main_bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .count();
+            .map(|b| b.call_parts().1)
+            .collect();
+        assert!(
+            call_targets.contains(&(syn0 as u32)) && call_targets.contains(&(syn1 as u32)),
+            "virtual main CALLs must target harness cases; targets={call_targets:?} syn0={syn0} syn1={syn1}"
+        );
+        let calls_in_main = call_targets.len();
         assert!(
             calls_in_main >= 2,
             "virtual main should CALL each harness case; got {calls_in_main}"
