@@ -729,6 +729,46 @@ fn main() { return; }
     }
 
     #[test]
+    fn vec_push_helper_is_not_pure() {
+        let ast = parse_ast(
+            r#"
+fn grow(Vec<int> a, int x) {
+    a.push(x);
+}
+fn main() { return; }
+"#,
+        );
+        let set = analyze_pure_fns(&ast);
+        assert!(
+            !set.contains("grow"),
+            "ArrayPush through a helper must be impure: {set:?}"
+        );
+    }
+
+    #[test]
+    fn loop_helper_without_effects_is_pure() {
+        let ast = parse_ast(
+            r#"
+fn absorb(int x) -> int {
+    let t = 0;
+    let k = 0;
+    while k < x {
+        t = t + 1;
+        k = k + 1;
+    }
+    return t;
+}
+fn main() { return; }
+"#,
+        );
+        let set = analyze_pure_fns(&ast);
+        assert!(
+            set.contains("absorb"),
+            "counted helper with no host/push must stay pure: {set:?}"
+        );
+    }
+
+    #[test]
     fn mutual_recursion_without_self_call_excluded() {
         let set = pure_set(
             r#"

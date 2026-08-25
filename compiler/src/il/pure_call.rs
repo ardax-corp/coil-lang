@@ -1,24 +1,49 @@
 //! Pure-call context for IL passes that refuse impure `CALL` barriers (COI-99).
+//!
+//! Reuses [`crate::typechecking::analyze_pure_fns`] (auto-par's whole-function
+//! purity). A callee is length-safe only when that set contains its bind name
+//! (or a single-segment `mod::f` / `Type::m` suffix). Anything the lattice
+//! cannot prove — host / FFI / `FORMAT`, field get/set, `CallIndirect`,
+//! `ArrayPush` in the callee — stays a barrier.
 
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
-use common::Instruction;
+use common::{Byte, Instruction};
 
 use super::op::{EntryKind, IlJumpKind, IlOp, Label};
 
-/// Maps entry labels to callee names plus the purity closure from the AST.
+/// Maps entry labels and packed CALL offsets to callee names plus the AST purity set.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct PureCallCtx {
     pub pure_fns: HashSet<String>,
     pub label_callees: HashMap<u32, String>,
+    /// Emit-time `CALL` targets (`self.functions` offsets) → bind names.
+    pub offset_callees: HashMap<u32, String>,
 }
 
 impl PureCallCtx {
     pub fn call_is_pure(&self, target: Label) -> bool {
         self.label_callees
             .get(&target.0)
-            .is_some_and(|n| self.pure_fns.contains(n))
+            .is_some_and(|n| self.name_is_pure(n))
+    }
+
+    pub fn call_offset_is_pure(&self, target: u32) -> bool {
+        self.offset_callees
+            .get(&target)
+            .is_some_and(|n| self.name_is_pure(n))
+    }
+
+    /// Exact bind name, or a single `::` suffix against the AST short name.
+    fn name_is_pure(&self, name: &str) -> bool {
+        if self.pure_fns.contains(name) {
+            return true;
+        }
+        match name.rsplit_once("::") {
+            Some((prefix, short)) if !prefix.contains("::") => self.pure_fns.contains(short),
+            _ => false,
+        }
     }
 }
 
@@ -39,11 +64,20 @@ fn active_ctx() -> Option<PureCallCtx> {
     PURE_CALL_CTX.with(|c| c.borrow().clone())
 }
 
+fn call_byte_is_pure(byte: &Byte, ctx: Option<&PureCallCtx>) -> bool {
+    if *byte.bytecode() != Instruction::CALL {
+        return false;
+    }
+    let (_, target) = byte.call_parts();
+    ctx.is_some_and(|c| c.call_offset_is_pure(target as u32))
+}
+
 /// True when `op` blocks length-invariance / ArrayLen hoist for an array loop.
 pub fn op_blocks_length_proof(op: &IlOp) -> bool {
     let ctx = active_ctx();
     match op {
         IlOp::HostInvoke { .. } | IlOp::Print { .. } => true,
+        IlOp::GetField { .. } | IlOp::SetField { .. } => true,
         IlOp::Entry {
             kind: EntryKind::Call,
             target,
@@ -54,19 +88,23 @@ pub fn op_blocks_length_proof(op: &IlOp) -> bool {
             kind: IlJumpKind::JumpIfMatch { .. },
             ..
         } => true,
-        IlOp::Byte { byte, .. } => matches!(
-            *byte.bytecode(),
+        IlOp::Byte { byte, .. } => match *byte.bytecode() {
             Instruction::HostInvoke
-                | Instruction::PRINT
-                | Instruction::CALL
-                | Instruction::FORMAT
-                | Instruction::FfiInvoke
-        ),
+            | Instruction::PRINT
+            | Instruction::FORMAT
+            | Instruction::FfiInvoke
+            | Instruction::CallIndirect
+            | Instruction::GetField
+            | Instruction::SetField
+            | Instruction::TailCall => true,
+            Instruction::CALL => !call_byte_is_pure(byte, ctx.as_ref()),
+            _ => false,
+        },
         _ => false,
     }
 }
 
-/// True when `op` blocks LICM / field-sensitive hoists (GetField allowed).
+/// True when `op` blocks LICM / field-sensitive hoists.
 pub fn op_blocks_licm(op: &IlOp) -> bool {
     let ctx = active_ctx();
     match op {
@@ -82,15 +120,18 @@ pub fn op_blocks_licm(op: &IlOp) -> bool {
             kind: IlJumpKind::JumpIfMatch { .. },
             ..
         } => true,
-        IlOp::Byte { byte, .. } => matches!(
-            *byte.bytecode(),
+        IlOp::Byte { byte, .. } => match *byte.bytecode() {
             Instruction::HostInvoke
-                | Instruction::PRINT
-                | Instruction::CALL
-                | Instruction::FfiInvoke
-                | Instruction::SetField
-                | Instruction::GetField
-        ),
+            | Instruction::PRINT
+            | Instruction::FORMAT
+            | Instruction::FfiInvoke
+            | Instruction::CallIndirect
+            | Instruction::SetField
+            | Instruction::GetField
+            | Instruction::TailCall => true,
+            Instruction::CALL => !call_byte_is_pure(byte, ctx.as_ref()),
+            _ => false,
+        },
         _ => false,
     }
 }
@@ -131,5 +172,50 @@ mod tests {
             loc: loc(),
         };
         assert!(op_blocks_length_proof(&op));
+    }
+
+    #[test]
+    fn pure_call_byte_offset_is_not_a_length_barrier() {
+        let mut ctx = PureCallCtx::default();
+        ctx.pure_fns.insert("sq".into());
+        ctx.offset_callees.insert(42, "sq".into());
+        set_pure_call_ctx(Some(ctx));
+        let op = IlOp::Byte {
+            byte: Byte::new(Instruction::CALL).with_call_packed(1, 42),
+            loc: loc(),
+        };
+        assert!(!op_blocks_length_proof(&op));
+        set_pure_call_ctx(None);
+    }
+
+    #[test]
+    fn unknown_call_byte_stays_a_barrier() {
+        set_pure_call_ctx(None);
+        let op = IlOp::Byte {
+            byte: Byte::new(Instruction::CALL).with_call_packed(1, 42),
+            loc: loc(),
+        };
+        assert!(op_blocks_length_proof(&op));
+    }
+
+    #[test]
+    fn call_indirect_and_field_ops_stay_barriers() {
+        set_pure_call_ctx(None);
+        assert!(op_blocks_length_proof(&IlOp::Byte {
+            byte: Byte::new(Instruction::CallIndirect),
+            loc: loc(),
+        }));
+        assert!(op_blocks_length_proof(&IlOp::GetField { loc: loc() }));
+        assert!(op_blocks_length_proof(&IlOp::SetField { loc: loc() }));
+    }
+
+    #[test]
+    fn module_qualified_pure_name_matches_ast_short_name() {
+        let mut ctx = PureCallCtx::default();
+        ctx.pure_fns.insert("sq".into());
+        ctx.label_callees.insert(3, "util::sq".into());
+        assert!(ctx.call_is_pure(Label(3)));
+        ctx.label_callees.insert(4, "mod::Type::sq".into());
+        assert!(!ctx.call_is_pure(Label(4)));
     }
 }
