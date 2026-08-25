@@ -1297,11 +1297,11 @@ mod tests {
 
     #[test]
     fn leftover_boxed_client_opts_enable_attaches() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         reset_preferred();
         install_preferred(abi.clone());
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
@@ -1324,16 +1324,17 @@ mod tests {
         );
         crate::tls::tls_client_disable(&mut heap, inner_stream).expect("disable");
         reset_preferred();
+        drop(abi);
         drop(server);
     }
 
     #[test]
     fn leftover_boxed_server_opts_enable_attaches() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         reset_preferred();
         install_preferred(abi.clone());
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
@@ -1354,6 +1355,7 @@ mod tests {
         );
         crate::tls::tls_server_disable(&mut heap, inner_stream).expect("disable");
         reset_preferred();
+        drop(abi);
         drop(client);
     }
 
