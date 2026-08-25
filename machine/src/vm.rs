@@ -733,13 +733,15 @@ impl<const S: usize> Machine<S> {
     }
 
     fn pop_call_frame(&mut self) -> usize {
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
         self.frame_pins.pop();
         self.frames.pop().get()
     }
 
     fn push_pin_frame(&mut self) {
         self.frame_pins
-            .rewrite_top_and_push(|_| {}, |pins| pins.clear());
+            .setup_current_and_advance(|pins| pins.clear());
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
     }
 
     fn current_pins_mut(&mut self) -> &mut HashMap<u32, Object> {
@@ -1646,6 +1648,9 @@ impl<const S: usize> Machine<S> {
                 f.seek(frame_ip);
                 f.set(base_sp + sp_off);
             });
+            // Yield pops pins with frames; restore a matching empty pin map
+            // so later CALL / ArrayPin / finalizers still have a live slot.
+            self.push_pin_frame();
         }
 
         *ip = coro.resume_ip;
@@ -1697,6 +1702,7 @@ impl<const S: usize> Machine<S> {
             self.frame_pins.pop();
             self.frames.pop();
         }
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
         if self.resume_stack.len() > parent_entry_idx + 1 {
             self.resume_stack.truncate(parent_entry_idx + 1);
         }
@@ -1762,6 +1768,7 @@ impl<const S: usize> Machine<S> {
             self.frame_pins.pop();
             self.frames.pop();
         }
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
 
         self.stack.push(yield_val);
         let caller = self.frames.get_mut();
@@ -2591,6 +2598,7 @@ impl<const S: usize> Machine<S> {
                             |frame| frame.set(callee_sp),
                         );
                         sp = callee_sp;
+                        self.push_pin_frame();
                     }
                 }
                 Instruction::TailCall => {

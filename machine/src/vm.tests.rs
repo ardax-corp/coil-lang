@@ -2245,6 +2245,28 @@
         assert_eq!(vm.pop().as_int(), 42);
     }
 
+    /// Yield used to pop the caller's pin frame; CALL after resume needs it.
+    #[test]
+    fn coroutine_yield_keeps_caller_pin_frame() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            make_coro(0, 5),
+            Byte::new(Instruction::ResumeCoro),
+            Byte::new(Instruction::CALL).with_call_packed(0, 8),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            // 5: coroutine body
+            const_int(42),
+            Byte::new(Instruction::YieldCoro),
+            Byte::new(Instruction::RETURN),
+            // 8: empty callee
+            Byte::new(Instruction::ConstReturnImm).with_operand_u32(7),
+        ]);
+        assert!(!vm.panicked());
+        assert_eq!(vm.pop().as_int(), 7);
+        assert_eq!(vm.pop().as_int(), 42);
+    }
+
     /// Resuming a completed coroutine panics.
     #[test]
     fn coroutine_resume_after_done_panics() {
