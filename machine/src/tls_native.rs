@@ -422,6 +422,13 @@ impl TlsSessionSlot {
             Self::Native(n) => n.alpn_protocol(),
         }
     }
+
+    /// `coil_tls_disable`: close_notify. Session stays valid until Drop.
+    pub fn disable(&self, fd: i64) -> Result<(), IoErrorTag> {
+        match self {
+            Self::Native(n) => n.disable(fd),
+        }
+    }
 }
 
 /// Non-blocking app read for a Tls-kind stream.
@@ -446,11 +453,14 @@ pub fn slot_write(
     }
 }
 
-/// Free the native session (`coil_tls_free`). close_notify is leftover `tls_*_disable`.
+/// close_notify (`coil_tls_disable`) if `handle` still has a usable fd, then
+/// Drop (`coil_tls_free`). Session stays valid between the two.
 ///
-/// Stream close / GC must not call `coil_tls_disable`: coil-tls currently frees
-/// inside disable (`tls.h`), so a following Drop `free` would double-free.
-pub fn drop_slot(_handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
+/// Best-effort: if the fd is already gone, skip disable and only free.
+pub fn drop_slot(handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
+    if let Some(h) = handle {
+        let _ = slot.disable(h.tls_abi_fd());
+    }
     drop(slot);
 }
 
@@ -696,6 +706,12 @@ mod tests {
         unsafe { f(session as i64) }
     }
 
+    unsafe fn stub_disable_calls_total(abi: &TlsNativeAbi) -> i32 {
+        let f: unsafe extern "C" fn() -> i32 =
+            unsafe { stub_sym(abi, b"coil_tls_stub_disable_calls_total\0") };
+        unsafe { f() }
+    }
+
     unsafe fn stub_set_next_enable_err(abi: &TlsNativeAbi, err: i32) {
         let f: unsafe extern "C" fn(i32) =
             unsafe { stub_sym(abi, b"coil_tls_stub_set_next_enable_err\0") };
@@ -779,9 +795,15 @@ mod tests {
         assert_eq!(wrote, 3);
         assert!(unsafe { stub_write_calls(&abi, ptr) } >= 1);
 
+        let live0 = unsafe { stub_live_sessions(&abi) };
+        let free0 = unsafe { stub_free_calls(&abi) };
+        let disable0 = unsafe { stub_disable_calls_total(&abi) };
         stream_close(&mut heap, stream).expect("close");
         assert!(with_stream_mut(&mut heap, stream, |s| s.closed).unwrap());
         assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
+        assert_eq!(unsafe { stub_disable_calls_total(&abi) }, disable0 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0 - 1);
         let _ = server.write_all(b"x");
     }
 
@@ -1123,11 +1145,59 @@ mod tests {
         assert_eq!(n, Some(5));
         assert_eq!(unsafe { stub_enable_calls(&abi) }, enable0 + 1);
 
+        let live0 = unsafe { stub_live_sessions(&abi) };
+        let disable0 = unsafe { stub_disable_calls_total(&abi) };
         crate::tls::tls_client_disable(&mut heap, stream).expect("disable");
         assert_eq!(
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
             StreamKind::Tcp
         );
+        assert_eq!(unsafe { stub_disable_calls_total(&abi) }, disable0 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0 - 1);
+        reset_preferred();
+        drop(server);
+    }
+
+    #[test]
+    fn leftover_disable_is_close_notify_then_drop() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi.clone());
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let opts = client_enable_opts(&mut heap);
+        crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts).expect("enable");
+
+        let ptr = native_ptr(&mut heap, stream);
+        let live0 = unsafe { stub_live_sessions(&abi) };
+        let free0 = unsafe { stub_free_calls(&abi) };
+        let disable0 = unsafe { stub_disable_calls(&abi, ptr) };
+        with_stream_mut(&mut heap, stream, |s| {
+            let fd = s.handle.as_ref().map(|h| h.tls_abi_fd()).unwrap_or(-1);
+            s.tls.as_ref().unwrap().disable(fd).expect("close_notify");
+        })
+        .unwrap();
+        assert!(unsafe { stub_disable_calls(&abi, ptr) } > disable0);
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
+
+        let disable1 = unsafe { stub_disable_calls_total(&abi) };
+        crate::tls::tls_client_disable(&mut heap, stream).expect("leftover disable");
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tcp
+        );
+        assert_eq!(unsafe { stub_disable_calls_total(&abi) }, disable1 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0 - 1);
         reset_preferred();
         drop(server);
     }
@@ -1153,7 +1223,13 @@ mod tests {
         let proto = crate::tls::tls_alpn_protocol(&mut heap, stream).expect("alpn");
         let s = crate::io::value_as_string(&heap, proto).expect("alpn string");
         assert_eq!(s, "h2");
-        crate::tls::tls_server_disable(&mut heap, stream).ok();
+        let live0 = unsafe { stub_live_sessions(&abi) };
+        let free0 = unsafe { stub_free_calls(&abi) };
+        let disable0 = unsafe { stub_disable_calls_total(&abi) };
+        crate::tls::tls_server_disable(&mut heap, stream).expect("server disable");
+        assert_eq!(unsafe { stub_disable_calls_total(&abi) }, disable0 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0 - 1);
         reset_preferred();
         drop(client);
     }
@@ -1251,16 +1327,6 @@ mod tests {
         Value::from(obj.addr())
     }
 
-    /// coil-tls `coil_tls_disable` also frees; leftover Drop would double-free.
-    fn leak_tls_slot(heap: &mut Heap, stream: Value) {
-        let _ = with_stream_mut(heap, stream, |s| {
-            if let Some(slot) = s.tls.take() {
-                std::mem::forget(slot);
-            }
-            s.kind = StreamKind::Tcp;
-        });
-    }
-
     #[test]
     fn leftover_abi_real_libtls_enable_would_block_keeps_session() {
         let Some(abi) = load_real_libtls() else {
@@ -1321,9 +1387,7 @@ mod tests {
             let opts = server_enable_opts_full(&mut heap, &cert_pem, &key_pem, 5000, "h2");
             let s = crate::tls::tls_server_enable(&mut heap, s, opts).expect("server enable");
             let proto = crate::tls::tls_alpn_protocol(&mut heap, s).expect("alpn");
-            let name = crate::io::value_as_string(&heap, proto).expect("alpn string");
-            leak_tls_slot(&mut heap, s);
-            name
+            crate::io::value_as_string(&heap, proto).expect("alpn string")
         });
         ready_rx
             .recv_timeout(Duration::from_secs(2))
@@ -1338,7 +1402,6 @@ mod tests {
             crate::tls::tls_client_enable(&mut heap, s, "localhost", opts).expect("client enable");
         let proto = crate::tls::tls_alpn_protocol(&mut heap, s).expect("alpn");
         let client_alpn = crate::io::value_as_string(&heap, proto).expect("alpn string");
-        leak_tls_slot(&mut heap, s);
         let server_alpn = server.join().expect("server");
         reactor.shutdown();
         reset_preferred();
@@ -1415,7 +1478,6 @@ mod tests {
         let s = crate::io::tcp_connect(&mut heap, "127.0.0.1", port as i64).expect("tcp");
         let opts = client_enable_opts_full(&mut heap, 100, "");
         let _ = crate::tls::tls_client_enable(&mut heap, s, "127.0.0.1", opts);
-        leak_tls_slot(&mut heap, s);
         let _ = peer.join();
 
         assert!(

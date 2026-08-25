@@ -319,6 +319,7 @@ pub fn stream_close(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
         }
         if s.kind == StreamKind::Tls {
             if let Some(slot) = s.tls.take() {
+                // close_notify while the fd is still open, then Drop frees.
                 crate::tls_native::drop_slot(s.handle.as_mut(), slot);
             }
         }

@@ -1056,6 +1056,7 @@ impl Drop for ObjStream {
     fn drop(&mut self) {
         if self.kind == StreamKind::Tls {
             if let Some(slot) = self.tls.take() {
+                // close_notify if the fd is still here, then free.
                 crate::tls_native::drop_slot(self.handle.as_mut(), slot);
             }
         }

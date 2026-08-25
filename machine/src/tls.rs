@@ -344,7 +344,10 @@ fn tls_teardown(heap: &mut Heap, stream: Value) -> Result<Value, IoErrorTag> {
             return Err(IoErrorTag::InvalidInput);
         }
         if let Some(slot) = s.tls.take() {
-            crate::tls_native::drop_slot(s.handle.as_mut(), slot);
+            if let Some(h) = s.handle.as_ref() {
+                let _ = slot.disable(h.tls_abi_fd());
+            }
+            crate::tls_native::drop_slot(None, slot);
         }
         s.kind = StreamKind::Tcp;
         Ok(())
