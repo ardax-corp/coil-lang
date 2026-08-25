@@ -1994,4 +1994,105 @@ fn main() { add(1, 2); }
             "bytecode should preserve StoreIndexPin* count; il={il_pins} bc={bc_pins}"
         );
     }
+
+    #[test]
+    fn pure_helper_on_index_hoists_len_and_unchecks() {
+        use common::Instruction;
+
+        let src = r#"
+fn absorb(int x) -> int {
+    let t = 0;
+    let k = 0;
+    while k < x {
+        t = t + 1;
+        k = k + 1;
+    }
+    return t;
+}
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    let n = 16;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let acc = 0;
+    let j = 0;
+    while j < len(b) {
+        acc = acc + absorb(b[j]);
+        j = j + 1;
+    }
+    return acc;
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline
+            .compile_src_retaining_il(src)
+            .expect("compile pure helper scan");
+        let stats = crate::last_bounds_stats();
+        assert!(
+            stats.array_len_hoists >= 1,
+            "len(b) should hoist across pure absorb; stats={stats:?}"
+        );
+        assert!(
+            stats.proven_index >= 1,
+            "b[j] should be proven under i < len(b); stats={stats:?}"
+        );
+        let snap = pipeline.cursor_il.as_ref().expect("retained IL");
+        let unchecked = snap.ops.iter().filter(|op| {
+            op.as_encode_byte().is_some_and(|b| {
+                matches!(
+                    *b.bytecode(),
+                    Instruction::IndexUnchecked | Instruction::IndexPinUnchecked
+                )
+            })
+        }).count();
+        assert!(
+            unchecked >= 1,
+            "pure helper scan should emit Unchecked index; stats={stats:?}"
+        );
+        let calls = bytecode
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::CALL)
+            .count();
+        assert!(
+            calls >= 1,
+            "absorb must remain a CALL (not tiny-inlined); otherwise the test is vacuous"
+        );
+    }
+
+    #[test]
+    fn pushing_helper_refuses_len_hoist() {
+        let src = r#"
+fn grow(Vec<int> a, int x) {
+    a.push(x);
+}
+fn main() {
+    let b: Vec<int> = Vec::new();
+    let n = 16;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let j = 0;
+    while j < len(b) {
+        grow(b, b[j]);
+        j = j + 1;
+    }
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        pipeline.compile_src(src).expect("compile pushing helper scan");
+        let stats = crate::last_bounds_stats();
+        assert_eq!(
+            stats.array_len_hoists, 0,
+            "pushing callee must refuse ArrayLen hoist; stats={stats:?}"
+        );
+        assert_eq!(
+            stats.proven_index, 0,
+            "pushing callee must not prove Index; stats={stats:?}"
+        );
+    }
 }

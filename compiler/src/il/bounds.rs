@@ -1098,8 +1098,9 @@ fn store_index_at_proven(ops: &[IlOp], store_op: usize, cl: &CountedLoop) -> boo
 /// arrays this loop addresses change while it runs?* Element writes cannot —
 /// `StoreIndex` overwrites a slot in place — so `while i < len(a) { a[i] = … }`
 /// still has an invariant `len(a)` even though the array is mutated. Anything
-/// that could grow, shrink or rebind an array (`ArrayPush`, a call, a host
-/// native, an unmodelled opcode) refuses the whole region.
+/// that could grow, shrink or rebind an array (`ArrayPush`, an impure call, a
+/// host native, an unmodelled opcode) refuses the whole region. Pure user
+/// helpers on `b[i]` are not a barrier ([COI-99]).
 ///
 /// When the length is invariant, the `LOAD a; ArrayLen; STORE t` triple codegen
 /// leaves in the loop header moves to the preheader, as does the `CONST; STORE`
@@ -1121,8 +1122,9 @@ mod hoist {
     pub(super) enum Refusal {
         /// Header stack height is not statically known.
         HeaderSpUnknown,
-        /// A call, host native, field access or unmodelled opcode in the body: it
-        /// could reach the array through an alias we cannot see.
+        /// A host native, field access, unmodelled opcode, or impure call in
+        /// the body: it could reach the array through an alias we cannot see.
+        /// Pure user helpers are not this refusal ([COI-99]).
         OpaqueOp,
         /// The body can change an array's length (`ArrayPush`, `MakeArray`, …).
         LengthMayChange,
@@ -2796,9 +2798,8 @@ mod tests {
 
     #[test]
     fn pure_call_in_loop_allows_array_len_hoist() {
+        use crate::il::op::EntryKind;
         use super::super::pure_call::{PureCallCtx, set_pure_call_ctx};
-        use crate::il::op::{EntryKind, IlJumpKind};
-        use std::collections::{HashMap, HashSet};
 
         reset_bounds_stats();
         let mut ctx = PureCallCtx::default();
@@ -2858,9 +2859,150 @@ mod tests {
         ];
         loop_bounds(&mut ops);
         set_pure_call_ctx(None);
+        let stats = last_bounds_stats();
         assert!(
-            last_bounds_stats().array_len_hoists >= 1,
-            "pure helper call must not block ArrayLen hoist"
+            stats.array_len_hoists >= 1,
+            "pure helper call must not block ArrayLen hoist; stats={stats:?}"
+        );
+        assert!(
+            stats.proven_index >= 1,
+            "pure helper on b[i] should prove Index; stats={stats:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(
+                op,
+                IlOp::IndexUnchecked { .. } | IlOp::IndexPinUnchecked { .. }
+            )),
+            "proven Index under a pure helper should rewrite to Unchecked; stats={stats:?}"
+        );
+    }
+
+    #[test]
+    fn impure_call_in_loop_refuses_array_len_hoist() {
+        use super::super::pure_call::set_pure_call_ctx;
+        reset_bounds_stats();
+        set_pure_call_ctx(None);
+        let mut ops = vec![
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            array_len_op(),
+            IlOp::StorePop { slot: 4, loc: loc() },
+            IlOp::Load { slot: 3, loc: loc() },
+            IlOp::Load { slot: 4, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc: loc(),
+            },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Index { loc: loc() },
+            IlOp::Entry {
+                kind: crate::il::op::EntryKind::Call,
+                arity: 1,
+                target: Label(9),
+                loc: loc(),
+            },
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Halt { loc: loc() },
+        ];
+        loop_bounds(&mut ops);
+        let stats = last_bounds_stats();
+        assert_eq!(
+            stats.array_len_hoists, 0,
+            "unknown CALL must refuse ArrayLen hoist; stats={stats:?}"
+        );
+        assert_eq!(
+            stats.proven_index, 0,
+            "unknown CALL must not prove Index; stats={stats:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IlOp::Index { .. })),
+            "Index must stay checked across an impure helper"
+        );
+    }
+
+    #[test]
+    fn field_ops_in_loop_refuse_length_proof() {
+        use super::super::pure_call::set_pure_call_ctx;
+        reset_bounds_stats();
+        set_pure_call_ctx(None);
+        let mut ops = vec![
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            array_len_op(),
+            IlOp::StorePop { slot: 4, loc: loc() },
+            IlOp::Load { slot: 3, loc: loc() },
+            IlOp::Load { slot: 4, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc: loc(),
+            },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Index { loc: loc() },
+            IlOp::Pop { loc: loc() },
+            IlOp::GetField { loc: loc() },
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Halt { loc: loc() },
+        ];
+        loop_bounds(&mut ops);
+        assert_eq!(
+            last_bounds_stats().array_len_hoists, 0,
+            "GetField must refuse length invariance"
         );
     }
 

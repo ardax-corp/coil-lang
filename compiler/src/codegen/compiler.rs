@@ -15684,9 +15684,15 @@ impl Compiler {
             .iter()
             .map(|(name, label)| (label.0, name.clone()))
             .collect();
+        let offset_callees = self
+            .functions
+            .iter()
+            .map(|(name, off)| (*off as u32, name.clone()))
+            .collect();
         self.opt_options.pure_call_ctx = Some(crate::il::PureCallCtx {
             pure_fns: self.pure_fns.clone(),
             label_callees,
+            offset_callees,
         });
         self.bytecode.set_opt_options(self.opt_options.clone());
         let mut lowered = if self.retain_cursor_il {
