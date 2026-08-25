@@ -86,9 +86,10 @@ VM parks on `reactor_wait_fd_no_help`, then pumps handshake via empty
 `coil_tls_read` / `coil_tls_write` until Ready (COI-116). Do not retry
 `enable`. `WouldBlock` from later `.so` IO is the same tagged `IoError`
 and parks on the VM reactor; do not handshake on a blocking `.so` thread.
-`coil_tls_disable` is close_notify; `coil_tls_free` is Drop. Stream close / GC
-only `free` — coil-tls `disable` currently also frees, so leftover Drop must
-not call disable.
+`coil_tls_disable` is close_notify; `coil_tls_free` is Drop. Leftover
+`tls_*_disable`, stream close, and GC send close_notify when the fd is still
+usable, then Drop frees. If the fd is already gone, free-only is OK
+(best-effort close_notify).
 
 ## Env / knobs
 
