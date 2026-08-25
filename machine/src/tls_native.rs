@@ -585,8 +585,8 @@ mod tests {
 
     const ABI_OK: i32 = -1;
     use crate::io_reactor::Interest;
-    use crate::memory::{Heap, Member, ObjArray, Object};
-    use common::Value;
+    use crate::memory::{Heap, Member, ObjArray, ObjBoxed, Object};
+    use common::{Value, ValueTag};
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
@@ -1086,6 +1086,24 @@ mod tests {
         Value::from(obj.addr())
     }
 
+    /// Generic `enable<T>` call sites box the anonymous record (`ValueTag::Record`
+    /// → `Object::Boxed`) the same way leftover actually sees it.
+    fn box_record_opts(heap: &mut Heap, inner: Value) -> Value {
+        let addr = inner.raw() as u64;
+        let payload = match heap.find_object_by_addr(addr) {
+            Some(obj) => Member::Object(obj),
+            None => Member::Value(inner),
+        };
+        let (obj, _) = heap.alloc(
+            ObjBoxed {
+                tag: ValueTag::Record as u16,
+                payload,
+            },
+            Object::Boxed,
+        );
+        Value::from(obj.addr())
+    }
+
     #[test]
     fn leftover_enable_without_abi_leaves_tcp() {
         let _guard = stub_lock();
@@ -1252,6 +1270,80 @@ mod tests {
         assert_eq!(err, IoErrorTag::InvalidInput);
         reset_preferred();
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn leftover_boxed_client_opts_parse_is_not_invalid_input() {
+        let _guard = stub_lock();
+        reset_preferred();
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let opts = box_record_opts(&mut heap, client_enable_opts(&mut heap));
+        let err = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts).unwrap_err();
+        assert_ne!(
+            err,
+            IoErrorTag::InvalidInput,
+            "boxed generic opts must parse; leftover without ABI is Other"
+        );
+        assert_eq!(err, IoErrorTag::Other);
+        drop(server);
+    }
+
+    #[test]
+    fn leftover_boxed_client_opts_enable_attaches() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi.clone());
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        unsafe { stub_set_next_enable_err(&abi, IoErrorTag::WouldBlock as i32) };
+
+        let opts = box_record_opts(&mut heap, client_enable_opts(&mut heap));
+        let out = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts)
+            .expect("boxed generic opts must parse and leftover enable must attach");
+        assert_eq!(out, stream);
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tls
+        );
+        crate::tls::tls_client_disable(&mut heap, stream).expect("disable");
+        reset_preferred();
+        drop(server);
+    }
+
+    #[test]
+    fn leftover_boxed_server_opts_enable_attaches() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi.clone());
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(server), StreamKind::Tcp).expect("alloc");
+        let opts = box_record_opts(&mut heap, server_enable_opts(&mut heap));
+        crate::tls::tls_server_enable(&mut heap, stream, opts)
+            .expect("boxed generic server opts must parse and leftover enable must attach");
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tls
+        );
+        crate::tls::tls_server_disable(&mut heap, stream).expect("disable");
+        reset_preferred();
+        drop(client);
     }
 
     fn real_libtls_path() -> Option<PathBuf> {

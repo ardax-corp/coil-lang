@@ -18,7 +18,7 @@ use crate::io::{
     value_as_string, with_stream_mut,
 };
 use crate::io_reactor::Interest;
-use crate::memory::{Heap, Member, ObjString, Object, StreamKind};
+use crate::memory::{Heap, Member, ObjString, Object, RefInstance, StreamKind};
 use crate::tls_native::{NativeEnable, TlsNativeAbi, attach_enable_outcome, resolve_preferred};
 
 struct ClientEnableOpts {
@@ -68,11 +68,28 @@ fn value_as_option_string(heap: &Heap, v: Value) -> Result<Option<String>, IoErr
     }
 }
 
+/// Generic `enable<T>` forwards a boxed anonymous record (`ValueTag::Record`
+/// → `Object::Boxed`) without `UnboxValue`. Peel one box so leftover parse
+/// sees the inner instance the same way as a direct call.
+fn opts_instance(heap: &Heap, opts: Value) -> Result<RefInstance, IoErrorTag> {
+    match heap.find_object_by_addr(opts.raw() as u64) {
+        Some(Object::Instance(gc)) => Ok(gc),
+        Some(Object::Boxed(gc)) => {
+            let inner = match &gc.as_ref().payload {
+                Member::Object(o) => o.addr(),
+                Member::Value(v) => v.raw() as u64,
+            };
+            match heap.find_object_by_addr(inner) {
+                Some(Object::Instance(inst)) => Ok(inst),
+                _ => Err(IoErrorTag::InvalidInput),
+            }
+        }
+        _ => Err(IoErrorTag::InvalidInput),
+    }
+}
+
 fn parse_tls_options(heap: &Heap, opts: Value) -> Result<ClientEnableOpts, IoErrorTag> {
-    let addr = opts.raw() as u64;
-    let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else {
-        return Err(IoErrorTag::InvalidInput);
-    };
+    let gc = opts_instance(heap, opts)?;
     let mut verify: Option<bool> = None;
     let mut ca_pem: Option<Option<String>> = None;
     let mut ca_path: Option<Option<String>> = None;
@@ -119,10 +136,7 @@ fn parse_tls_options(heap: &Heap, opts: Value) -> Result<ClientEnableOpts, IoErr
 }
 
 fn parse_server_enable_options(heap: &Heap, opts: Value) -> Result<ServerEnableOpts, IoErrorTag> {
-    let addr = opts.raw() as u64;
-    let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else {
-        return Err(IoErrorTag::InvalidInput);
-    };
+    let gc = opts_instance(heap, opts)?;
     let mut cert_pem: Option<String> = None;
     let mut key_pem: Option<String> = None;
     let mut timeout_ms: Option<i64> = None;
