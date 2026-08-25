@@ -1590,7 +1590,7 @@ fn aot_p2_vec_scan_dispatch_regression() {
 /// `len(v)` and rewrites the index. `absorb` must remain a CALL.
 #[test]
 fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
-    let (bc, _, _, _, pipeline) = compile("examples/perf/vec_scan_pure.hy");
+    let (bc, pool, strings, statics, pipeline) = compile("examples/perf/vec_scan_pure.hy");
     let stats = compiler::last_bounds_stats();
     assert!(
         stats.array_len_hoists >= 1,
@@ -1622,6 +1622,13 @@ fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
     assert!(
         count_opcodes_in(&bc, start, end, Instruction::CALL) >= 1,
         "absorb must remain a CALL (not tiny-inlined)"
+    );
+    let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
+    println!("[COI-99] vec_scan_pure dispatches={dispatches}");
+    // absorb's 8-iter loop plus CALL; vec_scan itself is ~5.0M.
+    assert!(
+        dispatches > 5_300_000 && dispatches < 20_000_000,
+        "vec_scan_pure dispatch count unexpected: {dispatches}"
     );
 }
 
