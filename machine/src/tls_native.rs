@@ -1280,7 +1280,8 @@ mod tests {
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
-        let opts = box_record_opts(&mut heap, client_enable_opts(&mut heap));
+        let inner = client_enable_opts(&mut heap);
+        let opts = box_record_opts(&mut heap, inner);
         let err = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts).unwrap_err();
         assert_ne!(
             err,
@@ -1307,7 +1308,8 @@ mod tests {
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
         unsafe { stub_set_next_enable_err(&abi, IoErrorTag::WouldBlock as i32) };
 
-        let opts = box_record_opts(&mut heap, client_enable_opts(&mut heap));
+        let inner = client_enable_opts(&mut heap);
+        let opts = box_record_opts(&mut heap, inner);
         let out = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts)
             .expect("boxed generic opts must parse and leftover enable must attach");
         assert_eq!(out, stream);
@@ -1334,7 +1336,8 @@ mod tests {
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(server), StreamKind::Tcp).expect("alloc");
-        let opts = box_record_opts(&mut heap, server_enable_opts(&mut heap));
+        let inner = server_enable_opts(&mut heap);
+        let opts = box_record_opts(&mut heap, inner);
         crate::tls::tls_server_enable(&mut heap, stream, opts)
             .expect("boxed generic server opts must parse and leftover enable must attach");
         assert_eq!(
