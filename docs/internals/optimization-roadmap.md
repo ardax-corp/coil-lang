@@ -87,7 +87,7 @@ titles can oversell.
 | **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. Dup-CSE re-expanded before lower for fuse-select. |
 | **`ssa_gvn`** (`gvn_ssa.rs`) | Virtual `Phi(block,slot)` VNs; redundant pure `Const`/`Load`+`Bin` → `Load` when value already in a slot | **Not rename.** `DIV`/`MOD`/`DIVF`/`MODF` excluded. Also runs inside per-body `cfg_gvn_with` when enabled. |
 | **`escape_analysis`** | Immediate-only `MakeArray` (arity ≤ 32) → consecutive frame slots | Fail-closed on escape. Computed elements stay heap. **Not** named-local class SROA (COI-84). |
-| **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists to preheader | **`Index` stays checked** — no `IndexUnchecked` (COI-85). `LEQ`/`GEQ` headers are **not** length proofs (COI-85 / COI-98). |
+| **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists; proven counted / stride sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked` (archive minor 12), then `IndexPin*` (minor 13) | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, helper-call, host, FFI, growing-array, and alias-push loops stay checked. Pure-helper coverage is [COI-99](https://linear.app/ardax/issue/COI-99), not "never ship Unchecked". |
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
 | **`seek_back_edge`** | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Default off** on `Standard`. COI-97 measured fuse loss on mandelbrot; outer-loop Seek splits `FloatChainStore`. **`Aggressive` / `-O3` turns it on** — production `Standard` stays off until re-measured. |
@@ -96,10 +96,12 @@ titles can oversell.
 | **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
 | **Branch layout / block reorder** | Profile/heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
 
-**Still open (not done):** PGO on the benchmark matrix (measurement suite still
-open). Inlining / predicate peel / direct `new Class(args).field` scalar
-replacement live in **codegen**, not `il/opt` (self-recursive peel refused,
-COI-86). No JIT — Cranelift section below remains a feasibility sketch.
+**Still open (not done):** length invariance across **pure** helper calls inside
+`while i < len(b)` loops — [COI-99](https://linear.app/ardax/issue/COI-99).
+PGO on the benchmark matrix (measurement suite still open). Inlining /
+predicate peel / direct `new Class(args).field` scalar replacement live in
+**codegen**, not `il/opt` (self-recursive peel refused, COI-86). No JIT —
+Cranelift section below remains a feasibility sketch.
 
 Pass headers in `compiler/src/il/**` are the source of truth when this table
 and Linear disagree.
@@ -173,13 +175,13 @@ What neither slice does yet (see
 Priority: high (first slice landed; unchecked opcodes + stride induction follow-up landed).
 
 Proven counted-loop sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
-(archive minor 12), then eligible loops pin the array and rewrite to
+(archive minor 12). Eligible loops then pin the array and rewrite to
 `IndexPinUnchecked` / `StoreIndexPinUnchecked` (archive minor 13) so the VM
 skips per-index `find_object_by_addr`. Unit `+1` loops (`while i < len(a)`) and
 invariant stride loops (`k = k + p` with positive invariant `p`) share the
-same length-invariance proof. Pure user helper calls on `b[i]` no longer block
-that proof ([COI-99](https://linear.app/ardax/issue/COI-99)). Dynamic indices
-and unproven stride steps keep checked `Index` / `StoreIndex`.
+same length-invariance proof (`LE` / post-canon `GT` headers only).
+`LEQ` / `GEQ` are **not** length / in-bounds proofs (COI-85 / COI-98). Dynamic
+indices and unproven stride steps keep checked `Index` / `StoreIndex`.
 
 `il::bounds.rs` proves **length invariance** per natural loop instead of
 relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
@@ -194,12 +196,20 @@ scan/fill shape, from 6.58M to 5.01M. Safety comes from the cursor: the
 preheader store floors it at `t + 1`, and every in-loop stack height staying at
 or above the header's proves no in-loop push can reach `t`.
 
+[#192](https://github.com/ardax-corp/coil-lang/pull/192) checked `Index` in
+nsieve went to **0** (1:1 opcode swap; dispatch count stayed 469,895). Wall /
+cycle deltas on the poop matrix were within noise; the leftover cost on those
+sites was `find_object_by_addr`, which minor 13 pins for proven loops.
+Unproven, helper-call, host, FFI, growing-array, and alias-push loops stay
+checked.
+
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):
 
-- **Impure calls in counted loops.** Pure user helpers on `b[i]` no longer block
-  length hoists or array pins; impure calls, host natives, and unmodelled ops
-  still refuse the region.
+- **Loops that call a helper on `b[i]`.** Most stdlib `while i < len(b)` loops
+  do, and a call could `push` through another reference. Wiring the existing
+  purity/effect summaries into the barrier is [COI-99](https://linear.app/ardax/issue/COI-99)
+  — that is the remaining coverage gap, not a reason to unship Unchecked.
 
 ### 3. Allocation and GC fast paths
 

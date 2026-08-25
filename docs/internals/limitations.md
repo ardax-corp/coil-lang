@@ -43,9 +43,9 @@ Tracked in Linear project Known limitations (milestone **IL / codegen model**). 
 | Optimization statistics — **default off** (`collect_stats` / `--opt-stats`) | [COI-131](https://linear.app/ardax/issue/COI-131) |
 | Slot promotion across loop back-edges — **decided: keep Unknown headers** ([COI-97](https://linear.app/ardax/issue/COI-97) measured: innermost mandelbrot has no self-stores; outer Seek splits FloatChain; `seek_back_edge` off on `Standard`, on on `Aggressive`) | [COI-83](https://linear.app/ardax/issue/COI-83) |
 | Named-local class scalar replacement — **decided: named locals stay heap-backed** (temps elide; `fn drop()` always boxes) | [COI-84](https://linear.app/ardax/issue/COI-84) |
-| Bounds analysis vs `IndexUnchecked` — **implemented**: proven counted-loop sites rewrite to unchecked opcodes; dynamic indices stay on `Index` / `StoreIndex` | [COI-85](https://linear.app/ardax/issue/COI-85) |
+| Bounds analysis vs `IndexUnchecked` — **implemented**: proven counted / stride loops (`LE` / `GT` headers) rewrite to unchecked opcodes; `LEQ`/`GEQ` are not proofs; dynamic indices stay on `Index` / `StoreIndex` | [COI-85](https://linear.app/ardax/issue/COI-85) |
 | Array pin / `IndexPin*` — **implemented**: proven loops pin arrays in the preheader and rewrite index sites to skip `find_object_by_addr` | archive minor 13 |
-| Pure helper calls in counted loops — **implemented**: purity summary lets length hoists and array pins survive pure `CALL` sites | [COI-99](https://linear.app/ardax/issue/COI-99) |
+| Pure helper calls in counted loops — **open**: any `CALL` still refuses length invariance (a callee may `push` through another reference); [COI-99](https://linear.app/ardax/issue/COI-99) is the remaining coverage gap | [COI-99](https://linear.app/ardax/issue/COI-99) |
 | Caller-side predicate peel vs self-recursion — **decided: keep refusals** (self-recursive peel loses to the frame) | [COI-86](https://linear.app/ardax/issue/COI-86) |
 | `*Jmpt` / fused invert — **implemented** (`*Jmpt` twins; invert fused `*Jmpf; JMP`) | [COI-87](https://linear.app/ardax/issue/COI-87) |
 | `multi_op_join_convoy` JMPF mis-sink — **decided: whole-buffer only** | [COI-91](https://linear.app/ardax/issue/COI-91) |
@@ -121,14 +121,17 @@ invariant-stride counted loop rewrite to `IndexUnchecked` / `StoreIndexUnchecked
 (archive minor 12), then to `IndexPinUnchecked` / `StoreIndexPinUnchecked` when
 the array slot is length-invariant (archive minor 13). Unproven dynamic indices
 keep the checked opcodes: out-of-range read → `-1`, out-of-range write → no-op.
-Pure user helper calls on `b[i]` no longer refuse the length-invariance proof
-([COI-99](https://linear.app/ardax/issue/COI-99)); impure calls still do.
+Helper-call, host, FFI, growing-array, and alias-push loops stay checked.
+[#192](https://github.com/ardax-corp/coil-lang/pull/192) nsieve checked `Index`
+went to 0; leftover cost on those sites was `find_object_by_addr` (addressed
+for proven loops by `IndexPin*`). Length invariance across **pure** helper
+calls is still open ([COI-99](https://linear.app/ardax/issue/COI-99)).
 
 The safety argument is the cursor, not liveness: the preheader `STORE t` floors the cursor at `t + 1`, and because the cursor is monotone in its input, proving every in-loop stack height stays at or above the header's proves every in-loop push lands above `t`. That is why the pass needs only `il::sp`, and why it works where `slot_promote` cannot — it *adds* a floor instead of removing one. Deliberately refused:
 
 | Refused | Why |
 |---------|-----|
-| Any impure call, host native, `GetField`/`SetField`, or unmodelled op in the body | The callee could hold another reference to the array and `push`/`pop` it. Pure user helpers on `b[i]` are allowed ([COI-99](https://linear.app/ardax/issue/COI-99)); still no `IndexUnchecked` across impure calls |
+| Any call, host native, `GetField`/`SetField`, or unmodelled op in the body | The callee could hold another reference to the array and `push`/`pop` it. Pure helpers on `b[i]` are [COI-99](https://linear.app/ardax/issue/COI-99), not a reason to skip the check today |
 | `ArrayPush` / `MakeArray` / `MakeDict` / `CodePtr` / `MakePolyFn` in the body | Length can change (`tests/positive/while_len_grow.hy`) or user code can run |
 | A rebound `Vec` local (`slots_stored_in_loop`) | A different array each pass, so its length is not invariant |
 | An `Index` / `StoreIndex` whose target is not a plain slot load | Nested `a[i][j]`, a `Dup`, a call result: the walk-back cannot name the array, so the whole loop is refused |
