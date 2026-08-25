@@ -596,6 +596,9 @@ pub const CRYPTO_CT_EQ: &str = "crypto_ct_eq";
 
 /// Pipeline wiring contract: `(registry_name, arity, host_fn)`.
 ///
+/// Ids reserved; do not reorder; userland extract will stub these
+/// (coil-crypto). See [`crate::reserved_hostinvoke`].
+///
 /// Register each entry with `pipeline.register_host_native` and wire via
 /// `HostInvoke` + `MakeTuple` (same stack order as `io` / `thread` natives:
 /// outer `CONST native_id` first, then `MakeTuple` args in source order).
