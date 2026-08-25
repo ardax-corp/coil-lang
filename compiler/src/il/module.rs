@@ -126,11 +126,15 @@ impl IlModule {
             if let Some(g) = self.glue.get(i) {
                 chunk.extend(g.iter().cloned());
             }
+            let old_entry = body.meta.entry.map(|Label(id)| id);
             let (chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
-            if let Some(Label(old_entry)) = body.meta.entry
-                && let Some(&new_entry) = map.get(&old_entry)
-            {
-                entry_labels.insert(old_entry, new_entry);
+            // Prefer the remapped emit-time entry. If opts dropped that id
+            // (preheader / relabel), CALL still has to land on this body.
+            let new_entry = old_entry
+                .and_then(|old| map.get(&old).copied())
+                .or_else(|| first_label_id(&chunk));
+            if let (Some(old), Some(new)) = (old_entry, new_entry) {
+                entry_labels.insert(old, new);
             }
             func_label_maps.push(map.clone());
             merge_remap_labels(&mut prior_labels, map);
@@ -267,13 +271,24 @@ fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
     }
 }
 
-/// Patch cross-function `Jump`/`Entry` targets; keep intra-segment labels local.
-/// Unique old ids map 1:1; collisions fall back to recorded function entries.
+fn first_label_id(ops: &[IlOp]) -> Option<u32> {
+    ops.iter().find_map(|op| match op {
+        IlOp::Label(Label(id)) => Some(*id),
+        _ => None,
+    })
+}
+
+/// Prefer recorded function entries so a later body's internal label cannot
+/// steal a reminted callee entry (unique-hit false positive). Unique old ids
+/// still map 1:1 for typeclass / default-method CALLs that are not `IlFunc.entry`.
 fn resolve_cross_function_entry(
     old: u32,
     maps: &[HashMap<u32, u32>],
     entry_labels: &HashMap<u32, u32>,
 ) -> Option<u32> {
+    if let Some(&entry) = entry_labels.get(&old) {
+        return Some(entry);
+    }
     let mut uniq = None;
     let mut hits = 0u8;
     for map in maps {
@@ -281,7 +296,7 @@ fn resolve_cross_function_entry(
             hits = hits.saturating_add(1);
             uniq = Some(new);
             if hits > 1 {
-                return entry_labels.get(&old).copied();
+                return None;
             }
         }
     }
@@ -548,6 +563,150 @@ mod tests {
         assert_eq!(
             entry_target, callee_label,
             "CALL target {entry_target} must be the callee entry {callee_label}, not the decoy's reused id"
+        );
+    }
+
+    #[test]
+    fn to_flat_remaps_call_when_entry_label_was_relabeled() {
+        let loc = loc();
+        let emit_entry = Label(10);
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("callee", Some(emit_entry), 0, 2),
+            ops: vec![IlOp::Label(Label(3)), IlOp::Return { loc }],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("caller", None, 0, 2),
+            ops: vec![
+                IlOp::Entry {
+                    kind: EntryKind::Call,
+                    arity: 0,
+                    target: emit_entry,
+                    loc,
+                },
+                IlOp::Return { loc },
+            ],
+        });
+        let (flat, _, _) = m.to_flat();
+        let callee_label = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Label(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .expect("callee body label");
+        let entry_target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .expect("caller Entry");
+        assert_eq!(
+            entry_target, callee_label,
+            "CALL to emit-time entry must follow the body's surviving label"
+        );
+    }
+
+    /// A decoy loop label uniquely owns the callee's emit-time entry id after
+    /// the callee body was relabeled. CALL must still follow `IlFunc.entry`.
+    #[test]
+    fn to_flat_prefers_recorded_entry_over_unique_internal_label() {
+        let loc = loc();
+        let emit_entry = Label(10);
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("decoy", Some(Label(0)), 0, 3),
+            ops: vec![
+                IlOp::Label(Label(0)),
+                IlOp::Label(emit_entry),
+                IlOp::Return { loc },
+            ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("callee", Some(emit_entry), 0, 2),
+            ops: vec![IlOp::Label(Label(3)), IlOp::Return { loc }],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("caller", None, 0, 2),
+            ops: vec![
+                IlOp::Entry {
+                    kind: EntryKind::Call,
+                    arity: 0,
+                    target: emit_entry,
+                    loc,
+                },
+                IlOp::Return { loc },
+            ],
+        });
+        let (flat, _, _) = m.to_flat();
+        let callee_label = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .nth(2)
+            .expect("callee entry is the third label");
+        let entry_target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .expect("caller Entry");
+        assert_eq!(
+            entry_target, callee_label,
+            "recorded entry must win over a unique decoy loop label"
+        );
+    }
+
+    /// Typeclass / default-method CALLs target a body label that is not
+    /// `IlFunc.entry`; unique-hit still remaps those.
+    #[test]
+    fn to_flat_remaps_unique_non_entry_call_target() {
+        let loc = loc();
+        let method = Label(7);
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("method", Some(Label(1)), 0, 3),
+            ops: vec![
+                IlOp::Label(Label(1)),
+                IlOp::Label(method),
+                IlOp::Return { loc },
+            ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("caller", None, 0, 2),
+            ops: vec![
+                IlOp::Entry {
+                    kind: EntryKind::Call,
+                    arity: 0,
+                    target: method,
+                    loc,
+                },
+                IlOp::Return { loc },
+            ],
+        });
+        let (flat, _, _) = m.to_flat();
+        let method_label = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .nth(1)
+            .expect("method body label");
+        let entry_target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .expect("caller Entry");
+        assert_eq!(
+            entry_target, method_label,
+            "unique non-entry CALL must follow the method body label"
         );
     }
 
