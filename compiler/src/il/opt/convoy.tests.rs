@@ -1757,6 +1757,7 @@
                 iterative_optimization: false,
                 max_optimization_iterations: 10,
                 collect_stats: false,
+                pure_call_ctx: None,
             },
             3,
             &mut Vec::new(),

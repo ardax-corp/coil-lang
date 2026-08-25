@@ -1893,4 +1893,105 @@ fn main() { add(1, 2); }
         let json = stats.format_json();
         assert!(json.contains("\"functions_inlined\""));
     }
+
+    #[test]
+    fn vec_scan_array_pin_entry_jumps_stay_in_function() {
+        use common::Instruction;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let src =
+            std::fs::read_to_string(root.join("examples/perf/vec_scan.hy")).expect("read vec_scan");
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline.compile_src(&src).expect("compile vec_scan");
+        let syms = pipeline.program_debug().fn_symbols;
+        let end = bytecode.len();
+        for name in ["fill", "scan"] {
+            let idx = syms.iter().position(|s| s.name == name).expect("fn sym");
+            let start = syms[idx].entry_pc as usize;
+            let end = syms
+                .get(idx + 1)
+                .map(|s| s.entry_pc as usize)
+                .unwrap_or(end);
+            for (pc, b) in bytecode[start..end].iter().enumerate() {
+                let pc = start + pc;
+                let insn = *b.bytecode();
+                if matches!(insn, Instruction::JMP) {
+                    let target = b.operand_u32() as usize;
+                    assert!(
+                        (start..end).contains(&target),
+                        "{name}: JMP at {pc} escapes function body (target={target}, range={start}..{end})"
+                    );
+                }
+            }
+            assert!(
+                bytecode[start..end]
+                    .iter()
+                    .any(|b| *b.bytecode() == Instruction::ArrayPin),
+                "{name} should emit ArrayPin in final bytecode"
+            );
+        }
+    }
+
+    #[test]
+    fn nsieve_retained_il_and_bytecode_emit_store_index_pin() {
+        use common::Instruction;
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let src =
+            std::fs::read_to_string(root.join("examples/perf/nsieve.hy")).expect("read nsieve");
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline
+            .compile_src_retaining_il(&src)
+            .expect("compile nsieve");
+        let snap = pipeline
+            .cursor_il
+            .as_ref()
+            .expect("retained IL snapshot");
+        let il_index_pins = snap
+            .ops
+            .iter()
+            .filter(|op| {
+                op.as_encode_byte().is_some_and(|b| {
+                    matches!(
+                        b.bytecode(),
+                        Instruction::IndexPin | Instruction::IndexPinUnchecked
+                    )
+                })
+            })
+            .count();
+        let il_pins = snap
+            .ops
+            .iter()
+            .filter(|op| {
+                op.as_encode_byte().is_some_and(|b| {
+                    matches!(
+                        b.bytecode(),
+                        Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked
+                    )
+                })
+            })
+            .count();
+        let bc_pins = bytecode
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.bytecode(),
+                    Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked
+                )
+            })
+            .count();
+        assert!(
+            il_index_pins >= 1,
+            "retained IL should contain IndexPin*; il_index_pins={il_index_pins}"
+        );
+        assert!(
+            il_pins >= 1,
+            "retained IL should contain StoreIndexPin*; il_pins={il_pins} il_index_pins={il_index_pins} stats={:?}",
+            crate::last_bounds_stats()
+        );
+        assert_eq!(
+            bc_pins, il_pins,
+            "bytecode should preserve StoreIndexPin* count; il={il_pins} bc={bc_pins}"
+        );
+    }
 }

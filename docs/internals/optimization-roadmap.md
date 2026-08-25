@@ -96,10 +96,9 @@ titles can oversell.
 | **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
 | **Branch layout / block reorder** | Profile/heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
 
-**Still open (not done):** length invariance across **pure** helper calls inside
-`while i < len(b)` loops — [COI-99](https://linear.app/ardax/issue/COI-99).
-Still no `IndexUnchecked`. Inlining / predicate peel / direct `new Class(args).field`
-scalar replacement live in **codegen**, not `il/opt` (self-recursive peel refused,
+**Still open (not done):** PGO on the benchmark matrix (measurement suite still
+open). Inlining / predicate peel / direct `new Class(args).field` scalar
+replacement live in **codegen**, not `il/opt` (self-recursive peel refused,
 COI-86). No JIT — Cranelift section below remains a feasibility sketch.
 
 Pass headers in `compiler/src/il/**` are the source of truth when this table
@@ -171,41 +170,36 @@ What neither slice does yet (see
 
 ### 2. Loop range and bounds analysis
 
-Priority: high (first slice landed).
+Priority: high (first slice landed; unchecked opcodes + stride induction follow-up landed).
 
-`Index` and `StoreIndex` still perform runtime object lookup and signed bounds
-checks in `machine/src/vm.rs`, and that has not changed: the landed slice is
-proof-only and touches no VM handler.
+Proven counted-loop sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
+(archive minor 12), then eligible loops pin the array and rewrite to
+`IndexPinUnchecked` / `StoreIndexPinUnchecked` (archive minor 13) so the VM
+skips per-index `find_object_by_addr`. Unit `+1` loops (`while i < len(a)`) and
+invariant stride loops (`k = k + p` with positive invariant `p`) share the
+same length-invariance proof. Pure user helper calls on `b[i]` no longer block
+that proof ([COI-99](https://linear.app/ardax/issue/COI-99)). Dynamic indices
+and unproven stride steps keep checked `Index` / `StoreIndex`.
 
 `il::bounds.rs` proves **length invariance** per natural loop instead of
-per-index bounds. `StoreIndex` overwrites an element in place, so a loop that
-writes `a[i]` still has an invariant `len(a)`; `ArrayPush`, a call, a host
-native or any unmodelled op refuses the region. Two invariant materializations
-move to the preheader on that proof — the `LOAD a; ArrayLen; STORE t` triple
-codegen leaves in the header of `while i < len(a)`, and the `CONST imm; STORE t`
-pair that materializes a constant addressing operand in `a[i] = 0`. `nsieve`'s
-sieve loop went from 8 words per iteration to 6 (545.6k → 469.9k dispatches);
-`examples/perf/vec_scan.hy`, the `while i < len(v)` scan/fill shape, from 6.58M
-to 5.01M. Safety comes from the cursor: the preheader store floors it at
-`t + 1`, and every in-loop stack height staying at or above the header's proves
-no in-loop push can reach `t`.
+relying on per-index runtime tests alone. `StoreIndex` overwrites an element in
+place, so a loop that writes `a[i]` still has an invariant `len(a)`; `ArrayPush`,
+a call, a host native or any unmodelled op refuses the region. Two invariant
+materializations move to the preheader on that proof — the `LOAD a; ArrayLen;
+STORE t` triple codegen leaves in the header of `while i < len(a)`, and the
+`CONST imm; STORE t` pair that materializes a constant addressing operand in
+`a[i] = 0`. `nsieve`'s sieve loop went from 8 words per iteration to 6 (545.6k
+→ 469.9k dispatches); `examples/perf/vec_scan.hy`, the `while i < len(v)`
+scan/fill shape, from 6.58M to 5.01M. Safety comes from the cursor: the
+preheader store floors it at `t + 1`, and every in-loop stack height staying at
+or above the header's proves no in-loop push can reach `t`.
 
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):
 
-- **`0 <= i < len` is not proven at all.** Induction-variable detection was
-  deliberately left out because nothing consumes the fact: without an unchecked
-  addressing form the proof cannot change a single emitted word. `loop_unroll`
-  may accept `LEQ` for **trip count** — that meaning is separate from bounds
-  Index proofs (COI-85 / COI-98). Pair in-bounds work with an opcode decision,
-  not with this pass alone.
-- **Loops that call a helper on `b[i]`.** Most stdlib `while i < len(b)` loops do,
-  and a call could `push` to the array through another reference. Wiring the
-  existing purity/effect summaries into the barrier test is the widest available
-  win here.
-- **The `find_object_by_addr` lookup per `Index`.** Hoisting the resolved array
-  means keeping a heap address live across a GC point in IL; the length hoists
-  precisely because it is an `int`.
+- **Impure calls in counted loops.** Pure user helpers on `b[i]` no longer block
+  length hoists or array pins; impure calls, host natives, and unmodelled ops
+  still refuse the region.
 
 ### 3. Allocation and GC fast paths
 
@@ -298,7 +292,7 @@ existing opcode; fits append-only opcode ABI.
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
 | `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle=1` (`tr`→`zr`); IL opts refused overlapping live ranges | ~2.56M dispatches/run (LOAD+STORE latch) | **needs more proof** (or defer pending benches) | Largest residual dispatch count, but mandelbrot-heavy; tak/numeric/nsieve have 0 latch shuffles. Needs universality proof (more loop-carried programs) before an append-only `MoveSlot` / rename op. Overlapping ranges may still need SSA rename rather than a 1-op shuffle. |
-| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **needs more proof** | Align with roadmap §2: diagnostics and bounds proofs first; opcode only after proof-only analysis shows a universal safe fast path. **`ssa_gvn` / escape / unroll do not remove Index checks today.** |
+| Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **done** | `il::bounds` proofs + `IndexPin*` (minor 13) on proven loops |
 | Unary slot / float `BinSlotImm` / packing holes | 0 on mandelbrot/tak/numeric/nsieve | — | **defer** | Zero evidence on the hot matrix. |
 | Slot move (non-latch) | numeric `slot_move` ≤3 (format/host temp) | low | **defer** | Not loop-carried; format-path noise, not a fuse candidate. |
 

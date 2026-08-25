@@ -946,6 +946,8 @@ pub struct Compiler {
 
     /// Self-recursive pure function names eligible for auto fork-join.
     recursive_pure: HashSet<String>,
+    /// Side-effect-free user `fn` names (loop bounds / COI-99).
+    pure_fns: HashSet<String>,
     /// Detected independent-parallel-arm fork sites for pure fns.
     par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
     /// Concrete arg vectors requiring `__coil_par_*` specializations.
@@ -1047,6 +1049,7 @@ impl Default for Compiler {
             suppress_match_fusion_barrier: false,
             match_tail_call: false,
             recursive_pure: HashSet::new(),
+            pure_fns: HashSet::new(),
             par_shapes: HashMap::new(),
             par_spec_args: HashMap::new(),
             loop_par_sites: crate::typechecking::LoopParSites::new(),

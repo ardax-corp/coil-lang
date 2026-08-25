@@ -457,7 +457,10 @@ fn try_mark_dead_store(
 /// True when `Load` at `load_idx` is the tuple-destructure reload (`Const; Index`).
 pub(super) fn mem_fwd_load_feeds_index(ops: &[IlOp], load_idx: usize) -> bool {
     matches!(ops.get(load_idx + 1), Some(IlOp::Const { .. }))
-        && matches!(ops.get(load_idx + 2), Some(IlOp::Index { .. }))
+        && matches!(
+            ops.get(load_idx + 2),
+            Some(IlOp::Index { .. } | IlOp::IndexUnchecked { .. })
+        )
 }
 
 /// Drop `StorePop s` (and a preceding dead producer / Dup) when `s` is unused

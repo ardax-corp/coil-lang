@@ -421,6 +421,14 @@ fn format_il_op(op: &IlOp) -> String {
         IlOp::Dup { .. } => "DUPLICATE".to_string(),
         IlOp::Pop { .. } => "POP".to_string(),
         IlOp::Index { .. } => "Index".to_string(),
+        IlOp::IndexUnchecked { .. } => "IndexUnchecked".to_string(),
+        IlOp::ArrayPin { slot, .. } => format!("ArrayPin slot={slot}"),
+        IlOp::IndexPin { slot, .. } => format!("IndexPin slot={slot}"),
+        IlOp::IndexPinUnchecked { slot, .. } => format!("IndexPinUnchecked slot={slot}"),
+        IlOp::StoreIndexPin { slot, .. } => format!("StoreIndexPin slot={slot}"),
+        IlOp::StoreIndexPinUnchecked { slot, .. } => {
+            format!("StoreIndexPinUnchecked slot={slot}")
+        }
         IlOp::MakeTuple { arity, .. } => format!("MakeTuple arity={arity}"),
         IlOp::MakeArray { arity, .. } => format!("MakeArray arity={arity}"),
         IlOp::MakeEnum { tag, arity, .. } => format!("MakeEnum tag={tag} arity={arity}"),

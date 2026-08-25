@@ -16,6 +16,11 @@ pub struct Lowered {
     pub label_pcs: HashMap<u32, usize>,
     /// Pre-fusion emitting index → post-fusion PC (for remapping `functions` etc.).
     pub pre_to_post: HashMap<usize, usize>,
+    /// Cumulative emit-label → flat-IL label remap from [`super::IlModule::to_flat`].
+    pub label_remap: HashMap<u32, u32>,
+    /// Per-function chunk remaps from [`super::IlModule::to_flat`] (same order as
+    /// [`super::CodeBuf::funcs`]); use for entry-label PC resolution.
+    pub func_label_maps: Vec<HashMap<u32, u32>>,
     /// Post-fusion bytecode length.
     pub code_len: usize,
     /// Post-opt, pre-fuse ops when captured for the cursor_model gate.
@@ -136,8 +141,11 @@ pub(crate) fn lower_module_inner(
 ) -> Lowered {
     super::bounds::reset_bounds_stats();
     super::canon::reset_canon_stats();
-    let flat = module.optimize_and_flatten(opts, pool);
+    super::pure_call::set_pure_call_ctx(opts.pure_call_ctx.clone());
+    let (flat, label_remap, func_label_maps) = module.optimize_and_flatten(opts, pool);
     let mut lowered = lower_optimized(&flat, pool);
+    lowered.label_remap = label_remap;
+    lowered.func_label_maps = func_label_maps;
     if capture_ops {
         lowered.pre_fuse_ops = Some(flat);
     }
@@ -233,6 +241,8 @@ pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
         label_pcs,
         pre_to_post,
         code_len,
+        label_remap: HashMap::new(),
+        func_label_maps: Vec::new(),
         pre_fuse_ops: None,
     }
 }

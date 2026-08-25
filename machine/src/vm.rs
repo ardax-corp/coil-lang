@@ -1,6 +1,7 @@
 //! Bytecode interpreter: dispatch loop, automatic GC, and FFI.
 
 use std::{
+    collections::HashMap,
     ffi::c_void,
     fmt::Write as FmtWrite,
     io::{self, Write as IoWrite},
@@ -218,6 +219,14 @@ macro_rules! unary {
     };
 }
 
+#[inline(always)]
+fn set_jump_target(ip: &mut usize, target: usize, code_len: usize) {
+    // Lowering may target `code.len()` as “fall out of the loop” (next `while`
+    // check exits without fetching).
+    promise!(target <= code_len);
+    *ip = target;
+}
+
 // type External = fn(&[Value]) -> Value;
 
 type OutputSink = Box<dyn IoWrite + Send>;
@@ -252,6 +261,8 @@ pub struct Machine<const S: usize> {
     heap: Heap,
     stack: Stack<Value>,
     frames: ArrayVec<Frame, S>,
+    /// Per-frame pinned arrays for `ArrayPin` / `IndexPin*` (GC roots).
+    frame_pins: ArrayVec<HashMap<u32, Object>, S>,
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
@@ -329,11 +340,14 @@ impl<const S: usize> Machine<S> {
     pub fn with_operand_capacity(operand_slots: usize) -> Self {
         let mut frames = ArrayVec::default();
         frames.consume();
+        let mut frame_pins = ArrayVec::default();
+        frame_pins.consume();
         let worker_cap = crate::thread::WorkerCap::new();
         let reactor = crate::reactor::Reactor::new(worker_cap.max());
         let cap = operand_slots.clamp(1, crate::MAX_OPERAND_STACK_SLOTS);
         Self {
             frames,
+            frame_pins,
             heap: Heap::default(),
             stack: Stack::with_capacity(cap),
             output: None,
@@ -510,6 +524,8 @@ impl<const S: usize> Machine<S> {
         self.stack = Stack::with_capacity(self.stack.capacity());
         self.frames = ArrayVec::default();
         self.frames.consume();
+        self.frame_pins = ArrayVec::default();
+        self.frame_pins.consume();
         self.panicked = false;
         self.pending_ffi = None;
         self.pending_io = None;
@@ -714,6 +730,52 @@ impl<const S: usize> Machine<S> {
     /// Delegates to [`Heap::find_object_by_addr`] (O(1) addr index).
     fn find_object_by_addr(heap: &Heap, addr: u64) -> Option<Object> {
         heap.find_object_by_addr(addr)
+    }
+
+    fn pop_call_frame(&mut self) -> usize {
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
+        self.frame_pins.pop();
+        self.frames.pop().get()
+    }
+
+    fn push_pin_frame(&mut self) {
+        self.frame_pins
+            .setup_current_and_advance(|pins| pins.clear());
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
+    }
+
+    fn current_pins_mut(&mut self) -> &mut HashMap<u32, Object> {
+        self.frame_pins.get_mut()
+    }
+
+    fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Value {
+        let len = elements.len();
+        if unchecked {
+            let idx = index as usize;
+            promise!(index >= 0);
+            promise!(idx < len);
+            unsafe { *elements.get_unchecked(idx) }
+        } else if index >= 0 && (index as usize) < len {
+            unsafe { *elements.get_unchecked(index as usize) }
+        } else {
+            Value::from(-1_i64)
+        }
+    }
+
+    fn write_indexed(elements: &mut [Value], index: i64, value: Value, unchecked: bool) {
+        let len = elements.len();
+        if unchecked {
+            let idx = index as usize;
+            promise!(index >= 0);
+            promise!(idx < len);
+            unsafe {
+                *elements.get_unchecked_mut(idx) = value;
+            }
+        } else if index >= 0 && (index as usize) < len {
+            unsafe {
+                *elements.get_unchecked_mut(index as usize) = value;
+            }
+        }
     }
 
     #[allow(dead_code)]
@@ -926,6 +988,11 @@ impl<const S: usize> Machine<S> {
             if let Object::Coroutine(gc) = obj {
                 roots.push(gc.as_ptr() as u64);
                 Self::root_coroutine_saved_stack(&self.heap, gc.as_ref(), &mut roots);
+            }
+        }
+        for pins in self.frame_pins.iter() {
+            for obj in pins.values() {
+                roots.push(obj.addr());
             }
         }
         roots
@@ -1581,6 +1648,9 @@ impl<const S: usize> Machine<S> {
                 f.seek(frame_ip);
                 f.set(base_sp + sp_off);
             });
+            // Yield pops pins with frames; restore a matching empty pin map
+            // so later CALL / ArrayPin / finalizers still have a live slot.
+            self.push_pin_frame();
         }
 
         *ip = coro.resume_ip;
@@ -1629,8 +1699,10 @@ impl<const S: usize> Machine<S> {
 
         self.stack.seek(parent_ctx.base_sp);
         while self.frames.len() > parent_ctx.frame_depth {
+            self.frame_pins.pop();
             self.frames.pop();
         }
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
         if self.resume_stack.len() > parent_entry_idx + 1 {
             self.resume_stack.truncate(parent_entry_idx + 1);
         }
@@ -1693,8 +1765,10 @@ impl<const S: usize> Machine<S> {
 
         self.stack.seek(base_sp);
         while self.frames.len() > frame_depth {
+            self.frame_pins.pop();
             self.frames.pop();
         }
+        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
 
         self.stack.push(yield_val);
         let caller = self.frames.get_mut();
@@ -1952,6 +2026,7 @@ impl<const S: usize> Machine<S> {
             f.seek(0);
             f.set(callee_sp);
         });
+        self.push_pin_frame();
         // Capture only when RETURN reaches this frame depth (the
         // call_function entry), not when inner CALLs return.
         self.nested_frame_depths.push(self.frames.len());
@@ -1984,7 +2059,7 @@ impl<const S: usize> Machine<S> {
                 break;
             }
         }
-        let _ = self.frames.pop();
+        let _ = self.pop_call_frame();
         self.stack.seek(saved_sp);
         self.nested_depth -= 1;
         let _ = self.nested_frame_depths.pop();
@@ -2082,8 +2157,9 @@ impl<const S: usize> Machine<S> {
         let mut ip: usize = start_ip;
         let mut sp = self.frames.get_mut().get();
         let stack_cap = self.stack.capacity();
+        let code_len = code.len();
 
-        while ip < code.len() {
+        while ip < code_len {
             #[cfg(any(test, feature = "debugger"))]
             if unlikely(self.debug.is_some())
                 && let Some(reason) = self.debug_check_stop_at(ip)
@@ -2106,7 +2182,7 @@ impl<const S: usize> Machine<S> {
             });
 
             // SAFETY: loop condition guarantees `ip < code.len()`.
-            promise!(ip < code.len());
+            promise!(ip < code_len);
             let opcode = unsafe { code.get_unchecked(ip) };
             ip += 1;
 
@@ -2115,7 +2191,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::BinSlotSlotConstJmpt as u8);
+            promise!(*bc as u8 <= Instruction::StoreIndexPinUnchecked as u8);
 
             match bc {
                 Instruction::POP => {
@@ -2127,7 +2203,9 @@ impl<const S: usize> Machine<S> {
                 Instruction::CONST => {
                     let op = opcode.operand_u32();
                     let raw = if unlikely(op & Byte::POOL_FLAG != 0) {
-                        constants[(op & !Byte::POOL_FLAG) as usize]
+                        let pool_idx = (op & !Byte::POOL_FLAG) as usize;
+                        promise!(pool_idx < constants.len());
+                        unsafe { *constants.get_unchecked(pool_idx) }
                     } else {
                         op as i32 as i64 as u64
                     };
@@ -2149,6 +2227,7 @@ impl<const S: usize> Machine<S> {
                     let mut max_slot = sp;
                     for i in 0..count {
                         let slot = sp + opcode.load_store_slot_at(i) as usize;
+                        promise!(slot < stack_cap);
                         max_slot = max_slot.max(slot);
                         let val = self.stack.pop();
                         self.stack[slot] = val;
@@ -2208,16 +2287,13 @@ impl<const S: usize> Machine<S> {
                 Instruction::PairJumpIfTag => {
                     let operands = opcode.operand_u32();
                     let expected_tag = operands >> 16;
-                    if self.stack.tell() > 0 && self.stack.peek().as_int() as u32 == expected_tag {
+                    promise!(self.stack.tell() > 0);
+                    if self.stack.peek().as_int() as u32 == expected_tag {
                         let pool_idx = (operands & 0xFFFF) as usize;
-                        debug_assert!(
-                            pool_idx < constants.len(),
-                            "PairJumpIfTag pool index {pool_idx} out of range (len {})",
-                            constants.len()
-                        );
+                        promise!(pool_idx < constants.len());
                         let target = opcode.jump_if_match_target(constants);
                         self.stack.pop();
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 Instruction::PairToHeap => {
@@ -2258,7 +2334,7 @@ impl<const S: usize> Machine<S> {
                     {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(payload);
                     self.stack.push(tag);
@@ -2274,6 +2350,7 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::INC => {
                     let (slot, prefix, is_float) = opcode.inc_dec_parts();
+                    promise!(sp + slot < stack_cap);
                     let idx = sp + slot;
                     let old = self.stack[idx];
                     let new_val = if is_float {
@@ -2286,6 +2363,7 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::DEC => {
                     let (slot, prefix, is_float) = opcode.inc_dec_parts();
+                    promise!(sp + slot < stack_cap);
                     let idx = sp + slot;
                     let old = self.stack[idx];
                     let new_val = if is_float {
@@ -2477,23 +2555,25 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::JMP => {
-                    ip = opcode.operand_u32() as usize;
+                    set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
                 }
                 Instruction::JMPF => {
                     if !self.stack.pop().as_bool() {
-                        ip = opcode.operand_u32() as usize;
+                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
                     }
                 }
                 Instruction::JMPT => {
                     if self.stack.pop().as_bool() {
-                        ip = opcode.operand_u32() as usize;
+                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
                     }
                 }
                 Instruction::CALL => {
                     let (arity, target) = opcode.call_parts();
+                    promise!(self.stack.tell() >= arity);
                     if arity == 1
                         && self.finalizer_pcs.contains(&(target as u32))
                     {
+                        promise!(self.stack.tell() >= 1);
                         let self_val = self.stack[self.stack.tell() - 1];
                         if !self.claim_finalizer(self_val) {
                             self.stack.pop();
@@ -2510,17 +2590,20 @@ impl<const S: usize> Machine<S> {
                             |frame| frame.set(callee_sp),
                         );
                         sp = callee_sp;
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
+                        self.push_pin_frame();
                     } else {
                         self.frames.rewrite_top_and_push(
                             |caller| caller.seek(ip + 1),
                             |frame| frame.set(callee_sp),
                         );
                         sp = callee_sp;
+                        self.push_pin_frame();
                     }
                 }
                 Instruction::TailCall => {
                     let (arity, target) = opcode.call_parts();
+                    promise!(self.stack.tell() >= arity);
                     let callee_sp = self.frames.get().get();
                     let src = self.stack.tell() - arity;
                     // Args sit at TOS; frame base is at or below them.
@@ -2530,7 +2613,7 @@ impl<const S: usize> Machine<S> {
                     // not past the args. Using `callee_sp + arity` would make
                     // subsequent LOAD/BinSlotImm read the wrong slots.
                     sp = callee_sp;
-                    ip = target;
+                    set_jump_target(&mut ip, target, code_len);
                 }
                 Instruction::CastIntToFloat => {
                     let v = self.stack.pop().as_int() as f64;
@@ -2578,7 +2661,7 @@ impl<const S: usize> Machine<S> {
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -2654,7 +2737,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::CmpJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 // Fused `LOAD slot; CONST imm; <cond>; JMPF/JMPT` without stack traffic.
@@ -2686,7 +2769,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::BinSlotImmJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 Instruction::LogNotJmpf | Instruction::LogNotJmpt => {
@@ -2699,7 +2782,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let val = self.stack.pop();
                     if (val.as_int() == 0) == matches!(*bc, Instruction::LogNotJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 // Fused `BinSlotSlot; JMPF/JMPT` — pool packs (target<<32)|b.
@@ -2732,7 +2815,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::BinSlotSlotJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 // Fused `LOAD src; CONST imm; <op>; STORE dest` — pool packs (dest<<32)|imm.
@@ -2775,6 +2858,7 @@ impl<const S: usize> Machine<S> {
                         _ => Value::default(),
                     };
                     let dest_idx = sp + dest;
+                    promise!(dest_idx < stack_cap);
                     self.stack[dest_idx] = result;
                     let tell = self.stack.tell();
                     if tell < dest_idx + 1 {
@@ -2786,6 +2870,7 @@ impl<const S: usize> Machine<S> {
                     let (op, a, b, dest) = opcode.bin_slot_slot_store_parts();
                     promise!(sp + a < stack_cap);
                     promise!(sp + b < stack_cap);
+                    promise!(sp + dest < stack_cap);
                     let va = self.stack[sp + a];
                     let vb = self.stack[sp + b];
                     let result = match Instruction::from(op) {
@@ -2835,11 +2920,13 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::LoadReturnSlot => {
-                    let ret_val = self.stack[sp + opcode.operand_u32() as usize];
+                    let slot = opcode.operand_u32() as usize;
+                    promise!(sp + slot < stack_cap);
+                    let ret_val = self.stack[sp + slot];
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -2849,7 +2936,7 @@ impl<const S: usize> Machine<S> {
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -2903,7 +2990,7 @@ impl<const S: usize> Machine<S> {
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
-                    let return_sp = self.frames.pop().get();
+                    let return_sp = self.pop_call_frame();
                     self.stack.seek(return_sp);
                     self.stack.push(ret_val);
                     self.after_return(&mut ip, &mut sp);
@@ -3311,7 +3398,7 @@ impl<const S: usize> Machine<S> {
                         _ => false,
                     };
                     if taken == matches!(*bc, Instruction::BinSlotSlotConstJmpt) {
-                        ip = target;
+                        set_jump_target(&mut ip, target, code_len);
                     }
                 }
                 Instruction::HALT => {
@@ -3362,7 +3449,8 @@ impl<const S: usize> Machine<S> {
                     }
 
                     let sp = self.stack.tell();
-                    let n = arity.min(sp);
+                    promise!(sp >= arity);
+                    let n = arity;
                     if n <= 3 {
                         note_make_fast();
                     }
@@ -3378,7 +3466,8 @@ impl<const S: usize> Machine<S> {
                     let operands = opcode.operand_u32();
                     let arity = (operands & 0xFFFF) as usize;
                     let sp = self.stack.tell();
-                    let n = arity.min(sp);
+                    promise!(sp >= arity);
+                    let n = arity;
                     let base = sp - n;
                     if n <= 3 {
                         note_make_fast();
@@ -3402,18 +3491,31 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(addr));
                     self.maybe_gc_after_alloc();
                 }
-                Instruction::Index => {
+                Instruction::ArrayPin => {
+                    let slot = opcode.operand_u32();
+                    let arr_val = self.stack.pop();
+                    let addr = arr_val.raw() as u64;
+                    if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) {
+                        self.current_pins_mut().insert(slot, Object::Array(gc));
+                    }
+                }
+                Instruction::Index | Instruction::IndexUnchecked => {
                     let index_val = self.stack.pop();
                     let target_val = self.stack.pop();
                     let target_addr = target_val.raw() as u64;
                     let index = index_val.as_int();
+                    let unchecked = matches!(*bc, Instruction::IndexUnchecked);
                     // Arrays dominate Index traffic (Vec); check Array before Tuple.
                     let result = match Self::find_object_by_addr(&self.heap, target_addr) {
                         Some(crate::memory::Object::Array(gc)) => {
                             let elements = &gc.as_ref().elements;
                             let len = elements.len();
-                            if index >= 0 && (index as usize) < len {
-                                // SAFETY: bounds checked above.
+                            if unchecked {
+                                let idx = index as usize;
+                                promise!(index >= 0);
+                                promise!(idx < len);
+                                unsafe { *elements.get_unchecked(idx) }
+                            } else if index >= 0 && (index as usize) < len {
                                 unsafe { *elements.get_unchecked(index as usize) }
                             } else {
                                 Value::from(-1_i64)
@@ -3422,11 +3524,31 @@ impl<const S: usize> Machine<S> {
                         Some(crate::memory::Object::Tuple(gc)) => {
                             let elements = &gc.as_ref().elements;
                             let len = elements.len();
-                            if index >= 0 && (index as usize) < len {
+                            if unchecked {
+                                let idx = index as usize;
+                                promise!(index >= 0);
+                                promise!(idx < len);
+                                unsafe { *elements.get_unchecked(idx) }
+                            } else if index >= 0 && (index as usize) < len {
                                 unsafe { *elements.get_unchecked(index as usize) }
                             } else {
                                 Value::from(-1_i64)
                             }
+                        }
+                        _ => Value::from(-1_i64),
+                    };
+                    self.stack.push(result);
+                }
+                Instruction::IndexPin | Instruction::IndexPinUnchecked => {
+                    let slot = opcode.operand_u32();
+                    let index = self.stack.pop().as_int();
+                    let unchecked = matches!(*bc, Instruction::IndexPinUnchecked);
+                    let result = match self.current_pins_mut().get(&slot) {
+                        Some(Object::Array(gc)) => {
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                        }
+                        Some(Object::Tuple(gc)) => {
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
                         _ => Value::from(-1_i64),
                     };
@@ -3500,23 +3622,42 @@ impl<const S: usize> Machine<S> {
                     }
                     self.stack.push(value);
                 }
-                Instruction::StoreIndex => {
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked => {
                     let value = self.stack.pop();
                     let index_val = self.stack.pop();
                     let target_val = self.stack.pop();
                     let target_addr = target_val.raw() as u64;
                     let index = index_val.as_int();
+                    let unchecked = matches!(*bc, Instruction::StoreIndexUnchecked);
                     if let Some(crate::memory::Object::Array(mut gc)) =
                         Self::find_object_by_addr(&self.heap, target_addr)
                     {
                         let arr = gc.as_mut();
                         let len = arr.elements.len();
-                        if index >= 0 && (index as usize) < len {
-                            // SAFETY: bounds checked above.
+                        if unchecked {
+                            let idx = index as usize;
+                            promise!(index >= 0);
+                            promise!(idx < len);
+                            unsafe {
+                                *arr.elements.get_unchecked_mut(idx) = value;
+                            }
+                        } else if index >= 0 && (index as usize) < len {
                             unsafe {
                                 *arr.elements.get_unchecked_mut(index as usize) = value;
                             }
                         }
+                    }
+                    self.stack.push(value);
+                }
+                Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked => {
+                    let slot = opcode.operand_u32();
+                    let value = self.stack.pop();
+                    let index = self.stack.pop().as_int();
+                    let unchecked = matches!(*bc, Instruction::StoreIndexPinUnchecked);
+                    if let Some(Object::Array(mut gc)) = self.current_pins_mut().get(&slot).copied()
+                    {
+                        let arr = gc.as_mut();
+                        Self::write_indexed(&mut arr.elements, index, value, unchecked);
                     }
                     self.stack.push(value);
                 }
@@ -3596,60 +3737,22 @@ impl<const S: usize> Machine<S> {
                     let operands = opcode.operand_u32();
                     let expected_tag = operands >> 16;
 
-                    if self.stack.tell() == 0 {
-                        // Intentional empty body: defensive no-op when the stack is
-                        // empty (typechecker should prevent this; do not panic).
-                    } else {
-                        let scrutinee_addr = self.stack.peek().raw() as u64;
+                    promise!(self.stack.tell() > 0);
+                    let scrutinee_addr = self.stack.peek().raw() as u64;
 
-                        let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                            .and_then(|o| match o {
-                                Object::Enum(e) => Some(e),
-                                _ => None,
-                            });
+                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
+                        .and_then(|o| match o {
+                            Object::Enum(e) => Some(e),
+                            _ => None,
+                        });
 
-                        if let Some(enum_ref) = obj_enum {
-                            let enum_ref = enum_ref.as_ref();
-                            if enum_ref.tag == expected_tag {
-                                let pool_idx = (operands & 0xFFFF) as usize;
-                                debug_assert!(
-                                    pool_idx < constants.len(),
-                                    "JumpIfMatch pool index {pool_idx} out of range (len {})",
-                                    constants.len()
-                                );
-                                let target_offset = opcode.jump_if_match_target(constants);
-                                let _ = self.stack.pop();
-                                for member in &enum_ref.payload {
-                                    let value = match member {
-                                        Member::Value(v) => *v,
-                                        Member::Object(o) => Value::from(o.addr()),
-                                    };
-                                    self.stack.push(value);
-                                }
-                                ip = target_offset;
-                            }
-                        }
-                    }
-                }
-                Instruction::Unpack => {
-                    // Pops enum scrutinee; pushes payload in declaration order
-                    // (stack/locals overlap — see STORE).
-                    let _arity = opcode.operand_u32() as usize;
-
-                    if self.stack.tell() == 0 {
-                        // Intentional empty body: defensive no-op when the stack is
-                        // empty (typechecker should prevent this; do not panic).
-                    } else {
-                        let scrutinee_addr = self.stack.pop().raw() as u64;
-
-                        let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                            .and_then(|o| match o {
-                                Object::Enum(e) => Some(e),
-                                _ => None,
-                            });
-
-                        if let Some(enum_ref) = obj_enum {
-                            let enum_ref = enum_ref.as_ref();
+                    if let Some(enum_ref) = obj_enum {
+                        let enum_ref = enum_ref.as_ref();
+                        if enum_ref.tag == expected_tag {
+                            let pool_idx = (operands & 0xFFFF) as usize;
+                            promise!(pool_idx < constants.len());
+                            let target_offset = opcode.jump_if_match_target(constants);
+                            let _ = self.stack.pop();
                             for member in &enum_ref.payload {
                                 let value = match member {
                                     Member::Value(v) => *v,
@@ -3657,42 +3760,63 @@ impl<const S: usize> Machine<S> {
                                 };
                                 self.stack.push(value);
                             }
+                            set_jump_target(&mut ip, target_offset, code_len);
+                        }
+                    }
+                }
+                Instruction::Unpack => {
+                    // Pops enum scrutinee; pushes payload in declaration order
+                    // (stack/locals overlap — see STORE).
+                    let arity = opcode.operand_u32() as usize;
+
+                    promise!(self.stack.tell() > 0);
+                    let scrutinee_addr = self.stack.pop().raw() as u64;
+
+                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
+                        .and_then(|o| match o {
+                            Object::Enum(e) => Some(e),
+                            _ => None,
+                        });
+
+                    if let Some(enum_ref) = obj_enum {
+                        let enum_ref = enum_ref.as_ref();
+                        promise!(arity == enum_ref.payload.len());
+                        for i in 0..arity {
+                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
+                            let value = match member {
+                                Member::Value(v) => *v,
+                                Member::Object(o) => Value::from(o.addr()),
+                            };
+                            self.stack.push(value);
                         }
                     }
                 }
                 Instruction::LoadField => {
                     let field_index = (opcode.operand_u32() & 0xFFFF) as usize;
 
-                    if self.stack.tell() == 0 {
-                        // Intentional empty body: defensive no-op when the stack is
-                        // empty (typechecker should prevent this; do not panic).
+                    promise!(self.stack.tell() > 0);
+                    let scrutinee_addr = self.stack.pop().raw() as u64;
+
+                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
+                        .and_then(|o| match o {
+                            Object::Enum(e) => Some(e),
+                            _ => None,
+                        });
+
+                    if let Some(enum_ref) = obj_enum {
+                        let enum_ref = enum_ref.as_ref();
+                        promise!(field_index < enum_ref.payload.len());
+                        let member = unsafe { enum_ref.payload.get_unchecked(field_index) };
+                        let value = match member {
+                            Member::Value(v) => *v,
+                            Member::Object(o) => Value::from(o.addr()),
+                        };
+                        self.stack.push(value);
                     } else {
-                        let scrutinee_addr = self.stack.pop().raw() as u64;
-
-                        let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                            .and_then(|o| match o {
-                                Object::Enum(e) => Some(e),
-                                _ => None,
-                            });
-
-                        if let Some(enum_ref) = obj_enum {
-                            let enum_ref = enum_ref.as_ref();
-                            if let Some(member) = enum_ref.payload.get(field_index) {
-                                let value = match member {
-                                    Member::Value(v) => *v,
-                                    Member::Object(o) => Value::from(o.addr()),
-                                };
-                                self.stack.push(value);
-                            } else {
-                                // OOB field index — keep stack balanced.
-                                self.stack.push(Value::default());
-                            }
-                        } else {
-                            // Non-enum receiver (e.g. class Instance misrouted
-                            // through LoadField). Push a sentinel so the pop
-                            // above does not leave the stack short.
-                            self.stack.push(Value::default());
-                        }
+                        // Non-enum receiver (e.g. class Instance misrouted
+                        // through LoadField). Push a sentinel so the pop
+                        // above does not leave the stack short.
+                        self.stack.push(Value::default());
                     }
                 }
                 Instruction::UnpackAt => {
@@ -3701,34 +3825,32 @@ impl<const S: usize> Machine<S> {
                     // `tell` so subsequent LOAD/StorePop see the written slots.
                     let operands = opcode.operand_u32();
                     let slot_offset = (operands & 0xFFFF) as usize;
-                    let _arity = (operands >> 16) as usize;
+                    let arity = (operands >> 16) as usize;
 
                     let slot = sp + slot_offset;
-                    if slot >= self.stack.tell() {
-                        // Intentional empty body: defensive no-op when the UnpackAt
-                        // slot is out of range (typechecker should prevent this).
-                    } else {
-                        let scrutinee_addr = self.stack[slot].raw() as u64;
+                    promise!(slot < self.stack.tell());
+                    let scrutinee_addr = self.stack[slot].raw() as u64;
 
-                        let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                            .and_then(|o| match o {
-                                Object::Enum(e) => Some(e),
-                                _ => None,
-                            });
+                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
+                        .and_then(|o| match o {
+                            Object::Enum(e) => Some(e),
+                            _ => None,
+                        });
 
-                        if let Some(enum_ref) = obj_enum {
-                            let enum_ref = enum_ref.as_ref();
-                            for (i, member) in enum_ref.payload.iter().enumerate() {
-                                let value = match member {
-                                    Member::Value(v) => *v,
-                                    Member::Object(o) => Value::from(o.addr()),
-                                };
-                                self.stack[slot + i] = value;
-                            }
-                            let end = slot + enum_ref.payload.len();
-                            if self.stack.tell() < end {
-                                self.stack.seek(end);
-                            }
+                    if let Some(enum_ref) = obj_enum {
+                        let enum_ref = enum_ref.as_ref();
+                        promise!(arity == enum_ref.payload.len());
+                        for i in 0..arity {
+                            let member = unsafe { enum_ref.payload.get_unchecked(i) };
+                            let value = match member {
+                                Member::Value(v) => *v,
+                                Member::Object(o) => Value::from(o.addr()),
+                            };
+                            self.stack[slot + i] = value;
+                        }
+                        let end = slot + arity;
+                        if self.stack.tell() < end {
+                            self.stack.seek(end);
                         }
                     }
                 }
@@ -3739,6 +3861,7 @@ impl<const S: usize> Machine<S> {
                     let count = opcode.load_store_count();
                     for i in 0..count {
                         let slot = sp + opcode.load_store_slot_at(i) as usize;
+                        promise!(slot < stack_cap);
                         let val = self.stack.pop();
                         self.stack[slot] = val;
                         let tell = self.stack.tell();
@@ -3749,11 +3872,9 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::MakeCoro => {
                     let (arity, target) = opcode.call_parts();
+                    promise!(self.stack.tell() >= arity);
                     let mut values: Vec<Value> = Vec::with_capacity(arity);
                     for _ in 0..arity {
-                        if self.stack.tell() == 0 {
-                            break;
-                        }
                         values.push(self.stack.pop());
                     }
                     values.reverse();
@@ -3776,77 +3897,63 @@ impl<const S: usize> Machine<S> {
                     self.maybe_gc_after_alloc();
                 }
                 Instruction::ResumeCoro => {
-                    if self.stack.tell() == 0 {
-                        // Intentional empty body: defensive no-op when the stack is
-                        // empty (typechecker should prevent this; do not panic).
+                    promise!(self.stack.tell() > 0);
+                    let has_send = opcode.operand_u32() & 1 != 0;
+                    let handle = self.stack.pop();
+                    let send_val = if has_send {
+                        promise!(self.stack.tell() > 0);
+                        self.stack.pop()
                     } else {
-                        let has_send = opcode.operand_u32() & 1 != 0;
-                        let handle = self.stack.pop();
-                        let send_val = if has_send {
-                            self.stack.pop()
-                        } else {
-                            Value::from(0_i64)
-                        };
-                        let addr = handle.raw() as u64;
-                        if let Some(Object::Coroutine(gc)) =
-                            Self::find_object_by_addr(&self.heap, addr)
-                        {
-                            if gc.as_ref().state == CoroState::Done {
-                                return self.runtime_panic(
-                                    "resumed after completion",
-                                    ip.saturating_sub(1),
-                                );
-                            } else if let Some(sub) = gc.as_ref().yield_from {
-                                self.with_coroutine_mut(gc.as_ptr() as u64, |c| {
-                                    c.pending_send = send_val;
-                                });
-                                self.resume_coroutine(&mut ip, &mut sp, sub, send_val, code, true);
-                            } else {
-                                self.resume_coroutine(&mut ip, &mut sp, gc, send_val, code, true);
-                            }
-                        } else {
+                        Value::from(0_i64)
+                    };
+                    let addr = handle.raw() as u64;
+                    if let Some(Object::Coroutine(gc)) =
+                        Self::find_object_by_addr(&self.heap, addr)
+                    {
+                        if gc.as_ref().state == CoroState::Done {
                             return self.runtime_panic(
-                                "resumed invalid coroutine handle",
+                                "resumed after completion",
                                 ip.saturating_sub(1),
                             );
+                        } else if let Some(sub) = gc.as_ref().yield_from {
+                            self.with_coroutine_mut(gc.as_ptr() as u64, |c| {
+                                c.pending_send = send_val;
+                            });
+                            self.resume_coroutine(&mut ip, &mut sp, sub, send_val, code, true);
+                        } else {
+                            self.resume_coroutine(&mut ip, &mut sp, gc, send_val, code, true);
                         }
+                    } else {
+                        return self.runtime_panic(
+                            "resumed invalid coroutine handle",
+                            ip.saturating_sub(1),
+                        );
                     }
                 }
                 Instruction::YieldCoro => {
-                    if self.stack.tell() == 0 {
-                        // Intentional empty body: defensive no-op when the stack is
-                        // empty (typechecker should prevent this; do not panic).
-                    } else {
-                        let yield_val = self.stack.pop();
-                        self.yield_coroutine(&mut ip, &mut sp, yield_val);
-                    }
+                    promise!(self.stack.tell() > 0);
+                    let yield_val = self.stack.pop();
+                    self.yield_coroutine(&mut ip, &mut sp, yield_val);
                 }
                 Instruction::YieldFromCoro => {
-                    if self.stack.tell() == 0 {
-                        // Intentional empty body: defensive no-op when the stack is
-                        // empty (typechecker should prevent this; do not panic).
-                    } else {
-                        let handle = self.stack.pop();
-                        let addr = handle.raw() as u64;
-                        if let Some(Object::Coroutine(sub)) =
-                            Self::find_object_by_addr(&self.heap, addr)
-                        {
-                            self.start_yield_from(&mut ip, &mut sp, sub, code);
-                        }
+                    promise!(self.stack.tell() > 0);
+                    let handle = self.stack.pop();
+                    let addr = handle.raw() as u64;
+                    if let Some(Object::Coroutine(sub)) =
+                        Self::find_object_by_addr(&self.heap, addr)
+                    {
+                        self.start_yield_from(&mut ip, &mut sp, sub, code);
                     }
                 }
                 Instruction::DoneCoro => {
-                    if self.stack.tell() == 0 {
-                        self.stack.push(Value::from(false));
-                    } else {
-                        let handle = self.stack.pop();
-                        let addr = handle.raw() as u64;
-                        let is_done = matches!(
-                            Self::find_object_by_addr(&self.heap, addr),
-                            Some(Object::Coroutine(gc)) if gc.as_ref().state == CoroState::Done
-                        );
-                        self.stack.push(Value::from(is_done));
-                    }
+                    promise!(self.stack.tell() > 0);
+                    let handle = self.stack.pop();
+                    let addr = handle.raw() as u64;
+                    let is_done = matches!(
+                        Self::find_object_by_addr(&self.heap, addr),
+                        Some(Object::Coroutine(gc)) if gc.as_ref().state == CoroState::Done
+                    );
+                    self.stack.push(Value::from(is_done));
                 }
                 Instruction::CallIndirect => {
                     // Stack: [value_args..., app_dicts..., target]
@@ -3854,6 +3961,7 @@ impl<const S: usize> Machine<S> {
                     let packed = opcode.operand_u32();
                     let value_arity = (packed & 0xFFFF) as usize;
                     let app_dict_arity = ((packed >> 16) & 0xFFFF) as usize;
+                    promise!(self.stack.tell() >= value_arity + app_dict_arity + 1);
                     let raw = self.stack.pop();
 
                     // First-class ObjFn: merge new args into holes / captures.
@@ -3990,7 +4098,8 @@ impl<const S: usize> Machine<S> {
                         self.frames
                             .setup_current_and_advance(|frame| frame.set(callee_sp));
                         sp = callee_sp;
-                        ip = entry as usize;
+                        set_jump_target(&mut ip, entry as usize, code_len);
+                        self.push_pin_frame();
                         continue;
                     }
 
@@ -4060,7 +4169,8 @@ impl<const S: usize> Machine<S> {
                     self.frames
                         .setup_current_and_advance(|frame| frame.set(callee_sp));
                     sp = callee_sp;
-                    ip = target;
+                    set_jump_target(&mut ip, target, code_len);
+                    self.push_pin_frame();
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):
@@ -4102,25 +4212,15 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::LoadStatic => {
                     let slot = opcode.operand_u32() as usize;
-                    debug_assert!(
-                        slot < self.statics.len(),
-                        "LoadStatic slot {slot} out of bounds (len {})",
-                        self.statics.len()
-                    );
-                    let val = self.statics.get(slot).copied().unwrap_or_default();
+                    promise!(slot < self.statics.len());
+                    let val = self.statics[slot];
                     self.stack.push(val);
                 }
                 Instruction::StoreStatic => {
                     let slot = opcode.operand_u32() as usize;
-                    debug_assert!(
-                        slot < self.statics.len(),
-                        "StoreStatic slot {slot} out of bounds (len {})",
-                        self.statics.len()
-                    );
+                    promise!(slot < self.statics.len());
                     let val = self.stack.pop();
-                    if let Some(s) = self.statics.get_mut(slot) {
-                        *s = val;
-                    }
+                    self.statics[slot] = val;
                 }
                 Instruction::BoxValue => {
                     let tag = (opcode.operand_u32() & 0xFFFF) as u16;

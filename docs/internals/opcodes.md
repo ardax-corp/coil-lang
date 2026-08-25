@@ -18,6 +18,8 @@ User code does not name these directly; the compiler emits them:
 | `FloatChainStore` | Execute two or three source-ordered float stages and store (slots and/or const-pool operands; no FMA/reassoc) |
 | `BinSlotSlotConstJmpf` | `BinSlotSlot` float-arith + pool `CONST` + float `CmpJmpf` in one dispatch (e.g. mandelbrot `|z|² > 4`) |
 | `CmpJmpt` / `BinSlotImmJmpt` / `LogNotJmpt` / `BinSlotSlotJmpt` / `BinSlotSlotConstJmpt` | Jump-if-true twins of the `*Jmpf` family (same packing; fused invert of `*Jmpf; JMP`) |
+| `IndexUnchecked` / `StoreIndexUnchecked` | Bounds-proofed array access from `il::bounds` counted-loop analysis |
+| `ArrayPin` / `IndexPin*` / `StoreIndexPin*` | Pinned array indexing: `ArrayPin` caches the array in the frame pin table; `IndexPin*` / `StoreIndexPin*` skip per-site `find_object_by_addr` |
 | `NEGF` | Float unary negate (IEEE sign-bit flip); replaces `CONST -1; MULF` |
 | `InitTyped` | Allocate a class instance stamped with a compile-time type id (operand); `INIT` remains for untyped bags / old archives |
 

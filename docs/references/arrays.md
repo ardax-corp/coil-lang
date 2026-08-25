@@ -86,8 +86,8 @@ non-array target, yields the integer `-1`. A write `v[i] = x` with a bad index
 is a no-op; the expression still produces `x`. Literal OOB on `[T; N]` and
 tuples is a compile error.
 
-`Index` / `StoreIndex` keep that in-VM check even when `il::bounds` has proved
-length invariance ([COI-85](https://linear.app/ardax/issue/COI-85)). Prefer
+`Index` / `StoreIndex` keep that in-VM check for unproven sites. Proven counted-loop
+reads/writes rewrite to unchecked opcodes (archive minor 12). Prefer
 `i < len(a)` in loops.
 
 ---

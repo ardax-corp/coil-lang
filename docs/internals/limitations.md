@@ -43,7 +43,9 @@ Tracked in Linear project Known limitations (milestone **IL / codegen model**). 
 | Optimization statistics — **default off** (`collect_stats` / `--opt-stats`) | [COI-131](https://linear.app/ardax/issue/COI-131) |
 | Slot promotion across loop back-edges — **decided: keep Unknown headers** ([COI-97](https://linear.app/ardax/issue/COI-97) measured: innermost mandelbrot has no self-stores; outer Seek splits FloatChain; `seek_back_edge` off on `Standard`, on on `Aggressive`) | [COI-83](https://linear.app/ardax/issue/COI-83) |
 | Named-local class scalar replacement — **decided: named locals stay heap-backed** (temps elide; `fn drop()` always boxes) | [COI-84](https://linear.app/ardax/issue/COI-84) |
-| Bounds analysis vs `IndexUnchecked` — **decided: Index stays checked** (length hoists only; no unchecked opcode) | [COI-85](https://linear.app/ardax/issue/COI-85) |
+| Bounds analysis vs `IndexUnchecked` — **implemented**: proven counted-loop sites rewrite to unchecked opcodes; dynamic indices stay on `Index` / `StoreIndex` | [COI-85](https://linear.app/ardax/issue/COI-85) |
+| Array pin / `IndexPin*` — **implemented**: proven loops pin arrays in the preheader and rewrite index sites to skip `find_object_by_addr` | archive minor 13 |
+| Pure helper calls in counted loops — **implemented**: purity summary lets length hoists and array pins survive pure `CALL` sites | [COI-99](https://linear.app/ardax/issue/COI-99) |
 | Caller-side predicate peel vs self-recursion — **decided: keep refusals** (self-recursive peel loses to the frame) | [COI-86](https://linear.app/ardax/issue/COI-86) |
 | `*Jmpt` / fused invert — **implemented** (`*Jmpt` twins; invert fused `*Jmpf; JMP`) | [COI-87](https://linear.app/ardax/issue/COI-87) |
 | `multi_op_join_convoy` JMPF mis-sink — **decided: whole-buffer only** | [COI-91](https://linear.app/ardax/issue/COI-91) |
@@ -114,21 +116,27 @@ The shared bytecode/symbolic-IL tell model is validated differentially: `tell_cu
 | Anything inside a loop whose body raises the cursor | The header cursor is genuinely `Unknown` (see `il::tell`). **COI-97 measured:** a `Seek` on the latch makes the header `Known` and drops in-loop self-stores (synthetic IL). Mandelbrot's innermost body has none — residual STOREs are real moves / `tr→zr` latch copies, not `tell == slot+1`. Applying the same Seek to an *outer* loop (x/y) drops `cr`'s store and splits `FloatChainStore` (4→3). Pass stays off on `Standard` (`seek_back_edge` default false); `Aggressive` / `-O3` turns it on — re-measure before promoting to production |
 | Pool-packed fused slot operands (`BinSlot*Store` / `BinSlot*Jmpf`), `Seek`, `UnpackAt` | Destination slot is not readable from symbolic IL — the whole body is refused |
 
-**Counted-loop bounds analysis proves length invariance, not in-bounds indices.** `il::bounds` answers one question per natural loop: can the length of the arrays this loop addresses change while it runs? Element writes cannot — `StoreIndex` overwrites a slot in place — so `while i < len(a) { a[i] = 0; }` has an invariant `len(a)` even though the array is mutated. On that proof two invariant materializations move to the preheader: the `LOAD a; ArrayLen; STORE t` triple codegen leaves in the loop header, and the `CONST imm; STORE t` pair that materializes a constant addressing operand (`vec_scan` 6.58M → 5.01M dispatches, `nsieve` 545.6k → 469.9k). **No bounds check is removed**: `Index` / `StoreIndex` keep the in-VM range test, so an out-of-range read still yields `-1` and an out-of-range write is still a no-op.
+**Counted-loop bounds analysis proves length invariance and rewrites proven indices.** `il::bounds` answers one question per natural loop: can the length of the arrays this loop addresses change while it runs? Element writes cannot — `StoreIndex` overwrites a slot in place — so `while i < len(a) { a[i] = 0; }` has an invariant `len(a)` even though the array is mutated. On that proof two invariant materializations move to the preheader: the `LOAD a; ArrayLen; STORE t` triple codegen leaves in the loop header, and the `CONST imm; STORE t` pair that materializes a constant addressing operand (`vec_scan` 6.58M → 5.01M dispatches, `nsieve` 545.6k → 469.9k). Proven `LOAD arr; LOAD i; Index` / `StoreIndex` sites in a unit-increment or
+invariant-stride counted loop rewrite to `IndexUnchecked` / `StoreIndexUnchecked`
+(archive minor 12), then to `IndexPinUnchecked` / `StoreIndexPinUnchecked` when
+the array slot is length-invariant (archive minor 13). Unproven dynamic indices
+keep the checked opcodes: out-of-range read → `-1`, out-of-range write → no-op.
+Pure user helper calls on `b[i]` no longer refuse the length-invariance proof
+([COI-99](https://linear.app/ardax/issue/COI-99)); impure calls still do.
 
 The safety argument is the cursor, not liveness: the preheader `STORE t` floors the cursor at `t + 1`, and because the cursor is monotone in its input, proving every in-loop stack height stays at or above the header's proves every in-loop push lands above `t`. That is why the pass needs only `il::sp`, and why it works where `slot_promote` cannot — it *adds* a floor instead of removing one. Deliberately refused:
 
 | Refused | Why |
 |---------|-----|
-| Any call, host native, `GetField`/`SetField`, or unmodelled op in the body | The callee could hold another reference to the array and `push`/`pop` it. This is the single biggest coverage gap: most stdlib `while i < len(b)` loops call a helper on `b[i]`. Follow-up: [COI-99](https://linear.app/ardax/issue/COI-99) (pure helpers only; still no `IndexUnchecked`) |
+| Any impure call, host native, `GetField`/`SetField`, or unmodelled op in the body | The callee could hold another reference to the array and `push`/`pop` it. Pure user helpers on `b[i]` are allowed ([COI-99](https://linear.app/ardax/issue/COI-99)); still no `IndexUnchecked` across impure calls |
 | `ArrayPush` / `MakeArray` / `MakeDict` / `CodePtr` / `MakePolyFn` in the body | Length can change (`tests/positive/while_len_grow.hy`) or user code can run |
 | A rebound `Vec` local (`slots_stored_in_loop`) | A different array each pass, so its length is not invariant |
 | An `Index` / `StoreIndex` whose target is not a plain slot load | Nested `a[i][j]`, a `Dup`, a call result: the walk-back cannot name the array, so the whole loop is refused |
 | A loop that computes `len(a)` but addresses no array | Outside P2's remit; nothing licenses reasoning about aliasing there |
 | A body whose stack height dips below the header's | The preheader floor would not survive, so a later push could land on the temp |
 | A temp read before its def in the body, or outside the loop | The hoist changes what the earlier read observes; the cursor floor also stops protecting the slot once control leaves the loop |
-| **`0 <= i < len` itself** | Implemented nowhere: with no unchecked opcode there is no consumer for the fact. Induction-variable detection plus a monotonicity proof is the next slice, and it only pays off together with an `IndexUnchecked`-style form or an in-VM object-lookup cache — both opcode/ABI decisions |
-| The `find_object_by_addr` lookup each `Index` still pays | Caching the resolved array across a loop means keeping a heap address live in IL across a GC point; the length is an `int`, which is why it hoists and the object does not |
+| **`0 <= i < len` with non-unit stride** | Implemented for invariant positive stride slots (`k += p`); dynamic or stored stride steps stay checked |
+| The `find_object_by_addr` lookup each unchecked `Index` still paid | **Addressed** for proven loops: `ArrayPin` + `IndexPin*` cache the resolved array in the frame pin table (archive minor 13). Unproven sites and non-loop `Index` still pay the lookup |
 
 **The caller-side predicate peel only pays when it spills nothing.** When a callee opens with a pure guard over its parameters and returns an immediate or a parameter from that arm, codegen evaluates the guard at the call site so base cases skip the frame. Arguments that compile to a single pure byte (one slot load, one constant) are re-materialized in both the guard and the argument prep instead of being stored to a temp, which drops one `STORE` plus one spill `LOAD` per argument and leaves the guard reading the caller's own locals (peel-heavy loop: 4.28G → 3.29G instructions, 189ms → 152ms). Anything longer than a byte still takes a temp, because the guard copy and the call copy would each pay for it.
 
@@ -159,6 +167,6 @@ That byte budget is the whole profitability margin, and it is what rules out pee
 
 ## Tracking
 
-Open items are Linear issues in the [Known limitations](https://linear.app/ardax/project/known-limitations-29053df372c3) project; investigation issues write the expected model first. Already tracked elsewhere: [COI-26](https://linear.app/ardax/issue/COI-26), [COI-70](https://linear.app/ardax/issue/COI-70), [COI-71](https://linear.app/ardax/issue/COI-71), [COI-35](https://linear.app/ardax/issue/COI-35). Remaining follow-up from the investigation batch: [COI-99](https://linear.app/ardax/issue/COI-99) (length invariance across pure helper calls).
+Open items are Linear issues in the [Known limitations](https://linear.app/ardax/project/known-limitations-29053df372c3) project; investigation issues write the expected model first. Already tracked elsewhere: [COI-26](https://linear.app/ardax/issue/COI-26), [COI-70](https://linear.app/ardax/issue/COI-70), [COI-71](https://linear.app/ardax/issue/COI-71), [COI-35](https://linear.app/ardax/issue/COI-35).
 
 Most items have no inline `TODO`/`FIXME` — knowledge lives here and in [.cursor/skills/coil-contributor/reference.md](../../.cursor/skills/coil-contributor/reference.md). Update this file when closing a limitation.

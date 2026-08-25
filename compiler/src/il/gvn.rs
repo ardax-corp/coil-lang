@@ -30,6 +30,7 @@ fn is_pure_producer(op: &IlOp) -> bool {
             | IlOp::BinSlotImm { .. }
             | IlOp::BinSlotSlot { .. }
             | IlOp::Index { .. }
+            | IlOp::IndexUnchecked { .. }
             | IlOp::Dup { .. }
             | IlOp::LoadField { .. }
     ) || matches!(
@@ -382,6 +383,9 @@ fn is_get_field_barrier(op: &IlOp) -> bool {
                 | Instruction::FORMAT
                 | Instruction::FfiInvoke
                 | Instruction::StoreIndex
+                | Instruction::StoreIndexUnchecked
+                | Instruction::StoreIndexPin
+                | Instruction::StoreIndexPinUnchecked
                 | Instruction::ArrayPush
         )
     )
@@ -594,6 +598,7 @@ fn join_pure_tail(ops: &[IlOp], start: usize, end: usize, len: usize) -> Option<
                 | IlOp::BinSlotImm { .. }
                 | IlOp::BinSlotSlot { .. }
                 | IlOp::Index { .. }
+            | IlOp::IndexUnchecked { .. }
                 | IlOp::LoadField { .. }
                 | IlOp::Dup { .. }
         ) {

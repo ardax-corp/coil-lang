@@ -470,6 +470,7 @@ fn is_multi_op_suffix_op(op: &IlOp) -> bool {
             | IlOp::BinSlotImm { .. }
             | IlOp::BinSlotSlot { .. }
             | IlOp::Index { .. }
+            | IlOp::IndexUnchecked { .. }
             | IlOp::LoadField { .. }
             | IlOp::BoxValue { .. }
             | IlOp::UnboxValue { .. }

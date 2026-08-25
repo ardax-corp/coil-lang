@@ -72,6 +72,8 @@ pub struct OptimizeOptions {
     pub max_optimization_iterations: usize,
     /// Record per-pass counters into [`stats::OptStats`] (COI-131). Default **off**.
     pub collect_stats: bool,
+    /// Pure user `fn` names + entry labels for COI-99 length-proof barriers.
+    pub pure_call_ctx: Option<super::pure_call::PureCallCtx>,
 }
 
 impl Default for OptimizeOptions {
@@ -108,6 +110,7 @@ impl Default for OptimizeOptions {
             iterative_optimization: false,
             max_optimization_iterations: 10,
             collect_stats: false,
+            pure_call_ctx: None,
         }
     }
 }
@@ -498,7 +501,8 @@ pub fn optimize_per_func(
     }
 
     let mut module = super::IlModule::from_flat(ops, funcs);
-    *ops = module.optimize_and_flatten(opts, pool);
+    let (optimized, _, _) = module.optimize_and_flatten(opts, pool);
+    *ops = optimized;
 }
 
 /// Map inclusive-exclusive emitting indices to a raw op range, including
@@ -546,7 +550,7 @@ pub use stats::{OptStats, begin_opt_stats, last_opt_stats};
 pub(crate) use stats::note_function_inlined;
 #[allow(unused_imports)]
 pub use branch_opt::{BranchProfile, optimize_branches};
-pub(crate) use branch_opt::max_code_label;
+pub(crate) use branch_opt::{max_code_label, remap_label_space};
 pub(crate) use block_order::reorder_basic_blocks;
 
 mod cfg;

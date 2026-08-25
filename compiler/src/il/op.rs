@@ -82,6 +82,35 @@ pub enum IlOp {
     Index {
         loc: DebugLoc,
     },
+    /// Bounds-proofed `Index` (see [`Instruction::IndexUnchecked`]).
+    IndexUnchecked {
+        loc: DebugLoc,
+    },
+    /// Pin a stack-top array in the current frame (operand: source slot).
+    ArrayPin {
+        slot: u32,
+        loc: DebugLoc,
+    },
+    /// Index via a pinned array (operand: pin slot); pops index only.
+    IndexPin {
+        slot: u32,
+        loc: DebugLoc,
+    },
+    /// Bounds-proofed [`Instruction::IndexPin`].
+    IndexPinUnchecked {
+        slot: u32,
+        loc: DebugLoc,
+    },
+    /// `StoreIndex` via a pinned array (operand: pin slot); pops value + index.
+    StoreIndexPin {
+        slot: u32,
+        loc: DebugLoc,
+    },
+    /// Bounds-proofed [`Instruction::StoreIndexPin`].
+    StoreIndexPinUnchecked {
+        slot: u32,
+        loc: DebugLoc,
+    },
     /// `MakeTuple` — pop `arity` values, push tuple.
     MakeTuple {
         arity: u32,
@@ -260,6 +289,27 @@ impl IlOp {
             Instruction::DUPLICATE => Self::Dup { loc },
             Instruction::POP => Self::Pop { loc },
             Instruction::Index => Self::Index { loc },
+            Instruction::IndexUnchecked => Self::IndexUnchecked { loc },
+            Instruction::ArrayPin => Self::ArrayPin {
+                slot: byte.operand_u32(),
+                loc,
+            },
+            Instruction::IndexPin => Self::IndexPin {
+                slot: byte.operand_u32(),
+                loc,
+            },
+            Instruction::IndexPinUnchecked => Self::IndexPinUnchecked {
+                slot: byte.operand_u32(),
+                loc,
+            },
+            Instruction::StoreIndexPin => Self::StoreIndexPin {
+                slot: byte.operand_u32(),
+                loc,
+            },
+            Instruction::StoreIndexPinUnchecked => Self::StoreIndexPinUnchecked {
+                slot: byte.operand_u32(),
+                loc,
+            },
             Instruction::MakeTuple => Self::MakeTuple {
                 arity: byte.operand_u32(),
                 loc,
@@ -343,6 +393,22 @@ impl IlOp {
             IlOp::Dup { .. } => Byte::new(Instruction::DUPLICATE),
             IlOp::Pop { .. } => Byte::new(Instruction::POP),
             IlOp::Index { .. } => Byte::new(Instruction::Index),
+            IlOp::IndexUnchecked { .. } => Byte::new(Instruction::IndexUnchecked),
+            IlOp::ArrayPin { slot, .. } => {
+                Byte::new(Instruction::ArrayPin).with_operand_u32(*slot)
+            }
+            IlOp::IndexPin { slot, .. } => {
+                Byte::new(Instruction::IndexPin).with_operand_u32(*slot)
+            }
+            IlOp::IndexPinUnchecked { slot, .. } => {
+                Byte::new(Instruction::IndexPinUnchecked).with_operand_u32(*slot)
+            }
+            IlOp::StoreIndexPin { slot, .. } => {
+                Byte::new(Instruction::StoreIndexPin).with_operand_u32(*slot)
+            }
+            IlOp::StoreIndexPinUnchecked { slot, .. } => {
+                Byte::new(Instruction::StoreIndexPinUnchecked).with_operand_u32(*slot)
+            }
             IlOp::MakeTuple { arity, .. } => {
                 Byte::new(Instruction::MakeTuple).with_operand_u32(*arity)
             }
@@ -425,6 +491,12 @@ impl IlOp {
             | IlOp::Dup { loc }
             | IlOp::Pop { loc }
             | IlOp::Index { loc }
+            | IlOp::IndexUnchecked { loc }
+            | IlOp::ArrayPin { loc, .. }
+            | IlOp::IndexPin { loc, .. }
+            | IlOp::IndexPinUnchecked { loc, .. }
+            | IlOp::StoreIndexPin { loc, .. }
+            | IlOp::StoreIndexPinUnchecked { loc, .. }
             | IlOp::MakeTuple { loc, .. }
             | IlOp::MakeArray { loc, .. }
             | IlOp::MakeEnum { loc, .. }
@@ -462,6 +534,12 @@ impl IlOp {
             | IlOp::Dup { loc: l }
             | IlOp::Pop { loc: l }
             | IlOp::Index { loc: l }
+            | IlOp::IndexUnchecked { loc: l }
+            | IlOp::ArrayPin { loc: l, .. }
+            | IlOp::IndexPin { loc: l, .. }
+            | IlOp::IndexPinUnchecked { loc: l, .. }
+            | IlOp::StoreIndexPin { loc: l, .. }
+            | IlOp::StoreIndexPinUnchecked { loc: l, .. }
             | IlOp::MakeTuple { loc: l, .. }
             | IlOp::MakeArray { loc: l, .. }
             | IlOp::MakeEnum { loc: l, .. }
@@ -503,6 +581,12 @@ impl IlOp {
             IlOp::Dup { .. } => Some(Instruction::DUPLICATE),
             IlOp::Pop { .. } => Some(Instruction::POP),
             IlOp::Index { .. } => Some(Instruction::Index),
+            IlOp::IndexUnchecked { .. } => Some(Instruction::IndexUnchecked),
+            IlOp::ArrayPin { .. } => Some(Instruction::ArrayPin),
+            IlOp::IndexPin { .. } => Some(Instruction::IndexPin),
+            IlOp::IndexPinUnchecked { .. } => Some(Instruction::IndexPinUnchecked),
+            IlOp::StoreIndexPin { .. } => Some(Instruction::StoreIndexPin),
+            IlOp::StoreIndexPinUnchecked { .. } => Some(Instruction::StoreIndexPinUnchecked),
             IlOp::MakeTuple { .. } => Some(Instruction::MakeTuple),
             IlOp::MakeArray { .. } => Some(Instruction::MakeArray),
             IlOp::MakeEnum { .. } => Some(Instruction::MakeEnum),

@@ -707,6 +707,25 @@ impl NaturalLoop {
     }
 }
 
+fn il_function_start(ops: &[IlOp], idx: usize) -> usize {
+    for i in (0..idx).rev() {
+        if matches!(ops[i], IlOp::Return { .. }) {
+            return i + 1;
+        }
+    }
+    0
+}
+
+fn resolve_label_before(ops: &[IlOp], before: usize, target: Label) -> Option<usize> {
+    let start = il_function_start(ops, before);
+    for i in (start..before).rev() {
+        if matches!(&ops[i], IlOp::Label(l) if *l == target) {
+            return Some(i);
+        }
+    }
+    None
+}
+
 fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
     let mut loops = find_natural_loops(ops);
     let prefer = PREFER_HOT.with(|c| c.get());
@@ -722,12 +741,6 @@ fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
 }
 
 pub(super) fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
-    let mut label_at: HashMap<u32, usize> = HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
-            label_at.insert(*id, i);
-        }
-    }
     let mut out = Vec::new();
     for (i, op) in ops.iter().enumerate() {
         let IlOp::Jump {
@@ -738,7 +751,7 @@ pub(super) fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
         else {
             continue;
         };
-        let Some(&h) = label_at.get(&target.0) else {
+        let Some(h) = resolve_label_before(ops, i, *target) else {
             continue;
         };
         // Back-edge: jump target is before the jump.
@@ -790,34 +803,7 @@ fn loop_may_change_array_length(ops: &[IlOp], lp: &NaturalLoop) -> bool {
 }
 
 pub(super) fn loop_has_barrier(ops: &[IlOp], lp: &NaturalLoop) -> bool {
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
-            IlOp::HostInvoke { .. }
-            | IlOp::Print { .. }
-            | IlOp::SetField { .. }
-            | IlOp::Entry { .. }
-            | IlOp::GetField { .. } => return true,
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfMatch { .. },
-                ..
-            } => return true,
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    common::Instruction::HostInvoke
-                        | common::Instruction::PRINT
-                        | common::Instruction::SetField
-                        | common::Instruction::GetField
-                        | common::Instruction::CALL
-                        | common::Instruction::FfiInvoke
-                ) =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
+    (lp.header..=lp.latch).any(|i| super::pure_call::op_blocks_licm(&ops[i]))
 }
 
 /// Barriers that block string-key LICM. GetField/SetField are allowed — the
@@ -906,32 +892,56 @@ fn apply_hoist(ops: &mut Vec<IlOp>, lp: &NaturalLoop, hoist_idx: usize, cand: Il
     insert_preheader_ops(ops, &lp2, vec![cand]);
 }
 
+fn fresh_preheader_label(ops: &[IlOp]) -> Label {
+    let mut id = ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(n)) => Some(*n),
+            _ => None,
+        })
+        .max()
+        .map(|m| m.saturating_add(1))
+        .unwrap_or(0);
+    while ops
+        .iter()
+        .any(|op| matches!(op, IlOp::Label(Label(n)) if *n == id))
+    {
+        id = id.saturating_add(1);
+    }
+    Label(id)
+}
+
 pub(super) fn insert_preheader_ops(ops: &mut Vec<IlOp>, lp: &NaturalLoop, materialize: Vec<IlOp>) {
     if materialize.is_empty() {
         return;
     }
-    let pre = Label(
-        ops.iter()
-            .filter_map(|op| {
-                if let IlOp::Label(Label(id)) = op {
-                    Some(*id)
-                } else {
-                    None
-                }
-            })
-            .max()
-            .unwrap_or(0)
-            .wrapping_add(1),
-    );
+    let pre = fresh_preheader_label(ops);
+    let duplicate_labels: std::collections::HashSet<u32> = {
+        let mut counts = std::collections::HashMap::<u32, usize>::new();
+        for op in ops.iter() {
+            if let IlOp::Label(Label(id)) = op {
+                *counts.entry(*id).or_default() += 1;
+            }
+        }
+        counts
+            .into_iter()
+            .filter(|(_, c)| *c > 1)
+            .map(|(id, _)| id)
+            .collect()
+    };
 
     // Redirect external jumps that targeted the header to the preheader,
     // except the latch back-edge (keeps jumping to header).
+    let fn_start = il_function_start(ops, lp.header);
     for (i, op) in ops.iter_mut().enumerate() {
         if i == lp.latch {
             continue;
         }
+        if i < fn_start || i > lp.latch {
+            continue;
+        }
         if let IlOp::Jump { target, .. } = op
-            && *target == lp.header_label
+            && (*target == lp.header_label || duplicate_labels.contains(&target.0))
         {
             *target = pre;
         }

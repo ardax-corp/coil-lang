@@ -223,10 +223,16 @@ test("two") { assert(true)?; }
         );
 
         let main_bc = &bc[main_off..];
-        let calls_in_main = main_bc
+        let call_targets: Vec<u32> = main_bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .count();
+            .map(|b| b.call_parts().1 as u32)
+            .collect();
+        assert!(
+            call_targets.contains(&(syn0 as u32)) && call_targets.contains(&(syn1 as u32)),
+            "virtual main CALLs must target harness cases; targets={call_targets:?} syn0={syn0} syn1={syn1}"
+        );
+        let calls_in_main = call_targets.len();
         assert!(
             calls_in_main >= 2,
             "virtual main should CALL each harness case; got {calls_in_main}"
@@ -2169,9 +2175,15 @@ i = i + 1; \
         let has_len = bc
             .iter()
             .any(|b| matches!(b.bytecode(), Instruction::ArrayLen));
-        let has_index = bc
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::Index));
+        let has_index = bc.iter().any(|b| {
+            matches!(
+                b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )
+        });
         let jmp = bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::JMP))
@@ -6849,10 +6861,14 @@ fn main() {
                 .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
             "expected registry HostInvoke in prologue"
         );
-        assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::CodePtr)),
-            "expected CodePtr for drop entry"
+        let drop_ptr = bc
+            .iter()
+            .find(|b| matches!(b.bytecode(), Instruction::CodePtr))
+            .expect("expected CodePtr for drop entry");
+        assert_ne!(
+            drop_ptr.operand_u32(),
+            0,
+            "drop CodePtr must resolve past the CALL/JMP/HALT prologue"
         );
     }
 

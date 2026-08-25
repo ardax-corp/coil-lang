@@ -9925,6 +9925,7 @@ impl Compiler {
         }
 
         self.bind_function_entry("main".to_string());
+        let body_start = self.bytecode.len();
 
         let prev_vars = std::mem::take(&mut self.context.variables);
         self.context.variables = Interner::default();
@@ -9995,6 +9996,11 @@ impl Compiler {
 
         bb.finalize()
             .expect("BlockBuilder::finalize: virtual test main labels bound");
+        let body_end = self.bytecode.len();
+        self.record_fn_span("main".to_string(), body_start, body_end);
+        let entry = self.fn_entry_labels.get("main").copied();
+        self.bytecode
+            .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
         self.context.variables = prev_vars;
     }
 
@@ -12542,6 +12548,19 @@ impl Compiler {
                     // Test cases are typed as unit / Result<(), string> — zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
+
+                let body_end = self.bytecode.len();
+                // Flatten remaps per IlFunc; unrecorded tests share the epilogue
+                // and collide with ArrayPin labels in earlier bodies.
+                self.record_fn_span(fn_name.clone(), offset as usize, body_end);
+                let entry = self.fn_entry_labels.get(&fn_name).copied();
+                self.bytecode.record_func_with_sp(
+                    fn_name.clone(),
+                    entry,
+                    offset as usize,
+                    body_end,
+                    0,
+                );
 
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
@@ -15428,13 +15447,14 @@ impl Compiler {
         } else {
             HashSet::new()
         };
+        self.pure_fns = crate::typechecking::analyze_pure_fns(ast);
         if auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
-            let pure = crate::typechecking::analyze_pure_fns(ast);
-            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, &pure);
+            let pure = &self.pure_fns;
+            self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
             self.par_spec_args =
                 crate::typechecking::collect_par_specialization_args(ast, &self.par_shapes);
-            self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &pure);
+            self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
         } else {
             self.par_shapes.clear();
             self.par_spec_args.clear();
@@ -15659,6 +15679,15 @@ impl Compiler {
             None
         };
 
+        let label_callees = self
+            .fn_entry_labels
+            .iter()
+            .map(|(name, label)| (label.0, name.clone()))
+            .collect();
+        self.opt_options.pure_call_ctx = Some(crate::il::PureCallCtx {
+            pure_fns: self.pure_fns.clone(),
+            label_callees,
+        });
         self.bytecode.set_opt_options(self.opt_options.clone());
         let mut lowered = if self.retain_cursor_il {
             self.bytecode.lower_in_place_capturing(&mut self.constants)
@@ -15680,8 +15709,44 @@ impl Compiler {
         };
         // Prefer entry labels: IL opts (dead_block) shift emitting indices
         // before fuse, so raw `functions` / `test_cases` PCs are stale.
+        // Per-function chunk remaps avoid collisions in the cumulative map.
+        let func_label_maps = &lowered.func_label_maps;
+        let funcs = self.bytecode.funcs();
+        let flat_label = |func_idx: usize, emit_id: u32| -> u32 {
+            func_label_maps
+                .get(func_idx)
+                .and_then(|m| m.get(&emit_id).copied())
+                .unwrap_or(emit_id)
+        };
+        let func_idx_for_pre = |pre: usize| -> Option<usize> {
+            funcs
+                .iter()
+                .position(|f| pre >= f.code_start && pre < f.code_end)
+        };
+        let func_idx_for_name = |name: &str| -> Option<usize> {
+            funcs.iter().position(|f| f.name == name)
+        };
+        let resolve_fn_label_pc = |name: &str, emit_id: u32| -> Option<usize> {
+            let idx = func_idx_for_name(name)?;
+            let flat_id = flat_label(idx, emit_id);
+            lowered.label_pcs.get(&flat_id).copied()
+        };
         let resolve_entry = |pre: usize| -> usize {
             if let Some(label) = self.bytecode.entry_label_for_offset(pre) {
+                if let Some(idx) = func_idx_for_pre(pre) {
+                    let flat_id = flat_label(idx, label.0);
+                    if let Some(pc) = lowered.label_pcs.get(&flat_id).copied() {
+                        return pc;
+                    }
+                }
+                let global_flat = lowered
+                    .label_remap
+                    .get(&label.0)
+                    .copied()
+                    .unwrap_or(label.0);
+                if let Some(pc) = lowered.label_pcs.get(&global_flat).copied() {
+                    return pc;
+                }
                 if let Some(&pc) = lowered.label_pcs.get(&label.0) {
                     return pc;
                 }
@@ -15690,7 +15755,7 @@ impl Compiler {
         };
         for (name, offset) in self.functions.iter_mut() {
             if let Some(label) = self.fn_entry_labels.get(name) {
-                if let Some(&pc) = lowered.label_pcs.get(&label.0) {
+                if let Some(pc) = resolve_fn_label_pc(name, label.0) {
                     *offset = pc;
                     continue;
                 }
@@ -15707,6 +15772,10 @@ impl Compiler {
         self.setup_entry_offset = resolve_entry(self.setup_entry_offset as usize) as u32;
 
         self.debug_locs = lowered.debug_locs;
+
+        self.operand_stack_slots = self
+            .operand_stack_slots
+            .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
 
         debug_assert_eq!(
             self.debug_locs.len(),
