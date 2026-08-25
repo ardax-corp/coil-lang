@@ -4091,6 +4091,7 @@ impl<const S: usize> Machine<S> {
                             .setup_current_and_advance(|frame| frame.set(callee_sp));
                         sp = callee_sp;
                         set_jump_target(&mut ip, entry as usize, code_len);
+                        self.push_pin_frame();
                         continue;
                     }
 
@@ -4161,6 +4162,7 @@ impl<const S: usize> Machine<S> {
                         .setup_current_and_advance(|frame| frame.set(callee_sp));
                     sp = callee_sp;
                     set_jump_target(&mut ip, target, code_len);
+                    self.push_pin_frame();
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):
