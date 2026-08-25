@@ -1904,6 +1904,17 @@ Native threads via `use thread::{spawn, join, …};` — each worker runs on its
 
 ---
 
+### `examples/tls_thread_loopback.hy`
+
+**Demonstrates:** Leftover `io::__tls` client+server `enable` across Coil threads (COI-116). Server enable runs in `thread::spawn`; client enable runs on the root. Needs `libtls` on `[ffi] search_paths` (coil-tls native).
+
+| | |
+|---|---|
+| **Run** | `COIL_MAX_WORKER_THREADS=1 cargo run -- examples/tls_thread_loopback.hy` |
+| **Output** | `ok` |
+
+---
+
 ### `examples/gc_root_weak.hy`
 
 **Demonstrates:** Virtual `gc` module — `root` / `get` / `weak` / `upgrade` / `unroot`.
@@ -2152,6 +2163,7 @@ See [`examples/projects/README.md`](../../examples/projects/README.md).
 | `thread_channel.hy` | OS threads | `hello` |
 | `thread_reply.hy` | OS threads | `ping` |
 | `thread_mutex.hy` | OS threads | `2` |
+| `tls_thread_loopback.hy` | TLS leftover | `ok` (needs `libtls`) |
 | `for_in_coro.hy` | Coroutines | `01210` |
 | `for_in_array.hy` | Collections | `123` |
 | `for_in_tuple.hy` | Collections | `123` |

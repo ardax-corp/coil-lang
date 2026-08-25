@@ -72,20 +72,23 @@ When a CPU reactor is bound (`HostStateGuard`), those blocking waits use
 [`wait_fd_helping`](../../machine/src/io_reactor.rs): short poll slices interleaved with
 [`Reactor::help_once`](../../machine/src/reactor.rs).
 
-**TLS handshake is different:** `tls_*_enable` waits via
-[`reactor_wait_fd_no_help`](../../machine/src/io.rs) so a mid-handshake park
-cannot nest-steal the peer `thread::spawn` job onto the same stack (that
-deadlocked both sides under `COIL_MAX_WORKER_THREADS=1` — COI-116). The pool
-worker still runs the peer while the waiter polls.
+**TLS handshake is different:** leftover `tls_*_enable` parks via
+[`reactor_wait_fd_no_help`](../../machine/src/io.rs) and pumps one rustls
+step per `coil_tls_read` / `coil_tls_write` until the handshake completes,
+so a mid-handshake park cannot nest-steal the peer `thread::spawn` job onto
+the same stack (that deadlocked both sides under `COIL_MAX_WORKER_THREADS=1`
+— COI-116). The pool worker still runs the peer while the waiter polls.
 
 After enable, `StreamKind::Tls` IO (`stream_read` / `stream_write` / close)
 dispatches to dloaded `coil_tls_*` (`dload("tls")` / `[ffi] search_paths`).
-WouldBlock from leftover `tls_*_enable` still returns that session: attach
-(`kind = Tls`), park, then continue on read/write — do not free it and do
-not call enable again. WouldBlock from later `.so` IO is the same tagged
-`IoError` and parks on the VM reactor; do not handshake on a blocking
-`.so` thread. `coil_tls_disable` is close_notify; `coil_tls_free` drops the
-session.
+WouldBlock during leftover `tls_*_enable` is attached (`kind = Tls`) and the
+VM parks on `reactor_wait_fd_no_help`, then pumps handshake via empty
+`coil_tls_read` / `coil_tls_write` until Ready (COI-116). Do not retry
+`enable`. `WouldBlock` from later `.so` IO is the same tagged `IoError`
+and parks on the VM reactor; do not handshake on a blocking `.so` thread.
+`coil_tls_disable` is close_notify; `coil_tls_free` is Drop. Stream close / GC
+only `free` — coil-tls `disable` currently also frees, so leftover Drop must
+not call disable.
 
 ## Env / knobs
 
