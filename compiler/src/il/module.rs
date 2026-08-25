@@ -147,7 +147,11 @@ impl IlModule {
         for (idx, (start, end)) in segment_ranges.iter().copied().enumerate() {
             let is_prologue = idx == 0 && !self.prologue.is_empty();
             if is_prologue {
-                remap_cross_function_entry_call_targets(&mut out[start..end], &entry_labels);
+                remap_cross_function_entry_call_targets(
+                    &mut out[start..end],
+                    &func_label_maps,
+                    &entry_labels,
+                );
                 remap_cross_function_jump_targets(
                     &mut out[start..end],
                     &prior_labels,
@@ -159,7 +163,11 @@ impl IlModule {
                     &prior_labels,
                     &flat_label_ids,
                 );
-                remap_cross_function_entry_call_targets(&mut out[start..end], &entry_labels);
+                remap_cross_function_entry_call_targets(
+                    &mut out[start..end],
+                    &func_label_maps,
+                    &entry_labels,
+                );
             }
         }
         (out, prior_labels, func_label_maps)
@@ -260,7 +268,31 @@ fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
 }
 
 /// Patch cross-function `Jump`/`Entry` targets; keep intra-segment labels local.
-fn remap_cross_function_entry_call_targets(ops: &mut [IlOp], entry_labels: &HashMap<u32, u32>) {
+/// Unique old ids map 1:1; collisions fall back to recorded function entries.
+fn resolve_cross_function_entry(
+    old: u32,
+    maps: &[HashMap<u32, u32>],
+    entry_labels: &HashMap<u32, u32>,
+) -> Option<u32> {
+    let mut uniq = None;
+    let mut hits = 0u8;
+    for map in maps {
+        if let Some(&new) = map.get(&old) {
+            hits = hits.saturating_add(1);
+            uniq = Some(new);
+            if hits > 1 {
+                return entry_labels.get(&old).copied();
+            }
+        }
+    }
+    uniq
+}
+
+fn remap_cross_function_entry_call_targets(
+    ops: &mut [IlOp],
+    maps: &[HashMap<u32, u32>],
+    entry_labels: &HashMap<u32, u32>,
+) {
     use std::collections::HashSet;
 
     let local: HashSet<u32> = ops
@@ -271,13 +303,11 @@ fn remap_cross_function_entry_call_targets(ops: &mut [IlOp], entry_labels: &Hash
         })
         .collect();
     for op in ops.iter_mut() {
-        // Function entries only — a full old→new map collides when two bodies
-        // reuse label 0..n (ArrayPin preheaders vs a later callee entry).
         if let IlOp::Entry { target, .. } = op {
             if local.contains(&target.0) {
                 continue;
             }
-            if let Some(&new_id) = entry_labels.get(&target.0) {
+            if let Some(new_id) = resolve_cross_function_entry(target.0, maps, entry_labels) {
                 if new_id != target.0 && !local.contains(&new_id) {
                     target.0 = new_id;
                 }
