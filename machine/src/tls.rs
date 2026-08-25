@@ -14,12 +14,12 @@ use std::time::Instant;
 use common::Value;
 
 use crate::io::{
-    IoErrorTag, duration_from_timeout_ms, reactor_wait_fd_no_help, stream_wait_handle,
-    value_as_string, with_stream_mut,
+    duration_from_timeout_ms, reactor_wait_fd_no_help, stream_wait_handle, value_as_string,
+    with_stream_mut, IoErrorTag,
 };
 use crate::io_reactor::Interest;
 use crate::memory::{Heap, Member, ObjString, Object, RefInstance, StreamKind};
-use crate::tls_native::{NativeEnable, TlsNativeAbi, attach_enable_outcome, resolve_preferred};
+use crate::tls_native::{attach_enable_outcome, resolve_preferred, NativeEnable, TlsNativeAbi};
 
 struct ClientEnableOpts {
     verify: bool,
@@ -68,22 +68,23 @@ fn value_as_option_string(heap: &Heap, v: Value) -> Result<Option<String>, IoErr
     }
 }
 
-/// Generic `enable<T>` forwards a boxed anonymous record (`ValueTag::Record`
-/// → `Object::Boxed`) without `UnboxValue`. Peel one box so leftover parse
-/// sees the inner instance the same way as a direct call.
+/// Peel one `Object::Boxed` cell from the generic `BoxValue` ABI.
+pub(crate) fn unwrap_boxed_value(heap: &Heap, v: Value) -> Value {
+    match heap.find_object_by_addr(v.raw() as u64) {
+        Some(Object::Boxed(gc)) => match &gc.as_ref().payload {
+            Member::Value(inner) => *inner,
+            Member::Object(o) => Value::from(o.addr()),
+        },
+        _ => v,
+    }
+}
+
+/// Generic `enable<T>` forwards boxed args without `UnboxValue`. Peel one box
+/// so leftover parse sees the inner instance the same way as a direct call.
 fn opts_instance(heap: &Heap, opts: Value) -> Result<RefInstance, IoErrorTag> {
+    let opts = unwrap_boxed_value(heap, opts);
     match heap.find_object_by_addr(opts.raw() as u64) {
         Some(Object::Instance(gc)) => Ok(gc),
-        Some(Object::Boxed(gc)) => {
-            let inner = match &gc.as_ref().payload {
-                Member::Object(o) => o.addr(),
-                Member::Value(v) => v.raw() as u64,
-            };
-            match heap.find_object_by_addr(inner) {
-                Some(Object::Instance(inst)) => Ok(inst),
-                _ => Err(IoErrorTag::InvalidInput),
-            }
-        }
         _ => Err(IoErrorTag::InvalidInput),
     }
 }
@@ -286,6 +287,7 @@ pub fn tls_client_enable(
     host: &str,
     opts: Value,
 ) -> Result<Value, IoErrorTag> {
+    let stream = unwrap_boxed_value(heap, stream);
     let opts = parse_tls_options(heap, opts)?;
     let fd = require_tcp_stream(heap, stream)?;
     let abi = require_abi()?;
@@ -306,6 +308,7 @@ pub fn tls_client_enable(
 
 /// Upgrade a TCP `Stream` in place via dloaded `coil_tls_server_enable`.
 pub fn tls_server_enable(heap: &mut Heap, stream: Value, opts: Value) -> Result<Value, IoErrorTag> {
+    let stream = unwrap_boxed_value(heap, stream);
     let opts = parse_server_enable_options(heap, opts)?;
     let fd = require_tcp_stream(heap, stream)?;
     let abi = require_abi()?;

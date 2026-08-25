@@ -386,6 +386,7 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
     };
     use crate::tls::{
         tls_client_disable, tls_client_enable, tls_server_disable, tls_server_enable,
+        unwrap_boxed_value,
     };
 
     for &kind in IoKind::all() {
@@ -543,25 +544,43 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
                                 as_result_value(heap, r)
                             }
                             IoKind::TlsClientEnable => {
-                                let host = match value_as_string(heap, args[1]) {
+                                let host = match value_as_string(
+                                    heap,
+                                    unwrap_boxed_value(heap, args[1]),
+                                ) {
                                     Ok(s) => s,
                                     Err(tag) => {
                                         return Ok(Some(as_result_value(heap, Err(tag))));
                                     }
                                 };
-                                let r = tls_client_enable(heap, args[0], &host, args[2]);
+                                let r = tls_client_enable(
+                                    heap,
+                                    unwrap_boxed_value(heap, args[0]),
+                                    &host,
+                                    args[2],
+                                );
                                 as_result_value(heap, r)
                             }
                             IoKind::TlsClientDisable => {
-                                let r = tls_client_disable(heap, args[0]);
+                                let r = tls_client_disable(
+                                    heap,
+                                    unwrap_boxed_value(heap, args[0]),
+                                );
                                 as_result_value(heap, r)
                             }
                             IoKind::TlsServerEnable => {
-                                let r = tls_server_enable(heap, args[0], args[1]);
+                                let r = tls_server_enable(
+                                    heap,
+                                    unwrap_boxed_value(heap, args[0]),
+                                    args[1],
+                                );
                                 as_result_value(heap, r)
                             }
                             IoKind::TlsServerDisable => {
-                                let r = tls_server_disable(heap, args[0]);
+                                let r = tls_server_disable(
+                                    heap,
+                                    unwrap_boxed_value(heap, args[0]),
+                                );
                                 as_result_value(heap, r)
                             }
                         };

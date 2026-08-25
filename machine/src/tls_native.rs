@@ -8,14 +8,14 @@
 //! is the destructor.
 
 use std::cell::Cell;
-use std::ffi::{CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CString};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use libloading::Library;
 
-use crate::ffi::{FfiError, resolve_library};
+use crate::ffi::{resolve_library, FfiError};
 use crate::io::IoErrorTag;
 use crate::io_handle::NativeHandle;
 use crate::memory::{Heap, ObjStream, StreamKind};
@@ -1086,9 +1086,9 @@ mod tests {
         Value::from(obj.addr())
     }
 
-    /// Generic `enable<T>` call sites box the anonymous record (`ValueTag::Record`
-    /// → `Object::Boxed`) the same way leftover actually sees it.
-    fn box_record_opts(heap: &mut Heap, inner: Value) -> Value {
+    /// Generic `enable<T>` call sites `BoxValue` every argument. Leftover
+    /// actually sees `Object::Boxed` cells with these tags.
+    fn box_value(heap: &mut Heap, inner: Value, tag: ValueTag) -> Value {
         let addr = inner.raw() as u64;
         let payload = match heap.find_object_by_addr(addr) {
             Some(obj) => Member::Object(obj),
@@ -1096,12 +1096,16 @@ mod tests {
         };
         let (obj, _) = heap.alloc(
             ObjBoxed {
-                tag: ValueTag::Record as u16,
+                tag: tag as u16,
                 payload,
             },
             Object::Boxed,
         );
         Value::from(obj.addr())
+    }
+
+    fn box_record_opts(heap: &mut Heap, inner: Value) -> Value {
+        box_value(heap, inner, ValueTag::Record)
     }
 
     #[test]
@@ -1149,12 +1153,10 @@ mod tests {
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
             StreamKind::Tls
         );
-        assert!(
-            with_stream_mut(&mut heap, stream, |s| {
-                s.tls.as_ref().is_some_and(|t| t.wants_write())
-            })
-            .unwrap()
-        );
+        assert!(with_stream_mut(&mut heap, stream, |s| {
+            s.tls.as_ref().is_some_and(|t| t.wants_write())
+        })
+        .unwrap());
         assert_eq!(unsafe { stub_enable_calls(&abi) }, enable0 + 1);
         assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
 
@@ -1280,6 +1282,7 @@ mod tests {
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let stream = box_value(&mut heap, stream, ValueTag::Instance);
         let inner = client_enable_opts(&mut heap);
         let opts = box_record_opts(&mut heap, inner);
         let err = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts).unwrap_err();
@@ -1308,16 +1311,18 @@ mod tests {
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
         unsafe { stub_set_next_enable_err(&abi, IoErrorTag::WouldBlock as i32) };
 
+        let stream = box_value(&mut heap, stream, ValueTag::Instance);
         let inner = client_enable_opts(&mut heap);
         let opts = box_record_opts(&mut heap, inner);
         let out = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts)
             .expect("boxed generic opts must parse and leftover enable must attach");
-        assert_eq!(out, stream);
+        let inner_stream = crate::tls::unwrap_boxed_value(&heap, stream);
+        assert_eq!(out, inner_stream);
         assert_eq!(
-            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            with_stream_mut(&mut heap, inner_stream, |s| s.kind).unwrap(),
             StreamKind::Tls
         );
-        crate::tls::tls_client_disable(&mut heap, stream).expect("disable");
+        crate::tls::tls_client_disable(&mut heap, inner_stream).expect("disable");
         reset_preferred();
         drop(server);
     }
@@ -1336,15 +1341,18 @@ mod tests {
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(server), StreamKind::Tcp).expect("alloc");
+        let stream = box_value(&mut heap, stream, ValueTag::Instance);
         let inner = server_enable_opts(&mut heap);
         let opts = box_record_opts(&mut heap, inner);
-        crate::tls::tls_server_enable(&mut heap, stream, opts)
+        let out = crate::tls::tls_server_enable(&mut heap, stream, opts)
             .expect("boxed generic server opts must parse and leftover enable must attach");
+        let inner_stream = crate::tls::unwrap_boxed_value(&heap, stream);
+        assert_eq!(out, inner_stream);
         assert_eq!(
-            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            with_stream_mut(&mut heap, inner_stream, |s| s.kind).unwrap(),
             StreamKind::Tls
         );
-        crate::tls::tls_server_disable(&mut heap, stream).expect("disable");
+        crate::tls::tls_server_disable(&mut heap, inner_stream).expect("disable");
         reset_preferred();
         drop(client);
     }
