@@ -7031,7 +7031,7 @@ fn main() {
     assert_eq!(n, expect, "match Ok len must match process argc");
 }
 
-/// Virtual TLS is gone: `use io::net::tls` / `use tls` fail until coil-tls is on roots.
+/// Public `tls` / `io::net::tls` stay missing; leftover HostInvoke is `io::__tls`.
 #[test]
 fn virtual_tls_modules_do_not_resolve() {
     fn check_missing(src: &str) {
@@ -7050,6 +7050,152 @@ fn virtual_tls_modules_do_not_resolve() {
     check_missing("use io::net::tls::client::{enable};\nfn main() {}\n");
     check_missing("use io::net::tls::{alpn_protocol};\nfn main() {}\n");
     check_missing("use tls::{client};\nfn main() {}\n");
+}
+
+/// coil-tls binds leftover enable through `io::__tls`, not a public `tls` module.
+#[test]
+fn io_tls_leftover_client_enable_typechecks() {
+    fn check_ok(src: &str) {
+        let mut pipeline = Pipeline::new();
+        assert!(
+            pipeline.compile_src(src).is_ok(),
+            "expected typecheck Ok for {src:?}, messages={:?}",
+            pipeline.messages()
+        );
+    }
+    check_ok("use io::__tls::client::enable;\nfn main() {}\n");
+    check_ok("use io::__tls::client::{enable};\nfn main() {}\n");
+    check_ok("use io::__tls::server::{enable, disable};\nfn main() {}\n");
+    check_ok("use io::__tls::{alpn_protocol};\nfn main() {}\n");
+}
+
+/// HostInvoke + leftover `io::__tls::client`: enable on non-TCP → InvalidInput.
+#[test]
+fn tls_client_enable_non_tcp_is_err_via_host_invoke() {
+    let output = run_example_src(
+        r#"
+use io::{open, stdout, IoError, write};
+use io::__tls::client::{enable};
+use string::{format, to_bytes};
+
+fn classify(IoError e) -> int {
+    return match e {
+        IoError::WouldBlock => 10,
+        IoError::NotFound => 11,
+        IoError::PermissionDenied => 12,
+        IoError::AlreadyClosed => 13,
+        IoError::InvalidInput => 1,
+        IoError::Other => 15,
+        IoError::NotADirectory => 16,
+        IoError::AlreadyExists => 17,
+        IoError::TimedOut => 18,
+        IoError::Truncated => 19,
+        IoError::Certificate => 20,
+        IoError::Handshake => 21,
+    };
+}
+
+fn main() {
+    let path = "coil_tls_enable_kind.bin";
+    let s = open(path, "w")?;
+    let r = enable(s, "127.0.0.1", { verify: false, ca_pem: Option::None, ca_path: Option::None, timeout_ms: 0, alpn: "" });
+    let code = match r {
+        Result::Ok(_) => 0,
+        Result::Err(e) => classify(e),
+    };
+    write(stdout(), to_bytes(format("%i", code)));
+}
+"#,
+    );
+    assert_eq!(output, "1");
+}
+
+/// HostInvoke wiring for leftover client `disable` on a non-TLS stream → Err.
+#[test]
+fn tls_client_disable_on_file_is_err_via_host_invoke() {
+    let output = run_example_src(
+        r#"
+use io::{open, stdout, write};
+use io::__tls::client::{disable};
+use string::{format, to_bytes};
+
+fn disable_file_is_err() -> int {
+    let path = "coil_tls_disable_kind.bin";
+    return match open(path, "w") {
+        Result::Ok(s) => match disable(s) {
+            Result::Ok(_) => 0,
+            Result::Err(_) => 1,
+        },
+        Result::Err(_) => 9,
+    };
+}
+
+fn main() {
+    write(stdout(), to_bytes(format("%i", disable_file_is_err())));
+}
+"#,
+    );
+    assert_eq!(output, "1");
+}
+
+/// Two-arg leftover client `enable` is not a complete call (needs opts record).
+#[test]
+fn tls_client_enable_two_arg_does_not_compile() {
+    let mut pipeline = Pipeline::new();
+    let err = pipeline.compile_src(
+        r#"
+use io::{open, IoError, Stream, write};
+use io::__tls::client::{enable};
+
+fn main() {
+    let path = "coil_tls_arity.bin";
+    let s = open(path, "w")?;
+    let r: Result<Stream, IoError> = enable(s, "127.0.0.1");
+}
+"#,
+    );
+    assert!(
+        err.is_err(),
+        "2-arg enable should fail to typecheck as Result"
+    );
+}
+
+/// Third arg to leftover client `enable` must be a record with `verify: bool`.
+#[test]
+fn tls_client_enable_non_record_opts_does_not_compile() {
+    let mut pipeline = Pipeline::new();
+    let err = pipeline.compile_src(
+        r#"
+use io::{open, write};
+use io::__tls::client::{enable};
+
+fn main() {
+    let path = "coil_tls_opts.bin";
+    let s = open(path, "w")?;
+    let _ = enable(s, "127.0.0.1", 1)?;
+}
+"#,
+    );
+    assert!(err.is_err(), "non-record opts should fail to typecheck");
+}
+
+/// Empty leftover client opts `{}` omit required `verify` → type error.
+#[test]
+fn tls_client_enable_empty_opts_does_not_compile() {
+    let mut pipeline = Pipeline::new();
+    let err = pipeline.compile_src(
+        r#"
+use io::{open, write};
+use io::__tls::client::{enable};
+
+fn main() {
+    let path = "coil_tls_empty_opts.bin";
+    let s = open(path, "w")?;
+    let _ = enable(s, "127.0.0.1", {})?;
+}
+"#,
+    );
+    assert!(err.is_err(), "empty opts should fail to typecheck");
 }
 
 #[test]
