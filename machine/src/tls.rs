@@ -176,6 +176,14 @@ fn parse_server_enable_options(heap: &Heap, opts: Value) -> Result<ServerEnableO
     })
 }
 
+pub(crate) fn leftover_client_opts_parse(heap: &Heap, opts: Value) -> Result<(), IoErrorTag> {
+    parse_tls_options(heap, opts).map(|_| ())
+}
+
+pub(crate) fn leftover_server_opts_parse(heap: &Heap, opts: Value) -> Result<(), IoErrorTag> {
+    parse_server_enable_options(heap, opts).map(|_| ())
+}
+
 fn require_tcp_stream(heap: &mut Heap, stream: Value) -> Result<i64, IoErrorTag> {
     with_stream_mut(heap, stream, |s| {
         if s.closed || s.handle.is_none() {

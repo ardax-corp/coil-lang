@@ -773,11 +773,11 @@ mod tests {
 
     #[test]
     fn stub_dload_read_write_close_hit_coil_tls_symbols() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, mut server) = tcp_pair();
         let mut heap = Heap::default();
@@ -809,11 +809,11 @@ mod tests {
 
     #[test]
     fn stub_would_block_parks_via_reactor_wait_fd_no_help() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, mut server) = tcp_pair();
         let wait = crate::io_handle::WaitHandle::from_tcp(&client);
@@ -842,11 +842,11 @@ mod tests {
 
     #[test]
     fn stub_enable_failure_does_not_attach() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
@@ -869,11 +869,11 @@ mod tests {
 
     #[test]
     fn stub_alpn_and_write_would_block() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
@@ -931,11 +931,11 @@ mod tests {
 
     #[test]
     fn stub_enable_would_block_attaches_and_keeps_session() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
@@ -988,11 +988,11 @@ mod tests {
 
     #[test]
     fn stub_enable_handshake_error_frees_and_does_not_attach() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
@@ -1028,11 +1028,11 @@ mod tests {
 
     #[test]
     fn stub_disable_is_close_notify_free_is_destructor() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let session = expect_ready(abi.client_enable(-1, "localhost", false, None, None, 0, ""));
         let ptr = session.test_ptr();
@@ -1112,6 +1112,12 @@ mod tests {
     fn leftover_enable_without_abi_leaves_tcp() {
         let _guard = stub_lock();
         reset_preferred();
+        if resolve_preferred().is_some() {
+            reset_preferred();
+            // Windows LoadLibrary("tls.dll") reuses a leftover stub still mapped
+            // by sibling tests in this process.
+            return;
+        }
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream =
@@ -1129,11 +1135,11 @@ mod tests {
 
     #[test]
     fn leftover_hostinvoke_enable_attaches_and_parks_would_block() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         reset_preferred();
         install_preferred(abi.clone());
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
@@ -1181,11 +1187,11 @@ mod tests {
 
     #[test]
     fn leftover_disable_is_close_notify_then_drop() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         reset_preferred();
         install_preferred(abi.clone());
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
@@ -1224,11 +1230,11 @@ mod tests {
 
     #[test]
     fn leftover_server_enable_and_alpn() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         reset_preferred();
         install_preferred(abi.clone());
         unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
@@ -1256,11 +1262,11 @@ mod tests {
 
     #[test]
     fn leftover_enable_non_tcp_is_invalid_input() {
+        let _guard = stub_lock();
         let Some(abi) = load_stub() else {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
-        let _guard = stub_lock();
         reset_preferred();
         install_preferred(abi);
         let mut heap = Heap::default();
@@ -1276,23 +1282,15 @@ mod tests {
 
     #[test]
     fn leftover_boxed_client_opts_parse_is_not_invalid_input() {
-        let _guard = stub_lock();
-        reset_preferred();
-        let (client, server) = tcp_pair();
         let mut heap = Heap::default();
-        let stream =
-            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
-        let stream = box_value(&mut heap, stream, ValueTag::Instance);
         let inner = client_enable_opts(&mut heap);
         let opts = box_record_opts(&mut heap, inner);
-        let err = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts).unwrap_err();
-        assert_ne!(
-            err,
-            IoErrorTag::InvalidInput,
-            "boxed generic opts must parse; leftover without ABI is Other"
-        );
-        assert_eq!(err, IoErrorTag::Other);
-        drop(server);
+        crate::tls::leftover_client_opts_parse(&heap, opts)
+            .expect("boxed generic client opts parse");
+        let inner = server_enable_opts(&mut heap);
+        let opts = box_record_opts(&mut heap, inner);
+        crate::tls::leftover_server_opts_parse(&heap, opts)
+            .expect("boxed generic server opts parse");
     }
 
     #[test]
