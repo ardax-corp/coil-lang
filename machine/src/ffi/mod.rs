@@ -16,6 +16,7 @@ pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
 pub use libloading::Library;
 pub use registry::{HostClosureFn, NativeFn, Natives};
+pub(crate) use resolve::library_stem;
 pub use resolve::{library_candidates, platform_shared_lib_filename, resolve_library};
 pub use runtime::{check_native_libraries, packaged_app_ffi_startup_check, probe_system_libffi};
 pub use signature::{FfiError, FfiSignature, FfiSignatureBuilder};

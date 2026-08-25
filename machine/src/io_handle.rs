@@ -119,6 +119,24 @@ impl NativeHandle {
             Self::Udp(s) => s.as_raw_fd(),
         }
     }
+
+    /// Socket/fd identity passed to `coil_tls_*` (Unix fd or Windows SOCKET).
+    pub fn tls_abi_fd(&self) -> i64 {
+        #[cfg(unix)]
+        {
+            self.as_raw_fd() as i64
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::{AsRawHandle, AsRawSocket};
+            match self {
+                Self::File(f) => f.as_raw_handle() as usize as i64,
+                Self::Tcp(s) => s.as_raw_socket() as i64,
+                Self::Listener(s) => s.as_raw_socket() as i64,
+                Self::Udp(s) => s.as_raw_socket() as i64,
+            }
+        }
+    }
 }
 
 impl Read for NativeHandle {

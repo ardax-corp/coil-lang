@@ -3063,6 +3063,7 @@ impl<const S: usize> Machine<S> {
                         &self.ffi_search_paths,
                     ) {
                         Ok(lib_arc) => {
+                            crate::tls_native::note_loaded_library(&path, lib_arc.clone());
                             self.libraries
                                 .entry(path.clone())
                                 .or_insert_with(|| lib_arc.clone());
