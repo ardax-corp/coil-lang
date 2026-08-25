@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["crypto", "time", "tls"]
+default = ["crypto", "time"]
 debugger = []
 crypto = [
     "dep:sha2",
@@ -20,7 +20,6 @@ crypto = [
     "dep:subtle",
 ]
 time = ["dep:chrono"]
-tls = ["dep:rustls", "dep:webpki-roots", "dep:rustls-pemfile"]
 vm_profile = []
 
 [dependencies]
@@ -43,10 +42,6 @@ getrandom = { version = "0.4.3", optional = true }
 zeroize = { version = "1.9.0", optional = true }
 subtle = { version = "2.6.1", optional = true }
 chrono = { version = "0.4.45", optional = true }
-rustls = { version = "0.23", optional = true, default-features = false, features = ["ring", "std", "tls12"] }
-webpki-roots = { version = "0.26", optional = true }
-rustls-pemfile = { version = "2", optional = true }
 
 [dev-dependencies]
 libc = "0.2"
-rcgen = "0.13"

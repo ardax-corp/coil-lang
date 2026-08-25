@@ -23,7 +23,6 @@ serde_json = "1"
 path = "src/lib.rs"
 
 [features]
-default = ["crypto", "time", "tls"]
+default = ["crypto", "time"]
 crypto = ["machine/crypto", "compiler/crypto", "coil-cli/crypto"]
 time = ["machine/time", "compiler/time", "coil-cli/time"]
-tls = ["machine/tls", "compiler/tls", "coil-cli/tls"]

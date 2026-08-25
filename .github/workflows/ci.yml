@@ -43,11 +43,6 @@ jobs:
               mode: check
           - os: ubuntu-latest
             features:
-              id: tls
-              flags: "--no-default-features --features tls"
-              mode: check
-          - os: ubuntu-latest
-            features:
               id: dissect
               flags: "--features dissect"
               mode: test

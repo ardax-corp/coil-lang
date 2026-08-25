@@ -11,7 +11,6 @@ path = "src/main.rs"
 coil-cli = { path = "../coil-cli", default-features = false }
 
 [features]
-default = ["crypto", "time", "tls"]
+default = ["crypto", "time"]
 crypto = ["coil-cli/crypto"]
 time = ["coil-cli/time"]
-tls = ["coil-cli/tls"]
