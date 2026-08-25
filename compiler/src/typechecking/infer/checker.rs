@@ -776,7 +776,7 @@ impl Checker {
 
     /// Scheme for a virtual `io` host native (inserted on `use io::{…}`).
     pub fn io_fn_scheme(kind: IoBuiltin) -> Scheme {
-        use crate::typechecking::ty::{boolean, byte, stream_ty, tuple};
+        use crate::typechecking::ty::{boolean, byte, record, stream_ty, tuple};
         let stream = stream_ty();
         let bytes = vec_app_ty(byte());
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
@@ -820,6 +820,30 @@ impl Checker {
                 fun(&[stream, bytes], res_recv_from)
             }
             IoBuiltin::UdpLocalPort => fun(&[stream], res_int),
+            IoBuiltin::TlsClientEnable => {
+                let opt_string = option_app_ty(string());
+                let opts = record(vec![
+                    ("verify".into(), boolean()),
+                    ("ca_pem".into(), opt_string.clone()),
+                    ("ca_path".into(), opt_string),
+                    ("timeout_ms".into(), int()),
+                    ("alpn".into(), string()),
+                ]);
+                fun(&[stream, string(), opts], res_stream)
+            }
+            IoBuiltin::TlsClientDisable => fun(&[stream], res_stream),
+            IoBuiltin::TlsServerEnable => {
+                let opts = record(vec![
+                    ("cert_pem".into(), string()),
+                    ("key_pem".into(), string()),
+                    ("timeout_ms".into(), int()),
+                    ("client_ca_pem".into(), string()),
+                    ("alpn".into(), string()),
+                ]);
+                fun(&[stream, opts], res_stream)
+            }
+            IoBuiltin::TlsServerDisable => fun(&[stream], res_stream),
+            IoBuiltin::TlsAlpnProtocol => fun(&[stream], res_string),
         };
         Scheme::mono(ty)
     }

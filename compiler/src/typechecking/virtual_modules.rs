@@ -36,6 +36,15 @@ pub const IO_NET_TCP_MODULE: &str = "io::net::tcp";
 /// UDP helpers under `io::net::udp` (`bind`, `send_to`, …).
 pub const IO_NET_UDP_MODULE: &str = "io::net::udp";
 
+/// Leftover TLS HostInvoke for coil-tls (`alpn_protocol`). Not `tls` / `io::net::tls`.
+pub const IO_TLS_LEFTOVER_MODULE: &str = "io::__tls";
+
+/// Leftover client TLS (`enable` / `disable`) under `io::__tls::client`.
+pub const IO_TLS_LEFTOVER_CLIENT_MODULE: &str = "io::__tls::client";
+
+/// Leftover server TLS (`enable` / `disable`) under `io::__tls::server`.
+pub const IO_TLS_LEFTOVER_SERVER_MODULE: &str = "io::__tls::server";
+
 /// Canonical module path for OS threads, channels, and locks.
 pub const THREAD_MODULE: &str = "thread";
 
@@ -216,6 +225,16 @@ pub enum IoBuiltin {
     UdpRecvFrom,
     /// Local bound port of a UDP socket (useful after `bind(..., 0)`).
     UdpLocalPort,
+    /// Leftover client TLS upgrade (`io::__tls::client::enable`).
+    TlsClientEnable,
+    /// Leftover client TLS teardown (`io::__tls::client::disable`).
+    TlsClientDisable,
+    /// Leftover server TLS upgrade (`io::__tls::server::enable`).
+    TlsServerEnable,
+    /// Leftover server TLS teardown (`io::__tls::server::disable`).
+    TlsServerDisable,
+    /// Negotiated ALPN protocol (`io::__tls::alpn_protocol`).
+    TlsAlpnProtocol,
 }
 
 impl IoBuiltin {
@@ -249,6 +268,9 @@ impl IoBuiltin {
             Self::UdpSendTo => "send_to",
             Self::UdpRecvFrom => "recv_from",
             Self::UdpLocalPort => "local_port",
+            Self::TlsClientEnable | Self::TlsServerEnable => "enable",
+            Self::TlsClientDisable | Self::TlsServerDisable => "disable",
+            Self::TlsAlpnProtocol => "alpn_protocol",
         }
     }
 
@@ -282,6 +304,11 @@ impl IoBuiltin {
             Self::UdpSendTo => "udp_send_to",
             Self::UdpRecvFrom => "udp_recv_from",
             Self::UdpLocalPort => "udp_local_port",
+            Self::TlsClientEnable => "tls_client_enable",
+            Self::TlsClientDisable => "tls_client_disable",
+            Self::TlsServerEnable => "tls_server_enable",
+            Self::TlsServerDisable => "tls_server_disable",
+            Self::TlsAlpnProtocol => "tls_alpn_protocol",
         }
     }
 
@@ -330,6 +357,27 @@ impl IoBuiltin {
         ]
     }
 
+    /// Exports of leftover `io::__tls::client`.
+    pub fn tls_client() -> &'static [IoBuiltin] {
+        &[Self::TlsClientEnable, Self::TlsClientDisable]
+    }
+
+    /// Exports of leftover `io::__tls::server`.
+    pub fn tls_server() -> &'static [IoBuiltin] {
+        &[Self::TlsServerEnable, Self::TlsServerDisable]
+    }
+
+    /// Every leftover TLS HostInvoke (not exported from `io` or `io::net::tls`).
+    pub fn tls() -> &'static [IoBuiltin] {
+        &[
+            Self::TlsClientEnable,
+            Self::TlsClientDisable,
+            Self::TlsServerEnable,
+            Self::TlsServerDisable,
+            Self::TlsAlpnProtocol,
+        ]
+    }
+
     /// Every IO host native (for pipeline registration).
     pub fn all() -> &'static [IoBuiltin] {
         &[
@@ -364,6 +412,12 @@ impl IoBuiltin {
             // `build_standard_host_natives` (append-only).
             Self::WaitReady,
             Self::WriteFrom,
+            // Leftover internals under `io::__tls` (not `io` / `io::net::tls`).
+            Self::TlsClientEnable,
+            Self::TlsClientDisable,
+            Self::TlsServerEnable,
+            Self::TlsServerDisable,
+            Self::TlsAlpnProtocol,
         ]
     }
 }
@@ -789,6 +843,23 @@ impl VirtualModules {
             .map(|kind| BuiltinExport::IoFn { kind: *kind })
             .collect();
         modules.insert(IO_NET_UDP_MODULE, udp_exports);
+
+        modules.insert(
+            IO_TLS_LEFTOVER_MODULE,
+            vec![BuiltinExport::IoFn {
+                kind: IoBuiltin::TlsAlpnProtocol,
+            }],
+        );
+        let tls_client_exports: Vec<BuiltinExport> = IoBuiltin::tls_client()
+            .iter()
+            .map(|kind| BuiltinExport::IoFn { kind: *kind })
+            .collect();
+        modules.insert(IO_TLS_LEFTOVER_CLIENT_MODULE, tls_client_exports);
+        let tls_server_exports: Vec<BuiltinExport> = IoBuiltin::tls_server()
+            .iter()
+            .map(|kind| BuiltinExport::IoFn { kind: *kind })
+            .collect();
+        modules.insert(IO_TLS_LEFTOVER_SERVER_MODULE, tls_server_exports);
 
         let mut thread_exports = vec![
             BuiltinExport::OpaqueType { name: "Thread" },
@@ -1222,6 +1293,75 @@ mod tests {
     }
 
     #[test]
+    fn io_tls_leftover_client_and_server_namespaces() {
+        let vm = VirtualModules::new();
+        let leftover = vm
+            .resolve_glob(&["io".into(), "__tls".into()])
+            .expect("io::__tls");
+        assert!(leftover.iter().any(|e| e.short_name() == "alpn_protocol"));
+        assert!(!leftover.iter().any(|e| e.short_name() == "enable"));
+        assert_eq!(
+            IoBuiltin::TlsAlpnProtocol.native_name(),
+            "tls_alpn_protocol"
+        );
+
+        let alpn = vm
+            .resolve_item(&["io".into(), "__tls".into()], "alpn_protocol")
+            .expect("io::__tls::alpn_protocol");
+        assert_eq!(
+            alpn,
+            BuiltinExport::IoFn {
+                kind: IoBuiltin::TlsAlpnProtocol
+            }
+        );
+
+        let client = vm
+            .resolve_glob(&["io".into(), "__tls".into(), "client".into()])
+            .expect("io::__tls::client");
+        assert!(client.iter().any(|e| e.short_name() == "enable"));
+        assert!(client.iter().any(|e| e.short_name() == "disable"));
+
+        let server = vm
+            .resolve_glob(&["io".into(), "__tls".into(), "server".into()])
+            .expect("io::__tls::server");
+        assert!(server.iter().any(|e| e.short_name() == "enable"));
+        assert!(server.iter().any(|e| e.short_name() == "disable"));
+
+        assert_eq!(
+            IoBuiltin::TlsClientEnable.native_name(),
+            "tls_client_enable"
+        );
+        assert_eq!(
+            IoBuiltin::TlsServerEnable.native_name(),
+            "tls_server_enable"
+        );
+        assert_eq!(IoBuiltin::TlsClientEnable.as_str(), "enable");
+        assert_eq!(IoBuiltin::TlsServerEnable.as_str(), "enable");
+
+        let client_enable = vm
+            .resolve_item(&["io".into(), "__tls".into(), "client".into()], "enable")
+            .expect("io::__tls::client::enable");
+        assert_eq!(
+            client_enable,
+            BuiltinExport::IoFn {
+                kind: IoBuiltin::TlsClientEnable
+            }
+        );
+        let server_enable = vm
+            .resolve_item(&["io".into(), "__tls".into(), "server".into()], "enable")
+            .expect("io::__tls::server::enable");
+        assert_eq!(
+            server_enable,
+            BuiltinExport::IoFn {
+                kind: IoBuiltin::TlsServerEnable
+            }
+        );
+        assert!(!vm.resolves_use(&["io".into(), "__tls".into()], "enable"));
+        assert!(!vm.resolves_use(&["io".into(), "net".into(), "tls".into()], "enable"));
+        assert_eq!(IoBuiltin::tls().len(), 5);
+    }
+
+    #[test]
     fn io_glob_excludes_net_helpers() {
         let vm = VirtualModules::new();
         let exports = vm.resolve_glob(&["io".into()]).expect("io");
@@ -1239,6 +1379,8 @@ mod tests {
         );
         assert!(!exports.iter().any(|e| e.short_name() == "bind"));
         assert!(!exports.iter().any(|e| e.short_name() == "listen"));
+        assert!(!exports.iter().any(|e| e.short_name() == "enable"));
+        assert!(!exports.iter().any(|e| e.short_name() == "alpn_protocol"));
         let tcp_path = ["io".into(), "net".into(), "tcp".into()];
         assert!(vm.resolves_use(&tcp_path, "*"));
         assert!(vm.resolves_use(&tcp_path, "connect_timeout"));
