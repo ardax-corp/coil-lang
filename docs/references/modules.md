@@ -69,7 +69,7 @@ Some `use` paths resolve to **compiler-owned virtual modules**, not `.hy` files 
 | `thread` | `spawn`, channels, mutexes | No — `use thread::{spawn, join, channel, …};` |
 | `gc` | `Root` / `Weak`, `root` / `unroot` / `get` / `weak` / `upgrade`, `heap_bytes` / `collect` | No — `use gc::{root, weak, collect, …};` |
 
-TLS is **not** a virtual module. Use the [coil-tls](https://github.com/ardax-corp/coil-tls) package (`use tls::{client, server}`); see [tls](tls.md). `use tls` / `use io::net::tls` without that package on `[module].roots` is a module-not-found error.
+TLS for applications is **not** a virtual module named `tls` or `io::net::tls`. Use the [coil-tls](https://github.com/ardax-corp/coil-tls) package (`use tls::{client, server}`); see [tls](tls.md). `use tls` / `use io::net::tls` without that package on `[module].roots` is a module-not-found error. coil-tls binds leftover HostInvoke via `io::__tls`.
 
 ### Prelude rebind / redefine
 

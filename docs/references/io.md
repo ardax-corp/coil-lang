@@ -23,7 +23,7 @@ use io::sync::{write_all, read_to_end};   // optional blocking adapters (coil-st
 | `io::net::tcp::{peer_addr,local_addr,set_nodelay,shutdown}` | TCP helpers | Address tuples, `TCP_NODELAY`, and half-close (`0` read, `1` write, `2` both) |
 | `io::net::udp::{bind,connect,send_to,recv_from,local_port}` | UDP | Nested module; `recv_from` → `(nbytes, host, port)` |
 
-TLS is **not** a virtual module. Use the [coil-tls](https://github.com/ardax-corp/coil-tls) package (`use tls::{client, server}`) with `libtls` on `[ffi] search_paths`. See [tls](tls.md).
+TLS for applications is **not** `use tls` / `use io::net::tls`. Use the [coil-tls](https://github.com/ardax-corp/coil-tls) package (`use tls::{client, server}`) with `libtls` on `[ffi] search_paths`. See [tls](tls.md). Leftover HostInvoke for that package is `io::__tls` (not a public import).
 
 ## Userland sync adapters (`io::sync`)
 
