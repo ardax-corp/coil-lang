@@ -1586,6 +1586,45 @@ fn aot_p2_vec_scan_dispatch_regression() {
     );
 }
 
+/// COI-99: `while i < len(v) { f(v[i]) }` with a non-inlined pure `f` hoists
+/// `len(v)` and rewrites the index. `absorb` must remain a CALL.
+#[test]
+fn aot_p2_vec_scan_pure_helper_hoists_and_unchecks() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/vec_scan_pure.hy");
+    let stats = compiler::last_bounds_stats();
+    assert!(
+        stats.array_len_hoists >= 1,
+        "len(v) should hoist across pure absorb; stats={stats:?}"
+    );
+    assert!(
+        stats.proven_index >= 1,
+        "v[i] under i < len(v) should prove; stats={stats:?}"
+    );
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "scan", bc.len());
+    let (inner_start, inner_end) = innermost_loop_range(&bc, start, end);
+    assert_eq!(
+        count_opcodes_in(&bc, inner_start, inner_end, Instruction::ArrayLen),
+        0,
+        "scan must not recompute len(v) every iteration"
+    );
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::Index),
+        0,
+        "scan Index should rewrite away"
+    );
+    let unchecked = count_opcodes_in(&bc, start, end, Instruction::IndexUnchecked)
+        + count_opcodes_in(&bc, start, end, Instruction::IndexPinUnchecked);
+    assert!(
+        unchecked >= 1,
+        "pure helper scan should emit Unchecked index"
+    );
+    assert!(
+        count_opcodes_in(&bc, start, end, Instruction::CALL) >= 1,
+        "absorb must remain a CALL (not tiny-inlined)"
+    );
+}
+
 #[test]
 fn aot_p2_nsieve_dispatch_regression() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/nsieve.hy");
