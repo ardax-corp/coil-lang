@@ -123,12 +123,9 @@ pub fn op_blocks_licm(op: &IlOp) -> bool {
         IlOp::Byte { byte, .. } => match *byte.bytecode() {
             Instruction::HostInvoke
             | Instruction::PRINT
-            | Instruction::FORMAT
             | Instruction::FfiInvoke
-            | Instruction::CallIndirect
             | Instruction::SetField
-            | Instruction::GetField
-            | Instruction::TailCall => true,
+            | Instruction::GetField => true,
             Instruction::CALL => !call_byte_is_pure(byte, ctx.as_ref()),
             _ => false,
         },
