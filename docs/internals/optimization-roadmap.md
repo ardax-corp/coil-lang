@@ -198,8 +198,10 @@ or above the header's proves no in-loop push can reach `t`.
 nsieve went to **0** (1:1 opcode swap; dispatch count stayed 469,895). Wall /
 cycle deltas on the poop matrix were within noise; the leftover cost on those
 sites was `find_object_by_addr`, which minor 13 pins for proven loops.
-Unproven, host, FFI, growing-array, alias-push, and impure helper-call loops
-stay checked. Pure user helpers on `b[i]` no longer block the proof
+That reverses the original [COI-85](https://linear.app/ardax/issue/COI-85)
+"Index stays checked" decision; `LEQ` / `GEQ` still bind. Unproven, host, FFI,
+growing-array, alias-push, and impure helper-call loops stay checked. Pure user
+helpers on `b[i]` no longer block the proof
 ([COI-99](https://linear.app/ardax/issue/COI-99)).
 
 What is still open (full refusal table in
@@ -208,6 +210,9 @@ What is still open (full refusal table in
 - **Impure calls in counted loops.** Host natives, FFI, `FORMAT`, field get/set,
   `CallIndirect`, `ArrayPush` / `MakeArray`, and any callee purity cannot prove
   still refuse the region. `LEQ` / `GEQ` headers are still not proofs.
+- **ArrayPtr / pinned-handle layout** ([COI-198](https://linear.app/ardax/issue/COI-198)).
+  `#192` already pins proven loops (`IndexPin*`). That ticket is the VM identity /
+  GC write-up, not this IL proof.
 
 ### 3. Allocation and GC fast paths
 
