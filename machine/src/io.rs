@@ -108,6 +108,25 @@ impl IoErrorTag {
             _ => Self::Other,
         }
     }
+
+    /// Map a `coil_tls_*` `err_out` discriminant (`IoErrorTag` as `i32`).
+    pub fn from_abi(code: i32) -> Self {
+        match code {
+            0 => Self::WouldBlock,
+            1 => Self::NotFound,
+            2 => Self::PermissionDenied,
+            3 => Self::AlreadyClosed,
+            4 => Self::InvalidInput,
+            5 => Self::Other,
+            6 => Self::NotADirectory,
+            7 => Self::AlreadyExists,
+            8 => Self::TimedOut,
+            9 => Self::Truncated,
+            10 => Self::Certificate,
+            11 => Self::Handshake,
+            _ => Self::Other,
+        }
+    }
 }
 
 /// Allocate `Result::Ok(payload)` on the heap.
@@ -234,7 +253,6 @@ pub fn alloc_stream(heap: &mut Heap, handle: NativeHandle, kind: StreamKind) -> 
             closed: false,
             read_timeout: None,
             write_timeout: None,
-            #[cfg(feature = "tls")]
             tls: None,
         },
         Object::Stream,
@@ -281,12 +299,10 @@ pub fn stream_close(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
         if s.closed {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        #[cfg(feature = "tls")]
         if s.kind == StreamKind::Tls {
-            if let (Some(handle), Some(tls)) = (s.handle.as_mut(), s.tls.as_mut()) {
-                let _ = crate::tls::send_close_notify(handle, tls);
+            if let Some(slot) = s.tls.take() {
+                crate::tls_native::drop_slot(s.handle.as_mut(), slot);
             }
-            s.tls.take();
         }
         s.handle.take();
         s.closed = true;
@@ -332,10 +348,9 @@ fn stream_read_into(
             return Err(IoErrorTag::AlreadyClosed);
         }
         let handle = s.handle.as_mut().unwrap();
-        #[cfg(feature = "tls")]
         if s.kind == StreamKind::Tls {
             let tls = s.tls.as_mut().ok_or(IoErrorTag::Other)?;
-            return crate::tls::tls_read(handle, tls, &mut tmp);
+            return crate::tls_native::slot_read(handle, tls, &mut tmp);
         }
         match handle.read(&mut tmp) {
             Ok(0) => Ok(None),
@@ -408,10 +423,9 @@ fn stream_write_bytes(heap: &mut Heap, stream: Value, bytes: &[u8]) -> Result<us
             return result;
         }
         let handle = s.handle.as_mut().unwrap();
-        #[cfg(feature = "tls")]
         if s.kind == StreamKind::Tls {
             let tls = s.tls.as_mut().ok_or(IoErrorTag::Other)?;
-            return crate::tls::tls_write(handle, tls, bytes);
+            return crate::tls_native::slot_write(handle, tls, bytes);
         }
         match handle.write(bytes) {
             Ok(n) => Ok(n),
@@ -546,7 +560,6 @@ pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<()
 
 fn wait_readable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     let timeout = stream_read_timeout(heap, stream)?;
-    #[cfg(feature = "tls")]
     {
         let skip = with_stream_mut(heap, stream, |s| {
             s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.has_buffered_plaintext())
@@ -571,7 +584,6 @@ fn wait_readable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
 
 fn wait_writable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     let timeout = stream_write_timeout(heap, stream)?;
-    #[cfg(feature = "tls")]
     {
         // Prefer draining pending TLS ciphertext when the socket can accept writes.
         let wants = with_stream_mut(heap, stream, |s| {
@@ -608,7 +620,6 @@ fn stream_await_interest(
         Interest::Readable => stream_read_timeout(heap, stream)?,
         Interest::Writable => stream_write_timeout(heap, stream)?,
     };
-    #[cfg(feature = "tls")]
     if interest == Interest::Readable {
         let skip = with_stream_mut(heap, stream, |s| {
             s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.has_buffered_plaintext())
@@ -825,9 +836,7 @@ fn tcp_stream_addr(
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp | StreamKind::TcpListener => Ok(s.kind),
-            #[cfg(feature = "tls")]
-            StreamKind::Tls => Ok(s.kind),
+            StreamKind::Tcp | StreamKind::TcpListener | StreamKind::Tls => Ok(s.kind),
             _ => Err(IoErrorTag::InvalidInput),
         }
     })??;
@@ -881,9 +890,7 @@ pub fn tcp_set_nodelay(heap: &mut Heap, stream: Value, enabled: bool) -> Result<
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp => {}
-            #[cfg(feature = "tls")]
-            StreamKind::Tls => {}
+            StreamKind::Tcp | StreamKind::Tls => {}
             _ => return Err(IoErrorTag::InvalidInput),
         }
         let sock = s
@@ -910,9 +917,7 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp => {}
-            #[cfg(feature = "tls")]
-            StreamKind::Tls => {}
+            StreamKind::Tcp | StreamKind::Tls => {}
             _ => return Err(IoErrorTag::InvalidInput),
         }
         let sock = s

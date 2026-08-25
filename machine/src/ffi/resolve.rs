@@ -10,7 +10,7 @@ use super::signature::FfiError;
 /// Strip a known shared-library suffix and optional `lib` prefix, yielding a stem.
 ///
 /// Examples: `libsum.so` → `sum`, `sum.dll` → `sum`, `libc.so.6` → `c`.
-fn library_stem(name: &str) -> String {
+pub(crate) fn library_stem(name: &str) -> String {
     let mut stem = name.to_string();
 
     // `.so.<version>` (e.g. libc.so.6) before plain `.so`.

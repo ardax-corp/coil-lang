@@ -528,7 +528,6 @@ pub enum StreamKind {
     /// Datagram socket (`io::net::udp::bind` / `connect`).
     Udp,
     /// TLS-wrapped TCP (`io::net::tls::{client,server}::enable` / `disable`).
-    #[cfg(feature = "tls")]
     Tls,
 }
 
@@ -1049,28 +1048,19 @@ pub struct ObjStream {
     pub read_timeout: Option<std::time::Duration>,
     /// Soft deadline for sync write adapters / TLS handshake writes (`None` = wait forever).
     pub write_timeout: Option<std::time::Duration>,
-    /// Optional rustls session (client or server; only for [`StreamKind::Tls`]).
-    #[cfg(feature = "tls")]
-    pub tls: Option<Box<crate::tls::TlsSession>>,
+    /// TLS session: in-tree rustls and/or a dloaded `coil_tls_*` opaque pointer.
+    pub tls: Option<crate::tls_native::TlsSessionSlot>,
 }
 
 impl Drop for ObjStream {
     fn drop(&mut self) {
-        #[cfg(feature = "tls")]
         if self.kind == StreamKind::Tls {
-            // Best-effort close_notify so GC without explicit `close()` is not
-            // always an abrupt TCP reset. Errors are ignored in Drop.
-            if let (Some(handle), Some(tls)) = (self.handle.as_mut(), self.tls.as_mut()) {
-                let _ = crate::tls::send_close_notify(handle, tls);
+            if let Some(slot) = self.tls.take() {
+                crate::tls_native::drop_slot(self.handle.as_mut(), slot);
             }
-            self.tls.take();
         }
         // NativeHandle closes on drop; clear explicitly for clarity.
         self.handle.take();
-        #[cfg(feature = "tls")]
-        {
-            self.tls.take();
-        }
         self.closed = true;
     }
 }

@@ -62,7 +62,7 @@ impl TlsSession {
     }
 
     /// Negotiated ALPN after handshake, or empty if none was selected.
-    fn alpn_protocol(&self) -> String {
+    pub(crate) fn alpn_protocol(&self) -> String {
         self.conn
             .alpn_protocol()
             .map(|p| String::from_utf8_lossy(p).into_owned())
@@ -518,7 +518,7 @@ pub fn tls_client_enable(
     };
     with_stream_mut(heap, stream, |s| {
         s.kind = StreamKind::Tls;
-        s.tls = Some(Box::new(session));
+        s.tls = Some(crate::tls_native::TlsSessionSlot::InTree(Box::new(session)));
     })?;
     Ok(stream)
 }
@@ -691,7 +691,7 @@ pub fn tls_server_enable(heap: &mut Heap, stream: Value, opts: Value) -> Result<
     };
     with_stream_mut(heap, stream, |s| {
         s.kind = StreamKind::Tls;
-        s.tls = Some(Box::new(session));
+        s.tls = Some(crate::tls_native::TlsSessionSlot::InTree(Box::new(session)));
     })?;
     Ok(stream)
 }
@@ -737,10 +737,9 @@ fn tls_teardown(heap: &mut Heap, stream: Value) -> Result<Value, IoErrorTag> {
         if s.kind != StreamKind::Tls {
             return Err(IoErrorTag::InvalidInput);
         }
-        if let (Some(handle), Some(tls)) = (s.handle.as_mut(), s.tls.as_mut()) {
-            let _ = send_close_notify(handle, tls);
+        if let Some(slot) = s.tls.take() {
+            crate::tls_native::drop_slot(s.handle.as_mut(), slot);
         }
-        s.tls.take();
         s.kind = StreamKind::Tcp;
         Ok(())
     })??;
