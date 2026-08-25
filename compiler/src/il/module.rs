@@ -108,7 +108,10 @@ impl IlModule {
     /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
     pub fn to_flat(&self) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
         let mut out = Vec::new();
-        let mut next_label = opt::max_code_label(&self.prologue).saturating_add(1);
+        // New ids must sit above every old Label/Jump/Entry id in the module.
+        // Starting at prologue-max+1 lets body labels 0..n occupy the same
+        // numbers as still-unpatched CALL targets and skip the remap.
+        let mut next_label = self.max_code_label().saturating_add(1);
         let mut prior_labels = HashMap::new();
         let mut func_label_maps = Vec::new();
         let mut segment_ranges: Vec<(usize, usize)> = Vec::new();
@@ -154,6 +157,17 @@ impl IlModule {
             }
         }
         (out, prior_labels, func_label_maps)
+    }
+
+    fn max_code_label(&self) -> u32 {
+        let mut max = opt::max_code_label(&self.prologue);
+        for body in &self.funcs {
+            max = max.max(opt::max_code_label(&body.ops));
+        }
+        for gap in &self.glue {
+            max = max.max(opt::max_code_label(gap));
+        }
+        max.max(opt::max_code_label(&self.epilogue))
     }
 
     /// Per-func opts (excluding multi_op) + CFG GVN on each body, then
@@ -244,11 +258,6 @@ fn remap_cross_function_targets(ops: &mut [IlOp], prior: &HashMap<u32, u32>) {
     let flat_label_ids: std::collections::HashSet<u32> = prior.values().copied().collect();
     remap_cross_function_entry_call_targets(ops, prior, &flat_label_ids);
     remap_cross_function_jump_targets(ops, prior, &flat_label_ids);
-}
-
-fn remap_cross_function_entry_targets(ops: &mut [IlOp], prior: &HashMap<u32, u32>) {
-    let flat_label_ids: std::collections::HashSet<u32> = prior.values().copied().collect();
-    remap_cross_function_entry_call_targets(ops, prior, &flat_label_ids);
 }
 
 fn remap_cross_function_entry_call_targets(
@@ -457,6 +466,59 @@ mod tests {
         assert_eq!(
             entry_target, callee_label,
             "cross-function Entry must use the remapped callee entry label"
+        );
+    }
+
+    /// ArrayPin preheaders mint extra labels in the callee. Those new ids used
+    /// to overlap the caller's still-old Entry target, and `flat_label_ids`
+    /// then skipped the patch (variadic `sum` + `greet`).
+    #[test]
+    fn to_flat_remaps_entry_when_callee_label_count_overlaps_old_target() {
+        let loc = loc();
+        let callee_entry = Label(2);
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("callee", Some(callee_entry), 0, 6),
+            ops: vec![
+                IlOp::Label(Label(0)),
+                IlOp::Label(Label(1)),
+                IlOp::Label(callee_entry),
+                IlOp::Label(Label(3)),
+                IlOp::Label(Label(4)),
+                IlOp::Return { loc },
+            ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("caller", None, 0, 2),
+            ops: vec![
+                IlOp::Entry {
+                    kind: EntryKind::Call,
+                    arity: 1,
+                    target: callee_entry,
+                    loc,
+                },
+                IlOp::Return { loc },
+            ],
+        });
+        let (flat, _, _) = m.to_flat();
+        let callee_label = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .nth(2)
+            .expect("callee entry is the third label");
+        let entry_target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry { target, .. } => Some(target.0),
+                _ => None,
+            })
+            .expect("caller Entry");
+        assert_eq!(
+            entry_target, callee_label,
+            "CALL target {entry_target} must follow remapped entry {callee_label}, not a reused id"
         );
     }
 
