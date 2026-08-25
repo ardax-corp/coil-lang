@@ -12,6 +12,7 @@ mod ffi;
 pub mod fs;
 pub mod gc_handles;
 pub mod host_natives;
+pub mod reserved_hostinvoke;
 pub mod io;
 mod io_handle;
 pub mod io_reactor;
@@ -39,6 +40,7 @@ pub use ffi::*;
 pub use fs::FS_WIRING;
 pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING};
 pub use host_natives::{build_standard_host_natives, wire_standard_host_natives, PGO_HIT_NATIVE};
+pub use reserved_hostinvoke::{RESERVED_CRYPTO_HOSTINVOKE, RESERVED_TLS_HOSTINVOKE};
 pub use memory::*;
 pub use opcode::*;
 pub use packed_la::{

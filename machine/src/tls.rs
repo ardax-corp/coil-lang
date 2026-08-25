@@ -5,6 +5,9 @@
 //! After handshake, [`tls_alpn_protocol`] reports the negotiated ALPN (or `""`).
 //! Both upgrade a TCP [`crate::memory::ObjStream`] in place; after handshake,
 //! normal Stream read/write use the shared TLS session.
+//!
+//! HostInvoke ids reserved; do not reorder; userland extract will stub these
+//! (coil-tls). See [`crate::reserved_hostinvoke`].
 
 use std::io::{self, ErrorKind, Read, Write};
 use std::net::TcpStream;

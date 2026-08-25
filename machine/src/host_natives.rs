@@ -31,12 +31,18 @@ pub fn build_standard_host_natives(
 ) -> Vec<Arc<dyn NativeFn>> {
     let mut out: Vec<Arc<dyn NativeFn>> = Vec::new();
     push_io_natives(&mut out, &mut register_id);
+    // TLS / crypto HostInvoke ids reserved; do not reorder; userland extract
+    // will stub these. See `reserved_hostinvoke`.
+    #[cfg(not(feature = "tls"))]
+    crate::reserved_hostinvoke::push_tls_stream_stubs(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, FS_WIRING, "fs");
     #[cfg(feature = "time")]
     push_wiring(&mut out, &mut register_id, TIME_WIRING, "time");
     push_wiring(&mut out, &mut register_id, ENV_WIRING, "env");
     #[cfg(feature = "crypto")]
     push_wiring(&mut out, &mut register_id, CRYPTO_WIRING, "crypto");
+    #[cfg(not(feature = "crypto"))]
+    crate::reserved_hostinvoke::push_crypto_stubs(&mut out, &mut register_id);
     push_prelude_char_ord(&mut out, &mut register_id);
     push_thread_natives(&mut out, &mut register_id);
     push_packed_la(&mut out, &mut register_id);
@@ -45,6 +51,8 @@ pub fn build_standard_host_natives(
     push_io_write_from(&mut out, &mut register_id);
     #[cfg(feature = "tls")]
     push_tls_alpn_protocol(&mut out, &mut register_id);
+    #[cfg(not(feature = "tls"))]
+    crate::reserved_hostinvoke::push_tls_alpn_stub(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, GC_WIRING, "gc");
     push_math_libm(&mut out, &mut register_id);
     // Append-only after math_libm: Vec helpers.
@@ -217,6 +225,8 @@ fn push_io_write_from(
 }
 
 /// Read negotiated ALPN on a TLS stream (`io::net::tls::alpn_protocol`).
+///
+/// Id reserved; do not reorder; userland extract will stub this.
 #[cfg(feature = "tls")]
 fn push_tls_alpn_protocol(
     out: &mut Vec<Arc<dyn NativeFn>>,
@@ -265,6 +275,7 @@ enum IoKind {
     UdpSendTo,
     UdpRecvFrom,
     UdpLocalPort,
+    // Ids reserved; do not reorder; userland extract will stub these.
     #[cfg(feature = "tls")]
     TlsClientEnable,
     #[cfg(feature = "tls")]
@@ -303,6 +314,7 @@ impl IoKind {
             Self::UdpSendTo,
             Self::UdpRecvFrom,
             Self::UdpLocalPort,
+            // Ids reserved; do not reorder; userland extract will stub these.
             #[cfg(feature = "tls")]
             Self::TlsClientEnable,
             #[cfg(feature = "tls")]
