@@ -38,7 +38,7 @@ coil-http consumes this package the same way (`roots` / `[dependencies]`). Hands
 
 coil-tls re-exports leftover enable as `tls::client::enable(Stream, host, opts) -> Stream`. Internally it imports `use io::__tls::client::{enable}` (and the matching server / `alpn_protocol` leftovers). Bodies stay dload + `attach_enable_outcome` + park + empty read/write until Ready (no rustls in coil-lang). WouldBlock enable keeps the session; do not retry `enable`. Leftover `disable` sends `coil_tls_disable` (close_notify) on the live fd, then Drop `coil_tls_free`. Stream close / GC do the same when the fd is still usable. Do not import `io::__tls` from application code — use the package.
 
-Unbounded `enable<T>` is not monomorphized: the call site boxes the anonymous opts record (`ValueTag::Record` → `Object::Boxed`) and the generic body forwards it without unboxing. Leftover parse unwraps that cell and reads the inner instance the same way as a direct call. HostInvoke ids are unchanged.
+Unbounded `enable<T>` is not monomorphized: the call site boxes every argument (`Stream` as `ValueTag::Instance`, host as `String`, opts record as `Record`) and the generic body forwards those `Object::Boxed` cells without unboxing. Leftover enable peels one box on stream, host, and opts, then parses the inner instance the same way as a direct call. HostInvoke ids are unchanged.
 
 `examples/tls_thread_loopback.hy` is the leftover client+server enable regression (COI-116): server `enable` in `thread::spawn`, client `enable` on the root, ALPN `h2`. Needs `libtls` on `[ffi] search_paths`.
 
