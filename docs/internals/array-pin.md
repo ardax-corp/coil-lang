@@ -72,9 +72,10 @@ nsieve uses the unchecked twins
 
 The same length-sensitive refusals as Unchecked apply: `ArrayPush`, rebound
 array slot, impure `CALL`, host, FFI, `GetField`/`SetField`, `CallIndirect`,
-`TailCall`, `FORMAT`, `MakeArray`. Pure user helpers are not a barrier
-([COI-99](https://linear.app/ardax/issue/COI-99)). `LEQ` / `GEQ` headers are
-not in-bounds proofs ([COI-85](https://linear.app/ardax/issue/COI-85) /
+`TailCall`, `YieldCoro` / `YieldFromCoro`, `FORMAT`, `MakeArray`. Pure user
+helpers are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)).
+`LEQ` / `GEQ` headers are not in-bounds proofs
+([COI-85](https://linear.app/ardax/issue/COI-85) /
 [COI-98](https://linear.app/ardax/issue/COI-98)).
 
 ### Who consumes it
@@ -91,7 +92,7 @@ There is no generation or pin-token opcode. A pin dies when:
 - the frame pops (`RETURN`, `pop_call_frame`, yield unwind);
 - `ArrayPin` overwrites the same slot;
 - coroutine resume pushes a **fresh empty** map for each restored frame
-  (`push_pin_frame` after yield — see leftover below).
+  (`push_pin_frame` after yield — see yield barrier below).
 
 `CALL` / `CallIndirect` / `call_function` push a new empty map for the
 callee; the caller's map stays on the previous frame and is still a GC root.
@@ -145,7 +146,7 @@ pays that probe plus the in-VM range test.
 |------|---------------------|
 | Unproven / dynamic `Index` / `StoreIndex` | `rewrite_array_pins` requires `index_at_proven` / `store_index_at_proven` (induction index + length-invariant array slot) |
 | `Index` outside a counted loop | No preheader pin |
-| `LEQ` / `GEQ` headers, growing arrays, impure calls, host, FFI | Length proof refuses; Unchecked and pin both stay off |
+| `LEQ` / `GEQ` headers, growing arrays, impure calls, host, FFI, yield | Length proof refuses; Unchecked and pin both stay off |
 | `ArrayLen`, `ArrayPush`, `Vec` host natives | Different opcodes; not rewritten |
 | Tuple `Index` | `ArrayPin` only inserts `Object::Array` |
 | `examples/perf/binary_trees.hy` | Recursive `Tree` alloc + `match`, not array `Index` |
@@ -170,19 +171,14 @@ path, and they collide with `Value` being an address-or-immediate today.
 
 A generation / moving-GC stamp is unused while sweep is non-moving.
 
-## Pin-lifetime leftover (not ArrayPtr)
+## Yield is a length-proof barrier
 
-`YieldCoro` is not a length-proof barrier (`op_blocks_length_proof` in
-`compiler/src/il/pure_call.rs`). Yield pops pin maps with frames and resume
-restores **empty** maps, so a compiler-emitted `ArrayPin` in a yielding
-counted loop would miss after the first suspend (`IndexPin*` → `-1`). The
-array `Value` on the saved stack is still a GC root — this is a pin-table
-lifetime gap, not a dangling `Gc`.
-
-If that shape shows up, the fail-closed fix is to treat `YieldCoro` /
-`YieldFromCoro` as length-proof barriers (same family as `TailCall`). Saving
-pin maps on `ObjCoroutine` would be a larger VM change and is not needed
-for the ArrayPtr question.
+`YieldCoro` / `YieldFromCoro` are length-proof barriers
+(`op_blocks_length_proof` in `compiler/src/il/pure_call.rs`), same family as
+`TailCall`. Resume pushes a **fresh empty** pin map; a pin emitted in a
+yielding counted loop would miss after the first suspend (`IndexPin*` → `-1`).
+Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
+`IndexPin*` / `IndexUnchecked`. Pins are not persisted on `ObjCoroutine`.
 
 ## Refusals
 
@@ -201,5 +197,5 @@ for the ArrayPtr question.
 [COI-198](https://linear.app/ardax/issue/COI-198) after this note lands. Do
 not file a Feature for ArrayPtr.
 
-Leave unpinned hashing and the yield-barrier shape as ordinary leftovers
-under the existing bounds refusals. They are not a new handle type.
+Leave unpinned hashing as an ordinary leftover under the existing bounds
+refusals. Yield is a barrier, not a new handle type.

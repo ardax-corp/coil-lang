@@ -44,7 +44,7 @@ Tracked in Linear project Known limitations (milestone **IL / codegen model**). 
 | Slot promotion across loop back-edges — **decided: keep Unknown headers** ([COI-97](https://linear.app/ardax/issue/COI-97) measured: innermost mandelbrot has no self-stores; outer Seek splits FloatChain; `seek_back_edge` off on `Standard`, on on `Aggressive`) | [COI-83](https://linear.app/ardax/issue/COI-83) |
 | Named-local class scalar replacement — **decided: named locals stay heap-backed** (temps elide; `fn drop()` always boxes) | [COI-84](https://linear.app/ardax/issue/COI-84) |
 | Bounds analysis vs `IndexUnchecked` — **superseded by [#192](https://github.com/ardax-corp/coil-lang/pull/192)**: original "Index stays checked" decision is not current. Unchecked exists for proven counted / stride loops (`LE` / `GT`); `LEQ`/`GEQ` are still not proofs. Helper-call coverage is [COI-99](https://linear.app/ardax/issue/COI-99) | [COI-85](https://linear.app/ardax/issue/COI-85) |
-| Array pin / `IndexPin*` — **implemented** for proven loops (archive minor 13). Layout: [array-pin.md](array-pin.md). **Defer** a second ArrayPtr; close [COI-198](https://linear.app/ardax/issue/COI-198) after that note | [COI-198](https://linear.app/ardax/issue/COI-198) |
+| Array pin / `IndexPin*` — **implemented** for proven loops (archive minor 13). Layout: [array-pin.md](array-pin.md). **Yield is a length-proof barrier** (`YieldCoro` / `YieldFromCoro`); resume restores empty pins; do not persist pin maps on `ObjCoroutine`. **Defer** a second ArrayPtr; close [COI-198](https://linear.app/ardax/issue/COI-198) after that note | [COI-198](https://linear.app/ardax/issue/COI-198) |
 | Pure helper calls in counted loops — **implemented**: `analyze_pure_fns` lets length hoists and Unchecked / pin rewrites survive pure `CALL` sites; impure / pushing callees still refuse | [COI-99](https://linear.app/ardax/issue/COI-99) |
 | Caller-side predicate peel vs self-recursion — **decided: keep refusals** (self-recursive peel loses to the frame) | [COI-86](https://linear.app/ardax/issue/COI-86) |
 | `*Jmpt` / fused invert — **implemented** (`*Jmpt` twins; invert fused `*Jmpf; JMP`) | [COI-87](https://linear.app/ardax/issue/COI-87) |
@@ -122,7 +122,7 @@ invariant-stride counted loop rewrite to `IndexUnchecked` / `StoreIndexUnchecked
 the array slot is length-invariant (archive minor 13). Unproven dynamic indices
 keep the checked opcodes: out-of-range read → `-1`, out-of-range write → no-op.
 Helper-call loops stay checked unless the callee is a proven-pure user `fn`
-([COI-99](https://linear.app/ardax/issue/COI-99)); host, FFI, growing-array, and
+([COI-99](https://linear.app/ardax/issue/COI-99)); host, FFI, yield, growing-array, and
 alias-push loops stay checked. [#192](https://github.com/ardax-corp/coil-lang/pull/192)
 nsieve checked `Index` went to 0; leftover cost on those sites was
 `find_object_by_addr` (addressed for proven loops by `IndexPin*`).
@@ -132,6 +132,7 @@ The safety argument is the cursor, not liveness: the preheader `STORE t` floors 
 | Refused | Why |
 |---------|-----|
 | Any impure call, host native, `GetField`/`SetField`, or unmodelled op in the body | The callee could hold another reference to the array and `push`/`pop` it. Pure user helpers on `b[i]` are allowed ([COI-99](https://linear.app/ardax/issue/COI-99)); still no `IndexUnchecked` across impure calls |
+| `YieldCoro` / `YieldFromCoro` in the body | Resume restores empty pin maps; fail closed so the loop does not get `ArrayPin` / `IndexPin*` / `IndexUnchecked`. Pins are not saved on `ObjCoroutine` |
 | `ArrayPush` / `MakeArray` / `MakeDict` / `CodePtr` / `MakePolyFn` in the body | Length can change (`tests/positive/while_len_grow.hy`) or user code can run |
 | A rebound `Vec` local (`slots_stored_in_loop`) | A different array each pass, so its length is not invariant |
 | An `Index` / `StoreIndex` whose target is not a plain slot load | Nested `a[i][j]`, a `Dup`, a call result: the walk-back cannot name the array, so the whole loop is refused |
