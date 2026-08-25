@@ -96,7 +96,10 @@ pub fn op_blocks_length_proof(op: &IlOp) -> bool {
             | Instruction::CallIndirect
             | Instruction::GetField
             | Instruction::SetField
-            | Instruction::TailCall => true,
+            | Instruction::TailCall
+            // Resume restores empty pin maps; pins are not saved on ObjCoroutine.
+            | Instruction::YieldCoro
+            | Instruction::YieldFromCoro => true,
             Instruction::CALL => !call_byte_is_pure(byte, ctx.as_ref()),
             _ => false,
         },
@@ -204,6 +207,23 @@ mod tests {
         }));
         assert!(op_blocks_length_proof(&IlOp::GetField { loc: loc() }));
         assert!(op_blocks_length_proof(&IlOp::SetField { loc: loc() }));
+    }
+
+    #[test]
+    fn yield_ops_are_length_proof_barriers() {
+        set_pure_call_ctx(None);
+        assert!(op_blocks_length_proof(&IlOp::Byte {
+            byte: Byte::new(Instruction::YieldCoro),
+            loc: loc(),
+        }));
+        assert!(op_blocks_length_proof(&IlOp::Byte {
+            byte: Byte::new(Instruction::YieldFromCoro),
+            loc: loc(),
+        }));
+        assert!(op_blocks_length_proof(&IlOp::Byte {
+            byte: Byte::new(Instruction::TailCall).with_call_packed(1, 0),
+            loc: loc(),
+        }));
     }
 
     #[test]
