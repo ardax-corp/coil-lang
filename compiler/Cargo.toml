@@ -4,11 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["crypto", "time", "tls"]
+default = ["crypto", "time"]
 dissect = []
 crypto = ["machine/crypto"]
 time = ["machine/time"]
-tls = ["machine/tls"]
 pratt = []
 
 [dependencies]
@@ -24,7 +23,6 @@ bincode = "1"
 machine = { path = "../machine", default-features = false, features = ["vm_profile"] }
 proptest = "1"
 libc = "0.2"
-rcgen = "0.13"
 serde_json = "1"
 
 [[test]]

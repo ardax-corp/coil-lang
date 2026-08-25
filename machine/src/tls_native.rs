@@ -1,14 +1,13 @@
 //! Dloaded `coil_tls_*` ABI used by [`StreamKind::Tls`](crate::memory::StreamKind).
 //!
-//! In-tree rustls ([`crate::tls`]) stays the enable/read fallback while the
-//! `tls` Cargo feature is on. When a stream holds a [`NativeTlsSession`],
-//! `stream_read` / `stream_write` / close / disable / ALPN call these symbols
-//! instead. Handshake parks stay in the VM ([`crate::io::reactor_wait_fd_no_help`]).
-//!
-//! Enable WouldBlock still returns a session: attach (`kind = Tls`), park, then
-//! continue on read/write — never free that pointer and never call enable again.
-//! `coil_tls_disable` is close_notify; `coil_tls_free` is the destructor.
+//! Leftover HostInvoke ([`crate::tls`]) resolves these symbols, attaches a
+//! [`NativeTlsSession`], and parks WouldBlock on
+//! [`crate::io::reactor_wait_fd_no_help`]. Handshake then continues on
+//! `stream_read` / `stream_write` — never call enable again, never free a
+//! WouldBlock session. `coil_tls_disable` is close_notify; `coil_tls_free`
+//! is the destructor.
 
+use std::cell::Cell;
 use std::ffi::{CString, c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::ptr::{self, NonNull};
@@ -103,7 +102,7 @@ impl TlsNativeAbi {
 
     /// Create a client session in the `.so`. `timeout_ms <= 0` means no deadline.
     ///
-    /// One rustls step per call. WouldBlock still yields a session to attach;
+    /// One handshake step per call. WouldBlock still yields a session to attach;
     /// the next step is read/write, not another enable.
     pub fn client_enable(
         self: &Arc<Self>,
@@ -224,8 +223,13 @@ pub enum NativeEnable {
 }
 
 fn session_from_enable(abi: Arc<TlsNativeAbi>, ptr: *mut c_void, err: i32) -> NativeEnable {
-    let keep =
-        |abi: Arc<TlsNativeAbi>| NonNull::new(ptr).map(|p| NativeTlsSession { ptr: Some(p), abi });
+    let keep = |abi: Arc<TlsNativeAbi>| {
+        NonNull::new(ptr).map(|p| NativeTlsSession {
+            ptr: Some(p),
+            abi,
+            wants_write: Cell::new(false),
+        })
+    };
     if err == ABI_OK {
         return keep(abi)
             .map(NativeEnable::Ready)
@@ -243,10 +247,13 @@ fn session_from_enable(abi: Arc<TlsNativeAbi>, ptr: *mut c_void, err: i32) -> Na
     NativeEnable::Failed(tag)
 }
 
-/// Opaque rustls session living in dloaded `libtls`.
+/// Opaque session living in dloaded `libtls`.
 pub struct NativeTlsSession {
     ptr: Option<NonNull<c_void>>,
     abi: Arc<TlsNativeAbi>,
+    /// Last WouldBlock was a write (or client enable). Used when the `.so`
+    /// does not export `wants_write` so leftover park picks the right interest.
+    wants_write: Cell<bool>,
 }
 
 unsafe impl Send for NativeTlsSession {}
@@ -264,6 +271,15 @@ impl NativeTlsSession {
             .unwrap_or(ptr::null_mut())
     }
 
+    /// Handshake/IO park interest: true → wait writable (ClientHello / flush).
+    pub fn set_wants_write(&self, wants: bool) {
+        self.wants_write.set(wants);
+    }
+
+    pub fn wants_write(&self) -> bool {
+        self.wants_write.get()
+    }
+
     pub fn read(&self, fd: i64, buf: &mut [u8]) -> Result<Option<usize>, IoErrorTag> {
         let ptr = self.raw();
         if ptr.is_null() {
@@ -272,7 +288,11 @@ impl NativeTlsSession {
         let mut err = ABI_OK;
         let n = unsafe { (self.abi.read)(ptr, fd, buf.as_mut_ptr(), buf.len(), &mut err) };
         if err != ABI_OK {
-            return Err(IoErrorTag::from_abi(err));
+            let tag = IoErrorTag::from_abi(err);
+            if tag == IoErrorTag::WouldBlock {
+                self.wants_write.set(false);
+            }
+            return Err(tag);
         }
         if n < 0 {
             return Err(IoErrorTag::Other);
@@ -292,7 +312,11 @@ impl NativeTlsSession {
         let mut err = ABI_OK;
         let n = unsafe { (self.abi.write)(ptr, fd, buf.as_ptr(), buf.len(), &mut err) };
         if err != ABI_OK {
-            return Err(IoErrorTag::from_abi(err));
+            let tag = IoErrorTag::from_abi(err);
+            if tag == IoErrorTag::WouldBlock {
+                self.wants_write.set(true);
+            }
+            return Err(tag);
         }
         if n < 0 {
             return Err(IoErrorTag::Other);
@@ -338,11 +362,8 @@ impl Drop for NativeTlsSession {
     }
 }
 
-/// TLS session stored on [`ObjStream`]: in-tree rustls or a native `.so` pointer.
+/// TLS session stored on [`ObjStream`]: a native `.so` pointer.
 pub enum TlsSessionSlot {
-    /// In-tree rustls (feature `tls` fallback when the stream was enabled here).
-    #[cfg(feature = "tls")]
-    InTree(Box<crate::tls::TlsSession>),
     /// Session owned by dloaded `libtls`.
     Native(NativeTlsSession),
 }
@@ -350,24 +371,18 @@ pub enum TlsSessionSlot {
 impl TlsSessionSlot {
     pub fn has_buffered_plaintext(&self) -> bool {
         match self {
-            #[cfg(feature = "tls")]
-            Self::InTree(t) => t.has_buffered_plaintext(),
             Self::Native(_) => false,
         }
     }
 
     pub fn wants_write(&self) -> bool {
         match self {
-            #[cfg(feature = "tls")]
-            Self::InTree(t) => t.wants_write(),
-            Self::Native(_) => false,
+            Self::Native(n) => n.wants_write(),
         }
     }
 
     pub fn alpn_protocol(&self) -> String {
         match self {
-            #[cfg(feature = "tls")]
-            Self::InTree(t) => t.alpn_protocol(),
             Self::Native(n) => n.alpn_protocol(),
         }
     }
@@ -380,8 +395,6 @@ pub fn slot_read(
     buf: &mut [u8],
 ) -> Result<Option<usize>, IoErrorTag> {
     match slot {
-        #[cfg(feature = "tls")]
-        TlsSessionSlot::InTree(tls) => crate::tls::tls_read(handle, tls, buf),
         TlsSessionSlot::Native(n) => n.read(handle.tls_abi_fd(), buf),
     }
 }
@@ -393,8 +406,6 @@ pub fn slot_write(
     buf: &[u8],
 ) -> Result<usize, IoErrorTag> {
     match slot {
-        #[cfg(feature = "tls")]
-        TlsSessionSlot::InTree(tls) => crate::tls::tls_write(handle, tls, buf),
         TlsSessionSlot::Native(n) => n.write(handle.tls_abi_fd(), buf),
     }
 }
@@ -402,12 +413,6 @@ pub fn slot_write(
 /// Best-effort `coil_tls_disable` (close_notify), then drop frees the slot.
 pub fn drop_slot(handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
     match slot {
-        #[cfg(feature = "tls")]
-        TlsSessionSlot::InTree(mut tls) => {
-            if let Some(h) = handle {
-                let _ = crate::tls::send_close_notify(h, &mut tls);
-            }
-        }
         TlsSessionSlot::Native(n) => {
             if let Some(h) = handle {
                 let _ = n.disable(h.tls_abi_fd());
@@ -463,8 +468,12 @@ pub fn note_loaded_library(name: &str, lib: Arc<Library>) {
     }
 }
 
-/// Try to resolve `libtls` on VM FFI search paths (no-op if missing).
+/// Remember FFI search paths and try to resolve `libtls` (no-op if missing).
 pub fn note_search_paths(base_dir: Option<&Path>, search_paths: &[PathBuf]) {
+    *search_paths_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) =
+        (base_dir.map(Path::to_path_buf), search_paths.to_vec());
     if preferred().is_some() {
         return;
     }
@@ -481,6 +490,23 @@ pub fn preferred() -> Option<Arc<TlsNativeAbi>> {
         .clone()
 }
 
+/// `preferred()`, or a resolve against the last [`note_search_paths`] roots.
+pub fn resolve_preferred() -> Option<Arc<TlsNativeAbi>> {
+    if let Some(abi) = preferred() {
+        return Some(abi);
+    }
+    let (base, paths) = search_paths_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone();
+    if let Ok(abi) = TlsNativeAbi::resolve(base.as_deref(), &paths) {
+        set_preferred(abi.clone());
+        Some(abi)
+    } else {
+        None
+    }
+}
+
 fn set_preferred(abi: Arc<TlsNativeAbi>) {
     *preferred_slot().lock().unwrap_or_else(|e| e.into_inner()) = Some(abi);
 }
@@ -488,6 +514,21 @@ fn set_preferred(abi: Arc<TlsNativeAbi>) {
 fn preferred_slot() -> &'static Mutex<Option<Arc<TlsNativeAbi>>> {
     static SLOT: OnceLock<Mutex<Option<Arc<TlsNativeAbi>>>> = OnceLock::new();
     SLOT.get_or_init(|| Mutex::new(None))
+}
+
+fn search_paths_slot() -> &'static Mutex<(Option<PathBuf>, Vec<PathBuf>)> {
+    static SLOT: OnceLock<Mutex<(Option<PathBuf>, Vec<PathBuf>)>> = OnceLock::new();
+    SLOT.get_or_init(|| Mutex::new((None, Vec::new())))
+}
+
+#[cfg(test)]
+pub(crate) fn install_preferred(abi: Arc<TlsNativeAbi>) {
+    set_preferred(abi);
+}
+
+#[cfg(test)]
+pub(crate) fn reset_preferred() {
+    *preferred_slot().lock().unwrap_or_else(|e| e.into_inner()) = None;
 }
 
 #[cfg(test)]
@@ -499,7 +540,7 @@ mod tests {
         with_stream_mut,
     };
     use crate::io_reactor::Interest;
-    use crate::memory::{Heap, ObjArray, Object};
+    use crate::memory::{Heap, Member, ObjArray, Object};
     use common::Value;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
@@ -947,5 +988,166 @@ mod tests {
         drop(session);
         assert_eq!(unsafe { stub_live_sessions(&abi) }, live - 1);
         assert_eq!(unsafe { stub_free_calls(&abi) }, frees + 1);
+    }
+
+    fn alloc_option_none_member(heap: &mut Heap) -> Member {
+        let none = crate::io::alloc_option_none(heap);
+        match heap.find_object_by_addr(none.raw() as u64) {
+            Some(obj) => Member::Object(obj),
+            None => Member::Value(none),
+        }
+    }
+
+    fn alloc_string_member(heap: &mut Heap, s: &str) -> Member {
+        let gc = heap.intern(s.to_string());
+        Member::Object(Object::String(gc))
+    }
+
+    fn client_enable_opts(heap: &mut Heap) -> Value {
+        use crate::memory::ObjInstance;
+        let (obj, mut gc) = heap.alloc(ObjInstance::default(), Object::Instance);
+        let inst = gc.as_mut();
+        let intern = |h: &mut Heap, n: &str| h.intern(n.to_string());
+        let k_verify = intern(heap, "verify");
+        inst.set(k_verify, Member::Value(Value::from(false)));
+        let k_ca_pem = intern(heap, "ca_pem");
+        inst.set(k_ca_pem, alloc_option_none_member(heap));
+        let k_ca_path = intern(heap, "ca_path");
+        inst.set(k_ca_path, alloc_option_none_member(heap));
+        let k_timeout = intern(heap, "timeout_ms");
+        inst.set(k_timeout, Member::Value(Value::from(25i64)));
+        let k_alpn = intern(heap, "alpn");
+        inst.set(k_alpn, alloc_string_member(heap, ""));
+        Value::from(obj.addr())
+    }
+
+    fn server_enable_opts(heap: &mut Heap) -> Value {
+        use crate::memory::ObjInstance;
+        let (obj, mut gc) = heap.alloc(ObjInstance::default(), Object::Instance);
+        let inst = gc.as_mut();
+        let intern = |h: &mut Heap, n: &str| h.intern(n.to_string());
+        inst.set(intern(heap, "cert_pem"), alloc_string_member(heap, "cert"));
+        inst.set(intern(heap, "key_pem"), alloc_string_member(heap, "key"));
+        inst.set(
+            intern(heap, "timeout_ms"),
+            Member::Value(Value::from(25i64)),
+        );
+        inst.set(intern(heap, "client_ca_pem"), alloc_string_member(heap, ""));
+        inst.set(intern(heap, "alpn"), alloc_string_member(heap, ""));
+        Value::from(obj.addr())
+    }
+
+    #[test]
+    fn leftover_enable_without_abi_leaves_tcp() {
+        let _guard = stub_lock();
+        reset_preferred();
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let opts = client_enable_opts(&mut heap);
+        let err = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts).unwrap_err();
+        assert_eq!(err, IoErrorTag::Other);
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tcp
+        );
+        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
+        drop(server);
+    }
+
+    #[test]
+    fn leftover_hostinvoke_enable_attaches_and_parks_would_block() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi.clone());
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let enable0 = unsafe { stub_enable_calls(&abi) };
+        let free0 = unsafe { stub_free_calls(&abi) };
+        unsafe { stub_set_next_enable_err(&abi, IoErrorTag::WouldBlock as i32) };
+
+        let opts = client_enable_opts(&mut heap);
+        let out = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts)
+            .expect("leftover enable returns the same Stream");
+        assert_eq!(out, stream);
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tls
+        );
+        assert!(
+            with_stream_mut(&mut heap, stream, |s| {
+                s.tls.as_ref().is_some_and(|t| t.wants_write())
+            })
+            .unwrap()
+        );
+        assert_eq!(unsafe { stub_enable_calls(&abi) }, enable0 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
+
+        let buf = make_byte_array(&mut heap, &[0; 16]);
+        let n = stream_read(&mut heap, stream, buf).expect("read continues handshake");
+        assert_eq!(n, Some(5));
+        assert_eq!(unsafe { stub_enable_calls(&abi) }, enable0 + 1);
+
+        crate::tls::tls_client_disable(&mut heap, stream).expect("disable");
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tcp
+        );
+        reset_preferred();
+        drop(server);
+    }
+
+    #[test]
+    fn leftover_server_enable_and_alpn() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi.clone());
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(server), StreamKind::Tcp).expect("alloc");
+        let err = crate::tls::tls_alpn_protocol(&mut heap, stream).unwrap_err();
+        assert_eq!(err, IoErrorTag::InvalidInput);
+        let opts = server_enable_opts(&mut heap);
+        crate::tls::tls_server_enable(&mut heap, stream, opts).expect("server enable");
+        let proto = crate::tls::tls_alpn_protocol(&mut heap, stream).expect("alpn");
+        let s = crate::io::value_as_string(&heap, proto).expect("alpn string");
+        assert_eq!(s, "h2");
+        crate::tls::tls_server_disable(&mut heap, stream).ok();
+        reset_preferred();
+        drop(client);
+    }
+
+    #[test]
+    fn leftover_enable_non_tcp_is_invalid_input() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        reset_preferred();
+        install_preferred(abi);
+        let mut heap = Heap::default();
+        let path = std::env::temp_dir().join("coil_tls_leftover_file.bin");
+        let _ = std::fs::write(&path, b"x");
+        let stream = crate::io::stream_open(&mut heap, path.to_str().unwrap(), "r").expect("open");
+        let opts = client_enable_opts(&mut heap);
+        let err = crate::tls::tls_client_enable(&mut heap, stream, "localhost", opts).unwrap_err();
+        assert_eq!(err, IoErrorTag::InvalidInput);
+        reset_preferred();
+        let _ = std::fs::remove_file(path);
     }
 }

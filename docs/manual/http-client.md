@@ -20,6 +20,6 @@ use http::{Client, Server};
 
 **Docs:** [coil-http](https://github.com/ardax-corp/coil-http/blob/main/docs/README.md)
 
-Transport uses virtual [`io::net::tcp`](../references/io.md) and [`io::net::tls`](../references/io.md).
+Transport uses virtual [`io::net::tcp`](../references/io.md) and the [coil-tls](https://github.com/ardax-corp/coil-tls) package ([tls](../references/tls.md)).
 
 For a sibling checkout instead of spool, add `../coil-http/src` to `[module].roots` (see [consume](https://github.com/ardax-corp/coil-http/blob/main/docs/consume.md)).

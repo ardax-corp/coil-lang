@@ -776,9 +776,7 @@ impl Checker {
 
     /// Scheme for a virtual `io` host native (inserted on `use io::{…}`).
     pub fn io_fn_scheme(kind: IoBuiltin) -> Scheme {
-        #[cfg(feature = "tls")]
-        use crate::typechecking::ty::record;
-        use crate::typechecking::ty::{boolean, byte, stream_ty, tuple};
+        use crate::typechecking::ty::{boolean, byte, record, stream_ty, tuple};
         let stream = stream_ty();
         let bytes = vec_app_ty(byte());
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
@@ -816,7 +814,12 @@ impl Checker {
             IoBuiltin::TcpPeerAddr | IoBuiltin::TcpLocalAddr => fun(&[stream], res_addr),
             IoBuiltin::TcpSetNodelay => fun(&[stream, boolean()], res_unit),
             IoBuiltin::TcpShutdown => fun(&[stream, int()], res_unit),
-            #[cfg(feature = "tls")]
+            IoBuiltin::UdpBind | IoBuiltin::UdpConnect => fun(&[string(), int()], res_stream),
+            IoBuiltin::UdpSendTo => fun(&[stream, bytes, string(), int()], res_int),
+            IoBuiltin::UdpRecvFrom => {
+                fun(&[stream, bytes], res_recv_from)
+            }
+            IoBuiltin::UdpLocalPort => fun(&[stream], res_int),
             IoBuiltin::TlsClientEnable => {
                 let opt_string = option_app_ty(string());
                 let opts = record(vec![
@@ -828,9 +831,7 @@ impl Checker {
                 ]);
                 fun(&[stream, string(), opts], res_stream)
             }
-            #[cfg(feature = "tls")]
             IoBuiltin::TlsClientDisable => fun(&[stream], res_stream),
-            #[cfg(feature = "tls")]
             IoBuiltin::TlsServerEnable => {
                 let opts = record(vec![
                     ("cert_pem".into(), string()),
@@ -841,16 +842,8 @@ impl Checker {
                 ]);
                 fun(&[stream, opts], res_stream)
             }
-            #[cfg(feature = "tls")]
             IoBuiltin::TlsServerDisable => fun(&[stream], res_stream),
-            #[cfg(feature = "tls")]
             IoBuiltin::TlsAlpnProtocol => fun(&[stream], res_string),
-            IoBuiltin::UdpBind | IoBuiltin::UdpConnect => fun(&[string(), int()], res_stream),
-            IoBuiltin::UdpSendTo => fun(&[stream, bytes, string(), int()], res_int),
-            IoBuiltin::UdpRecvFrom => {
-                fun(&[stream, bytes], res_recv_from)
-            }
-            IoBuiltin::UdpLocalPort => fun(&[stream], res_int),
         };
         Scheme::mono(ty)
     }

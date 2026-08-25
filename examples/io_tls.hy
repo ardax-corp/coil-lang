@@ -1,34 +1,21 @@
-// TLS via `io::net::tls::{client,server}` (host rustls; Cargo feature `tls`).
+// TLS is userland: https://github.com/ardax-corp/coil-tls
 //
-// Client:
-//   use io::net::tls::client::{connect, enable, disable};
-//   let s = connect("example.com", 443)?;
-//   let s = enable(s, "example.com", { verify: true, ca_pem: Option::None, ca_path: Option::None, timeout_ms: 0, alpn: "" })?;
-//   let s = disable(s)?;
+// Add coil-tls to module roots and native search paths:
 //
-// Server (after accept):
-//   use io::net::tls::server::{enable, disable};
-//   let s = enable(s, { cert_pem: cert, key_pem: key, timeout_ms: 0, client_ca_pem: "" })?;
-//   let s = disable(s)?;
+//   [module]
+//   roots = ["./src", "../coil-tls/src"]
+//   [ffi]
+//   search_paths = ["../coil-tls/native"]
 //
-// Handshake runs in the host; the handle is a normal `Stream`.
-// Machine unit tests cover client enable and server enable round-trips
-// against local sockets (no public network required).
+// Then:
+//   use tls::{client, server};
+//   let s = client::enable(tcp, "example.com", { verify: true, ... })?;
 //
-// Smoke: client enable on a non-TCP stream → Err (InvalidInput).
-use io::{close, open, stdout};
-use io::net::tls::client::{enable};
+// `use tls` / `use io::net::tls` without coil-tls on roots does not resolve.
+use io::{stdout};
 use io::sync::{write_all};
-
-use string::{format, to_bytes};
+use string::{to_bytes};
 
 fn main() {
-    let path = "coil_tls_smoke.bin";
-    let s = open(path, "w")?;
-    let msg = match enable(s, "127.0.0.1", { verify: false, ca_pem: Option::None, ca_path: Option::None, timeout_ms: 0, alpn: "" }) {
-        Result::Ok(_) => "unexpected-ok",
-        Result::Err(_) => "tls-ok",
-    };
-    close(s)?;
-    write_all(stdout(), to_bytes(format("%s", msg)));
+    write_all(stdout(), to_bytes("use-coil-tls"));
 }

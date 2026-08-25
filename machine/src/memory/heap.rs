@@ -527,7 +527,7 @@ pub enum StreamKind {
     TcpListener,
     /// Datagram socket (`io::net::udp::bind` / `connect`).
     Udp,
-    /// TLS-wrapped TCP (`io::net::tls::{client,server}::enable` / `disable`).
+    /// TLS-wrapped TCP (leftover `tls_*_enable` / coil-tls `dload("tls")`).
     Tls,
 }
 
@@ -1048,7 +1048,7 @@ pub struct ObjStream {
     pub read_timeout: Option<std::time::Duration>,
     /// Soft deadline for sync write adapters / TLS handshake writes (`None` = wait forever).
     pub write_timeout: Option<std::time::Duration>,
-    /// TLS session: in-tree rustls and/or a dloaded `coil_tls_*` opaque pointer.
+    /// TLS session: a dloaded `coil_tls_*` opaque pointer (`libtls`).
     pub tls: Option<crate::tls_native::TlsSessionSlot>,
 }
 

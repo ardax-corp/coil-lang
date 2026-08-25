@@ -627,6 +627,26 @@ fn stream_await_interest(
         if skip {
             return Ok(Some(as_result_unit(heap, Ok(()))));
         }
+        // Native sessions track last WouldBlock interest; wait writable when
+        // ClientHello / ciphertext still needs to flush (wrong-read park).
+        let wants_write = with_stream_mut(heap, stream, |s| {
+            s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.wants_write())
+        })?;
+        if wants_write {
+            let handle = stream_wait_handle(heap, stream)?;
+            match reactor_wait_fd(handle, Interest::Writable, Some(Duration::ZERO)) {
+                Ok(()) => return Ok(Some(as_result_unit(heap, Ok(())))),
+                Err(IoErrorTag::TimedOut) => {
+                    request_io_park(IoParkRequest {
+                        handle,
+                        interest: Interest::Writable,
+                        timeout: stream_write_timeout(heap, stream)?,
+                    });
+                    return Ok(None);
+                }
+                Err(e) => return Ok(Some(as_result_unit(heap, Err(e)))),
+            }
+        }
     }
     let handle = stream_wait_handle(heap, stream)?;
     // Already ready?
@@ -656,7 +676,7 @@ pub fn io_wait_ready(_heap: &mut Heap) -> Value {
     Value::from(n as i64)
 }
 
-fn stream_wait_handle(heap: &mut Heap, stream: Value) -> Result<WaitHandle, IoErrorTag> {
+pub(crate) fn stream_wait_handle(heap: &mut Heap, stream: Value) -> Result<WaitHandle, IoErrorTag> {
     with_stream_mut(heap, stream, |s| {
         if s.closed || s.handle.is_none() {
             Err(IoErrorTag::AlreadyClosed)

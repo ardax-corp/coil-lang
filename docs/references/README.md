@@ -39,12 +39,14 @@ Compiler builtins live in **virtual modules** (not `.hy` files). Every file gets
 | [env](env.md) | Virtual module | Args, env vars, `exec` |
 | [crypto](crypto.md) | Virtual module | Hashes, AEAD, keys |
 | [regex](regex.md) | Userland package | [coil-regex](https://github.com/ardax-corp/coil-regex) — PCRE2 via FFI |
+| [tls](tls.md) | Userland package | [coil-tls](https://github.com/ardax-corp/coil-tls) — rustls via `dload("tls")` |
 | [gc](gc.md) | Virtual module | `Root` / `Weak` pins |
 | [ord / char](ord-char.md) | Prelude | Single-byte string ↔ `byte` |
 | [host natives](host-natives.md) | Embedder API | Rust closures via `HostInvoke` |
 | [What is NOT a builtin](not-builtins.md) | Scope | Gaps vs builtins |
 | [coil-stdlib](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/README.md) | Userland | `bytes`, `text`, `collections`, `io::sync`, … |
 | [coil-regex](https://github.com/ardax-corp/coil-regex/blob/main/docs/README.md) | Userland | PCRE2 regex — see [regex](regex.md) |
+| [coil-tls](https://github.com/ardax-corp/coil-tls) | Userland | TLS (`libtls`) — see [tls](tls.md) |
 | [coil-http](https://github.com/ardax-corp/coil-http/blob/main/docs/README.md) | Userland | HTTP/1.1 client + server — [install via spool](../manual/http-client.md) |
 
 Do not document coil-stdlib APIs here; they live in that repo. Workspace

@@ -1,12 +1,12 @@
-//! Reserved HostInvoke slots for TLS and crypto natives moving to userland.
+//! Reserved HostInvoke slots for TLS leftover and crypto natives moving to userland.
 //!
-//! Live bodies stay in `tls.rs` / `crypto.rs` while those Cargo features are
-//! on. When a feature is off, the stub pushers below occupy the same ids with
-//! fail-closed panics so later natives do not shift.
+//! TLS leftover bodies live in `tls.rs` (dload+attach, not rustls). Crypto live
+//! bodies stay in `crypto.rs` while that Cargo feature is on. When `crypto` is
+//! off, the stub pushers occupy the same ids with fail-closed panics so later
+//! natives do not shift.
 //!
-//! coil-tls (COI-209 / COI-210) and coil-crypto (COI-215 / COI-216) will
-//! replace the feature-on bodies with these stubs. Do not reorder the name
-//! tables. Do not bump `ARCHIVE_VERSION` for this reservation.
+//! Do not reorder the name tables. Do not bump `ARCHIVE_VERSION` for this
+//! reservation.
 
 use std::sync::Arc;
 
@@ -18,8 +18,8 @@ use crate::{FfiSignature, HostClosureFn, NativeFn};
 /// TLS HostInvoke names in table order (stream upgrades, then ALPN).
 ///
 /// The four stream natives sit at the end of the IO block; `tls_alpn_protocol`
-/// is append-only after `write_from`. Ids reserved; do not reorder; userland
-/// extract will stub these.
+/// is append-only after `write_from`. Ids reserved; do not reorder. Live
+/// leftover bodies are in `tls.rs` (not these panic stubs).
 pub const RESERVED_TLS_HOSTINVOKE: &[&str] = &[
     "tls_client_enable",
     "tls_client_disable",
@@ -84,6 +84,9 @@ pub fn push_crypto_stubs(
 }
 
 /// Register the four TLS stream-upgrade slots after `udp_local_port`.
+///
+/// Unused on the live path: leftover enable/disable bodies occupy these ids.
+#[allow(dead_code)]
 pub fn push_tls_stream_stubs(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
@@ -92,6 +95,9 @@ pub fn push_tls_stream_stubs(
 }
 
 /// Register `tls_alpn_protocol` after `write_from` as a fail-closed panic.
+///
+/// Unused on the live path: leftover `tls_alpn_protocol` occupies this id.
+#[allow(dead_code)]
 pub fn push_tls_alpn_stub(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
@@ -210,7 +216,7 @@ mod tests {
         assert_eq!(wiring, RESERVED_CRYPTO_HOSTINVOKE);
     }
 
-    #[cfg(all(feature = "crypto", feature = "time", feature = "tls"))]
+    #[cfg(all(feature = "crypto", feature = "time"))]
     /// Default-feature HostInvoke ids. Inserting a native *before* a reserved
     /// slot must update this snapshot.
     const RESERVED_HOSTINVOKE_ID_SNAPSHOT: &[(&str, usize)] = &[
@@ -244,7 +250,7 @@ mod tests {
         ("tls_alpn_protocol", 121),
     ];
 
-    #[cfg(all(feature = "crypto", feature = "time", feature = "tls"))]
+    #[cfg(all(feature = "crypto", feature = "time"))]
     #[test]
     fn reserved_tls_and_crypto_hostinvoke_ids_match_snapshot() {
         let map = registered_ids();
@@ -269,19 +275,5 @@ mod tests {
             .expect("crypto_sha256 stub");
         let mut heap = crate::Heap::default();
         let _ = native.invoke(&mut heap, &[Value::from(0i64)]);
-    }
-
-    #[cfg(not(feature = "tls"))]
-    #[test]
-    #[should_panic(expected = "reserved HostInvoke `tls_client_enable`")]
-    fn tls_stub_panics_when_feature_is_off() {
-        let natives = build_standard_host_natives(|_, _| {});
-        let native = natives
-            .iter()
-            .find(|n| n.name() == "tls_client_enable")
-            .expect("tls_client_enable stub");
-        let mut heap = crate::Heap::default();
-        let args = [Value::from(0i64), Value::from(0i64), Value::from(0i64)];
-        let _ = native.invoke(&mut heap, &args);
     }
 }

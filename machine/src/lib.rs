@@ -27,7 +27,6 @@ pub mod vec_ops;
 pub mod thread;
 #[cfg(feature = "time")]
 pub mod time;
-#[cfg(feature = "tls")]
 pub mod tls;
 mod tls_native;
 mod vm;
@@ -44,7 +43,7 @@ pub use host_natives::{build_standard_host_natives, wire_standard_host_natives, 
 pub use reserved_hostinvoke::{RESERVED_CRYPTO_HOSTINVOKE, RESERVED_TLS_HOSTINVOKE};
 pub use tls_native::{
     NativeEnable, NativeTlsSession, TlsNativeAbi, TlsSessionSlot, attach_enable_outcome,
-    attach_native, note_search_paths, preferred,
+    attach_native, note_search_paths, preferred, resolve_preferred,
 };
 pub use memory::*;
 pub use opcode::*;

@@ -31,14 +31,14 @@ Regex is a **userland** package (not a virtual module). Clone [coil-regex](https
 
 ### Optional Cargo features (`crypto` / `time`)
 
-The default build enables virtual `crypto` and `time` (and `tls`). Embedders can strip them:
+The default build enables virtual `crypto` and `time`. Embedders can strip them:
 
 ```toml
 machine = { path = "...", default-features = false, features = ["time"] }
 # or: features = ["crypto"]
 ```
 
-The `compiler` and root `coil` crates mirror the same feature names. With a feature disabled, the corresponding virtual module imports (e.g. `use crypto::{sha256};`, `use time::{timestamp};`) will not resolve. Use [coil-regex](https://github.com/ardax-corp/coil-regex) for `use regex::{…}`.
+The `compiler` and root `coil` crates mirror the same feature names. With a feature disabled, the corresponding virtual module imports (e.g. `use crypto::{sha256};`, `use time::{timestamp};`) will not resolve. Use [coil-regex](https://github.com/ardax-corp/coil-regex) for `use regex::{…}` and [coil-tls](https://github.com/ardax-corp/coil-tls) for `use tls::{…}` ([tls](../references/tls.md)).
 
 ## Build the project
 

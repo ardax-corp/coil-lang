@@ -396,6 +396,7 @@ impl<const S: usize> Machine<S> {
     pub fn set_ffi_paths(&mut self, base_dir: Option<PathBuf>, search_paths: Vec<PathBuf>) {
         self.base_dir = base_dir;
         self.ffi_search_paths = search_paths;
+        crate::tls_native::note_search_paths(self.base_dir.as_deref(), &self.ffi_search_paths);
     }
 
     pub fn set_program_debug(&mut self, debug: ProgramDebug) {
@@ -711,8 +712,7 @@ impl<const S: usize> Machine<S> {
     }
 
     pub fn with_ffi_paths(mut self, base_dir: Option<PathBuf>, search_paths: Vec<PathBuf>) -> Self {
-        self.base_dir = base_dir;
-        self.ffi_search_paths = search_paths;
+        self.set_ffi_paths(base_dir, search_paths);
         self
     }
 
