@@ -2949,6 +2949,86 @@ mod tests {
     }
 
     #[test]
+    fn yield_in_loop_refuses_length_proof_and_pin() {
+        use super::super::pure_call::set_pure_call_ctx;
+        reset_bounds_stats();
+        set_pure_call_ctx(None);
+        let mut ops = vec![
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::Load { slot: 0, loc: loc() },
+            array_len_op(),
+            IlOp::StorePop { slot: 4, loc: loc() },
+            IlOp::Load { slot: 3, loc: loc() },
+            IlOp::Load { slot: 4, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc: loc(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc: loc(),
+            },
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Index { loc: loc() },
+            IlOp::byte(Byte::new(Instruction::YieldCoro)),
+            IlOp::Pop { loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Halt { loc: loc() },
+        ];
+        loop_bounds(&mut ops);
+        let stats = last_bounds_stats();
+        assert_eq!(
+            stats.array_len_hoists, 0,
+            "YieldCoro must refuse ArrayLen hoist; stats={stats:?}"
+        );
+        assert_eq!(
+            stats.proven_index, 0,
+            "YieldCoro must not prove Index; stats={stats:?}"
+        );
+        assert_eq!(
+            stats.array_pin_hoists, 0,
+            "YieldCoro must not hoist ArrayPin; stats={stats:?}"
+        );
+        assert!(
+            ops.iter().any(|op| matches!(op, IlOp::Index { .. })),
+            "Index must stay checked across yield"
+        );
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                IlOp::ArrayPin { .. }
+                    | IlOp::IndexPin { .. }
+                    | IlOp::IndexPinUnchecked { .. }
+                    | IlOp::IndexUnchecked { .. }
+            )),
+            "yielding counted loop must not pin or uncheck"
+        );
+    }
+
+    #[test]
     fn field_ops_in_loop_refuse_length_proof() {
         use super::super::pure_call::set_pure_call_ctx;
         reset_bounds_stats();

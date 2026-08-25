@@ -2095,4 +2095,115 @@ fn main() {
             "pushing callee must not prove Index; stats={stats:?}"
         );
     }
+
+    /// Yield is a length-proof barrier: resume restores empty pin maps, so a
+    /// counted loop that yields must keep checked Index and must not pin.
+    #[test]
+    fn yielding_counted_loop_refuses_pin_non_yielding_sibling_pins() {
+        use common::Instruction;
+
+        fn fn_span(
+            syms: &[common::FnDebugSym],
+            bytecode_len: usize,
+            name: &str,
+        ) -> std::ops::Range<usize> {
+            let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
+                let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+                panic!("missing fn_symbol `{name}`; have {names:?}");
+            });
+            let start = syms[idx].entry_pc as usize;
+            let end = syms
+                .get(idx + 1)
+                .map(|s| s.entry_pc as usize)
+                .unwrap_or(bytecode_len);
+            start..end
+        }
+
+        fn is_pin(op: Instruction) -> bool {
+            matches!(
+                op,
+                Instruction::ArrayPin
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )
+        }
+
+        let src = r#"
+fn scan_sum(Vec<int> b) -> int {
+    let acc = 0;
+    let j = 0;
+    while j < len(b) {
+        acc = acc + b[j];
+        j = j + 1;
+    }
+    return acc;
+}
+async fn scan_yield(Vec<int> b) {
+    let j = 0;
+    while j < len(b) {
+        yield b[j];
+        j = j + 1;
+    }
+}
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    let n = 16;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let acc = scan_sum(b);
+    let h = scan_yield(b);
+    resume h;
+    return acc;
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline
+            .compile_src(src)
+            .expect("compile yield-barrier scan");
+        let syms = pipeline.program_debug().fn_symbols;
+        let yield_span = fn_span(&syms, bytecode.len(), "scan_yield");
+        let sum_span = fn_span(&syms, bytecode.len(), "scan_sum");
+        let yield_body = &bytecode[yield_span.clone()];
+        let sum_body = &bytecode[sum_span.clone()];
+
+        assert!(
+            yield_body
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::YieldCoro),
+            "scan_yield must contain YieldCoro"
+        );
+        assert!(
+            yield_body
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::Index),
+            "scan_yield must keep checked Index; body={:?}",
+            yield_body
+                .iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            yield_body.iter().all(|b| !is_pin(*b.bytecode())
+                && *b.bytecode() != Instruction::IndexUnchecked
+                && *b.bytecode() != Instruction::StoreIndexUnchecked),
+            "scan_yield must not pin or uncheck; body={:?}",
+            yield_body
+                .iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            sum_body.iter().any(|b| is_pin(*b.bytecode())),
+            "non-yielding sibling scan_sum should still pin; body={:?}",
+            sum_body
+                .iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+    }
 }
