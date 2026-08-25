@@ -43,7 +43,8 @@ pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING}
 pub use host_natives::{build_standard_host_natives, wire_standard_host_natives, PGO_HIT_NATIVE};
 pub use reserved_hostinvoke::{RESERVED_CRYPTO_HOSTINVOKE, RESERVED_TLS_HOSTINVOKE};
 pub use tls_native::{
-    NativeTlsSession, TlsNativeAbi, TlsSessionSlot, attach_native, note_search_paths, preferred,
+    NativeEnable, NativeTlsSession, TlsNativeAbi, TlsSessionSlot, attach_enable_outcome,
+    attach_native, note_search_paths, preferred,
 };
 pub use memory::*;
 pub use opcode::*;

@@ -1,5 +1,9 @@
 /* In-tree test cdylib for COI-208. Implements the seven coil_tls_* symbols
- * plus a few stub-only hooks so machine tests can force WouldBlock. */
+ * plus stub-only hooks so machine tests can force WouldBlock, including
+ * enable returning WouldBlock with a live session pointer.
+ *
+ * coil_tls_disable is close_notify only; coil_tls_free is the destructor.
+ * Tests assert the VM wrapper never treats disable as free. */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -22,7 +26,19 @@ typedef struct {
     uint32_t alpn_len;
 } StubSession;
 
+static int32_t g_next_enable_err = ABI_OK;
+static int32_t g_live_sessions = 0;
+static int32_t g_enable_calls = 0;
+static int32_t g_free_calls = 0;
+static int32_t g_disable_calls = 0;
+
 static StubSession *as_session(void *p) { return (StubSession *)p; }
+
+static int32_t take_enable_err(void) {
+    int32_t err = g_next_enable_err;
+    g_next_enable_err = ABI_OK;
+    return err;
+}
 
 static void *new_session(void) {
     StubSession *s = (StubSession *)calloc(1, sizeof(StubSession));
@@ -33,6 +49,7 @@ static void *new_session(void) {
     s->payload_len = 5;
     memcpy(s->alpn, "h2", 2);
     s->alpn_len = 2;
+    g_live_sessions += 1;
     return s;
 }
 
@@ -47,8 +64,11 @@ void *coil_tls_client_enable(int64_t fd, const char *host, int32_t verify,
     (void)ca_path;
     (void)timeout_ms;
     (void)alpn;
+    g_enable_calls += 1;
     if (err_out) {
-        *err_out = ABI_OK;
+        *err_out = take_enable_err();
+    } else {
+        (void)take_enable_err();
     }
     return new_session();
 }
@@ -62,8 +82,11 @@ void *coil_tls_server_enable(int64_t fd, const char *cert_pem, const char *key_p
     (void)timeout_ms;
     (void)client_ca_pem;
     (void)alpn;
+    g_enable_calls += 1;
     if (err_out) {
-        *err_out = ABI_OK;
+        *err_out = take_enable_err();
+    } else {
+        (void)take_enable_err();
     }
     return new_session();
 }
@@ -143,10 +166,9 @@ intptr_t coil_tls_alpn(void *session, uint8_t *out, uintptr_t out_len) {
 int32_t coil_tls_disable(void *session, int64_t fd, int32_t *err_out) {
     (void)fd;
     StubSession *s = as_session(session);
+    g_disable_calls += 1;
     if (s) {
         s->disable_calls += 1;
-        /* Snapshot counts are lost after free; tests read them before disable. */
-        free(s);
     }
     if (err_out) {
         *err_out = ABI_OK;
@@ -154,7 +176,13 @@ int32_t coil_tls_disable(void *session, int64_t fd, int32_t *err_out) {
     return 0;
 }
 
-void coil_tls_free(void *session) { free(session); }
+void coil_tls_free(void *session) {
+    g_free_calls += 1;
+    if (session) {
+        g_live_sessions -= 1;
+        free(session);
+    }
+}
 
 void coil_tls_stub_set_would_block_reads(void *session, int32_t n) {
     StubSession *s = as_session(session);
@@ -184,3 +212,16 @@ int32_t coil_tls_stub_disable_calls(void *session) {
     StubSession *s = as_session(session);
     return s ? s->disable_calls : -1;
 }
+
+/* One-shot `err_out` for the next client/server enable. Always still returns
+ * a live session when calloc succeeds (WouldBlock keeps it; other errors
+ * leave a leftover the VM must free). */
+void coil_tls_stub_set_next_enable_err(int32_t err) { g_next_enable_err = err; }
+
+int32_t coil_tls_stub_live_sessions(void) { return g_live_sessions; }
+
+int32_t coil_tls_stub_enable_calls(void) { return g_enable_calls; }
+
+int32_t coil_tls_stub_free_calls(void) { return g_free_calls; }
+
+int32_t coil_tls_stub_disable_calls_total(void) { return g_disable_calls; }

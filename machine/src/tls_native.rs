@@ -4,6 +4,10 @@
 //! `tls` Cargo feature is on. When a stream holds a [`NativeTlsSession`],
 //! `stream_read` / `stream_write` / close / disable / ALPN call these symbols
 //! instead. Handshake parks stay in the VM ([`crate::io::reactor_wait_fd_no_help`]).
+//!
+//! Enable WouldBlock still returns a session: attach (`kind = Tls`), park, then
+//! continue on read/write — never free that pointer and never call enable again.
+//! `coil_tls_disable` is close_notify; `coil_tls_free` is the destructor.
 
 use std::ffi::{CString, c_char, c_void};
 use std::path::{Path, PathBuf};
@@ -98,6 +102,9 @@ impl TlsNativeAbi {
     }
 
     /// Create a client session in the `.so`. `timeout_ms <= 0` means no deadline.
+    ///
+    /// One rustls step per call. WouldBlock still yields a session to attach;
+    /// the next step is read/write, not another enable.
     pub fn client_enable(
         self: &Arc<Self>,
         fd: i64,
@@ -107,11 +114,23 @@ impl TlsNativeAbi {
         ca_path: Option<&str>,
         timeout_ms: i64,
         alpn: &str,
-    ) -> Result<NativeTlsSession, IoErrorTag> {
-        let host = c_string(host)?;
-        let ca_pem = optional_c_string(ca_pem)?;
-        let ca_path = optional_c_string(ca_path)?;
-        let alpn = c_string(alpn)?;
+    ) -> NativeEnable {
+        let host = match c_string(host) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
+        let ca_pem = match optional_c_string(ca_pem) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
+        let ca_path = match optional_c_string(ca_path) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
+        let alpn = match c_string(alpn) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
         let mut err = ABI_OK;
         let ptr = unsafe {
             (self.client_enable)(
@@ -137,11 +156,23 @@ impl TlsNativeAbi {
         timeout_ms: i64,
         client_ca_pem: &str,
         alpn: &str,
-    ) -> Result<NativeTlsSession, IoErrorTag> {
-        let cert = c_string(cert_pem)?;
-        let key = c_string(key_pem)?;
-        let client_ca = c_string(client_ca_pem)?;
-        let alpn = c_string(alpn)?;
+    ) -> NativeEnable {
+        let cert = match c_string(cert_pem) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
+        let key = match c_string(key_pem) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
+        let client_ca = match c_string(client_ca_pem) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
+        let alpn = match c_string(alpn) {
+            Ok(s) => s,
+            Err(e) => return NativeEnable::Failed(e),
+        };
         let mut err = ABI_OK;
         let ptr = unsafe {
             (self.server_enable)(
@@ -183,22 +214,33 @@ fn opt_ptr(s: &Option<CString>) -> *const c_char {
     s.as_ref().map(|c| c.as_ptr()).unwrap_or(ptr::null())
 }
 
-fn session_from_enable(
-    abi: Arc<TlsNativeAbi>,
-    ptr: *mut c_void,
-    err: i32,
-) -> Result<NativeTlsSession, IoErrorTag> {
-    if err != ABI_OK {
-        if !ptr.is_null() {
-            unsafe { (abi.free)(ptr) };
-        }
-        return Err(IoErrorTag::from_abi(err));
+/// Outcome of `coil_tls_*_enable`. `Result<Session, IoError>` cannot carry a
+/// session on WouldBlock; this shape can.
+#[must_use]
+pub enum NativeEnable {
+    Ready(NativeTlsSession),
+    WouldBlock(NativeTlsSession),
+    Failed(IoErrorTag),
+}
+
+fn session_from_enable(abi: Arc<TlsNativeAbi>, ptr: *mut c_void, err: i32) -> NativeEnable {
+    let keep =
+        |abi: Arc<TlsNativeAbi>| NonNull::new(ptr).map(|p| NativeTlsSession { ptr: Some(p), abi });
+    if err == ABI_OK {
+        return keep(abi)
+            .map(NativeEnable::Ready)
+            .unwrap_or(NativeEnable::Failed(IoErrorTag::Other));
     }
-    let ptr = NonNull::new(ptr).ok_or(IoErrorTag::Other)?;
-    Ok(NativeTlsSession {
-        ptr: Some(ptr),
-        abi,
-    })
+    let tag = IoErrorTag::from_abi(err);
+    if tag == IoErrorTag::WouldBlock {
+        return keep(abi)
+            .map(NativeEnable::WouldBlock)
+            .unwrap_or(NativeEnable::Failed(IoErrorTag::WouldBlock));
+    }
+    if !ptr.is_null() {
+        unsafe { (abi.free)(ptr) };
+    }
+    NativeEnable::Failed(tag)
 }
 
 /// Opaque rustls session living in dloaded `libtls`.
@@ -271,9 +313,9 @@ impl NativeTlsSession {
         String::from_utf8_lossy(&buf[..n as usize]).into_owned()
     }
 
-    /// `close_notify` + free the session in the `.so`.
-    pub fn disable(mut self, fd: i64) -> Result<(), IoErrorTag> {
-        let ptr = self.take_ptr();
+    /// `close_notify` only. [`Drop`] calls `coil_tls_free`.
+    pub fn disable(&self, fd: i64) -> Result<(), IoErrorTag> {
+        let ptr = self.raw();
         if ptr.is_null() {
             return Ok(());
         }
@@ -357,7 +399,7 @@ pub fn slot_write(
     }
 }
 
-/// Best-effort `close_notify` / `coil_tls_disable` before dropping the slot.
+/// Best-effort `coil_tls_disable` (close_notify), then drop frees the slot.
 pub fn drop_slot(handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
     match slot {
         #[cfg(feature = "tls")]
@@ -391,6 +433,24 @@ pub fn attach_native(
         s.tls = Some(TlsSessionSlot::Native(session));
         Ok(())
     })?
+}
+
+/// Attach a [`NativeEnable`] outcome. Ready and WouldBlock both set `kind = Tls`.
+/// WouldBlock returns `Err(WouldBlock)` after attach so the caller parks, then
+/// continues on read/write. Failed leaves `kind = Tcp`.
+pub fn attach_enable_outcome(
+    heap: &mut Heap,
+    stream: common::Value,
+    outcome: NativeEnable,
+) -> Result<(), IoErrorTag> {
+    match outcome {
+        NativeEnable::Ready(session) => attach_native(heap, stream, session),
+        NativeEnable::WouldBlock(session) => {
+            attach_native(heap, stream, session)?;
+            Err(IoErrorTag::WouldBlock)
+        }
+        NativeEnable::Failed(err) => Err(err),
+    }
 }
 
 /// Remember a `dload("tls")` so later HostInvoke enable can prefer the `.so`.
@@ -444,7 +504,7 @@ mod tests {
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::path::PathBuf;
-    use std::sync::OnceLock;
+    use std::sync::{Mutex, OnceLock};
     use std::time::Duration;
 
     fn workspace_root() -> PathBuf {
@@ -524,34 +584,72 @@ mod tests {
         Value::from(obj.addr())
     }
 
+    fn stub_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
+    unsafe fn stub_sym<T: Copy>(abi: &TlsNativeAbi, name: &[u8]) -> T {
+        let s: libloading::Symbol<T> = unsafe { abi.library().get(name).expect("stub hook") };
+        *s
+    }
+
     unsafe fn stub_set_would_block_reads(abi: &TlsNativeAbi, session: *mut c_void, n: i32) {
-        type Fn = unsafe extern "C" fn(*mut c_void, i32);
-        let f: libloading::Symbol<Fn> = unsafe {
-            abi.library()
-                .get(b"coil_tls_stub_set_would_block_reads\0")
-                .expect("stub hook")
-        };
+        let f: unsafe extern "C" fn(*mut c_void, i32) =
+            unsafe { stub_sym(abi, b"coil_tls_stub_set_would_block_reads\0") };
         unsafe { f(session, n) };
     }
 
     unsafe fn stub_read_calls(abi: &TlsNativeAbi, session: *mut c_void) -> i32 {
-        type Fn = unsafe extern "C" fn(*mut c_void) -> i32;
-        let f: libloading::Symbol<Fn> = unsafe {
-            abi.library()
-                .get(b"coil_tls_stub_read_calls\0")
-                .expect("stub hook")
-        };
+        let f: unsafe extern "C" fn(*mut c_void) -> i32 =
+            unsafe { stub_sym(abi, b"coil_tls_stub_read_calls\0") };
         unsafe { f(session) }
     }
 
     unsafe fn stub_write_calls(abi: &TlsNativeAbi, session: *mut c_void) -> i32 {
-        type Fn = unsafe extern "C" fn(*mut c_void) -> i32;
-        let f: libloading::Symbol<Fn> = unsafe {
-            abi.library()
-                .get(b"coil_tls_stub_write_calls\0")
-                .expect("stub hook")
-        };
+        let f: unsafe extern "C" fn(*mut c_void) -> i32 =
+            unsafe { stub_sym(abi, b"coil_tls_stub_write_calls\0") };
         unsafe { f(session) }
+    }
+
+    unsafe fn stub_disable_calls(abi: &TlsNativeAbi, session: *mut c_void) -> i32 {
+        let f: unsafe extern "C" fn(*mut c_void) -> i32 =
+            unsafe { stub_sym(abi, b"coil_tls_stub_disable_calls\0") };
+        unsafe { f(session) }
+    }
+
+    unsafe fn stub_set_next_enable_err(abi: &TlsNativeAbi, err: i32) {
+        let f: unsafe extern "C" fn(i32) =
+            unsafe { stub_sym(abi, b"coil_tls_stub_set_next_enable_err\0") };
+        unsafe { f(err) };
+    }
+
+    unsafe fn stub_live_sessions(abi: &TlsNativeAbi) -> i32 {
+        let f: unsafe extern "C" fn() -> i32 =
+            unsafe { stub_sym(abi, b"coil_tls_stub_live_sessions\0") };
+        unsafe { f() }
+    }
+
+    unsafe fn stub_enable_calls(abi: &TlsNativeAbi) -> i32 {
+        let f: unsafe extern "C" fn() -> i32 =
+            unsafe { stub_sym(abi, b"coil_tls_stub_enable_calls\0") };
+        unsafe { f() }
+    }
+
+    unsafe fn stub_free_calls(abi: &TlsNativeAbi) -> i32 {
+        let f: unsafe extern "C" fn() -> i32 =
+            unsafe { stub_sym(abi, b"coil_tls_stub_free_calls\0") };
+        unsafe { f() }
+    }
+
+    fn expect_ready(outcome: NativeEnable) -> NativeTlsSession {
+        match outcome {
+            NativeEnable::Ready(s) => s,
+            NativeEnable::WouldBlock(_) => panic!("expected Ready, got WouldBlock"),
+            NativeEnable::Failed(e) => panic!("expected Ready, got Failed({e:?})"),
+        }
     }
 
     fn attach_stub_stream(heap: &mut Heap, sock: TcpStream, abi: &Arc<TlsNativeAbi>) -> Value {
@@ -568,9 +666,7 @@ mod tests {
             }
         };
         let stream = alloc_stream(heap, NativeHandle::Tcp(sock), StreamKind::Tcp).expect("alloc");
-        let session = abi
-            .client_enable(fd, "localhost", false, None, None, 0, "")
-            .expect("stub enable");
+        let session = expect_ready(abi.client_enable(fd, "localhost", false, None, None, 0, ""));
         attach_native(heap, stream, session).expect("attach");
         stream
     }
@@ -589,6 +685,8 @@ mod tests {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
+        let _guard = stub_lock();
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, mut server) = tcp_pair();
         let mut heap = Heap::default();
         let stream = attach_stub_stream(&mut heap, client, &abi);
@@ -617,6 +715,8 @@ mod tests {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
+        let _guard = stub_lock();
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, mut server) = tcp_pair();
         let wait = crate::io_handle::WaitHandle::from_tcp(&client);
         let mut heap = Heap::default();
@@ -648,6 +748,8 @@ mod tests {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
+        let _guard = stub_lock();
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream =
@@ -657,9 +759,7 @@ mod tests {
             s.handle.as_ref().map(|h| h.tls_abi_fd()).unwrap_or(-1)
         })
         .unwrap();
-        let session = abi
-            .client_enable(fd, "localhost", false, None, None, 0, "")
-            .expect("enable");
+        let session = expect_ready(abi.client_enable(fd, "localhost", false, None, None, 0, ""));
         drop(session);
         assert_eq!(
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
@@ -675,6 +775,8 @@ mod tests {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
+        let _guard = stub_lock();
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream = attach_stub_stream(&mut heap, client, &abi);
@@ -708,8 +810,10 @@ mod tests {
             eprintln!("skip: cc could not build tls ABI stub");
             return;
         };
+        let _guard = stub_lock();
         let dir = path.parent().unwrap();
         let abi = TlsNativeAbi::resolve(None, &[dir.to_path_buf()]).expect("resolve tls");
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
         let (client, server) = tcp_pair();
         #[cfg(unix)]
         let fd = {
@@ -721,11 +825,127 @@ mod tests {
             use std::os::windows::io::AsRawSocket;
             client.as_raw_socket() as i64
         };
-        let session = abi
-            .client_enable(fd, "localhost", false, None, None, 0, "h2")
-            .expect("enable");
+        let session = expect_ready(abi.client_enable(fd, "localhost", false, None, None, 0, "h2"));
         drop(session);
         drop(client);
         drop(server);
+    }
+
+    #[test]
+    fn stub_enable_would_block_attaches_and_keeps_session() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let fd = with_stream_mut(&mut heap, stream, |s| {
+            s.handle.as_ref().map(|h| h.tls_abi_fd()).unwrap_or(-1)
+        })
+        .unwrap();
+
+        let live0 = unsafe { stub_live_sessions(&abi) };
+        let enable0 = unsafe { stub_enable_calls(&abi) };
+        let free0 = unsafe { stub_free_calls(&abi) };
+        unsafe { stub_set_next_enable_err(&abi, IoErrorTag::WouldBlock as i32) };
+
+        let outcome = abi.client_enable(fd, "localhost", false, None, None, 0, "");
+        assert!(matches!(outcome, NativeEnable::WouldBlock(_)));
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0 + 1);
+        assert_eq!(unsafe { stub_enable_calls(&abi) }, enable0 + 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
+
+        let err = attach_enable_outcome(&mut heap, stream, outcome).unwrap_err();
+        assert_eq!(err, IoErrorTag::WouldBlock);
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tls
+        );
+        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_some()).unwrap());
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
+
+        let ptr = native_ptr(&mut heap, stream);
+        assert!(!ptr.is_null());
+        let buf = make_byte_array(&mut heap, &[0; 16]);
+        let n = stream_read(&mut heap, stream, buf).expect("read after WouldBlock enable");
+        assert_eq!(n, Some(5));
+        assert!(unsafe { stub_read_calls(&abi, ptr) } >= 1);
+        assert_eq!(unsafe { stub_enable_calls(&abi) }, enable0 + 1);
+
+        let out = make_byte_array(&mut heap, b"xy");
+        let wrote = stream_write(&mut heap, stream, out).expect("write after WouldBlock enable");
+        assert_eq!(wrote, 2);
+        assert!(unsafe { stub_write_calls(&abi, ptr) } >= 1);
+        assert_eq!(unsafe { stub_enable_calls(&abi) }, enable0 + 1);
+
+        stream_close(&mut heap, stream).ok();
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        drop(server);
+    }
+
+    #[test]
+    fn stub_enable_handshake_error_frees_and_does_not_attach() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let fd = with_stream_mut(&mut heap, stream, |s| {
+            s.handle.as_ref().map(|h| h.tls_abi_fd()).unwrap_or(-1)
+        })
+        .unwrap();
+
+        let live0 = unsafe { stub_live_sessions(&abi) };
+        let free0 = unsafe { stub_free_calls(&abi) };
+        unsafe { stub_set_next_enable_err(&abi, IoErrorTag::Handshake as i32) };
+
+        let outcome = abi.client_enable(fd, "localhost", false, None, None, 0, "");
+        assert!(matches!(
+            outcome,
+            NativeEnable::Failed(IoErrorTag::Handshake)
+        ));
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live0);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+
+        let err = attach_enable_outcome(&mut heap, stream, outcome).unwrap_err();
+        assert_eq!(err, IoErrorTag::Handshake);
+        assert_eq!(
+            with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
+            StreamKind::Tcp
+        );
+        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
+        assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
+        drop(server);
+    }
+
+    #[test]
+    fn stub_disable_is_close_notify_free_is_destructor() {
+        let Some(abi) = load_stub() else {
+            eprintln!("skip: cc could not build tls ABI stub");
+            return;
+        };
+        let _guard = stub_lock();
+        unsafe { stub_set_next_enable_err(&abi, ABI_OK) };
+        let session = expect_ready(abi.client_enable(-1, "localhost", false, None, None, 0, ""));
+        let ptr = session.raw();
+        let live = unsafe { stub_live_sessions(&abi) };
+        let frees = unsafe { stub_free_calls(&abi) };
+        session.disable(-1).expect("close_notify");
+        assert!(unsafe { stub_disable_calls(&abi, ptr) } >= 1);
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, frees);
+        drop(session);
+        assert_eq!(unsafe { stub_live_sessions(&abi) }, live - 1);
+        assert_eq!(unsafe { stub_free_calls(&abi) }, frees + 1);
     }
 }
