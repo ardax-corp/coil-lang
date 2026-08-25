@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use super::func::IlFunc;
-use super::op::{EntryKind, IlOp, Label};
+use super::op::{IlOp, Label};
 use super::opt::{self, OptimizeOptions};
 
 /// One function's owned IL ops (labels inclusive at span edges).
