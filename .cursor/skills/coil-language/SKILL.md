@@ -43,7 +43,7 @@ Every runnable program needs `fn main()` **unless** the file only has `test("…
 
 Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude::test`, `prelude::math`) — injected by the compiler, not written in source.
 
-Explicit `use` for: `io`, `string`, `ffi`, `thread`, `time`, `env`, `crypto`, `gc`. Regex: [coil-regex](https://github.com/ardax-corp/coil-regex) userland package.
+Explicit `use` for: `io`, `string`, `ffi`, `thread`, `time`, `env`, `crypto`, `gc`. Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls).
 
 ```coil
 use io::{stdout};

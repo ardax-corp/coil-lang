@@ -77,25 +77,22 @@ See `examples/io_text.hy`.
 | `io::sync::{write_all,read_exact,read_to_end}` | [coil-stdlib](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md) | Blocking adapters over L0 + `await_*` |
 | `io::net::tcp::{connect,listen,accept,…}` | TCP | `connect` / `connect_timeout` / `listen` / `accept`, plus address / shutdown helpers |
 | `io::net::udp::{bind,send_to,recv_from,…}` | UDP | Datagram sockets; see below |
-| `io::net::tls::{alpn_protocol}` | TLS ALPN | Negotiated protocol after handshake (feature `tls`) |
-| `io::net::tls::client::{enable,disable}` | TLS client | `enable` / `disable` (feature `tls`) |
-| `io::net::tls::server::{enable,disable}` | TLS server | `enable` / `disable` (feature `tls`) |
 
 For stdout text, call `write_all(stdout(), to_bytes(...))`. Blocking adapters
 and `io::file` are documented in
 [coil-stdlib IO](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/io.md).
 
-TCP, UDP, and TLS live in nested virtual modules — import them explicitly
+TCP and UDP live in nested virtual modules — import them explicitly
 (like `ffi::types`):
 
 ```coil
 use io::{stdout};
 use io::net::tcp::{connect};
 use io::net::udp::{bind, local_port, send_to};
-use io::net::tls::{alpn_protocol};
-use io::net::tls::client::{enable, disable};
-use io::net::tls::server::{enable, disable};
 ```
+
+TLS is the [coil-tls](https://github.com/ardax-corp/coil-tls) package, not a
+virtual module. See [tls](../../references/tls.md) and `examples/io_tls.hy`.
 
 ---
 
@@ -148,59 +145,8 @@ See `examples/io_udp.hy`.
 | `set_nodelay(s, enabled)` | `→ Result<(), IoError>` | Toggle `TCP_NODELAY` on TCP/TLS streams |
 | `shutdown(s, how)` | `→ Result<(), IoError>` | Half-close: `0` read, `1` write, `2` both |
 
----
-
-## TLS (`io::net::tls::{client,server}`)
-
-TLS via rustls (Cargo feature `tls`, default-on). Upgrade a connected TCP
-`Stream` in place (opportunistic); afterwards use the normal `Stream` APIs
-(`write_all` / `read` / `read_exact` / `read_to_end` / `close`).
-Client and server share the names `enable` / `disable` under separate modules.
-
-| Module | Function | Behavior |
-|--------|----------|----------|
-| `tls` | `alpn_protocol(s)` | Selected ALPN or `""`; `InvalidInput` if not TLS |
-| `tls::client` | `enable(s, host, opts)` | TCP→TLS; `opts.verify`, `ca_pem`, `ca_path`, `timeout_ms` **required** |
-| `tls::client` | `disable(s)` | Tear TLS down; plaintext on same fd |
-| `tls::server` | `enable(s, opts)` | TCP→TLS; `opts.cert_pem`, `key_pem`, `timeout_ms`, `client_ca_pem` **required** |
-| `tls::server` | `disable(s)` | Same teardown as client `disable` |
-
-```coil
-use io::net::tcp::{connect};
-use io::net::tls::client::{enable, disable};
-
-let s = connect("example.com", 443)?;
-let s = enable(s, "example.com", { verify: true, ca_pem: Option::None, ca_path: Option::None, timeout_ms: 0 })?;
-let s = disable(s)?;
-```
-
-```coil
-use io::net::tcp::{accept_wait};
-use io::net::tls::server::{enable, disable};
-
-let s = accept_wait(listener)?;
-let s = enable(s, { cert_pem: cert, key_pem: key, timeout_ms: 0, client_ca_pem: "" })?;
-let s = disable(s)?;
-```
-
-`{ verify: false, ca_pem: Option::None, ca_path: Option::None, timeout_ms: 0 }` skips cert **trust** only
-(signatures still checked) — local/dev; never use in production. When
-`verify` is true, trust always includes webpki roots; `ca_pem` /
-`ca_path` as `Option::Some(...)` **append** extra PEM anchors (from a
-string or file path). `Option::None` means no extras. Server
-`client_ca_pem: ""` means no mTLS; non-empty PEM enables client certificate
-auth. Empty `{}` / unknown keys are rejected, and `timeout_ms <= 0` means no
-handshake deadline.
-Handshake / TLS failures map to `IoError::Certificate`, `IoError::Handshake`,
-or `IoError::TimedOut`. Prefer a DNS `host` for client SNI. Failed handshakes
-restore non-blocking on the TCP fd.
-`client::disable` and `server::disable` share the same teardown (either name
-works on a TLS stream). `disable` discards unread TLS plaintext. Prefer
-explicit `close(s)` for a clean shutdown; GC drop still sends a best-effort
-TLS `close_notify`.
-
-
-See `examples/io_tls.hy`.
+TLS wrap of a TCP stream is [coil-tls](https://github.com/ardax-corp/coil-tls)
+(`use tls::{client, server}`), not a virtual module. See [tls](../../references/tls.md).
 
 ---
 
