@@ -108,11 +108,11 @@ impl IlModule {
     /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
     pub fn to_flat(&self) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
         let mut out = Vec::new();
-        // New ids must sit above every old Label/Jump/Entry id in the module.
-        // Starting at prologue-max+1 lets body labels 0..n occupy the same
-        // numbers as still-unpatched CALL targets and skip the remap.
+        // New ids must not overlap old Label/Jump/Entry ids still sitting on
+        // cross-function CALL sites until the post-concat patch.
         let mut next_label = self.max_code_label().saturating_add(1);
         let mut prior_labels = HashMap::new();
+        let mut entry_labels = HashMap::new();
         let mut func_label_maps = Vec::new();
         let mut segment_ranges: Vec<(usize, usize)> = Vec::new();
         if !self.prologue.is_empty() {
@@ -127,6 +127,11 @@ impl IlModule {
                 chunk.extend(g.iter().cloned());
             }
             let (chunk, map) = opt::remap_label_space(&chunk, &mut next_label, &prior_labels);
+            if let Some(Label(old_entry)) = body.meta.entry
+                && let Some(&new_entry) = map.get(&old_entry)
+            {
+                entry_labels.insert(old_entry, new_entry);
+            }
             func_label_maps.push(map.clone());
             merge_remap_labels(&mut prior_labels, map);
             out.extend(chunk);
@@ -142,18 +147,19 @@ impl IlModule {
         for (idx, (start, end)) in segment_ranges.iter().copied().enumerate() {
             let is_prologue = idx == 0 && !self.prologue.is_empty();
             if is_prologue {
-                remap_cross_function_targets(&mut out[start..end], &prior_labels);
+                remap_cross_function_entry_call_targets(&mut out[start..end], &entry_labels);
+                remap_cross_function_jump_targets(
+                    &mut out[start..end],
+                    &prior_labels,
+                    &flat_label_ids,
+                );
             } else {
                 remap_cross_function_jump_targets(
                     &mut out[start..end],
                     &prior_labels,
                     &flat_label_ids,
                 );
-                remap_cross_function_entry_call_targets(
-                    &mut out[start..end],
-                    &prior_labels,
-                    &flat_label_ids,
-                );
+                remap_cross_function_entry_call_targets(&mut out[start..end], &entry_labels);
             }
         }
         (out, prior_labels, func_label_maps)
@@ -254,17 +260,7 @@ fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
 }
 
 /// Patch cross-function `Jump`/`Entry` targets; keep intra-segment labels local.
-fn remap_cross_function_targets(ops: &mut [IlOp], prior: &HashMap<u32, u32>) {
-    let flat_label_ids: std::collections::HashSet<u32> = prior.values().copied().collect();
-    remap_cross_function_entry_call_targets(ops, prior, &flat_label_ids);
-    remap_cross_function_jump_targets(ops, prior, &flat_label_ids);
-}
-
-fn remap_cross_function_entry_call_targets(
-    ops: &mut [IlOp],
-    prior: &HashMap<u32, u32>,
-    flat_label_ids: &std::collections::HashSet<u32>,
-) {
+fn remap_cross_function_entry_call_targets(ops: &mut [IlOp], entry_labels: &HashMap<u32, u32>) {
     use std::collections::HashSet;
 
     let local: HashSet<u32> = ops
@@ -275,12 +271,13 @@ fn remap_cross_function_entry_call_targets(
         })
         .collect();
     for op in ops.iter_mut() {
-        // Prologue finalizer registry uses CodePtr; CALL is the common case.
+        // Function entries only — a full old→new map collides when two bodies
+        // reuse label 0..n (ArrayPin preheaders vs a later callee entry).
         if let IlOp::Entry { target, .. } = op {
-            if flat_label_ids.contains(&target.0) {
+            if local.contains(&target.0) {
                 continue;
             }
-            if let Some(&new_id) = prior.get(&target.0) {
+            if let Some(&new_id) = entry_labels.get(&target.0) {
                 if new_id != target.0 && !local.contains(&new_id) {
                     target.0 = new_id;
                 }
@@ -469,24 +466,26 @@ mod tests {
         );
     }
 
-    /// ArrayPin preheaders mint extra labels in the callee. Those new ids used
-    /// to overlap the caller's still-old Entry target, and `flat_label_ids`
-    /// then skipped the patch (variadic `sum` + `greet`).
+    /// A later callee's emit-time entry id can equal an earlier function's
+    /// loop/preheader label. CALL must follow `IlFunc.entry`, not first-wins
+    /// old→new (variadic `sum` + `greet`).
     #[test]
     fn to_flat_remaps_entry_when_callee_label_count_overlaps_old_target() {
         let loc = loc();
         let callee_entry = Label(2);
         let mut m = IlModule::default();
         m.funcs.push(IlFuncBody {
-            meta: IlFunc::new("callee", Some(callee_entry), 0, 6),
+            meta: IlFunc::new("decoy", Some(Label(0)), 0, 4),
             ops: vec![
                 IlOp::Label(Label(0)),
                 IlOp::Label(Label(1)),
                 IlOp::Label(callee_entry),
-                IlOp::Label(Label(3)),
-                IlOp::Label(Label(4)),
                 IlOp::Return { loc },
             ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("callee", Some(callee_entry), 0, 2),
+            ops: vec![IlOp::Label(callee_entry), IlOp::Return { loc }],
         });
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("caller", None, 0, 2),
@@ -507,8 +506,8 @@ mod tests {
                 IlOp::Label(Label(id)) => Some(*id),
                 _ => None,
             })
-            .nth(2)
-            .expect("callee entry is the third label");
+            .nth(3)
+            .expect("callee entry is the fourth label (after decoy's three)");
         let entry_target = flat
             .iter()
             .find_map(|op| match op {
@@ -518,7 +517,7 @@ mod tests {
             .expect("caller Entry");
         assert_eq!(
             entry_target, callee_label,
-            "CALL target {entry_target} must follow remapped entry {callee_label}, not a reused id"
+            "CALL target {entry_target} must be the callee entry {callee_label}, not the decoy's reused id"
         );
     }
 

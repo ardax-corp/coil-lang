@@ -50,8 +50,9 @@ fn remap_label_target(id: u32, local: &HashMap<u32, u32>, prior: &HashMap<u32, u
 
 /// Remap labels in `ops` into a fresh id space starting at `*next_label`.
 ///
-/// Jump/Entry targets that refer to labels bound in earlier concatenated chunks
-/// are resolved via `prior_labels` (cross-function `Entry{Call}` sites).
+/// Jump targets that refer to labels bound in earlier concatenated chunks
+/// are resolved via `prior_labels`. Cross-function `Entry` (CALL/CodePtr)
+/// is patched separately from each function's recorded entry label.
 pub(crate) fn remap_label_space(
     ops: &[IlOp],
     next_label: &mut u32,
@@ -90,7 +91,10 @@ pub(crate) fn remap_label_space(
             } => IlOp::Entry {
                 kind: *kind,
                 arity: *arity,
-                target: Label(remap_label_target(target.0, &map, prior_labels)),
+                // Local recursive calls only. Cross-function CALL/CodePtr
+                // targets are patched from function entry labels after concat
+                // (`prior` collides when two bodies reuse 0..n).
+                target: Label(map.get(&target.0).copied().unwrap_or(target.0)),
                 loc: *loc,
             },
             other => other.clone(),
