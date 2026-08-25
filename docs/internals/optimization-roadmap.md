@@ -210,9 +210,11 @@ What is still open (full refusal table in
 - **Impure calls in counted loops.** Host natives, FFI, `FORMAT`, field get/set,
   `CallIndirect`, `ArrayPush` / `MakeArray`, and any callee purity cannot prove
   still refuse the region. `LEQ` / `GEQ` headers are still not proofs.
-- **ArrayPtr / pinned-handle layout** ([COI-198](https://linear.app/ardax/issue/COI-198)).
-  `#192` already pins proven loops (`IndexPin*`). That ticket is the VM identity /
-  GC write-up, not this IL proof.
+- **ArrayPtr / pinned-handle layout** — **deferred.** `#192` already pins proven
+  loops (`IndexPin*`, archive minor 13). Pins *are* that handle; do not add a
+  second opcode. Close [COI-198](https://linear.app/ardax/issue/COI-198) after
+  [array-pin.md](array-pin.md). Unpinned `Index` hashing is leftover cost, not a
+  new product.
 
 ### 3. Allocation and GC fast paths
 

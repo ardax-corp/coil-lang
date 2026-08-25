@@ -19,7 +19,7 @@ User code does not name these directly; the compiler emits them:
 | `BinSlotSlotConstJmpf` | `BinSlotSlot` float-arith + pool `CONST` + float `CmpJmpf` in one dispatch (e.g. mandelbrot `|z|² > 4`) |
 | `CmpJmpt` / `BinSlotImmJmpt` / `LogNotJmpt` / `BinSlotSlotJmpt` / `BinSlotSlotConstJmpt` | Jump-if-true twins of the `*Jmpf` family (same packing; fused invert of `*Jmpf; JMP`) |
 | `IndexUnchecked` / `StoreIndexUnchecked` | Bounds-proofed array access from `il::bounds` counted-loop analysis |
-| `ArrayPin` / `IndexPin*` / `StoreIndexPin*` | Pinned array indexing: `ArrayPin` caches the array in the frame pin table; `IndexPin*` / `StoreIndexPin*` skip per-site `find_object_by_addr` |
+| `ArrayPin` / `IndexPin*` / `StoreIndexPin*` | Pinned array indexing: `ArrayPin` caches the array in the frame pin table; `IndexPin*` / `StoreIndexPin*` skip per-site `find_object_by_addr`. Layout: [array-pin.md](array-pin.md) |
 | `NEGF` | Float unary negate (IEEE sign-bit flip); replaces `CONST -1; MULF` |
 | `InitTyped` | Allocate a class instance stamped with a compile-time type id (operand); `INIT` remains for untyped bags / old archives |
 
@@ -28,4 +28,5 @@ User code does not name these directly; the compiler emits them:
 ## Related
 
 - [pipeline](pipeline.md)
+- [array-pin.md](array-pin.md)
 - [debug-info](debug-info.md)

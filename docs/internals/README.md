@@ -6,6 +6,7 @@ How coil is structured for contributors and embedders. End-user language docs li
 |----------|----------|
 | [Pipeline](pipeline.md) | Parse → typecheck → codegen → archive → execute |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
+| [Array pins](array-pin.md) | Shipped `ArrayPin` / `IndexPin*` handle; COI-198 deferred |
 | [SIMD](simd.md) | `coil-simd` — stable `std::arch` kernels for packed LA |
 | [Auto-par](auto-par.md) | Purity analysis + capped fork-join for recursive binops |
 | [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal |
