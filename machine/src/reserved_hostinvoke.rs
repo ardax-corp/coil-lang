@@ -70,41 +70,6 @@ pub const RESERVED_CRYPTO_HOSTINVOKE: &[(&str, usize)] = &[
     ("crypto_ct_eq", 2),
 ];
 
-/// Default-feature (`crypto` + `time` + `tls`) HostInvoke ids.
-///
-/// Inserting a native *before* a reserved slot must update this snapshot.
-#[cfg(all(feature = "crypto", feature = "time", feature = "tls"))]
-const RESERVED_HOSTINVOKE_ID_SNAPSHOT: &[(&str, usize)] = &[
-    ("tls_client_enable", 25),
-    ("tls_client_disable", 26),
-    ("tls_server_enable", 27),
-    ("tls_server_disable", 28),
-    ("crypto_sha256", 69),
-    ("crypto_sha512", 70),
-    ("crypto_blake3", 71),
-    ("crypto_hasher_init", 72),
-    ("crypto_hasher_update", 73),
-    ("crypto_hasher_finalize", 74),
-    ("crypto_hmac_sha256", 75),
-    ("crypto_hmac_sha512", 76),
-    ("crypto_hmac_verify_sha256", 77),
-    ("crypto_random_bytes", 78),
-    ("crypto_random_u64", 79),
-    ("crypto_chacha20_poly1305_encrypt", 80),
-    ("crypto_chacha20_poly1305_decrypt", 81),
-    ("crypto_aes_256_gcm_encrypt", 82),
-    ("crypto_aes_256_gcm_decrypt", 83),
-    ("crypto_ed25519_generate", 84),
-    ("crypto_ed25519_sign", 85),
-    ("crypto_ed25519_verify", 86),
-    ("crypto_x25519_generate", 87),
-    ("crypto_x25519_shared_secret", 88),
-    ("crypto_argon2id_hash", 89),
-    ("crypto_argon2id_verify", 90),
-    ("crypto_ct_eq", 91),
-    ("tls_alpn_protocol", 121),
-];
-
 /// Fail-closed body after coil-tls / coil-crypto extract the live native.
 pub fn reserved_slot_panic(name: &'static str) -> ! {
     panic!("reserved HostInvoke `{name}`: this native moved to coil-tls / coil-crypto; recompile");
@@ -244,6 +209,40 @@ mod tests {
             .collect();
         assert_eq!(wiring, RESERVED_CRYPTO_HOSTINVOKE);
     }
+
+    #[cfg(all(feature = "crypto", feature = "time", feature = "tls"))]
+    /// Default-feature HostInvoke ids. Inserting a native *before* a reserved
+    /// slot must update this snapshot.
+    const RESERVED_HOSTINVOKE_ID_SNAPSHOT: &[(&str, usize)] = &[
+        ("tls_client_enable", 25),
+        ("tls_client_disable", 26),
+        ("tls_server_enable", 27),
+        ("tls_server_disable", 28),
+        ("crypto_sha256", 69),
+        ("crypto_sha512", 70),
+        ("crypto_blake3", 71),
+        ("crypto_hasher_init", 72),
+        ("crypto_hasher_update", 73),
+        ("crypto_hasher_finalize", 74),
+        ("crypto_hmac_sha256", 75),
+        ("crypto_hmac_sha512", 76),
+        ("crypto_hmac_verify_sha256", 77),
+        ("crypto_random_bytes", 78),
+        ("crypto_random_u64", 79),
+        ("crypto_chacha20_poly1305_encrypt", 80),
+        ("crypto_chacha20_poly1305_decrypt", 81),
+        ("crypto_aes_256_gcm_encrypt", 82),
+        ("crypto_aes_256_gcm_decrypt", 83),
+        ("crypto_ed25519_generate", 84),
+        ("crypto_ed25519_sign", 85),
+        ("crypto_ed25519_verify", 86),
+        ("crypto_x25519_generate", 87),
+        ("crypto_x25519_shared_secret", 88),
+        ("crypto_argon2id_hash", 89),
+        ("crypto_argon2id_verify", 90),
+        ("crypto_ct_eq", 91),
+        ("tls_alpn_protocol", 121),
+    ];
 
     #[cfg(all(feature = "crypto", feature = "time", feature = "tls"))]
     #[test]
