@@ -81,9 +81,12 @@ worker still runs the peer while the waiter polls.
 After enable, `StreamKind::Tls` IO (`stream_read` / `stream_write` / close)
 uses in-tree rustls while the `tls` feature is on, or dloaded `coil_tls_*`
 when the stream holds a native session pointer (`dload("tls")` /
-`[ffi] search_paths`). WouldBlock from the `.so` is the same tagged
-`IoError` and parks on the VM reactor; do not handshake on a blocking `.so`
-thread.
+`[ffi] search_paths`). WouldBlock from enable still returns that session:
+attach (`kind = Tls`), park, then continue on read/write — do not free it
+and do not call enable again. WouldBlock from later `.so` IO is the same
+tagged `IoError` and parks on the VM reactor; do not handshake on a blocking
+`.so` thread. `coil_tls_disable` is close_notify; `coil_tls_free` drops the
+session.
 
 ## Env / knobs
 
