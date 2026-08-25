@@ -776,8 +776,6 @@ impl Checker {
 
     /// Scheme for a virtual `io` host native (inserted on `use io::{…}`).
     pub fn io_fn_scheme(kind: IoBuiltin) -> Scheme {
-        #[cfg(feature = "tls")]
-        use crate::typechecking::ty::record;
         use crate::typechecking::ty::{boolean, byte, stream_ty, tuple};
         let stream = stream_ty();
         let bytes = vec_app_ty(byte());
@@ -816,35 +814,6 @@ impl Checker {
             IoBuiltin::TcpPeerAddr | IoBuiltin::TcpLocalAddr => fun(&[stream], res_addr),
             IoBuiltin::TcpSetNodelay => fun(&[stream, boolean()], res_unit),
             IoBuiltin::TcpShutdown => fun(&[stream, int()], res_unit),
-            #[cfg(feature = "tls")]
-            IoBuiltin::TlsClientEnable => {
-                let opt_string = option_app_ty(string());
-                let opts = record(vec![
-                    ("verify".into(), boolean()),
-                    ("ca_pem".into(), opt_string.clone()),
-                    ("ca_path".into(), opt_string),
-                    ("timeout_ms".into(), int()),
-                    ("alpn".into(), string()),
-                ]);
-                fun(&[stream, string(), opts], res_stream)
-            }
-            #[cfg(feature = "tls")]
-            IoBuiltin::TlsClientDisable => fun(&[stream], res_stream),
-            #[cfg(feature = "tls")]
-            IoBuiltin::TlsServerEnable => {
-                let opts = record(vec![
-                    ("cert_pem".into(), string()),
-                    ("key_pem".into(), string()),
-                    ("timeout_ms".into(), int()),
-                    ("client_ca_pem".into(), string()),
-                    ("alpn".into(), string()),
-                ]);
-                fun(&[stream, opts], res_stream)
-            }
-            #[cfg(feature = "tls")]
-            IoBuiltin::TlsServerDisable => fun(&[stream], res_stream),
-            #[cfg(feature = "tls")]
-            IoBuiltin::TlsAlpnProtocol => fun(&[stream], res_string),
             IoBuiltin::UdpBind | IoBuiltin::UdpConnect => fun(&[string(), int()], res_stream),
             IoBuiltin::UdpSendTo => fun(&[stream, bytes, string(), int()], res_int),
             IoBuiltin::UdpRecvFrom => {
