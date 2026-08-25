@@ -266,12 +266,8 @@ fn remap_cross_function_entry_call_targets(
         })
         .collect();
     for op in ops.iter_mut() {
-        if let IlOp::Entry {
-            kind: EntryKind::Call,
-            target,
-            ..
-        } = op
-        {
+        // Prologue finalizer registry uses CodePtr; CALL is the common case.
+        if let IlOp::Entry { target, .. } = op {
             if flat_label_ids.contains(&target.0) {
                 continue;
             }
@@ -461,6 +457,53 @@ mod tests {
         assert_eq!(
             entry_target, callee_label,
             "cross-function Entry must use the remapped callee entry label"
+        );
+    }
+
+    #[test]
+    fn to_flat_remaps_prologue_codeptr_entry_targets() {
+        let loc = loc();
+        let drop_entry = Label(0);
+        let mut m = IlModule::default();
+        m.prologue = vec![
+            IlOp::Entry {
+                kind: EntryKind::CodePtr,
+                arity: 0,
+                target: drop_entry,
+                loc,
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(99),
+                loc,
+            },
+        ];
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("drop", Some(drop_entry), 0, 2),
+            ops: vec![IlOp::Label(drop_entry), IlOp::Return { loc }],
+        });
+        let (flat, _, _) = m.to_flat();
+        let drop_label = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Label(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .expect("drop entry label");
+        let codeptr_target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry {
+                    kind: EntryKind::CodePtr,
+                    target,
+                    ..
+                } => Some(target.0),
+                _ => None,
+            })
+            .expect("prologue CodePtr");
+        assert_eq!(
+            codeptr_target, drop_label,
+            "prologue CodePtr must use the remapped drop entry label"
         );
     }
 

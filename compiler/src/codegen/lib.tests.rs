@@ -6855,10 +6855,14 @@ fn main() {
                 .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
             "expected registry HostInvoke in prologue"
         );
-        assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::CodePtr)),
-            "expected CodePtr for drop entry"
+        let drop_ptr = bc
+            .iter()
+            .find(|b| matches!(b.bytecode(), Instruction::CodePtr))
+            .expect("expected CodePtr for drop entry");
+        assert_ne!(
+            drop_ptr.operand_u32(),
+            0,
+            "drop CodePtr must resolve past the CALL/JMP/HALT prologue"
         );
     }
 
