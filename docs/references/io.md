@@ -61,7 +61,9 @@ non-empty PEM enables mTLS. `alpn: ""` leaves default; `"h2"` advertises HTTP/2.
 
 After handshake, `io::net::tls::alpn_protocol(s)` returns `Result<string, IoError>`:
 the selected protocol (`"h2"`, `"http/1.1"`, …) or `""` if none. Non-TLS streams
-yield `InvalidInput`.
+yield `InvalidInput`. The stream is still a TCP `Stream` (`StreamKind::Tls`);
+read/write/close dispatch through in-tree rustls or dloaded `coil_tls_*` when
+`libtls` is resolved.
 
 Buffers are **`Vec<byte>`**. Use `string::{from_bytes, to_bytes}` for text; `io::{from_bytes, to_bytes}` remain aliases. Use `write_all(stdout(), to_bytes(...))` for stdout text. HTTP is userland [coil-http](https://github.com/ardax-corp/coil-http) — install via [spool](../manual/http-client.md).
 

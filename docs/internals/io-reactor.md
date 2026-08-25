@@ -78,6 +78,13 @@ cannot nest-steal the peer `thread::spawn` job onto the same stack (that
 deadlocked both sides under `COIL_MAX_WORKER_THREADS=1` — COI-116). The pool
 worker still runs the peer while the waiter polls.
 
+After enable, `StreamKind::Tls` IO (`stream_read` / `stream_write` / close)
+uses in-tree rustls while the `tls` feature is on, or dloaded `coil_tls_*`
+when the stream holds a native session pointer (`dload("tls")` /
+`[ffi] search_paths`). WouldBlock from the `.so` is the same tagged
+`IoError` and parks on the VM reactor; do not handshake on a blocking `.so`
+thread.
+
 ## Env / knobs
 
 IO waits inherit the same `Machine` as CPU work; pool size is still
