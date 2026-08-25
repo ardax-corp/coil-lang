@@ -226,7 +226,7 @@ test("two") { assert(true)?; }
         let call_targets: Vec<u32> = main_bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .map(|b| b.call_parts().1)
+            .map(|b| b.call_parts().1 as u32)
             .collect();
         assert!(
             call_targets.contains(&(syn0 as u32)) && call_targets.contains(&(syn1 as u32)),
