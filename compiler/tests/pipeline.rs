@@ -7127,6 +7127,80 @@ fn main() {
     assert_eq!(output, "1");
 }
 
+/// Generic `enable<T>` wrapper boxes the anonymous opts record. Leftover parse
+/// must unwrap `Object::Boxed` so this is Other (no ABI) / TimedOut, not InvalidInput.
+#[test]
+fn tls_client_enable_generic_wrap_is_not_invalid_input() {
+    let output = run_example_src(
+        r#"
+use io::{stdout, write, IoError, Stream};
+use io::net::tcp::{listen, connect, local_addr};
+use io::__tls::client::{enable};
+use string::{format, to_bytes};
+
+fn wrap<T>(Stream s, string host, T opts) -> Result<Stream, IoError> {
+    return enable(s, host, opts)?;
+}
+
+fn tag(IoError e) -> string {
+    return match e {
+        IoError::WouldBlock => "WouldBlock",
+        IoError::NotFound => "NotFound",
+        IoError::PermissionDenied => "PermissionDenied",
+        IoError::AlreadyClosed => "AlreadyClosed",
+        IoError::InvalidInput => "InvalidInput",
+        IoError::Other => "Other",
+        IoError::NotADirectory => "NotADirectory",
+        IoError::AlreadyExists => "AlreadyExists",
+        IoError::TimedOut => "TimedOut",
+        IoError::Truncated => "Truncated",
+        IoError::Certificate => "Certificate",
+        IoError::Handshake => "Handshake",
+    };
+}
+
+fn run() -> string {
+    let listener = match listen("127.0.0.1", 0) {
+        Result::Ok(s) => s,
+        Result::Err(_) => { return "listen"; },
+    };
+    let addr = match local_addr(listener) {
+        Result::Ok(a) => a,
+        Result::Err(_) => { return "addr"; },
+    };
+    let (_, port) = addr;
+    let tcp = match connect("127.0.0.1", port) {
+        Result::Ok(s) => s,
+        Result::Err(_) => { return "connect"; },
+    };
+    let r = wrap(tcp, "127.0.0.1", {
+        verify: false,
+        ca_pem: Option::None,
+        ca_path: Option::None,
+        timeout_ms: 50,
+        alpn: "",
+    });
+    return match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => tag(e),
+    };
+}
+
+fn main() {
+    write(stdout(), to_bytes(format("%s", run())));
+}
+"#,
+    );
+    assert_ne!(
+        output, "InvalidInput",
+        "generic wrap must not fail leftover parse; got {output:?}"
+    );
+    assert!(
+        output == "Other" || output == "TimedOut" || output == "Handshake" || output == "ok",
+        "expected leftover enable after parse, got {output:?}"
+    );
+}
+
 /// HostInvoke wiring for leftover client `disable` on a non-TLS stream → Err.
 #[test]
 fn tls_client_disable_on_file_is_err_via_host_invoke() {
