@@ -1,7 +1,7 @@
-//! Dloaded `coil_tls_*` ABI used by [`StreamKind::Tls`](crate::memory::StreamKind).
+//! Dloaded `coil_tls_*` ABI used by leftover `io::__tls` enable.
 //!
-//! Leftover HostInvoke ([`crate::tls`]) resolves these symbols, attaches a
-//! [`NativeTlsSession`], and parks WouldBlock on
+//! Leftover HostInvoke ([`crate::tls`]) resolves these symbols, attaches via
+//! the generic [`crate::stream_attach`] vtable, and parks WouldBlock on
 //! [`crate::io::reactor_wait_fd_no_help`]. Handshake then continues on
 //! `stream_read` / `stream_write` — never call enable again, never free a
 //! WouldBlock session. `coil_tls_disable` is close_notify; `coil_tls_free`
@@ -19,6 +19,7 @@ use crate::ffi::{FfiError, resolve_library};
 use crate::io::IoErrorTag;
 use crate::io_handle::NativeHandle;
 use crate::memory::{Heap, ObjStream, StreamKind};
+use crate::stream_attach::{AttachedIo, StreamVTable};
 
 type ClientEnableFn = unsafe extern "C" fn(
     i64,
@@ -274,7 +275,29 @@ impl NativeTlsSession {
         self.ptr.map(|p| p.as_ptr() as i64).unwrap_or(0)
     }
 
+    /// Box this leftover session as a generic attached vtable (fd captured).
+    pub fn into_attached(self, fd: i64) -> AttachedIo {
+        let leftover_session = self.raw_i64();
+        let leftover_alpn = self.abi.alpn;
+        let wants = self.wants_write.get();
+        let boxed = Box::new(LeftoverBox { session: self, fd });
+        let ptr = NonNull::new(Box::into_raw(boxed) as *mut c_void).expect("leftover box");
+        AttachedIo::from_leftover(
+            ptr,
+            StreamVTable {
+                read: leftover_vt_read,
+                write: leftover_vt_write,
+                shutdown: leftover_vt_shutdown,
+                free: leftover_vt_free,
+            },
+            wants,
+            leftover_session,
+            leftover_alpn,
+        )
+    }
+
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn test_ptr(&self) -> *mut c_void {
         self.ptr.map(NonNull::as_ptr).unwrap_or(ptr::null_mut())
     }
@@ -392,12 +415,49 @@ impl Drop for NativeTlsSession {
     }
 }
 
-/// TLS session stored on [`ObjStream`]: a native `.so` pointer.
+struct LeftoverBox {
+    session: NativeTlsSession,
+    fd: i64,
+}
+
+unsafe extern "C" fn leftover_vt_read(
+    p: *mut c_void,
+    buf: *mut u8,
+    len: usize,
+    err: *mut *const c_char,
+) -> i64 {
+    let b = unsafe { &*(p as *const LeftoverBox) };
+    unsafe { (b.session.abi.read)(b.session.raw_i64(), b.fd, buf, len as i64, err) }
+}
+
+unsafe extern "C" fn leftover_vt_write(
+    p: *mut c_void,
+    buf: *const u8,
+    len: usize,
+    err: *mut *const c_char,
+) -> i64 {
+    let b = unsafe { &*(p as *const LeftoverBox) };
+    unsafe { (b.session.abi.write)(b.session.raw_i64(), b.fd, buf, len as i64, err) }
+}
+
+unsafe extern "C" fn leftover_vt_shutdown(p: *mut c_void, err: *mut *const c_char) -> i32 {
+    let b = unsafe { &*(p as *const LeftoverBox) };
+    unsafe { (b.session.abi.disable)(b.session.raw_i64(), b.fd, err) };
+    0
+}
+
+unsafe extern "C" fn leftover_vt_free(p: *mut c_void) {
+    drop(unsafe { Box::from_raw(p as *mut LeftoverBox) });
+}
+
+/// TLS session stored on leftover enable before generic attach (tests / ALPN).
+#[allow(dead_code)]
 pub enum TlsSessionSlot {
     /// Session owned by dloaded `libtls`.
     Native(NativeTlsSession),
 }
 
+#[allow(dead_code)]
 impl TlsSessionSlot {
     pub fn has_buffered_plaintext(&self) -> bool {
         match self {
@@ -431,7 +491,8 @@ impl TlsSessionSlot {
     }
 }
 
-/// Non-blocking app read for a Tls-kind stream.
+/// Non-blocking app read for a leftover native session (unused after generic attach).
+#[allow(dead_code)]
 pub fn slot_read(
     handle: &mut NativeHandle,
     slot: &mut TlsSessionSlot,
@@ -442,7 +503,8 @@ pub fn slot_read(
     }
 }
 
-/// Non-blocking app write for a Tls-kind stream.
+/// Non-blocking app write for a leftover native session (unused after generic attach).
+#[allow(dead_code)]
 pub fn slot_write(
     handle: &mut NativeHandle,
     slot: &mut TlsSessionSlot,
@@ -457,6 +519,7 @@ pub fn slot_write(
 /// Drop (`coil_tls_free`). Session stays valid between the two.
 ///
 /// Best-effort: if the fd is already gone, skip disable and only free.
+#[allow(dead_code)]
 pub fn drop_slot(handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
     if let Some(h) = handle {
         let _ = slot.disable(h.tls_abi_fd());
@@ -464,7 +527,7 @@ pub fn drop_slot(handle: Option<&mut NativeHandle>, slot: TlsSessionSlot) {
     drop(slot);
 }
 
-/// Attach a native session to a TCP stream (`kind` stays Tcp on failure).
+/// Attach a native leftover session to a TCP stream via the generic vtable.
 pub fn attach_native(
     heap: &mut Heap,
     stream: common::Value,
@@ -474,16 +537,17 @@ pub fn attach_native(
         if s.closed || s.handle.is_none() {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        if s.kind != StreamKind::Tcp || s.tls.is_some() {
+        if s.kind != StreamKind::Tcp || s.attached.is_some() {
             return Err(IoErrorTag::InvalidInput);
         }
-        s.kind = StreamKind::Tls;
-        s.tls = Some(TlsSessionSlot::Native(session));
+        let fd = s.handle.as_ref().unwrap().fd_i64();
+        s.kind = StreamKind::Attached;
+        s.attached = Some(session.into_attached(fd));
         Ok(())
     })?
 }
 
-/// Attach a [`NativeEnable`] outcome. Ready and WouldBlock both set `kind = Tls`.
+/// Attach a [`NativeEnable`] outcome. Ready and WouldBlock both set `kind = Attached`.
 /// WouldBlock returns `Err(WouldBlock)` after attach so the caller parks, then
 /// continues on read/write. Failed leaves `kind = Tcp`.
 pub fn attach_enable_outcome(
@@ -764,9 +828,11 @@ mod tests {
     }
 
     fn native_ptr(heap: &mut Heap, stream: Value) -> *mut c_void {
-        with_stream_mut(heap, stream, |s| match s.tls.as_ref() {
-            Some(TlsSessionSlot::Native(n)) => n.test_ptr(),
-            _ => ptr::null_mut(),
+        with_stream_mut(heap, stream, |s| {
+            s.attached
+                .as_ref()
+                .map(|a| a.leftover_session_ptr())
+                .unwrap_or(ptr::null_mut())
         })
         .expect("stream")
     }
@@ -800,7 +866,7 @@ mod tests {
         let disable0 = unsafe { stub_disable_calls_total(&abi) };
         stream_close(&mut heap, stream).expect("close");
         assert!(with_stream_mut(&mut heap, stream, |s| s.closed).unwrap());
-        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
+        assert!(with_stream_mut(&mut heap, stream, |s| s.attached.is_none()).unwrap());
         assert_eq!(unsafe { stub_disable_calls_total(&abi) }, disable0 + 1);
         assert_eq!(unsafe { stub_free_calls(&abi) }, free0 + 1);
         assert_eq!(unsafe { stub_live_sessions(&abi) }, live0 - 1);
@@ -863,7 +929,7 @@ mod tests {
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
             StreamKind::Tcp
         );
-        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
+        assert!(with_stream_mut(&mut heap, stream, |s| s.attached.is_none()).unwrap());
         drop(server);
     }
 
@@ -879,9 +945,9 @@ mod tests {
         let mut heap = Heap::default();
         let stream = attach_stub_stream(&mut heap, client, &abi);
         let proto = with_stream_mut(&mut heap, stream, |s| {
-            s.tls
+            s.attached
                 .as_ref()
-                .map(|t| t.alpn_protocol())
+                .map(|t| t.leftover_alpn_protocol())
                 .unwrap_or_default()
         })
         .unwrap();
@@ -961,9 +1027,9 @@ mod tests {
         assert_eq!(err, IoErrorTag::WouldBlock);
         assert_eq!(
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
-            StreamKind::Tls
+            StreamKind::Attached
         );
-        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_some()).unwrap());
+        assert!(with_stream_mut(&mut heap, stream, |s| s.attached.is_some()).unwrap());
         assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
 
         let ptr = native_ptr(&mut heap, stream);
@@ -1021,7 +1087,7 @@ mod tests {
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
             StreamKind::Tcp
         );
-        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
+        assert!(with_stream_mut(&mut heap, stream, |s| s.attached.is_none()).unwrap());
         assert_eq!(unsafe { stub_free_calls(&abi) }, free0);
         drop(server);
     }
@@ -1101,7 +1167,7 @@ mod tests {
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
             StreamKind::Tcp
         );
-        assert!(with_stream_mut(&mut heap, stream, |s| s.tls.is_none()).unwrap());
+        assert!(with_stream_mut(&mut heap, stream, |s| s.attached.is_none()).unwrap());
         drop(server);
     }
 
@@ -1129,11 +1195,11 @@ mod tests {
         assert_eq!(out, stream);
         assert_eq!(
             with_stream_mut(&mut heap, stream, |s| s.kind).unwrap(),
-            StreamKind::Tls
+            StreamKind::Attached
         );
         assert!(
             with_stream_mut(&mut heap, stream, |s| {
-                s.tls.as_ref().is_some_and(|t| t.wants_write())
+                s.attached.as_ref().is_some_and(|t| t.wants_write())
             })
             .unwrap()
         );
@@ -1181,8 +1247,11 @@ mod tests {
         let free0 = unsafe { stub_free_calls(&abi) };
         let disable0 = unsafe { stub_disable_calls(&abi, ptr) };
         with_stream_mut(&mut heap, stream, |s| {
-            let fd = s.handle.as_ref().map(|h| h.tls_abi_fd()).unwrap_or(-1);
-            s.tls.as_ref().unwrap().disable(fd).expect("close_notify");
+            s.attached
+                .as_ref()
+                .unwrap()
+                .shutdown()
+                .expect("close_notify");
         })
         .unwrap();
         assert!(unsafe { stub_disable_calls(&abi, ptr) } > disable0);

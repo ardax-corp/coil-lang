@@ -16,6 +16,7 @@ pub mod reserved_hostinvoke;
 pub mod io;
 mod io_handle;
 pub mod io_reactor;
+pub mod stream_attach;
 pub mod math_libm;
 mod memory;
 mod opcode;
@@ -39,7 +40,11 @@ pub use env::ENV_WIRING;
 pub use ffi::*;
 pub use fs::FS_WIRING;
 pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING};
-pub use host_natives::{build_standard_host_natives, wire_standard_host_natives, PGO_HIT_NATIVE};
+pub use host_natives::{
+    build_standard_host_natives, wire_standard_host_natives, PGO_HIT_NATIVE, STREAM_ATTACH_NATIVE,
+    STREAM_PARK_NATIVE,
+};
+pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use reserved_hostinvoke::{RESERVED_CRYPTO_HOSTINVOKE, RESERVED_TLS_HOSTINVOKE};
 pub use tls_native::{
     NativeEnable, NativeTlsSession, TlsNativeAbi, TlsSessionSlot, attach_enable_outcome,

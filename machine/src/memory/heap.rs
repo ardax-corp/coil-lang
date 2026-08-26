@@ -527,8 +527,8 @@ pub enum StreamKind {
     TcpListener,
     /// Datagram socket (`io::net::udp::bind` / `connect`).
     Udp,
-    /// TLS-wrapped TCP (leftover `tls_*_enable` / coil-tls `dload("tls")`).
-    Tls,
+    /// Package IO attached in place (`Stream.attach` / leftover enable shim).
+    Attached,
 }
 
 #[derive(Clone, Copy)]
@@ -1039,26 +1039,24 @@ pub struct ObjFn {
     pub captures: Vec<Value>,
 }
 
-/// Host-backed non-blocking IO stream (file / stdio / TCP / UDP / TLS).
+/// Host-backed non-blocking IO stream (file / stdio / TCP / UDP / attached).
 pub struct ObjStream {
     pub handle: Option<crate::io_handle::NativeHandle>,
     pub kind: StreamKind,
     pub closed: bool,
-    /// Soft deadline for sync read adapters / TLS handshake reads (`None` = wait forever).
+    /// Soft deadline for sync read adapters / handshake reads (`None` = wait forever).
     pub read_timeout: Option<std::time::Duration>,
-    /// Soft deadline for sync write adapters / TLS handshake writes (`None` = wait forever).
+    /// Soft deadline for sync write adapters / handshake writes (`None` = wait forever).
     pub write_timeout: Option<std::time::Duration>,
-    /// TLS session: a dloaded `coil_tls_*` opaque pointer (`libtls`).
-    pub tls: Option<crate::tls_native::TlsSessionSlot>,
+    /// Package session pointer + C vtable (`Stream.attach`).
+    pub attached: Option<crate::stream_attach::AttachedIo>,
 }
 
 impl Drop for ObjStream {
     fn drop(&mut self) {
-        if self.kind == StreamKind::Tls {
-            if let Some(slot) = self.tls.take() {
-                // close_notify if the fd is still here, then free.
-                crate::tls_native::drop_slot(self.handle.as_mut(), slot);
-            }
+        if let Some(slot) = self.attached.take() {
+            // shutdown when the fd is still here, then free.
+            slot.shutdown_then_free(self.handle.as_mut());
         }
         // NativeHandle closes on drop; clear explicitly for clarity.
         self.handle.take();

@@ -440,39 +440,43 @@ pub fn invoke_via_libffi(
     let mut struct_bufs: Vec<Vec<u8>> = Vec::new();
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(effective_types.len());
 
+    fn int_from_value(heap: &Heap, value: &Value) -> i64 {
+        crate::io::stream_fd_i64(heap, *value).unwrap_or_else(|| value.as_int())
+    }
+
     for (i, (ty, value)) in effective_types.iter().zip(args.iter()).enumerate() {
         match ty {
             FfiType::Int => {
                 slots.push(ArgSlot::I64(i64_storage.len()));
-                i64_storage.push(value.as_int());
+                i64_storage.push(int_from_value(ctx.heap(), value));
             }
             FfiType::Int8 => {
                 slots.push(ArgSlot::I8(i8_storage.len()));
-                i8_storage.push(value.as_int() as i8);
+                i8_storage.push(int_from_value(ctx.heap(), value) as i8);
             }
             FfiType::Int16 => {
                 slots.push(ArgSlot::I16(i16_storage.len()));
-                i16_storage.push(value.as_int() as i16);
+                i16_storage.push(int_from_value(ctx.heap(), value) as i16);
             }
             FfiType::Int32 => {
                 slots.push(ArgSlot::I32(i32_storage.len()));
-                i32_storage.push(value.as_int() as i32);
+                i32_storage.push(int_from_value(ctx.heap(), value) as i32);
             }
             FfiType::UInt8 => {
                 slots.push(ArgSlot::U8(u8_storage.len()));
-                u8_storage.push(value.as_int() as u8);
+                u8_storage.push(int_from_value(ctx.heap(), value) as u8);
             }
             FfiType::UInt16 => {
                 slots.push(ArgSlot::U16(u16_storage.len()));
-                u16_storage.push(value.as_int() as u16);
+                u16_storage.push(int_from_value(ctx.heap(), value) as u16);
             }
             FfiType::UInt32 => {
                 slots.push(ArgSlot::U32(u32_storage.len()));
-                u32_storage.push(value.as_int() as u32);
+                u32_storage.push(int_from_value(ctx.heap(), value) as u32);
             }
             FfiType::UInt64 => {
                 slots.push(ArgSlot::U64(u64_storage.len()));
-                u64_storage.push(value.as_int() as u64);
+                u64_storage.push(int_from_value(ctx.heap(), value) as u64);
             }
             FfiType::Float => {
                 slots.push(ArgSlot::F64(f64_storage.len()));

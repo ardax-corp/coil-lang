@@ -52,11 +52,21 @@ pub fn build_standard_host_natives(
     // Append-only after math_libm: Vec helpers.
     push_wiring(&mut out, &mut register_id, VEC_WIRING, "vec");
     push_pgo_hit(&mut out, &mut register_id);
+    // Append-only after pgo_hit. Leftover TLS (25–28, 121) and crypto slots
+    // stay reserved; do not reorder; do not bump ARCHIVE_VERSION in this PR.
+    push_stream_attach(&mut out, &mut register_id);
+    push_stream_park(&mut out, &mut register_id);
     out
 }
 
 /// Registry name for profile-counter HostInvoke (append-only after vec).
 pub const PGO_HIT_NATIVE: &str = "pgo_hit";
+
+/// In-place Stream attach (`Stream.attach`). Append-only after `pgo_hit`.
+pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
+
+/// Park this coro on the stream fd (`Stream.park`). Append-only after attach.
+pub const STREAM_PARK_NATIVE: &str = "stream_park";
 
 fn push_pgo_hit(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let sig = FfiSignature::from_parts(
@@ -71,6 +81,52 @@ fn push_pgo_hit(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&
         let packed = args.first().map(|v| v.as_int()).unwrap_or(0);
         crate::pgo::hit(packed);
         Ok(Some(Value::from(0i64)))
+    })));
+}
+
+fn push_stream_attach(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    use crate::io::as_result_value;
+    let sig = FfiSignature::from_parts(
+        STREAM_ATTACH_NATIVE.to_string(),
+        vec![FfiType::Int; 6],
+        FfiType::Int,
+    )
+    .expect("stream_attach signature");
+    let id = out.len();
+    register_id(STREAM_ATTACH_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let r = crate::stream_attach::stream_attach(
+            heap,
+            args[0],
+            args[1].as_int(),
+            args[2].as_int(),
+            args[3].as_int(),
+            args[4].as_int(),
+            args[5].as_int(),
+        );
+        Ok(Some(as_result_value(heap, r)))
+    })));
+}
+
+fn push_stream_park(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    use crate::io::as_result_unit;
+    let sig = FfiSignature::from_parts(
+        STREAM_PARK_NATIVE.to_string(),
+        vec![FfiType::Int],
+        FfiType::Int,
+    )
+    .expect("stream_park signature");
+    let id = out.len();
+    register_id(STREAM_PARK_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let r = crate::stream_attach::stream_park(heap, args[0]);
+        Ok(Some(as_result_unit(heap, r)))
     })));
 }
 

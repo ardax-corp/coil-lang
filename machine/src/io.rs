@@ -1,8 +1,9 @@
 //! Host-backed non-blocking IO streams (files, stdio, TCP).
 //!
 //! Streams are always non-blocking at the OS level. Blocking adapters are
-//! Coil userland (coil-stdlib `io/sync.hy`) over L0 + `await_*`. TLS handshake
-//! waits still use the [`crate::io_reactor::IoReactor`] internally.
+//! Coil userland (coil-stdlib `io/sync.hy`) over L0 + `await_*`. Attached
+//! package IO (leftover TLS enable, later others) parks handshake waits on
+//! [`reactor_wait_fd_no_help`].
 
 use std::cell::RefCell;
 use std::io::{self, ErrorKind, Read, Write};
@@ -271,7 +272,7 @@ pub fn alloc_stream(heap: &mut Heap, handle: NativeHandle, kind: StreamKind) -> 
             closed: false,
             read_timeout: None,
             write_timeout: None,
-            tls: None,
+            attached: None,
         },
         Object::Stream,
     );
@@ -300,11 +301,22 @@ pub fn stream_open(heap: &mut Heap, path: &str, mode: &str) -> Result<Value, IoE
     alloc_stream(heap, handle, StreamKind::File).map_err(|e| IoErrorTag::from_kind(e.kind()))
 }
 
+pub(crate) fn peel_one_boxed(heap: &Heap, v: Value) -> Value {
+    match heap.find_object_by_addr(v.raw() as u64) {
+        Some(Object::Boxed(gc)) => match &gc.as_ref().payload {
+            Member::Value(inner) => *inner,
+            Member::Object(o) => Value::from(o.addr()),
+        },
+        _ => v,
+    }
+}
+
 pub(crate) fn with_stream_mut<R>(
     heap: &mut Heap,
     stream: Value,
     f: impl FnOnce(&mut ObjStream) -> R,
 ) -> Result<R, IoErrorTag> {
+    let stream = peel_one_boxed(heap, stream);
     let addr = stream.raw() as u64;
     let Some(Object::Stream(mut gc)) = heap.find_object_by_addr(addr) else {
         return Err(IoErrorTag::InvalidInput);
@@ -317,11 +329,8 @@ pub fn stream_close(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
         if s.closed {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        if s.kind == StreamKind::Tls {
-            if let Some(slot) = s.tls.take() {
-                // close_notify while the fd is still open, then Drop frees.
-                crate::tls_native::drop_slot(s.handle.as_mut(), slot);
-            }
+        if let Some(slot) = s.attached.take() {
+            slot.shutdown_then_free(s.handle.as_mut());
         }
         s.handle.take();
         s.closed = true;
@@ -367,9 +376,8 @@ fn stream_read_into(
             return Err(IoErrorTag::AlreadyClosed);
         }
         let handle = s.handle.as_mut().unwrap();
-        if s.kind == StreamKind::Tls {
-            let tls = s.tls.as_mut().ok_or(IoErrorTag::Other)?;
-            return crate::tls_native::slot_read(handle, tls, &mut tmp);
+        if let Some(att) = s.attached.as_ref() {
+            return att.read(&mut tmp);
         }
         match handle.read(&mut tmp) {
             Ok(0) => Ok(None),
@@ -442,9 +450,8 @@ fn stream_write_bytes(heap: &mut Heap, stream: Value, bytes: &[u8]) -> Result<us
             return result;
         }
         let handle = s.handle.as_mut().unwrap();
-        if s.kind == StreamKind::Tls {
-            let tls = s.tls.as_mut().ok_or(IoErrorTag::Other)?;
-            return crate::tls_native::slot_write(handle, tls, bytes);
+        if let Some(att) = s.attached.as_ref() {
+            return att.write(bytes);
         }
         match handle.write(bytes) {
             Ok(n) => Ok(n),
@@ -580,16 +587,10 @@ pub fn stream_write_all(heap: &mut Heap, stream: Value, buf: Value) -> Result<()
 fn wait_readable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     let timeout = stream_read_timeout(heap, stream)?;
     {
-        let skip = with_stream_mut(heap, stream, |s| {
-            s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.has_buffered_plaintext())
-        })?;
-        if skip {
-            return Ok(());
-        }
-        // Pending TLS ciphertext must go out before we can expect a reply.
+        // Pending attached ciphertext must go out before we can expect a reply.
         // Prefer writable poll so sync adapters (read_to_end after write) progress.
         let wants_write = with_stream_mut(heap, stream, |s| {
-            s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.wants_write())
+            s.attached.as_ref().is_some_and(|t| t.wants_write())
         })?;
         if wants_write {
             let handle = stream_wait_handle(heap, stream)?;
@@ -604,9 +605,9 @@ fn wait_readable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
 fn wait_writable(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
     let timeout = stream_write_timeout(heap, stream)?;
     {
-        // Prefer draining pending TLS ciphertext when the socket can accept writes.
+        // Prefer draining pending attached writes when the socket can accept them.
         let wants = with_stream_mut(heap, stream, |s| {
-            s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.wants_write())
+            s.attached.as_ref().is_some_and(|t| t.wants_write())
         })?;
         if wants {
             let handle = stream_wait_handle(heap, stream)?;
@@ -640,16 +641,10 @@ fn stream_await_interest(
         Interest::Writable => stream_write_timeout(heap, stream)?,
     };
     if interest == Interest::Readable {
-        let skip = with_stream_mut(heap, stream, |s| {
-            s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.has_buffered_plaintext())
-        })?;
-        if skip {
-            return Ok(Some(as_result_unit(heap, Ok(()))));
-        }
-        // Native sessions track last WouldBlock interest; wait writable when
-        // ClientHello / ciphertext still needs to flush (wrong-read park).
+        // Attached sessions track last WouldBlock interest; wait writable when
+        // handshake / ciphertext still needs to flush (wrong-read park).
         let wants_write = with_stream_mut(heap, stream, |s| {
-            s.kind == StreamKind::Tls && s.tls.as_ref().is_some_and(|t| t.wants_write())
+            s.attached.as_ref().is_some_and(|t| t.wants_write())
         })?;
         if wants_write {
             let handle = stream_wait_handle(heap, stream)?;
@@ -875,7 +870,7 @@ fn tcp_stream_addr(
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp | StreamKind::TcpListener | StreamKind::Tls => Ok(s.kind),
+            StreamKind::Tcp | StreamKind::TcpListener | StreamKind::Attached => Ok(s.kind),
             _ => Err(IoErrorTag::InvalidInput),
         }
     })??;
@@ -929,7 +924,7 @@ pub fn tcp_set_nodelay(heap: &mut Heap, stream: Value, enabled: bool) -> Result<
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp | StreamKind::Tls => {}
+            StreamKind::Tcp | StreamKind::Attached => {}
             _ => return Err(IoErrorTag::InvalidInput),
         }
         let sock = s
@@ -956,7 +951,7 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
             return Err(IoErrorTag::AlreadyClosed);
         }
         match s.kind {
-            StreamKind::Tcp | StreamKind::Tls => {}
+            StreamKind::Tcp | StreamKind::Attached => {}
             _ => return Err(IoErrorTag::InvalidInput),
         }
         let sock = s
@@ -1166,9 +1161,19 @@ pub fn udp_recv_from_wait(heap: &mut Heap, stream: Value, buf: Value) -> Result<
 
 /// Decode a heap string `Value` into a Rust `String`.
 pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
+    let v = peel_one_boxed(heap, v);
     match heap.find_object_by_addr(v.raw() as u64) {
         Some(Object::String(gc)) => Ok(gc.as_ref().data.clone()),
         _ => Err(IoErrorTag::InvalidInput),
+    }
+}
+
+/// Marshal a Stream (or one Boxed Stream) to its fd. `None` if `v` is not a stream.
+pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
+    let v = peel_one_boxed(heap, v);
+    match heap.find_object_by_addr(v.raw() as u64) {
+        Some(Object::Stream(gc)) => gc.as_ref().handle.as_ref().map(|h| h.fd_i64()),
+        _ => None,
     }
 }
 

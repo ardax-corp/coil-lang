@@ -1,11 +1,11 @@
 //! Leftover HostInvoke for in-place TCP→TLS upgrade after rustls left coil.
 //!
 //! Bodies resolve dloaded `coil_tls_*` ([`crate::tls_native::preferred`] /
-//! FFI search paths), call enable once, [`attach_enable_outcome`], then park
-//! WouldBlock on [`reactor_wait_fd_no_help`] and pump via empty read/write
-//! until handshake completes (COI-116). Never call enable again, never free a
-//! WouldBlock session. `coil_tls_disable` is close_notify; `coil_tls_free`
-//! is Drop.
+//! FFI search paths), call enable once, [`attach_enable_outcome`] (generic
+//! [`crate::stream_attach`] path), then park WouldBlock on
+//! [`reactor_wait_fd_no_help`] and pump via empty read/write until handshake
+//! completes (COI-116). Never call enable again, never free a WouldBlock
+//! session. `coil_tls_disable` is close_notify; `coil_tls_free` is Drop.
 //!
 //! Ids reserved; do not reorder; do not bump `ARCHIVE_VERSION`.
 
@@ -14,8 +14,8 @@ use std::time::Instant;
 use common::Value;
 
 use crate::io::{
-    IoErrorTag, duration_from_timeout_ms, reactor_wait_fd_no_help, stream_wait_handle,
-    value_as_string, with_stream_mut,
+    IoErrorTag, duration_from_timeout_ms, peel_one_boxed, reactor_wait_fd_no_help,
+    stream_wait_handle, value_as_string, with_stream_mut,
 };
 use crate::io_reactor::Interest;
 use crate::memory::{Heap, Member, ObjString, Object, StreamKind};
@@ -69,6 +69,7 @@ fn value_as_option_string(heap: &Heap, v: Value) -> Result<Option<String>, IoErr
 }
 
 fn parse_tls_options(heap: &Heap, opts: Value) -> Result<ClientEnableOpts, IoErrorTag> {
+    let opts = peel_one_boxed(heap, opts);
     let addr = opts.raw() as u64;
     let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else {
         return Err(IoErrorTag::InvalidInput);
@@ -119,6 +120,7 @@ fn parse_tls_options(heap: &Heap, opts: Value) -> Result<ClientEnableOpts, IoErr
 }
 
 fn parse_server_enable_options(heap: &Heap, opts: Value) -> Result<ServerEnableOpts, IoErrorTag> {
+    let opts = peel_one_boxed(heap, opts);
     let addr = opts.raw() as u64;
     let Some(Object::Instance(gc)) = heap.find_object_by_addr(addr) else {
         return Err(IoErrorTag::InvalidInput);
@@ -166,10 +168,10 @@ fn require_tcp_stream(heap: &mut Heap, stream: Value) -> Result<i64, IoErrorTag>
         if s.closed || s.handle.is_none() {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        if s.kind != StreamKind::Tcp || s.tls.is_some() {
+        if s.kind != StreamKind::Tcp || s.attached.is_some() {
             return Err(IoErrorTag::InvalidInput);
         }
-        Ok(s.handle.as_ref().unwrap().tls_abi_fd())
+        Ok(s.handle.as_ref().unwrap().fd_i64())
     })?
 }
 
@@ -195,7 +197,7 @@ fn park_enable_would_block(
 ) -> Result<(), IoErrorTag> {
     let wait = stream_wait_handle(heap, stream)?;
     let wants_write = with_stream_mut(heap, stream, |s| {
-        s.tls.as_ref().is_some_and(|t| t.wants_write())
+        s.attached.as_ref().is_some_and(|t| t.wants_write())
     })?;
     let interest = if wants_write {
         Interest::Writable
@@ -224,9 +226,8 @@ fn pump_enable_handshake(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTa
         if s.closed || s.handle.is_none() {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        let fd = s.handle.as_ref().unwrap().tls_abi_fd();
-        let tls = s.tls.as_ref().ok_or(IoErrorTag::Other)?;
-        tls.handshake_step(fd)
+        let att = s.attached.as_ref().ok_or(IoErrorTag::Other)?;
+        att.handshake_step()
     })?
 }
 
@@ -322,12 +323,12 @@ pub fn tls_server_disable(heap: &mut Heap, stream: Value) -> Result<Value, IoErr
 /// Negotiated ALPN on a TLS stream, or `""` if none.
 pub fn tls_alpn_protocol(heap: &mut Heap, stream: Value) -> Result<Value, IoErrorTag> {
     let proto = with_stream_mut(heap, stream, |s| {
-        if s.kind != StreamKind::Tls {
+        if s.kind != StreamKind::Attached {
             return Err(IoErrorTag::InvalidInput);
         }
-        Ok(s.tls
+        Ok(s.attached
             .as_ref()
-            .map(|t| t.alpn_protocol())
+            .map(|t| t.leftover_alpn_protocol())
             .unwrap_or_default())
     })?;
     let proto = proto?;
@@ -340,14 +341,11 @@ fn tls_teardown(heap: &mut Heap, stream: Value) -> Result<Value, IoErrorTag> {
         if s.closed || s.handle.is_none() {
             return Err(IoErrorTag::AlreadyClosed);
         }
-        if s.kind != StreamKind::Tls {
+        if s.kind != StreamKind::Attached {
             return Err(IoErrorTag::InvalidInput);
         }
-        if let Some(slot) = s.tls.take() {
-            if let Some(h) = s.handle.as_ref() {
-                let _ = slot.disable(h.tls_abi_fd());
-            }
-            crate::tls_native::drop_slot(None, slot);
+        if let Some(slot) = s.attached.take() {
+            slot.shutdown_then_free(s.handle.as_mut());
         }
         s.kind = StreamKind::Tcp;
         Ok(())

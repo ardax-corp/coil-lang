@@ -264,6 +264,22 @@ mod tests {
         }
     }
 
+    #[cfg(all(feature = "crypto", feature = "time"))]
+    #[test]
+    fn stream_attach_and_park_append_after_pgo_hit() {
+        // Ids reserved; do not reorder leftover TLS/crypto; do not bump ARCHIVE_VERSION.
+        let names = registered_names();
+        let pgo = names
+            .iter()
+            .position(|n| n == crate::PGO_HIT_NATIVE)
+            .expect("pgo_hit");
+        assert_eq!(names[pgo + 1], crate::STREAM_ATTACH_NATIVE);
+        assert_eq!(names[pgo + 2], crate::STREAM_PARK_NATIVE);
+        let map = registered_ids();
+        assert_eq!(map.get("tls_client_enable").copied(), Some(25));
+        assert_eq!(map.get("tls_alpn_protocol").copied(), Some(121));
+    }
+
     #[cfg(not(feature = "crypto"))]
     #[test]
     #[should_panic(expected = "reserved HostInvoke `crypto_sha256`")]

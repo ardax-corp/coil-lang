@@ -120,7 +120,12 @@ impl NativeHandle {
         }
     }
 
-    /// Socket/fd identity passed to `coil_tls_*` (Unix fd or Windows SOCKET).
+    /// Socket/fd identity for attach / leftover enable (Unix fd or Windows SOCKET).
+    pub fn fd_i64(&self) -> i64 {
+        self.tls_abi_fd()
+    }
+
+    /// Socket/fd identity passed to leftover `coil_tls_*` (Unix fd or Windows SOCKET).
     pub fn tls_abi_fd(&self) -> i64 {
         #[cfg(unix)]
         {
