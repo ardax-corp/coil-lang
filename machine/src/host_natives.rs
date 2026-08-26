@@ -865,6 +865,14 @@ mod tests {
         assert_eq!(names[pgo + 2], STREAM_PARK_NATIVE);
         assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(pgo + 1));
         assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(pgo + 2));
+        // Default `time` table: attach=120, park=121 (old tls_alpn_protocol id
+        // reused after the hole collapse; the leftover *name* is gone).
+        #[cfg(feature = "time")]
+        {
+            assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
+            assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
+            assert_eq!(pgo, 119);
+        }
         // IO block ends at udp_local_port; leftover TLS 25–28 used to follow it.
         let udp = names
             .iter()
