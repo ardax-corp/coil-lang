@@ -12,7 +12,7 @@ appear in a length-invariant loop). Named-local class SROA stays a non-goal
 
 ## Already on main (archive minor 13)
 
-`ARCHIVE_MINOR` is 13. Minor 12 added `IndexUnchecked` / `StoreIndexUnchecked`.
+`ARCHIVE_MINOR` is 14 (leftover TLS and virtual crypto HostInvoke slots dropped). Minor 13 added `ArrayPin` / `IndexPin*` / `StoreIndexPin*`. Minor 12 added `IndexUnchecked` / `StoreIndexUnchecked`.
 Minor 13 appended, at the end of `Instruction`:
 
 | Opcode | Stack | Operand |

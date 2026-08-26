@@ -11,7 +11,7 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 
 ## User preferences
 
-- Tests: `cargo test --workspace --lib --tests --bins` (required gate; covers integration tests, skips Criterion benches). Bare optional stack: `cargo test --workspace --lib --tests --bins --no-default-features` (feature-dependent tests are `cfg`-skipped). CI still compile-gates each of `crypto`/`time` with `cargo check --workspace --lib --tests --bins --no-default-features --features <name>`. Tooling: `--features <dissect|debugger>` with full test. Leak smoke: `cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)`. Soft CPU: `./scripts/poop_baseline.sh`.
+- Tests: `cargo test --workspace --lib --tests --bins` (required gate; covers integration tests, skips Criterion benches). Bare optional stack: `cargo test --workspace --lib --tests --bins --no-default-features` (feature-dependent tests are `cfg`-skipped). CI still compile-gates each of `crypto`/`time` with `cargo check --workspace --lib --tests --bins --no-default-features --features <name>` (`crypto` is an empty leftover Cargo feature; virtual crypto is gone). Tooling: `--features <dissect|debugger>` with full test. Leak smoke: `cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)`. Soft CPU: `./scripts/poop_baseline.sh`.
 - Large tasks: scoped sub-agents on disjoint modules.
 - VM perf: alloc reduction, hot-loop tuning, bounds-check elimination, `promise!` — not benchmark-shaped opcodes unless universal.
 - Language features: draft plans; full HM; update `docs/`; minimal runnable example.

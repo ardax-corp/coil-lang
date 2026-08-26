@@ -29,16 +29,15 @@ You can build and run all non-FFI examples without libffi.
 
 Regex is a **userland** package (not a virtual module). Clone [coil-regex](https://github.com/ardax-corp/coil-regex) separately or add via spool; see [regex reference](../references/regex.md). Tests and examples live in that repo (`coil test` after `make -C native`).
 
-### Optional Cargo features (`crypto` / `time`)
+### Optional Cargo feature (`time`)
 
-The default build enables virtual `crypto` and `time`. Embedders can strip them:
+The default build enables virtual `time`. Embedders can strip it:
 
 ```toml
 machine = { path = "...", default-features = false, features = ["time"] }
-# or: features = ["crypto"]
 ```
 
-The `compiler` and root `coil` crates mirror the same feature names. With a feature disabled, the corresponding virtual module imports (e.g. `use crypto::{sha256};`, `use time::{timestamp};`) will not resolve. Use [coil-regex](https://github.com/ardax-corp/coil-regex) for `use regex::{…}` and [coil-tls](https://github.com/ardax-corp/coil-tls) for `use tls::{…}` ([tls](../references/tls.md)).
+The `compiler` and root `coil` crates mirror the same feature name. With `time` disabled, `use time::{timestamp};` will not resolve. Crypto is [coil-crypto](https://github.com/ardax-corp/coil-crypto), not a virtual module. Use [coil-regex](https://github.com/ardax-corp/coil-regex) for `use regex::{…}` and [coil-tls](https://github.com/ardax-corp/coil-tls) for `use tls::{…}` ([tls](../references/tls.md)).
 
 ## Build the project
 
