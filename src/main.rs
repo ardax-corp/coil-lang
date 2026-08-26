@@ -56,6 +56,8 @@ enum Command {
     Fmt,
     /// Re-exec `coil-lsp` (LSP transport runs over stdin/stdout).
     Lsp,
+    /// Print the toolchain version (`CARGO_PKG_VERSION`) and exit.
+    Version,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -120,13 +122,34 @@ fn print_help() {
          \x20 --log-json           Emit SARIF 2.1 diagnostics on stdout\n\
          \x20 --log-lsp            Emit LSP Diagnostic NDJSON on stdout\n\
          \x20 -h, --help           Show this help\n\
+         \x20 -V, --version        Print the toolchain version and exit\n\
          \n\
          When no file is given, `coil` / `coil compile` use `[entry].file` from coil.toml.\n\
          (default diagnostics) Pretty reports on stderr"
     );
 }
 
+fn print_version() {
+    println!("coil {}", env!("CARGO_PKG_VERSION"));
+}
+
 fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
+    // `-V` / `--version` win over every other token, including `-h` / `--help`.
+    if args.iter().skip(1).any(|a| a == "-V" || a == "--version") {
+        return Ok(CliArgs {
+            command: Command::Version,
+            log_json: false,
+            log_lsp: false,
+            include_tests: false,
+            opt_level: OptLevel::Standard,
+            opt_stats: false,
+            opt_stats_json: false,
+            pgo_instrument: false,
+            pgo_use_profile: None,
+            pgo_generate_profile: None,
+        });
+    }
+
     let mut log_json = false;
     let mut log_lsp = false;
     let mut fail_fast = false;
@@ -319,7 +342,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
             }
             s if s.starts_with('-') => {
                 return Err(
-                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --opt-stats, --opt-stats-json, --pgo-instrument, --pgo-use-profile, --pgo-generate-profile, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, or a command/file)",
+                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --opt-stats, --opt-stats-json, --pgo-instrument, --pgo-use-profile, --pgo-generate-profile, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, -V/--version, or a command/file)",
                 );
             }
             _ => positionals.push(arg.clone()),
@@ -1474,6 +1497,11 @@ fn main() {
         }
     };
 
+    if let Command::Version = cli.command {
+        print_version();
+        exit(0);
+    }
+
     let config = match ReportConfig::from_cli_flags(cli.log_json, cli.log_lsp) {
         Ok(c) => c,
         Err(msg) => {
@@ -1549,7 +1577,8 @@ fn main() {
                 | Command::Dissect { .. }
                 | Command::Debug { .. }
                 | Command::Fmt
-                | Command::Lsp => {
+                | Command::Lsp
+                | Command::Version => {
                     unreachable!()
                 }
             }
@@ -1569,6 +1598,24 @@ mod tests {
         std::iter::once("coil".to_string())
             .chain(parts.iter().map(|s| (*s).to_string()))
             .collect()
+    }
+
+    #[test]
+    fn parse_version_long_and_short() {
+        let cli = parse_args(&args(&["--version"])).unwrap();
+        assert_eq!(cli.command, Command::Version);
+        let cli = parse_args(&args(&["-V"])).unwrap();
+        assert_eq!(cli.command, Command::Version);
+    }
+
+    #[test]
+    fn parse_version_wins_over_other_args() {
+        let cli = parse_args(&args(&["compile", "a.hy", "--version"])).unwrap();
+        assert_eq!(cli.command, Command::Version);
+        let cli = parse_args(&args(&["--help", "--version"])).unwrap();
+        assert_eq!(cli.command, Command::Version);
+        let cli = parse_args(&args(&["-V", "--help"])).unwrap();
+        assert_eq!(cli.command, Command::Version);
     }
 
     #[test]
@@ -1838,7 +1885,9 @@ mod tests {
 
     #[test]
     fn parse_rejects_unrecognized_flag() {
-        assert!(parse_args(&args(&["--bogus", "a.hy"])).is_err());
+        let err = parse_args(&args(&["--bogus", "a.hy"])).unwrap_err();
+        assert!(err.contains("unrecognized flag"));
+        assert!(err.contains("--version"));
     }
 
     #[test]
