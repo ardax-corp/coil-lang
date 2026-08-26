@@ -214,7 +214,7 @@ impl WaitHandle {
         sock.wait_socket()
     }
 
-    /// Wait identity for a TCP stream (tests and TLS handshake).
+    /// Wait identity for a TCP stream (tests and package attach handshake).
     pub fn from_tcp(stream: &TcpStream) -> Self {
         Self::from_socket(stream)
     }

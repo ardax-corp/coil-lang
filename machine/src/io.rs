@@ -110,7 +110,7 @@ impl IoErrorTag {
         }
     }
 
-    /// Map a `coil_tls_*` `err_out` discriminant (`IoErrorTag` as `i32`).
+    /// Map a package-IO `err_out` discriminant (`IoErrorTag` as `i32`).
     pub fn from_abi(code: i32) -> Self {
         match code {
             0 => Self::WouldBlock,
@@ -129,7 +129,7 @@ impl IoErrorTag {
         }
     }
 
-    /// Map a `coil_tls_*` `err_out` name (`tls.h`: NUL-terminated tag, NULL = ok).
+    /// Map a package-IO `err_out` name (`tls.h` tag names: NUL-terminated, NULL = ok).
     pub fn from_abi_name(name: &str) -> Self {
         match name {
             "WouldBlock" => Self::WouldBlock,
@@ -240,7 +240,7 @@ pub fn reactor_wait_fd(
     crate::thread::host_io_wait(handle, interest, timeout)
 }
 
-/// Wait for handle readiness without CPU help-steal (TLS handshake; see COI-116).
+/// Wait for handle readiness without CPU help-steal (package attach handshake; COI-116).
 pub fn reactor_wait_fd_no_help(
     handle: WaitHandle,
     interest: Interest,

@@ -1,6 +1,6 @@
 //! IO readiness reactor — sibling of the CPU work-stealing [`crate::reactor::Reactor`].
 //!
-//! `await_*` and TLS handshake waits block here via a single-handle wait
+//! `await_*` and package attach handshake waits block here via a single-handle wait
 //! (`poll` on Unix, `WSAPoll` / `WaitForSingleObject` on Windows). Userland
 //! sync adapters reach the same path through `await_readable` / `await_writable`.
 //! Async waiters register interest and are woken when [`IoReactor::poll_once`]
@@ -78,7 +78,7 @@ impl IoReactor {
 
     /// Block until `handle` is ready for `interest`, or `timeout` elapses.
     ///
-    /// Used by sync adapters and TLS handshake. Prefer
+    /// Used by sync adapters and package attach handshake (COI-116). Prefer
     /// [`Self::wait_fd_helping`] when a CPU reactor is available so fork-join
     /// work can progress during the wait.
     pub fn wait_fd(
