@@ -36,7 +36,7 @@ The parser accepts a minimal TOML-like subset:
 - Key-value lines: `key = value`
 - String values: double-quoted (`"./src"`)
 - Array values: `["a", "b"]`
-- Inline tables: `{ git = "…", version = "^0.2" }` (used under `[dependencies]`)
+- Inline tables: `{ git = "…" }` (used under `[dependencies]`; optional `version` / `rev`)
 - Comments: `#` to end of line
 - Blank lines are ignored
 
@@ -50,7 +50,7 @@ Unknown sections or keys are parse errors.
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
-| `roots` | array of strings | No (defaults to `["src"]`) | Directories searched for module files, relative to the project root. For coil-stdlib, see [consume](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/consume.md) (`../coil-stdlib/src`, `./.deps/coil-stdlib/src`, or `.spool/deps/stdlib` after `spool add`). |
+| `roots` | array of strings | No (defaults to `["src"]`) | Directories searched for module files, relative to the project root. For coil-stdlib, see [consume](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/consume.md) (`../coil-stdlib/src`, `./.deps/coil-stdlib/src`, or `.spool/deps/stdlib` when a managed root is present). |
 
 Example:
 
@@ -134,22 +134,30 @@ Declares library dependencies for **`spool`**. Each key is the short package nam
 
 | Form | Keys | Description |
 |------|------|-------------|
-| Git | `git` (string URL), `version` (semver range, e.g. `"^0.2"`) | Fetch from git; versions are semver tags (`v1.2.3` or `1.2.3`). |
+| Git | `git` (string URL). Optional `version`, optional `rev`. | `{ git = "…" }` is valid. `version` is optional schema, not a resolved tag. `rev` is stored only. The pin is `coil.lock` (`rev` + `content_hash`) until COI-219. |
 | Path | `path` (string) | Local checkout relative to the project root. |
 
-`git` and `path` must not be combined on the same entry. Unknown inline keys are parse errors. Duplicate dependency names are parse errors.
+`git` and `path` must not be combined on the same entry. `version` or `rev` without `git` is a parse error. Unknown inline keys are parse errors. Duplicate dependency names are parse errors.
 
 Example:
 
 ```toml
 [dependencies]
-http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
+http = { git = "https://github.com/coil-lang/http.git" }
 local_http = { path = "../local-http" }
 ```
 
-**Compiler role:** parse and store the schema so manifests with deps still compile. **`spool`** (when available) resolves versions, writes `coil.lock`, fetches into a shared cache, and maintains a project-local managed root (e.g. `.spool/deps/<name>` symlinks) that should appear in `[module].roots`. The compiler does **not** read `coil.lock` or auto-inject roots.
+`version` and `rev` may appear on a git entry; both are optional:
 
-Typical roots after `spool install`:
+```toml
+http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
+http = { git = "https://github.com/coil-lang/http.git", rev = "abc123" }
+http = { git = "https://github.com/coil-lang/http.git", version = "^0.2", rev = "abc123" }
+```
+
+**Compiler role:** parse and store the schema so manifests with deps still compile. Optional `version` and `rev` are stored as parsed fields only — the compiler does not resolve tags, fetch git, or write a lockfile. Until COI-219 there is no public spool CLI; `coil.lock` (`rev` + `content_hash`) remains the pin. **`spool`** is meant to resolve deps, write that lock, and maintain a project-local managed root (e.g. `.spool/deps/<name>`) that should appear in `[module].roots`. The compiler does **not** read `coil.lock` or auto-inject roots.
+
+When a managed root is on disk:
 
 ```toml
 [module]
@@ -175,7 +183,7 @@ version = "0.1.0"
 # Search roots for `use` resolution. Each path is relative to
 # the directory containing this coil.toml file. The compiler
 # searches the roots in order; the first file that exists wins.
-# Include ./.spool/deps after `spool install` for library deps.
+# Include ./.spool/deps when a managed library root is present.
 roots = ["./src", "./vendor", "../coil-stdlib/src"]
 
 # Default when no coil.toml exists: roots = ["src"]
@@ -185,7 +193,9 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # file = "./src/main.hy"
 
 # [dependencies]
+# http = { git = "https://github.com/coil-lang/http.git" }
 # http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
+# http = { git = "https://github.com/coil-lang/http.git", rev = "abc123" }
 # local_http = { path = "../local-http" }
 ```
 
