@@ -31,7 +31,7 @@ pub use dissect::{
     DissectArtifacts, FnSym, IlSnapshot, filter_symbols, format_bytecode, format_bytecode_section,
     format_il, format_symbol_index, matches_fn_pat,
 };
-pub use manifest::{DependencySpec, Manifest, ManifestError, PackageInfo};
+pub use manifest::{DependencySpec, Manifest, ManifestError, PackageInfo, Scripts};
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
 pub use reporting::{ErrorCode, Label, Message, MessageKind};
