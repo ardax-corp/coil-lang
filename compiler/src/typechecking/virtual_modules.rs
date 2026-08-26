@@ -235,6 +235,10 @@ pub enum IoBuiltin {
     TlsServerDisable,
     /// Negotiated ALPN protocol (`io::__tls::alpn_protocol`).
     TlsAlpnProtocol,
+    /// In-place attach of package IO hooks (`Stream.attach`).
+    StreamAttach,
+    /// Park this coro on the stream fd (`Stream.park`).
+    StreamPark,
 }
 
 impl IoBuiltin {
@@ -271,6 +275,8 @@ impl IoBuiltin {
             Self::TlsClientEnable | Self::TlsServerEnable => "enable",
             Self::TlsClientDisable | Self::TlsServerDisable => "disable",
             Self::TlsAlpnProtocol => "alpn_protocol",
+            Self::StreamAttach => "attach",
+            Self::StreamPark => "park",
         }
     }
 
@@ -309,6 +315,8 @@ impl IoBuiltin {
             Self::TlsServerEnable => "tls_server_enable",
             Self::TlsServerDisable => "tls_server_disable",
             Self::TlsAlpnProtocol => "tls_alpn_protocol",
+            Self::StreamAttach => "stream_attach",
+            Self::StreamPark => "stream_park",
         }
     }
 
@@ -329,6 +337,8 @@ impl IoBuiltin {
             Self::WaitReady,
             Self::FromBytes,
             Self::ToBytes,
+            Self::StreamAttach,
+            Self::StreamPark,
         ]
     }
 
@@ -418,6 +428,8 @@ impl IoBuiltin {
             Self::TlsServerEnable,
             Self::TlsServerDisable,
             Self::TlsAlpnProtocol,
+            Self::StreamAttach,
+            Self::StreamPark,
         ]
     }
 }
@@ -1370,6 +1382,8 @@ mod tests {
         assert!(exports.iter().any(|e| e.short_name() == "await_readable"));
         assert!(exports.iter().any(|e| e.short_name() == "wait_ready"));
         assert!(exports.iter().any(|e| e.short_name() == "write_from"));
+        assert!(exports.iter().any(|e| e.short_name() == "attach"));
+        assert!(exports.iter().any(|e| e.short_name() == "park"));
         assert!(!exports.iter().any(|e| e.short_name() == "write_all"));
         assert!(!exports.iter().any(|e| e.short_name() == "set_read_timeout"));
         assert!(

@@ -7069,6 +7069,40 @@ fn io_tls_leftover_client_enable_typechecks() {
     check_ok("use io::__tls::{alpn_protocol};\nfn main() {}\n");
 }
 
+/// Generic Stream.attach / Stream.park are compiler-known `io` methods.
+#[test]
+fn stream_attach_and_park_typecheck() {
+    fn check_ok(src: &str) {
+        let mut pipeline = Pipeline::new();
+        assert!(
+            pipeline.compile_src(src).is_ok(),
+            "expected typecheck Ok for {src:?}, messages={:?}",
+            pipeline.messages()
+        );
+    }
+    check_ok("use io::{attach, park};\nfn main() {}\n");
+    check_ok(
+        r#"
+use io::{stdout, attach, park};
+fn main() {
+    let s = stdout();
+    let _ = attach(s, 1, 2, 3, 4, 5);
+    let _ = s.park();
+}
+"#,
+    );
+    check_ok(
+        r#"
+use io::{stdout};
+fn main() {
+    let s = stdout();
+    let _ = s.attach(1, 2, 3, 4, 5);
+    let _ = s.park();
+}
+"#,
+    );
+}
+
 /// COI-116 leftover client+server enable across Coil threads (typecheck only;
 /// running needs libtls on [ffi] search_paths).
 #[test]

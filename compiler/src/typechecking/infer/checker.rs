@@ -162,6 +162,7 @@ impl Checker {
         checker.register_builtin_enums();
         checker.register_builtin_vec();
         checker.register_builtin_range();
+        checker.register_builtin_stream();
         checker.register_builtin_call_sigs();
         checker
     }
@@ -346,6 +347,77 @@ impl Checker {
                 .or_default()
                 .insert("to_vec".to_string(), (Visibility::Public, scheme));
         }
+    }
+
+    /// Synthetic `Stream` inherent methods (`attach` / `park`).
+    ///
+    /// Idempotent: same re-entry contract as [`Self::register_builtin_vec`].
+    fn register_builtin_stream(&mut self) {
+        use crate::typechecking::ty::{STREAM, stream_ty};
+        self.overload_sets.retain(|k, _| !k.starts_with("Stream::"));
+        self.classes
+            .entry(STREAM.to_string())
+            .or_insert_with(Vec::new);
+
+        let fun = |params: &[Ty], ret: Ty| {
+            params
+                .iter()
+                .rev()
+                .fold(ret, |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)))
+        };
+        let dummy = 0..0;
+        let stream = stream_ty();
+        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
+        let res_stream = result_app_ty(stream.clone(), io_err.clone());
+        let res_unit = result_app_ty(unit_ty(), io_err);
+
+        let attach_ty = fun(
+            &[stream.clone(), int(), int(), int(), int(), int()],
+            res_stream,
+        );
+        let park_ty = fun(&[stream], res_unit);
+        let attach_params = ["ptr", "read", "write", "shutdown", "free"];
+
+        let fqn = format!("{STREAM}::attach");
+        let scheme = Scheme::mono(attach_ty);
+        self.fn_param_names.insert(
+            fqn.clone(),
+            attach_params.iter().map(|s| (*s).to_string()).collect(),
+        );
+        self.register_overload_candidate(
+            &fqn,
+            OverloadCandidate {
+                id: 0,
+                fixed_arity: 5,
+                is_rest: false,
+                scheme: scheme.clone(),
+                param_names: attach_params.iter().map(|s| (*s).to_string()).collect(),
+            },
+            &dummy,
+        );
+        self.methods
+            .entry(STREAM.to_string())
+            .or_default()
+            .insert("attach".to_string(), (Visibility::Public, scheme));
+
+        let fqn = format!("{STREAM}::park");
+        let scheme = Scheme::mono(park_ty);
+        self.fn_param_names.insert(fqn.clone(), Vec::new());
+        self.register_overload_candidate(
+            &fqn,
+            OverloadCandidate {
+                id: 0,
+                fixed_arity: 0,
+                is_rest: false,
+                scheme: scheme.clone(),
+                param_names: Vec::new(),
+            },
+            &dummy,
+        );
+        self.methods
+            .entry(STREAM.to_string())
+            .or_default()
+            .insert("park".to_string(), (Visibility::Public, scheme));
     }
 
     /// Parameter names for builtins that support named arguments at call sites.
@@ -844,6 +916,10 @@ impl Checker {
             }
             IoBuiltin::TlsServerDisable => fun(&[stream], res_stream),
             IoBuiltin::TlsAlpnProtocol => fun(&[stream], res_string),
+            IoBuiltin::StreamAttach => {
+                fun(&[stream, int(), int(), int(), int(), int()], res_stream)
+            }
+            IoBuiltin::StreamPark => fun(&[stream], res_unit),
         };
         Scheme::mono(ty)
     }
@@ -1524,6 +1600,7 @@ impl Checker {
         // `fn_param_names` was cleared above — reinstall Vec / Range method ABI.
         self.register_builtin_vec();
         self.register_builtin_range();
+        self.register_builtin_stream();
         self.register_builtin_call_sigs();
 
         // Implicit `use prelude::*; use prelude::ops::*;` — FFI stays out.
