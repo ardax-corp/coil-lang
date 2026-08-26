@@ -119,11 +119,16 @@ fn print_help() {
          \x20 --check              With `fmt`, exit 1 if files would change (no writes)\n\
          \x20 --log-json           Emit SARIF 2.1 diagnostics on stdout\n\
          \x20 --log-lsp            Emit LSP Diagnostic NDJSON on stdout\n\
+         \x20 -V, --version        Print version and exit\n\
          \x20 -h, --help           Show this help\n\
          \n\
          When no file is given, `coil` / `coil compile` use `[entry].file` from coil.toml.\n\
          (default diagnostics) Pretty reports on stderr"
     );
+}
+
+fn print_version() {
+    println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 }
 
 fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
@@ -208,6 +213,10 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
             }
             "-h" | "--help" => {
                 print_help();
+                exit(0);
+            }
+            "-V" | "--version" => {
+                print_version();
                 exit(0);
             }
             "-o" | "--output" => {
@@ -319,7 +328,7 @@ fn parse_args(args: &[String]) -> Result<CliArgs, &'static str> {
             }
             s if s.starts_with('-') => {
                 return Err(
-                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --opt-stats, --opt-stats-json, --pgo-instrument, --pgo-use-profile, --pgo-generate-profile, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, or a command/file)",
+                    "unrecognized flag (expected --log-json, --log-lsp, --stdio, --fail-fast, --include-tests, --opt-stats, --opt-stats-json, --pgo-instrument, --pgo-use-profile, --pgo-generate-profile, --check-native, --strip-debug, --runner, --fn, --il, --ast, -x, --batch, --check, -o/--output, -O/--opt-level, -V/--version, or a command/file)",
                 );
             }
             _ => positionals.push(arg.clone()),
