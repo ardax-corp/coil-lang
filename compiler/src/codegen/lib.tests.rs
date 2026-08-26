@@ -1525,11 +1525,10 @@ fn main() {
             "expected fused n <= 2 guard (Jmpf or inverted Jmpt)"
         );
         assert!(
-            bc.iter().any(|b| {
-                *b.bytecode() == Instruction::ConstReturnImm
-                    || *b.bytecode() == Instruction::CONST
-            }),
-            "expected fused base-case ConstReturnImm (or CONST before RETURN after layout invert)"
+            bc.iter()
+                .any(|b| *b.bytecode() == Instruction::ConstReturnImm && b.operand_u32() == 1),
+            "expected fused base-case ConstReturnImm; ops={:?}",
+            bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
         );
     }
 
@@ -4262,9 +4261,10 @@ return s; \
             "folded `if 5 < 5` should not emit JMPF"
         );
         // Taken else prints 0 — must see CONST 0 (or ConstReturnImm), not only CONST 1.
-        let has_zero = bc
-            .iter()
-            .any(|b| matches!(b.bytecode(), Instruction::CONST) && b.operand_u32() as i32 == 0);
+        let has_zero = bc.iter().any(|b| {
+            matches!(b.bytecode(), Instruction::CONST | Instruction::ConstReturnImm)
+                && b.operand_u32() as i32 == 0
+        });
         assert!(
             has_zero,
             "else branch for `5 < 5` should emit CONST 0; opcodes: {:?}",
