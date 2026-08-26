@@ -2,7 +2,7 @@
 //!
 //! Streams are always non-blocking at the OS level. Blocking adapters are
 //! Coil userland (coil-stdlib `io/sync.hy`) over L0 + `await_*`. Attached
-//! package IO (leftover TLS enable, later others) parks handshake waits on
+//! package IO (`Stream.attach`) parks handshake waits on
 //! [`reactor_wait_fd_no_help`].
 
 use std::cell::RefCell;

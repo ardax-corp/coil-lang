@@ -23,9 +23,6 @@ pub type StreamWriteFn =
 pub type StreamShutdownFn = unsafe extern "C" fn(*mut c_void, *mut *const c_char) -> i32;
 pub type StreamFreeFn = unsafe extern "C" fn(*mut c_void);
 
-/// Leftover `coil_tls_alpn` shape; not part of the public attach ABI.
-pub type LeftoverAlpnFn = unsafe extern "C" fn(i64, *mut u8, i64) -> i64;
-
 /// Package session pointer plus C vtable living on the Stream object.
 pub struct StreamVTable {
     pub read: StreamReadFn,
@@ -34,13 +31,11 @@ pub struct StreamVTable {
     pub free: StreamFreeFn,
 }
 
-/// Attached native IO. Session memory lives in the package `.so` (or a leftover box).
+/// Attached native IO. Session memory lives in the package `.so`.
 pub struct AttachedIo {
     ptr: Option<NonNull<c_void>>,
     vtable: StreamVTable,
     wants_write: Cell<bool>,
-    leftover_session: i64,
-    leftover_alpn: Option<LeftoverAlpnFn>,
 }
 
 unsafe impl Send for AttachedIo {}
@@ -53,25 +48,6 @@ impl AttachedIo {
             ptr: Some(ptr),
             vtable,
             wants_write: Cell::new(false),
-            leftover_session: 0,
-            leftover_alpn: None,
-        }
-    }
-
-    /// Leftover TLS enable: same vtable path, plus ALPN dload for `io::__tls`.
-    pub fn from_leftover(
-        ptr: NonNull<c_void>,
-        vtable: StreamVTable,
-        wants_write: bool,
-        leftover_session: i64,
-        leftover_alpn: LeftoverAlpnFn,
-    ) -> Self {
-        Self {
-            ptr: Some(ptr),
-            vtable,
-            wants_write: Cell::new(wants_write),
-            leftover_session,
-            leftover_alpn: Some(leftover_alpn),
         }
     }
 
@@ -169,7 +145,6 @@ impl AttachedIo {
         if let Some(p) = self.ptr.take() {
             unsafe { (self.vtable.free)(p.as_ptr()) };
         }
-        self.leftover_session = 0;
     }
 
     /// Shutdown when `handle` still has a usable fd, then free.
@@ -178,31 +153,6 @@ impl AttachedIo {
             let _ = self.shutdown();
         }
         self.free();
-    }
-
-    /// Leftover ALPN. Empty when this attach did not come from leftover TLS.
-    pub fn leftover_alpn_protocol(&self) -> String {
-        let Some(alpn) = self.leftover_alpn else {
-            return String::new();
-        };
-        if self.leftover_session == 0 {
-            return String::new();
-        }
-        let n = unsafe { alpn(self.leftover_session, std::ptr::null_mut(), 0) };
-        if n <= 0 {
-            return String::new();
-        }
-        let mut buf = vec![0u8; n as usize];
-        let n = unsafe { alpn(self.leftover_session, buf.as_mut_ptr(), buf.len() as i64) };
-        if n <= 0 {
-            return String::new();
-        }
-        String::from_utf8_lossy(&buf[..n as usize]).into_owned()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn leftover_session_ptr(&self) -> *mut c_void {
-        self.leftover_session as *mut c_void
     }
 
     #[cfg(test)]

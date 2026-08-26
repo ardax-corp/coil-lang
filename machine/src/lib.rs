@@ -1,10 +1,6 @@
 //! Stack VM, managed heap, and FFI runtime for coil bytecode.
 
 pub mod char_ord;
-#[cfg(feature = "crypto")]
-pub mod crypto;
-#[cfg(feature = "crypto")]
-mod crypto_hasher_state;
 #[cfg(any(test, feature = "debugger"))]
 pub mod debug;
 pub mod env;
@@ -12,7 +8,6 @@ mod ffi;
 pub mod fs;
 pub mod gc_handles;
 pub mod host_natives;
-pub mod reserved_hostinvoke;
 pub mod io;
 mod io_handle;
 pub mod io_reactor;
@@ -28,12 +23,8 @@ pub mod vec_ops;
 pub mod thread;
 #[cfg(feature = "time")]
 pub mod time;
-pub mod tls;
-mod tls_native;
 mod vm;
 
-#[cfg(feature = "crypto")]
-pub use crypto::{CRYPTO_WIRING, CryptoErrorTag};
 #[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, StepMode, StopReason};
 pub use env::ENV_WIRING;
@@ -45,11 +36,6 @@ pub use host_natives::{
     STREAM_PARK_NATIVE,
 };
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
-pub use reserved_hostinvoke::{RESERVED_CRYPTO_HOSTINVOKE, RESERVED_TLS_HOSTINVOKE};
-pub use tls_native::{
-    NativeEnable, NativeTlsSession, TlsNativeAbi, TlsSessionSlot, attach_enable_outcome,
-    attach_native, note_search_paths, preferred, resolve_preferred,
-};
 pub use memory::*;
 pub use opcode::*;
 pub use packed_la::{
