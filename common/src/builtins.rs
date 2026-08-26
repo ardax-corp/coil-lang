@@ -37,19 +37,6 @@ pub const BUILTIN_IO_ERROR_VARIANTS: &[&str] = &[
     "Handshake",
 ];
 
-/// Built-in `CryptoError` enum name (virtual `crypto` module).
-pub const BUILTIN_CRYPTO_ERROR_ENUM: &str = "CryptoError";
-
-/// `CryptoError` variants in tag order.
-pub const BUILTIN_CRYPTO_ERROR_VARIANTS: &[&str] = &[
-    "InvalidInput",
-    "InvalidLength",
-    "AuthenticationFailed",
-    "UnsupportedAlgorithm",
-    "AlreadyFinalized",
-    "Other",
-];
-
 /// Built-in `ThreadError` enum name (virtual `thread` module).
 pub const BUILTIN_THREAD_ERROR_ENUM: &str = "ThreadError";
 
@@ -113,12 +100,11 @@ pub const BUILTIN_FFI_ERROR_ENUM: &str = "Error";
 pub const BUILTIN_FFI_ERROR_VARIANT: &str = "Error";
 
 /// True when `name` is a reserved built-in enum (`Option`, `Result`, `IoError`,
-/// `CryptoError`, `Error` / `ErrorKind`, or `FFIType`).
+/// `Error` / `ErrorKind`, or `FFIType`).
 pub fn is_builtin_enum(name: &str) -> bool {
     is_builtin_option_enum(name)
         || is_builtin_result_enum(name)
         || is_builtin_io_error_enum(name)
-        || is_builtin_crypto_error_enum(name)
         || is_builtin_thread_error_enum(name)
         || is_builtin_env_error_enum(name)
         || is_builtin_time_error_enum(name)
@@ -129,10 +115,6 @@ pub fn is_builtin_enum(name: &str) -> bool {
 
 pub fn is_builtin_io_error_enum(name: &str) -> bool {
     name == BUILTIN_IO_ERROR_ENUM
-}
-
-pub fn is_builtin_crypto_error_enum(name: &str) -> bool {
-    name == BUILTIN_CRYPTO_ERROR_ENUM
 }
 
 pub fn is_builtin_thread_error_enum(name: &str) -> bool {

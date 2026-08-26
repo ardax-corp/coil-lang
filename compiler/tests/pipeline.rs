@@ -6900,30 +6900,20 @@ fn example_ansi_color_prints_red() {
     );
 }
 
-/// HostInvoke + virtual `crypto` wiring: empty SHA-256 digest length is 32.
-#[cfg(feature = "crypto")]
+/// Virtual `crypto` is gone (COI-216); coil-crypto is a package.
 #[test]
-fn crypto_sha256_empty_digest_len_via_host_invoke() {
-    let output = run_example_src(
-        r#"
-use crypto::{sha256};
-use io::{stdout, write};
-use string::{format, to_bytes};
-
-fn digest_len() -> int {
-    let empty: Vec<byte> = Vec::new();
-    return match sha256(empty) {
-        Result::Ok(d) => len(d),
-        Result::Err(_) => 0,
-    };
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", digest_len())));
-}
-"#,
+fn virtual_crypto_module_does_not_resolve() {
+    let mut pipeline = Pipeline::new();
+    let err = pipeline.compile_src("use crypto::{sha256};\nfn main() {}\n");
+    assert!(err.is_err(), "expected module-not-found for virtual crypto");
+    assert!(
+        pipeline.messages().iter().any(|m| {
+            m.code() == Some(compiler::ErrorCode::IoError)
+                || m.message().contains("Module not found")
+        }),
+        "use crypto without coil-crypto must surface Module not found / E0900, got {:?}",
+        pipeline.messages()
     );
-    assert_eq!(output, "32");
 }
 
 /// HostInvoke + virtual `io::fs` wiring: `exists(".")` returns Ok.
@@ -7031,7 +7021,7 @@ fn main() {
     assert_eq!(n, expect, "match Ok len must match process argc");
 }
 
-/// Public `tls` / `io::net::tls` stay missing; leftover HostInvoke is `io::__tls`.
+/// Public `tls` / `io::net::tls` / leftover `io::__tls` stay missing.
 #[test]
 fn virtual_tls_modules_do_not_resolve() {
     fn check_missing(src: &str) {
@@ -7050,23 +7040,8 @@ fn virtual_tls_modules_do_not_resolve() {
     check_missing("use io::net::tls::client::{enable};\nfn main() {}\n");
     check_missing("use io::net::tls::{alpn_protocol};\nfn main() {}\n");
     check_missing("use tls::{client};\nfn main() {}\n");
-}
-
-/// coil-tls binds leftover enable through `io::__tls`, not a public `tls` module.
-#[test]
-fn io_tls_leftover_client_enable_typechecks() {
-    fn check_ok(src: &str) {
-        let mut pipeline = Pipeline::new();
-        assert!(
-            pipeline.compile_src(src).is_ok(),
-            "expected typecheck Ok for {src:?}, messages={:?}",
-            pipeline.messages()
-        );
-    }
-    check_ok("use io::__tls::client::enable;\nfn main() {}\n");
-    check_ok("use io::__tls::client::{enable};\nfn main() {}\n");
-    check_ok("use io::__tls::server::{enable, disable};\nfn main() {}\n");
-    check_ok("use io::__tls::{alpn_protocol};\nfn main() {}\n");
+    check_missing("use io::__tls::client::{enable};\nfn main() {}\n");
+    check_missing("use io::__tls::{alpn_protocol};\nfn main() {}\n");
 }
 
 /// Generic Stream.attach / Stream.park are compiler-known `io` methods.
@@ -7103,152 +7078,6 @@ fn main() {
     );
 }
 
-/// COI-116 leftover client+server enable across Coil threads (typecheck only;
-/// running needs libtls on [ffi] search_paths).
-#[test]
-fn example_tls_thread_loopback_typechecks() {
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-    let full = workspace_root.join("examples/tls_thread_loopback.hy");
-    let mut pipeline = Pipeline::new();
-    assert!(
-        pipeline.compile_src_from_file(full.to_str().unwrap()).is_ok(),
-        "expected typecheck Ok for {}, messages={:?}",
-        full.display(),
-        pipeline.messages()
-    );
-}
-
-/// HostInvoke + leftover `io::__tls::client`: enable on non-TCP → InvalidInput.
-#[test]
-fn tls_client_enable_non_tcp_is_err_via_host_invoke() {
-    let output = run_example_src(
-        r#"
-use io::{open, stdout, IoError, write};
-use io::__tls::client::{enable};
-use string::{format, to_bytes};
-
-fn classify(IoError e) -> int {
-    return match e {
-        IoError::WouldBlock => 10,
-        IoError::NotFound => 11,
-        IoError::PermissionDenied => 12,
-        IoError::AlreadyClosed => 13,
-        IoError::InvalidInput => 1,
-        IoError::Other => 15,
-        IoError::NotADirectory => 16,
-        IoError::AlreadyExists => 17,
-        IoError::TimedOut => 18,
-        IoError::Truncated => 19,
-        IoError::Certificate => 20,
-        IoError::Handshake => 21,
-    };
-}
-
-fn main() {
-    let path = "coil_tls_enable_kind.bin";
-    let s = open(path, "w")?;
-    let r = enable(s, "127.0.0.1", { verify: false, ca_pem: Option::None, ca_path: Option::None, timeout_ms: 0, alpn: "" });
-    let code = match r {
-        Result::Ok(_) => 0,
-        Result::Err(e) => classify(e),
-    };
-    write(stdout(), to_bytes(format("%i", code)));
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
-
-/// HostInvoke wiring for leftover client `disable` on a non-TLS stream → Err.
-#[test]
-fn tls_client_disable_on_file_is_err_via_host_invoke() {
-    let output = run_example_src(
-        r#"
-use io::{open, stdout, write};
-use io::__tls::client::{disable};
-use string::{format, to_bytes};
-
-fn disable_file_is_err() -> int {
-    let path = "coil_tls_disable_kind.bin";
-    return match open(path, "w") {
-        Result::Ok(s) => match disable(s) {
-            Result::Ok(_) => 0,
-            Result::Err(_) => 1,
-        },
-        Result::Err(_) => 9,
-    };
-}
-
-fn main() {
-    write(stdout(), to_bytes(format("%i", disable_file_is_err())));
-}
-"#,
-    );
-    assert_eq!(output, "1");
-}
-
-/// Two-arg leftover client `enable` is not a complete call (needs opts record).
-#[test]
-fn tls_client_enable_two_arg_does_not_compile() {
-    let mut pipeline = Pipeline::new();
-    let err = pipeline.compile_src(
-        r#"
-use io::{open, IoError, Stream, write};
-use io::__tls::client::{enable};
-
-fn main() {
-    let path = "coil_tls_arity.bin";
-    let s = open(path, "w")?;
-    let r: Result<Stream, IoError> = enable(s, "127.0.0.1");
-}
-"#,
-    );
-    assert!(
-        err.is_err(),
-        "2-arg enable should fail to typecheck as Result"
-    );
-}
-
-/// Third arg to leftover client `enable` must be a record with `verify: bool`.
-#[test]
-fn tls_client_enable_non_record_opts_does_not_compile() {
-    let mut pipeline = Pipeline::new();
-    let err = pipeline.compile_src(
-        r#"
-use io::{open, write};
-use io::__tls::client::{enable};
-
-fn main() {
-    let path = "coil_tls_opts.bin";
-    let s = open(path, "w")?;
-    let _ = enable(s, "127.0.0.1", 1)?;
-}
-"#,
-    );
-    assert!(err.is_err(), "non-record opts should fail to typecheck");
-}
-
-/// Empty leftover client opts `{}` omit required `verify` → type error.
-#[test]
-fn tls_client_enable_empty_opts_does_not_compile() {
-    let mut pipeline = Pipeline::new();
-    let err = pipeline.compile_src(
-        r#"
-use io::{open, write};
-use io::__tls::client::{enable};
-
-fn main() {
-    let path = "coil_tls_empty_opts.bin";
-    let s = open(path, "w")?;
-    let _ = enable(s, "127.0.0.1", {})?;
-}
-"#,
-    );
-    assert!(err.is_err(), "empty opts should fail to typecheck");
-}
-
 #[test]
 fn example_io_tls_does_not_import_virtual_tls() {
     assert_eq!(run_example("examples/io_tls.hy"), "use-coil-tls");
@@ -7256,7 +7085,7 @@ fn example_io_tls_does_not_import_virtual_tls() {
 
 /// Feature-off `use` of optional virtual modules is a compile error (E0900 /
 /// "Module not found"), not a hang. Stays ungated so `--no-default-features`
-/// still exercises it.
+/// still exercises it. Virtual crypto / leftover `io::__tls` never resolve.
 #[test]
 fn optional_virtual_modules_match_cargo_features() {
     fn check(src: &str, enabled: bool) {
@@ -7280,10 +7109,8 @@ fn optional_virtual_modules_match_cargo_features() {
         }
     }
     check("use time::{epoch};\nfn main() {}\n", cfg!(feature = "time"));
-    check(
-        "use crypto::{sha256};\nfn main() {}\n",
-        cfg!(feature = "crypto"),
-    );
+    check("use crypto::{sha256};\nfn main() {}\n", false);
+    check("use io::__tls::client::{enable};\nfn main() {}\n", false);
     check(
         "use regex::{compile};\nfn main() {}\n",
         false,
@@ -7293,6 +7120,27 @@ fn optional_virtual_modules_match_cargo_features() {
         false,
     );
     check("use tls::{client};\nfn main() {}\n", false);
+}
+
+/// Root / compiler / machine default features are `time` only (no virtual crypto).
+#[test]
+fn language_default_features_are_time_only() {
+    let root = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml"));
+    let compiler = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+    let machine = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../machine/Cargo.toml"
+    ));
+    for (label, toml) in [("root", root), ("compiler", compiler), ("machine", machine)] {
+        assert!(
+            toml.contains("default = [\"time\"]"),
+            "{label} default features must be [\"time\"] only"
+        );
+        assert!(
+            !toml.contains("default = [\"crypto\""),
+            "{label} default features must not include crypto"
+        );
+    }
 }
 
 /// `#[derive(String)]` end-to-end: synthesized `to_string` is callable.
