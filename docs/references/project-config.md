@@ -1,6 +1,6 @@
 # Project configuration (`coil.toml`)
 
-The **`coil.toml`** file at a project's root tells the compiler where to find module files and optionally which file is the entry point. It may also declare **`[package]`** / **`[dependencies]`** metadata for the **`spool`** library dependency manager (schema is parsed today; install/fetch is WIP).
+The **`coil.toml`** file at a project's root tells the compiler where to find module files and optionally which file is the entry point. It may also declare **`[package]`** / **`[dependencies]`** / **`[scripts]`** metadata for the **`spool`** library dependency manager. The compiler parses and stores this schema; spool owns fetch, link, lifecycle scripts, include-hooks, and engine-range checks.
 
 ### `spool` vs `coil package`
 
@@ -32,7 +32,7 @@ If `coil.toml` is absent, the compiler uses built-in defaults (see [Default beha
 
 The parser accepts a minimal TOML-like subset:
 
-- Section headers: `[module]`, `[entry]`, `[env]`, `[ffi]`, `[package]`, `[dependencies]`
+- Section headers: `[module]`, `[entry]`, `[env]`, `[ffi]`, `[package]`, `[dependencies]`, `[scripts]`
 - Key-value lines: `key = value`
 - String values: double-quoted (`"./src"`)
 - Array values: `["a", "b"]`
@@ -111,22 +111,49 @@ allow_exec = true   # opt-in: enable env::exec for trusted scripts
 
 ### `[package]`
 
-Optional package identity for publishing / consuming libraries via **`spool`**. When the section is present, both keys are required.
+Optional package identity for publishing / consuming libraries via **`spool`**. When the section is present, `name` and `version` are required. Other keys below are optional.
 
 | Key | Type | Required | Description |
 |-----|------|----------|-------------|
 | `name` | string | Yes (if section present) | Short package name. Consumers import this name (`use http::…`), never the git URL. |
 | `version` | string | Yes (if section present) | Semver version of this package (e.g. `"0.1.0"`). |
+| `coil` | string | No | Optional Coil engine semver range (e.g. `">=0.1.0"`). Same range language as optional git-dep `version`. Stored only — this crate does not resolve or enforce it. Omit means no engine constraint. Compare later against `coil --version`. |
+| `include` | string | No | Optional include-hook path, relative to **this package's checkout**. Runs when another project depends on this package (not when this repo is the current project). There is no `[hooks]` table — unknown sections still error. |
 
 Example:
 
 ```toml
 [package]
-name = "my_app"
+name = "http"
 version = "0.1.0"
+coil = ">=0.1.0"
+include = "./hooks/include.sh"
 ```
 
-The compiler stores these fields but does **not** use them for module discovery. **`spool`** owns dependency semantics.
+The compiler stores these fields but does **not** use them for module discovery. **`spool`** owns dependency semantics, include-hook execution, and engine-range checks.
+
+### `[scripts]`
+
+Optional lifecycle scripts for **this project** when it is the current `spool` consumer. Paths are relative to this project root. Missing keys are `None` (no-op for later runners). Extra keys are parse errors. Allowed keys are only:
+
+| Key | Type | Required | Description |
+|-----|------|----------|-------------|
+| `pre_install` | string | No | Before `spool install` fetch/link |
+| `post_install` | string | No | After a successful `spool install` link |
+| `pre_update` | string | No | Before `spool update` fetch/link |
+| `post_update` | string | No | After a successful `spool update` link |
+
+```toml
+[scripts]
+pre_install = "./scripts/pre-install.sh"
+post_install = "./scripts/post-install.sh"
+pre_update = "./scripts/pre-update.sh"
+post_update = "./scripts/post-update.sh"
+```
+
+**Current-project vs include-hooks:** `[scripts]` fire only for the current project (`spool install` / `update` / `add` that materializes this project's deps). `[package].include` is the dependency's hook and runs in the consumer when that package is linked. They do not double-fire: a dependency's `[scripts]` are ignored during a consumer install; the consumer's `include` is ignored because it is not being consumed. The compiler stores both; spool owns running them.
+
+Keep scripts out of `coil package` (executable embed).
 
 ### `[dependencies]`
 
@@ -155,7 +182,7 @@ http = { git = "https://github.com/coil-lang/http.git", rev = "abc123" }
 http = { git = "https://github.com/coil-lang/http.git", version = "^0.2", rev = "abc123" }
 ```
 
-**Compiler role:** parse and store the schema so manifests with deps still compile. Optional `version` and `rev` are stored as parsed fields only — the compiler does not resolve tags, fetch git, or write a lockfile. Until COI-219 there is no public spool CLI; `coil.lock` (`rev` + `content_hash`) remains the pin. **`spool`** is meant to resolve deps, write that lock, and maintain a project-local managed root (e.g. `.spool/deps/<name>`) that should appear in `[module].roots`. The compiler does **not** read `coil.lock` or auto-inject roots.
+**Compiler role:** parse and store the schema so manifests with deps still compile. Optional `version` and `rev` are stored as parsed fields only — the compiler does not resolve tags, fetch git, or write a lockfile. Git tag resolution is COI-219; until then `coil.lock` (`rev` + `content_hash`) remains the pin. **`spool`** (`install` / `add` / `update`) resolves deps, writes that lock, and maintains a project-local managed root (e.g. `.spool/deps/<name>`) that should appear in `[module].roots`. The compiler does **not** read `coil.lock` or auto-inject roots.
 
 When a managed root is on disk:
 
@@ -178,6 +205,8 @@ From `coil.toml.example`:
 [package]
 name = "my_app"
 version = "0.1.0"
+# coil = ">=0.1.0"
+# include = "./hooks/include.sh"
 
 [module]
 # Search roots for `use` resolution. Each path is relative to
@@ -197,6 +226,12 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
 # http = { git = "https://github.com/coil-lang/http.git", rev = "abc123" }
 # local_http = { path = "../local-http" }
+
+# [scripts]
+# pre_install = "./scripts/pre-install.sh"
+# post_install = "./scripts/post-install.sh"
+# pre_update = "./scripts/pre-update.sh"
+# post_update = "./scripts/post-update.sh"
 ```
 
 ---
