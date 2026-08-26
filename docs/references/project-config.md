@@ -117,7 +117,7 @@ Optional package identity for publishing / consuming libraries via **`spool`**. 
 |-----|------|----------|-------------|
 | `name` | string | Yes (if section present) | Short package name. Consumers import this name (`use http::…`), never the git URL. |
 | `version` | string | Yes (if section present) | Semver version of this package (e.g. `"0.1.0"`). |
-| `coil` | string | No | Optional Coil engine semver range (e.g. `">=0.1.0"`). Same range language as optional git-dep `version`. Stored only — this crate does not resolve or enforce it. Omit means no engine constraint. Compare later against `coil --version`. |
+| `coil` | string | No | Optional Coil engine semver range (e.g. `">=0.1.0"`). Same range language as optional git-dep `version`. Stored only — this crate does not resolve or enforce it. Omit means no engine constraint. |
 | `include` | string | No | Optional include-hook path, relative to **this package's checkout**. Runs when another project depends on this package (not when this repo is the current project). There is no `[hooks]` table — unknown sections still error. |
 
 Example:
