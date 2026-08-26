@@ -388,8 +388,8 @@ mod tests {
         let _ = s.shutdowns.load(Ordering::SeqCst);
     }
 
-    fn fn_addr(p: usize) -> i64 {
-        p as i64
+    fn fn_addr(p: *const ()) -> i64 {
+        p as usize as i64
     }
 
     fn tcp_pair() -> (TcpStream, TcpStream) {
@@ -416,10 +416,10 @@ mod tests {
             heap,
             stream,
             raw as i64,
-            fn_addr(xor_read as usize),
-            fn_addr(xor_write as usize),
-            fn_addr(xor_shutdown as usize),
-            fn_addr(xor_free as usize),
+            fn_addr(xor_read as *const ()),
+            fn_addr(xor_write as *const ()),
+            fn_addr(xor_shutdown as *const ()),
+            fn_addr(xor_free as *const ()),
         )
         .expect("attach");
         (stream, raw)
@@ -573,10 +573,10 @@ mod tests {
             &mut heap,
             stream,
             raw as i64,
-            fn_addr(order_read as usize),
-            fn_addr(order_write as usize),
-            fn_addr(order_shutdown as usize),
-            fn_addr(order_free as usize),
+            fn_addr(order_read as *const ()),
+            fn_addr(order_write as *const ()),
+            fn_addr(order_shutdown as *const ()),
+            fn_addr(order_free as *const ()),
         )
         .expect("attach");
         stream_close(&mut heap, stream).expect("close");
@@ -599,10 +599,10 @@ mod tests {
             &mut heap,
             stream,
             1,
-            fn_addr(xor_read as usize),
-            fn_addr(xor_write as usize),
-            fn_addr(xor_shutdown as usize),
-            fn_addr(xor_free as usize),
+            fn_addr(xor_read as *const ()),
+            fn_addr(xor_write as *const ()),
+            fn_addr(xor_shutdown as *const ()),
+            fn_addr(xor_free as *const ()),
         )
         .unwrap_err();
         assert_eq!(err, IoErrorTag::InvalidInput);
