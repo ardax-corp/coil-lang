@@ -127,7 +127,6 @@ pub(crate) fn optimize_branches_at(
         }
         applied += 1;
     }
-    merge_cold_blocks(ops);
     applied
 }
 
@@ -314,12 +313,6 @@ fn is_seek(op: &IlOp) -> bool {
     matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek)
 }
 
-/// Collapse adjacent empty cold labels (size-oriented). Currently a no-op
-/// placeholder so COI-129 can grow layout merging without a second hook.
-pub fn merge_cold_blocks(ops: &mut [IlOp]) {
-    let _ = ops;
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -479,14 +472,6 @@ mod tests {
                 ..
             }
         ));
-    }
-
-    #[test]
-    fn merge_cold_blocks_is_a_stable_no_op() {
-        let mut ops = vec![ret(), ret()];
-        let before = ops.clone();
-        merge_cold_blocks(&mut ops);
-        assert!(ops == before);
     }
 
     #[test]

@@ -68,7 +68,6 @@ cargo test --workspace --lib --tests --bins   # required; includes */tests/* (sk
 #   cargo test --workspace --lib --tests --bins --no-default-features
 # Feature compile-gates / tooling (match CI matrix job titles):
 #   cargo check --workspace --lib --tests --bins --no-default-features --features time
-#   cargo check --workspace --lib --tests --bins --no-default-features --features crypto
 #   cargo test --workspace --lib --tests --bins --features dissect
 cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)  # leak smoke (64MB)
 cargo build --release --workspace
@@ -101,7 +100,7 @@ Auto: `prelude`, `prelude::ops`, `prelude::test`, `prelude::math`.
 
 Explicit `use`: `ffi`, `io`, `thread`, `time`, `env`, `string`, `gc`. Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
-Cargo feature `time` gates that virtual module (default on). `crypto` is an empty leftover Cargo feature for the CI compile-gate; there is no virtual crypto module.
+Cargo feature `time` gates that virtual module (default on). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
 Prefer compiler builtins over userland for core type machinery.
 

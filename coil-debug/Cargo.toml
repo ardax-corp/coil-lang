@@ -24,5 +24,4 @@ path = "src/lib.rs"
 
 [features]
 default = ["time"]
-crypto = ["machine/crypto", "compiler/crypto", "coil-cli/crypto"]
 time = ["machine/time", "compiler/time", "coil-cli/time"]
