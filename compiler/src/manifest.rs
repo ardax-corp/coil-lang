@@ -48,12 +48,14 @@ pub struct PackageInfo {
 /// A `[dependencies]` entry: either a git source, or a local path.
 ///
 /// `version` on git deps is optional schema, not a resolved tag; the lock
-/// (`rev` + `content_hash`) is the pin.
+/// (`rev` + `content_hash`) is the pin. Optional `rev` is stored as parsed
+/// schema only — this crate does not resolve or write a lockfile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencySpec {
     Git {
         url: String,
         version: Option<String>,
+        rev: Option<String>,
     },
     Path {
         path: PathBuf,
@@ -468,7 +470,7 @@ fn parse_string_array(value: &str) -> Option<Vec<String>> {
 }
 
 /// Parse a TOML-like inline table of string values:
-/// `{ git = "…" }` or `{ git = "…", version = "^0.2" }`.
+/// `{ git = "…" }` or `{ git = "…", version = "^0.2", rev = "abc" }`.
 fn parse_inline_table(value: &str) -> Option<Vec<(String, String)>> {
     let trimmed = value.trim();
     let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?;
@@ -489,23 +491,27 @@ fn parse_inline_table(value: &str) -> Option<Vec<(String, String)>> {
 /// Accepted forms:
 /// - `{ git = "url" }`
 /// - `{ git = "url", version = "^0.2" }`
+/// - `{ git = "url", rev = "abc" }`
+/// - `{ git = "url", version = "^0.2", rev = "abc" }`
 /// - `{ path = "../local" }`
 fn parse_dependency_spec(value: &str) -> Option<DependencySpec> {
     let entries = parse_inline_table(value)?;
     let mut git: Option<String> = None;
     let mut version: Option<String> = None;
     let mut path: Option<String> = None;
+    let mut rev: Option<String> = None;
     for (key, val) in entries {
         match key.as_str() {
             "git" if git.is_none() => git = Some(val),
             "version" if version.is_none() => version = Some(val),
             "path" if path.is_none() => path = Some(val),
+            "rev" if rev.is_none() => rev = Some(val),
             _ => return None,
         }
     }
-    match (git, version, path) {
-        (Some(url), version, None) => Some(DependencySpec::Git { url, version }),
-        (None, None, Some(path)) => Some(DependencySpec::Path {
+    match (git, version, path, rev) {
+        (Some(url), version, None, rev) => Some(DependencySpec::Git { url, version, rev }),
+        (None, None, Some(path), None) => Some(DependencySpec::Path {
             path: PathBuf::from(path),
         }),
         _ => None,
@@ -872,6 +878,7 @@ mod tests {
                     DependencySpec::Git {
                         url: "https://github.com/coil-lang/http.git".into(),
                         version: Some("^0.2".into()),
+                        rev: None,
                     }
                 ),
                 (
@@ -1031,6 +1038,47 @@ mod tests {
                 DependencySpec::Git {
                     url: "https://example.com/http.git".into(),
                     version: None,
+                    rev: None,
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_dependency_git_accepts_rev() {
+        let src = r#"
+            [dependencies]
+            http = { git = "https://example.com/http.git", rev = "abc123" }
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(
+            m.dependencies,
+            vec![(
+                "http".into(),
+                DependencySpec::Git {
+                    url: "https://example.com/http.git".into(),
+                    version: None,
+                    rev: Some("abc123".into()),
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_dependency_git_accepts_version_and_rev() {
+        let src = r#"
+            [dependencies]
+            http = { git = "https://example.com/http.git", version = "^0.2", rev = "abc123" }
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(
+            m.dependencies,
+            vec![(
+                "http".into(),
+                DependencySpec::Git {
+                    url: "https://example.com/http.git".into(),
+                    version: Some("^0.2".into()),
+                    rev: Some("abc123".into()),
                 }
             )]
         );
@@ -1055,7 +1103,7 @@ mod tests {
     fn parse_dependency_rejects_unknown_inline_key() {
         let src = r#"
             [dependencies]
-            http = { git = "https://example.com/http.git", version = "^1", rev = "abc" }
+            http = { git = "https://example.com/http.git", version = "^1", branch = "main" }
         "#;
         let err = Manifest::parse(src).unwrap_err();
         match err {
@@ -1086,6 +1134,21 @@ mod tests {
         let src = r#"
             [dependencies]
             http = { path = "../x", version = "^1" }
+        "#;
+        let err = Manifest::parse(src).unwrap_err();
+        match err {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected dependency table"));
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_dependency_rejects_path_with_rev() {
+        let src = r#"
+            [dependencies]
+            http = { path = "../x", rev = "abc123" }
         "#;
         let err = Manifest::parse(src).unwrap_err();
         match err {
@@ -1129,6 +1192,7 @@ mod tests {
                 DependencySpec::Git {
                     url: "https://example.com/http.git".into(),
                     version: Some("^0.2".into()),
+                    rev: None,
                 }
             )]
         );
@@ -1242,6 +1306,7 @@ local_lib = { path = "../local-lib" }
                     DependencySpec::Git {
                         url: "https://example.com/http.git".into(),
                         version: Some("^0.2".into()),
+                        rev: None,
                     }
                 ),
                 (
