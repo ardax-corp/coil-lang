@@ -2,7 +2,7 @@
 
 TLS is **userland** in [coil-tls](https://github.com/ardax-corp/coil-tls), not a public compiler builtin. rustls lives in that package's native cdylib (`libtls`), loaded with `dload("tls")`.
 
-coil-tls binds leftover HostInvoke (`tls_client_enable` … `tls_alpn_protocol`, ids 25–28 and 121) through **`io::__tls`** (`use io::__tls::client::enable`). That path is not named `tls` or `io::net::tls`: `use tls` / `use io::net::tls` without the package on `[module].roots` is still a module-not-found error (COI-210).
+coil-tls binds leftover HostInvoke (`tls_client_enable` … `tls_alpn_protocol`, ids 25–28 and 121) through **`io::__tls`** (`use io::__tls::client::enable`). Enable attaches via generic `Stream.attach` (no TLS-named `StreamKind`). That path is not named `tls` or `io::net::tls`: `use tls` / `use io::net::tls` without the package on `[module].roots` is still a module-not-found error (COI-210).
 
 ## Sibling checkout
 
@@ -36,7 +36,7 @@ coil-http consumes this package the same way (`roots` / `[dependencies]`). Hands
 
 ## Leftover HostInvoke (`io::__tls`)
 
-coil-tls re-exports leftover enable as `tls::client::enable(Stream, host, opts) -> Stream`. Internally it imports `use io::__tls::client::{enable}` (and the matching server / `alpn_protocol` leftovers). Bodies stay dload + `attach_enable_outcome` + park + empty read/write until Ready (no rustls in coil-lang). WouldBlock enable keeps the session; do not retry `enable`. Leftover `disable` sends `coil_tls_disable` (close_notify) on the live fd, then Drop `coil_tls_free`. Stream close / GC do the same when the fd is still usable. Do not import `io::__tls` from application code — use the package.
+coil-tls re-exports leftover enable as `tls::client::enable(Stream, host, opts) -> Stream`. Internally it imports `use io::__tls::client::{enable}` (and the matching server / `alpn_protocol` leftovers). Bodies stay dload + generic attach + park + empty read/write until Ready (no rustls in coil-lang). WouldBlock enable keeps the session; do not retry `enable`. Leftover `disable` sends `coil_tls_disable` (close_notify) on the live fd, then Drop `coil_tls_free`. Stream close / GC do the same when the fd is still usable. Do not import `io::__tls` from application code — use the package. New packages should `s.attach(ptr, read, write, shutdown, free)` and `s.park()` instead of a VM TLS kind.
 
 `examples/tls_thread_loopback.hy` is the leftover client+server enable regression (COI-116): server `enable` in `thread::spawn`, client `enable` on the root, ALPN `h2`. Needs `libtls` on `[ffi] search_paths`.
 

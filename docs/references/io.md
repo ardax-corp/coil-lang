@@ -19,6 +19,7 @@ use io::sync::{write_all, read_to_end};   // optional blocking adapters (coil-st
 | `wait_ready` | `() -> int` | Block until ≥1 registered waiter is ready |
 | `block_on` | Prelude | `block_on(coro) -> Y` — auto-imported; drives `async fn` to completion |
 | `from_bytes` / `to_bytes` | Text aliases | UTF-8 `Vec<byte> ↔ string` (`from_bytes` → `Result<string, IoError>`); also exported by [`string`](string.md) |
+| `attach` / `park` | Package IO | `s.attach(ptr, read, write, shutdown, free)` installs a C vtable on this Stream in place; later `s.read()` / `s.write()` / Drop go through those hooks. `s.park()` waits on the fd via `reactor_wait_fd_no_help` (no help-steal). Function pointers are `int` (from `dload`). There is no public `s.fd` field; FFI `Int` args marshal Stream → fd at the call boundary. |
 | `io::net::tcp::{connect,connect_timeout,listen,accept}` | TCP | Nested module — `use io::net::tcp::{connect, listen, …};`; timeout `ms <= 0` waits forever |
 | `io::net::tcp::{peer_addr,local_addr,set_nodelay,shutdown}` | TCP helpers | Address tuples, `TCP_NODELAY`, and half-close (`0` read, `1` write, `2` both) |
 | `io::net::udp::{bind,connect,send_to,recv_from,local_port}` | UDP | Nested module; `recv_from` → `(nbytes, host, port)` |

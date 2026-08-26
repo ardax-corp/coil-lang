@@ -5,7 +5,7 @@ coil keeps two runtime facets on each root [`Machine`](../../machine/src/vm.rs):
 | Facet | Module | Role |
 |-------|--------|------|
 | CPU | [`reactor.rs`](../../machine/src/reactor.rs) | Work-stealing Coil `Job`s (`spawn` / auto-par) |
-| IO | [`io_reactor.rs`](../../machine/src/io_reactor.rs) | handle readiness for streams / TLS |
+| IO | [`io_reactor.rs`](../../machine/src/io_reactor.rs) | handle readiness for streams / attached package IO |
 
 They share a lifecycle (cloned onto pool workers) but **never** put blocking IO onto stealable CPU jobs.
 
@@ -72,22 +72,25 @@ When a CPU reactor is bound (`HostStateGuard`), those blocking waits use
 [`wait_fd_helping`](../../machine/src/io_reactor.rs): short poll slices interleaved with
 [`Reactor::help_once`](../../machine/src/reactor.rs).
 
-**TLS handshake is different:** leftover `tls_*_enable` parks via
-[`reactor_wait_fd_no_help`](../../machine/src/io.rs) and pumps one rustls
-step per `coil_tls_read` / `coil_tls_write` until the handshake completes,
+**Attached package handshake is different:** leftover `tls_*_enable` (and
+userland `Stream.attach` + `Stream.park`) parks via
+[`reactor_wait_fd_no_help`](../../machine/src/io.rs) and pumps one native
+step per `read` / `write` until the handshake completes,
 so a mid-handshake park cannot nest-steal the peer `thread::spawn` job onto
 the same stack (that deadlocked both sides under `COIL_MAX_WORKER_THREADS=1`
 — COI-116). The pool worker still runs the peer while the waiter polls.
 
-After enable, `StreamKind::Tls` IO (`stream_read` / `stream_write` / close)
-dispatches to dloaded `coil_tls_*` (`dload("tls")` / `[ffi] search_paths`).
-WouldBlock during leftover `tls_*_enable` is attached (`kind = Tls`) and the
+After `Stream.attach` (or leftover enable, which attaches via the same path),
+IO (`stream_read` / `stream_write` / close) dispatches to the registered C
+vtable. The VM does not have a TLS-named stream kind. Leftover `io::__tls`
+still creates a session via `coil_tls_*` and then attaches those hooks.
+WouldBlock during leftover `tls_*_enable` is attached (`kind = Attached`) and the
 VM parks on `reactor_wait_fd_no_help`, then pumps handshake via empty
-`coil_tls_read` / `coil_tls_write` until Ready (COI-116). Do not retry
+vtable read/write until Ready (COI-116). Do not retry
 `enable`. `WouldBlock` from later `.so` IO is the same tagged `IoError`
 and parks on the VM reactor; do not handshake on a blocking `.so` thread.
 `coil_tls_disable` is close_notify; `coil_tls_free` is Drop. Leftover
-`tls_*_disable`, stream close, and GC send close_notify when the fd is still
+`tls_*_disable`, stream close, and GC send shutdown when the fd is still
 usable, then Drop frees. If the fd is already gone, free-only is OK
 (best-effort close_notify).
 
