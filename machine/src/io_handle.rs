@@ -120,8 +120,8 @@ impl NativeHandle {
         }
     }
 
-    /// Socket/fd identity passed to `coil_tls_*` (Unix fd or Windows SOCKET).
-    pub fn tls_abi_fd(&self) -> i64 {
+    /// Socket/fd identity for attach / FFI Stream→fd marshal (Unix fd or Windows SOCKET).
+    pub fn fd_i64(&self) -> i64 {
         #[cfg(unix)]
         {
             self.as_raw_fd() as i64

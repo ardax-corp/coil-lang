@@ -7,70 +7,112 @@ use std::sync::Arc;
 
 use common::Value;
 
-use crate::{
-    ENV_WIRING, FS_WIRING, FfiSignature, FfiType, HostClosureFn, NativeFn, PACKED_DOT,
-    PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH, packed_dot,
-    packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
-};
 use crate::math_libm::MATH_LIBM_WIRING;
+use crate::{
+    packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
+    FfiSignature, FfiType, HostClosureFn, NativeFn, ENV_WIRING, FS_WIRING, PACKED_DOT,
+    PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
+};
 
-#[cfg(feature = "crypto")]
-use crate::CRYPTO_WIRING;
+use crate::vec_ops::VEC_WIRING;
+use crate::GC_WIRING;
 #[cfg(feature = "time")]
 use crate::TIME_WIRING;
-use crate::GC_WIRING;
-use crate::vec_ops::VEC_WIRING;
 
 /// Build the standard host-native table in stable order.
 ///
 /// `register_id` is invoked as each native is appended (`name`, `id`) so the
 /// compiler can record `HostInvoke` lookups. Runtime-only callers may pass a
 /// no-op closure.
+///
+/// Leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and virtual crypto
+/// slots were dropped; holes collapsed. Append-only from this table.
 pub fn build_standard_host_natives(
     mut register_id: impl FnMut(&str, usize),
 ) -> Vec<Arc<dyn NativeFn>> {
     let mut out: Vec<Arc<dyn NativeFn>> = Vec::new();
     push_io_natives(&mut out, &mut register_id);
-    // TLS leftover + crypto HostInvoke ids reserved; do not reorder.
     push_wiring(&mut out, &mut register_id, FS_WIRING, "fs");
     #[cfg(feature = "time")]
     push_wiring(&mut out, &mut register_id, TIME_WIRING, "time");
     push_wiring(&mut out, &mut register_id, ENV_WIRING, "env");
-    #[cfg(feature = "crypto")]
-    push_wiring(&mut out, &mut register_id, CRYPTO_WIRING, "crypto");
-    #[cfg(not(feature = "crypto"))]
-    crate::reserved_hostinvoke::push_crypto_stubs(&mut out, &mut register_id);
     push_prelude_char_ord(&mut out, &mut register_id);
     push_thread_natives(&mut out, &mut register_id);
     push_packed_la(&mut out, &mut register_id);
     // Append-only: keep prior HostInvoke ids stable across ARCHIVE_MINOR bumps.
     push_io_wait_ready(&mut out, &mut register_id);
     push_io_write_from(&mut out, &mut register_id);
-    push_tls_alpn_protocol(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, GC_WIRING, "gc");
     push_math_libm(&mut out, &mut register_id);
     // Append-only after math_libm: Vec helpers.
     push_wiring(&mut out, &mut register_id, VEC_WIRING, "vec");
     push_pgo_hit(&mut out, &mut register_id);
+    // Append-only after pgo_hit. `stream_attach` / `stream_park` are the
+    // package-IO hooks (coil-tls uses these via `dload`, not VM TLS natives).
+    push_stream_attach(&mut out, &mut register_id);
+    push_stream_park(&mut out, &mut register_id);
     out
 }
 
 /// Registry name for profile-counter HostInvoke (append-only after vec).
 pub const PGO_HIT_NATIVE: &str = "pgo_hit";
 
+/// In-place Stream attach (`Stream.attach`). Append-only after `pgo_hit`.
+pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
+
+/// Park this coro on the stream fd (`Stream.park`). Append-only after attach.
+pub const STREAM_PARK_NATIVE: &str = "stream_park";
+
 fn push_pgo_hit(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    let sig = FfiSignature::from_parts(
-        PGO_HIT_NATIVE.to_string(),
-        vec![FfiType::Int],
-        FfiType::Int,
-    )
-    .expect("pgo_hit signature");
+    let sig =
+        FfiSignature::from_parts(PGO_HIT_NATIVE.to_string(), vec![FfiType::Int], FfiType::Int)
+            .expect("pgo_hit signature");
     let id = out.len();
     register_id(PGO_HIT_NATIVE, id);
     out.push(Arc::new(HostClosureFn::new(sig, |_heap, args| {
         let packed = args.first().map(|v| v.as_int()).unwrap_or(0);
         crate::pgo::hit(packed);
         Ok(Some(Value::from(0i64)))
+    })));
+}
+
+fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    use crate::io::as_result_value;
+    let sig = FfiSignature::from_parts(
+        STREAM_ATTACH_NATIVE.to_string(),
+        vec![FfiType::Int; 6],
+        FfiType::Int,
+    )
+    .expect("stream_attach signature");
+    let id = out.len();
+    register_id(STREAM_ATTACH_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let r = crate::stream_attach::stream_attach(
+            heap,
+            args[0],
+            args[1].as_int(),
+            args[2].as_int(),
+            args[3].as_int(),
+            args[4].as_int(),
+            args[5].as_int(),
+        );
+        Ok(Some(as_result_value(heap, r)))
+    })));
+}
+
+fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    use crate::io::as_result_unit;
+    let sig = FfiSignature::from_parts(
+        STREAM_PARK_NATIVE.to_string(),
+        vec![FfiType::Int],
+        FfiType::Int,
+    )
+    .expect("stream_park signature");
+    let id = out.len();
+    register_id(STREAM_PARK_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let r = crate::stream_attach::stream_park(heap, args[0]);
+        Ok(Some(as_result_unit(heap, r)))
     })));
 }
 
@@ -99,10 +141,7 @@ fn push_wiring(
     }
 }
 
-fn push_math_libm(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
+fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     for &(name, arity, host) in MATH_LIBM_WIRING {
         let args = vec![FfiType::Float; arity];
         let sig = FfiSignature::from_parts(name.to_string(), args, FfiType::Float)
@@ -185,10 +224,7 @@ fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
     )));
 }
 
-fn push_io_wait_ready(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
+fn push_io_wait_ready(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let sig = FfiSignature::from_parts("wait_ready".to_string(), vec![], FfiType::Int)
         .expect("wait_ready signature");
     let id = out.len();
@@ -199,10 +235,7 @@ fn push_io_wait_ready(
 }
 
 /// Write `buf[offset..]` without allocating a Coil suffix array.
-fn push_io_write_from(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
+fn push_io_write_from(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     use crate::io::{as_result_int, stream_write_from};
     let sig = FfiSignature::from_parts(
         "write_from".to_string(),
@@ -215,29 +248,6 @@ fn push_io_write_from(
     out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
         let r = stream_write_from(heap, args[0], args[1], args[2].as_int());
         Ok(Some(as_result_int(heap, r)))
-    })));
-}
-
-/// Read negotiated ALPN on a TLS stream (leftover HostInvoke).
-///
-/// Id reserved; do not reorder.
-fn push_tls_alpn_protocol(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
-    use crate::io::as_result_value;
-    use crate::tls::tls_alpn_protocol;
-    let sig = FfiSignature::from_parts(
-        "tls_alpn_protocol".to_string(),
-        vec![FfiType::Int],
-        FfiType::Int,
-    )
-    .expect("tls_alpn_protocol signature");
-    let id = out.len();
-    register_id("tls_alpn_protocol", id);
-    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
-        let r = tls_alpn_protocol(heap, args[0]);
-        Ok(Some(as_result_value(heap, r)))
     })));
 }
 
@@ -268,11 +278,6 @@ enum IoKind {
     UdpSendTo,
     UdpRecvFrom,
     UdpLocalPort,
-    // Ids reserved; do not reorder. Leftover bodies dload+attach (not rustls).
-    TlsClientEnable,
-    TlsClientDisable,
-    TlsServerEnable,
-    TlsServerDisable,
 }
 
 impl IoKind {
@@ -303,11 +308,6 @@ impl IoKind {
             Self::UdpSendTo,
             Self::UdpRecvFrom,
             Self::UdpLocalPort,
-            // Ids reserved; do not reorder. Leftover bodies dload+attach (not rustls).
-            Self::TlsClientEnable,
-            Self::TlsClientDisable,
-            Self::TlsServerEnable,
-            Self::TlsServerDisable,
         ]
     }
 
@@ -338,10 +338,6 @@ impl IoKind {
             Self::UdpSendTo => "udp_send_to",
             Self::UdpRecvFrom => "udp_recv_from",
             Self::UdpLocalPort => "udp_local_port",
-            Self::TlsClientEnable => "tls_client_enable",
-            Self::TlsClientDisable => "tls_client_disable",
-            Self::TlsServerEnable => "tls_server_enable",
-            Self::TlsServerDisable => "tls_server_disable",
         }
     }
 
@@ -367,9 +363,7 @@ impl IoKind {
             | Self::UdpBind
             | Self::UdpConnect
             | Self::UdpRecvFrom => 2,
-            Self::TcpConnectTimeout | Self::TlsClientEnable => 3,
-            Self::TlsClientDisable | Self::TlsServerDisable => 1,
-            Self::TlsServerEnable => 2,
+            Self::TcpConnectTimeout => 3,
             Self::UdpSendTo => 4,
         }
     }
@@ -377,15 +371,12 @@ impl IoKind {
 
 fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     use crate::io::{
-        as_result_int, as_result_option_int, as_result_unit, as_result_value, from_bytes,
-        io_drive, stream_await_readable, stream_await_writable, stream_close, stream_open,
-        stream_read, stream_stderr, stream_stdin, stream_stdout, stream_write, tcp_accept,
-        tcp_connect, tcp_connect_timeout, tcp_listen, tcp_local_addr, tcp_peer_addr,
-        tcp_set_nodelay, tcp_shutdown, to_bytes, udp_bind, udp_connect, udp_local_port,
-        udp_recv_from, udp_send_to, value_as_string,
-    };
-    use crate::tls::{
-        tls_client_disable, tls_client_enable, tls_server_disable, tls_server_enable,
+        as_result_int, as_result_option_int, as_result_unit, as_result_value, from_bytes, io_drive,
+        stream_await_readable, stream_await_writable, stream_close, stream_open, stream_read,
+        stream_stderr, stream_stdin, stream_stdout, stream_write, tcp_accept, tcp_connect,
+        tcp_connect_timeout, tcp_listen, tcp_local_addr, tcp_peer_addr, tcp_set_nodelay,
+        tcp_shutdown, to_bytes, udp_bind, udp_connect, udp_local_port, udp_recv_from, udp_send_to,
+        value_as_string,
     };
 
     for &kind in IoKind::all() {
@@ -398,174 +389,142 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
         register_id(&name, id);
         out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
             let v = match kind {
-                            // Stdio handles are `() -> Stream` (not Result).
-                            IoKind::Stdin => stream_stdin(heap).unwrap_or_default(),
-                            IoKind::Stdout => stream_stdout(heap).unwrap_or_default(),
-                            IoKind::Stderr => stream_stderr(heap).unwrap_or_default(),
-                            IoKind::Open => {
-                                let path = match value_as_string(heap, args[0]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let mode = match value_as_string(heap, args[1]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r = stream_open(heap, &path, &mode);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::Close => {
-                                let r = stream_close(heap, args[0]);
-                                as_result_unit(heap, r)
-                            }
-                            IoKind::Read => {
-                                let r = stream_read(heap, args[0], args[1]);
-                                as_result_option_int(heap, r)
-                            }
-                            IoKind::Write => {
-                                let r = stream_write(heap, args[0], args[1]);
-                                as_result_int(heap, r)
-                            }
-                            IoKind::AwaitReadable => {
-                                match stream_await_readable(heap, args[0]) {
-                                    Ok(v) => return Ok(v),
-                                    Err(tag) => as_result_unit(heap, Err(tag)),
-                                }
-                            }
-                            IoKind::AwaitWritable => {
-                                match stream_await_writable(heap, args[0]) {
-                                    Ok(v) => return Ok(v),
-                                    Err(tag) => as_result_unit(heap, Err(tag)),
-                                }
-                            }
-                            IoKind::Drive => return Ok(Some(io_drive(heap))),
-                            IoKind::FromBytes => {
-                                let r = from_bytes(heap, args[0]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::ToBytes => to_bytes(heap, args[0]),
-                            IoKind::TcpConnect => {
-                                let host = match value_as_string(heap, args[0]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r = tcp_connect(heap, &host, args[1].as_int());
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TcpConnectTimeout => {
-                                let host = match value_as_string(heap, args[0]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r = tcp_connect_timeout(
-                                    heap,
-                                    &host,
-                                    args[1].as_int(),
-                                    args[2].as_int(),
-                                );
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TcpListen => {
-                                let host = match value_as_string(heap, args[0]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r = tcp_listen(heap, &host, args[1].as_int());
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TcpAccept => {
-                                let r = tcp_accept(heap, args[0]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TcpPeerAddr => {
-                                let r = tcp_peer_addr(heap, args[0]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TcpLocalAddr => {
-                                let r = tcp_local_addr(heap, args[0]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TcpSetNodelay => {
-                                let r = tcp_set_nodelay(heap, args[0], args[1].as_bool());
-                                as_result_unit(heap, r)
-                            }
-                            IoKind::TcpShutdown => {
-                                let r = tcp_shutdown(heap, args[0], args[1].as_int());
-                                as_result_unit(heap, r)
-                            }
-                            IoKind::UdpBind => {
-                                let host = match value_as_string(heap, args[0]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r = udp_bind(heap, &host, args[1].as_int());
-                                as_result_value(heap, r)
-                            }
-                            IoKind::UdpConnect => {
-                                let host = match value_as_string(heap, args[0]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r = udp_connect(heap, &host, args[1].as_int());
-                                as_result_value(heap, r)
-                            }
-                            IoKind::UdpSendTo => {
-                                let host = match value_as_string(heap, args[2]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r =
-                                    udp_send_to(heap, args[0], args[1], &host, args[3].as_int());
-                                as_result_int(heap, r)
-                            }
-                            IoKind::UdpRecvFrom => {
-                                let r = udp_recv_from(heap, args[0], args[1]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::UdpLocalPort => {
-                                let r = udp_local_port(heap, args[0]).map(Value::from);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TlsClientEnable => {
-                                let host = match value_as_string(heap, args[1]) {
-                                    Ok(s) => s,
-                                    Err(tag) => {
-                                        return Ok(Some(as_result_value(heap, Err(tag))));
-                                    }
-                                };
-                                let r = tls_client_enable(heap, args[0], &host, args[2]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TlsClientDisable => {
-                                let r = tls_client_disable(heap, args[0]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TlsServerEnable => {
-                                let r = tls_server_enable(heap, args[0], args[1]);
-                                as_result_value(heap, r)
-                            }
-                            IoKind::TlsServerDisable => {
-                                let r = tls_server_disable(heap, args[0]);
-                                as_result_value(heap, r)
-                            }
-                        };
-                        Ok(Some(v))
+                // Stdio handles are `() -> Stream` (not Result).
+                IoKind::Stdin => stream_stdin(heap).unwrap_or_default(),
+                IoKind::Stdout => stream_stdout(heap).unwrap_or_default(),
+                IoKind::Stderr => stream_stderr(heap).unwrap_or_default(),
+                IoKind::Open => {
+                    let path = match value_as_string(heap, args[0]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let mode = match value_as_string(heap, args[1]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let r = stream_open(heap, &path, &mode);
+                    as_result_value(heap, r)
+                }
+                IoKind::Close => {
+                    let r = stream_close(heap, args[0]);
+                    as_result_unit(heap, r)
+                }
+                IoKind::Read => {
+                    let r = stream_read(heap, args[0], args[1]);
+                    as_result_option_int(heap, r)
+                }
+                IoKind::Write => {
+                    let r = stream_write(heap, args[0], args[1]);
+                    as_result_int(heap, r)
+                }
+                IoKind::AwaitReadable => match stream_await_readable(heap, args[0]) {
+                    Ok(v) => return Ok(v),
+                    Err(tag) => as_result_unit(heap, Err(tag)),
+                },
+                IoKind::AwaitWritable => match stream_await_writable(heap, args[0]) {
+                    Ok(v) => return Ok(v),
+                    Err(tag) => as_result_unit(heap, Err(tag)),
+                },
+                IoKind::Drive => return Ok(Some(io_drive(heap))),
+                IoKind::FromBytes => {
+                    let r = from_bytes(heap, args[0]);
+                    as_result_value(heap, r)
+                }
+                IoKind::ToBytes => to_bytes(heap, args[0]),
+                IoKind::TcpConnect => {
+                    let host = match value_as_string(heap, args[0]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let r = tcp_connect(heap, &host, args[1].as_int());
+                    as_result_value(heap, r)
+                }
+                IoKind::TcpConnectTimeout => {
+                    let host = match value_as_string(heap, args[0]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let r = tcp_connect_timeout(heap, &host, args[1].as_int(), args[2].as_int());
+                    as_result_value(heap, r)
+                }
+                IoKind::TcpListen => {
+                    let host = match value_as_string(heap, args[0]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let r = tcp_listen(heap, &host, args[1].as_int());
+                    as_result_value(heap, r)
+                }
+                IoKind::TcpAccept => {
+                    let r = tcp_accept(heap, args[0]);
+                    as_result_value(heap, r)
+                }
+                IoKind::TcpPeerAddr => {
+                    let r = tcp_peer_addr(heap, args[0]);
+                    as_result_value(heap, r)
+                }
+                IoKind::TcpLocalAddr => {
+                    let r = tcp_local_addr(heap, args[0]);
+                    as_result_value(heap, r)
+                }
+                IoKind::TcpSetNodelay => {
+                    let r = tcp_set_nodelay(heap, args[0], args[1].as_bool());
+                    as_result_unit(heap, r)
+                }
+                IoKind::TcpShutdown => {
+                    let r = tcp_shutdown(heap, args[0], args[1].as_int());
+                    as_result_unit(heap, r)
+                }
+                IoKind::UdpBind => {
+                    let host = match value_as_string(heap, args[0]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let r = udp_bind(heap, &host, args[1].as_int());
+                    as_result_value(heap, r)
+                }
+                IoKind::UdpConnect => {
+                    let host = match value_as_string(heap, args[0]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let r = udp_connect(heap, &host, args[1].as_int());
+                    as_result_value(heap, r)
+                }
+                IoKind::UdpSendTo => {
+                    let host = match value_as_string(heap, args[2]) {
+                        Ok(s) => s,
+                        Err(tag) => {
+                            return Ok(Some(as_result_value(heap, Err(tag))));
+                        }
+                    };
+                    let r = udp_send_to(heap, args[0], args[1], &host, args[3].as_int());
+                    as_result_int(heap, r)
+                }
+                IoKind::UdpRecvFrom => {
+                    let r = udp_recv_from(heap, args[0], args[1]);
+                    as_result_value(heap, r)
+                }
+                IoKind::UdpLocalPort => {
+                    let r = udp_local_port(heap, args[0]).map(Value::from);
+                    as_result_value(heap, r)
+                }
+            };
+            Ok(Some(v))
         })));
     }
 }
@@ -812,11 +771,15 @@ mod tests {
         let sig = natives[write_from].signature();
         assert_eq!(sig.args, vec![FfiType::Int, FfiType::Int, FfiType::Int]);
         assert_eq!(sig.ret, FfiType::Int);
-        let alpn = registrations
-            .iter()
-            .position(|(name, _)| name == "tls_alpn_protocol")
-            .expect("tls_alpn_protocol");
-        assert_eq!(alpn, write_from + 1);
+        assert_eq!(registrations[write_from + 1].0, "gc_root");
+        assert!(
+            registrations
+                .iter()
+                .all(|(name, _)| name != "tls_alpn_protocol"
+                    && name != "tls_client_enable"
+                    && !name.starts_with("crypto_")),
+            "leftover TLS and virtual crypto HostInvoke slots must be gone"
+        );
     }
 
     /// Auto-par specializations spawn N-ary recursive calls; the host native
@@ -858,6 +821,64 @@ mod tests {
     fn pgo_hit_is_appended_after_vec_helpers() {
         let mut names = Vec::new();
         build_standard_host_natives(|name, _id| names.push(name.to_string()));
-        assert_eq!(names.last().map(String::as_str), Some(PGO_HIT_NATIVE));
+        let pgo = names
+            .iter()
+            .position(|n| n == PGO_HIT_NATIVE)
+            .expect("pgo_hit");
+        assert_eq!(
+            names.get(pgo + 1).map(String::as_str),
+            Some(STREAM_ATTACH_NATIVE)
+        );
+        assert_eq!(
+            names.get(pgo + 2).map(String::as_str),
+            Some(STREAM_PARK_NATIVE)
+        );
+        assert_eq!(names.last().map(String::as_str), Some(STREAM_PARK_NATIVE));
+    }
+
+    #[test]
+    fn leftover_tls_and_crypto_hostinvoke_slots_are_gone() {
+        let mut map = std::collections::HashMap::new();
+        let mut names = Vec::new();
+        build_standard_host_natives(|name, id| {
+            map.insert(name.to_string(), id);
+            names.push(name.to_string());
+        });
+        for gone in [
+            "tls_client_enable",
+            "tls_client_disable",
+            "tls_server_enable",
+            "tls_server_disable",
+            "tls_alpn_protocol",
+            "crypto_sha256",
+        ] {
+            assert!(
+                !map.contains_key(gone),
+                "leftover HostInvoke `{gone}` must be dropped"
+            );
+        }
+        let pgo = names
+            .iter()
+            .position(|n| n == PGO_HIT_NATIVE)
+            .expect("pgo_hit");
+        assert_eq!(names[pgo + 1], STREAM_ATTACH_NATIVE);
+        assert_eq!(names[pgo + 2], STREAM_PARK_NATIVE);
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(pgo + 1));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(pgo + 2));
+        // Default `time` table: attach=120, park=121 (old tls_alpn_protocol id
+        // reused after the hole collapse; the leftover *name* is gone).
+        #[cfg(feature = "time")]
+        {
+            assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
+            assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
+            assert_eq!(pgo, 119);
+        }
+        // IO block ends at udp_local_port; leftover TLS 25–28 used to follow it.
+        let udp = names
+            .iter()
+            .position(|n| n == "udp_local_port")
+            .expect("udp_local_port");
+        assert_eq!(names[udp + 1], "fs_exists");
+        assert_eq!(udp, 24);
     }
 }

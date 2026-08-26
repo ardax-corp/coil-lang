@@ -23,8 +23,8 @@ Prefer `--lib --tests --bins` over `--all-targets`: Criterion `[[bench]]` target
 | Feature | Command | Notes |
 |---------|---------|--------|
 | default stack | `cargo test --workspace --lib --tests --bins` | full suite |
-| `no-default` | `cargo test --workspace --lib --tests --bins --no-default-features` | real suite; crypto/time tests are `cfg`-skipped |
-| `crypto` / `time` | `cargo check --workspace --lib --tests --bins --no-default-features --features <name>` | CI compile-gate only; `cargo test … --no-default-features --features <name>` finishes locally |
+| `no-default` | `cargo test --workspace --lib --tests --bins --no-default-features` | real suite; time tests are `cfg`-skipped |
+| `crypto` / `time` | `cargo check --workspace --lib --tests --bins --no-default-features --features <name>` | CI compile-gate only; `crypto` is an empty leftover Cargo feature |
 | `dissect` | `cargo test --workspace --lib --tests --bins --features dissect` | dissect integration |
 | `debugger` | `cargo test --workspace --lib --tests --bins --features debugger` | debugger paths |
 

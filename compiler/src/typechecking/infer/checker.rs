@@ -162,6 +162,7 @@ impl Checker {
         checker.register_builtin_enums();
         checker.register_builtin_vec();
         checker.register_builtin_range();
+        checker.register_builtin_stream();
         checker.register_builtin_call_sigs();
         checker
     }
@@ -348,6 +349,77 @@ impl Checker {
         }
     }
 
+    /// Synthetic `Stream` inherent methods (`attach` / `park`).
+    ///
+    /// Idempotent: same re-entry contract as [`Self::register_builtin_vec`].
+    fn register_builtin_stream(&mut self) {
+        use crate::typechecking::ty::{STREAM, stream_ty};
+        self.overload_sets.retain(|k, _| !k.starts_with("Stream::"));
+        self.classes
+            .entry(STREAM.to_string())
+            .or_insert_with(Vec::new);
+
+        let fun = |params: &[Ty], ret: Ty| {
+            params
+                .iter()
+                .rev()
+                .fold(ret, |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)))
+        };
+        let dummy = 0..0;
+        let stream = stream_ty();
+        let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
+        let res_stream = result_app_ty(stream.clone(), io_err.clone());
+        let res_unit = result_app_ty(unit_ty(), io_err);
+
+        let attach_ty = fun(
+            &[stream.clone(), int(), int(), int(), int(), int()],
+            res_stream,
+        );
+        let park_ty = fun(&[stream], res_unit);
+        let attach_params = ["ptr", "read", "write", "shutdown", "free"];
+
+        let fqn = format!("{STREAM}::attach");
+        let scheme = Scheme::mono(attach_ty);
+        self.fn_param_names.insert(
+            fqn.clone(),
+            attach_params.iter().map(|s| (*s).to_string()).collect(),
+        );
+        self.register_overload_candidate(
+            &fqn,
+            OverloadCandidate {
+                id: 0,
+                fixed_arity: 5,
+                is_rest: false,
+                scheme: scheme.clone(),
+                param_names: attach_params.iter().map(|s| (*s).to_string()).collect(),
+            },
+            &dummy,
+        );
+        self.methods
+            .entry(STREAM.to_string())
+            .or_default()
+            .insert("attach".to_string(), (Visibility::Public, scheme));
+
+        let fqn = format!("{STREAM}::park");
+        let scheme = Scheme::mono(park_ty);
+        self.fn_param_names.insert(fqn.clone(), Vec::new());
+        self.register_overload_candidate(
+            &fqn,
+            OverloadCandidate {
+                id: 0,
+                fixed_arity: 0,
+                is_rest: false,
+                scheme: scheme.clone(),
+                param_names: Vec::new(),
+            },
+            &dummy,
+        );
+        self.methods
+            .entry(STREAM.to_string())
+            .or_default()
+            .insert("park".to_string(), (Visibility::Public, scheme));
+    }
+
     /// Parameter names for builtins that support named arguments at call sites.
     fn register_builtin_call_sigs(&mut self) {
         self.fn_param_names
@@ -431,16 +503,6 @@ impl Checker {
         ) || host_registry.is_some_and(|r| r.starts_with("env_"));
         if needs_env_error && !self.enums.contains_key(common::BUILTIN_ENV_ERROR_ENUM) {
             self.register_builtin_env_error();
-        }
-
-        let needs_crypto_error = matches!(
-            &export,
-            BuiltinExport::Enum {
-                name: common::BUILTIN_CRYPTO_ERROR_ENUM
-            }
-        ) || host_registry.is_some_and(|r| r.starts_with("crypto_"));
-        if needs_crypto_error && !self.enums.contains_key(common::BUILTIN_CRYPTO_ERROR_ENUM) {
-            self.register_builtin_crypto_error();
         }
 
 
@@ -538,7 +600,7 @@ impl Checker {
         }
     }
 
-    /// Registry key for a generic host native (`time_*`, `env_*`, `fs_*`, `crypto_*`).
+    /// Registry key for a generic host native (`time_*`, `env_*`, `fs_*`).
     pub fn host_fn_in_scope(&self, name: &str) -> Option<&'static str> {
         match self.scope_bindings.get(name)? {
             BuiltinExport::HostFn { registry, .. } => Some(registry),
@@ -699,13 +761,6 @@ impl Checker {
         );
     }
 
-    fn register_builtin_crypto_error(&mut self) {
-        self.register_builtin_unit_enum(
-            common::BUILTIN_CRYPTO_ERROR_ENUM,
-            common::BUILTIN_CRYPTO_ERROR_VARIANTS,
-        );
-    }
-
 
     /// Pre-register `ThreadError` unit variants for the virtual `thread` module.
     fn register_builtin_thread_error(&mut self) {
@@ -776,7 +831,7 @@ impl Checker {
 
     /// Scheme for a virtual `io` host native (inserted on `use io::{…}`).
     pub fn io_fn_scheme(kind: IoBuiltin) -> Scheme {
-        use crate::typechecking::ty::{boolean, byte, record, stream_ty, tuple};
+        use crate::typechecking::ty::{boolean, byte, stream_ty, tuple};
         let stream = stream_ty();
         let bytes = vec_app_ty(byte());
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
@@ -820,30 +875,10 @@ impl Checker {
                 fun(&[stream, bytes], res_recv_from)
             }
             IoBuiltin::UdpLocalPort => fun(&[stream], res_int),
-            IoBuiltin::TlsClientEnable => {
-                let opt_string = option_app_ty(string());
-                let opts = record(vec![
-                    ("verify".into(), boolean()),
-                    ("ca_pem".into(), opt_string.clone()),
-                    ("ca_path".into(), opt_string),
-                    ("timeout_ms".into(), int()),
-                    ("alpn".into(), string()),
-                ]);
-                fun(&[stream, string(), opts], res_stream)
+            IoBuiltin::StreamAttach => {
+                fun(&[stream, int(), int(), int(), int(), int()], res_stream)
             }
-            IoBuiltin::TlsClientDisable => fun(&[stream], res_stream),
-            IoBuiltin::TlsServerEnable => {
-                let opts = record(vec![
-                    ("cert_pem".into(), string()),
-                    ("key_pem".into(), string()),
-                    ("timeout_ms".into(), int()),
-                    ("client_ca_pem".into(), string()),
-                    ("alpn".into(), string()),
-                ]);
-                fun(&[stream, opts], res_stream)
-            }
-            IoBuiltin::TlsServerDisable => fun(&[stream], res_stream),
-            IoBuiltin::TlsAlpnProtocol => fun(&[stream], res_string),
+            IoBuiltin::StreamPark => fun(&[stream], res_unit),
         };
         Scheme::mono(ty)
     }
@@ -1054,15 +1089,9 @@ impl Checker {
         }
     }
 
-    /// Scheme for `fs_*` / `time_*` / `env_*` / `crypto_*` pipeline host natives.
+    /// Scheme for `fs_*` / `time_*` / `env_*` pipeline host natives.
     pub fn host_fn_scheme(&mut self, registry: &str, range: Range<usize>) -> Scheme {
-        #[cfg(feature = "crypto")]
-        use crate::typechecking::ty::byte;
-        #[cfg(feature = "crypto")]
-        use crate::typechecking::ty::tuple;
         use crate::typechecking::ty::{boolean, record};
-        #[cfg(feature = "crypto")]
-        use common::BUILTIN_CRYPTO_ERROR_ENUM;
         #[cfg(feature = "time")]
         use common::BUILTIN_TIME_ERROR_ENUM;
         use common::{BUILTIN_ENV_ERROR_ENUM, BUILTIN_IO_ERROR_ENUM};
@@ -1077,8 +1106,6 @@ impl Checker {
         #[cfg(feature = "time")]
         let time_err = Ty::Con(BUILTIN_TIME_ERROR_ENUM.into());
         let env_err = Ty::Con(BUILTIN_ENV_ERROR_ENUM.into());
-        #[cfg(feature = "crypto")]
-        let crypto_err = Ty::Con(BUILTIN_CRYPTO_ERROR_ENUM.into());
 
         let res_bool_io = result_app_ty(boolean(), io_err.clone());
         let res_unit_io = result_app_ty(unit_ty(), io_err.clone());
@@ -1106,19 +1133,6 @@ impl Checker {
         let res_strs_env = result_app_ty(vec_app_ty(string()), env_err.clone());
         let res_unit_env = result_app_ty(unit_ty(), env_err.clone());
         let res_int_env = result_app_ty(int(), env_err);
-
-        #[cfg(feature = "crypto")]
-        let bytes = vec_app_ty(byte());
-        #[cfg(feature = "crypto")]
-        let res_bytes_crypto = result_app_ty(bytes.clone(), crypto_err.clone());
-        #[cfg(feature = "crypto")]
-        let res_bool_crypto = result_app_ty(boolean(), crypto_err.clone());
-        #[cfg(feature = "crypto")]
-        let res_int_crypto = result_app_ty(int(), crypto_err.clone());
-        #[cfg(feature = "crypto")]
-        let res_unit_crypto = result_app_ty(unit_ty(), crypto_err.clone());
-        #[cfg(feature = "crypto")]
-        let keypair = tuple(vec![bytes.clone(), bytes.clone()]);
 
         let ty = match registry {
             "fs_exists" | "fs_is_file" | "fs_is_dir" | "fs_is_symlink" => {
@@ -1165,58 +1179,6 @@ impl Checker {
             "env_set_var" => fun(&[string(), string()], res_unit_env.clone()),
             "env_exec" => fun(&[string(), vec_app_ty(string())], res_int_env),
             "env_exit" => fun(&[int()], unit_ty()),
-
-            #[cfg(feature = "crypto")]
-            "crypto_sha256" | "crypto_sha512" | "crypto_blake3" => {
-                fun(&[bytes.clone()], res_bytes_crypto.clone())
-            }
-            #[cfg(feature = "crypto")]
-            "crypto_hasher_init" => fun(&[string()], res_int_crypto.clone()),
-            #[cfg(feature = "crypto")]
-            "crypto_hasher_update" => fun(&[int(), bytes.clone()], res_unit_crypto.clone()),
-            #[cfg(feature = "crypto")]
-            "crypto_hasher_finalize" => fun(&[int()], res_bytes_crypto.clone()),
-            #[cfg(feature = "crypto")]
-            "crypto_hmac_sha256" | "crypto_hmac_sha512" => {
-                fun(&[bytes.clone(), bytes.clone()], res_bytes_crypto.clone())
-            }
-            #[cfg(feature = "crypto")]
-            "crypto_hmac_verify_sha256" => fun(
-                &[bytes.clone(), bytes.clone(), bytes.clone()],
-                res_bool_crypto.clone(),
-            ),
-            #[cfg(feature = "crypto")]
-            "crypto_random_bytes" => fun(&[int()], res_bytes_crypto.clone()),
-            #[cfg(feature = "crypto")]
-            "crypto_random_u64" => fun(&[], res_int_crypto),
-            #[cfg(feature = "crypto")]
-            "crypto_chacha20_poly1305_encrypt"
-            | "crypto_chacha20_poly1305_decrypt"
-            | "crypto_aes_256_gcm_encrypt"
-            | "crypto_aes_256_gcm_decrypt" => fun(
-                &[bytes.clone(), bytes.clone(), bytes.clone(), bytes.clone()],
-                res_bytes_crypto.clone(),
-            ),
-            #[cfg(feature = "crypto")]
-            "crypto_ed25519_generate" | "crypto_x25519_generate" => {
-                fun(&[], result_app_ty(keypair.clone(), crypto_err.clone()))
-            }
-            #[cfg(feature = "crypto")]
-            "crypto_ed25519_sign" | "crypto_x25519_shared_secret" => {
-                fun(&[bytes.clone(), bytes.clone()], res_bytes_crypto.clone())
-            }
-            #[cfg(feature = "crypto")]
-            "crypto_ed25519_verify" => fun(
-                &[bytes.clone(), bytes.clone(), bytes.clone()],
-                res_bool_crypto.clone(),
-            ),
-            #[cfg(feature = "crypto")]
-            "crypto_argon2id_hash" | "crypto_argon2id_verify" => {
-                fun(&[bytes.clone(), bytes.clone()], res_unit_crypto)
-            }
-            #[cfg(feature = "crypto")]
-            "crypto_ct_eq" => fun(&[bytes.clone(), bytes.clone()], res_bool_crypto),
-
 
             _ => {
                 let mut msg = Message::error(
@@ -1524,6 +1486,7 @@ impl Checker {
         // `fn_param_names` was cleared above — reinstall Vec / Range method ABI.
         self.register_builtin_vec();
         self.register_builtin_range();
+        self.register_builtin_stream();
         self.register_builtin_call_sigs();
 
         // Implicit `use prelude::*; use prelude::ops::*;` — FFI stays out.

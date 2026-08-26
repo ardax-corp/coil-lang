@@ -7213,7 +7213,7 @@ fn main() {
         use machine::{ENV_WIRING, FS_WIRING};
 
         let mut c = Checker::new();
-        #[allow(unused_mut)] // extended only when time/crypto features are on
+        #[allow(unused_mut)] // extended only when time feature is on
         let mut names: Vec<&str> = FS_WIRING
             .iter()
             .chain(ENV_WIRING.iter())
@@ -7223,12 +7223,8 @@ fn main() {
         {
             names.extend(machine::TIME_WIRING.iter().map(|&(n, _, _)| n));
         }
-        #[cfg(feature = "crypto")]
-        {
-            names.extend(machine::CRYPTO_WIRING.iter().map(|&(n, _, _)| n));
-        }
-        #[cfg(all(feature = "time", feature = "crypto"))]
-        assert_eq!(names.len(), 63);
+        #[cfg(feature = "time")]
+        assert_eq!(names.len(), 40);
         for name in names {
             let _ = c.host_fn_scheme(name, 0..0);
         }

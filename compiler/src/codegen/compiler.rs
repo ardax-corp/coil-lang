@@ -6747,6 +6747,45 @@ impl Compiler {
         self.emit_range_to_vec_thunk("RangeInclusive::__float_to_vec".into(), true, true);
     }
 
+    /// Inherent `Stream::attach` / `Stream::park` bodies (HostInvoke thunks).
+    fn emit_stream_method_thunks(&mut self) {
+        let owner = crate::typechecking::ty::STREAM;
+        let methods = self.context.methods.entry(owner.to_string()).or_default();
+        methods.insert("attach".to_string(), format!("{owner}::attach"));
+        methods.insert("park".to_string(), format!("{owner}::park"));
+
+        let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32]| {
+            if compiler.functions.contains_key(&fqn) {
+                return;
+            }
+            let Some(native_id) = compiler.native_id(native) else {
+                return;
+            };
+            compiler.bind_function_entry(fqn);
+            compiler
+                .bytecode
+                .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
+            for &slot in slots {
+                compiler.bytecode.push_load(slot);
+            }
+            compiler.bytecode.push_make_tuple(slots.len() as u32);
+            compiler.bytecode.push_host_invoke(slots.len() as u32);
+            compiler.bytecode.push_return();
+        };
+        emit_host(
+            self,
+            format!("{owner}::attach"),
+            machine::STREAM_ATTACH_NATIVE,
+            &[0, 1, 2, 3, 4, 5],
+        );
+        emit_host(
+            self,
+            format!("{owner}::park"),
+            machine::STREAM_PARK_NATIVE,
+            &[0],
+        );
+    }
+
     fn emit_range_to_vec_thunk(&mut self, fqn: String, inclusive: bool, float: bool) {
         if self.functions.contains_key(&fqn) {
             return;
@@ -15462,6 +15501,7 @@ impl Compiler {
         }
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();
+        self.emit_stream_method_thunks();
         // Builtin dictionary thunks are emitted immediately after the
         // prologue and before user code. Keep `program_start_offset`
         // pointing at the first user byte so `extern` prologue JMPs

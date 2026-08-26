@@ -4,9 +4,6 @@ use std::collections::{HashMap, HashSet};
 
 use super::AddrHashBuilder;
 
-#[cfg(feature = "crypto")]
-use crate::crypto_hasher_state::ObjCryptoHasher;
-
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
 
@@ -290,10 +287,6 @@ impl Heap {
             Object::RwLock(l) => {
                 l.release();
             }
-            #[cfg(feature = "crypto")]
-            Object::CryptoHasher(h) => {
-                h.release();
-            }
         }
     }
 
@@ -390,18 +383,6 @@ impl Heap {
     /// Find a heap object by its address (O(1) via addr index).
     pub fn find_object_by_addr(&self, addr: u64) -> Option<Object> {
         self.addr_index.get(&addr).copied()
-    }
-
-    #[cfg(feature = "crypto")]
-    pub fn with_crypto_hasher<R>(
-        &mut self,
-        addr: u64,
-        f: impl FnOnce(&mut ObjCryptoHasher) -> R,
-    ) -> Option<R> {
-        if let Some(Object::CryptoHasher(gc)) = self.find_object_by_addr(addr) {
-            return Some(f(gc.payload_mut()));
-        }
-        None
     }
 
     /// Write back scratch-buffer values into a live `ObjArray`.
@@ -513,8 +494,6 @@ pub type RefSender = Gc<ObjSender>;
 pub type RefReceiver = Gc<ObjReceiver>;
 pub type RefThreadMutex = Gc<ObjThreadMutex>;
 pub type RefRwLock = Gc<ObjRwLock>;
-#[cfg(feature = "crypto")]
-pub type RefCryptoHasher = Gc<ObjCryptoHasher>;
 
 /// Kind of host-backed IO stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -527,8 +506,8 @@ pub enum StreamKind {
     TcpListener,
     /// Datagram socket (`io::net::udp::bind` / `connect`).
     Udp,
-    /// TLS-wrapped TCP (leftover `tls_*_enable` / coil-tls `dload("tls")`).
-    Tls,
+    /// Package IO attached in place (`Stream.attach`).
+    Attached,
 }
 
 #[derive(Clone, Copy)]
@@ -553,8 +532,6 @@ pub enum Object {
     Receiver(RefReceiver),
     Mutex(RefThreadMutex),
     RwLock(RefRwLock),
-    #[cfg(feature = "crypto")]
-    CryptoHasher(RefCryptoHasher),
 }
 
 impl Object {
@@ -579,9 +556,7 @@ impl Object {
             Self::Receiver(r) => r.mark(),
             Self::Mutex(m) => m.mark(),
             Self::RwLock(l) => l.mark(),
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(h) => h.mark(),
-                    };
+        };
         if marked {
             grey_objects.push(*self);
         }
@@ -608,9 +583,7 @@ impl Object {
             Self::Receiver(r) => r.unmark(),
             Self::Mutex(m) => m.unmark(),
             Self::RwLock(l) => l.unmark(),
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(h) => h.unmark(),
-                    }
+        }
     }
 
     /// Return whether the object is marked.
@@ -635,9 +608,7 @@ impl Object {
             Self::Receiver(r) => r.is_marked(),
             Self::Mutex(m) => m.is_marked(),
             Self::RwLock(l) => l.is_marked(),
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(h) => h.is_marked(),
-                    }
+        }
     }
 
     /// Mark direct heap references held by this object.
@@ -696,9 +667,7 @@ impl Object {
             Self::Receiver(_) => {}
             Self::Mutex(_) => {}
             Self::RwLock(_) => {}
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(_) => {}
-                    }
+        }
     }
 
     /// Get the next object reference in the linked list.
@@ -723,9 +692,7 @@ impl Object {
             Self::Receiver(r) => r.get_next(),
             Self::Mutex(m) => m.get_next(),
             Self::RwLock(l) => l.get_next(),
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(h) => h.get_next(),
-                    }
+        }
     }
 
     /// Set the next object reference in the linked list.
@@ -749,9 +716,7 @@ impl Object {
             Self::Receiver(r) => r.set_next(next),
             Self::Mutex(m) => m.set_next(next),
             Self::RwLock(l) => l.set_next(next),
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(h) => h.set_next(next),
-                    }
+        }
     }
 
     #[must_use]
@@ -775,9 +740,7 @@ impl Object {
             Self::Receiver(r) => r.as_ptr() as u64,
             Self::Mutex(m) => m.as_ptr() as u64,
             Self::RwLock(l) => l.as_ptr() as u64,
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(h) => h.as_ptr() as u64,
-                    }
+        }
     }
 }
 
@@ -802,9 +765,7 @@ impl GcSized for Object {
             Self::Receiver(r) => r.size(),
             Self::Mutex(m) => m.size(),
             Self::RwLock(l) => l.size(),
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(h) => h.size(),
-                    }
+        }
     }
 }
 
@@ -829,9 +790,7 @@ impl fmt::Display for Object {
             Self::Receiver(_) => write!(f, "<receiver 0x{:08x}>", self.addr()),
             Self::Mutex(_) => write!(f, "<mutex 0x{:08x}>", self.addr()),
             Self::RwLock(_) => write!(f, "<rwlock 0x{:08x}>", self.addr()),
-            #[cfg(feature = "crypto")]
-            Self::CryptoHasher(_) => write!(f, "<crypto_hasher 0x{:08x}>", self.addr()),
-                    }
+        }
     }
 }
 
@@ -857,8 +816,6 @@ impl Object {
             | Self::Receiver(_)
             | Self::Mutex(_)
             | Self::RwLock(_) => std::ptr::null(),
-                        #[cfg(feature = "crypto")]
-            Self::CryptoHasher(_) => std::ptr::null(),
         }
     }
 }
@@ -1039,26 +996,24 @@ pub struct ObjFn {
     pub captures: Vec<Value>,
 }
 
-/// Host-backed non-blocking IO stream (file / stdio / TCP / UDP / TLS).
+/// Host-backed non-blocking IO stream (file / stdio / TCP / UDP / attached).
 pub struct ObjStream {
     pub handle: Option<crate::io_handle::NativeHandle>,
     pub kind: StreamKind,
     pub closed: bool,
-    /// Soft deadline for sync read adapters / TLS handshake reads (`None` = wait forever).
+    /// Soft deadline for sync read adapters / handshake reads (`None` = wait forever).
     pub read_timeout: Option<std::time::Duration>,
-    /// Soft deadline for sync write adapters / TLS handshake writes (`None` = wait forever).
+    /// Soft deadline for sync write adapters / handshake writes (`None` = wait forever).
     pub write_timeout: Option<std::time::Duration>,
-    /// TLS session: a dloaded `coil_tls_*` opaque pointer (`libtls`).
-    pub tls: Option<crate::tls_native::TlsSessionSlot>,
+    /// Package session pointer + C vtable (`Stream.attach`).
+    pub attached: Option<crate::stream_attach::AttachedIo>,
 }
 
 impl Drop for ObjStream {
     fn drop(&mut self) {
-        if self.kind == StreamKind::Tls {
-            if let Some(slot) = self.tls.take() {
-                // close_notify if the fd is still here, then free.
-                crate::tls_native::drop_slot(self.handle.as_mut(), slot);
-            }
+        if let Some(slot) = self.attached.take() {
+            // shutdown when the fd is still here, then free.
+            slot.shutdown_then_free(self.handle.as_mut());
         }
         // NativeHandle closes on drop; clear explicitly for clarity.
         self.handle.take();
@@ -2149,21 +2104,6 @@ mod tests {
             heap.find_object_by_addr(s_obj.addr()),
             Some(Object::String(_))
         ));
-    }
-
-    #[cfg(feature = "crypto")]
-    #[test]
-    fn with_crypto_hasher_rejects_wrong_type() {
-        let mut heap = Heap::default();
-        let (obj, _) = heap.alloc(ObjString::from("not-hasher"), Object::String);
-        assert!(
-            heap.with_crypto_hasher(obj.addr(), |_| panic!("must not run"))
-                .is_none()
-        );
-        assert!(
-            heap.with_crypto_hasher(0, |_| panic!("must not run"))
-                .is_none()
-        );
     }
 
     #[test]
