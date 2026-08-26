@@ -914,6 +914,12 @@ mod tests {
     fn pgo_hit_is_appended_after_vec_helpers() {
         let mut names = Vec::new();
         build_standard_host_natives(|name, _id| names.push(name.to_string()));
-        assert_eq!(names.last().map(String::as_str), Some(PGO_HIT_NATIVE));
+        let pgo = names
+            .iter()
+            .position(|n| n == PGO_HIT_NATIVE)
+            .expect("pgo_hit");
+        assert_eq!(names.get(pgo + 1).map(String::as_str), Some(STREAM_ATTACH_NATIVE));
+        assert_eq!(names.get(pgo + 2).map(String::as_str), Some(STREAM_PARK_NATIVE));
+        assert_eq!(names.last().map(String::as_str), Some(STREAM_PARK_NATIVE));
     }
 }
