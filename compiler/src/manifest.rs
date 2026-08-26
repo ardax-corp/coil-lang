@@ -43,6 +43,20 @@ impl std::error::Error for ManifestError {}
 pub struct PackageInfo {
     pub name: String,
     pub version: String,
+    /// Optional Coil engine semver range (e.g. `">=0.1.0"`). Stored only.
+    pub coil: Option<String>,
+    /// Optional include-hook path, relative to this package checkout.
+    pub include: Option<PathBuf>,
+}
+
+/// Current-project lifecycle scripts (`spool install` / `update`).
+/// Missing keys are `None` (no-op for later runners).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Scripts {
+    pub pre_install: Option<PathBuf>,
+    pub post_install: Option<PathBuf>,
+    pub pre_update: Option<PathBuf>,
+    pub post_update: Option<PathBuf>,
 }
 
 /// A `[dependencies]` entry: either a git source, or a local path.
@@ -76,10 +90,12 @@ pub struct Manifest {
     pub ffi_search_paths: Vec<PathBuf>,
     /// When false, `env::exec` fails at runtime with `ExecDisabled`.
     pub allow_exec: bool,
-    /// Optional `[package]` block (`name` + `version`).
+    /// Optional `[package]` block (`name` + `version`, plus optional `coil` / `include`).
     pub package: Option<PackageInfo>,
     /// `[dependencies]` entries in declaration order.
     pub dependencies: Vec<(String, DependencySpec)>,
+    /// `[scripts]` paths for the current project. All keys optional.
+    pub scripts: Scripts,
 }
 
 impl Default for Manifest {
@@ -94,6 +110,7 @@ impl Default for Manifest {
             allow_exec: false,
             package: None,
             dependencies: Vec::new(),
+            scripts: Scripts::default(),
         }
     }
 }
@@ -147,8 +164,11 @@ impl Manifest {
         let mut allow_exec: Option<bool> = None;
         let mut package_name: Option<String> = None;
         let mut package_version: Option<String> = None;
+        let mut package_coil: Option<String> = None;
+        let mut package_include: Option<PathBuf> = None;
         let mut saw_package_section = false;
         let mut dependencies: Vec<(String, DependencySpec)> = Vec::new();
+        let mut scripts = Scripts::default();
         let mut current_section: Option<&'static str> = None;
 
         for (idx, raw_line) in source.lines().enumerate() {
@@ -174,6 +194,7 @@ impl Manifest {
                         Some("package")
                     }
                     "dependencies" => Some("dependencies"),
+                    "scripts" => Some("scripts"),
                     other => {
                         return Err(ManifestError::Parse {
                             line: line_num,
@@ -250,6 +271,64 @@ impl Manifest {
                     }
                     package_version = Some(parsed);
                 }
+                ("package", "coil") => {
+                    let parsed = parse_string(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected string, got `{}`", value),
+                    })?;
+                    if package_coil.is_some() {
+                        return Err(ManifestError::Parse {
+                            line: line_num,
+                            message: "duplicate key `package.coil`".to_string(),
+                        });
+                    }
+                    package_coil = Some(parsed);
+                }
+                ("package", "include") => {
+                    let parsed = parse_string(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected string, got `{}`", value),
+                    })?;
+                    if package_include.is_some() {
+                        return Err(ManifestError::Parse {
+                            line: line_num,
+                            message: "duplicate key `package.include`".to_string(),
+                        });
+                    }
+                    package_include = Some(PathBuf::from(parsed));
+                }
+                ("scripts", "pre_install") => {
+                    assign_script_path(
+                        &mut scripts.pre_install,
+                        "scripts.pre_install",
+                        value,
+                        line_num,
+                    )?;
+                }
+                ("scripts", "post_install") => {
+                    assign_script_path(
+                        &mut scripts.post_install,
+                        "scripts.post_install",
+                        value,
+                        line_num,
+                    )?;
+                }
+                ("scripts", "pre_update") => {
+                    assign_script_path(
+                        &mut scripts.pre_update,
+                        "scripts.pre_update",
+                        value,
+                        line_num,
+                    )?;
+                }
+                ("scripts", "post_update") => {
+                    assign_script_path(
+                        &mut scripts.post_update,
+                        "scripts.post_update",
+                        value,
+                        line_num,
+                    )?;
+                }
                 ("dependencies", dep_name) => {
                     if dependencies.iter().any(|(n, _)| n == dep_name) {
                         return Err(ManifestError::Parse {
@@ -283,7 +362,12 @@ impl Manifest {
                     key: "name",
                 });
             }
-            (_, Some(name), Some(version)) => Some(PackageInfo { name, version }),
+            (_, Some(name), Some(version)) => Some(PackageInfo {
+                name,
+                version,
+                coil: package_coil,
+                include: package_include,
+            }),
             (_, None, Some(_)) => {
                 return Err(ManifestError::MissingKey {
                     section: "package",
@@ -305,6 +389,7 @@ impl Manifest {
             allow_exec: allow_exec.unwrap_or(false),
             package,
             dependencies,
+            scripts,
         })
     }
 
@@ -444,6 +529,26 @@ fn parse_string(value: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
+fn assign_script_path(
+    slot: &mut Option<PathBuf>,
+    fq: &str,
+    value: &str,
+    line_num: usize,
+) -> Result<(), ManifestError> {
+    let parsed = parse_string(value).ok_or(ManifestError::Parse {
+        line: line_num,
+        message: format!("expected string, got `{value}`"),
+    })?;
+    if slot.is_some() {
+        return Err(ManifestError::Parse {
+            line: line_num,
+            message: format!("duplicate key `{fq}`"),
+        });
+    }
+    *slot = Some(PathBuf::from(parsed));
+    Ok(())
+}
+
 fn parse_bool(value: &str) -> Option<bool> {
     match value.trim() {
         "true" => Some(true),
@@ -552,6 +657,7 @@ mod tests {
         assert_eq!(m.entry, None);
         assert!(m.package.is_none());
         assert!(m.dependencies.is_empty());
+        assert_eq!(m.scripts, Scripts::default());
     }
 
     #[test]
@@ -670,6 +776,7 @@ mod tests {
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
+            scripts: Scripts::default(),
         };
         let resolved = m.resolve_use(&tmp, &["lib_x".into()], "foo");
         assert!(
@@ -768,6 +875,7 @@ mod tests {
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
+            scripts: Scripts::default(),
         };
         let ns = m.namespace_of(&tmp, &file);
         assert_eq!(ns, Some("core::ffi::dload".to_string()));
@@ -790,6 +898,7 @@ mod tests {
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
+            scripts: Scripts::default(),
         };
         let ns = m.namespace_of(&tmp, &file);
         assert_eq!(ns, None);
@@ -868,6 +977,8 @@ mod tests {
             Some(PackageInfo {
                 name: "my_app".into(),
                 version: "0.1.0".into(),
+                coil: None,
+                include: None,
             })
         );
         assert_eq!(
@@ -901,6 +1012,7 @@ mod tests {
         let m = Manifest::parse(src).unwrap();
         assert!(m.package.is_none());
         assert!(m.dependencies.is_empty());
+        assert_eq!(m.scripts, Scripts::default());
         assert_eq!(m.roots, vec![PathBuf::from("./src")]);
         assert_eq!(m.entry, Some(PathBuf::from("./src/main.hy")));
     }
@@ -1296,6 +1408,8 @@ local_lib = { path = "../local-lib" }
             Some(PackageInfo {
                 name: "spool_consumer".into(),
                 version: "0.1.0".into(),
+                coil: None,
+                include: None,
             })
         );
         assert_eq!(
@@ -1322,5 +1436,200 @@ local_lib = { path = "../local-lib" }
             vec![PathBuf::from("./src"), PathBuf::from("./.spool/deps")]
         );
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parse_scripts_section_accepts_all_keys() {
+        let src = r#"
+            [scripts]
+            pre_install = "./scripts/pre-install.sh"
+            post_install = "./scripts/post-install.sh"
+            pre_update = "./scripts/pre-update.sh"
+            post_update = "./scripts/post-update.sh"
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(
+            m.scripts,
+            Scripts {
+                pre_install: Some(PathBuf::from("./scripts/pre-install.sh")),
+                post_install: Some(PathBuf::from("./scripts/post-install.sh")),
+                pre_update: Some(PathBuf::from("./scripts/pre-update.sh")),
+                post_update: Some(PathBuf::from("./scripts/post-update.sh")),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_scripts_missing_keys_are_none() {
+        let src = r#"
+            [scripts]
+            post_install = "./hooks/after.sh"
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(
+            m.scripts.pre_install, None,
+            "omitted scripts keys must stay None"
+        );
+        assert_eq!(
+            m.scripts.post_install,
+            Some(PathBuf::from("./hooks/after.sh"))
+        );
+        assert_eq!(m.scripts.pre_update, None);
+        assert_eq!(m.scripts.post_update, None);
+    }
+
+    #[test]
+    fn parse_unknown_scripts_key_errors() {
+        let src = "[scripts]\npre_build = \"./nope.sh\"\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(
+                    message.contains("unknown key `scripts.pre_build`"),
+                    "got {message}"
+                );
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_duplicate_scripts_key_errors() {
+        let src = "[scripts]\npre_install = \"./a.sh\"\npre_install = \"./b.sh\"\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(
+                    message.contains("duplicate key `scripts.pre_install`"),
+                    "got {message}"
+                );
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_hooks_section_is_unknown() {
+        let src = "[hooks]\ninclude = \"./hooks/include.sh\"\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("unknown section"), "got {message}");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_package_include_accepts_string_path() {
+        let src = r#"
+            [package]
+            name = "native-bits"
+            version = "0.1.0"
+            include = "./hooks/include.sh"
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        let pkg = m.package.expect("package");
+        assert_eq!(pkg.name, "native-bits");
+        assert_eq!(pkg.include, Some(PathBuf::from("./hooks/include.sh")));
+        assert_eq!(pkg.coil, None);
+    }
+
+    #[test]
+    fn parse_package_coil_accepts_semver_range() {
+        let src = r#"
+            [package]
+            name = "http"
+            version = "0.1.0"
+            coil = ">=0.1.0"
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        let pkg = m.package.expect("package");
+        assert_eq!(pkg.coil.as_deref(), Some(">=0.1.0"));
+        assert_eq!(pkg.include, None);
+    }
+
+    #[test]
+    fn parse_package_coil_and_include_together() {
+        let src = r#"
+            [package]
+            name = "http"
+            version = "0.1.0"
+            coil = ">=0.1.0"
+            include = "./hooks/include.sh"
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        let pkg = m.package.expect("package");
+        assert_eq!(pkg.coil.as_deref(), Some(">=0.1.0"));
+        assert_eq!(pkg.include, Some(PathBuf::from("./hooks/include.sh")));
+        assert_eq!(m.scripts, Scripts::default());
+    }
+
+    #[test]
+    fn parse_unknown_package_key_still_errors_with_new_fields() {
+        let src = "[package]\nname = \"x\"\nversion = \"0.1.0\"\ncoil = \">=0.1.0\"\nauthors = \"nope\"\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(
+                    message.contains("unknown key `package.authors`"),
+                    "got {message}"
+                );
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_omit_scripts_include_and_coil_still_works() {
+        let src = r#"
+            [package]
+            name = "my_app"
+            version = "0.1.0"
+
+            [module]
+            roots = ["./src"]
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        let pkg = m.package.expect("package");
+        assert_eq!(pkg.name, "my_app");
+        assert_eq!(pkg.version, "0.1.0");
+        assert_eq!(pkg.coil, None);
+        assert_eq!(pkg.include, None);
+        assert_eq!(m.scripts, Scripts::default());
+    }
+
+    #[test]
+    fn parse_package_still_requires_name_and_version_with_coil() {
+        let src = "[package]\ncoil = \">=0.1.0\"\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::MissingKey { section, key } => {
+                assert_eq!(section, "package");
+                assert_eq!(key, "name");
+            }
+            other => panic!("expected MissingKey, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_duplicate_package_coil_and_include_errors() {
+        let dup_coil =
+            "[package]\nname = \"a\"\nversion = \"0.1.0\"\ncoil = \">=0.1.0\"\ncoil = \"^0.2\"\n";
+        match Manifest::parse(dup_coil).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(
+                    message.contains("duplicate key `package.coil`"),
+                    "got {message}"
+                );
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+
+        let dup_include = "[package]\nname = \"a\"\nversion = \"0.1.0\"\ninclude = \"./a.sh\"\ninclude = \"./b.sh\"\n";
+        match Manifest::parse(dup_include).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(
+                    message.contains("duplicate key `package.include`"),
+                    "got {message}"
+                );
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
     }
 }

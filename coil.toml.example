@@ -13,6 +13,8 @@
 # [package]
 # name = "my_app"
 # version = "0.1.0"
+# coil = ">=0.1.0"                 # optional engine range; omit = no constraint
+# include = "./hooks/include.sh"    # optional; relative to this package checkout
 
 [module]
 # Search roots for `use` resolution. Each path is relative to the
@@ -45,6 +47,16 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # [dependencies]
 # http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
 # local_http = { path = "../local-http" }
+
+# --------------------------------------------------------------------------
+# Lifecycle scripts (current project only)
+# --------------------------------------------------------------------------
+#
+# [scripts]
+# pre_install = "./scripts/pre-install.sh"
+# post_install = "./scripts/post-install.sh"
+# pre_update = "./scripts/pre-update.sh"
+# post_update = "./scripts/post-update.sh"
 
 # --------------------------------------------------------------------------
 # Discovery algorithm
