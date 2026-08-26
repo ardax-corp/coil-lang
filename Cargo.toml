@@ -40,7 +40,7 @@ name = "fib"
 harness = false
 
 [features]
-default = ["crypto", "time"]
+default = ["time"]
 crypto = ["machine/crypto", "compiler/crypto", "coil-cli/crypto"]
 time = ["machine/time", "compiler/time", "coil-cli/time"]
 
