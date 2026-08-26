@@ -193,9 +193,8 @@ Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
 
 ## Decision
 
-**Defer.** Pins are the product. Close
-[COI-198](https://linear.app/ardax/issue/COI-198) after this note lands. Do
-not file a Feature for ArrayPtr.
+**Shipped.** Pins are the product. [COI-198](https://linear.app/ardax/issue/COI-198)
+is Done. Do not file a Feature for ArrayPtr.
 
 Leave unpinned hashing as an ordinary leftover under the existing bounds
 refusals. Yield is a barrier, not a new handle type.

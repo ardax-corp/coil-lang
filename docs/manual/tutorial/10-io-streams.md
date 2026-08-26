@@ -142,7 +142,7 @@ See `examples/io_udp.hy`.
 | `accept(s)` | `→ Result<Stream, IoError>` | Non-blocking; `WouldBlock` if empty |
 | `io::sync::accept_wait(s)` | same | Userland: `accept` + `await_readable` |
 | `peer_addr(s)` / `local_addr(s)` | `→ Result<(string, int), IoError>` | Connected peer / local socket address |
-| `set_nodelay(s, enabled)` | `→ Result<(), IoError>` | Toggle `TCP_NODELAY` on TCP/TLS streams |
+| `set_nodelay(s, enabled)` | `→ Result<(), IoError>` | Toggle `TCP_NODELAY` on TCP streams (attached packages share the fd) |
 | `shutdown(s, how)` | `→ Result<(), IoError>` | Half-close: `0` read, `1` write, `2` both |
 
 TLS wrap of a TCP stream is [coil-tls](https://github.com/ardax-corp/coil-tls)

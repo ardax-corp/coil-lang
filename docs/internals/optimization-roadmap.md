@@ -203,6 +203,9 @@ That reverses the original [COI-85](https://linear.app/ardax/issue/COI-85)
 growing-array, alias-push, and impure helper-call loops stay checked. Pure user
 helpers on `b[i]` no longer block the proof
 ([COI-99](https://linear.app/ardax/issue/COI-99)).
+Pins *are* the ArrayPtr handle ([COI-198](https://linear.app/ardax/issue/COI-198));
+do not add a second opcode. Unpinned `Index` hashing is leftover cost, not a
+new product.
 
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):
@@ -210,11 +213,6 @@ What is still open (full refusal table in
 - **Impure calls in counted loops.** Host natives, FFI, `FORMAT`, field get/set,
   `CallIndirect`, `ArrayPush` / `MakeArray`, and any callee purity cannot prove
   still refuse the region. `LEQ` / `GEQ` headers are still not proofs.
-- **ArrayPtr / pinned-handle layout** — **deferred.** `#192` already pins proven
-  loops (`IndexPin*`, archive minor 13). Pins *are* that handle; do not add a
-  second opcode. Close [COI-198](https://linear.app/ardax/issue/COI-198) after
-  [array-pin.md](array-pin.md). Unpinned `Index` hashing is leftover cost, not a
-  new product.
 
 ### 3. Allocation and GC fast paths
 
