@@ -1632,4 +1632,70 @@ local_lib = { path = "../local-lib" }
             other => panic!("expected Parse, got {other:?}"),
         }
     }
+
+    #[test]
+    fn parse_package_coil_rejects_non_string() {
+        let src = "[package]\nname = \"a\"\nversion = \"0.1.0\"\ncoil = 1\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected string"), "got {message}");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_package_include_rejects_non_string() {
+        let src = "[package]\nname = \"a\"\nversion = \"0.1.0\"\ninclude = true\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected string"), "got {message}");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_scripts_pre_install_rejects_non_string() {
+        let src = "[scripts]\npre_install = 1\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected string"), "got {message}");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_scripts_post_install_rejects_non_string() {
+        let src = "[scripts]\npost_install = true\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected string"), "got {message}");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_scripts_pre_update_rejects_non_string() {
+        let src = "[scripts]\npre_update = 1\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected string"), "got {message}");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_scripts_post_update_rejects_non_string() {
+        let src = "[scripts]\npost_update = true\n";
+        match Manifest::parse(src).unwrap_err() {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected string"), "got {message}");
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
+    }
 }
