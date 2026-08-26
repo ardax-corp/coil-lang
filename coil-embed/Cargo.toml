@@ -12,5 +12,4 @@ coil-cli = { path = "../coil-cli", default-features = false }
 
 [features]
 default = ["time"]
-crypto = ["coil-cli/crypto"]
 time = ["coil-cli/time"]

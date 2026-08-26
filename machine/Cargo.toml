@@ -6,8 +6,6 @@ edition = "2024"
 [features]
 default = ["time"]
 debugger = []
-# Empty: virtual crypto HostInvoke was deleted (COI-216). coil-crypto is a package.
-crypto = []
 time = ["dep:chrono"]
 vm_profile = []
 

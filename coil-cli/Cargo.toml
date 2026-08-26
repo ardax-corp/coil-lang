@@ -10,5 +10,4 @@ rkyv = "0.8.12"
 
 [features]
 default = ["time"]
-crypto = ["machine/crypto"]
 time = ["machine/time"]

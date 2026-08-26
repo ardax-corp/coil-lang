@@ -8,9 +8,6 @@ use std::time::Duration;
 
 fn coil_embed_build_args(target_dir: &Path) -> Vec<String> {
     let mut enabled = Vec::new();
-    if cfg!(feature = "crypto") {
-        enabled.push("crypto");
-    }
     if cfg!(feature = "time") {
         enabled.push("time");
     }
@@ -96,9 +93,6 @@ fn coil_embed_build_args_mirrors_optional_features() {
     assert_eq!(args[6], target_dir.display().to_string());
 
     let mut expected = Vec::new();
-    if cfg!(feature = "crypto") {
-        expected.push("crypto");
-    }
     if cfg!(feature = "time") {
         expected.push("time");
     }

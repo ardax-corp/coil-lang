@@ -6,7 +6,6 @@ edition = "2024"
 [features]
 default = ["time"]
 dissect = []
-crypto = ["machine/crypto"]
 time = ["machine/time"]
 pratt = []
 

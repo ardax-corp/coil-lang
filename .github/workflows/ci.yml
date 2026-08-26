@@ -33,11 +33,6 @@ jobs:
               mode: check
           - os: ubuntu-latest
             features:
-              id: crypto
-              flags: "--no-default-features --features crypto"
-              mode: check
-          - os: ubuntu-latest
-            features:
               id: time
               flags: "--no-default-features --features time"
               mode: check
