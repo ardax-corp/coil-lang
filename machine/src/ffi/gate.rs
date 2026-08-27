@@ -486,4 +486,32 @@ mod tests {
         assert!(!g.file_hash_allowed("crypto", &other));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn first_party_trusted_false_without_pin_is_denied() {
+        let g = DloadGate::from_consumer_trusted(
+            ["crypto", "tls", "regex", "time"],
+            &[],
+            std::iter::empty::<&str>(),
+        );
+        for stem in DLOAD_PRODUCTION_STEMS {
+            assert!(matches!(
+                g.check_request(stem),
+                Err(FfiError::LibraryDenied { .. })
+            ));
+            assert!(g.hash_required(stem));
+        }
+    }
+
+    #[test]
+    fn first_party_trusted_crypto_does_not_grant_tls() {
+        let g = DloadGate::from_consumer_trusted(["crypto", "tls"], &[], ["crypto"]);
+        assert!(g.check_request("crypto").is_ok());
+        assert!(!g.hash_required("crypto"));
+        assert!(matches!(
+            g.check_request("tls"),
+            Err(FfiError::LibraryDenied { .. })
+        ));
+        assert!(g.hash_required("tls"));
+    }
 }

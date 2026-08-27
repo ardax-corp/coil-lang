@@ -338,4 +338,21 @@ stem = 'plugin'
         )];
         assert!(trusted_extra_stems(&deps, &Lockfile::default()).is_empty());
     }
+
+    #[test]
+    fn trusted_coil_crypto_maps_to_crypto_stem() {
+        use crate::manifest::DependencySpec;
+        let deps = vec![(
+            "coil-crypto".into(),
+            DependencySpec::Git {
+                url: "https://example.com/coil-crypto.git".into(),
+                version: None,
+                rev: None,
+                trusted: true,
+            },
+        )];
+        let stems = trusted_extra_stems(&deps, &Lockfile::default());
+        assert!(stems.contains(&"coil-crypto".into()));
+        assert!(stems.contains(&"crypto".into()));
+    }
 }

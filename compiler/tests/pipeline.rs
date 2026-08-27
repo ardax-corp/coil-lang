@@ -2143,6 +2143,18 @@ fn main() {{
     )
 }
 
+fn first_party_dep_line(stem: &str, trusted: Option<bool>) -> String {
+    match trusted {
+        Some(true) => format!(
+            "{stem} = {{ git = \"https://example.com/coil-{stem}.git\", trusted = true }}\n"
+        ),
+        Some(false) => format!(
+            "{stem} = {{ git = \"https://example.com/coil-{stem}.git\", trusted = false }}\n"
+        ),
+        None => format!("{stem} = {{ git = \"https://example.com/coil-{stem}.git\" }}\n"),
+    }
+}
+
 fn dload_gate_for_project(
     test_name: &str,
     toml_extra: &str,
@@ -2604,6 +2616,154 @@ crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
     gate.check_request("crypto")
         .expect("bootstrap crypto allow+trusted must pass");
     assert!(!gate.hash_required("crypto"));
+}
+
+#[test]
+fn userland_dload_first_party_trusted_without_allow_is_denied() {
+    for stem in machine::DLOAD_PRODUCTION_STEMS {
+        let extra = format!("[dependencies]\n{}", first_party_dep_line(stem, Some(true)));
+        let output = run_userland_dload_project(
+            &format!("{stem}_trusted_no_allow"),
+            &extra,
+            None,
+            &dload_kind_program(&missing_abs_dload(stem)),
+        );
+        assert_eq!(output, "denied", "{stem} without [ffi] allow must be denied");
+    }
+}
+
+#[test]
+fn userland_dload_first_party_allow_plus_trusted_is_missing() {
+    for stem in machine::DLOAD_PRODUCTION_STEMS {
+        let extra = format!(
+            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            first_party_dep_line(stem, Some(true))
+        );
+        let output = run_userland_dload_project(
+            &format!("{stem}_allow_trusted"),
+            &extra,
+            None,
+            &dload_kind_program(&missing_abs_dload(stem)),
+        );
+        assert_eq!(
+            output, "missing",
+            "{stem} allow+trusted must skip hash; missing file is LibraryNotFound"
+        );
+    }
+}
+
+#[test]
+fn userland_dload_first_party_allow_without_hash_or_trusted_is_denied() {
+    for stem in machine::DLOAD_PRODUCTION_STEMS {
+        let extra = format!(
+            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            first_party_dep_line(stem, None)
+        );
+        let output = run_userland_dload_project(
+            &format!("{stem}_allow_omitted_trusted"),
+            &extra,
+            None,
+            &dload_kind_program(&missing_abs_dload(stem)),
+        );
+        assert_eq!(
+            output, "denied",
+            "{stem} allow without trusted and without pin must be denied"
+        );
+    }
+}
+
+#[test]
+fn userland_dload_first_party_allow_trusted_false_without_pin_is_denied() {
+    for stem in machine::DLOAD_PRODUCTION_STEMS {
+        let extra = format!(
+            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            first_party_dep_line(stem, Some(false))
+        );
+        let output = run_userland_dload_project(
+            &format!("{stem}_allow_trusted_false"),
+            &extra,
+            None,
+            &dload_kind_program(&missing_abs_dload(stem)),
+        );
+        assert_eq!(
+            output, "denied",
+            "{stem} trusted = false must not skip native sha256"
+        );
+    }
+}
+
+#[test]
+fn userland_dload_bootstrap_coil_crypto_trusted_is_missing() {
+    let extra = r#"
+[ffi]
+allow = ["crypto"]
+
+[dependencies]
+coil-crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
+"#;
+    let output = run_userland_dload_project(
+        "bootstrap_coil_crypto",
+        extra,
+        None,
+        &dload_kind_program(&missing_abs_dload("crypto")),
+    );
+    assert_eq!(output, "missing");
+}
+
+#[test]
+fn userland_dload_allowlisted_trusted_libc_is_denied() {
+    let extra = r#"
+[ffi]
+allow = ["libc"]
+
+[dependencies]
+libc = { git = "https://example.com/libc.git", trusted = true }
+"#;
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        run_userland_dload_project(
+            "trusted_allow_libc",
+            extra,
+            None,
+            &dload_kind_program("libc"),
+        )
+    }));
+    match panicked {
+        Ok(output) => assert_eq!(output, "denied"),
+        Err(payload) => {
+            let msg = panic_message(&payload);
+            assert!(
+                msg.contains("libc alias") && msg.contains("`libc`"),
+                "allow-listed libc must not grant dload; got panic {msg:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn pipeline_gate_first_party_allow_without_hash_or_trusted_is_denied() {
+    for stem in machine::DLOAD_PRODUCTION_STEMS {
+        let extra = format!(
+            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            first_party_dep_line(stem, None)
+        );
+        let gate = dload_gate_for_project(&format!("{stem}_gate_no_hash"), &extra, None);
+        assert_library_denied(&gate, stem, stem);
+        assert!(gate.hash_required(stem), "{stem} must require a lock hash");
+    }
+}
+
+#[test]
+fn pipeline_gate_first_party_allow_plus_trusted_skips_hash() {
+    for stem in machine::DLOAD_PRODUCTION_STEMS {
+        let extra = format!(
+            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            first_party_dep_line(stem, Some(true))
+        );
+        let gate = dload_gate_for_project(&format!("{stem}_gate_trusted"), &extra, None);
+        gate.check_request(stem)
+            .unwrap_or_else(|e| panic!("{stem} allow+trusted must pass, got {e:?}"));
+        assert!(!gate.hash_required(stem), "{stem} trusted must skip hash");
+    }
 }
 
 #[test]
