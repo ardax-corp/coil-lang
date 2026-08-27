@@ -1,15 +1,20 @@
 //! Read `coil.lock` native pins for extra `dload` stems.
 //!
 //! Spool owns writing this file. The compiler only extracts
-//! `[[package.native]] sha256` rows keyed by the enclosing package name.
+//! `[[package.native]] sha256` rows keyed by the enclosing package name,
+//! plus `stem`/`lib` so `trusted` deps can skip hash on that extra stem.
 //! First-party stems (`crypto`, `tls`, `regex`, `time`) do not need these pins.
 
 use std::path::Path;
+
+use crate::manifest::DependencySpec;
 
 /// Parsed lock subset used by the FFI gate.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Lockfile {
     pub native_pins: Vec<(String, String)>,
+    /// `(package name, dload stem)` from `[[package.native]]` (`stem`/`lib` or coil- strip).
+    package_stems: Vec<(String, String)>,
 }
 
 impl Lockfile {
@@ -25,6 +30,7 @@ impl Lockfile {
     /// Parse lock text. Unknown keys are ignored. Invalid native rows are skipped.
     pub fn parse(source: &str) -> Self {
         let mut pins = Vec::new();
+        let mut package_stems = Vec::new();
         let mut pkg_name = String::new();
         let mut native_sha = None;
         let mut native_stem = None;
@@ -33,11 +39,20 @@ impl Lockfile {
         let flush_native = |pkg: &str,
                             sha: &Option<String>,
                             stem: &Option<String>,
-                            pins: &mut Vec<(String, String)>| {
+                            pins: &mut Vec<(String, String)>,
+                            package_stems: &mut Vec<(String, String)>| {
+            if pkg.is_empty() {
+                return;
+            }
+            let mapped = dload_stem_for_package(pkg, stem.as_deref());
+            if stem.is_some() || sha.is_some() {
+                if !mapped.is_empty() {
+                    package_stems.push((pkg.to_string(), mapped.clone()));
+                }
+            }
             if let Some(sha256) = sha {
-                let stem = dload_stem_for_package(pkg, stem.as_deref());
-                if !stem.is_empty() && sha256.len() == 64 {
-                    pins.push((stem, sha256.clone()));
+                if !mapped.is_empty() && sha256.len() == 64 {
+                    pins.push((mapped, sha256.clone()));
                 }
             }
         };
@@ -48,7 +63,13 @@ impl Lockfile {
                 continue;
             }
             if line == "[[package]]" {
-                flush_native(&pkg_name, &native_sha, &native_stem, &mut pins);
+                flush_native(
+                    &pkg_name,
+                    &native_sha,
+                    &native_stem,
+                    &mut pins,
+                    &mut package_stems,
+                );
                 native_sha = None;
                 native_stem = None;
                 in_native = false;
@@ -56,7 +77,13 @@ impl Lockfile {
                 continue;
             }
             if line == "[[package.native]]" {
-                flush_native(&pkg_name, &native_sha, &native_stem, &mut pins);
+                flush_native(
+                    &pkg_name,
+                    &native_sha,
+                    &native_stem,
+                    &mut pins,
+                    &mut package_stems,
+                );
                 native_sha = None;
                 native_stem = None;
                 in_native = true;
@@ -73,24 +100,64 @@ impl Lockfile {
                 native_stem = Some(unquote(value));
             }
         }
-        flush_native(&pkg_name, &native_sha, &native_stem, &mut pins);
-        Self { native_pins: pins }
+        flush_native(
+            &pkg_name,
+            &native_sha,
+            &native_stem,
+            &mut pins,
+            &mut package_stems,
+        );
+        Self {
+            native_pins: pins,
+            package_stems,
+        }
     }
 
     pub fn native_pins(&self) -> &[(String, String)] {
-        &self.native_pins
+        self.native_pins.as_slice()
+    }
+
+    /// Extra `dload` stems whose `[dependencies]` row is `trusted = true`.
+    ///
+    /// Includes the dep name, `coil-` strip, and lock `[[package.native]]` stem.
+    pub fn trusted_extra_stems(&self, dependencies: &[(String, DependencySpec)]) -> Vec<String> {
+        trusted_extra_stems(dependencies, self)
     }
 }
 
 /// Map a lock package to the `dload` stem. `coil-tls` → `tls` unless
 /// `[[package.native]]` sets `stem` / `lib`.
-fn dload_stem_for_package(pkg: &str, native_stem: Option<&str>) -> String {
+pub(crate) fn dload_stem_for_package(pkg: &str, native_stem: Option<&str>) -> String {
     if let Some(stem) = native_stem {
         if !stem.is_empty() {
             return stem.to_string();
         }
     }
     pkg.strip_prefix("coil-").unwrap_or(pkg).to_string()
+}
+
+/// Extra stems that skip native sha256: trusted dep name, coil- strip, lock native stem.
+pub(crate) fn trusted_extra_stems(
+    dependencies: &[(String, DependencySpec)],
+    lock: &Lockfile,
+) -> Vec<String> {
+    let mut stems = Vec::new();
+    for (name, spec) in dependencies {
+        if !spec.trusted() {
+            continue;
+        }
+        stems.push(name.clone());
+        let stripped = dload_stem_for_package(name, None);
+        if stripped != *name {
+            stems.push(stripped);
+        }
+        for (pkg, stem) in &lock.package_stems {
+            if pkg == name {
+                stems.push(stem.clone());
+            }
+        }
+    }
+    stems
 }
 
 fn strip_comment(line: &str) -> &str {
@@ -199,5 +266,76 @@ sha256 = 'abc'
     fn load_missing_file_is_empty() {
         let lock = Lockfile::load(Path::new("/no-such-coil-lock-dir"));
         assert!(lock.native_pins.is_empty());
+        assert!(lock.package_stems.is_empty());
+    }
+
+    #[test]
+    fn native_stem_without_sha_is_recorded() {
+        let src = "[[package]]
+name = 'coil-http'
+[[package.native]]
+stem = 'plugin'
+";
+        let lock = Lockfile::parse(src);
+        assert!(lock.native_pins.is_empty());
+        assert_eq!(
+            lock.package_stems,
+            vec![("coil-http".into(), "plugin".into())]
+        );
+    }
+
+    #[test]
+    fn trusted_extra_stems_from_dep_name_and_coil_strip() {
+        use crate::manifest::DependencySpec;
+        let deps = vec![(
+            "coil-plugin".into(),
+            DependencySpec::Git {
+                url: "https://example.com/plugin.git".into(),
+                version: None,
+                rev: None,
+                trusted: true,
+            },
+        )];
+        let stems = trusted_extra_stems(&deps, &Lockfile::default());
+        assert!(stems.contains(&"coil-plugin".into()));
+        assert!(stems.contains(&"plugin".into()));
+    }
+
+    #[test]
+    fn trusted_extra_stems_include_lock_native_stem() {
+        use crate::manifest::DependencySpec;
+        let deps = vec![(
+            "coil-http".into(),
+            DependencySpec::Path {
+                path: "../http".into(),
+                trusted: true,
+            },
+        )];
+        let lock = Lockfile::parse(
+            "[[package]]
+name = 'coil-http'
+[[package.native]]
+stem = 'plugin'
+",
+        );
+        let stems = lock.trusted_extra_stems(&deps);
+        assert!(stems.contains(&"plugin".into()));
+        assert!(stems.contains(&"coil-http".into()));
+        assert!(stems.contains(&"http".into()));
+    }
+
+    #[test]
+    fn untrusted_deps_are_not_trusted_stems() {
+        use crate::manifest::DependencySpec;
+        let deps = vec![(
+            "plugin".into(),
+            DependencySpec::Git {
+                url: "https://example.com/plugin.git".into(),
+                version: None,
+                rev: None,
+                trusted: false,
+            },
+        )];
+        assert!(trusted_extra_stems(&deps, &Lockfile::default()).is_empty());
     }
 }

@@ -2170,6 +2170,191 @@ fn main() {{
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+fn missing_abs_dload(stem: &str) -> String {
+    let name = machine::platform_shared_lib_filename(stem);
+    if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    }
+}
+
+fn dload_kind_program(path: &str) -> String {
+    format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    )
+}
+
+fn run_userland_dload_project(
+    test_name: &str,
+    toml_extra: &str,
+    lock: Option<&str>,
+    src: &str,
+) -> String {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("coil_dload_{test_name}_{pid}_{nanos}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir dload project");
+    let stdlib = workspace_stdlib();
+    let manifest = format!(
+        "[module]\nroots = [\"{}\"]\n\n{toml_extra}\n",
+        stdlib.display()
+    );
+    std::fs::write(dir.join("coil.toml"), manifest).expect("write coil.toml");
+    if let Some(lock) = lock {
+        std::fs::write(dir.join("coil.lock"), lock).expect("write coil.lock");
+    }
+    let entry = dir.join("main.hy");
+    std::fs::write(&entry, src).expect("write main.hy");
+    let mut pipeline = Pipeline::new();
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(entry.to_str().unwrap())
+        .unwrap_or_else(|_| {
+            for msg in pipeline.messages() {
+                eprintln!("PIPELINE ERROR: {}", msg.message());
+            }
+            panic!("dload project failed to compile");
+        });
+    let output = run_bytecode(bytecode, constants, &pipeline, Some(entry.as_path()));
+    let _ = std::fs::remove_dir_all(&dir);
+    output
+}
+
+#[test]
+fn userland_dload_trusted_extra_without_pin_is_missing_not_denied() {
+    let extra = r#"
+[ffi]
+allow = ["plugin"]
+
+[dependencies]
+plugin = { git = "https://example.com/plugin.git", trusted = true }
+"#;
+    let output = run_userland_dload_project(
+        "trusted_no_pin",
+        extra,
+        None,
+        &dload_kind_program(&missing_abs_dload("plugin")),
+    );
+    assert_eq!(output, "missing");
+}
+
+#[test]
+fn userland_dload_trusted_extra_wrong_pin_is_missing_not_denied() {
+    let extra = r#"
+[ffi]
+allow = ["plugin"]
+
+[dependencies]
+plugin = { git = "https://example.com/plugin.git", trusted = true }
+"#;
+    let lock = "[[package]]
+name = 'plugin'
+[[package.native]]
+sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+";
+    let output = run_userland_dload_project(
+        "trusted_wrong_pin",
+        extra,
+        Some(lock),
+        &dload_kind_program(&missing_abs_dload("plugin")),
+    );
+    assert_eq!(output, "missing");
+}
+
+#[test]
+fn userland_dload_untrusted_extra_without_pin_is_denied() {
+    let extra = r#"
+[ffi]
+allow = ["plugin"]
+
+[dependencies]
+plugin = { git = "https://example.com/plugin.git", trusted = false }
+"#;
+    let output = run_userland_dload_project(
+        "untrusted_no_pin",
+        extra,
+        None,
+        &dload_kind_program(&missing_abs_dload("plugin")),
+    );
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_trusted_without_allow_is_denied() {
+    let extra = r#"
+[dependencies]
+plugin = { git = "https://example.com/plugin.git", trusted = true }
+"#;
+    let output = run_userland_dload_project(
+        "trusted_no_allow",
+        extra,
+        None,
+        &dload_kind_program(&missing_abs_dload("plugin")),
+    );
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_trusted_c_is_denied() {
+    let extra = r#"
+[dependencies]
+c = { git = "https://example.com/libc.git", trusted = true }
+"#;
+    let src = dload_kind_program("c");
+    let output = run_userland_dload_project("trusted_c", extra, None, &src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_trusted_production_crypto_is_noop() {
+    let extra = r#"
+[dependencies]
+crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
+"#;
+    let path = missing_abs_dload("crypto");
+    let src = dload_kind_program(&path);
+    let output = run_userland_dload_project("trusted_crypto", extra, None, &src);
+    assert_eq!(output, "missing");
+}
+
+#[test]
+fn userland_dload_trusted_coil_prefixed_dep_maps_to_extra_stem() {
+    let extra = r#"
+[ffi]
+allow = ["plugin"]
+
+[dependencies]
+coil-plugin = { git = "https://example.com/plugin.git", trusted = true }
+"#;
+    let output = run_userland_dload_project(
+        "trusted_coil_prefix",
+        extra,
+        None,
+        &dload_kind_program(&missing_abs_dload("plugin")),
+    );
+    assert_eq!(output, "missing");
+}
+
 #[test]
 fn example_coro_prints_suspended_1_resumed() {
     let output = run_example("examples/coro.hy");

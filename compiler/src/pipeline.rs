@@ -313,7 +313,8 @@ impl Pipeline {
     /// Grant extra `dload` of `stem` for the SHA-256 of `path` (host/tests).
     ///
     /// The CLI never calls this. First-party stems do not need it. Extra stems
-    /// from the consumer are `[ffi] allow` plus lock hashes.
+    /// from the consumer are `[ffi] allow` plus lock hashes, or allow plus
+    /// `trusted = true` on that dep (hash skip only).
     pub fn grant_dload_file(&mut self, stem: impl Into<String>, path: PathBuf) {
         self.extra_dload_grants.push((stem.into(), path));
     }
@@ -323,11 +324,15 @@ impl Pipeline {
         self.extra_dload_stems.push(stem.into());
     }
 
-    /// Fail-closed gate: production stems, plus extra allow/hash and host grants.
+    /// Fail-closed gate: production stems, plus extra allow/hash, trusted extras, and host grants.
     pub fn build_dload_gate(&self) -> machine::DloadGate {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
-        let mut gate =
-            machine::DloadGate::from_consumer(&self.manifest.ffi_allow, lock.native_pins());
+        let trusted = lock.trusted_extra_stems(&self.manifest.dependencies);
+        let mut gate = machine::DloadGate::from_consumer_trusted(
+            &self.manifest.ffi_allow,
+            lock.native_pins(),
+            &trusted,
+        );
         for stem in &self.extra_dload_stems {
             gate.grant_stem(stem);
         }
