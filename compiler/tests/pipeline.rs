@@ -1909,25 +1909,33 @@ fn main() {
 
 #[test]
 fn userland_dload_missing_library_returns_err() {
-    let src = r#"
-use ffi::{dload, ErrorKind};
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let r = dload("time");
-    let msg = match r {
+    let name = machine::platform_shared_lib_filename("time");
+    let missing = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{missing}");
+    let msg = match r {{
         Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {
+        Result::Err(e) => match e.kind {{
             ErrorKind::LibraryNotFound => "missing",
             _ => "other",
-        },
-    };
+        }},
+    }};
     write(stdout(), to_bytes(format("%s", msg)));
-}
-"#;
-    let output = run_example_src(src);
-    assert!(
-        output == "missing" || output == "ok",
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing",
         "allowed stem `time` must not be denied; got {output:?}"
     );
 }
@@ -2010,53 +2018,68 @@ fn main() {{
 
 #[test]
 fn userland_dload_production_stems_are_not_denied() {
-    let src = r#"
-use ffi::{dload, ErrorKind};
-use io::{stdout, write};
-use string::{format, to_bytes};
-fn main() {
-    let m0 = match dload("time") {
+    // Bare `dload("crypto")` opens system libcrypto on macOS and aborts
+    // (`loading libcrypto in an unsafe way`). Use a missing absolute path so
+    // the filename stem still passes the gate and dlopen never succeeds.
+    let paths: Vec<String> = ["time", "crypto", "tls", "regex"]
+        .into_iter()
+        .map(|stem| {
+            let name = machine::platform_shared_lib_filename(stem);
+            if cfg!(windows) {
+                format!("C:/coil-dload-missing/{name}")
+            } else {
+                format!("/coil-dload-missing/{name}")
+            }
+        })
+        .collect();
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let m0 = match dload("{}") {{
         Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {
+        Result::Err(e) => match e.kind {{
             ErrorKind::LibraryNotFound => "missing",
             ErrorKind::Other => "denied",
             _ => "other",
-        },
-    };
-    let m1 = match dload("crypto") {
+        }},
+    }};
+    let m1 = match dload("{}") {{
         Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {
+        Result::Err(e) => match e.kind {{
             ErrorKind::LibraryNotFound => "missing",
             ErrorKind::Other => "denied",
             _ => "other",
-        },
-    };
-    let m2 = match dload("tls") {
+        }},
+    }};
+    let m2 = match dload("{}") {{
         Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {
+        Result::Err(e) => match e.kind {{
             ErrorKind::LibraryNotFound => "missing",
             ErrorKind::Other => "denied",
             _ => "other",
-        },
-    };
-    let m3 = match dload("regex") {
+        }},
+    }};
+    let m3 = match dload("{}") {{
         Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {
+        Result::Err(e) => match e.kind {{
             ErrorKind::LibraryNotFound => "missing",
             ErrorKind::Other => "denied",
             _ => "other",
-        },
-    };
+        }},
+    }};
     write(stdout(), to_bytes(format("%s %s %s %s", m0, m1, m2, m3)));
-}
-"#;
-    let output = run_example_src(src);
-    for part in output.split_whitespace() {
-        assert!(
-            part == "ok" || part == "missing",
-            "production stem must not be denied; got {output:?}"
-        );
-    }
+}}
+"#,
+        paths[0], paths[1], paths[2], paths[3]
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing missing missing missing",
+        "production stems must pass the gate and miss on disk; got {output:?}"
+    );
 }
 
 #[test]

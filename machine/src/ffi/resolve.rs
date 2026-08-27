@@ -399,17 +399,33 @@ mod tests {
         );
     }
 
+    fn missing_abs_lib(stem: &str) -> String {
+        let name = platform_shared_lib_filename(stem);
+        if cfg!(windows) {
+            format!(r"C:\coil-dload-missing\{name}")
+        } else {
+            format!("/coil-dload-missing/{name}")
+        }
+    }
+
     #[test]
     fn production_stems_pass_the_gate() {
         for stem in DLOAD_PRODUCTION_STEMS {
             check_dload_allowlist(stem, &[])
                 .unwrap_or_else(|e| panic!("production stem {stem} must pass the gate, got {e:?}"));
-            match resolve_library(stem, None, &[]) {
-                Ok(_) | Err(FfiError::LibraryNotFound { .. }) => {}
-                Err(e) => panic!("production stem {stem} must not be denied, got {e:?}"),
-            }
             let prefixed = platform_shared_lib_filename(stem);
             check_dload_allowlist(&prefixed, &[]).expect("platform filename must map to stem");
+            // Absolute missing path: gate uses the filename stem, then dlopen
+            // fails closed on a non-existent file. Bare `dload("crypto")` would
+            // open system libcrypto on macOS and abort (dyld unsafe-load).
+            let missing = missing_abs_lib(stem);
+            match resolve_library(&missing, None, &[]) {
+                Err(FfiError::LibraryNotFound { .. }) => {}
+                Err(FfiError::LibraryDenied { .. }) => {
+                    panic!("production stem {stem} must not be denied for {missing}")
+                }
+                other => panic!("expected missing file for {missing}, got {other:?}"),
+            }
         }
     }
 
