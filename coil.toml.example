@@ -50,7 +50,7 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # # `trusted` is a bool on that git/path row (default false). `true` / `false`
 # # parse; any other type is a parse error. Meaning: that dep skips native
 # # sha256 only. Not git content_hash, not hooks, not engine, never dload("c").
-# # Parser stores the flag; spool does not honor it yet (COI-265).
+# # Parser stores the flag; spool does not honor it yet.
 # coil_crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
 
 # --------------------------------------------------------------------------
@@ -150,7 +150,7 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #   name = { git = "…", version = "…", rev = "…" } | { path = "…" }
 #   trusted                  # optional bool, default false; `true`/`false` only
 #                            # native sha256 skip on that dep only (schema).
-#                            # Parser stores; does not honor (COI-265).
+#                            # Parser stores; spool does not honor it yet.
 #                            # Not content_hash / hooks / engine / dload("c")
 #
 # Compiler builtins (prelude, ffi, …) are virtual modules and are
