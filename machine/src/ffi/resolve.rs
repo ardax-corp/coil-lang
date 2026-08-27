@@ -576,4 +576,25 @@ mod tests {
             other => panic!("load_library uses deny_all; expected LibraryDenied, got {other:?}"),
         }
     }
+
+    #[test]
+    fn first_party_allow_without_hash_or_trusted_is_library_denied() {
+        let gate = DloadGate::from_consumer(["crypto", "tls", "regex", "time"], &[]);
+        for stem in DLOAD_PRODUCTION_STEMS {
+            let path = missing_abs_lib(stem);
+            match resolve_library(&path, None, &[], &gate) {
+                Err(FfiError::LibraryDenied { stem: got, .. }) => assert_eq!(got, *stem),
+                other => panic!("expected LibraryDenied for allow-only {stem}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn allowlisted_trusted_libc_is_library_denied() {
+        let gate = DloadGate::from_consumer_trusted(["libc"], &[], ["libc"]);
+        match resolve_library("libc", None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "c"),
+            other => panic!("expected LibraryDenied for trusted allow-listed libc, got {other:?}"),
+        }
+    }
 }
