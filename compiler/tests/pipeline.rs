@@ -317,11 +317,7 @@ fn run_src_with_grants(
     run_bytecode(bytecode, constants, &pipeline, entry)
 }
 
-fn run_src_with_extra_stems(
-    src: &str,
-    entry: Option<&std::path::Path>,
-    stems: &[&str],
-) -> String {
+fn run_src_with_extra_stems(src: &str, entry: Option<&std::path::Path>, stems: &[&str]) -> String {
     let mut pipeline = Pipeline::new();
     for stem in stems {
         pipeline.grant_dload_stem((*stem).to_string());
@@ -1869,8 +1865,7 @@ fn example_ffi_printf_prints_hello_42() {
             let full = workspace_root.join("examples/ffi_printf.hy");
             let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
             let ((), os_out) = with_captured_os_stdout(|| {
-                let _vm_out =
-                    run_src_with_extra_stems(&src, Some(full.as_path()), &["c"]);
+                let _vm_out = run_src_with_extra_stems(&src, Some(full.as_path()), &["c"]);
             });
             os_out
         });
@@ -2350,6 +2345,58 @@ coil-plugin = { git = "https://example.com/plugin.git", trusted = true }
         "trusted_coil_prefix",
         extra,
         None,
+        &dload_kind_program(&missing_abs_dload("plugin")),
+    );
+    assert_eq!(output, "missing");
+}
+
+#[test]
+fn userland_dload_omitted_trusted_extra_without_pin_is_denied() {
+    let extra = r#"
+[ffi]
+allow = ["plugin"]
+
+[dependencies]
+plugin = { git = "https://example.com/plugin.git" }
+"#;
+    let output = run_userland_dload_project(
+        "omitted_trusted_no_pin",
+        extra,
+        None,
+        &dload_kind_program(&missing_abs_dload("plugin")),
+    );
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_trusted_libc_is_denied() {
+    let extra = r#"
+[dependencies]
+libc = { git = "https://example.com/libc.git", trusted = true }
+"#;
+    let output =
+        run_userland_dload_project("trusted_libc", extra, None, &dload_kind_program("libc"));
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_trusted_lock_native_stem_skips_hash() {
+    let extra = r#"
+[ffi]
+allow = ["plugin"]
+
+[dependencies]
+coil-http = { git = "https://example.com/http.git", trusted = true }
+"#;
+    let lock = "[[package]]
+name = 'coil-http'
+[[package.native]]
+stem = 'plugin'
+";
+    let output = run_userland_dload_project(
+        "trusted_lock_stem",
+        extra,
+        Some(lock),
         &dload_kind_program(&missing_abs_dload("plugin")),
     );
     assert_eq!(output, "missing");
@@ -9069,9 +9116,8 @@ fn main() {
 /// COI-19: `extern` in an imported module still initializes before main.
 #[test]
 fn extern_in_imported_module_runs() {
-    let result = std::panic::catch_unwind(|| {
-        run_file_with_extra_stems("examples/ffi_mod_entry.hy", &["c"])
-    });
+    let result =
+        std::panic::catch_unwind(|| run_file_with_extra_stems("examples/ffi_mod_entry.hy", &["c"]));
     let output = match result {
         Ok(s) => s,
         Err(_) => {
