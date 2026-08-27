@@ -34,12 +34,10 @@ pub(crate) fn library_stem(name: &str) -> String {
     stem
 }
 
-/// First-party stems `dload` may open without consumer allow or lock hashes.
-///
-/// Fail-closed for everything else. Not widened under `#[cfg(test)]`.
+/// First-party package stems. Named for docs and tests; grants no dload privilege.
 pub const DLOAD_PRODUCTION_STEMS: &[&str] = &["crypto", "tls", "regex", "time"];
 
-/// Whether `stem` is one of [`DLOAD_PRODUCTION_STEMS`].
+/// Whether `stem` is one of [`DLOAD_PRODUCTION_STEMS`] (docs/tests only).
 pub fn is_production_dload_stem(stem: &str) -> bool {
     DLOAD_PRODUCTION_STEMS.iter().any(|&s| s == stem)
 }
@@ -224,9 +222,8 @@ pub fn library_candidates(
 
 /// Resolve and load a shared library, trying each candidate in order.
 ///
-/// The gate runs before `Library::new`. Production stems skip hashing.
-/// Extra stems open only regular files whose SHA-256 is pinned for the stem,
-/// unless the extra stem is allow+trusted (hash skip) or a host unhashed grant.
+/// The gate runs before `Library::new`. Stems open only when allowed
+/// and either lock-hashed, allow+trusted, or a host unhashed grant.
 pub fn resolve_library(
     name: &str,
     base_dir: Option<&Path>,
@@ -453,26 +450,6 @@ mod tests {
     }
 
     #[test]
-    fn production_stems_pass_the_gate() {
-        let gate = DloadGate::deny_all();
-        for stem in DLOAD_PRODUCTION_STEMS {
-            gate.check_request(stem)
-                .unwrap_or_else(|e| panic!("production stem {stem} must pass the gate, got {e:?}"));
-            let prefixed = platform_shared_lib_filename(stem);
-            gate.check_request(&prefixed)
-                .expect("platform filename must map to stem");
-            let missing = missing_abs_lib(stem);
-            match resolve_library(&missing, None, &[], &gate) {
-                Err(FfiError::LibraryNotFound { .. }) => {}
-                Err(FfiError::LibraryDenied { .. }) => {
-                    panic!("production stem {stem} must not be denied for {missing}")
-                }
-                other => panic!("expected missing file for {missing}, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
     fn extra_stems_need_allow_and_hash() {
         let gate = DloadGate::deny_all();
         gate.check_request("sum").unwrap_err();
@@ -484,7 +461,7 @@ mod tests {
         gate.check_request(abs).unwrap_err();
     }
 
-    /// Default list is the four production stems in this crate (test and lib).
+    /// Named first-party list is crypto/tls/regex/time (test and lib). No gate privilege.
     #[test]
     fn production_allowlist_excludes_ffi_fixtures_and_is_not_cfg_test() {
         let src = include_str!("resolve.rs").replace("\r\n", "\n");
@@ -510,24 +487,8 @@ mod tests {
         for fixture in ["sum", "c", "libc", "noop"] {
             assert!(
                 !DLOAD_PRODUCTION_STEMS.contains(&fixture),
-                "{fixture} must stay off the default list"
+                "{fixture} must stay off the first-party list"
             );
-        }
-    }
-
-    #[test]
-    fn missing_allowed_stem_is_not_found_not_denied() {
-        let gate = DloadGate::deny_all();
-        let path = missing_abs_lib("crypto");
-        gate.check_request(&path)
-            .expect("filename stem crypto must pass the gate");
-        match resolve_library(&path, None, &[], &gate) {
-            Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
-            other => panic!("expected LibraryNotFound for missing allowed stem, got {other:?}"),
-        }
-        match super::super::load_library(&path) {
-            Err(FfiError::LibraryNotFound { .. }) => {}
-            other => panic!("load_library must not deny a missing allowed stem, got {other:?}"),
         }
     }
 
@@ -571,6 +532,48 @@ mod tests {
         match resolve_library("libc", None, &[], &gate) {
             Err(FfiError::LibraryDenied { .. }) => {}
             other => panic!("expected LibraryDenied for libc, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn untrusted_extra_without_pin_is_library_denied() {
+        let gate = DloadGate::from_consumer(["plugin"], &[]);
+        let path = missing_abs_lib("plugin");
+        match resolve_library(&path, None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "plugin"),
+            other => panic!("expected LibraryDenied for untrusted extra, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn first_party_without_allow_is_library_denied() {
+        let gate = DloadGate::deny_all();
+        for stem in DLOAD_PRODUCTION_STEMS {
+            let path = missing_abs_lib(stem);
+            match resolve_library(&path, None, &[], &gate) {
+                Err(FfiError::LibraryDenied { stem: got, .. }) => assert_eq!(got, *stem),
+                other => panic!("expected LibraryDenied for {stem} without allow, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn first_party_allow_plus_trusted_missing_file_is_not_found() {
+        let gate = DloadGate::from_consumer_trusted(
+            ["crypto", "tls", "regex", "time"],
+            &[],
+            ["crypto", "tls", "regex", "time"],
+        );
+        for stem in DLOAD_PRODUCTION_STEMS {
+            let path = missing_abs_lib(stem);
+            match resolve_library(&path, None, &[], &gate) {
+                Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
+                other => panic!("expected LibraryNotFound for trusted {stem}, got {other:?}"),
+            }
+        }
+        match super::super::load_library(&missing_abs_lib("crypto")) {
+            Err(FfiError::LibraryDenied { .. }) => {}
+            other => panic!("load_library uses deny_all; expected LibraryDenied, got {other:?}"),
         }
     }
 }
