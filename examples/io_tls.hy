@@ -10,7 +10,8 @@
 //
 // `tls` needs `[ffi] allow` plus `trusted = true` on the coil-tls dep
 // (or a matching `[[package.native]] sha256`). search_paths only locates
-// the file. A missing libtls that passed the gate is LibraryNotFound.
+// the file. Without allow, `dload` is `LibraryDenied`. A missing libtls
+// that passed the gate is `LibraryNotFound`.
 //
 // Then:
 //   use tls::{client, server};
