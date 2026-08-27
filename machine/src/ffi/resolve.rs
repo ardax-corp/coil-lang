@@ -312,15 +312,14 @@ mod tests {
         #[cfg(all(unix, not(target_os = "macos")))]
         assert!(c.iter().any(|p| p.to_string_lossy().contains("libc.so")));
         #[cfg(target_os = "macos")]
-        assert!(
-            c.iter()
-                .any(|p| p.to_string_lossy().contains("libSystem") || p.ends_with("c"))
-        );
+        assert!(c
+            .iter()
+            .any(|p| p.to_string_lossy().contains("libSystem") || p.ends_with("c")));
         #[cfg(target_os = "windows")]
-        assert!(
-            c.iter().any(|p| p.to_string_lossy().contains("ucrtbase")
-                || p.to_string_lossy().contains("msvcrt"))
-        );
+        assert!(c
+            .iter()
+            .any(|p| p.to_string_lossy().contains("ucrtbase")
+                || p.to_string_lossy().contains("msvcrt")));
     }
 
     #[test]
@@ -361,13 +360,25 @@ mod tests {
     }
 
     fn assert_denied(name: &str) {
+        let expected_stem = dload_request_stem(name);
         match check_dload_allowlist(name, &[]) {
-            Err(FfiError::LibraryDenied { .. }) => {}
+            Err(FfiError::LibraryDenied { stem, .. }) => {
+                assert_eq!(stem, expected_stem, "denied stem for {name:?}");
+            }
             other => panic!("expected LibraryDenied for {name:?}, got {other:?}"),
         }
         match resolve_library(name, None, &[]) {
-            Err(FfiError::LibraryDenied { .. }) => {}
+            Err(FfiError::LibraryDenied { name: n, stem }) => {
+                assert_eq!(n, name);
+                assert_eq!(stem, expected_stem);
+            }
             other => panic!("expected resolve deny for {name:?}, got {other:?}"),
+        }
+        match super::super::load_library(name) {
+            Err(FfiError::LibraryDenied { stem, .. }) => {
+                assert_eq!(stem, expected_stem);
+            }
+            other => panic!("expected load_library deny for {name:?}, got {other:?}"),
         }
     }
 
@@ -424,5 +435,58 @@ mod tests {
             "/tmp/libsum.so"
         };
         check_dload_allowlist(abs, &["sum"]).expect("absolute fixture path uses filename stem");
+    }
+
+    /// Default list is the four production stems in this crate (test and lib).
+    /// Fixture stems stay off it; extra stems are an explicit test hook.
+    #[test]
+    fn production_allowlist_excludes_ffi_fixtures_and_is_not_cfg_test() {
+        let src = include_str!("resolve.rs");
+        let decl = concat!(
+            "pub const DLOAD_PRODUCTION_STEMS: &[&str] = ",
+            "&[\"crypto\", \"tls\", \"regex\", \"time\"];",
+        );
+        assert!(
+            src.contains(decl),
+            "production stems must stay crypto/tls/regex/time"
+        );
+        let const_idx = src
+            .find("pub const DLOAD_PRODUCTION_STEMS")
+            .expect("DLOAD_PRODUCTION_STEMS");
+        let tests_idx = src
+            .find("#[cfg(test)]\nmod tests")
+            .expect("cfg(test) module");
+        assert!(
+            const_idx < tests_idx,
+            "DLOAD_PRODUCTION_STEMS must not be defined under #[cfg(test)]"
+        );
+        assert_eq!(DLOAD_PRODUCTION_STEMS, &["crypto", "tls", "regex", "time"]);
+        for fixture in ["sum", "c", "libc", "noop"] {
+            assert!(
+                !DLOAD_PRODUCTION_STEMS.contains(&fixture),
+                "{fixture} must stay off the default list"
+            );
+        }
+    }
+
+    /// Allowed stem, missing file: LibraryNotFound after the gate, not LibraryDenied.
+    #[test]
+    fn missing_allowed_stem_is_not_found_not_denied() {
+        let dir = std::env::temp_dir().join("coil-coi-229-no-such-dload-dir");
+        let path_buf = dir.join(platform_shared_lib_filename("crypto"));
+        let path = path_buf.to_str().expect("utf-8 path");
+        assert!(
+            !path_buf.exists(),
+            "pin path must not exist on disk: {path}"
+        );
+        check_dload_allowlist(path, &[]).expect("filename stem crypto must pass the gate");
+        match resolve_library(path, None, &[]) {
+            Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
+            other => panic!("expected LibraryNotFound for missing allowed stem, got {other:?}"),
+        }
+        match super::super::load_library(path) {
+            Err(FfiError::LibraryNotFound { .. }) => {}
+            other => panic!("load_library must not deny a missing allowed stem, got {other:?}"),
+        }
     }
 }
