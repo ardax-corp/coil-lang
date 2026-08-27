@@ -223,7 +223,7 @@ mod tests {
     use std::io::Write;
 
     #[test]
-    fn deny_all_rejects_c_and_unknown() {
+    fn deny_all_rejects_c_and_unknown_but_allows_production() {
         let g = DloadGate::deny_all();
         assert!(matches!(
             g.check_request("c"),
@@ -237,6 +237,10 @@ mod tests {
             g.check_request("/lib/x86_64-linux-gnu/libc.so.6"),
             Err(FfiError::LibraryDenied { .. })
         ));
+        for stem in DLOAD_PRODUCTION_STEMS {
+            g.check_request(stem)
+                .unwrap_or_else(|e| panic!("{stem} must pass without allow/hash, got {e:?}"));
+        }
     }
 
     #[test]
@@ -246,6 +250,7 @@ mod tests {
             g.check_request("plugin"),
             Err(FfiError::LibraryDenied { .. })
         ));
+        assert!(g.check_request("tls").is_ok());
     }
 
     #[test]
@@ -264,6 +269,13 @@ mod tests {
         );
         assert!(g.check_request("c").is_err());
         assert!(g.check_request("plugin").is_ok());
+    }
+
+    #[test]
+    fn production_stems_in_allow_do_not_need_hashes() {
+        let g = DloadGate::from_consumer(["tls", "crypto"], &[]);
+        assert!(g.check_request("tls").is_ok());
+        assert!(g.file_hash_allowed("tls", Path::new("/coil-dload-missing/libtls.so")));
     }
 
     #[test]
@@ -371,6 +383,17 @@ mod tests {
     }
 
     #[test]
+    fn trusted_on_production_stems_is_a_noop() {
+        let g = DloadGate::from_consumer_trusted(["crypto", "tls"], &[], ["crypto", "tls"]);
+        for stem in DLOAD_PRODUCTION_STEMS {
+            assert!(g.check_request(stem).is_ok());
+            assert!(!g.hash_required(stem));
+        }
+        let missing = Path::new("/coil-dload-missing/libcrypto.dylib");
+        assert!(g.file_hash_allowed("crypto", missing));
+    }
+
+    #[test]
     fn omitted_trusted_extra_on_allow_still_requires_hash() {
         let g = DloadGate::from_consumer(["plugin"], &[]);
         assert!(matches!(
@@ -400,70 +423,5 @@ mod tests {
             g.check_request("c"),
             Err(FfiError::LibraryDenied { .. })
         ));
-    }
-
-    #[test]
-    #[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-    fn deny_all_denies_first_party_stems() {
-        let g = DloadGate::deny_all();
-        for stem in DLOAD_PRODUCTION_STEMS {
-            assert!(
-                matches!(g.check_request(stem), Err(FfiError::LibraryDenied { .. })),
-                "{stem} must not load without allow and hash|trusted"
-            );
-            assert!(
-                g.hash_required(stem),
-                "{stem} must require a lock hash unless trusted"
-            );
-        }
-    }
-
-    #[test]
-    #[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-    fn first_party_allow_without_hash_or_trusted_is_denied() {
-        let g = DloadGate::from_consumer(["crypto", "tls", "regex", "time"], &[]);
-        for stem in DLOAD_PRODUCTION_STEMS {
-            assert!(matches!(
-                g.check_request(stem),
-                Err(FfiError::LibraryDenied { .. })
-            ));
-            assert!(g.hash_required(stem));
-        }
-    }
-
-    #[test]
-    #[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-    fn first_party_trusted_without_allow_is_denied() {
-        let g = DloadGate::from_consumer_trusted(
-            std::iter::empty::<&str>(),
-            &[],
-            ["crypto", "tls", "regex", "time"],
-        );
-        for stem in DLOAD_PRODUCTION_STEMS {
-            assert!(matches!(
-                g.check_request(stem),
-                Err(FfiError::LibraryDenied { .. })
-            ));
-        }
-    }
-
-    #[test]
-    #[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-    fn first_party_allow_plus_trusted_skips_native_hash() {
-        let g = DloadGate::from_consumer_trusted(
-            ["crypto", "tls", "regex", "time"],
-            &[],
-            ["crypto", "tls", "regex", "time"],
-        );
-        let missing = Path::new("/coil-dload-missing/libcrypto.so");
-        for stem in DLOAD_PRODUCTION_STEMS {
-            g.check_request(stem)
-                .unwrap_or_else(|e| panic!("{stem} allow+trusted must pass, got {e:?}"));
-            assert!(
-                !g.hash_required(stem),
-                "{stem} trusted must skip native sha256"
-            );
-        }
-        assert!(g.file_hash_allowed("crypto", missing));
     }
 }

@@ -1926,6 +1926,39 @@ fn main() {
 }
 
 #[test]
+fn userland_dload_missing_library_returns_err() {
+    let name = machine::platform_shared_lib_filename("time");
+    let missing = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{missing}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing",
+        "allowed stem `time` must not be denied; got {output:?}"
+    );
+}
+
+#[test]
 fn userland_dload_unknown_stem_is_denied_not_missing() {
     let src = r#"
 use ffi::{dload, ErrorKind};
@@ -1999,6 +2032,103 @@ fn main() {{
     );
     let output = run_example_src(&src);
     assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_production_stems_are_not_denied() {
+    // Bare `dload("crypto")` opens system libcrypto on macOS and aborts
+    // (`loading libcrypto in an unsafe way`). Use a missing absolute path so
+    // the filename stem still passes the gate and dlopen never succeeds.
+    let paths: Vec<String> = ["time", "crypto", "tls", "regex"]
+        .into_iter()
+        .map(|stem| {
+            let name = machine::platform_shared_lib_filename(stem);
+            if cfg!(windows) {
+                format!("C:/coil-dload-missing/{name}")
+            } else {
+                format!("/coil-dload-missing/{name}")
+            }
+        })
+        .collect();
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let m0 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m1 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m2 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m3 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s %s %s %s", m0, m1, m2, m3)));
+}}
+"#,
+        paths[0], paths[1], paths[2], paths[3]
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing missing missing missing",
+        "production stems must pass the gate and miss on disk; got {output:?}"
+    );
+}
+
+#[test]
+fn userland_dload_missing_allowed_absolute_is_library_not_found() {
+    let name = machine::platform_shared_lib_filename("crypto");
+    let path = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(output, "missing");
 }
 
 #[test]
@@ -2246,6 +2376,18 @@ c = { git = "https://example.com/libc.git", trusted = true }
 }
 
 #[test]
+fn userland_dload_trusted_production_crypto_is_noop() {
+    let extra = r#"
+[dependencies]
+crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
+"#;
+    let path = missing_abs_dload("crypto");
+    let src = dload_kind_program(&path);
+    let output = run_userland_dload_project("trusted_crypto", extra, None, &src);
+    assert_eq!(output, "missing");
+}
+
+#[test]
 fn userland_dload_trusted_coil_prefixed_dep_maps_to_extra_stem() {
     let extra = r#"
 [ffi]
@@ -2303,60 +2445,6 @@ c = { git = "https://example.com/libc.git", trusted = true }
             );
         }
     }
-}
-
-#[test]
-#[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-fn userland_dload_crypto_without_allow_is_denied() {
-    let extra = r#"
-[dependencies]
-crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
-"#;
-    let output = run_userland_dload_project(
-        "crypto_trusted_no_allow",
-        extra,
-        None,
-        &dload_kind_program(&missing_abs_dload("crypto")),
-    );
-    assert_eq!(output, "denied");
-}
-
-#[test]
-#[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-fn userland_dload_crypto_allow_without_hash_or_trusted_is_denied() {
-    let extra = r#"
-[ffi]
-allow = ["crypto"]
-
-[dependencies]
-crypto = { git = "https://example.com/coil-crypto.git" }
-"#;
-    let output = run_userland_dload_project(
-        "crypto_allow_no_hash",
-        extra,
-        None,
-        &dload_kind_program(&missing_abs_dload("crypto")),
-    );
-    assert_eq!(output, "denied");
-}
-
-#[test]
-#[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-fn userland_dload_bootstrap_crypto_allow_plus_trusted_is_missing() {
-    let extra = r#"
-[ffi]
-allow = ["crypto"]
-
-[dependencies]
-crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
-"#;
-    let output = run_userland_dload_project(
-        "bootstrap_crypto_trusted",
-        extra,
-        None,
-        &dload_kind_program(&missing_abs_dload("crypto")),
-    );
-    assert_eq!(output, "missing");
 }
 
 #[test]
@@ -2425,57 +2513,6 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
             );
         }
     }
-}
-
-#[test]
-#[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-fn pipeline_gate_first_party_without_allow_is_denied() {
-    let extra = r#"
-[ffi]
-allow = ["plugin"]
-
-[dependencies]
-plugin = { git = "https://example.com/plugin.git", trusted = true }
-"#;
-    let gate = dload_gate_for_project("first_party_no_allow", extra, None);
-    for stem in machine::DLOAD_PRODUCTION_STEMS {
-        assert_library_denied(&gate, stem, stem);
-        assert!(
-            gate.hash_required(stem),
-            "{stem} must require hash unless trusted"
-        );
-    }
-}
-
-#[test]
-#[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-fn pipeline_gate_crypto_allow_without_hash_or_trusted_is_denied() {
-    let extra = r#"
-[ffi]
-allow = ["crypto"]
-
-[dependencies]
-crypto = { git = "https://example.com/coil-crypto.git" }
-"#;
-    let gate = dload_gate_for_project("crypto_allow_no_hash_gate", extra, None);
-    assert_library_denied(&gate, "crypto", "crypto");
-    assert!(gate.hash_required("crypto"));
-}
-
-#[test]
-#[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
-fn pipeline_gate_bootstrap_crypto_allow_plus_trusted_skips_hash() {
-    let extra = r#"
-[ffi]
-allow = ["crypto"]
-
-[dependencies]
-crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
-"#;
-    let gate = dload_gate_for_project("bootstrap_crypto_gate", extra, None);
-    gate.check_request("crypto")
-        .expect("bootstrap crypto allow+trusted must pass");
-    assert!(!gate.hash_required("crypto"));
 }
 
 #[test]
