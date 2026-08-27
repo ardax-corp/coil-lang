@@ -560,4 +560,17 @@ mod tests {
             other => panic!("expected LibraryNotFound for trusted extra, got {other:?}"),
         }
     }
+
+    #[test]
+    fn allowlisted_trusted_c_is_library_denied() {
+        let gate = DloadGate::from_consumer_trusted(["c"], &[], ["c"]);
+        match resolve_library("c", None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "c"),
+            other => panic!("expected LibraryDenied for trusted allow-listed c, got {other:?}"),
+        }
+        match resolve_library("libc", None, &[], &gate) {
+            Err(FfiError::LibraryDenied { .. }) => {}
+            other => panic!("expected LibraryDenied for libc, got {other:?}"),
+        }
+    }
 }
