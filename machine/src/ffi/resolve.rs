@@ -413,7 +413,7 @@ mod tests {
     fn missing_abs_lib(stem: &str) -> String {
         let name = platform_shared_lib_filename(stem);
         if cfg!(windows) {
-            format!(r"C:\coil-dload-missing\{name}")
+            format!("C:/coil-dload-missing/{name}")
         } else {
             format!("/coil-dload-missing/{name}")
         }
@@ -488,19 +488,13 @@ mod tests {
     /// Allowed stem, missing file: LibraryNotFound after the gate, not LibraryDenied.
     #[test]
     fn missing_allowed_stem_is_not_found_not_denied() {
-        let dir = std::env::temp_dir().join("coil-coi-229-no-such-dload-dir");
-        let path_buf = dir.join(platform_shared_lib_filename("crypto"));
-        let path = path_buf.to_str().expect("utf-8 path");
-        assert!(
-            !path_buf.exists(),
-            "pin path must not exist on disk: {path}"
-        );
-        check_dload_allowlist(path, &[]).expect("filename stem crypto must pass the gate");
-        match resolve_library(path, None, &[]) {
+        let path = missing_abs_lib("crypto");
+        check_dload_allowlist(&path, &[]).expect("filename stem crypto must pass the gate");
+        match resolve_library(&path, None, &[]) {
             Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
             other => panic!("expected LibraryNotFound for missing allowed stem, got {other:?}"),
         }
-        match super::super::load_library(path) {
+        match super::super::load_library(&path) {
             Err(FfiError::LibraryNotFound { .. }) => {}
             other => panic!("load_library must not deny a missing allowed stem, got {other:?}"),
         }

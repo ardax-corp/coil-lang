@@ -1989,7 +1989,7 @@ fn main() {
 #[test]
 fn userland_dload_absolute_non_allowlisted_is_denied() {
     let path = if cfg!(windows) {
-        r"C:\Windows\System32\kernel32.dll"
+        "C:/Windows/System32/kernel32.dll"
     } else {
         "/lib/x86_64-linux-gnu/libc.so.6"
     };
@@ -2084,15 +2084,12 @@ fn main() {{
 
 #[test]
 fn userland_dload_missing_allowed_absolute_is_library_not_found() {
-    let path_buf = std::env::temp_dir()
-        .join("coil-coi-229-no-such-dload-dir")
-        .join(machine::platform_shared_lib_filename("crypto"));
-    assert!(
-        !path_buf.exists(),
-        "pin path must not exist on disk: {}",
-        path_buf.display()
-    );
-    let path = path_buf.to_str().expect("utf-8 path").replace('\\', "\\\\");
+    let name = machine::platform_shared_lib_filename("crypto");
+    let path = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
     let src = format!(
         r#"
 use ffi::{{dload, ErrorKind}};
