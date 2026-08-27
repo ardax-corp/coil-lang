@@ -2,9 +2,9 @@
 
 use common::{BUILTIN_FFI_ERROR_KIND_VARIANTS, BUILTIN_FFI_ERROR_VARIANT, Value};
 
-use crate::memory::{Heap, Member};
 #[cfg(test)]
 use crate::memory::Object;
+use crate::memory::{Heap, Member};
 
 use super::signature::FfiError;
 
@@ -26,6 +26,7 @@ impl FfiErrorKindTag {
     pub fn from_ffi_error(err: &FfiError) -> Self {
         match err {
             FfiError::LibraryNotFound { .. } => Self::LibraryNotFound,
+            FfiError::LibraryDenied { .. } => Self::Other,
             FfiError::SymbolNotFound { .. } => Self::SymbolNotFound,
             FfiError::ArityMismatch { .. } => Self::ArityMismatch,
             FfiError::Libffi(_) => Self::Libffi,
@@ -134,6 +135,13 @@ mod tests {
         assert_eq!(
             FfiErrorKindTag::from_ffi_error(&FfiError::Unsupported("x".into())),
             FfiErrorKindTag::Unsupported
+        );
+        assert_eq!(
+            FfiErrorKindTag::from_ffi_error(&FfiError::LibraryDenied {
+                name: "c".into(),
+                stem: "c".into(),
+            }),
+            FfiErrorKindTag::Other
         );
     }
 }

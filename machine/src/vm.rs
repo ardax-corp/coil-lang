@@ -272,6 +272,8 @@ pub struct Machine<const S: usize> {
     base_dir: Option<PathBuf>,
     /// Extra search paths from `coil.toml` `[ffi]`.
     ffi_search_paths: Vec<PathBuf>,
+    /// Extra `dload` stems unioned with [`crate::DLOAD_PRODUCTION_STEMS`].
+    dload_extra_stems: Vec<String>,
     /// Registered C struct layouts for pass-by-value FFI.
     struct_layouts: Vec<CStructLayout>,
     /// Keeps libffi callback trampolines alive (ties lifetime to VM run).
@@ -357,6 +359,7 @@ impl<const S: usize> Machine<S> {
             resume_stack: Vec::new(),
             base_dir: None,
             ffi_search_paths: Vec::new(),
+            dload_extra_stems: Vec::new(),
             struct_layouts: Vec::new(),
             ffi_closures: Vec::new(),
             program_code: Vec::new(),
@@ -396,6 +399,21 @@ impl<const S: usize> Machine<S> {
     pub fn set_ffi_paths(&mut self, base_dir: Option<PathBuf>, search_paths: Vec<PathBuf>) {
         self.base_dir = base_dir;
         self.ffi_search_paths = search_paths;
+    }
+
+    /// Extra stems unioned with the production `dload` list (`crypto`, `tls`, `regex`, `time`).
+    ///
+    /// Cargo FFI harness only. Does not replace the production stems.
+    pub fn set_dload_allowlist<I, S>(&mut self, extra_stems: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.dload_extra_stems = extra_stems.into_iter().map(Into::into).collect();
+    }
+
+    fn dload_extra_stem_refs(extra: &[String]) -> Vec<&str> {
+        extra.iter().map(String::as_str).collect()
     }
 
     pub fn set_program_debug(&mut self, debug: ProgramDebug) {
@@ -909,7 +927,16 @@ impl<const S: usize> Machine<S> {
 
     /// Load a shared library; returns its heap address as a `Value`.
     pub fn load_userland_library(&mut self, path: &str) -> Result<Value, String> {
-        let lib_arc = crate::ffi::load_library(path).map_err(|e| e.to_string())?;
+        let lib_arc = {
+            let extra = Self::dload_extra_stem_refs(&self.dload_extra_stems);
+            crate::ffi::resolve_library_with_extra_stems(
+                path,
+                self.base_dir.as_deref(),
+                &self.ffi_search_paths,
+                &extra,
+            )
+            .map_err(|e| e.to_string())?
+        };
         let (object, _gc) = self.heap.alloc_library(lib_arc.clone());
         let addr = object.addr();
         self.userland_libraries
@@ -3056,11 +3083,15 @@ impl<const S: usize> Machine<S> {
                         }
                     };
                     // Push `Result::Ok(handle)` or `Result::Err(ffi::Error)`.
-                    match crate::ffi::resolve_library(
-                        &path,
-                        self.base_dir.as_deref(),
-                        &self.ffi_search_paths,
-                    ) {
+                    match {
+                        let extra = Self::dload_extra_stem_refs(&self.dload_extra_stems);
+                        crate::ffi::resolve_library_with_extra_stems(
+                            &path,
+                            self.base_dir.as_deref(),
+                            &self.ffi_search_paths,
+                            &extra,
+                        )
+                    } {
                         Ok(lib_arc) => {
                             self.libraries
                                 .entry(path.clone())

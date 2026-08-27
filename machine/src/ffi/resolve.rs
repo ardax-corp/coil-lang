@@ -33,6 +33,33 @@ pub(crate) fn library_stem(name: &str) -> String {
     stem
 }
 
+/// First-party stems `dload` may open. Fail-closed; not user-extensible.
+pub const DLOAD_PRODUCTION_STEMS: &[&str] = &["crypto", "tls", "regex", "time"];
+
+/// Filename stem for the dload gate (`/abs/libfoo.so` → `foo`).
+pub fn dload_request_stem(name: &str) -> String {
+    let file = Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    library_stem(file)
+}
+
+/// Return `Err(LibraryDenied)` unless `name`'s stem is production or `extra_stems`.
+pub fn check_dload_allowlist(name: &str, extra_stems: &[&str]) -> Result<(), FfiError> {
+    let stem = dload_request_stem(name);
+    let allowed =
+        DLOAD_PRODUCTION_STEMS.iter().any(|&s| s == stem) || extra_stems.iter().any(|s| *s == stem);
+    if allowed {
+        Ok(())
+    } else {
+        Err(FfiError::LibraryDenied {
+            name: name.to_string(),
+            stem,
+        })
+    }
+}
+
 /// Whether `name` (or its stem) refers to the C standard library.
 fn is_libc_alias(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -203,11 +230,24 @@ pub fn library_candidates(
 }
 
 /// Resolve and load a shared library, trying each candidate in order.
+///
+/// Uses the production stem allowlist only ([`DLOAD_PRODUCTION_STEMS`]).
 pub fn resolve_library(
     name: &str,
     base_dir: Option<&Path>,
     search_paths: &[PathBuf],
 ) -> Result<Arc<Library>, FfiError> {
+    resolve_library_with_extra_stems(name, base_dir, search_paths, &[])
+}
+
+/// Like [`resolve_library`], with extra stems unioned onto the production list.
+pub fn resolve_library_with_extra_stems(
+    name: &str,
+    base_dir: Option<&Path>,
+    search_paths: &[PathBuf],
+    extra_stems: &[&str],
+) -> Result<Arc<Library>, FfiError> {
+    check_dload_allowlist(name, extra_stems)?;
     let candidates = library_candidates(name, base_dir, search_paths);
     let mut errors = Vec::new();
 
@@ -313,5 +353,76 @@ mod tests {
         };
         let c = library_candidates(abs.to_str().unwrap(), None, &[]);
         assert_eq!(c, vec![abs]);
+    }
+
+    #[test]
+    fn production_stems_are_crypto_tls_regex_time() {
+        assert_eq!(DLOAD_PRODUCTION_STEMS, &["crypto", "tls", "regex", "time"]);
+    }
+
+    fn assert_denied(name: &str) {
+        match check_dload_allowlist(name, &[]) {
+            Err(FfiError::LibraryDenied { .. }) => {}
+            other => panic!("expected LibraryDenied for {name:?}, got {other:?}"),
+        }
+        match resolve_library(name, None, &[]) {
+            Err(FfiError::LibraryDenied { .. }) => {}
+            other => panic!("expected resolve deny for {name:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dload_libc_aliases_are_denied() {
+        for name in ["c", "libc", "libc.so.6", "libsystem", "ucrtbase", "msvcrt"] {
+            assert_denied(name);
+        }
+    }
+
+    #[test]
+    fn dload_unknown_stem_is_denied() {
+        assert_denied("notalist");
+        assert_denied("sum");
+        assert_denied("noop");
+    }
+
+    #[test]
+    fn dload_absolute_non_allowlisted_path_is_denied() {
+        let path = if cfg!(windows) {
+            r"C:\Windows\System32\kernel32.dll"
+        } else {
+            "/lib/x86_64-linux-gnu/libc.so.6"
+        };
+        assert_denied(path);
+        assert_eq!(
+            dload_request_stem(path),
+            library_stem(Path::new(path).file_name().unwrap().to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn production_stems_pass_the_gate() {
+        for stem in DLOAD_PRODUCTION_STEMS {
+            check_dload_allowlist(stem, &[])
+                .unwrap_or_else(|e| panic!("production stem {stem} must pass the gate, got {e:?}"));
+            match resolve_library(stem, None, &[]) {
+                Ok(_) | Err(FfiError::LibraryNotFound { .. }) => {}
+                Err(e) => panic!("production stem {stem} must not be denied, got {e:?}"),
+            }
+            let prefixed = platform_shared_lib_filename(stem);
+            check_dload_allowlist(&prefixed, &[]).expect("platform filename must map to stem");
+        }
+    }
+
+    #[test]
+    fn extra_stems_allow_fixture_libraries_only_when_passed() {
+        check_dload_allowlist("sum", &[]).unwrap_err();
+        check_dload_allowlist("sum", &["sum"]).expect("extra stem sum");
+        check_dload_allowlist("libsum.so", &["sum"]).expect("libsum.so stem is sum");
+        let abs = if cfg!(windows) {
+            r"C:\tmp\libsum.dll"
+        } else {
+            "/tmp/libsum.so"
+        };
+        check_dload_allowlist(abs, &["sum"]).expect("absolute fixture path uses filename stem");
     }
 }

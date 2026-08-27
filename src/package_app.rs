@@ -107,11 +107,6 @@ pub fn cmd_package(
         if let Err(msg) = check_native_libraries(&libs, base_dir) {
             fail_and_exit(pipeline, ErrorCode::IoError, msg);
         }
-        if libs.is_empty() {
-            if let Err(msg) = check_native_libraries(&["c".to_string()], base_dir) {
-                fail_and_exit(pipeline, ErrorCode::IoError, msg);
-            }
-        }
     }
 
     let runner_path = match resolve_runner_path(runner) {

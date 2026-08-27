@@ -90,4 +90,24 @@ mod tests {
     fn probe_system_libffi_does_not_panic() {
         let _ = probe_system_libffi();
     }
+
+    #[test]
+    fn check_native_libraries_uses_dload_gate() {
+        let err = check_native_libraries(&["c".into(), "notalist".into()], None)
+            .expect_err("libc and unknown stems must fail the packaging probe");
+        assert!(
+            err.contains("denied") && err.contains("c") && err.contains("notalist"),
+            "expected deny messages, got {err}"
+        );
+        // Allowed stem may be missing from disk; that is not a deny.
+        match check_native_libraries(&["time".into()], None) {
+            Ok(()) => {}
+            Err(msg) => {
+                assert!(
+                    !msg.contains("denied"),
+                    "production stem must not be denied: {msg}"
+                );
+            }
+        }
+    }
 }

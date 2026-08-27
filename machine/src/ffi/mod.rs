@@ -16,7 +16,10 @@ pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
 pub use libloading::Library;
 pub use registry::{HostClosureFn, NativeFn, Natives};
-pub use resolve::{library_candidates, platform_shared_lib_filename, resolve_library};
+pub use resolve::{
+    DLOAD_PRODUCTION_STEMS, check_dload_allowlist, dload_request_stem, library_candidates,
+    platform_shared_lib_filename, resolve_library, resolve_library_with_extra_stems,
+};
 pub use runtime::{check_native_libraries, packaged_app_ffi_startup_check, probe_system_libffi};
 pub use signature::{FfiError, FfiSignature, FfiSignatureBuilder};
 
@@ -40,9 +43,10 @@ pub fn register_on_library(
 }
 
 /// Load a shared library by path (legacy — prefer [`resolve_library`]).
-pub fn load_library(name: &str) -> Result<Arc<Library>, libloading::Error> {
-    let lib = unsafe { Library::new(name) }?;
-    Ok(Arc::new(lib))
+///
+/// Goes through the same stem allowlist as [`resolve_library`].
+pub fn load_library(name: &str) -> Result<Arc<Library>, FfiError> {
+    resolve_library(name, None, &[])
 }
 
 /// Load with search path resolution.

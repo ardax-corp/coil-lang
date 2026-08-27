@@ -57,6 +57,11 @@ pub enum FfiError {
         tried: Vec<String>,
         detail: String,
     },
+    /// Stem is not on the fail-closed `dload` allowlist (not a missing file).
+    LibraryDenied {
+        name: String,
+        stem: String,
+    },
     Unsupported(String),
     /// Bad library handle or out-of-range function id at invoke/declare time.
     InvalidHandle(String),
@@ -81,6 +86,12 @@ impl std::fmt::Display for FfiError {
                     f,
                     "FFI library `{name}` not found (tried: {})",
                     tried.join(", ")
+                )
+            }
+            Self::LibraryDenied { name, stem } => {
+                write!(
+                    f,
+                    "FFI library `{name}` denied (stem `{stem}` is not on the dload allowlist)"
                 )
             }
             Self::Unsupported(msg) => write!(f, "unsupported FFI signature: {msg}"),
