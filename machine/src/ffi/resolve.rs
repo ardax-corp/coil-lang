@@ -457,7 +457,7 @@ mod tests {
     /// Fixture stems stay off it; extra stems are an explicit test hook.
     #[test]
     fn production_allowlist_excludes_ffi_fixtures_and_is_not_cfg_test() {
-        let src = include_str!("resolve.rs");
+        let src = include_str!("resolve.rs").replace("\r\n", "\n");
         let decl = concat!(
             "pub const DLOAD_PRODUCTION_STEMS: &[&str] = ",
             "&[\"crypto\", \"tls\", \"regex\", \"time\"];",
