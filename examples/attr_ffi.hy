@@ -1,6 +1,5 @@
-// attr_ffi.hy — `#[ffi]` attribute sugar for compile-time libc bindings.
-//
-// Expected output: `5` (strlen of "hello").
+// Default `dload` allowlist is crypto/tls/regex/time (COI-229). `#[ffi(lib = "c")]`
+// needs a host extra stem; a default `coil` run denies libc.
 
 use io::{stdout};
 use io::sync::{write_all};
