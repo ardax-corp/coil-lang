@@ -404,10 +404,10 @@ impl<const S: usize> Machine<S> {
     /// Extra stems unioned with the production `dload` list (`crypto`, `tls`, `regex`, `time`).
     ///
     /// Cargo FFI harness only. Does not replace the production stems.
-    pub fn set_dload_allowlist<I, S>(&mut self, extra_stems: I)
+    pub fn set_dload_allowlist<I, St>(&mut self, extra_stems: I)
     where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
+        I: IntoIterator<Item = St>,
+        St: Into<String>,
     {
         self.dload_extra_stems = extra_stems.into_iter().map(Into::into).collect();
     }
