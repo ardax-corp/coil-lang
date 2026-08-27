@@ -47,9 +47,10 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # [dependencies]
 # http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
 # local_http = { path = "../local-http" }
-# # `trusted = true` skips native sha256 on that dep only (spool). Default
-# # false. Not git content_hash, not hooks, not engine, never dload("c").
-# # Parser stores the flag; it does not skip a hash here.
+# # `trusted` is a bool on that git/path row (default false). `true` / `false`
+# # parse; any other type is a parse error. Meaning: that dep skips native
+# # sha256 only. Not git content_hash, not hooks, not engine, never dload("c").
+# # Parser stores the flag; spool does not honor it yet (COI-265).
 # coil_crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
 
 # --------------------------------------------------------------------------
@@ -134,11 +135,23 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #   [env]
 #   allow_exec = true        # opt-in: enable env::exec at runtime (default is false)
 #
+#   [ffi]
+#   search_paths             # extra dirs for FFI library lookup
+#
 #   [package]
 #   name / version           # package identity for spool
+#   coil                     # optional engine range; omit = no constraint
+#   include                  # optional include-hook; relative to this package
+#
+#   [scripts]
+#   pre_install / post_install / pre_update / post_update
 #
 #   [dependencies]
-#   name = { git = "…", version = "…" } | { path = "…" }
+#   name = { git = "…", version = "…", rev = "…" } | { path = "…" }
+#   trusted                  # optional bool, default false; `true`/`false` only
+#                            # native sha256 skip on that dep only (schema).
+#                            # Parser stores; does not honor (COI-265).
+#                            # Not content_hash / hooks / engine / dload("c")
 #
 # Compiler builtins (prelude, ffi, …) are virtual modules and are
 # not configured here. Extra disk search paths belong in `roots`.
