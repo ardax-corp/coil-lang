@@ -225,7 +225,8 @@ pub fn library_candidates(
 /// Resolve and load a shared library, trying each candidate in order.
 ///
 /// The gate runs before `Library::new`. Production stems skip hashing.
-/// Extra stems open only regular files whose SHA-256 is pinned for the stem.
+/// Extra stems open only regular files whose SHA-256 is pinned for the stem,
+/// unless the extra stem is allow+trusted (hash skip) or a host unhashed grant.
 pub fn resolve_library(
     name: &str,
     base_dir: Option<&Path>,
@@ -546,5 +547,17 @@ mod tests {
             other => panic!("expected hash mismatch deny, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_extra_missing_file_is_not_found_not_denied() {
+        let gate = DloadGate::from_consumer_trusted(["plugin"], &[], ["plugin"]);
+        let path = missing_abs_lib("plugin");
+        gate.check_request(&path)
+            .expect("allow + trusted extra stem must pass the gate");
+        match resolve_library(&path, None, &[], &gate) {
+            Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
+            other => panic!("expected LibraryNotFound for trusted extra, got {other:?}"),
+        }
     }
 }
