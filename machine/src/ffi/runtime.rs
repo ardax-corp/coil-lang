@@ -4,6 +4,7 @@ use std::path::Path;
 
 use libloading::Library;
 
+use super::gate::DloadGate;
 use super::resolve::resolve_library;
 
 /// Sonames to probe when checking for a dynamically linked libffi (optional `system` feature).
@@ -50,13 +51,17 @@ pub fn probe_system_libffi() -> Result<(), String> {
 }
 
 /// Verify that each named library can be resolved (for `coil package --check-native`).
-pub fn check_native_libraries(names: &[String], base_dir: Option<&Path>) -> Result<(), String> {
+pub fn check_native_libraries(
+    names: &[String],
+    base_dir: Option<&Path>,
+    gate: &DloadGate,
+) -> Result<(), String> {
     if names.is_empty() {
         return Ok(());
     }
     let mut errors = Vec::new();
     for name in names {
-        match resolve_library(name, base_dir, &[]) {
+        match resolve_library(name, base_dir, &[], gate) {
             Ok(_) => {}
             Err(e) => errors.push(format!("  - {name}: {e}")),
         }

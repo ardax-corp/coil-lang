@@ -17,6 +17,7 @@ rkyv = "0.8.12"
 libloading = "0.9"
 libffi = "5.1.1"
 libc = "0.2"
+sha2 = "0.10"
 chrono = { version = "0.4.45", optional = true }
 
 [dev-dependencies]

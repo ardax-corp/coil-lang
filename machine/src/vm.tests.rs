@@ -2126,6 +2126,9 @@
         }
 
         let mut vm = Machine::<512>::default();
+        vm.dload_gate_mut()
+            .grant_file("sum", &lib_path)
+            .unwrap_or_else(|e| panic!("grant {lib_name}: {e}"));
         let lib_val = vm
             .load_userland_library(lib_path.to_str().unwrap())
             .unwrap_or_else(|e| panic!("load {lib_name}: {e}"));
@@ -2189,7 +2192,10 @@
             eprintln!("skipping: {lib_name} not built");
             return;
         }
-        let lib = resolve_library(lib_path.to_str().unwrap(), None, &[])
+        let mut gate = crate::ffi::DloadGate::deny_all();
+        gate.grant_file("sum", &lib_path)
+            .unwrap_or_else(|e| panic!("grant {lib_name}: {e}"));
+        let lib = resolve_library(lib_path.to_str().unwrap(), None, &[], &gate)
             .unwrap_or_else(|e| panic!("load {lib_name}: {e}"));
 
         let mut vm = Machine::<512>::default();

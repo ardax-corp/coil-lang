@@ -3,6 +3,7 @@
 mod call;
 mod closure;
 mod error;
+mod gate;
 mod registry;
 mod resolve;
 mod runtime;
@@ -14,9 +15,13 @@ pub use call::{
 };
 pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
+pub use gate::DloadGate;
 pub use libloading::Library;
 pub use registry::{HostClosureFn, NativeFn, Natives};
-pub use resolve::{library_candidates, platform_shared_lib_filename, resolve_library};
+pub use resolve::{
+    dload_request_stem, is_libc_alias, library_candidates, platform_shared_lib_filename,
+    resolve_library,
+};
 pub use runtime::{check_native_libraries, packaged_app_ffi_startup_check, probe_system_libffi};
 pub use signature::{FfiError, FfiSignature, FfiSignatureBuilder};
 
@@ -40,9 +45,8 @@ pub fn register_on_library(
 }
 
 /// Load a shared library by path (legacy — prefer [`resolve_library`]).
-pub fn load_library(name: &str) -> Result<Arc<Library>, libloading::Error> {
-    let lib = unsafe { Library::new(name) }?;
-    Ok(Arc::new(lib))
+pub fn load_library(name: &str) -> Result<Arc<Library>, FfiError> {
+    resolve_library(name, None, &[], &DloadGate::deny_all())
 }
 
 /// Load with search path resolution.
@@ -50,6 +54,7 @@ pub fn load_library_resolved(
     name: &str,
     base_dir: Option<&Path>,
     search_paths: &[PathBuf],
+    gate: &DloadGate,
 ) -> Result<Arc<Library>, FfiError> {
-    resolve_library(name, base_dir, search_paths)
+    resolve_library(name, base_dir, search_paths, gate)
 }

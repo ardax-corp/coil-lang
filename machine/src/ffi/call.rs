@@ -1,6 +1,6 @@
 //! libffi call preparation and invocation.
 
-use std::ffi::{CStr, CString, c_char, c_void};
+use std::ffi::{c_char, c_void, CStr, CString};
 
 use common::Value;
 use libffi::middle::{Arg, Cif, CodePtr, Type};
@@ -627,7 +627,25 @@ pub fn invoke_via_libffi(
 mod tests {
     use super::*;
     use crate::ffi::FfiSignatureBuilder;
-    use crate::ffi::load_library;
+    use crate::ffi::{library_candidates, DloadGate};
+
+    fn open_libc_ungated() -> Option<std::sync::Arc<libloading::Library>> {
+        for c in library_candidates("c", None, &[]) {
+            if let Ok(lib) = unsafe { libloading::Library::new(&c) } {
+                return Some(std::sync::Arc::new(lib));
+            }
+        }
+        None
+    }
+
+    fn resolve_granted(
+        stem: &str,
+        path: &std::path::Path,
+    ) -> Result<std::sync::Arc<libloading::Library>, crate::ffi::FfiError> {
+        let mut gate = DloadGate::deny_all();
+        gate.grant_file(stem, path)?;
+        crate::ffi::resolve_library(path.to_str().unwrap(), None, &[], &gate)
+    }
 
     extern "C" fn add_two(a: i64, b: i64) -> i64 {
         a + b
@@ -698,9 +716,9 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn invoke_libc_strlen_via_libffi() {
-        let lib = match crate::ffi::resolve_library("c", None, &[]) {
-            Ok(l) => l,
-            Err(_) => {
+        let lib = match open_libc_ungated() {
+            Some(l) => l,
+            None => {
                 if std::env::var_os("CI").is_some() {
                     panic!("FFI soft-skip forbidden in CI: libc not reachable via dlopen");
                 }
@@ -747,7 +765,7 @@ mod tests {
             eprintln!("skipping: {lib_name} not built");
             return;
         }
-        let lib = match crate::ffi::resolve_library(lib_path.to_str().unwrap(), None, &[]) {
+        let lib = match resolve_granted("sum", &lib_path) {
             Ok(l) => l,
             Err(e) => {
                 if std::env::var_os("CI").is_some() {
@@ -886,9 +904,9 @@ mod tests {
     fn variadic_invoke_libc_snprintf_formats_int() {
         use std::ffi::CStr;
 
-        let lib = match crate::ffi::resolve_library("c", None, &[]) {
-            Ok(l) => l,
-            Err(_) => {
+        let lib = match open_libc_ungated() {
+            Some(l) => l,
+            None => {
                 if std::env::var_os("CI").is_some() {
                     panic!("FFI soft-skip forbidden in CI: libc not reachable via dlopen");
                 }

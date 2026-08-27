@@ -8,14 +8,15 @@ mod dissect;
 // the IL stays crate-private.
 pub(crate) mod il;
 pub(crate) mod profile;
+pub use il::opt::{OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
-pub use il::opt::{OptStats, last_opt_stats};
 pub use profile::{
-    InstrumentMap, LoadError, ProfileData, PROFILE_VERSION, current_profile, instrument_for_pgo,
+    InstrumentMap, LoadError, PROFILE_VERSION, ProfileData, current_profile, instrument_for_pgo,
     instrument_for_pgo_mut, last_instrument_map, optimize_with_profile, profile_from_runtime,
     set_current_profile, set_pgo_instrument,
 };
+mod lockfile;
 mod manifest;
 mod monomorphize;
 mod pipeline;

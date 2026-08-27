@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use libloading::Library;
 
+use super::gate::DloadGate;
 use super::signature::FfiError;
 
 /// Strip a known shared-library suffix and optional `lib` prefix, yielding a stem.
@@ -33,8 +34,17 @@ pub(crate) fn library_stem(name: &str) -> String {
     stem
 }
 
+/// Filename stem for the dload gate (`/abs/libfoo.so` → `foo`).
+pub fn dload_request_stem(name: &str) -> String {
+    let file = Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    library_stem(file)
+}
+
 /// Whether `name` (or its stem) refers to the C standard library.
-fn is_libc_alias(name: &str) -> bool {
+pub fn is_libc_alias(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     matches!(
         lower.as_str(),
@@ -203,19 +213,38 @@ pub fn library_candidates(
 }
 
 /// Resolve and load a shared library, trying each candidate in order.
+///
+/// The gate runs before `Library::new`. Only regular files whose SHA-256 is
+/// pinned for `name`'s stem are opened.
 pub fn resolve_library(
     name: &str,
     base_dir: Option<&Path>,
     search_paths: &[PathBuf],
+    gate: &DloadGate,
 ) -> Result<Arc<Library>, FfiError> {
+    let stem = gate.check_request(name)?;
     let candidates = library_candidates(name, base_dir, search_paths);
     let mut errors = Vec::new();
+    let mut saw_existing = false;
+    let mut saw_hash_reject = false;
 
     for candidate in &candidates {
+        if !candidate.is_file() {
+            continue;
+        }
+        saw_existing = true;
+        if !gate.file_hash_allowed(&stem, candidate) {
+            saw_hash_reject = true;
+            continue;
+        }
         match unsafe { Library::new(candidate) } {
             Ok(lib) => return Ok(Arc::new(lib)),
             Err(e) => errors.push(format!("{}: {e}", candidate.display())),
         }
+    }
+
+    if saw_existing && saw_hash_reject && errors.is_empty() {
+        return Err(DloadGate::hash_mismatch(name, &stem));
     }
 
     Err(FfiError::LibraryNotFound {
@@ -272,15 +301,14 @@ mod tests {
         #[cfg(all(unix, not(target_os = "macos")))]
         assert!(c.iter().any(|p| p.to_string_lossy().contains("libc.so")));
         #[cfg(target_os = "macos")]
-        assert!(
-            c.iter()
-                .any(|p| p.to_string_lossy().contains("libSystem") || p.ends_with("c"))
-        );
+        assert!(c
+            .iter()
+            .any(|p| p.to_string_lossy().contains("libSystem") || p.ends_with("c")));
         #[cfg(target_os = "windows")]
-        assert!(
-            c.iter().any(|p| p.to_string_lossy().contains("ucrtbase")
-                || p.to_string_lossy().contains("msvcrt"))
-        );
+        assert!(c
+            .iter()
+            .any(|p| p.to_string_lossy().contains("ucrtbase")
+                || p.to_string_lossy().contains("msvcrt")));
     }
 
     #[test]
@@ -313,5 +341,33 @@ mod tests {
         };
         let c = library_candidates(abs.to_str().unwrap(), None, &[]);
         assert_eq!(c, vec![abs]);
+    }
+
+    #[test]
+    fn dload_request_stem_uses_filename() {
+        assert_eq!(dload_request_stem("crypto"), "crypto");
+        assert_eq!(dload_request_stem("libtls.so"), "tls");
+        let abs = if cfg!(windows) {
+            r"C:\Windows\System32\kernel32.dll"
+        } else {
+            "/lib/x86_64-linux-gnu/libc.so.6"
+        };
+        assert_eq!(
+            dload_request_stem(abs),
+            library_stem(Path::new(abs).file_name().unwrap().to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn resolve_library_deny_all_does_not_dlopen() {
+        let deny = DloadGate::deny_all();
+        match resolve_library("c", None, &[], &deny) {
+            Err(FfiError::LibraryDenied { .. }) => {}
+            other => panic!("expected LibraryDenied, got {other:?}"),
+        }
+        match resolve_library("sum", None, &[], &deny) {
+            Err(FfiError::LibraryDenied { .. }) => {}
+            other => panic!("expected LibraryDenied, got {other:?}"),
+        }
     }
 }

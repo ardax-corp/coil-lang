@@ -302,6 +302,42 @@ fn run_bytecode(
     shared.into_utf8()
 }
 
+fn libc_file() -> Option<std::path::PathBuf> {
+    machine::library_candidates("c", None, &[])
+        .into_iter()
+        .find(|p| p.is_file())
+}
+
+fn run_src_with_grants(
+    src: &str,
+    entry: Option<&std::path::Path>,
+    grants: &[(&str, std::path::PathBuf)],
+) -> String {
+    let mut pipeline = Pipeline::new();
+    for (stem, path) in grants {
+        pipeline.grant_dload_file((*stem).to_string(), path.clone());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("example failed to compile (parse error or type errors)");
+    run_bytecode(bytecode, constants, &pipeline, entry)
+}
+
+fn run_file_with_grants(path: &str, grants: &[(&str, std::path::PathBuf)]) -> String {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join(path);
+    let mut pipeline = Pipeline::new();
+    for (stem, p) in grants {
+        pipeline.grant_dload_file((*stem).to_string(), p.clone());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(full.to_str().unwrap())
+        .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
+    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
+}
+
 #[test]
 fn example_panic_loc_archive_has_source_files() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1654,8 +1690,9 @@ fn example_ffi_sum_via_dlopen_prints_42() {
         &format!("dload(\"{}\")", lib_abs.display()),
     );
 
-    let result =
-        std::panic::catch_unwind(|| run_example_src_with_entry(&src, Some(full.as_path())));
+    let result = std::panic::catch_unwind(|| {
+        run_src_with_grants(&src, Some(full.as_path()), &[("sum", lib_abs.clone())])
+    });
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -1668,11 +1705,10 @@ fn example_ffi_sum_via_dlopen_prints_42() {
 
 #[test]
 fn example_strlen_prints_5() {
-    // Quick probe: if the portable `c` alias fails, skip outside CI.
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
+    let Some(libc) = libc_file() else {
+        ffi_soft_skip("no libc file to hash-grant on this platform");
         return;
-    }
+    };
 
     let result = std::panic::catch_unwind(|| {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1680,7 +1716,7 @@ fn example_strlen_prints_5() {
             .expect("compiler crate must have a parent (workspace root)");
         let full = workspace_root.join("examples/strlen.hy");
         let src = std::fs::read_to_string(&full).expect("read strlen.hy");
-        run_example_src_with_entry(&src, Some(full.as_path()))
+        run_src_with_grants(&src, Some(full.as_path()), &[("c", libc)])
     });
     let output = match result {
         Ok(s) => s,
@@ -1694,12 +1730,13 @@ fn example_strlen_prints_5() {
 
 #[test]
 fn example_strlen_prints_5_compile_src_from_file() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
+    let Some(libc) = libc_file() else {
+        ffi_soft_skip("no libc file to hash-grant on this platform");
         return;
-    }
+    };
 
-    let result = std::panic::catch_unwind(|| run_example("examples/strlen.hy"));
+    let result =
+        std::panic::catch_unwind(|| run_file_with_grants("examples/strlen.hy", &[("c", libc)]));
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -1803,13 +1840,14 @@ fn clean_captured_os_stdout(output: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn example_ffi_printf_prints_hello_42() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
+    let Some(libc) = libc_file() else {
+        ffi_soft_skip("no libc file to hash-grant on this platform");
         return;
-    }
+    };
 
     #[cfg(not(unix))]
     {
+        let _ = libc;
         ffi_soft_skip("ffi_printf OS-stdout capture is unix-only");
         return;
     }
@@ -1823,7 +1861,8 @@ fn example_ffi_printf_prints_hello_42() {
             let full = workspace_root.join("examples/ffi_printf.hy");
             let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
             let ((), os_out) = with_captured_os_stdout(|| {
-                let _vm_out = run_example_src_with_entry(&src, Some(full.as_path()));
+                let _vm_out =
+                    run_src_with_grants(&src, Some(full.as_path()), &[("c", libc.clone())]);
             });
             os_out
         });
@@ -1902,7 +1941,29 @@ fn main() {
 }
 "#;
     let output = run_example_src(src);
-    assert_eq!(output, "missing");
+    assert_eq!(output, "other");
+}
+
+#[test]
+fn userland_dload_c_is_denied() {
+    let src = r#"
+use ffi::{dload, ErrorKind};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let r = dload("c");
+    let msg = match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {
+            ErrorKind::LibraryNotFound => "missing",
+            _ => "denied",
+        },
+    };
+    write(stdout(), to_bytes(format("%s", msg)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "denied");
 }
 
 #[test]
@@ -2154,15 +2215,12 @@ fn main() {
     let (bytecode, _) = pipeline.compile_src(src).expect("range to_vec compile");
     let syms = pipeline.program_debug().fn_symbols;
     let body = |name: &str| {
-        let idx = syms
-            .iter()
-            .position(|s| s.name == name)
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing `{name}`; have {:?}",
-                    syms.iter().map(|s| &s.name).collect::<Vec<_>>()
-                )
-            });
+        let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
+            panic!(
+                "missing `{name}`; have {:?}",
+                syms.iter().map(|s| &s.name).collect::<Vec<_>>()
+            )
+        });
         let start = syms[idx].entry_pc as usize;
         let end = syms
             .get(idx + 1)
@@ -2184,9 +2242,8 @@ fn main() {
             .map(|b| b.bin_slot_imm_store_parts().0)
             .collect()
     };
-    let has = |slice: &[common::Byte], op: common::Instruction| {
-        slice.iter().any(|b| *b.bytecode() == op)
-    };
+    let has =
+        |slice: &[common::Byte], op: common::Instruction| slice.iter().any(|b| *b.bytecode() == op);
 
     let int_half = body("Range::to_vec");
     assert_eq!(
@@ -2500,7 +2557,7 @@ fn run_ffi_example_with_lib(path: &str, lib_path: &std::path::Path) -> String {
         "dload(\"sum\")",
         &format!("dload(\"{}\")", lib_abs.display()),
     );
-    run_example_src_with_entry(&src, Some(full.as_path()))
+    run_src_with_grants(&src, Some(full.as_path()), &[("sum", lib_abs)])
 }
 
 #[cfg(unix)]
@@ -2732,7 +2789,11 @@ fn main() {
 
 #[test]
 fn example_attr_ffi_strlen_prints_5() {
-    let output = run_example("examples/attr_ffi.hy");
+    let Some(libc) = libc_file() else {
+        ffi_soft_skip("no libc file to hash-grant on this platform");
+        return;
+    };
+    let output = run_file_with_grants("examples/attr_ffi.hy", &[("c", libc)]);
     assert_eq!(output, "5");
 }
 
@@ -7027,7 +7088,10 @@ fn virtual_tls_modules_do_not_resolve() {
     fn check_missing(src: &str) {
         let mut pipeline = Pipeline::new();
         let err = pipeline.compile_src(src);
-        assert!(err.is_err(), "expected module-not-found, got Ok for {src:?}");
+        assert!(
+            err.is_err(),
+            "expected module-not-found, got Ok for {src:?}"
+        );
         assert!(
             pipeline.messages().iter().any(|m| {
                 m.code() == Some(compiler::ErrorCode::IoError)
@@ -7111,14 +7175,8 @@ fn optional_virtual_modules_match_cargo_features() {
     check("use time::{epoch};\nfn main() {}\n", cfg!(feature = "time"));
     check("use crypto::{sha256};\nfn main() {}\n", false);
     check("use io::__tls::client::{enable};\nfn main() {}\n", false);
-    check(
-        "use regex::{compile};\nfn main() {}\n",
-        false,
-    );
-    check(
-        "use io::net::tls::client::{enable};\nfn main() {}\n",
-        false,
-    );
+    check("use regex::{compile};\nfn main() {}\n", false);
+    check("use io::net::tls::client::{enable};\nfn main() {}\n", false);
     check("use tls::{client};\nfn main() {}\n", false);
 }
 
@@ -8590,12 +8648,12 @@ fn main() {
 /// COI-19: extern handles in static slots survive locals / repeat calls.
 #[test]
 fn extern_system_twice_after_vec_ok() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable via resolve_library(\"c\")");
+    let Some(libc) = libc_file() else {
+        ffi_soft_skip("no libc file to hash-grant on this platform");
         return;
-    }
+    };
     let result = std::panic::catch_unwind(|| {
-        run_example_src(
+        run_src_with_grants(
             r#"
 use io::{stdout};
 use io::sync::{write_all};
@@ -8613,6 +8671,8 @@ fn main() {
     let _ = write_all(stdout(), to_bytes(format("%v %v\n", a, b)));
 }
 "#,
+            None,
+            &[("c", libc)],
         )
     });
     let output = match result {
@@ -8628,11 +8688,13 @@ fn main() {
 /// COI-19: `extern` in an imported module still initializes before main.
 #[test]
 fn extern_in_imported_module_runs() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable via resolve_library(\"c\")");
+    let Some(libc) = libc_file() else {
+        ffi_soft_skip("no libc file to hash-grant on this platform");
         return;
-    }
-    let result = std::panic::catch_unwind(|| run_example_multifile("examples/ffi_mod_entry.hy"));
+    };
+    let result = std::panic::catch_unwind(|| {
+        run_file_with_grants("examples/ffi_mod_entry.hy", &[("c", libc)])
+    });
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -8662,7 +8724,10 @@ test("bind free fn") {
 }
 "#,
     );
-    assert!(!bind_fn.contains("failed"), "free fn bind failed: {bind_fn:?}");
+    assert!(
+        !bind_fn.contains("failed"),
+        "free fn bind failed: {bind_fn:?}"
+    );
 
     let bind_method = run_harness_src(
         r#"
@@ -8888,7 +8953,8 @@ test("forward static method call from instance") {
     let cases = pipeline.test_cases().to_vec();
     assert_eq!(cases.len(), 9, "expected nine COI-108 cases, got {cases:?}");
     for (name, offset) in &cases {
-        let mut machine = Machine::<256>::with_operand_capacity(pipeline.operand_stack_slots() as usize);
+        let mut machine =
+            Machine::<256>::with_operand_capacity(pipeline.operand_stack_slots() as usize);
         pipeline.wire_host_natives(&mut machine);
         machine.load_program(&bytecode, &constants, pipeline.strings());
         let ret = machine.call_function(*offset, &[]);

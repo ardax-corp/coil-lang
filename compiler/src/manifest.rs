@@ -64,6 +64,7 @@ pub struct Scripts {
 /// `version` on git deps is optional schema, not a resolved tag; the lock
 /// (`rev` + `content_hash`) is the pin. Optional `rev` is stored as parsed
 /// schema only — this crate does not resolve or write a lockfile.
+/// Native `sha256` pins in `coil.lock` are read for the `dload` gate.
 ///
 /// Optional `trusted` (default `false`) is stored only. When `true`, spool
 /// may skip **native** `sha256` on that dep row (so a consumer can depend on
@@ -105,6 +106,8 @@ pub struct Manifest {
     pub entry: Option<PathBuf>,
     /// Extra directories searched when resolving FFI library paths.
     pub ffi_search_paths: Vec<PathBuf>,
+    /// Consumer `dload` stems (`[ffi] allow`). Empty is deny-all.
+    pub ffi_allow: Vec<String>,
     /// When false, `env::exec` fails at runtime with `ExecDisabled`.
     pub allow_exec: bool,
     /// Optional `[package]` block (`name` + `version`, plus optional `coil` / `include`).
@@ -124,6 +127,7 @@ impl Default for Manifest {
             roots: vec![PathBuf::from("src")],
             entry: None,
             ffi_search_paths: Vec::new(),
+            ffi_allow: Vec::new(),
             allow_exec: false,
             package: None,
             dependencies: Vec::new(),
@@ -178,6 +182,7 @@ impl Manifest {
         let mut roots: Option<Vec<PathBuf>> = None;
         let mut entry: Option<PathBuf> = None;
         let mut ffi_search_paths: Option<Vec<PathBuf>> = None;
+        let mut ffi_allow: Option<Vec<String>> = None;
         let mut allow_exec: Option<bool> = None;
         let mut package_name: Option<String> = None;
         let mut package_version: Option<String> = None;
@@ -254,6 +259,35 @@ impl Manifest {
                         message: format!("expected array of strings, got `{}`", value),
                     })?;
                     ffi_search_paths = Some(parsed.into_iter().map(PathBuf::from).collect());
+                }
+                ("ffi", "allow") => {
+                    let parsed = parse_string_array(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected array of strings, got `{}`", value),
+                    })?;
+                    let mut allow = Vec::new();
+                    for stem in parsed {
+                        if stem.contains('/') || stem.contains('\\') || stem.is_empty() {
+                            return Err(ManifestError::Parse {
+                                line: line_num,
+                                message: format!(
+                                    "`[ffi] allow` entries must be dload stems, got `{stem}`"
+                                ),
+                            });
+                        }
+                        if machine::is_libc_alias(&stem) {
+                            return Err(ManifestError::Parse {
+                                line: line_num,
+                                message: format!(
+                                    "`[ffi] allow` cannot include libc alias `{stem}`"
+                                ),
+                            });
+                        }
+                        if !allow.iter().any(|s| s == &stem) {
+                            allow.push(stem);
+                        }
+                    }
+                    ffi_allow = Some(allow);
                 }
                 ("env", "allow_exec") => {
                     let parsed = parse_bool(value).ok_or(ManifestError::Parse {
@@ -403,6 +437,7 @@ impl Manifest {
             roots: roots.unwrap_or_else(|| vec![PathBuf::from("src")]),
             entry,
             ffi_search_paths: ffi_search_paths.unwrap_or_default(),
+            ffi_allow: ffi_allow.unwrap_or_default(),
             allow_exec: allow_exec.unwrap_or(false),
             package,
             dependencies,
@@ -806,6 +841,7 @@ mod tests {
             roots: vec![PathBuf::from("src"), PathBuf::from("vendor")],
             entry: None,
             ffi_search_paths: Vec::new(),
+            ffi_allow: Vec::new(),
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
@@ -905,6 +941,7 @@ mod tests {
             roots: vec![PathBuf::from("src"), PathBuf::from("builtins")],
             entry: None,
             ffi_search_paths: Vec::new(),
+            ffi_allow: Vec::new(),
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
@@ -928,6 +965,7 @@ mod tests {
             roots: vec![PathBuf::from("src")],
             entry: None,
             ffi_search_paths: Vec::new(),
+            ffi_allow: Vec::new(),
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
@@ -988,6 +1026,39 @@ mod tests {
         let m = Manifest::load(&tmp).unwrap();
         assert_eq!(m.roots, vec![PathBuf::from("./vendor")]);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parse_ffi_allow_stems() {
+        let src = r#"
+            [ffi]
+            search_paths = ["./.spool/native/tls"]
+            allow = ["tls", "crypto"]
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(
+            m.ffi_search_paths,
+            vec![PathBuf::from("./.spool/native/tls")]
+        );
+        assert_eq!(m.ffi_allow, vec!["tls".to_string(), "crypto".to_string()]);
+    }
+
+    #[test]
+    fn parse_ffi_allow_rejects_libc() {
+        let err = Manifest::parse("[ffi]\nallow = [\"c\"]\n").unwrap_err();
+        let ManifestError::Parse { message, .. } = err else {
+            panic!("expected parse error, got {err:?}");
+        };
+        assert!(message.contains("libc alias"), "{message}");
+    }
+
+    #[test]
+    fn parse_ffi_allow_rejects_paths() {
+        let err = Manifest::parse("[ffi]\nallow = [\"../libfoo.so\"]\n").unwrap_err();
+        let ManifestError::Parse { message, .. } = err else {
+            panic!("expected parse error, got {err:?}");
+        };
+        assert!(message.contains("dload stems"), "{message}");
     }
 
     #[test]
