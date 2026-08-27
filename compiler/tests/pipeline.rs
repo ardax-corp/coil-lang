@@ -302,12 +302,6 @@ fn run_bytecode(
     shared.into_utf8()
 }
 
-fn libc_file() -> Option<std::path::PathBuf> {
-    machine::library_candidates("c", None, &[])
-        .into_iter()
-        .find(|p| p.is_file())
-}
-
 fn run_src_with_grants(
     src: &str,
     entry: Option<&std::path::Path>,
@@ -321,6 +315,36 @@ fn run_src_with_grants(
         .compile_src(src)
         .expect("example failed to compile (parse error or type errors)");
     run_bytecode(bytecode, constants, &pipeline, entry)
+}
+
+fn run_src_with_extra_stems(
+    src: &str,
+    entry: Option<&std::path::Path>,
+    stems: &[&str],
+) -> String {
+    let mut pipeline = Pipeline::new();
+    for stem in stems {
+        pipeline.grant_dload_stem((*stem).to_string());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("example failed to compile (parse error or type errors)");
+    run_bytecode(bytecode, constants, &pipeline, entry)
+}
+
+fn run_file_with_extra_stems(path: &str, stems: &[&str]) -> String {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join(path);
+    let mut pipeline = Pipeline::new();
+    for stem in stems {
+        pipeline.grant_dload_stem((*stem).to_string());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(full.to_str().unwrap())
+        .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
+    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
 }
 
 fn run_file_with_grants(path: &str, grants: &[(&str, std::path::PathBuf)]) -> String {
@@ -1705,18 +1729,13 @@ fn example_ffi_sum_via_dlopen_prints_42() {
 
 #[test]
 fn example_strlen_prints_5() {
-    let Some(libc) = libc_file() else {
-        ffi_soft_skip("no libc file to hash-grant on this platform");
-        return;
-    };
-
     let result = std::panic::catch_unwind(|| {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("compiler crate must have a parent (workspace root)");
         let full = workspace_root.join("examples/strlen.hy");
         let src = std::fs::read_to_string(&full).expect("read strlen.hy");
-        run_src_with_grants(&src, Some(full.as_path()), &[("c", libc)])
+        run_src_with_extra_stems(&src, Some(full.as_path()), &["c"])
     });
     let output = match result {
         Ok(s) => s,
@@ -1730,13 +1749,8 @@ fn example_strlen_prints_5() {
 
 #[test]
 fn example_strlen_prints_5_compile_src_from_file() {
-    let Some(libc) = libc_file() else {
-        ffi_soft_skip("no libc file to hash-grant on this platform");
-        return;
-    };
-
     let result =
-        std::panic::catch_unwind(|| run_file_with_grants("examples/strlen.hy", &[("c", libc)]));
+        std::panic::catch_unwind(|| run_file_with_extra_stems("examples/strlen.hy", &["c"]));
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -1840,14 +1854,8 @@ fn clean_captured_os_stdout(output: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn example_ffi_printf_prints_hello_42() {
-    let Some(libc) = libc_file() else {
-        ffi_soft_skip("no libc file to hash-grant on this platform");
-        return;
-    };
-
     #[cfg(not(unix))]
     {
-        let _ = libc;
         ffi_soft_skip("ffi_printf OS-stdout capture is unix-only");
         return;
     }
@@ -1862,7 +1870,7 @@ fn example_ffi_printf_prints_hello_42() {
             let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
             let ((), os_out) = with_captured_os_stdout(|| {
                 let _vm_out =
-                    run_src_with_grants(&src, Some(full.as_path()), &[("c", libc.clone())]);
+                    run_src_with_extra_stems(&src, Some(full.as_path()), &["c"]);
             });
             os_out
         });
@@ -2985,11 +2993,7 @@ fn main() {
 
 #[test]
 fn example_attr_ffi_strlen_prints_5() {
-    let Some(libc) = libc_file() else {
-        ffi_soft_skip("no libc file to hash-grant on this platform");
-        return;
-    };
-    let output = run_file_with_grants("examples/attr_ffi.hy", &[("c", libc)]);
+    let output = run_file_with_extra_stems("examples/attr_ffi.hy", &["c"]);
     assert_eq!(output, "5");
 }
 
@@ -8844,12 +8848,8 @@ fn main() {
 /// COI-19: extern handles in static slots survive locals / repeat calls.
 #[test]
 fn extern_system_twice_after_vec_ok() {
-    let Some(libc) = libc_file() else {
-        ffi_soft_skip("no libc file to hash-grant on this platform");
-        return;
-    };
     let result = std::panic::catch_unwind(|| {
-        run_src_with_grants(
+        run_src_with_extra_stems(
             r#"
 use io::{stdout};
 use io::sync::{write_all};
@@ -8868,7 +8868,7 @@ fn main() {
 }
 "#,
             None,
-            &[("c", libc)],
+            &["c"],
         )
     });
     let output = match result {
@@ -8884,12 +8884,8 @@ fn main() {
 /// COI-19: `extern` in an imported module still initializes before main.
 #[test]
 fn extern_in_imported_module_runs() {
-    let Some(libc) = libc_file() else {
-        ffi_soft_skip("no libc file to hash-grant on this platform");
-        return;
-    };
     let result = std::panic::catch_unwind(|| {
-        run_file_with_grants("examples/ffi_mod_entry.hy", &[("c", libc)])
+        run_file_with_extra_stems("examples/ffi_mod_entry.hy", &["c"])
     });
     let output = match result {
         Ok(s) => s,

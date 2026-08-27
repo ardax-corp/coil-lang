@@ -18,6 +18,8 @@ use super::signature::FfiError;
 pub struct DloadGate {
     allowed_stems: HashSet<String>,
     hashes_by_stem: HashMap<String, HashSet<[u8; 32]>>,
+    /// Host/test extra stems that skip lock hashing (`set_dload_allowlist`).
+    host_unhashed: HashSet<String>,
 }
 
 impl DloadGate {
@@ -62,9 +64,17 @@ impl DloadGate {
         gate
     }
 
+    /// Host/test extra stem with no lock hash (libc / fixtures on dyld or DLL search).
+    ///
+    /// Does not widen the production list. Manifest `[ffi] allow` cannot do this.
+    pub fn grant_stem(&mut self, stem: &str) {
+        self.host_unhashed.insert(stem.to_string());
+        self.allowed_stems.insert(stem.to_string());
+    }
+
     /// Host/test grant: allow extra `stem` only for files whose contents match `path`.
     ///
-    /// This is the fixture hook for `sum` / libc. It does not widen the production list.
+    /// Fixture hook for hashed extras (`sum`). It does not widen the production list.
     pub fn grant_file(&mut self, stem: &str, path: &Path) -> Result<(), FfiError> {
         let hash = sha256_file(path).map_err(|e| FfiError::LibraryDenied {
             name: path.display().to_string(),
@@ -90,7 +100,7 @@ impl DloadGate {
         if is_production_dload_stem(&stem) {
             return Ok(stem);
         }
-        if self.extra_granted(&stem) {
+        if self.extra_granted(&stem) || self.host_unhashed.contains(&stem) {
             return Ok(stem);
         }
         Err(FfiError::LibraryDenied {
@@ -105,11 +115,16 @@ impl DloadGate {
         })
     }
 
+    /// Extra stems from allow+hash must match a pin. Production and host unhashed skip.
+    pub fn hash_required(&self, stem: &str) -> bool {
+        !is_production_dload_stem(stem) && !self.host_unhashed.contains(stem)
+    }
+
     /// Whether `path`'s contents may be opened for `stem`.
     ///
-    /// Production stems skip hashing. Extra stems need a matching pin/grant.
+    /// Production stems and host unhashed extras skip hashing.
     pub fn file_hash_allowed(&self, stem: &str, path: &Path) -> bool {
-        if is_production_dload_stem(stem) {
+        if !self.hash_required(stem) {
             return true;
         }
         let Some(allowed) = self.hashes_by_stem.get(stem) else {
@@ -267,5 +282,14 @@ mod tests {
     fn hex_sha256(path: &Path) -> String {
         let h = sha256_file(path).unwrap();
         h.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    fn grant_stem_allows_libc_without_hash() {
+        let mut g = DloadGate::deny_all();
+        assert!(g.check_request("c").is_err());
+        g.grant_stem("c");
+        assert!(g.check_request("c").is_ok());
+        assert!(!g.hash_required("c"));
     }
 }

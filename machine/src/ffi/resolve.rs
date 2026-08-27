@@ -237,15 +237,18 @@ pub fn resolve_library(
     let mut errors = Vec::new();
     let mut saw_existing = false;
     let mut saw_hash_reject = false;
+    let hash_required = gate.hash_required(&stem);
 
     for candidate in &candidates {
-        if !candidate.is_file() {
-            continue;
-        }
-        saw_existing = true;
-        if !gate.file_hash_allowed(&stem, candidate) {
-            saw_hash_reject = true;
-            continue;
+        if hash_required {
+            if !candidate.is_file() {
+                continue;
+            }
+            saw_existing = true;
+            if !gate.file_hash_allowed(&stem, candidate) {
+                saw_hash_reject = true;
+                continue;
+            }
         }
         match unsafe { Library::new(candidate) } {
             Ok(lib) => return Ok(Arc::new(lib)),

@@ -406,6 +406,17 @@ impl<const S: usize> Machine<S> {
         self.dload_gate = gate;
     }
 
+    /// Host/test extra stems with no lock hash. Does not widen production stems.
+    pub fn set_dload_allowlist<I, St>(&mut self, extra_stems: I)
+    where
+        I: IntoIterator<Item = St>,
+        St: AsRef<str>,
+    {
+        for stem in extra_stems {
+            self.dload_gate.grant_stem(stem.as_ref());
+        }
+    }
+
     /// Mutable access for host/test grants after [`Self::set_dload_gate`].
     pub fn dload_gate_mut(&mut self) -> &mut crate::ffi::DloadGate {
         &mut self.dload_gate

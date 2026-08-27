@@ -76,6 +76,8 @@ pub struct Pipeline {
     include_tests: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
     extra_dload_grants: Vec<(String, PathBuf)>,
+    /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
+    extra_dload_stems: Vec<String>,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -316,11 +318,19 @@ impl Pipeline {
         self.extra_dload_grants.push((stem.into(), path));
     }
 
+    /// Host/test extra stem with no lock hash (libc fixtures). Not a consumer grant.
+    pub fn grant_dload_stem(&mut self, stem: impl Into<String>) {
+        self.extra_dload_stems.push(stem.into());
+    }
+
     /// Fail-closed gate: production stems, plus extra allow/hash and host grants.
     pub fn build_dload_gate(&self) -> machine::DloadGate {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
         let mut gate =
             machine::DloadGate::from_consumer(&self.manifest.ffi_allow, lock.native_pins());
+        for stem in &self.extra_dload_stems {
+            gate.grant_stem(stem);
+        }
         for (stem, path) in &self.extra_dload_grants {
             let _ = gate.grant_file(stem, path);
         }
@@ -437,6 +447,7 @@ impl Pipeline {
             overlays: HashMap::new(),
             include_tests: false,
             extra_dload_grants: Vec::new(),
+            extra_dload_stems: Vec::new(),
             opt_level: crate::OptLevel::Standard,
             collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
