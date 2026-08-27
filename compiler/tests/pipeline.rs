@@ -2113,6 +2113,14 @@ fn assert_library_denied(gate: &machine::DloadGate, name: &str, stem: &str) {
     }
 }
 
+fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+        .unwrap_or_default()
+}
+
 fn run_userland_dload_project(
     test_name: &str,
     toml_extra: &str,
@@ -2282,9 +2290,19 @@ allow = ["c"]
 [dependencies]
 c = { git = "https://example.com/libc.git", trusted = true }
 "#;
-    let output =
-        run_userland_dload_project("trusted_allow_c", extra, None, &dload_kind_program("c"));
-    assert_eq!(output, "denied");
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        run_userland_dload_project("trusted_allow_c", extra, None, &dload_kind_program("c"))
+    }));
+    match panicked {
+        Ok(output) => assert_eq!(output, "denied"),
+        Err(payload) => {
+            let msg = panic_message(&payload);
+            assert!(
+                msg.contains("libc alias") && msg.contains("`c`"),
+                "allow-listed c must not grant dload; got panic {msg:?}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -2390,10 +2408,23 @@ allow = ["c", "plugin"]
 c = { git = "https://example.com/libc.git", trusted = true }
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
-    let gate = dload_gate_for_project("allow_trusted_c", extra, None);
-    assert_library_denied(&gate, "c", "c");
-    gate.check_request("plugin")
-        .expect("trusted extra plugin must still pass");
+    let panicked = catch_unwind(AssertUnwindSafe(|| {
+        dload_gate_for_project("allow_trusted_c", extra, None)
+    }));
+    match panicked {
+        Ok(gate) => {
+            assert_library_denied(&gate, "c", "c");
+            gate.check_request("plugin")
+                .expect("trusted extra plugin must still pass");
+        }
+        Err(payload) => {
+            let msg = panic_message(&payload);
+            assert!(
+                msg.contains("libc alias") && msg.contains("`c`"),
+                "allow-listed c must not grant dload; got panic {msg:?}"
+            );
+        }
+    }
 }
 
 #[test]
