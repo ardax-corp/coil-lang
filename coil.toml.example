@@ -63,10 +63,11 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # post_update = "./scripts/post-update.sh"
 
 # [ffi]
-# search_paths locates shared libraries; allow lists dload stems.
-# Files must also match [[package.native]] sha256 in coil.lock.
-# search_paths = ["./.spool/native/tls"]
-# allow = ["tls"]
+# search_paths locates shared libraries; it is not a grant.
+# crypto / tls / regex / time always pass the dload gate (no lock hash).
+# Extra stems need allow AND a matching [[package.native]] sha256 in coil.lock.
+# search_paths = ["./.spool/native"]
+# allow = ["plugin"]
 
 # --------------------------------------------------------------------------
 # Discovery algorithm

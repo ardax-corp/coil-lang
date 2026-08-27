@@ -1917,23 +1917,57 @@ fn main() {
     let _ = machine.restore_output();
     let output = shared.into_utf8();
     assert!(
-        output.contains("panic:") && output.contains("not found"),
-        "expected panic message about missing library, got: {output:?}"
+        output.contains("panic:") && output.contains("denied"),
+        "expected panic about dload deny, got: {output:?}"
     );
 }
 
 #[test]
 fn userland_dload_missing_library_returns_err() {
+    let name = machine::platform_shared_lib_filename("time");
+    let missing = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{missing}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing",
+        "allowed stem `time` must not be denied; got {output:?}"
+    );
+}
+
+#[test]
+fn userland_dload_unknown_stem_is_denied_not_missing() {
     let src = r#"
 use ffi::{dload, ErrorKind};
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
-    let r = dload("this_library_definitely_does_not_exist_xyzzy");
+    let r = dload("notalist");
     let msg = match r {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e.kind {
             ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
             _ => "other",
         },
     };
@@ -1941,7 +1975,7 @@ fn main() {
 }
 "#;
     let output = run_example_src(src);
-    assert_eq!(output, "other");
+    assert_eq!(output, "denied");
 }
 
 #[test]
@@ -1956,7 +1990,8 @@ fn main() {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e.kind {
             ErrorKind::LibraryNotFound => "missing",
-            _ => "denied",
+            ErrorKind::Other => "denied",
+            _ => "other",
         },
     };
     write(stdout(), to_bytes(format("%s", msg)));
@@ -1964,6 +1999,167 @@ fn main() {
 "#;
     let output = run_example_src(src);
     assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_absolute_non_allowlisted_is_denied() {
+    let path = if cfg!(windows) {
+        "C:/Windows/System32/kernel32.dll"
+    } else {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_production_stems_are_not_denied() {
+    // Bare `dload("crypto")` opens system libcrypto on macOS and aborts
+    // (`loading libcrypto in an unsafe way`). Use a missing absolute path so
+    // the filename stem still passes the gate and dlopen never succeeds.
+    let paths: Vec<String> = ["time", "crypto", "tls", "regex"]
+        .into_iter()
+        .map(|stem| {
+            let name = machine::platform_shared_lib_filename(stem);
+            if cfg!(windows) {
+                format!("C:/coil-dload-missing/{name}")
+            } else {
+                format!("/coil-dload-missing/{name}")
+            }
+        })
+        .collect();
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let m0 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m1 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m2 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m3 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s %s %s %s", m0, m1, m2, m3)));
+}}
+"#,
+        paths[0], paths[1], paths[2], paths[3]
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing missing missing missing",
+        "production stems must pass the gate and miss on disk; got {output:?}"
+    );
+}
+
+#[test]
+fn userland_dload_missing_allowed_absolute_is_library_not_found() {
+    let name = machine::platform_shared_lib_filename("crypto");
+    let path = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(output, "missing");
+}
+
+#[test]
+fn userland_dload_extra_stem_hash_mismatch_is_denied() {
+    let dir = std::env::temp_dir().join("coil_userland_dload_mismatch");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = machine::platform_shared_lib_filename("plugin");
+    let path = dir.join(&name);
+    std::fs::write(&path, b"plugin-bytes").unwrap();
+    let other = dir.join("other.bin");
+    std::fs::write(&other, b"other-bytes").unwrap();
+    let abs = path.to_str().unwrap().replace('\\', "/");
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{abs}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_src_with_grants(&src, None, &[("plugin", other)]);
+    assert_eq!(output, "denied");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
