@@ -106,7 +106,7 @@ pub struct Manifest {
     pub entry: Option<PathBuf>,
     /// Extra directories searched when resolving FFI library paths.
     pub ffi_search_paths: Vec<PathBuf>,
-    /// Consumer `dload` stems (`[ffi] allow`). Empty is deny-all.
+    /// Extra consumer `dload` stems (`[ffi] allow`) beyond crypto/tls/regex/time.
     pub ffi_allow: Vec<String>,
     /// When false, `env::exec` fails at runtime with `ExecDisabled`.
     pub allow_exec: bool,

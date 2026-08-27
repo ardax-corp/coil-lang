@@ -1,7 +1,8 @@
-//! Read `coil.lock` native pins for the `dload` gate.
+//! Read `coil.lock` native pins for extra `dload` stems.
 //!
 //! Spool owns writing this file. The compiler only extracts
 //! `[[package.native]] sha256` rows keyed by the enclosing package name.
+//! First-party stems (`crypto`, `tls`, `regex`, `time`) do not need these pins.
 
 use std::path::Path;
 

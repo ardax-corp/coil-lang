@@ -19,8 +19,8 @@ pub use gate::DloadGate;
 pub use libloading::Library;
 pub use registry::{HostClosureFn, NativeFn, Natives};
 pub use resolve::{
-    dload_request_stem, is_libc_alias, library_candidates, platform_shared_lib_filename,
-    resolve_library,
+    DLOAD_PRODUCTION_STEMS, dload_request_stem, is_libc_alias, is_production_dload_stem,
+    library_candidates, platform_shared_lib_filename, resolve_library,
 };
 pub use runtime::{check_native_libraries, packaged_app_ffi_startup_check, probe_system_libffi};
 pub use signature::{FfiError, FfiSignature, FfiSignatureBuilder};

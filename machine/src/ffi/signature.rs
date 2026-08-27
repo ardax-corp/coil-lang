@@ -60,7 +60,7 @@ pub enum FfiError {
     Unsupported(String),
     /// Bad library handle or out-of-range function id at invoke/declare time.
     InvalidHandle(String),
-    /// Shared library blocked by the `dload` gate (allow list / lock hash).
+    /// Shared library blocked by the `dload` gate (stem list / extra allow+hash).
     LibraryDenied {
         name: String,
         stem: String,

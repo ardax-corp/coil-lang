@@ -1,4 +1,4 @@
-//! Fail-closed `dload` gate: consumer allow-list + lock-hashed file.
+//! Fail-closed `dload` gate: hardcoded first-party stems + extra allow/hash.
 
 use std::collections::{HashMap, HashSet};
 use std::io::Read;
@@ -6,14 +6,14 @@ use std::path::Path;
 
 use sha2::{Digest, Sha256};
 
-use super::resolve::{dload_request_stem, is_libc_alias};
+use super::resolve::{dload_request_stem, is_libc_alias, is_production_dload_stem};
 use super::signature::FfiError;
 
 /// Default-deny policy for opening shared libraries.
 ///
-/// The language hardcodes this gate, not a stem list. Allowed stems come from
-/// the consumer `coil.toml` `[ffi] allow`; file bytes must match a
-/// `[[package.native]]` sha256 in `coil.lock` (or a host [`Self::grant_file`]).
+/// First-party stems (`crypto`, `tls`, `regex`, `time`) always pass the gate
+/// with no lock hash (until COI-60). Extra stems need consumer `[ffi] allow`
+/// **and** a matching `[[package.native]] sha256` (or a host [`Self::grant_file`]).
 #[derive(Clone, Debug, Default)]
 pub struct DloadGate {
     allowed_stems: HashSet<String>,
@@ -21,17 +21,15 @@ pub struct DloadGate {
 }
 
 impl DloadGate {
-    /// No stems, no hashes — every `dload` is denied.
+    /// No extra stems — production stems still pass; everything else is denied.
     pub fn deny_all() -> Self {
         Self::default()
     }
 
-    /// Build from consumer `[ffi] allow` and lock native `(package, sha256 hex)` pins.
+    /// Extra stems from consumer `[ffi] allow` and lock native `(stem, sha256 hex)` pins.
     ///
-    /// Libc aliases in `allow` are ignored (they cannot be granted from a manifest).
-    /// A lock pin whose package name is not in `allow` is ignored (a dep request
-    /// is not a grant). Depending on `tls` only helps after the consumer lists
-    /// `tls` and the lock carries that package's hashed native.
+    /// Libc aliases in `allow` or lock pins are ignored. Production stems do not
+    /// need to be listed. A lock pin whose package is not on `allow` is ignored.
     pub fn from_consumer(
         allow: impl IntoIterator<Item = impl AsRef<str>>,
         native_pins: &[(String, String)],
@@ -39,7 +37,7 @@ impl DloadGate {
         let mut gate = Self::deny_all();
         for stem in allow {
             let stem = stem.as_ref();
-            if is_libc_alias(stem) {
+            if is_libc_alias(stem) || is_production_dload_stem(stem) {
                 continue;
             }
             if dload_request_stem(stem) != stem {
@@ -48,6 +46,9 @@ impl DloadGate {
             gate.allowed_stems.insert(stem.to_string());
         }
         for (pkg, hex) in native_pins {
+            if is_libc_alias(pkg) || is_production_dload_stem(pkg) {
+                continue;
+            }
             if !gate.allowed_stems.contains(pkg.as_str()) {
                 continue;
             }
@@ -61,7 +62,9 @@ impl DloadGate {
         gate
     }
 
-    /// Host/test grant: allow `stem` only for files whose contents match `path`.
+    /// Host/test grant: allow extra `stem` only for files whose contents match `path`.
+    ///
+    /// This is the fixture hook for `sum` / libc. It does not widen the production list.
     pub fn grant_file(&mut self, stem: &str, path: &Path) -> Result<(), FfiError> {
         let hash = sha256_file(path).map_err(|e| FfiError::LibraryDenied {
             name: path.display().to_string(),
@@ -76,25 +79,39 @@ impl DloadGate {
         Ok(())
     }
 
+    fn extra_granted(&self, stem: &str) -> bool {
+        self.allowed_stems.contains(stem)
+            && self.hashes_by_stem.get(stem).is_some_and(|h| !h.is_empty())
+    }
+
     /// Stem check before candidate search. Absolute paths use the filename stem.
     pub fn check_request(&self, name: &str) -> Result<String, FfiError> {
         let stem = dload_request_stem(name);
-        if !self.allowed_stems.contains(&stem) {
-            return Err(FfiError::LibraryDenied {
-                name: name.to_string(),
-                stem: stem.clone(),
-                reason: if is_libc_alias(name) || is_libc_alias(&stem) {
-                    "libc aliases cannot be dloaded".into()
-                } else {
-                    "stem is not on the consumer [ffi] allow list".into()
-                },
-            });
+        if is_production_dload_stem(&stem) {
+            return Ok(stem);
         }
-        Ok(stem)
+        if self.extra_granted(&stem) {
+            return Ok(stem);
+        }
+        Err(FfiError::LibraryDenied {
+            name: name.to_string(),
+            stem: stem.clone(),
+            reason: if is_libc_alias(name) || is_libc_alias(&stem) {
+                "libc aliases cannot be dloaded".into()
+            } else {
+                "stem is not a first-party library and lacks consumer [ffi] allow + lock hash"
+                    .into()
+            },
+        })
     }
 
-    /// Whether `path`'s contents match a lock/host hash for `stem`.
+    /// Whether `path`'s contents may be opened for `stem`.
+    ///
+    /// Production stems skip hashing. Extra stems need a matching pin/grant.
     pub fn file_hash_allowed(&self, stem: &str, path: &Path) -> bool {
+        if is_production_dload_stem(stem) {
+            return true;
+        }
         let Some(allowed) = self.hashes_by_stem.get(stem) else {
             return false;
         };
@@ -104,7 +121,7 @@ impl DloadGate {
         }
     }
 
-    /// Denied because the stem is allowed but no pin matched this file.
+    /// Denied because the extra stem is granted but no pin matched this file.
     pub fn hash_mismatch(name: &str, stem: &str) -> FfiError {
         FfiError::LibraryDenied {
             name: name.to_string(),
@@ -154,10 +171,11 @@ fn from_hex(b: u8) -> Option<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ffi::resolve::DLOAD_PRODUCTION_STEMS;
     use std::io::Write;
 
     #[test]
-    fn deny_all_rejects_c_and_unknown() {
+    fn deny_all_rejects_c_and_unknown_but_allows_production() {
         let g = DloadGate::deny_all();
         assert!(matches!(
             g.check_request("c"),
@@ -171,61 +189,78 @@ mod tests {
             g.check_request("/lib/x86_64-linux-gnu/libc.so.6"),
             Err(FfiError::LibraryDenied { .. })
         ));
+        for stem in DLOAD_PRODUCTION_STEMS {
+            g.check_request(stem)
+                .unwrap_or_else(|e| panic!("{stem} must pass without allow/hash, got {e:?}"));
+        }
     }
 
     #[test]
-    fn consumer_allow_without_pin_still_fails_hash() {
-        let g = DloadGate::from_consumer(["tls"], &[]);
+    fn extra_allow_without_pin_is_denied() {
+        let g = DloadGate::from_consumer(["plugin"], &[]);
+        assert!(matches!(
+            g.check_request("plugin"),
+            Err(FfiError::LibraryDenied { .. })
+        ));
         assert!(g.check_request("tls").is_ok());
-        assert!(g.check_request("c").is_err());
-        assert!(!g.file_hash_allowed("tls", Path::new("/nope")));
     }
 
     #[test]
     fn lock_pin_without_allow_is_not_a_grant() {
         let hash = "ab".repeat(32);
-        let g = DloadGate::from_consumer(std::iter::empty::<&str>(), &[("tls".into(), hash)]);
-        assert!(g.check_request("tls").is_err());
+        let g = DloadGate::from_consumer(std::iter::empty::<&str>(), &[("plugin".into(), hash)]);
+        assert!(g.check_request("plugin").is_err());
     }
 
     #[test]
-    fn libc_in_allow_is_ignored() {
-        let g = DloadGate::from_consumer(["c", "libc", "tls"], &[]);
+    fn libc_in_allow_or_lock_is_ignored() {
+        let hash = "ab".repeat(32);
+        let g = DloadGate::from_consumer(
+            ["c", "libc", "plugin"],
+            &[("c".into(), hash.clone()), ("plugin".into(), hash)],
+        );
         assert!(g.check_request("c").is_err());
+        assert!(g.check_request("plugin").is_ok());
+    }
+
+    #[test]
+    fn production_stems_in_allow_do_not_need_hashes() {
+        let g = DloadGate::from_consumer(["tls", "crypto"], &[]);
         assert!(g.check_request("tls").is_ok());
+        assert!(g.file_hash_allowed("tls", Path::new("/coil-dload-missing/libtls.so")));
     }
 
     #[test]
     fn grant_file_allows_matching_bytes_only() {
         let dir = std::env::temp_dir().join("coil_dload_gate_hash");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("libtls.so");
+        let path = dir.join("libplugin.so");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(b"native-bytes").unwrap();
         drop(f);
 
         let mut g = DloadGate::deny_all();
-        g.grant_file("tls", &path).unwrap();
-        assert!(g.check_request("tls").is_ok());
-        assert!(g.file_hash_allowed("tls", &path));
+        g.grant_file("plugin", &path).unwrap();
+        assert!(g.check_request("plugin").is_ok());
+        assert!(g.file_hash_allowed("plugin", &path));
 
         let other = dir.join("other.so");
         std::fs::write(&other, b"different").unwrap();
-        assert!(!g.file_hash_allowed("tls", &other));
+        assert!(!g.file_hash_allowed("plugin", &other));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
-    fn from_consumer_binds_pin_to_allowed_stem() {
+    fn from_consumer_binds_pin_to_allowed_extra_stem() {
         let dir = std::env::temp_dir().join("coil_dload_gate_pin");
         let _ = std::fs::create_dir_all(&dir);
-        let path = dir.join("libtls.so");
-        std::fs::write(&path, b"pinned-tls").unwrap();
+        let path = dir.join("libplugin.so");
+        std::fs::write(&path, b"pinned-plugin").unwrap();
         let hex = hex_sha256(&path);
 
-        let g = DloadGate::from_consumer(["tls"], &[("tls".into(), hex)]);
-        assert!(g.file_hash_allowed("tls", &path));
-        assert!(!g.file_hash_allowed("crypto", &path));
+        let g = DloadGate::from_consumer(["plugin"], &[("plugin".into(), hex)]);
+        assert!(g.file_hash_allowed("plugin", &path));
+        assert!(!g.file_hash_allowed("sum", &path));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

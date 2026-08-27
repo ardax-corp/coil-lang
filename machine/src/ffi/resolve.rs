@@ -34,6 +34,16 @@ pub(crate) fn library_stem(name: &str) -> String {
     stem
 }
 
+/// First-party stems `dload` may open without consumer allow or lock hashes.
+///
+/// Fail-closed for everything else. Not widened under `#[cfg(test)]`.
+pub const DLOAD_PRODUCTION_STEMS: &[&str] = &["crypto", "tls", "regex", "time"];
+
+/// Whether `stem` is one of [`DLOAD_PRODUCTION_STEMS`].
+pub fn is_production_dload_stem(stem: &str) -> bool {
+    DLOAD_PRODUCTION_STEMS.iter().any(|&s| s == stem)
+}
+
 /// Filename stem for the dload gate (`/abs/libfoo.so` → `foo`).
 pub fn dload_request_stem(name: &str) -> String {
     let file = Path::new(name)
@@ -214,8 +224,8 @@ pub fn library_candidates(
 
 /// Resolve and load a shared library, trying each candidate in order.
 ///
-/// The gate runs before `Library::new`. Only regular files whose SHA-256 is
-/// pinned for `name`'s stem are opened.
+/// The gate runs before `Library::new`. Production stems skip hashing.
+/// Extra stems open only regular files whose SHA-256 is pinned for the stem.
 pub fn resolve_library(
     name: &str,
     base_dir: Option<&Path>,
@@ -301,14 +311,15 @@ mod tests {
         #[cfg(all(unix, not(target_os = "macos")))]
         assert!(c.iter().any(|p| p.to_string_lossy().contains("libc.so")));
         #[cfg(target_os = "macos")]
-        assert!(c
-            .iter()
-            .any(|p| p.to_string_lossy().contains("libSystem") || p.ends_with("c")));
+        assert!(
+            c.iter()
+                .any(|p| p.to_string_lossy().contains("libSystem") || p.ends_with("c"))
+        );
         #[cfg(target_os = "windows")]
-        assert!(c
-            .iter()
-            .any(|p| p.to_string_lossy().contains("ucrtbase")
-                || p.to_string_lossy().contains("msvcrt")));
+        assert!(
+            c.iter().any(|p| p.to_string_lossy().contains("ucrtbase")
+                || p.to_string_lossy().contains("msvcrt"))
+        );
     }
 
     #[test]
@@ -369,5 +380,168 @@ mod tests {
             Err(FfiError::LibraryDenied { .. }) => {}
             other => panic!("expected LibraryDenied, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn production_stems_are_crypto_tls_regex_time() {
+        assert_eq!(DLOAD_PRODUCTION_STEMS, &["crypto", "tls", "regex", "time"]);
+    }
+
+    fn missing_abs_lib(stem: &str) -> String {
+        let name = platform_shared_lib_filename(stem);
+        if cfg!(windows) {
+            format!("C:/coil-dload-missing/{name}")
+        } else {
+            format!("/coil-dload-missing/{name}")
+        }
+    }
+
+    fn assert_denied(name: &str) {
+        let gate = DloadGate::deny_all();
+        let expected_stem = dload_request_stem(name);
+        match gate.check_request(name) {
+            Err(FfiError::LibraryDenied { stem, .. }) => {
+                assert_eq!(stem, expected_stem, "denied stem for {name:?}");
+            }
+            other => panic!("expected LibraryDenied for {name:?}, got {other:?}"),
+        }
+        match resolve_library(name, None, &[], &gate) {
+            Err(FfiError::LibraryDenied { name: n, stem, .. }) => {
+                assert_eq!(n, name);
+                assert_eq!(stem, expected_stem);
+            }
+            other => panic!("expected resolve deny for {name:?}, got {other:?}"),
+        }
+        match super::super::load_library(name) {
+            Err(FfiError::LibraryDenied { stem, .. }) => {
+                assert_eq!(stem, expected_stem);
+            }
+            other => panic!("expected load_library deny for {name:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dload_libc_aliases_are_denied() {
+        for name in ["c", "libc", "libc.so.6", "libsystem", "ucrtbase", "msvcrt"] {
+            assert_denied(name);
+        }
+    }
+
+    #[test]
+    fn dload_unknown_stem_is_denied() {
+        assert_denied("notalist");
+        assert_denied("sum");
+        assert_denied("noop");
+    }
+
+    #[test]
+    fn dload_absolute_non_allowlisted_path_is_denied() {
+        let path = if cfg!(windows) {
+            r"C:\Windows\System32\kernel32.dll"
+        } else {
+            "/lib/x86_64-linux-gnu/libc.so.6"
+        };
+        assert_denied(path);
+        assert_eq!(
+            dload_request_stem(path),
+            library_stem(Path::new(path).file_name().unwrap().to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn production_stems_pass_the_gate() {
+        let gate = DloadGate::deny_all();
+        for stem in DLOAD_PRODUCTION_STEMS {
+            gate.check_request(stem)
+                .unwrap_or_else(|e| panic!("production stem {stem} must pass the gate, got {e:?}"));
+            let prefixed = platform_shared_lib_filename(stem);
+            gate.check_request(&prefixed)
+                .expect("platform filename must map to stem");
+            let missing = missing_abs_lib(stem);
+            match resolve_library(&missing, None, &[], &gate) {
+                Err(FfiError::LibraryNotFound { .. }) => {}
+                Err(FfiError::LibraryDenied { .. }) => {
+                    panic!("production stem {stem} must not be denied for {missing}")
+                }
+                other => panic!("expected missing file for {missing}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn extra_stems_need_allow_and_hash() {
+        let gate = DloadGate::deny_all();
+        gate.check_request("sum").unwrap_err();
+        let abs = if cfg!(windows) {
+            r"C:\tmp\libsum.dll"
+        } else {
+            "/tmp/libsum.so"
+        };
+        gate.check_request(abs).unwrap_err();
+    }
+
+    /// Default list is the four production stems in this crate (test and lib).
+    #[test]
+    fn production_allowlist_excludes_ffi_fixtures_and_is_not_cfg_test() {
+        let src = include_str!("resolve.rs").replace("\r\n", "\n");
+        let decl = concat!(
+            "pub const DLOAD_PRODUCTION_STEMS: &[&str] = ",
+            "&[\"crypto\", \"tls\", \"regex\", \"time\"];",
+        );
+        assert!(
+            src.contains(decl),
+            "production stems must stay crypto/tls/regex/time"
+        );
+        let const_idx = src
+            .find("pub const DLOAD_PRODUCTION_STEMS")
+            .expect("DLOAD_PRODUCTION_STEMS");
+        let tests_idx = src
+            .find("#[cfg(test)]\nmod tests")
+            .expect("cfg(test) module");
+        assert!(
+            const_idx < tests_idx,
+            "DLOAD_PRODUCTION_STEMS must not be defined under #[cfg(test)]"
+        );
+        assert_eq!(DLOAD_PRODUCTION_STEMS, &["crypto", "tls", "regex", "time"]);
+        for fixture in ["sum", "c", "libc", "noop"] {
+            assert!(
+                !DLOAD_PRODUCTION_STEMS.contains(&fixture),
+                "{fixture} must stay off the default list"
+            );
+        }
+    }
+
+    #[test]
+    fn missing_allowed_stem_is_not_found_not_denied() {
+        let gate = DloadGate::deny_all();
+        let path = missing_abs_lib("crypto");
+        gate.check_request(&path)
+            .expect("filename stem crypto must pass the gate");
+        match resolve_library(&path, None, &[], &gate) {
+            Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
+            other => panic!("expected LibraryNotFound for missing allowed stem, got {other:?}"),
+        }
+        match super::super::load_library(&path) {
+            Err(FfiError::LibraryNotFound { .. }) => {}
+            other => panic!("load_library must not deny a missing allowed stem, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn extra_stem_hash_mismatch_is_denied() {
+        let dir = std::env::temp_dir().join("coil_dload_extra_mismatch");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join(platform_shared_lib_filename("plugin"));
+        std::fs::write(&path, b"plugin-bytes").unwrap();
+        let other = dir.join("other.bin");
+        std::fs::write(&other, b"other-bytes").unwrap();
+
+        let mut gate = DloadGate::deny_all();
+        gate.grant_file("plugin", &other).unwrap();
+        match resolve_library(path.to_str().unwrap(), None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "plugin"),
+            other => panic!("expected hash mismatch deny, got {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

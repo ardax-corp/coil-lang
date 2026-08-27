@@ -7,18 +7,18 @@ use std::{
 };
 
 use common::{
-    archive_version_compatible, ArchivedArchivedProgram, ArchivedProgram, Byte, Instruction,
-    ProgramDebug, ARCHIVE_VERSION,
+    ARCHIVE_VERSION, ArchivedArchivedProgram, ArchivedProgram, Byte, Instruction, ProgramDebug,
+    archive_version_compatible,
 };
 use machine::{FfiError, FfiSignature, FfiType, Heap, HostClosureFn, NativeFn};
-use parser::{ast::Expression, Pratt, SimpleSpan};
+use parser::{Pratt, SimpleSpan, ast::Expression};
 use reporting::{
-    create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
+    Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap, create_sink,
 };
 use rkyv::rancor::Error;
 
-use crate::manifest::Manifest;
 use crate::Compiler;
+use crate::manifest::Manifest;
 
 /// A queued file to compile, along with the path it was
 /// discovered under. The pipeline processes queued files
@@ -308,14 +308,15 @@ impl Pipeline {
         &self.manifest
     }
 
-    /// Grant `dload` of `stem` for the SHA-256 of `path` (host/tests).
+    /// Grant extra `dload` of `stem` for the SHA-256 of `path` (host/tests).
     ///
-    /// The CLI never calls this. Consumer grants are `[ffi] allow` plus lock hashes.
+    /// The CLI never calls this. First-party stems do not need it. Extra stems
+    /// from the consumer are `[ffi] allow` plus lock hashes.
     pub fn grant_dload_file(&mut self, stem: impl Into<String>, path: PathBuf) {
         self.extra_dload_grants.push((stem.into(), path));
     }
 
-    /// Fail-closed gate: manifest allow + `coil.lock` native sha256 + host grants.
+    /// Fail-closed gate: production stems, plus extra allow/hash and host grants.
     pub fn build_dload_gate(&self) -> machine::DloadGate {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
         let mut gate =
@@ -1823,9 +1824,11 @@ fn main() {
     #[test]
     fn compile_src_retaining_il_clears_flag_on_failure() {
         let mut pipeline = Pipeline::new();
-        assert!(pipeline
-            .compile_src_retaining_il("fn main() { !!! }")
-            .is_err());
+        assert!(
+            pipeline
+                .compile_src_retaining_il("fn main() { !!! }")
+                .is_err()
+        );
         assert!(
             !pipeline.retain_cursor_il,
             "retain flag must clear even when compile fails"
