@@ -143,5 +143,13 @@ mod tests {
             }),
             FfiErrorKindTag::Other
         );
+        assert_eq!(
+            FfiErrorKindTag::from_ffi_error(&FfiError::LibraryNotFound {
+                name: "crypto".into(),
+                tried: vec![],
+                detail: String::new(),
+            }),
+            FfiErrorKindTag::LibraryNotFound
+        );
     }
 }

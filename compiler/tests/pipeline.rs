@@ -2083,6 +2083,40 @@ fn main() {{
 }
 
 #[test]
+fn userland_dload_missing_allowed_absolute_is_library_not_found() {
+    let path_buf = std::env::temp_dir()
+        .join("coil-coi-229-no-such-dload-dir")
+        .join(machine::platform_shared_lib_filename("crypto"));
+    assert!(
+        !path_buf.exists(),
+        "pin path must not exist on disk: {}",
+        path_buf.display()
+    );
+    let path = path_buf.to_str().expect("utf-8 path").replace('\\', "\\\\");
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(output, "missing");
+}
+
+#[test]
 fn example_coro_prints_suspended_1_resumed() {
     let output = run_example("examples/coro.hy");
     assert_eq!(output, "Suspended\n1Resumed\n");
