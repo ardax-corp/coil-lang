@@ -260,16 +260,18 @@ fn fuse_slots_with_origins(
         // Do not fuse a window that would pull an op with an incoming
         // label / absolute jump into a fused superinstruction with a
         // preceding op (match joins, attr-inlined absolute JMP→RETURN).
-        // *Return fusions also refuse a join on window[0]: JMP-to-join
-        // lands on ConstReturnImm/LoadReturnSlot/BinReturn and ignores
-        // the stacked arm value (label bind or absolute JMP target).
+        // *Return fusions refuse an *unconditional* join on window[0]:
+        // `JMP` there can carry a stacked arm value that `RETURN` must
+        // pop, while `ConstReturnImm` would ignore it. Compare-jumps
+        // (`*Jmpf`/`*Jmpt`) do not leave that value, so a labeled
+        // `CONST; RETURN` (fib `if n <= 2 { return 1 }`) may fuse.
         let mut fused = None;
         if let Some((f, window)) = try_fuse_slots(&slots[i..], pool) {
             let crosses_label = (1..window).any(|k| binds_at.contains_key(&(i + k)));
             let crosses_abs = (1..window).any(|k| abs_jump_targets.contains(&(i + k)));
-            let return_at_join = slot_is_return_fusion(&f)
-                && (binds_at.contains_key(&i) || abs_jump_targets.contains(&i));
-            if !crosses_label && !crosses_abs && !return_at_join {
+            let return_at_uncond_join = slot_is_return_fusion(&f)
+                && join_has_unconditional_pred(&slots, i, binds_at);
+            if !crosses_label && !crosses_abs && !return_at_uncond_join {
                 fused = Some((f, window));
             }
         }
@@ -894,6 +896,27 @@ fn slot_is_return_fusion(s: &Slot) -> bool {
         ),
         _ => false,
     }
+}
+
+/// True when an unconditional `JMP` (symbolic or residual absolute) targets `i`.
+fn join_has_unconditional_pred(
+    slots: &[Slot],
+    i: usize,
+    binds_at: &HashMap<usize, Vec<u32>>,
+) -> bool {
+    let labels = binds_at.get(&i).map(Vec::as_slice).unwrap_or(&[]);
+    for slot in slots {
+        match slot {
+            Slot::Jump(IlJumpKind::Unconditional, t, _) if labels.contains(&t.0) => return true,
+            Slot::Byte(b, _)
+                if *b.bytecode() == Instruction::JMP && b.operand_u32() as usize == i =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -> Byte {
@@ -1945,27 +1968,72 @@ mod tests {
         assert_eq!(lowered.label_pcs.get(&mid.0).copied(), Some(1));
     }
 
-    /// JMP-to-join must not land on ConstReturnImm: stacked arm value is ignored.
+    /// Unconditional JMP-to-join must not land on ConstReturnImm: stacked
+    /// arm value is ignored. Compare-jumps to the same join may fuse.
     #[test]
-    fn lower_refuses_const_return_fuse_when_label_binds_producer() {
+    fn lower_refuses_const_return_fuse_when_uncond_jmp_binds_producer() {
         let mut il = IlBuilder::new();
         let join = il.fresh_label();
+        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(1));
+        il.emit_jump(IlJumpKind::Unconditional, join);
         il.bind_label(join);
         il.push_byte(Byte::new(Instruction::CONST).with_const_inline(7));
         il.push_byte(Byte::new(Instruction::RETURN));
 
         let mut pool = Vec::new();
         let lowered = lower(il.ops(), &mut pool);
-        assert_eq!(lowered.bytecode.len(), 2);
-        assert!(matches!(
-            *lowered.bytecode[0].bytecode(),
-            Instruction::CONST
+        assert!(
+            lowered
+                .bytecode
+                .iter()
+                .any(|b| matches!(*b.bytecode(), Instruction::CONST) && b.operand_u32() == 7),
+            "uncond JMP join must keep CONST; RETURN unfused; got {:?}",
+            lowered
+                .bytecode
+                .iter()
+                .map(|b| *b.bytecode())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| matches!(*b.bytecode(), Instruction::ConstReturnImm)),
+            "must not fuse ConstReturnImm on an uncond JMP join"
+        );
+    }
+
+    #[test]
+    fn lower_fuses_const_return_when_only_cond_jump_targets_producer() {
+        let mut il = IlBuilder::new();
+        let base = il.fresh_label();
+        il.push_byte(Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(
+            Instruction::LEQ as u8,
+            0,
+            2,
         ));
-        assert!(matches!(
-            *lowered.bytecode[1].bytecode(),
-            Instruction::RETURN
-        ));
-        assert_eq!(lowered.label_pcs.get(&join.0).copied(), Some(0));
+        il.emit_jump(IlJumpKind::JumpIfTrue, base);
+        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(0));
+        il.push_byte(Byte::new(Instruction::RETURN));
+        il.bind_label(base);
+        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(1));
+        il.push_byte(Byte::new(Instruction::RETURN));
+
+        let mut pool = Vec::new();
+        let lowered = lower(il.ops(), &mut pool);
+        assert!(
+            lowered
+                .bytecode
+                .iter()
+                .any(|b| matches!(*b.bytecode(), Instruction::ConstReturnImm)
+                    && b.operand_u32() == 1),
+            "cond-jump to `return 1` should fuse ConstReturnImm; got {:?}",
+            lowered
+                .bytecode
+                .iter()
+                .map(|b| *b.bytecode())
+                .collect::<Vec<_>>()
+        );
     }
 
     /// A mid-window label bind is a fuse barrier (match joins / attr sites).

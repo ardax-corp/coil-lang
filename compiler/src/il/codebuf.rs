@@ -787,13 +787,12 @@ mod tests {
         let mut pool = Vec::new();
         let lowered = buf.lower_in_place(&mut pool);
         let ops: Vec<_> = lowered.bytecode.iter().map(|b| *b.bytecode()).collect();
-        // Entry label binds the Const producer, so ConstReturnImm fuse is refused.
+        // Entry is a CALL target, not an uncond JMP join, so CONST; RETURN fuses.
         assert!(
             matches!(
                 ops.as_slice(),
                 [
-                    Instruction::CONST,
-                    Instruction::RETURN,
+                    Instruction::ConstReturnImm,
                     Instruction::CALL,
                     Instruction::HALT
                 ]
@@ -802,7 +801,7 @@ mod tests {
         );
         assert_eq!(lowered.bytecode[0].operand_u32(), 7);
         assert_eq!(
-            lowered.bytecode[2].call_parts(),
+            lowered.bytecode[1].call_parts(),
             (0, 0),
             "CALL must target entry PC after owning-module lower"
         );
