@@ -25,7 +25,7 @@ coil/
 ├── src/main.rs   # CLI: run, compile, test, debug, dissect
 ├── examples/     # Runnable .hy demos
 ├── tests/        # Integration .hy tests (coil test)
-└── docs/         # User + internals docs (update for language features)
+└── docs/         # Contributor internals (user docs: coil-website)
 ```
 
 Pipeline detail: [docs/internals/pipeline.md](docs/internals/pipeline.md).
@@ -53,7 +53,7 @@ Single compilation path: stack codegen in `compiler/src/lib.rs` — no register 
    Incompatible ABI/layout changes bump archive **major** (reset minor). Loaders accept same major with archive minor ≤ runtime minor.
 2. **Virtual module natives** — use `HostInvoke`, not new opcodes for `io`/`thread`/etc.
 3. **Reject benchmark-shaped opcodes** unless pattern is universal (see AGENTS.md user preferences).
-4. **New language features** — full HM integration + `docs/` updates + minimal runnable example. Prefer **method-based APIs** (`impl` methods on classes) over free functions for operations tied to a receiver type; free generic fns returning enums are codegen-fragile (see [limitations.md](docs/internals/limitations.md)).
+4. **New language features** — full HM integration + user-doc updates in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`) + internals here when needed + minimal runnable example. Prefer **method-based APIs** (`impl` methods on classes) over free functions for operations tied to a receiver type; free generic fns returning enums are codegen-fragile (see [limitations.md](docs/internals/limitations.md)).
 
 `STORE` vs deprecated `StorePop`: compiler emits `STORE` only. Match bindings skip store (value already in slot via `UNPACK`/`JUMP_IF_MATCH`) but codegen must reserve those slots in `variables` so arm-body temps cannot clobber them.
 
@@ -87,10 +87,10 @@ rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 55 (default r
 
 1. Draft plan for large language changes (do not edit attached plan files during impl).
 2. Parser + AST if syntax changes.
-3. Typechecker — new types/constraints/diagnostics (`E####` in error-codes.md).
+3. Typechecker — new types/constraints/diagnostics (`E####` in coil-website `src/content/docs/references/error-codes.md`).
 4. Codegen — `BlockBuilder` / `IlBuilder`; extend IL opts only when justified.
 5. VM only if new opcode (rare) or runtime behavior.
-6. `docs/manual/` or `docs/references/` + example in `examples/` or `tests/`.
+6. coil-website `src/content/docs/` (manual/references; routes `/docs/…`) + example in `examples/` or `tests/`.
 7. Bump archive **minor** for additive bytecode; bump **major** if bytecode/tag/opcode incompatible.
 8. Granular conventional commits; stage only related files.
 

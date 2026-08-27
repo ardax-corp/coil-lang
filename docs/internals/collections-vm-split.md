@@ -32,7 +32,7 @@ applies `impl` type-param bounds to method schemes and emits dictionary
 arguments on inherent method `CALL` (same ABI as free generics). Free generic
 fns returning enums remain codegen-fragile; methods are the supported path.
 
-**`Option` field match:** `match` copies the field (GC pointer / immediate). Nested `match` on the same `Option` field is valid and does not empty the field — no write-back. See [COI-77](https://linear.app/ardax/issue/COI-77) and [Enums and Match](../manual/tutorial/03-enums-and-match.md#match-does-not-consume-the-scrutinee).
+**`Option` field match:** `match` copies the field (GC pointer / immediate). Nested `match` on the same `Option` field is valid and does not empty the field — no write-back. See [COI-77](https://linear.app/ardax/issue/COI-77) and [Enums and Match](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/03-enums-and-match.md#match-does-not-consume-the-scrutinee).
 
 ## Known language gaps (remaining)
 

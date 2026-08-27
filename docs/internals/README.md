@@ -1,6 +1,6 @@
 # Internals
 
-How coil is structured for contributors and embedders. End-user language docs live in the [manual](../manual/getting-started.md) and [references](../references/README.md).
+How coil is structured for contributors and embedders. End-user language docs live in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`; site routes `/docs/<path>` until a public domain is set).
 
 | Document | Contents |
 |----------|----------|

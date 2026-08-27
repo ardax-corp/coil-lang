@@ -75,8 +75,8 @@ Soft baseline: `./scripts/poop_baseline.sh` (compile once, then `coil run` archi
 
 | Tree | When to update |
 |------|----------------|
-| `docs/manual/` | Tutorials, getting started, examples catalog |
-| `docs/references/` | Syntax, per-API builtin pages, error codes |
+| [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/manual/` | Tutorials, getting started, examples catalog (`/docs/manual/…`) |
+| [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/references/` | Syntax, per-API builtin pages, error codes (`/docs/references/…`) |
 | `docs/internals/` | Pipeline, opcodes, debugger (contributor-facing) |
 
-New stable diagnostics: add to `docs/references/error-codes.md`.
+New stable diagnostics: add to coil-website `src/content/docs/references/error-codes.md`.

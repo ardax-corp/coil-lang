@@ -118,7 +118,8 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # --------------------------------------------------------------------------
 #
 # Unknown sections and keys are parse errors. Accepted today
-# (see docs/references/project-config.md):
+# (see coil-website src/content/docs/references/project-config.md,
+#  site route /docs/references/project-config):
 #
 #   [module]
 #   roots                    # search directories for `use` resolution

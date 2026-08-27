@@ -34,7 +34,7 @@ still surface functions and locals.
 Virtual-module imports use the compiler's `VirtualModules` registry as a
 documentation-stub source. Imported functions, types, and implicit prelude
 exports receive completion and hover documentation with links to the matching
-reference page under `docs/references/`.
+reference page in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`; site route `/docs/…`).
 
 Function completion items use snippet insertion: selecting `fib` inserts
 parameter placeholders such as `fib(${1:n})$0` and advertises `(` / `,` as

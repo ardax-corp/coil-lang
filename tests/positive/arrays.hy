@@ -73,7 +73,7 @@ test("nested array index") {
     assert(a[1][0] == 3)?;
 }
 
-// Runtime Index / StoreIndex contract (docs/references/arrays.md):
+// Runtime Index / StoreIndex contract (coil-website /docs/references/arrays):
 // variable OOB read → -1; OOB write → no-op (no panic).
 test("variable oob index yields minus one") {
     let a = [10, 20, 30];
