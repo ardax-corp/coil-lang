@@ -51,7 +51,6 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # parse; any other type is a parse error. Meaning: that dep skips native
 # sha256 only, and only when its stem is also on `[ffi] allow`.
 # Not git content_hash, not hooks, not engine, never dload("c").
-# Spool still does not write native pins (COI-60).
 # crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
 
 # --------------------------------------------------------------------------
@@ -72,14 +71,13 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # `dload("/abs/libplugin.so")` is still stem `plugin`.
 # `[ffi] search_paths` locates files; it is not a grant.
 #
-# Every dload stem (including `crypto`, `tls`, `regex`, `time`) needs
-# `[ffi] allow` **and** a matching `[[package.native]] sha256` **or**
-# `trusted = true` on that dep row. Allow without trusted and without a
-# pin is deny. Trusted without allow is deny. A missing file that passed
-# the gate is `LibraryNotFound`, not Denied.
+# Every `dload` stem needs `[ffi] allow`, then a matching lock
+# `[[package.native]] sha256` or `trusted = true` on that dep.
+# `crypto`, `tls`, `regex`, and `time` follow the same rule; they have
+# no skip. A stem without allow is `LibraryDenied`. Allow plus
+# `trusted` when the file is missing is `LibraryNotFound`.
 #
-# Bootstrap for coil-crypto is allow plus trusted (or a lock hash), not
-# a hardcoded skip:
+# coil-crypto bootstrap is allow plus trusted (or a lock hash):
 #
 #   [ffi]
 #   allow = ["crypto"]
@@ -87,7 +85,7 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #   crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
 #
 # Extra stems use the same rule. Allow without a hash, a hash without
-# allow, or a mismatch is deny.
+# allow, or a mismatch is `LibraryDenied`.
 #
 # `dload("c")` / libc aliases stay deny even if listed in `allow` or a
 # lock pin, and even if a dependency row is `trusted`.
@@ -185,7 +183,6 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #   trusted                  # optional bool, default false; `true`/`false` only
 #                            # native sha256 skip on that dep only, if also on
 #                            # `[ffi] allow` (including crypto/tls/regex/time).
-#                            # Spool does not write native pins (COI-60).
 #                            # Not content_hash / hooks / engine / dload("c")
 #
 # Compiler builtins (prelude, ffi, …) are virtual modules and are
