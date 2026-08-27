@@ -342,11 +342,8 @@ mod tests {
         let path = dir.join("libplugin.so");
         std::fs::write(&path, b"plugin-bytes").unwrap();
         let wrong = "ab".repeat(32);
-        let g = DloadGate::from_consumer_trusted(
-            ["plugin"],
-            &[("plugin".into(), wrong)],
-            ["plugin"],
-        );
+        let g =
+            DloadGate::from_consumer_trusted(["plugin"], &[("plugin".into(), wrong)], ["plugin"]);
         assert!(g.check_request("plugin").is_ok());
         assert!(!g.hash_required("plugin"));
         assert!(g.file_hash_allowed("plugin", &path));
@@ -365,11 +362,7 @@ mod tests {
 
     #[test]
     fn trusted_without_allow_is_denied() {
-        let g = DloadGate::from_consumer_trusted(
-            std::iter::empty::<&str>(),
-            &[],
-            ["plugin"],
-        );
+        let g = DloadGate::from_consumer_trusted(std::iter::empty::<&str>(), &[], ["plugin"]);
         assert!(matches!(
             g.check_request("plugin"),
             Err(FfiError::LibraryDenied { .. })
