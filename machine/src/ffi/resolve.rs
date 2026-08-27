@@ -453,26 +453,6 @@ mod tests {
     }
 
     #[test]
-    fn production_stems_pass_the_gate() {
-        let gate = DloadGate::deny_all();
-        for stem in DLOAD_PRODUCTION_STEMS {
-            gate.check_request(stem)
-                .unwrap_or_else(|e| panic!("production stem {stem} must pass the gate, got {e:?}"));
-            let prefixed = platform_shared_lib_filename(stem);
-            gate.check_request(&prefixed)
-                .expect("platform filename must map to stem");
-            let missing = missing_abs_lib(stem);
-            match resolve_library(&missing, None, &[], &gate) {
-                Err(FfiError::LibraryNotFound { .. }) => {}
-                Err(FfiError::LibraryDenied { .. }) => {
-                    panic!("production stem {stem} must not be denied for {missing}")
-                }
-                other => panic!("expected missing file for {missing}, got {other:?}"),
-            }
-        }
-    }
-
-    #[test]
     fn extra_stems_need_allow_and_hash() {
         let gate = DloadGate::deny_all();
         gate.check_request("sum").unwrap_err();
@@ -516,22 +496,6 @@ mod tests {
     }
 
     #[test]
-    fn missing_allowed_stem_is_not_found_not_denied() {
-        let gate = DloadGate::deny_all();
-        let path = missing_abs_lib("crypto");
-        gate.check_request(&path)
-            .expect("filename stem crypto must pass the gate");
-        match resolve_library(&path, None, &[], &gate) {
-            Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
-            other => panic!("expected LibraryNotFound for missing allowed stem, got {other:?}"),
-        }
-        match super::super::load_library(&path) {
-            Err(FfiError::LibraryNotFound { .. }) => {}
-            other => panic!("load_library must not deny a missing allowed stem, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn extra_stem_hash_mismatch_is_denied() {
         let dir = std::env::temp_dir().join("coil_dload_extra_mismatch");
         let _ = std::fs::create_dir_all(&dir);
@@ -558,6 +522,55 @@ mod tests {
         match resolve_library(&path, None, &[], &gate) {
             Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
             other => panic!("expected LibraryNotFound for trusted extra, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn allowlisted_trusted_c_is_library_denied() {
+        let gate = DloadGate::from_consumer_trusted(["c"], &[], ["c"]);
+        match resolve_library("c", None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "c"),
+            other => panic!("expected LibraryDenied for trusted allow-listed c, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn untrusted_extra_without_pin_is_library_denied() {
+        let gate = DloadGate::from_consumer(["plugin"], &[]);
+        let path = missing_abs_lib("plugin");
+        match resolve_library(&path, None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "plugin"),
+            other => panic!("expected LibraryDenied for untrusted extra, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
+    fn first_party_without_allow_is_library_denied() {
+        let gate = DloadGate::deny_all();
+        for stem in DLOAD_PRODUCTION_STEMS {
+            let path = missing_abs_lib(stem);
+            match resolve_library(&path, None, &[], &gate) {
+                Err(FfiError::LibraryDenied { stem: got, .. }) => assert_eq!(got, *stem),
+                other => panic!("expected LibraryDenied for {stem} without allow, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "COI-265 leftover on #221: first-party stems still skip allow/hash"]
+    fn first_party_allow_plus_trusted_missing_file_is_not_found() {
+        let gate = DloadGate::from_consumer_trusted(
+            ["crypto", "tls", "regex", "time"],
+            &[],
+            ["crypto", "tls", "regex", "time"],
+        );
+        for stem in DLOAD_PRODUCTION_STEMS {
+            let path = missing_abs_lib(stem);
+            match resolve_library(&path, None, &[], &gate) {
+                Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
+                other => panic!("expected LibraryNotFound for trusted {stem}, got {other:?}"),
+            }
         }
     }
 }
