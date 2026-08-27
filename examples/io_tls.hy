@@ -7,6 +7,9 @@
 //   [ffi]
 //   search_paths = ["../coil-tls/native"]
 //
+// `tls` is a first-party dload stem: no `[ffi] allow` and no lock hash.
+// search_paths only locates the file. A missing libtls is LibraryNotFound.
+//
 // Then:
 //   use tls::{client, server};
 //   let s = client::enable(tcp, "example.com", { verify: true, ... })?;
