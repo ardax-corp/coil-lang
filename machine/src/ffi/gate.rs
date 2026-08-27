@@ -13,13 +13,17 @@ use super::signature::FfiError;
 ///
 /// First-party stems (`crypto`, `tls`, `regex`, `time`) always pass the gate
 /// with no lock hash (until COI-60). Extra stems need consumer `[ffi] allow`
-/// **and** a matching `[[package.native]] sha256` (or a host [`Self::grant_file`]).
+/// **and** a matching `[[package.native]] sha256`, unless that extra stem's
+/// `[dependencies]` row is `trusted = true` (honor-only skip of native sha256).
+/// Host [`Self::grant_file`] / [`Self::grant_stem`] remain test-only.
 #[derive(Clone, Debug, Default)]
 pub struct DloadGate {
     allowed_stems: HashSet<String>,
     hashes_by_stem: HashMap<String, HashSet<[u8; 32]>>,
     /// Host/test extra stems that skip lock hashing (`set_dload_allowlist`).
     host_unhashed: HashSet<String>,
+    /// Extra stems on `[ffi] allow` whose dep row is `trusted = true`.
+    trusted_unhashed: HashSet<String>,
 }
 
 impl DloadGate {
@@ -35,6 +39,19 @@ impl DloadGate {
     pub fn from_consumer(
         allow: impl IntoIterator<Item = impl AsRef<str>>,
         native_pins: &[(String, String)],
+    ) -> Self {
+        Self::from_consumer_trusted(allow, native_pins, std::iter::empty::<&str>())
+    }
+
+    /// Like [`Self::from_consumer`], plus extra stems whose dep row is `trusted = true`.
+    ///
+    /// Trusted skips **native sha256** for that extra stem only. The stem must
+    /// still be on `[ffi] allow`. Libc aliases and production stems are ignored
+    /// (`trusted` is not an allowlist and is a no-op on the first-party four).
+    pub fn from_consumer_trusted(
+        allow: impl IntoIterator<Item = impl AsRef<str>>,
+        native_pins: &[(String, String)],
+        trusted: impl IntoIterator<Item = impl AsRef<str>>,
     ) -> Self {
         let mut gate = Self::deny_all();
         for stem in allow {
@@ -59,6 +76,18 @@ impl DloadGate {
                     .entry(pkg.clone())
                     .or_default()
                     .insert(hash);
+            }
+        }
+        for stem in trusted {
+            let stem = stem.as_ref();
+            if is_libc_alias(stem) || is_production_dload_stem(stem) {
+                continue;
+            }
+            if dload_request_stem(stem) != stem {
+                continue;
+            }
+            if gate.allowed_stems.contains(stem) {
+                gate.trusted_unhashed.insert(stem.to_string());
             }
         }
         gate
@@ -91,7 +120,8 @@ impl DloadGate {
 
     fn extra_granted(&self, stem: &str) -> bool {
         self.allowed_stems.contains(stem)
-            && self.hashes_by_stem.get(stem).is_some_and(|h| !h.is_empty())
+            && (self.trusted_unhashed.contains(stem)
+                || self.hashes_by_stem.get(stem).is_some_and(|h| !h.is_empty()))
     }
 
     /// Stem check before candidate search. Absolute paths use the filename stem.
@@ -115,14 +145,17 @@ impl DloadGate {
         })
     }
 
-    /// Extra stems from allow+hash must match a pin. Production and host unhashed skip.
+    /// Extra stems from allow+hash must match a pin. Production, host unhashed,
+    /// and allow+trusted extras skip.
     pub fn hash_required(&self, stem: &str) -> bool {
-        !is_production_dload_stem(stem) && !self.host_unhashed.contains(stem)
+        !is_production_dload_stem(stem)
+            && !self.host_unhashed.contains(stem)
+            && !self.trusted_unhashed.contains(stem)
     }
 
     /// Whether `path`'s contents may be opened for `stem`.
     ///
-    /// Production stems and host unhashed extras skip hashing.
+    /// Production stems, host unhashed extras, and trusted extras skip hashing.
     pub fn file_hash_allowed(&self, stem: &str, path: &Path) -> bool {
         if !self.hash_required(stem) {
             return true;
@@ -291,5 +324,72 @@ mod tests {
         g.grant_stem("c");
         assert!(g.check_request("c").is_ok());
         assert!(!g.hash_required("c"));
+    }
+
+    #[test]
+    fn trusted_extra_on_allow_skips_hash_without_pin() {
+        let g = DloadGate::from_consumer_trusted(["plugin"], &[], ["plugin"]);
+        assert!(g.check_request("plugin").is_ok());
+        assert!(!g.hash_required("plugin"));
+        let missing = Path::new("/coil-dload-missing/libplugin.so");
+        assert!(g.file_hash_allowed("plugin", missing));
+    }
+
+    #[test]
+    fn trusted_extra_on_allow_ignores_wrong_pin() {
+        let dir = std::env::temp_dir().join("coil_dload_gate_trusted_wrong_pin");
+        let _ = std::fs::create_dir_all(&dir);
+        let path = dir.join("libplugin.so");
+        std::fs::write(&path, b"plugin-bytes").unwrap();
+        let wrong = "ab".repeat(32);
+        let g =
+            DloadGate::from_consumer_trusted(["plugin"], &[("plugin".into(), wrong)], ["plugin"]);
+        assert!(g.check_request("plugin").is_ok());
+        assert!(!g.hash_required("plugin"));
+        assert!(g.file_hash_allowed("plugin", &path));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_false_extra_without_pin_is_denied() {
+        let g = DloadGate::from_consumer_trusted(["plugin"], &[], std::iter::empty::<&str>());
+        assert!(matches!(
+            g.check_request("plugin"),
+            Err(FfiError::LibraryDenied { .. })
+        ));
+        assert!(g.hash_required("plugin"));
+    }
+
+    #[test]
+    fn trusted_without_allow_is_denied() {
+        let g = DloadGate::from_consumer_trusted(std::iter::empty::<&str>(), &[], ["plugin"]);
+        assert!(matches!(
+            g.check_request("plugin"),
+            Err(FfiError::LibraryDenied { .. })
+        ));
+        assert!(g.hash_required("plugin"));
+    }
+
+    #[test]
+    fn trusted_on_libc_is_still_denied() {
+        let g = DloadGate::from_consumer_trusted(["c", "libc", "plugin"], &[], ["c", "libc"]);
+        assert!(matches!(
+            g.check_request("c"),
+            Err(FfiError::LibraryDenied { .. })
+        ));
+        assert!(g.check_request("libc").is_err());
+        assert!(g.hash_required("c"));
+        assert!(g.check_request("plugin").is_err());
+    }
+
+    #[test]
+    fn trusted_on_production_stems_is_a_noop() {
+        let g = DloadGate::from_consumer_trusted(["crypto", "tls"], &[], ["crypto", "tls"]);
+        for stem in DLOAD_PRODUCTION_STEMS {
+            assert!(g.check_request(stem).is_ok());
+            assert!(!g.hash_required(stem));
+        }
+        let missing = Path::new("/coil-dload-missing/libcrypto.dylib");
+        assert!(g.file_hash_allowed("crypto", missing));
     }
 }

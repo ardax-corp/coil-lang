@@ -66,11 +66,12 @@ pub struct Scripts {
 /// schema only — this crate does not resolve or write a lockfile.
 /// Native `sha256` pins in `coil.lock` are read for the `dload` gate.
 ///
-/// Optional `trusted` (default `false`) is stored only. When `true`, spool
-/// may skip **native** `sha256` on that dep row (so a consumer can depend on
-/// coil-crypto and use it to verify other deps). It is not git `content_hash`,
-/// not hooks, not engine, and never `dload("c")`. This crate does not skip a
-/// hash or change FFI loading.
+/// Optional `trusted` (default `false`). When `true` on an extra-stem dep
+/// that is also on `[ffi] allow`, the `dload` gate skips **native** `sha256`
+/// for that stem only. It is not git `content_hash`, not hooks, not engine,
+/// not an allowlist, and never `dload("c")`. First-party stems already skip
+/// hash; `trusted` on those rows is a no-op at the gate. Spool still does
+/// not write native pins (COI-60).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencySpec {
     Git {
@@ -107,6 +108,7 @@ pub struct Manifest {
     /// Extra directories searched when resolving FFI library paths.
     pub ffi_search_paths: Vec<PathBuf>,
     /// Extra consumer `dload` stems (`[ffi] allow`) beyond crypto/tls/regex/time.
+    /// Extra stems still need a lock hash unless the matching dep is `trusted`.
     pub ffi_allow: Vec<String>,
     /// When false, `env::exec` fails at runtime with `ExecDisabled`.
     pub allow_exec: bool,
