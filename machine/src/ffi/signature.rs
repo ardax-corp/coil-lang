@@ -60,6 +60,12 @@ pub enum FfiError {
     Unsupported(String),
     /// Bad library handle or out-of-range function id at invoke/declare time.
     InvalidHandle(String),
+    /// Shared library blocked by the `dload` gate (stem list / extra allow+hash).
+    LibraryDenied {
+        name: String,
+        stem: String,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for FfiError {
@@ -85,6 +91,9 @@ impl std::fmt::Display for FfiError {
             }
             Self::Unsupported(msg) => write!(f, "unsupported FFI signature: {msg}"),
             Self::InvalidHandle(msg) => write!(f, "{msg}"),
+            Self::LibraryDenied { name, stem, reason } => {
+                write!(f, "FFI library `{name}` (stem `{stem}`) denied: {reason}")
+            }
         }
     }
 }

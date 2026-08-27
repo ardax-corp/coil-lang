@@ -6,9 +6,9 @@ use std::process::exit;
 
 use coil_cli::resolve_default_runner;
 use common::{
-    ARCHIVE_VERSION, ArchivedArchivedProgram, ArchivedProgram, Byte, PACKAGE_FLAG_USES_FFI,
     append_package_payload, bytecode_uses_ffi, ffi_library_names_from_bytecode,
-    is_packaged_executable,
+    is_packaged_executable, ArchivedArchivedProgram, ArchivedProgram, Byte, ARCHIVE_VERSION,
+    PACKAGE_FLAG_USES_FFI,
 };
 use compiler::Pipeline;
 use machine::check_native_libraries;
@@ -104,13 +104,9 @@ pub fn cmd_package(
         .filter(|p| !p.as_os_str().is_empty());
     if check_native && uses_ffi {
         let libs = ffi_library_names_from_bytecode(&bytecode, &strings);
-        if let Err(msg) = check_native_libraries(&libs, base_dir) {
+        let gate = pipeline.build_dload_gate();
+        if let Err(msg) = check_native_libraries(&libs, base_dir, &gate) {
             fail_and_exit(pipeline, ErrorCode::IoError, msg);
-        }
-        if libs.is_empty() {
-            if let Err(msg) = check_native_libraries(&["c".to_string()], base_dir) {
-                fail_and_exit(pipeline, ErrorCode::IoError, msg);
-            }
         }
     }
 
@@ -189,8 +185,8 @@ pub fn run_packaged_output(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coil_cli::{LoadErr, load_archive_bytes};
-    use common::{ArchivedProgram, Instruction, pack_archive_version};
+    use coil_cli::{load_archive_bytes, LoadErr};
+    use common::{pack_archive_version, ArchivedProgram, Instruction};
 
     #[test]
     fn load_archive_bytes_rejects_version() {

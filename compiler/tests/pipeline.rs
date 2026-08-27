@@ -302,6 +302,66 @@ fn run_bytecode(
     shared.into_utf8()
 }
 
+fn run_src_with_grants(
+    src: &str,
+    entry: Option<&std::path::Path>,
+    grants: &[(&str, std::path::PathBuf)],
+) -> String {
+    let mut pipeline = Pipeline::new();
+    for (stem, path) in grants {
+        pipeline.grant_dload_file((*stem).to_string(), path.clone());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("example failed to compile (parse error or type errors)");
+    run_bytecode(bytecode, constants, &pipeline, entry)
+}
+
+fn run_src_with_extra_stems(
+    src: &str,
+    entry: Option<&std::path::Path>,
+    stems: &[&str],
+) -> String {
+    let mut pipeline = Pipeline::new();
+    for stem in stems {
+        pipeline.grant_dload_stem((*stem).to_string());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("example failed to compile (parse error or type errors)");
+    run_bytecode(bytecode, constants, &pipeline, entry)
+}
+
+fn run_file_with_extra_stems(path: &str, stems: &[&str]) -> String {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join(path);
+    let mut pipeline = Pipeline::new();
+    for stem in stems {
+        pipeline.grant_dload_stem((*stem).to_string());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(full.to_str().unwrap())
+        .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
+    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
+}
+
+fn run_file_with_grants(path: &str, grants: &[(&str, std::path::PathBuf)]) -> String {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join(path);
+    let mut pipeline = Pipeline::new();
+    for (stem, p) in grants {
+        pipeline.grant_dload_file((*stem).to_string(), p.clone());
+    }
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(full.to_str().unwrap())
+        .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
+    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
+}
+
 #[test]
 fn example_panic_loc_archive_has_source_files() {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1654,8 +1714,9 @@ fn example_ffi_sum_via_dlopen_prints_42() {
         &format!("dload(\"{}\")", lib_abs.display()),
     );
 
-    let result =
-        std::panic::catch_unwind(|| run_example_src_with_entry(&src, Some(full.as_path())));
+    let result = std::panic::catch_unwind(|| {
+        run_src_with_grants(&src, Some(full.as_path()), &[("sum", lib_abs.clone())])
+    });
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -1668,19 +1729,13 @@ fn example_ffi_sum_via_dlopen_prints_42() {
 
 #[test]
 fn example_strlen_prints_5() {
-    // Quick probe: if the portable `c` alias fails, skip outside CI.
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
-        return;
-    }
-
     let result = std::panic::catch_unwind(|| {
         let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("compiler crate must have a parent (workspace root)");
         let full = workspace_root.join("examples/strlen.hy");
         let src = std::fs::read_to_string(&full).expect("read strlen.hy");
-        run_example_src_with_entry(&src, Some(full.as_path()))
+        run_src_with_extra_stems(&src, Some(full.as_path()), &["c"])
     });
     let output = match result {
         Ok(s) => s,
@@ -1694,12 +1749,8 @@ fn example_strlen_prints_5() {
 
 #[test]
 fn example_strlen_prints_5_compile_src_from_file() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
-        return;
-    }
-
-    let result = std::panic::catch_unwind(|| run_example("examples/strlen.hy"));
+    let result =
+        std::panic::catch_unwind(|| run_file_with_extra_stems("examples/strlen.hy", &["c"]));
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -1803,11 +1854,6 @@ fn clean_captured_os_stdout(output: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn example_ffi_printf_prints_hello_42() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
-        return;
-    }
-
     #[cfg(not(unix))]
     {
         ffi_soft_skip("ffi_printf OS-stdout capture is unix-only");
@@ -1823,7 +1869,8 @@ fn example_ffi_printf_prints_hello_42() {
             let full = workspace_root.join("examples/ffi_printf.hy");
             let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
             let ((), os_out) = with_captured_os_stdout(|| {
-                let _vm_out = run_example_src_with_entry(&src, Some(full.as_path()));
+                let _vm_out =
+                    run_src_with_extra_stems(&src, Some(full.as_path()), &["c"]);
             });
             os_out
         });
@@ -1878,23 +1925,57 @@ fn main() {
     let _ = machine.restore_output();
     let output = shared.into_utf8();
     assert!(
-        output.contains("panic:") && output.contains("not found"),
-        "expected panic message about missing library, got: {output:?}"
+        output.contains("panic:") && output.contains("denied"),
+        "expected panic about dload deny, got: {output:?}"
     );
 }
 
 #[test]
 fn userland_dload_missing_library_returns_err() {
+    let name = machine::platform_shared_lib_filename("time");
+    let missing = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{missing}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing",
+        "allowed stem `time` must not be denied; got {output:?}"
+    );
+}
+
+#[test]
+fn userland_dload_unknown_stem_is_denied_not_missing() {
     let src = r#"
 use ffi::{dload, ErrorKind};
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
-    let r = dload("this_library_definitely_does_not_exist_xyzzy");
+    let r = dload("notalist");
     let msg = match r {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e.kind {
             ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
             _ => "other",
         },
     };
@@ -1902,7 +1983,191 @@ fn main() {
 }
 "#;
     let output = run_example_src(src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_c_is_denied() {
+    let src = r#"
+use ffi::{dload, ErrorKind};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let r = dload("c");
+    let msg = match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        },
+    };
+    write(stdout(), to_bytes(format("%s", msg)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_absolute_non_allowlisted_is_denied() {
+    let path = if cfg!(windows) {
+        "C:/Windows/System32/kernel32.dll"
+    } else {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_production_stems_are_not_denied() {
+    // Bare `dload("crypto")` opens system libcrypto on macOS and aborts
+    // (`loading libcrypto in an unsafe way`). Use a missing absolute path so
+    // the filename stem still passes the gate and dlopen never succeeds.
+    let paths: Vec<String> = ["time", "crypto", "tls", "regex"]
+        .into_iter()
+        .map(|stem| {
+            let name = machine::platform_shared_lib_filename(stem);
+            if cfg!(windows) {
+                format!("C:/coil-dload-missing/{name}")
+            } else {
+                format!("/coil-dload-missing/{name}")
+            }
+        })
+        .collect();
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let m0 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m1 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m2 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    let m3 = match dload("{}") {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s %s %s %s", m0, m1, m2, m3)));
+}}
+"#,
+        paths[0], paths[1], paths[2], paths[3]
+    );
+    let output = run_example_src(&src);
+    assert_eq!(
+        output, "missing missing missing missing",
+        "production stems must pass the gate and miss on disk; got {output:?}"
+    );
+}
+
+#[test]
+fn userland_dload_missing_allowed_absolute_is_library_not_found() {
+    let name = machine::platform_shared_lib_filename("crypto");
+    let path = if cfg!(windows) {
+        format!("C:/coil-dload-missing/{name}")
+    } else {
+        format!("/coil-dload-missing/{name}")
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
     assert_eq!(output, "missing");
+}
+
+#[test]
+fn userland_dload_extra_stem_hash_mismatch_is_denied() {
+    let dir = std::env::temp_dir().join("coil_userland_dload_mismatch");
+    let _ = std::fs::create_dir_all(&dir);
+    let name = machine::platform_shared_lib_filename("plugin");
+    let path = dir.join(&name);
+    std::fs::write(&path, b"plugin-bytes").unwrap();
+    let other = dir.join("other.bin");
+    std::fs::write(&other, b"other-bytes").unwrap();
+    let abs = path.to_str().unwrap().replace('\\', "/");
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{abs}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_src_with_grants(&src, None, &[("plugin", other)]);
+    assert_eq!(output, "denied");
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 #[test]
@@ -2154,15 +2419,12 @@ fn main() {
     let (bytecode, _) = pipeline.compile_src(src).expect("range to_vec compile");
     let syms = pipeline.program_debug().fn_symbols;
     let body = |name: &str| {
-        let idx = syms
-            .iter()
-            .position(|s| s.name == name)
-            .unwrap_or_else(|| {
-                panic!(
-                    "missing `{name}`; have {:?}",
-                    syms.iter().map(|s| &s.name).collect::<Vec<_>>()
-                )
-            });
+        let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
+            panic!(
+                "missing `{name}`; have {:?}",
+                syms.iter().map(|s| &s.name).collect::<Vec<_>>()
+            )
+        });
         let start = syms[idx].entry_pc as usize;
         let end = syms
             .get(idx + 1)
@@ -2184,9 +2446,8 @@ fn main() {
             .map(|b| b.bin_slot_imm_store_parts().0)
             .collect()
     };
-    let has = |slice: &[common::Byte], op: common::Instruction| {
-        slice.iter().any(|b| *b.bytecode() == op)
-    };
+    let has =
+        |slice: &[common::Byte], op: common::Instruction| slice.iter().any(|b| *b.bytecode() == op);
 
     let int_half = body("Range::to_vec");
     assert_eq!(
@@ -2500,7 +2761,7 @@ fn run_ffi_example_with_lib(path: &str, lib_path: &std::path::Path) -> String {
         "dload(\"sum\")",
         &format!("dload(\"{}\")", lib_abs.display()),
     );
-    run_example_src_with_entry(&src, Some(full.as_path()))
+    run_src_with_grants(&src, Some(full.as_path()), &[("sum", lib_abs)])
 }
 
 #[cfg(unix)]
@@ -2732,7 +2993,7 @@ fn main() {
 
 #[test]
 fn example_attr_ffi_strlen_prints_5() {
-    let output = run_example("examples/attr_ffi.hy");
+    let output = run_file_with_extra_stems("examples/attr_ffi.hy", &["c"]);
     assert_eq!(output, "5");
 }
 
@@ -7027,7 +7288,10 @@ fn virtual_tls_modules_do_not_resolve() {
     fn check_missing(src: &str) {
         let mut pipeline = Pipeline::new();
         let err = pipeline.compile_src(src);
-        assert!(err.is_err(), "expected module-not-found, got Ok for {src:?}");
+        assert!(
+            err.is_err(),
+            "expected module-not-found, got Ok for {src:?}"
+        );
         assert!(
             pipeline.messages().iter().any(|m| {
                 m.code() == Some(compiler::ErrorCode::IoError)
@@ -7111,14 +7375,8 @@ fn optional_virtual_modules_match_cargo_features() {
     check("use time::{epoch};\nfn main() {}\n", cfg!(feature = "time"));
     check("use crypto::{sha256};\nfn main() {}\n", false);
     check("use io::__tls::client::{enable};\nfn main() {}\n", false);
-    check(
-        "use regex::{compile};\nfn main() {}\n",
-        false,
-    );
-    check(
-        "use io::net::tls::client::{enable};\nfn main() {}\n",
-        false,
-    );
+    check("use regex::{compile};\nfn main() {}\n", false);
+    check("use io::net::tls::client::{enable};\nfn main() {}\n", false);
     check("use tls::{client};\nfn main() {}\n", false);
 }
 
@@ -8590,12 +8848,8 @@ fn main() {
 /// COI-19: extern handles in static slots survive locals / repeat calls.
 #[test]
 fn extern_system_twice_after_vec_ok() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable via resolve_library(\"c\")");
-        return;
-    }
     let result = std::panic::catch_unwind(|| {
-        run_example_src(
+        run_src_with_extra_stems(
             r#"
 use io::{stdout};
 use io::sync::{write_all};
@@ -8613,6 +8867,8 @@ fn main() {
     let _ = write_all(stdout(), to_bytes(format("%v %v\n", a, b)));
 }
 "#,
+            None,
+            &["c"],
         )
     });
     let output = match result {
@@ -8628,11 +8884,9 @@ fn main() {
 /// COI-19: `extern` in an imported module still initializes before main.
 #[test]
 fn extern_in_imported_module_runs() {
-    if machine::resolve_library("c", None, &[]).is_err() {
-        ffi_soft_skip("C library not loadable via resolve_library(\"c\")");
-        return;
-    }
-    let result = std::panic::catch_unwind(|| run_example_multifile("examples/ffi_mod_entry.hy"));
+    let result = std::panic::catch_unwind(|| {
+        run_file_with_extra_stems("examples/ffi_mod_entry.hy", &["c"])
+    });
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -8662,7 +8916,10 @@ test("bind free fn") {
 }
 "#,
     );
-    assert!(!bind_fn.contains("failed"), "free fn bind failed: {bind_fn:?}");
+    assert!(
+        !bind_fn.contains("failed"),
+        "free fn bind failed: {bind_fn:?}"
+    );
 
     let bind_method = run_harness_src(
         r#"
@@ -8888,7 +9145,8 @@ test("forward static method call from instance") {
     let cases = pipeline.test_cases().to_vec();
     assert_eq!(cases.len(), 9, "expected nine COI-108 cases, got {cases:?}");
     for (name, offset) in &cases {
-        let mut machine = Machine::<256>::with_operand_capacity(pipeline.operand_stack_slots() as usize);
+        let mut machine =
+            Machine::<256>::with_operand_capacity(pipeline.operand_stack_slots() as usize);
         pipeline.wire_host_natives(&mut machine);
         machine.load_program(&bytecode, &constants, pipeline.strings());
         let ret = machine.call_function(*offset, &[]);

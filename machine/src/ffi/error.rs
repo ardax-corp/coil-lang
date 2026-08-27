@@ -2,9 +2,9 @@
 
 use common::{BUILTIN_FFI_ERROR_KIND_VARIANTS, BUILTIN_FFI_ERROR_VARIANT, Value};
 
-use crate::memory::{Heap, Member};
 #[cfg(test)]
 use crate::memory::Object;
+use crate::memory::{Heap, Member};
 
 use super::signature::FfiError;
 
@@ -35,6 +35,7 @@ impl FfiErrorKindTag {
             | FfiError::EmptyName => Self::InvalidSignature,
             FfiError::Unsupported(_) => Self::Unsupported,
             FfiError::InvalidHandle(_) => Self::InvalidHandle,
+            FfiError::LibraryDenied { .. } => Self::Other,
         }
     }
 }

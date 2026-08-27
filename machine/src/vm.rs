@@ -272,6 +272,8 @@ pub struct Machine<const S: usize> {
     base_dir: Option<PathBuf>,
     /// Extra search paths from `coil.toml` `[ffi]`.
     ffi_search_paths: Vec<PathBuf>,
+    /// Fail-closed `dload` policy (production stems + extra allow/hash).
+    dload_gate: crate::ffi::DloadGate,
     /// Registered C struct layouts for pass-by-value FFI.
     struct_layouts: Vec<CStructLayout>,
     /// Keeps libffi callback trampolines alive (ties lifetime to VM run).
@@ -357,6 +359,7 @@ impl<const S: usize> Machine<S> {
             resume_stack: Vec::new(),
             base_dir: None,
             ffi_search_paths: Vec::new(),
+            dload_gate: crate::ffi::DloadGate::deny_all(),
             struct_layouts: Vec::new(),
             ffi_closures: Vec::new(),
             program_code: Vec::new(),
@@ -396,6 +399,27 @@ impl<const S: usize> Machine<S> {
     pub fn set_ffi_paths(&mut self, base_dir: Option<PathBuf>, search_paths: Vec<PathBuf>) {
         self.base_dir = base_dir;
         self.ffi_search_paths = search_paths;
+    }
+
+    /// Replace the `dload` gate (default is production stems only).
+    pub fn set_dload_gate(&mut self, gate: crate::ffi::DloadGate) {
+        self.dload_gate = gate;
+    }
+
+    /// Host/test extra stems with no lock hash. Does not widen production stems.
+    pub fn set_dload_allowlist<I, St>(&mut self, extra_stems: I)
+    where
+        I: IntoIterator<Item = St>,
+        St: AsRef<str>,
+    {
+        for stem in extra_stems {
+            self.dload_gate.grant_stem(stem.as_ref());
+        }
+    }
+
+    /// Mutable access for host/test grants after [`Self::set_dload_gate`].
+    pub fn dload_gate_mut(&mut self) -> &mut crate::ffi::DloadGate {
+        &mut self.dload_gate
     }
 
     pub fn set_program_debug(&mut self, debug: ProgramDebug) {
@@ -909,7 +933,13 @@ impl<const S: usize> Machine<S> {
 
     /// Load a shared library; returns its heap address as a `Value`.
     pub fn load_userland_library(&mut self, path: &str) -> Result<Value, String> {
-        let lib_arc = crate::ffi::load_library(path).map_err(|e| e.to_string())?;
+        let lib_arc = crate::ffi::resolve_library(
+            path,
+            self.base_dir.as_deref(),
+            &self.ffi_search_paths,
+            &self.dload_gate,
+        )
+        .map_err(|e| e.to_string())?;
         let (object, _gc) = self.heap.alloc_library(lib_arc.clone());
         let addr = object.addr();
         self.userland_libraries
@@ -3060,6 +3090,7 @@ impl<const S: usize> Machine<S> {
                         &path,
                         self.base_dir.as_deref(),
                         &self.ffi_search_paths,
+                        &self.dload_gate,
                     ) {
                         Ok(lib_arc) => {
                             self.libraries

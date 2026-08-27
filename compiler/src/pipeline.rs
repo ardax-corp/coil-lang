@@ -74,6 +74,10 @@ pub struct Pipeline {
     overlays: HashMap<PathBuf, String>,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
+    /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
+    extra_dload_grants: Vec<(String, PathBuf)>,
+    /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
+    extra_dload_stems: Vec<String>,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -306,6 +310,33 @@ impl Pipeline {
         &self.manifest
     }
 
+    /// Grant extra `dload` of `stem` for the SHA-256 of `path` (host/tests).
+    ///
+    /// The CLI never calls this. First-party stems do not need it. Extra stems
+    /// from the consumer are `[ffi] allow` plus lock hashes.
+    pub fn grant_dload_file(&mut self, stem: impl Into<String>, path: PathBuf) {
+        self.extra_dload_grants.push((stem.into(), path));
+    }
+
+    /// Host/test extra stem with no lock hash (libc fixtures). Not a consumer grant.
+    pub fn grant_dload_stem(&mut self, stem: impl Into<String>) {
+        self.extra_dload_stems.push(stem.into());
+    }
+
+    /// Fail-closed gate: production stems, plus extra allow/hash and host grants.
+    pub fn build_dload_gate(&self) -> machine::DloadGate {
+        let lock = crate::lockfile::Lockfile::load(&self.project_root);
+        let mut gate =
+            machine::DloadGate::from_consumer(&self.manifest.ffi_allow, lock.native_pins());
+        for stem in &self.extra_dload_stems {
+            gate.grant_stem(stem);
+        }
+        for (stem, path) in &self.extra_dload_grants {
+            let _ = gate.grant_file(stem, path);
+        }
+        gate
+    }
+
     /// Resolve `[entry].file` from the manifest to an absolute path.
     /// Returns `None` when the manifest has no entry point.
     pub fn manifest_entry_path(&self) -> Option<PathBuf> {
@@ -332,6 +363,7 @@ impl Pipeline {
             .map(|p| self.project_root.join(p))
             .collect();
         vm.set_ffi_paths(base_dir, search);
+        vm.set_dload_gate(self.build_dload_gate());
         for def in self.compiler_lazy().c_structs() {
             let fields = def
                 .fields
@@ -414,6 +446,8 @@ impl Pipeline {
             source_cache: Vec::new(),
             overlays: HashMap::new(),
             include_tests: false,
+            extra_dload_grants: Vec::new(),
+            extra_dload_stems: Vec::new(),
             opt_level: crate::OptLevel::Standard,
             collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
@@ -1801,7 +1835,11 @@ fn main() {
     #[test]
     fn compile_src_retaining_il_clears_flag_on_failure() {
         let mut pipeline = Pipeline::new();
-        assert!(pipeline.compile_src_retaining_il("fn main() { !!! }").is_err());
+        assert!(
+            pipeline
+                .compile_src_retaining_il("fn main() { !!! }")
+                .is_err()
+        );
         assert!(
             !pipeline.retain_cursor_il,
             "retain flag must clear even when compile fails"
@@ -1898,7 +1936,9 @@ fn main() { add(1, 2); }
     fn vec_scan_array_pin_entry_jumps_stay_in_function() {
         use common::Instruction;
 
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
         let src =
             std::fs::read_to_string(root.join("examples/perf/vec_scan.hy")).expect("read vec_scan");
         let mut pipeline = Pipeline::new();
@@ -1936,17 +1976,16 @@ fn main() { add(1, 2); }
     fn nsieve_retained_il_and_bytecode_emit_store_index_pin() {
         use common::Instruction;
 
-        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
         let src =
             std::fs::read_to_string(root.join("examples/perf/nsieve.hy")).expect("read nsieve");
         let mut pipeline = Pipeline::new();
         let (bytecode, _) = pipeline
             .compile_src_retaining_il(&src)
             .expect("compile nsieve");
-        let snap = pipeline
-            .cursor_il
-            .as_ref()
-            .expect("retained IL snapshot");
+        let snap = pipeline.cursor_il.as_ref().expect("retained IL snapshot");
         let il_index_pins = snap
             .ops
             .iter()
@@ -2040,14 +2079,18 @@ fn main() -> int {
             "b[j] should be proven under i < len(b); stats={stats:?}"
         );
         let snap = pipeline.cursor_il.as_ref().expect("retained IL");
-        let unchecked = snap.ops.iter().filter(|op| {
-            op.as_encode_byte().is_some_and(|b| {
-                matches!(
-                    *b.bytecode(),
-                    Instruction::IndexUnchecked | Instruction::IndexPinUnchecked
-                )
+        let unchecked = snap
+            .ops
+            .iter()
+            .filter(|op| {
+                op.as_encode_byte().is_some_and(|b| {
+                    matches!(
+                        *b.bytecode(),
+                        Instruction::IndexUnchecked | Instruction::IndexPinUnchecked
+                    )
+                })
             })
-        }).count();
+            .count();
         assert!(
             unchecked >= 1,
             "pure helper scan should emit Unchecked index; stats={stats:?}"
@@ -2084,7 +2127,9 @@ fn main() {
 }
 "#;
         let mut pipeline = Pipeline::new();
-        pipeline.compile_src(src).expect("compile pushing helper scan");
+        pipeline
+            .compile_src(src)
+            .expect("compile pushing helper scan");
         let stats = crate::last_bounds_stats();
         assert_eq!(
             stats.array_len_hoists, 0,
