@@ -2126,6 +2126,7 @@
         }
 
         let mut vm = Machine::<512>::default();
+        vm.set_dload_allowlist(["sum"]);
         let lib_val = vm
             .load_userland_library(lib_path.to_str().unwrap())
             .unwrap_or_else(|e| panic!("load {lib_name}: {e}"));
@@ -2173,7 +2174,7 @@
     fn vm_callback_apply_cb_doubles() {
         use crate::ffi::{
             FfiSignature, InvokeContext, callback_cif, invoke_via_libffi, make_int_callback,
-            prepare_cif_for_symbol, resolve_library,
+            prepare_cif_for_symbol, resolve_library_with_extra_stems,
         };
         use crate::memory::FfiType;
         use std::ffi::c_void;
@@ -2189,7 +2190,7 @@
             eprintln!("skipping: {lib_name} not built");
             return;
         }
-        let lib = resolve_library(lib_path.to_str().unwrap(), None, &[])
+        let lib = resolve_library_with_extra_stems(lib_path.to_str().unwrap(), None, &[], &["sum"])
             .unwrap_or_else(|e| panic!("load {lib_name}: {e}"));
 
         let mut vm = Machine::<512>::default();

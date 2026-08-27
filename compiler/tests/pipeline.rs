@@ -242,21 +242,33 @@ fn compile_src_with_tests(src: &str) -> (Pipeline, Vec<common::Byte>, Vec<u64>) 
 
 fn run_harness_src(src: &str) -> String {
     let (pipeline, bytecode, constants) = compile_src_with_tests(src);
-    run_bytecode(bytecode, constants, &pipeline, None)
+    run_bytecode(bytecode, constants, &pipeline, None, &[])
 }
 
 fn run_example_src_with_entry(src: &str, entry: Option<&std::path::Path>) -> String {
+    run_example_src_with_entry_and_dload(src, entry, &[])
+}
+
+fn run_example_src_with_entry_and_dload(
+    src: &str,
+    entry: Option<&std::path::Path>,
+    dload_extra: &[&str],
+) -> String {
     let mut pipeline = Pipeline::new();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("example failed to compile (parse error or type errors)");
-    run_bytecode(bytecode, constants, &pipeline, entry)
+    run_bytecode(bytecode, constants, &pipeline, entry, dload_extra)
 }
 
 /// Multi-file examples (`use` / `mod`) must go through
 /// `compile_src_from_file` so the pipeline discovers dependencies
 /// via `coil.toml` roots. In-memory `compile_src` cannot load them.
 fn run_example_multifile(path: &str) -> String {
+    run_example_multifile_with_dload(path, &[])
+}
+
+fn run_example_multifile_with_dload(path: &str, dload_extra: &[&str]) -> String {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("compiler crate must have a parent (workspace root)");
@@ -265,7 +277,13 @@ fn run_example_multifile(path: &str) -> String {
     let (bytecode, constants) = pipeline
         .compile_src_from_file(full.to_str().unwrap())
         .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
-    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
+    run_bytecode(
+        bytecode,
+        constants,
+        &pipeline,
+        Some(full.as_path()),
+        dload_extra,
+    )
 }
 
 /// Soft-skip an FFI-dependent test outside CI. In CI (`CI` env set), skip is a
@@ -282,10 +300,12 @@ fn run_bytecode(
     constants: Vec<u64>,
     pipeline: &Pipeline,
     entry: Option<&std::path::Path>,
+    dload_extra: &[&str],
 ) -> String {
     let operand_slots = pipeline.operand_stack_slots() as usize;
     let shared = SharedBuf::new();
     let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
+    machine.set_dload_allowlist(dload_extra.iter().copied());
     machine.set_shared_print(shared.inner.clone());
     machine.with_output(shared.clone());
     pipeline.wire_vm_ffi(&mut machine, entry);
@@ -1057,7 +1077,7 @@ use string::{format, to_bytes};
         )
     });
     assert!(has_arith, "expected fib arithmetic with PolyFn present");
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     // fib(6) = 8
     assert_eq!(output, "8");
 }
@@ -1654,8 +1674,9 @@ fn example_ffi_sum_via_dlopen_prints_42() {
         &format!("dload(\"{}\")", lib_abs.display()),
     );
 
-    let result =
-        std::panic::catch_unwind(|| run_example_src_with_entry(&src, Some(full.as_path())));
+    let result = std::panic::catch_unwind(|| {
+        run_example_src_with_entry_and_dload(&src, Some(full.as_path()), &["sum"])
+    });
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -1669,7 +1690,7 @@ fn example_ffi_sum_via_dlopen_prints_42() {
 #[test]
 fn example_strlen_prints_5() {
     // Quick probe: if the portable `c` alias fails, skip outside CI.
-    if machine::resolve_library("c", None, &[]).is_err() {
+    if machine::resolve_library_with_extra_stems("c", None, &[], &["c"]).is_err() {
         ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
         return;
     }
@@ -1680,7 +1701,7 @@ fn example_strlen_prints_5() {
             .expect("compiler crate must have a parent (workspace root)");
         let full = workspace_root.join("examples/strlen.hy");
         let src = std::fs::read_to_string(&full).expect("read strlen.hy");
-        run_example_src_with_entry(&src, Some(full.as_path()))
+        run_example_src_with_entry_and_dload(&src, Some(full.as_path()), &["c"])
     });
     let output = match result {
         Ok(s) => s,
@@ -1694,12 +1715,14 @@ fn example_strlen_prints_5() {
 
 #[test]
 fn example_strlen_prints_5_compile_src_from_file() {
-    if machine::resolve_library("c", None, &[]).is_err() {
+    if machine::resolve_library_with_extra_stems("c", None, &[], &["c"]).is_err() {
         ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
         return;
     }
 
-    let result = std::panic::catch_unwind(|| run_example("examples/strlen.hy"));
+    let result = std::panic::catch_unwind(|| {
+        run_example_multifile_with_dload("examples/strlen.hy", &["c"])
+    });
     let output = match result {
         Ok(s) => s,
         Err(_) => {
@@ -1803,7 +1826,7 @@ fn clean_captured_os_stdout(output: &str) -> String {
 #[cfg(unix)]
 #[test]
 fn example_ffi_printf_prints_hello_42() {
-    if machine::resolve_library("c", None, &[]).is_err() {
+    if machine::resolve_library_with_extra_stems("c", None, &[], &["c"]).is_err() {
         ffi_soft_skip("C library not loadable on this platform via resolve_library(\"c\")");
         return;
     }
@@ -1823,7 +1846,8 @@ fn example_ffi_printf_prints_hello_42() {
             let full = workspace_root.join("examples/ffi_printf.hy");
             let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
             let ((), os_out) = with_captured_os_stdout(|| {
-                let _vm_out = run_example_src_with_entry(&src, Some(full.as_path()));
+                let _vm_out =
+                    run_example_src_with_entry_and_dload(&src, Some(full.as_path()), &["c"]);
             });
             os_out
         });
@@ -1878,8 +1902,8 @@ fn main() {
     let _ = machine.restore_output();
     let output = shared.into_utf8();
     assert!(
-        output.contains("panic:") && output.contains("not found"),
-        "expected panic message about missing library, got: {output:?}"
+        output.contains("panic:") && output.contains("denied"),
+        "expected panic about dload deny, got: {output:?}"
     );
 }
 
@@ -1890,7 +1914,7 @@ use ffi::{dload, ErrorKind};
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
-    let r = dload("this_library_definitely_does_not_exist_xyzzy");
+    let r = dload("time");
     let msg = match r {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e.kind {
@@ -1902,7 +1926,119 @@ fn main() {
 }
 "#;
     let output = run_example_src(src);
-    assert_eq!(output, "missing");
+    assert!(
+        output == "missing" || output == "ok",
+        "allowed stem `time` must not be denied; got {output:?}"
+    );
+}
+
+#[test]
+fn userland_dload_unknown_stem_is_denied_not_missing() {
+    let src = r#"
+use ffi::{dload, ErrorKind};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let r = dload("notalist");
+    let msg = match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        },
+    };
+    write(stdout(), to_bytes(format("%s", msg)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_libc_alias_is_denied() {
+    let src = r#"
+use ffi::{dload, ErrorKind};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let r = dload("c");
+    let msg = match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        },
+    };
+    write(stdout(), to_bytes(format("%s", msg)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_absolute_non_allowlisted_is_denied() {
+    let path = if cfg!(windows) {
+        r"C:\Windows\System32\kernel32.dll"
+    } else {
+        "/lib/x86_64-linux-gnu/libc.so.6"
+    };
+    let src = format!(
+        r#"
+use ffi::{{dload, ErrorKind}};
+use io::{{stdout, write}};
+use string::{{format, to_bytes}};
+fn main() {{
+    let r = dload("{path}");
+    let msg = match r {{
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {{
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        }},
+    }};
+    write(stdout(), to_bytes(format("%s", msg)));
+}}
+"#
+    );
+    let output = run_example_src(&src);
+    assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_production_stems_are_not_denied() {
+    let src = r#"
+use ffi::{dload, ErrorKind};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn kind_of(name: string) -> string {
+    match dload(name) {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e.kind {
+            ErrorKind::LibraryNotFound => "missing",
+            ErrorKind::Other => "denied",
+            _ => "other",
+        },
+    }
+}
+fn main() {
+    let a = kind_of("time");
+    let b = kind_of("crypto");
+    let c = kind_of("tls");
+    let d = kind_of("regex");
+    write(stdout(), to_bytes(format("%s %s %s %s", a, b, c, d)));
+}
+"#;
+    let output = run_example_src(src);
+    for part in output.split_whitespace() {
+        assert!(
+            part == "ok" || part == "missing",
+            "production stem must not be denied; got {output:?}"
+        );
+    }
 }
 
 #[test]
@@ -2500,7 +2636,7 @@ fn run_ffi_example_with_lib(path: &str, lib_path: &std::path::Path) -> String {
         "dload(\"sum\")",
         &format!("dload(\"{}\")", lib_abs.display()),
     );
-    run_example_src_with_entry(&src, Some(full.as_path()))
+    run_example_src_with_entry_and_dload(&src, Some(full.as_path()), &["sum"])
 }
 
 #[cfg(unix)]
@@ -3760,7 +3896,7 @@ fn main() { write(stdout(), to_bytes("ok")); }
         pipeline.test_cases().is_empty(),
         "production compile must not register harness cases"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "ok");
 }
 
@@ -4541,7 +4677,7 @@ fn main() {
         pipeline.function_offset("__coil_par_fib_20").is_none(),
         "fib(20) must not get a parallel specialization"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "17711");
 }
 
@@ -4582,7 +4718,7 @@ fn main() {
         "expected an enum-ctor specialization for build(21)"
     );
     // `build` shares fib's recurrence, so the leaf count is fib(22).
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "17711");
 }
 
@@ -4643,7 +4779,7 @@ fn main() {
         pipeline.function_offset("__coil_par_diff_22").is_some(),
         "expected a Sub specialization for diff(22)"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     // d(n)=d(n-1)-d(n-2) with d(0)=0,d(1)=1 is period-6; d(22)=-1.
     assert_eq!(output, "-1");
 }
@@ -4682,7 +4818,7 @@ fn main() {
             .is_none(),
         "a narrow x - y gap must not specialize"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "12");
 }
 
@@ -4710,7 +4846,7 @@ fn main() {
         pipeline.function_offset("__coil_par_tak_18_12_6").is_none(),
         "fair tak(18, 12, 6) must not get a parallel specialization"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "7");
 }
 
@@ -4770,7 +4906,7 @@ fn main() {
         "expected a specialization for pair_fib(22)"
     );
     // fib(22) + fib(21)
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "28657");
 }
 
@@ -4800,7 +4936,7 @@ fn main() {
         "two multiplies must not buy a spawn"
     );
     // 22² + 21²
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "925");
 }
 
@@ -4829,7 +4965,7 @@ fn main() {
         pipeline.function_offset("__coil_par_fibm_22").is_some(),
         "irrefutable match arm must still specialize"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "17711");
 }
 
@@ -4862,7 +4998,7 @@ fn main() {
         "expected a chunk worker for the counted loop"
     );
     // Sum of i*i for i in 0..100, and the induction variable past its range.
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "328350,100");
 }
 
@@ -4984,7 +5120,7 @@ fn main() {
             "expected a chunk worker named {name}"
         );
     }
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let output = run_bytecode(bytecode, constants, &pipeline, None, &[]);
     assert_eq!(output, "8555,780");
 }
 
@@ -5093,7 +5229,7 @@ fn main() {
         pipeline.function_offset("__coil_par_loop_1").is_none(),
         "a 20-trip loop cannot pay for a spawn"
     );
-    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "2470");
+    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None, &[]), "2470");
 }
 
 /// Nested CALL + `let x = f(); if x == k` must not hang: mem_fwd must not
@@ -6741,7 +6877,7 @@ fn main() {
         "float aggregate negate must not emit int NEG"
     );
     assert_eq!(
-        run_bytecode(bytecode, constants, &pipeline, None),
+        run_bytecode(bytecode, constants, &pipeline, None, &[]),
         "-1.5,-2.0"
     );
 }
@@ -8590,12 +8726,12 @@ fn main() {
 /// COI-19: extern handles in static slots survive locals / repeat calls.
 #[test]
 fn extern_system_twice_after_vec_ok() {
-    if machine::resolve_library("c", None, &[]).is_err() {
+    if machine::resolve_library_with_extra_stems("c", None, &[], &["c"]).is_err() {
         ffi_soft_skip("C library not loadable via resolve_library(\"c\")");
         return;
     }
     let result = std::panic::catch_unwind(|| {
-        run_example_src(
+        run_example_src_with_entry_and_dload(
             r#"
 use io::{stdout};
 use io::sync::{write_all};
@@ -8613,6 +8749,8 @@ fn main() {
     let _ = write_all(stdout(), to_bytes(format("%v %v\n", a, b)));
 }
 "#,
+            None,
+            &["c"],
         )
     });
     let output = match result {
@@ -8628,11 +8766,13 @@ fn main() {
 /// COI-19: `extern` in an imported module still initializes before main.
 #[test]
 fn extern_in_imported_module_runs() {
-    if machine::resolve_library("c", None, &[]).is_err() {
+    if machine::resolve_library_with_extra_stems("c", None, &[], &["c"]).is_err() {
         ffi_soft_skip("C library not loadable via resolve_library(\"c\")");
         return;
     }
-    let result = std::panic::catch_unwind(|| run_example_multifile("examples/ffi_mod_entry.hy"));
+    let result = std::panic::catch_unwind(|| {
+        run_example_multifile_with_dload("examples/ffi_mod_entry.hy", &["c"])
+    });
     let output = match result {
         Ok(s) => s,
         Err(_) => {

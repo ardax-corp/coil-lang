@@ -627,7 +627,6 @@ pub fn invoke_via_libffi(
 mod tests {
     use super::*;
     use crate::ffi::FfiSignatureBuilder;
-    use crate::ffi::load_library;
 
     extern "C" fn add_two(a: i64, b: i64) -> i64 {
         a + b
@@ -698,7 +697,7 @@ mod tests {
     #[cfg(not(target_os = "windows"))]
     #[test]
     fn invoke_libc_strlen_via_libffi() {
-        let lib = match crate::ffi::resolve_library("c", None, &[]) {
+        let lib = match crate::ffi::resolve_library_with_extra_stems("c", None, &[], &["c"]) {
             Ok(l) => l,
             Err(_) => {
                 if std::env::var_os("CI").is_some() {
@@ -747,7 +746,12 @@ mod tests {
             eprintln!("skipping: {lib_name} not built");
             return;
         }
-        let lib = match crate::ffi::resolve_library(lib_path.to_str().unwrap(), None, &[]) {
+        let lib = match crate::ffi::resolve_library_with_extra_stems(
+            lib_path.to_str().unwrap(),
+            None,
+            &[],
+            &["sum"],
+        ) {
             Ok(l) => l,
             Err(e) => {
                 if std::env::var_os("CI").is_some() {
@@ -886,7 +890,7 @@ mod tests {
     fn variadic_invoke_libc_snprintf_formats_int() {
         use std::ffi::CStr;
 
-        let lib = match crate::ffi::resolve_library("c", None, &[]) {
+        let lib = match crate::ffi::resolve_library_with_extra_stems("c", None, &[], &["c"]) {
             Ok(l) => l,
             Err(_) => {
                 if std::env::var_os("CI").is_some() {
