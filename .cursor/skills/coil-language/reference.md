@@ -112,7 +112,7 @@ Runtime:
 use ffi::{dload, declare, invoke};
 use ffi::types::{Int, Ptr};
 
-let lib = dload("libc.so.6")?;
+let lib = dload("crypto")?;
 let f = declare(lib, "strlen", (String,), Int)?;
 ```
 

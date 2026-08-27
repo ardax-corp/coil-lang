@@ -6,7 +6,7 @@ User code does not name these directly; the compiler emits them:
 |--------|------|
 | `PRINT` | Write string to output |
 | `FORMAT` | Build formatted string from specifiers |
-| `FfiLoad` | `dload` |
+| `FfiLoad` | `dload` (fail-closed stem allowlist: `crypto`, `tls`, `regex`, `time`; HostInvoke is not this gate) |
 | `DeclareFFI` | `declare` |
 | `FfiInvoke` | `invoke` |
 | `HostInvoke` | Host-registered closure |

@@ -5,10 +5,8 @@
 // rebuild, NO Rust closures to register, NO manual dload/
 // declare/invoke ceremony.
 //
-// `extern "c"` resolves to the platform C library (`libc.so.6`,
-// `libSystem.B.dylib`, `ucrtbase.dll`, …) via the FFI resolver.
-// On load/declare failure the compiler-emitted unwrap panics
-// with a clear message instead of segfaulting.
+// Default `dload` allowlist is crypto/tls/regex/time (COI-229). `extern "c"`
+// needs a host extra stem; a default `coil` run denies libc.
 //
 // Expected output: `5` (strlen of "hello").
 

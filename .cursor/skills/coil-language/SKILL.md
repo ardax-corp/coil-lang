@@ -135,7 +135,7 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 1. **`main` + `test()`** — do not combine in one file.
 2. **Assuming stdlib** — no `sort` or HTTP in the VM; add [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) for collections/IO adapters; HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool. `sqrt` is prelude math.
 3. **Missing `use`** — `io`/`string` are not auto-imported.
-4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `coil.toml` paths, system.
+4. **FFI** — needs system libffi; `dload` is fail-closed to stems `crypto`, `tls`, `regex`, `time`. Search paths do not bypass the stem gate. HostInvoke natives are not that gate.
 5. **Stale `out.hyc`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
 7. **Free fn vs method** — use `impl` methods for collection/container ops; free generic fns returning `Option`/`Result` can mis-codegen — see [limitations.md](docs/internals/limitations.md).
