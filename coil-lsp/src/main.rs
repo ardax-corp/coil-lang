@@ -1147,25 +1147,28 @@ fn insert_virtual_candidate(
         .or_insert_with(|| (kind, builtin_documentation(path, &name, export)));
 }
 
+const WEBSITE_DOCS: &str =
+    "https://github.com/ardax-corp/coil-website/blob/main/src/content/docs";
+
 fn builtin_documentation(path: &[String], name: &str, export: &BuiltinExport) -> String {
     let module = path.join("::");
-    let reference = match module.as_str() {
-        "prelude" => "option-result.md",
-        "prelude::ops" => "types.md",
-        "prelude::test" => "assert.md",
-        "prelude::math" => "math.md",
-        "io" => "io.md",
-        "io::fs" => "io-fs.md",
-        "string" => "string.md",
-        "thread" => "../manual/tutorial/11-threads.md",
-        "time" => "time.md",
-        "env" => "env.md",
-        "gc" => "gc.md",
-        "ffi" | "ffi::types" => "ffi.md",
-        _ => "modules.md",
+    let doc_path = match module.as_str() {
+        "prelude" => "references/option-result.md",
+        "prelude::ops" => "references/types.md",
+        "prelude::test" => "references/assert.md",
+        "prelude::math" => "references/math.md",
+        "io" => "references/io.md",
+        "io::fs" => "references/io-fs.md",
+        "string" => "references/string.md",
+        "thread" => "manual/tutorial/11-threads.md",
+        "time" => "references/time.md",
+        "env" => "references/env.md",
+        "gc" => "references/gc.md",
+        "ffi" | "ffi::types" => "references/ffi.md",
+        _ => "references/modules.md",
     };
     let description = builtin_description(&module, name, export);
-    format!("{description}\n\n[Read the `{module}` reference](docs/references/{reference}).")
+    format!("{description}\n\n[Read the `{module}` reference]({WEBSITE_DOCS}/{doc_path}).")
 }
 
 fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> String {
@@ -1387,6 +1390,7 @@ fn hover_has_detail(hover: &Hover) -> bool {
             value.contains("```")
                 || value.contains("\n\n---\n\n")
                 || value.contains("docs/references/")
+                || value.contains("src/content/docs/")
         }
         _ => false,
     }

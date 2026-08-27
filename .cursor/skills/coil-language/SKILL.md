@@ -14,7 +14,7 @@ coil is a **statically typed** scripting language with Hindley–Milner inferenc
 **Do not invent stdlib APIs** — userland helpers live in
 [coil-stdlib](https://github.com/ardax-corp/coil-stdlib)
 ([docs](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/README.md)).
-Compiler builtins live in virtual modules; see [docs/references/not-builtins.md](docs/references/not-builtins.md).
+Compiler builtins live in virtual modules; see [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/not-builtins.md) (`/docs/references/not-builtins`).
 
 **Prefer method-based APIs** — operations on a type should be `impl` methods (`m.insert(k, v)`), not free functions (`insert(m, k, v)`). Virtual-module host primitives (`io::read`) stay as free fns; stdlib collections and new language surface default to methods.
 
@@ -78,7 +78,7 @@ Named call-site args: positional prefix then `f(name: v)`. Rest: trailing `T... 
 Ranges `a..b` / `a..=b` are **lazy** `Range<T: Ord>` / `RangeInclusive<T: Ord>`.
 `for` and `.to_vec()` step `int`/`byte`/`float` only; other `Ord` is a type error.
 
-Full grammar: [docs/references/syntax.md](docs/references/syntax.md).
+Full grammar: [syntax](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/syntax.md) (`/docs/references/syntax`).
 
 ## Virtual modules (explicit `use`)
 
@@ -100,7 +100,7 @@ userland modules. Prelude is auto-injected.
 
 `async fn`, `yield`, `resume h`, `resume h with v`, `let x = yield e`, `yield from`, `done(h)`. Types: `coroutine<Y, S>`. Resume after done → default value.
 
-Tutorial: [docs/manual/tutorial/08-coroutines.md](docs/manual/tutorial/08-coroutines.md).
+Tutorial: [08-coroutines](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/08-coroutines.md) (`/docs/manual/tutorial/08-coroutines`).
 
 ## Tests
 
@@ -114,7 +114,7 @@ Or `#[test("desc")] fn … { … }`. Body is Result mode. `panic` aborts VM; `co
 
 ## Multi-file projects
 
-`coil.toml` at project root; entry file has empty namespace. See [docs/references/project-config.md](docs/references/project-config.md).
+`coil.toml` at project root; entry file has empty namespace. See [project-config](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/project-config.md) (`/docs/references/project-config`).
 
 ## Learn by example
 
@@ -126,9 +126,9 @@ Or `#[test("desc")] fn … { … }`. Body is Result mode. `panic` aborts VM; `co
 | Coroutines | `examples/coro.hy` |
 | FFI | `examples/strlen.hy` |
 | GC `fn drop()` | `examples/finalizer.hy` |
-| Full catalog | [docs/manual/examples.md](docs/manual/examples.md) |
+| Full catalog | [examples](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/examples.md) (`/docs/manual/examples`) |
 
-Tutorial path: [docs/manual/getting-started.md](docs/manual/getting-started.md) → chapters 01–11.
+Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/getting-started.md) (`/docs/manual/getting-started`) → chapters 01–11.
 
 ## Common pitfalls
 
@@ -137,7 +137,7 @@ Tutorial path: [docs/manual/getting-started.md](docs/manual/getting-started.md) 
 3. **Missing `use`** — `io`/`string` are not auto-imported.
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `coil.toml` paths, system.
 5. **Stale `out.hyc`** — only from `coil compile`; delete before `coil run` if sources changed.
-6. **Type errors** — read diagnostic `E####`; index in [docs/references/error-codes.md](docs/references/error-codes.md).
+6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
 7. **Free fn vs method** — use `impl` methods for collection/container ops; free generic fns returning `Option`/`Result` can mis-codegen — see [limitations.md](docs/internals/limitations.md).
 
 ## Debugging programs
@@ -147,6 +147,6 @@ For hangs, wrong values, panics, breakpoints: use the **coil-debug** skill (`coi
 ## Additional resources
 
 - Syntax cheat sheet + patterns: [reference.md](reference.md)
-- API lookup: [docs/references/README.md](docs/references/README.md)
+- API lookup: [references](https://github.com/ardax-corp/coil-website/tree/main/src/content/docs/references) (`/docs/references`)
 - Userland stdlib: [coil-stdlib docs](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/README.md)
 - Internals (contributors): **coil-contributor** skill

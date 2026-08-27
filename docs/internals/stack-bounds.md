@@ -50,7 +50,7 @@ fn walk(int n) -> int {
 ```
 
 `N` is a positive integer upper bound on simultaneous call frames of that
-recursive function. Valid only on `fn` (see [Syntax — Attributes](../references/syntax.md#attributes)).
+recursive function. Valid only on `fn` (see [Syntax — Attributes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/syntax.md#attributes)).
 
 ## Relation to auto-par
 

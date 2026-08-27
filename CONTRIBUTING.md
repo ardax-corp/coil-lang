@@ -33,7 +33,7 @@ See [AGENTS.md](AGENTS.md). Highlights:
 
 - Append-only opcodes — new `Instruction` variants at the end only; bump archive **minor**, VM `promise!` ceiling, and `instruction_from_u8_covers_last_appended_variant`.
 - Virtual-module natives via `HostInvoke` — not new opcodes for `io` / `thread` / etc.
-- Language features need full HM integration, `docs/` updates, and a minimal runnable example.
+- Language features need full HM integration, user-doc updates in [coil-website](https://github.com/ardax-corp/coil-website), internals updates here when needed, and a minimal runnable example.
 - **Method-based APIs** — prefer `impl` methods on classes over free functions for type-tied operations (stdlib, new surface). See [limitations.md](docs/internals/limitations.md) for codegen gaps on free generic enum returns.
 
 Known gaps and workarounds: [docs/internals/limitations.md](docs/internals/limitations.md).
@@ -42,10 +42,12 @@ Known gaps and workarounds: [docs/internals/limitations.md](docs/internals/limit
 
 | Tree | When to update |
 |------|----------------|
-| `docs/manual/` | Tutorials, getting started, examples catalog |
-| `docs/references/` | Syntax, per-API **builtin** pages, error codes |
-| `docs/internals/` | Pipeline, VM, tooling |
+| [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/manual/` | Tutorials, getting started, examples catalog (`/docs/manual/…`) |
+| [coil-website](https://github.com/ardax-corp/coil-website) `src/content/docs/references/` | Syntax, per-API **builtin** pages, error codes (`/docs/references/…`) |
+| `docs/internals/` | Pipeline, VM, tooling (this repo) |
 | [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) | Userland API docs (`docs/` in that repo); `///` on public `.hy` |
+
+User-facing docs live in coil-website until a public domain is set.
 
 ## Commits
 

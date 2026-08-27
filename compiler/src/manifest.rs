@@ -1,5 +1,5 @@
 //! Project manifest (`coil.toml`) parsing and module path resolution.
-//! Format and discovery rules: `docs/references/project-config.md`.
+//! Format and discovery rules: coil-website `src/content/docs/references/project-config.md` (`/docs/references/project-config`).
 
 use std::path::{Path, PathBuf};
 
@@ -410,7 +410,8 @@ impl Manifest {
     ///    `sadge` lives inside that module file)
     ///
     /// If both exist, Convention A wins silently (documented in
-    /// `docs/references/modules.md` under Path resolution /
+    /// coil-website `src/content/docs/references/modules.md`
+    /// (`/docs/references/modules`) under Path resolution /
     /// Shadowing). Brace/glob imports against a module file are
     /// unaffected when only Convention B is present.
     ///

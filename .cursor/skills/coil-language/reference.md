@@ -1,6 +1,6 @@
 # coil language reference (agent cheat sheet)
 
-Read when you need syntax detail beyond SKILL.md. User docs live under `docs/`.
+Read when you need syntax detail beyond SKILL.md. User docs live in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`; routes `/docs/…` until a domain is set).
 
 ## Type system highlights
 
@@ -8,7 +8,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live under `docs/`.
 - Type aliases: `type Name = T;` — lexically scoped; inner may shadow outer.
 - `never` from `return`/`raise`/`panic` and proven-infinite loops absorbs in joins.
 - Path completeness: concrete non-unit returns need all paths to exit (`E0111`).
-- Casts: `expr as T` — see [docs/references/casts.md](docs/references/casts.md).
+- Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/casts.md) (`/docs/references/casts`).
 
 ## Expression forms
 
@@ -55,7 +55,7 @@ close(s)?;
 
 Buffers are `[byte]`, not `string`. Convert via `string::to_bytes` / `from_bytes`.
 
-Sync adapters exist for blocking-style loops on non-blocking streams — see [docs/references/io.md](docs/references/io.md).
+Sync adapters exist for blocking-style loops on non-blocking streams — see [io](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/io.md) (`/docs/references/io`).
 
 ## Error handling patterns
 
@@ -122,4 +122,4 @@ let f = declare(lib, "strlen", (String,), Int)?;
 
 ## What does NOT exist
 
-See [docs/references/not-builtins.md](docs/references/not-builtins.md): no general `sort`, string slice/trim builtins, `sin`/`sqrt`, HTTP in VM, manual alloc/free.
+See [not-builtins](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/not-builtins.md) (`/docs/references/not-builtins`): no general `sort`, string slice/trim builtins, `sin`/`sqrt`, HTTP in VM, manual alloc/free.
