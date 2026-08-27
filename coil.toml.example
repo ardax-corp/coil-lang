@@ -47,6 +47,10 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # [dependencies]
 # http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
 # local_http = { path = "../local-http" }
+# # `trusted = true` skips native sha256 on that dep only (spool). Default
+# # false. Not git content_hash, not hooks, not engine, never dload("c").
+# # Parser stores the flag; it does not skip a hash here.
+# coil_crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
 
 # --------------------------------------------------------------------------
 # Lifecycle scripts (current project only)

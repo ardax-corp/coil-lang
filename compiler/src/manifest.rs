@@ -64,16 +64,33 @@ pub struct Scripts {
 /// `version` on git deps is optional schema, not a resolved tag; the lock
 /// (`rev` + `content_hash`) is the pin. Optional `rev` is stored as parsed
 /// schema only — this crate does not resolve or write a lockfile.
+///
+/// Optional `trusted` (default `false`) is stored only. When `true`, spool
+/// may skip **native** `sha256` on that dep row (so a consumer can depend on
+/// coil-crypto and use it to verify other deps). It is not git `content_hash`,
+/// not hooks, not engine, and never `dload("c")`. This crate does not skip a
+/// hash or change FFI loading.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencySpec {
     Git {
         url: String,
         version: Option<String>,
         rev: Option<String>,
+        trusted: bool,
     },
     Path {
         path: PathBuf,
+        trusted: bool,
     },
+}
+
+impl DependencySpec {
+    /// Native-`sha256` skip flag for this row. Default `false` when omitted.
+    pub fn trusted(&self) -> bool {
+        match self {
+            Self::Git { trusted, .. } | Self::Path { trusted, .. } => *trusted,
+        }
+    }
 }
 
 /// Resolved project manifest.
@@ -575,8 +592,8 @@ fn parse_string_array(value: &str) -> Option<Vec<String>> {
     Some(out)
 }
 
-/// Parse a TOML-like inline table of string values:
-/// `{ git = "…" }` or `{ git = "…", version = "^0.2", rev = "abc" }`.
+/// Parse a TOML-like inline table into raw `key = rhs` pairs.
+/// `{ git = "…" }` or `{ git = "…", trusted = true }`.
 fn parse_inline_table(value: &str) -> Option<Vec<(String, String)>> {
     let trimmed = value.trim();
     let inner = trimmed.strip_prefix('{')?.strip_suffix('}')?;
@@ -587,7 +604,7 @@ fn parse_inline_table(value: &str) -> Option<Vec<(String, String)>> {
             continue;
         }
         let (key, rhs) = parse_kv(piece)?;
-        out.push((key.to_string(), parse_string(rhs)?));
+        out.push((key.to_string(), rhs.to_string()));
     }
     Some(out)
 }
@@ -600,25 +617,40 @@ fn parse_inline_table(value: &str) -> Option<Vec<(String, String)>> {
 /// - `{ git = "url", rev = "abc" }`
 /// - `{ git = "url", version = "^0.2", rev = "abc" }`
 /// - `{ path = "../local" }`
+///
+/// Optional `trusted = true` / `trusted = false` (bool, default `false`)
+/// may appear on either form.
 fn parse_dependency_spec(value: &str) -> Option<DependencySpec> {
     let entries = parse_inline_table(value)?;
     let mut git: Option<String> = None;
     let mut version: Option<String> = None;
     let mut path: Option<String> = None;
     let mut rev: Option<String> = None;
+    let mut trusted = false;
+    let mut saw_trusted = false;
     for (key, val) in entries {
         match key.as_str() {
-            "git" if git.is_none() => git = Some(val),
-            "version" if version.is_none() => version = Some(val),
-            "path" if path.is_none() => path = Some(val),
-            "rev" if rev.is_none() => rev = Some(val),
+            "git" if git.is_none() => git = Some(parse_string(&val)?),
+            "version" if version.is_none() => version = Some(parse_string(&val)?),
+            "path" if path.is_none() => path = Some(parse_string(&val)?),
+            "rev" if rev.is_none() => rev = Some(parse_string(&val)?),
+            "trusted" if !saw_trusted => {
+                trusted = parse_bool(&val)?;
+                saw_trusted = true;
+            }
             _ => return None,
         }
     }
     match (git, version, path, rev) {
-        (Some(url), version, None, rev) => Some(DependencySpec::Git { url, version, rev }),
+        (Some(url), version, None, rev) => Some(DependencySpec::Git {
+            url,
+            version,
+            rev,
+            trusted,
+        }),
         (None, None, Some(path), None) => Some(DependencySpec::Path {
             path: PathBuf::from(path),
+            trusted,
         }),
         _ => None,
     }
@@ -991,12 +1023,14 @@ mod tests {
                         url: "https://github.com/coil-lang/http.git".into(),
                         version: Some("^0.2".into()),
                         rev: None,
+                        trusted: false,
                     }
                 ),
                 (
                     "local_http".into(),
                     DependencySpec::Path {
                         path: PathBuf::from("../local-http"),
+                        trusted: false,
                     }
                 ),
             ]
@@ -1152,6 +1186,7 @@ mod tests {
                     url: "https://example.com/http.git".into(),
                     version: None,
                     rev: None,
+                    trusted: false,
                 }
             )]
         );
@@ -1172,6 +1207,7 @@ mod tests {
                     url: "https://example.com/http.git".into(),
                     version: None,
                     rev: Some("abc123".into()),
+                    trusted: false,
                 }
             )]
         );
@@ -1192,6 +1228,7 @@ mod tests {
                     url: "https://example.com/http.git".into(),
                     version: Some("^0.2".into()),
                     rev: Some("abc123".into()),
+                    trusted: false,
                 }
             )]
         );
@@ -1306,9 +1343,86 @@ mod tests {
                     url: "https://example.com/http.git".into(),
                     version: Some("^0.2".into()),
                     rev: None,
+                    trusted: false,
                 }
             )]
         );
+    }
+
+    #[test]
+    fn parse_dependency_trusted_omitted_is_false() {
+        let src = r#"
+            [dependencies]
+            crypto = { git = "https://example.com/coil-crypto.git" }
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert!(!m.dependencies[0].1.trusted());
+    }
+
+    #[test]
+    fn parse_dependency_trusted_true_on_git() {
+        let src = r#"
+            [dependencies]
+            crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(
+            m.dependencies,
+            vec![(
+                "crypto".into(),
+                DependencySpec::Git {
+                    url: "https://example.com/coil-crypto.git".into(),
+                    version: None,
+                    rev: None,
+                    trusted: true,
+                }
+            )]
+        );
+        assert!(m.dependencies[0].1.trusted());
+    }
+
+    #[test]
+    fn parse_dependency_trusted_false_explicit() {
+        let src = r#"
+            [dependencies]
+            http = { git = "https://example.com/http.git", trusted = false }
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert!(!m.dependencies[0].1.trusted());
+    }
+
+    #[test]
+    fn parse_dependency_trusted_true_on_path() {
+        let src = r#"
+            [dependencies]
+            crypto = { path = "../coil-crypto", trusted = true }
+        "#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(
+            m.dependencies,
+            vec![(
+                "crypto".into(),
+                DependencySpec::Path {
+                    path: PathBuf::from("../coil-crypto"),
+                    trusted: true,
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn parse_dependency_rejects_trusted_as_string() {
+        let src = r#"
+            [dependencies]
+            crypto = { git = "https://example.com/coil-crypto.git", trusted = "true" }
+        "#;
+        let err = Manifest::parse(src).unwrap_err();
+        match err {
+            ManifestError::Parse { message, .. } => {
+                assert!(message.contains("expected dependency table"));
+            }
+            other => panic!("expected Parse, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1422,12 +1536,14 @@ local_lib = { path = "../local-lib" }
                         url: "https://example.com/http.git".into(),
                         version: Some("^0.2".into()),
                         rev: None,
+                        trusted: false,
                     }
                 ),
                 (
                     "local_lib".into(),
                     DependencySpec::Path {
                         path: PathBuf::from("../local-lib"),
+                        trusted: false,
                     }
                 ),
             ]
