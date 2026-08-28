@@ -182,7 +182,8 @@ On a failed spawn or join, a single worker call covers `[begin, end)`.
 threads (size = [`WorkerCap`](../../machine/src/thread.rs), default
 `available_parallelism`). Jobs land on a crossbeam injector / local deques;
 idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
-`std::thread::spawn`.
+`std::thread::spawn`. Each job copies the parent VM's `[ffi] search_paths` and
+`dload` gate so worker `dload` sees the same libraries as main.
 
 | Env | Effect |
 |-----|--------|
