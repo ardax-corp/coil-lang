@@ -3,6 +3,7 @@
 use std::cell::RefCell;
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
@@ -802,6 +803,12 @@ pub struct ThreadSpawnContext {
     pub worker_cap: Arc<WorkerCap>,
     pub reactor: Arc<crate::reactor::Reactor>,
     pub io_reactor: Arc<crate::io_reactor::IoReactor>,
+    /// Entry-script directory used for relative `dload` (same as parent).
+    pub base_dir: Option<PathBuf>,
+    /// `[ffi] search_paths` from the parent graph (COI-233).
+    pub ffi_search_paths: Vec<PathBuf>,
+    /// Fail-closed `dload` policy from the parent VM.
+    pub dload_gate: crate::ffi::DloadGate,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -814,6 +821,9 @@ impl Clone for ThreadSpawnContext {
             worker_cap: Arc::clone(&self.worker_cap),
             reactor: Arc::clone(&self.reactor),
             io_reactor: Arc::clone(&self.io_reactor),
+            base_dir: self.base_dir.clone(),
+            ffi_search_paths: self.ffi_search_paths.clone(),
+            dload_gate: self.dload_gate.clone(),
         }
     }
 }

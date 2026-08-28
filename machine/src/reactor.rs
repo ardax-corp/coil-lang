@@ -31,6 +31,9 @@ pub struct Job {
     pub live_threads: LiveThreadRegistry,
     pub reactor: Arc<Reactor>,
     pub io_reactor: Arc<crate::io_reactor::IoReactor>,
+    pub base_dir: Option<std::path::PathBuf>,
+    pub ffi_search_paths: Vec<std::path::PathBuf>,
+    pub dload_gate: crate::ffi::DloadGate,
 }
 
 /// Per-root-VM work-stealing reactor.
@@ -387,6 +390,9 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         live_threads,
         reactor,
         io_reactor,
+        base_dir,
+        ffi_search_paths,
+        dload_gate,
     } = job;
 
     // A joining root help-steals jobs onto its *own* thread, so the print
@@ -406,6 +412,8 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         vm.set_live_threads(Arc::clone(&live_threads));
         vm.set_reactor(Arc::clone(&reactor));
         vm.set_io_reactor(Arc::clone(&io_reactor));
+        vm.set_ffi_paths(base_dir, ffi_search_paths);
+        vm.set_dload_gate(dload_gate);
         vm.set_worker_cap(crate::thread::WorkerCap::from_count(reactor.worker_count()));
         if let Some(buf) = &shared_print {
             vm.set_shared_print(Arc::clone(buf));
@@ -462,6 +470,9 @@ pub fn job_from_spawn_context(
         live_threads: ctx.live_threads,
         reactor: ctx.reactor,
         io_reactor: ctx.io_reactor,
+        base_dir: ctx.base_dir,
+        ffi_search_paths: ctx.ffi_search_paths,
+        dload_gate: ctx.dload_gate,
     }
 }
 
@@ -497,6 +508,9 @@ mod tests {
             live_threads: crate::thread::new_live_thread_registry(),
             reactor: Arc::clone(reactor),
             io_reactor: crate::io_reactor::IoReactor::new(),
+            base_dir: None,
+            ffi_search_paths: Vec::new(),
+            dload_gate: crate::ffi::DloadGate::deny_all(),
         };
         reactor.submit(job);
         state
@@ -591,6 +605,9 @@ mod tests {
             live_threads: crate::thread::new_live_thread_registry(),
             reactor: Arc::clone(&foreign),
             io_reactor: crate::io_reactor::IoReactor::new(),
+            base_dir: None,
+            ffi_search_paths: Vec::new(),
+            dload_gate: crate::ffi::DloadGate::deny_all(),
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(

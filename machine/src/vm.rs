@@ -1422,6 +1422,9 @@ impl<const S: usize> Machine<S> {
             worker_cap: std::sync::Arc::clone(&self.worker_cap),
             reactor: std::sync::Arc::clone(&self.reactor),
             io_reactor: std::sync::Arc::clone(&self.io_reactor),
+            base_dir: self.base_dir.clone(),
+            ffi_search_paths: self.ffi_search_paths.clone(),
+            dload_gate: self.dload_gate.clone(),
         })
     }
 
