@@ -545,6 +545,35 @@ mod tests {
         }
     }
 
+    /// COI-260: `dload("time")` is a first-party stem, not a virtual host.
+    #[test]
+    fn dload_time_without_allow_is_library_denied() {
+        let gate = DloadGate::deny_all();
+        match resolve_library("time", None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "time"),
+            other => panic!("expected LibraryDenied for dload(time), got {other:?}"),
+        }
+        let path = missing_abs_lib("time");
+        match resolve_library(&path, None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "time"),
+            other => panic!("expected LibraryDenied for missing time lib, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn dload_time_allow_plus_trusted_missing_file_is_library_not_found() {
+        let gate = DloadGate::from_consumer_trusted(["time"], &[], ["time"]);
+        let path = missing_abs_lib("time");
+        match resolve_library(&path, None, &[], &gate) {
+            Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
+            other => panic!("expected LibraryNotFound for trusted time, got {other:?}"),
+        }
+        match resolve_library("c", None, &[], &gate) {
+            Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "c"),
+            other => panic!("time allow must never grant dload(c), got {other:?}"),
+        }
+    }
+
     #[test]
     fn first_party_without_allow_is_library_denied() {
         let gate = DloadGate::deny_all();
