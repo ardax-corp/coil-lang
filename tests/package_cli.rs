@@ -200,18 +200,27 @@ fn package_with_native_lock_requires_spool_download_then_runs() {
     std::fs::create_dir_all(tmp.join("native")).unwrap();
     std::fs::create_dir_all(tmp.join("src")).unwrap();
 
-    let so = tmp.join("native/libsum.so");
-    let cc = Command::new("cc")
+    let lib_name = machine::platform_shared_lib_filename("sum");
+    let so = tmp.join("native").join(&lib_name);
+    let mut cc = Command::new("cc");
+    #[cfg(target_os = "macos")]
+    {
+        cc.arg("-dynamiclib");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cc.arg("-shared").arg("-fPIC");
+    }
+    let cc = cc
         .args([
-            "-shared",
-            "-fPIC",
+            "-O2",
             "-o",
             so.to_str().unwrap(),
             manifest_dir.join("examples/sum.c").to_str().unwrap(),
         ])
         .status()
         .expect("cc");
-    assert!(cc.success(), "failed to build libsum.so");
+    assert!(cc.success(), "failed to build {lib_name}");
 
     std::fs::write(
         tmp.join("src/main.hy"),
@@ -258,7 +267,7 @@ url = "https://example.com/libsum.so"
     .unwrap();
 
     let out = tmp.join(format!("sum-app{}", std::env::consts::EXE_SUFFIX));
-    let status = Command::new(&bin)
+    let packaged = Command::new(&bin)
         .args([
             "package",
             "src/main.hy",
@@ -268,9 +277,13 @@ url = "https://example.com/libsum.so"
             embed.to_str().unwrap(),
         ])
         .current_dir(&tmp)
-        .status()
+        .output()
         .expect("package");
-    assert!(status.success(), "package with [[ffi.native]] should succeed");
+    assert!(
+        packaged.status.success(),
+        "package with [[ffi.native]] should succeed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
 
     let dump = Command::new(&bin)
         .args(["natives", "dump", "--tsv", out.to_str().unwrap()])
@@ -278,7 +291,10 @@ url = "https://example.com/libsum.so"
         .expect("natives dump");
     assert!(dump.status.success(), "natives dump failed");
     let tsv = String::from_utf8_lossy(&dump.stdout);
-    assert!(tsv.contains("sum\t0.0.1\tlibsum.so"), "tsv={tsv}");
+    assert!(
+        tsv.contains(&format!("sum\t0.0.1\t{lib_name}")),
+        "tsv={tsv}"
+    );
     assert!(tsv.contains("# os="), "missing os comment");
 
     let natives_root = tmp.join("natives-cache");
@@ -319,7 +335,7 @@ url = "https://example.com/libsum.so"
         .join("0.0.1")
         .join(&hash16);
     std::fs::create_dir_all(&dest_dir).unwrap();
-    std::fs::copy(&so, dest_dir.join("libsum.so")).unwrap();
+    std::fs::copy(&so, dest_dir.join(&lib_name)).unwrap();
 
     let run_ok = run_command_with_timeout(
         {
