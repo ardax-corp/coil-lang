@@ -11,10 +11,55 @@ use crate::memory::{Heap, Member, ObjArray, Object};
 /// When false, [`host_exec`] returns `ExecDisabled`. Set from `coil.toml` `[env] allow_exec`.
 pub static ALLOW_EXEC: AtomicBool = AtomicBool::new(false);
 
+/// When false, [`host_exit`] panics instead of terminating. Set from `[env] allow_exit`.
+pub static ALLOW_EXIT: AtomicBool = AtomicBool::new(false);
+
+/// When false, FFI `system` / `execve` (and aliases) are denied at symbol resolve.
+/// Set from `[env] allow_ffi_exec`. Independent of [`ALLOW_EXEC`].
+pub static ALLOW_FFI_EXEC: AtomicBool = AtomicBool::new(false);
+
 /// Runtime gate for `env::exec` (from project manifest).
 pub fn set_allow_exec(allow: bool) {
     ALLOW_EXEC.store(allow, Ordering::Relaxed);
 }
+
+/// Runtime gate for `env::exit` (from project manifest).
+pub fn set_allow_exit(allow: bool) {
+    ALLOW_EXIT.store(allow, Ordering::Relaxed);
+}
+
+/// Runtime gate for FFI process-exec symbols (`system`, `execve`, …).
+pub fn set_allow_ffi_exec(allow: bool) {
+    ALLOW_FFI_EXEC.store(allow, Ordering::Relaxed);
+}
+
+/// True when `name` is a libc/CRT process-exec symbol (not `env::exec`).
+pub fn is_ffi_exec_symbol(name: &str) -> bool {
+    let n = name.trim().trim_matches('_').to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "system"
+            | "wsystem"
+            | "libc_system"
+            | "exec"
+            | "execl"
+            | "execle"
+            | "execlp"
+            | "execv"
+            | "execvp"
+            | "execvpe"
+            | "execve"
+            | "fexecve"
+            | "execveat"
+            | "posix_spawn"
+            | "posix_spawnp"
+            | "popen"
+            | "createprocessa"
+            | "createprocessw"
+            | "winexec"
+    )
+}
+
 
 /// Tag indices for [`EnvError`](common::BUILTIN_ENV_ERROR_ENUM).
 #[repr(u32)]
@@ -207,8 +252,13 @@ fn try_host_set_cwd(heap: &mut Heap, args: &[Value]) -> Result<(), EnvErrorTag> 
     Ok(())
 }
 
-/// Terminates the process (`std::process::exit`). Never returns.
+/// Terminates the process (`std::process::exit`). Never returns when granted.
+///
+/// Denied unless `[env] allow_exit = true`. [`ALLOW_EXEC`] does not grant this.
 pub fn host_exit(_heap: &mut Heap, args: &[Value]) -> Value {
+    if !ALLOW_EXIT.load(Ordering::Relaxed) {
+        panic!("env::exit denied; set [env] allow_exit = true in coil.toml");
+    }
     let code = if args.is_empty() { 0 } else { args[0].as_int() };
     std::process::exit(code as i32);
 }
@@ -366,6 +416,43 @@ mod tests {
         let mut heap = Heap::default();
         let r = host_cwd(&mut heap, &[]);
         assert_eq!(enum_tag(&heap, r), Some(0));
+    }
+
+    #[test]
+    fn ffi_exec_symbols_are_denied_without_allow_ffi_exec() {
+        let _guard = ENV_TEST_GUARD.lock().expect("env test mutex");
+        let prev_exec = ALLOW_EXEC.load(Ordering::Relaxed);
+        let prev_ffi = ALLOW_FFI_EXEC.load(Ordering::Relaxed);
+        ALLOW_EXEC.store(true, Ordering::Relaxed);
+        ALLOW_FFI_EXEC.store(false, Ordering::Relaxed);
+        assert!(is_ffi_exec_symbol("system"));
+        assert!(is_ffi_exec_symbol("execve"));
+        assert!(is_ffi_exec_symbol("_wsystem"));
+        assert!(!is_ffi_exec_symbol("strlen"));
+        assert!(
+            is_ffi_exec_symbol("system") && !ALLOW_FFI_EXEC.load(Ordering::Relaxed),
+            "allow_exec must not grant FFI system/execve"
+        );
+        ALLOW_FFI_EXEC.store(true, Ordering::Relaxed);
+        assert!(ALLOW_FFI_EXEC.load(Ordering::Relaxed));
+        ALLOW_EXEC.store(prev_exec, Ordering::Relaxed);
+        ALLOW_FFI_EXEC.store(prev_ffi, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn host_exit_denied_when_flag_off() {
+        let _guard = ENV_TEST_GUARD.lock().expect("env test mutex");
+        let prev_exit = ALLOW_EXIT.load(Ordering::Relaxed);
+        let prev_exec = ALLOW_EXEC.load(Ordering::Relaxed);
+        ALLOW_EXIT.store(false, Ordering::Relaxed);
+        ALLOW_EXEC.store(true, Ordering::Relaxed);
+        let panicked = std::panic::catch_unwind(|| {
+            let mut heap = Heap::default();
+            let _ = host_exit(&mut heap, &[Value::from(0_i64)]);
+        });
+        ALLOW_EXIT.store(prev_exit, Ordering::Relaxed);
+        ALLOW_EXEC.store(prev_exec, Ordering::Relaxed);
+        assert!(panicked.is_err(), "env::exit must not run without allow_exit");
     }
 
     #[test]
