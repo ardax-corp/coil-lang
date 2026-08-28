@@ -948,4 +948,83 @@ mod tests {
         assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
         assert_eq!(map.get(PGO_HIT_NATIVE).copied(), Some(119));
     }
+
+    /// COI-260: virtual time sources stay gone (no `time.rs`, chrono, TIME_WIRING table).
+    #[test]
+    fn virtual_time_machine_sources_are_absent() {
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !crate_dir.join("src/time.rs").exists(),
+            "machine/src/time.rs must stay deleted"
+        );
+        let lib = include_str!("lib.rs");
+        assert!(
+            !lib.lines().any(|l| {
+                let t = l.trim_start();
+                t.starts_with("mod time")
+                    || t.starts_with("pub mod time")
+                    || t.contains("feature = \"time\"")
+            }),
+            "machine/src/lib.rs must not declare a time module"
+        );
+        let natives = include_str!("host_natives.rs");
+        assert!(
+            !natives.contains("const TIME_WIRING"),
+            "TIME_WIRING table must not return"
+        );
+        let cargo = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
+        assert!(!cargo.contains("chrono"), "machine must not depend on chrono");
+        assert!(
+            !cargo.contains("time = "),
+            "machine must not declare a time cargo feature"
+        );
+    }
+
+    /// COI-257/260: leftover `time_*` slots panic; they must not sleep or clock.
+    #[test]
+    fn removed_time_stubs_panic_and_do_not_run_real_time() {
+        let natives = build_standard_host_natives(|_, _| {});
+        let mut heap = crate::Heap::default();
+        for &(name, arity) in TIME_REMOVED {
+            let native = natives.iter().find(|n| n.name() == name).expect(name);
+            let args: Vec<Value> = (0..arity).map(|i| Value::from(i as i64)).collect();
+            let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                native.invoke(&mut heap, &args)
+            }));
+            let payload = panicked.expect_err(&format!("{name} must panic, not run"));
+            let msg = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_string()))
+                .unwrap_or_default();
+            assert!(
+                msg.contains("virtual time is gone") && msg.contains(name),
+                "{name} stub must name the removed host, got {msg:?}"
+            );
+        }
+    }
+
+    /// Instant handles were a VM HashMap leak; drop lives in coil-time, not HostInvoke.
+    #[test]
+    fn instant_drop_is_not_a_vm_host() {
+        let mut names = Vec::new();
+        build_standard_host_natives(|name, _id| names.push(name.to_string()));
+        assert!(
+            names.iter().all(|n| n != "time_instant_drop" && n != "instant_drop"),
+            "Instant drop must not be a VM host: {names:?}"
+        );
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let src = crate_dir.join("src");
+        let mut leftover = Vec::new();
+        for rel in ["lib.rs", "host_natives.rs", "vm.rs", "memory/heap.rs"] {
+            let text = std::fs::read_to_string(src.join(rel)).unwrap_or_default();
+            if text.contains("NEXT_INSTANT_ID") || text.contains("static INSTANTS") {
+                leftover.push(rel);
+            }
+        }
+        assert!(
+            leftover.is_empty(),
+            "VM Instant registry must stay gone: {leftover:?}"
+        );
+    }
 }
