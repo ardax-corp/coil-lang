@@ -253,7 +253,7 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).unwrap_or_default();
-            machine::env::set_allow_exec(self.manifest.allow_exec);
+            Self::apply_env_grants(&self.manifest);
         }
         self.failed = false;
         self.processed.clear();
@@ -324,6 +324,13 @@ impl Pipeline {
         self.extra_dload_stems.push(stem.into());
     }
 
+    fn apply_env_grants(m: &Manifest) {
+        machine::env::set_allow_exec(m.allow_exec);
+        machine::env::set_allow_exit(m.allow_exit);
+        machine::env::set_allow_ffi_exec(m.allow_ffi_exec);
+        machine::set_allow_attach(m.allow_attach);
+    }
+
     /// Fail-closed gate: consumer allow+hash, allow+trusted, and host grants.
     pub fn build_dload_gate(&self) -> machine::DloadGate {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
@@ -369,6 +376,7 @@ impl Pipeline {
             .collect();
         vm.set_ffi_paths(base_dir, search);
         vm.set_dload_gate(self.build_dload_gate());
+        Self::apply_env_grants(&self.manifest);
         for def in self.compiler_lazy().c_structs() {
             let fields = def
                 .fields
@@ -464,8 +472,8 @@ impl Pipeline {
         };
         match Manifest::load(&project_root) {
             Ok(m) => {
-                pipeline.manifest = m.clone();
-                machine::env::set_allow_exec(m.allow_exec);
+                pipeline.manifest = m;
+                Self::apply_env_grants(&pipeline.manifest);
             }
             Err(e) => pipeline.emit_manifest_load_error(&project_root, e),
         }
@@ -1250,7 +1258,7 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-            machine::env::set_allow_exec(self.manifest.allow_exec);
+            Self::apply_env_grants(&self.manifest);
         }
         self.failed = false;
         self.processed.clear();
@@ -1303,7 +1311,7 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-            machine::env::set_allow_exec(self.manifest.allow_exec);
+            Self::apply_env_grants(&self.manifest);
         }
         self.failed = false;
         self.processed.clear();

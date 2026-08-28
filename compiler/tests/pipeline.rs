@@ -7949,6 +7949,56 @@ fn main() {
 }
 
 #[test]
+fn stream_attach_denied_without_allow_attach() {
+    let src = r#"
+use io::{stdout, write, attach, IoError};
+use string::{format, to_bytes};
+fn main() {
+    let s = stdout();
+    let r = attach(s, 0, 0, 0, 0, 0);
+    let msg = match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            IoError::PermissionDenied => "denied",
+            IoError::InvalidInput => "invalid",
+            _ => "other",
+        },
+    };
+    write(stdout(), to_bytes(format("%s", msg)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "denied", "attach must be off by default, got {output:?}");
+}
+
+#[test]
+fn stream_attach_invalid_when_allow_attach() {
+    let extra = "[ffi]\nallow_attach = true\n";
+    let src = r#"
+use io::{stdout, write, attach, IoError};
+use string::{format, to_bytes};
+fn main() {
+    let s = stdout();
+    let r = attach(s, 0, 0, 0, 0, 0);
+    let msg = match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            IoError::PermissionDenied => "denied",
+            IoError::InvalidInput => "invalid",
+            _ => "other",
+        },
+    };
+    write(stdout(), to_bytes(format("%s", msg)));
+}
+"#;
+    let output = run_userland_dload_project("allow_attach_null", extra, None, src);
+    assert_eq!(
+        output, "invalid",
+        "allow_attach must reach pointer checks, got {output:?}"
+    );
+}
+
+#[test]
 fn example_io_tls_does_not_import_virtual_tls() {
     assert_eq!(run_example("examples/io_tls.hy"), "use-coil-tls");
 }
@@ -9479,7 +9529,7 @@ fn main() {
 
 /// COI-19: extern handles in static slots survive locals / repeat calls.
 #[test]
-fn extern_system_twice_after_vec_ok() {
+fn extern_strlen_twice_after_vec_ok() {
     let result = std::panic::catch_unwind(|| {
         run_src_with_extra_stems(
             r#"
@@ -9488,14 +9538,14 @@ use io::sync::{write_all};
 use string::{format, to_bytes};
 
 extern "c" {
-    fn system(string cmd) -> int;
+    fn strlen(string s) -> int;
 }
 
 fn main() {
     let v = Vec::new();
     v.push("x");
-    let a = system("true");
-    let b = system("true");
+    let a = strlen("hello");
+    let b = strlen("hello");
     let _ = write_all(stdout(), to_bytes(format("%v %v\n", a, b)));
 }
 "#,
@@ -9506,11 +9556,11 @@ fn main() {
     let output = match result {
         Ok(s) => s,
         Err(_) => {
-            ffi_soft_skip("extern system test panicked (dlopen failure?)");
+            ffi_soft_skip("extern strlen test panicked (dlopen failure?)");
             return;
         }
     };
-    assert_eq!(output, "0 0\n");
+    assert_eq!(output, "5 5\n");
 }
 
 /// COI-19: `extern` in an imported module still initializes before main.
@@ -9525,7 +9575,7 @@ fn extern_in_imported_module_runs() {
             return;
         }
     };
-    assert_eq!(output, "0\n");
+    assert_eq!(output, "4\n");
 }
 
 /// COI-106: binding a unary Result/Option call before match must preserve heap payloads.

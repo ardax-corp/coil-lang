@@ -80,6 +80,10 @@ so a mid-handshake park cannot nest-steal the peer `thread::spawn` job onto
 the same stack (that deadlocked both sides under `COIL_MAX_WORKER_THREADS=1`
 — COI-116). The pool worker still runs the peer while the waiter polls.
 
+`Stream.attach` is gated by `[ffi] allow_attach` (default false). Without
+that flag the native returns `IoError::PermissionDenied`. `[ffi] allow` for
+`dload` does not grant attach.
+
 After `Stream.attach`, IO (`stream_read` / `stream_write` / close) dispatches
 to the registered C vtable. The VM does not have a TLS-named stream kind and
 does not call `coil_tls_*`. coil-tls enable is `dload` + attach. `WouldBlock`
@@ -87,6 +91,24 @@ from package IO is the tagged `IoError` and parks on the VM reactor; do not
 handshake on a blocking `.so` thread. Stream close and GC send shutdown when
 the fd is still usable, then Drop frees. If the fd is already gone, free-only
 is OK (best-effort close_notify).
+
+## HostInvoke ids (attach / park)
+
+| Native | HostInvoke id | Language |
+|--------|---------------|----------|
+| `stream_attach` | **120** | `Stream.attach` |
+| `stream_park` | **121** | `Stream.park` |
+
+These are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
+Leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and virtual crypto
+slots were **dropped** (archive minor 14); holes collapsed. Regex slots were
+dropped earlier (minor 11). Do not treat COI-37 / COI-209 / COI-215 stub
+reservations as live for these ids.
+
+Virtual-time names still occupy panic stubs earlier in the table so later ids,
+including 120/121, stay put. Do not reclaim or reshuffle HostInvoke ids.
+Source of truth: `machine/src/host_natives.rs`
+(`STREAM_ATTACH_NATIVE` / `STREAM_PARK_NATIVE`).
 
 ## Env / knobs
 
