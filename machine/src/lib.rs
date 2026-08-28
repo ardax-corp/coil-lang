@@ -33,7 +33,7 @@ pub use host_natives::{
     build_standard_host_natives, wire_standard_host_natives, PGO_HIT_NATIVE, STREAM_ATTACH_NATIVE,
     STREAM_PARK_NATIVE,
 };
-pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
+pub use stream_attach::{AttachedIo, StreamVTable, set_allow_attach, stream_attach, stream_park};
 pub use memory::*;
 pub use opcode::*;
 pub use packed_la::{

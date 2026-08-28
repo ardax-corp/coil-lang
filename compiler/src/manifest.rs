@@ -132,6 +132,8 @@ pub struct Manifest {
     pub ffi_natives: Vec<FfiNativeDecl>,
     /// When false, `env::exec` fails at runtime with `ExecDisabled`.
     pub allow_exec: bool,
+    /// When false, `Stream.attach` fails at runtime with `PermissionDenied`.
+    pub allow_attach: bool,
     /// When false, `env::exit` panics instead of terminating the process.
     pub allow_exit: bool,
     /// When false, FFI `system` / `execve` (and aliases) are denied at resolve.
@@ -157,6 +159,7 @@ impl Default for Manifest {
             ffi_allow: Vec::new(),
             ffi_natives: Vec::new(),
             allow_exec: false,
+            allow_attach: false,
             allow_exit: false,
             allow_ffi_exec: false,
             package: None,
@@ -216,6 +219,7 @@ impl Manifest {
         let mut ffi_natives: Vec<FfiNativeDecl> = Vec::new();
         let mut ffi_native_draft: Option<FfiNativeDraft> = None;
         let mut allow_exec: Option<bool> = None;
+        let mut allow_attach: Option<bool> = None;
         let mut allow_exit: Option<bool> = None;
         let mut allow_ffi_exec: Option<bool> = None;
         let mut package_name: Option<String> = None;
@@ -306,6 +310,13 @@ impl Manifest {
                         message: format!("expected array of strings, got `{}`", value),
                     })?;
                     ffi_search_paths = Some(parsed.into_iter().map(PathBuf::from).collect());
+                }
+                ("ffi", "allow_attach") => {
+                    let parsed = parse_bool(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected `true` or `false`, got `{}`", value),
+                    })?;
+                    allow_attach = Some(parsed);
                 }
                 ("ffi", "allow") => {
                     let parsed = parse_string_array(value).ok_or(ManifestError::Parse {
@@ -583,6 +594,7 @@ impl Manifest {
             ffi_allow: ffi_allow.unwrap_or_default(),
             ffi_natives,
             allow_exec: allow_exec.unwrap_or(false),
+            allow_attach: allow_attach.unwrap_or(false),
             allow_exit: allow_exit.unwrap_or(false),
             allow_ffi_exec: allow_ffi_exec.unwrap_or(false),
             package,
@@ -1032,6 +1044,7 @@ mod tests {
             ffi_allow: Vec::new(),
             ffi_natives: Vec::new(),
             allow_exec: true,
+            allow_attach: false,
             allow_exit: false,
             allow_ffi_exec: false,
             package: None,
@@ -1135,6 +1148,7 @@ mod tests {
             ffi_allow: Vec::new(),
             ffi_natives: Vec::new(),
             allow_exec: true,
+            allow_attach: false,
             allow_exit: false,
             allow_ffi_exec: false,
             package: None,
@@ -1162,6 +1176,7 @@ mod tests {
             ffi_allow: Vec::new(),
             ffi_natives: Vec::new(),
             allow_exec: true,
+            allow_attach: false,
             allow_exit: false,
             allow_ffi_exec: false,
             package: None,
@@ -1183,6 +1198,7 @@ mod tests {
         assert_eq!(m.roots, vec![PathBuf::from("src")]);
         assert_eq!(m.entry, None);
         assert!(!m.allow_exec);
+        assert!(!m.allow_attach);
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -1213,6 +1229,36 @@ mod tests {
         assert!(!m.allow_exec);
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+
+    #[test]
+    fn load_reads_ffi_allow_attach_true() {
+        let tmp = std::env::temp_dir().join("coil_manifest_test_attach_on");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("coil.toml"),
+            "[ffi]\nallow_attach = true\n[module]\nroots = [\"./src\"]\n",
+        )
+        .unwrap();
+        let m = Manifest::load(&tmp).unwrap();
+        assert!(m.allow_attach);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn load_reads_ffi_allow_attach_false() {
+        let tmp = std::env::temp_dir().join("coil_manifest_test_attach_off");
+        std::fs::create_dir_all(&tmp).unwrap();
+        std::fs::write(
+            tmp.join("coil.toml"),
+            "[ffi]\nallow_attach = false\n[module]\nroots = [\"./src\"]\n",
+        )
+        .unwrap();
+        let m = Manifest::load(&tmp).unwrap();
+        assert!(!m.allow_attach);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
 
     #[test]
     fn load_reads_env_allow_exit_and_allow_ffi_exec() {

@@ -328,6 +328,7 @@ impl Pipeline {
         machine::env::set_allow_exec(m.allow_exec);
         machine::env::set_allow_exit(m.allow_exit);
         machine::env::set_allow_ffi_exec(m.allow_ffi_exec);
+        machine::set_allow_attach(m.allow_attach);
     }
 
     /// Fail-closed gate: consumer allow+hash, allow+trusted, and host grants.
@@ -375,6 +376,7 @@ impl Pipeline {
             .collect();
         vm.set_ffi_paths(base_dir, search);
         vm.set_dload_gate(self.build_dload_gate());
+        Self::apply_env_grants(&self.manifest);
         for def in self.compiler_lazy().c_structs() {
             let fields = def
                 .fields
@@ -470,8 +472,8 @@ impl Pipeline {
         };
         match Manifest::load(&project_root) {
             Ok(m) => {
-                pipeline.manifest = m.clone();
-                Self::apply_env_grants(&m);
+                pipeline.manifest = m;
+                Self::apply_env_grants(&pipeline.manifest);
             }
             Err(e) => pipeline.emit_manifest_load_error(&project_root, e),
         }
