@@ -355,6 +355,47 @@ mod tests {
         assert_eq!(c, vec![abs]);
     }
 
+    fn path_uses_native_tls_fallback(p: &Path) -> bool {
+        let comps: Vec<_> = p.components().map(|c| c.as_os_str().to_owned()).collect();
+        comps.windows(2).any(|w| {
+            w[0] == "native" && {
+                let name = w[1].to_string_lossy();
+                name == "libtls.so"
+                    || name == "libtls.dylib"
+                    || name == "tls.dll"
+                    || name == "libtls.dll"
+                    || name == "tls"
+                    || name == "libtls"
+            }
+        })
+    }
+
+    /// COI-233: `[ffi] search_paths` must not grow a cwd `./native/libtls.so` fallback.
+    #[test]
+    fn search_paths_do_not_fallback_to_cwd_native_tls() {
+        let search = vec![PathBuf::from("/allowed/ffi")];
+        let base = PathBuf::from("/proj");
+        let c = library_candidates("tls", Some(&base), &search);
+        assert!(
+            c.iter().any(|p| p.starts_with("/allowed/ffi")),
+            "configured search_paths must be searched, got {c:?}"
+        );
+        assert!(
+            !c.iter().any(|p| path_uses_native_tls_fallback(p)),
+            "cwd ./native/libtls must not be an FFI fallback candidate, got {c:?}"
+        );
+    }
+
+    /// COI-233: a bare `dload("tls")` must not inject `native/libtls.*` on its own.
+    #[test]
+    fn bare_tls_stem_does_not_inject_native_dir() {
+        let c = library_candidates("tls", None, &[]);
+        assert!(
+            !c.iter().any(|p| path_uses_native_tls_fallback(p)),
+            "bare tls stem must not search ./native/, got {c:?}"
+        );
+    }
+
     #[test]
     fn dload_request_stem_uses_filename() {
         assert_eq!(dload_request_stem("crypto"), "crypto");
