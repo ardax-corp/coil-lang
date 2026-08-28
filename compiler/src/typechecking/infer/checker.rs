@@ -129,10 +129,13 @@ impl Checker {
             ffi_fn_ret_tys: HashMap::new(),
             ffi_fn_variadic: HashMap::new(),
             ffi_fn_nfixed: HashMap::new(),
+            ffi_fn_arg_tags: HashMap::new(),
             ffi_fn_ret_by_field: HashMap::new(),
             ffi_fn_variadic_by_field: HashMap::new(),
             ffi_fn_nfixed_by_field: HashMap::new(),
+            ffi_fn_arg_tags_by_field: HashMap::new(),
             ffi_fn_param_invoke_ret: HashMap::new(),
+            ffi_fn_param_invoke_args: HashMap::new(),
             current_function: None,
             extern_variadic: HashSet::new(),
             extern_variadic_nfixed: HashMap::new(),
@@ -1388,10 +1391,13 @@ impl Checker {
         self.ffi_fn_ret_tys.clear();
         self.ffi_fn_variadic.clear();
         self.ffi_fn_nfixed.clear();
+        self.ffi_fn_arg_tags.clear();
         self.ffi_fn_ret_by_field.clear();
         self.ffi_fn_variadic_by_field.clear();
         self.ffi_fn_nfixed_by_field.clear();
+        self.ffi_fn_arg_tags_by_field.clear();
         self.ffi_fn_param_invoke_ret.clear();
+        self.ffi_fn_param_invoke_args.clear();
         self.current_function = None;
         self.extern_variadic.clear();
         self.extern_variadic_nfixed.clear();
@@ -8231,6 +8237,25 @@ impl Checker {
         }
     }
 
+    fn ffi_integer_tag(tag: u32) -> bool {
+        use common::tag;
+        matches!(
+            tag,
+            tag::INT
+                | tag::INT8
+                | tag::INT16
+                | tag::INT32
+                | tag::UINT8
+                | tag::UINT16
+                | tag::UINT32
+                | tag::UINT64
+        )
+    }
+
+    fn ty_is_stream(ty: &Ty) -> bool {
+        matches!(ty, Ty::Con(n) if n == crate::typechecking::ty::STREAM)
+    }
+
     fn ffi_tag_from_ty_static(ty: &Ty) -> (u32, u32) {
         use common::tag;
         match ty {
@@ -10610,6 +10635,11 @@ impl Checker {
         let init = unwrap_expr_wrappers(expr);
         let init = match init.1.as_ref() {
             Expression::Try(inner) => unwrap_expr_wrappers(inner),
+            Expression::Match { scrutinee, .. } => unwrap_expr_wrappers(scrutinee),
+            _ => init,
+        };
+        let init = match init.1.as_ref() {
+            Expression::Try(inner) => unwrap_expr_wrappers(inner),
             _ => init,
         };
         match init.1.as_ref() {
@@ -10633,9 +10663,19 @@ impl Checker {
             return;
         }
         let ret = self.ty_from_ffi_type_expr(&dargs[3]);
-        let nfixed = match dargs[2].1.as_ref() {
-            Expression::Tuple(items) => items.len(),
-            _ => 0,
+        let (nfixed, arg_tags) = match dargs[2].1.as_ref() {
+            Expression::Tuple(items) => (
+                items.len(),
+                items
+                    .iter()
+                    .map(|item| {
+                        self.ffi_type_tag_from_output(item)
+                            .map(|(tag, _)| tag)
+                            .unwrap_or(common::tag::INT)
+                    })
+                    .collect::<Vec<_>>(),
+            ),
+            _ => (0, Vec::new()),
         };
         let variadic = if dargs.len() == 5 {
             matches!(dargs[4].1.as_ref(), Expression::Bool(true))
@@ -10645,11 +10685,13 @@ impl Checker {
         if store_field {
             self.ffi_fn_ret_by_field.insert(key.clone(), ret);
             self.ffi_fn_variadic_by_field.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed_by_field.insert(key, nfixed);
+            self.ffi_fn_nfixed_by_field.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags_by_field.insert(key, arg_tags);
         } else {
             self.ffi_fn_ret_tys.insert(key.clone(), ret);
             self.ffi_fn_variadic.insert(key.clone(), variadic);
-            self.ffi_fn_nfixed.insert(key, nfixed);
+            self.ffi_fn_nfixed.insert(key.clone(), nfixed);
+            self.ffi_fn_arg_tags.insert(key, arg_tags);
         }
     }
 
@@ -10698,6 +10740,50 @@ impl Checker {
         }
     }
 
+    fn ffi_invoke_arg_tags(&self, expr: &Output) -> Option<Vec<u32>> {
+        match expr.1.as_ref() {
+            Expression::Identifier(name) => {
+                if let Some(tys) = self.ffi_fn_arg_tags.get(*name) {
+                    return Some(tys.clone());
+                }
+                if let Some(fn_name) = &self.current_function {
+                    let key = Self::ffi_param_invoke_key(fn_name, name);
+                    return self.ffi_fn_param_invoke_args.get(&key).cloned();
+                }
+                None
+            }
+            Expression::Access(receiver, field) => {
+                let class = self.class_name_for_field_receiver(receiver)?;
+                let key = Self::qualified_class_field_key(&class, field);
+                self.ffi_fn_arg_tags_by_field.get(&key).cloned()
+            }
+            _ => None,
+        }
+    }
+
+    fn ffi_invoke_arg_tags_prescan(
+        &self,
+        expr: &Output,
+        local_class_scopes: &[HashMap<String, String>],
+    ) -> Option<Vec<u32>> {
+        match expr.1.as_ref() {
+            Expression::Identifier(name) => self.ffi_fn_arg_tags.get(*name).cloned(),
+            Expression::Access(receiver, field) => {
+                let class = match receiver.1.as_ref() {
+                    Expression::Identifier("self") => self.impl_owner.clone()?,
+                    Expression::Identifier(name) => local_class_scopes
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.get(*name).cloned())?,
+                    _ => return None,
+                };
+                let key = Self::qualified_class_field_key(&class, field);
+                self.ffi_fn_arg_tags_by_field.get(&key).cloned()
+            }
+            _ => None,
+        }
+    }
+
     fn maybe_record_ffi_declare_for_field_assignment(&mut self, target: &Output, value: &Output) {
         let Expression::Access(receiver, field) = target.1.as_ref() else {
             return;
@@ -10727,9 +10813,15 @@ impl Checker {
                         .copied()
                         .unwrap_or(false);
                     let nfixed = self.ffi_fn_nfixed_by_field.get(&key).copied().unwrap_or(0);
+                    let arg_tags = self
+                        .ffi_fn_arg_tags_by_field
+                        .get(&key)
+                        .cloned()
+                        .unwrap_or_default();
                     self.ffi_fn_ret_tys.insert(name.to_string(), ret);
                     self.ffi_fn_variadic.insert(name.to_string(), variadic);
                     self.ffi_fn_nfixed.insert(name.to_string(), nfixed);
+                    self.ffi_fn_arg_tags.insert(name.to_string(), arg_tags);
                 }
             }
         }
@@ -10748,9 +10840,11 @@ impl Checker {
             let Some((ret, variadic, nfixed)) = self.ffi_invoke_fn_id_metadata(arg) else {
                 continue;
             };
+            let arg_tys = self.ffi_invoke_arg_tags(arg).unwrap_or_default();
             let key = Self::ffi_param_invoke_key(fn_name, param);
             self.ffi_fn_param_invoke_ret
-                .insert(key, (ret, variadic, nfixed));
+                .insert(key.clone(), (ret, variadic, nfixed));
+            self.ffi_fn_param_invoke_args.insert(key, arg_tys);
         }
     }
 
@@ -10826,9 +10920,13 @@ impl Checker {
             else {
                 continue;
             };
+            let arg_tys = self
+                .ffi_invoke_arg_tags_prescan(arg, local_class_scopes)
+                .unwrap_or_default();
             let key = Self::ffi_param_invoke_key(fn_name, param);
             self.ffi_fn_param_invoke_ret
-                .insert(key, (ret, variadic, nfixed));
+                .insert(key.clone(), (ret, variadic, nfixed));
+            self.ffi_fn_param_invoke_args.insert(key, arg_tys);
         }
     }
 
@@ -10881,9 +10979,24 @@ impl Checker {
             }
             match args[2].1.as_ref() {
                 Expression::Tuple(items) => {
+                    let declared = self.ffi_invoke_arg_tags(&args[1]);
                     let mut tags = Vec::with_capacity(items.len());
-                    for item in items {
+                    for (i, item) in items.iter().enumerate() {
                         let ty = self.infer(item);
+                        if let Some(&expected_tag) = declared.as_ref().and_then(|d| d.get(i)) {
+                            let pruned = apply_ty_prune(&self.subst, &ty);
+                            if Self::ffi_integer_tag(expected_tag) && Self::ty_is_stream(&pruned) {
+                                self.error_with_help(
+                                    ErrorCode::TypeMismatch,
+                                    "Type mismatch: expected `int`, found `Stream`".to_string(),
+                                    item.0.into_range(),
+                                    Some(
+                                        "FFI integer types do not accept a Stream (no silent fd coercion)"
+                                            .to_string(),
+                                    ),
+                                );
+                            }
+                        }
                         tags.push(Self::ffi_tag_from_ty_static(&apply_ty_prune(
                             &self.subst,
                             &ty,
