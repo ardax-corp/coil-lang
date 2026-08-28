@@ -253,7 +253,7 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).unwrap_or_default();
-            machine::env::set_allow_exec(self.manifest.allow_exec);
+            self.apply_runtime_gates();
         }
         self.failed = false;
         self.processed.clear();
@@ -351,6 +351,11 @@ impl Pipeline {
             .map(|rel| self.project_root.join(rel))
     }
 
+    fn apply_runtime_gates(&self) {
+        machine::env::set_allow_exec(self.manifest.allow_exec);
+        machine::set_allow_attach(self.manifest.allow_attach);
+    }
+
     /// Wire FFI library resolution paths and C struct layouts into the VM.
     pub fn wire_vm_ffi<const N: usize>(
         &self,
@@ -369,6 +374,7 @@ impl Pipeline {
             .collect();
         vm.set_ffi_paths(base_dir, search);
         vm.set_dload_gate(self.build_dload_gate());
+        self.apply_runtime_gates();
         for def in self.compiler_lazy().c_structs() {
             let fields = def
                 .fields
@@ -464,8 +470,8 @@ impl Pipeline {
         };
         match Manifest::load(&project_root) {
             Ok(m) => {
-                pipeline.manifest = m.clone();
-                machine::env::set_allow_exec(m.allow_exec);
+                pipeline.manifest = m;
+                pipeline.apply_runtime_gates();
             }
             Err(e) => pipeline.emit_manifest_load_error(&project_root, e),
         }
@@ -1250,7 +1256,7 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-            machine::env::set_allow_exec(self.manifest.allow_exec);
+            self.apply_runtime_gates();
         }
         self.failed = false;
         self.processed.clear();
@@ -1303,7 +1309,7 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-            machine::env::set_allow_exec(self.manifest.allow_exec);
+            self.apply_runtime_gates();
         }
         self.failed = false;
         self.processed.clear();
