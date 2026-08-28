@@ -1021,7 +1021,8 @@ mod tests {
         let mut leftover = Vec::new();
         for rel in ["lib.rs", "host_natives.rs", "vm.rs", "memory/heap.rs"] {
             let text = std::fs::read_to_string(src.join(rel)).unwrap_or_default();
-            if text.contains("NEXT_INSTANT_ID") || text.contains("static INSTANTS") {
+            let prod = text.split("#[cfg(test)]").next().unwrap_or(&text);
+            if prod.contains("NEXT_INSTANT_ID") || prod.contains("static INSTANTS") {
                 leftover.push(rel);
             }
         }
