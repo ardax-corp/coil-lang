@@ -10,7 +10,7 @@ use common::{
     archive_version_compatible, default_natives_root, embedded_archive_slice,
     format_archive_version, read_embedded_native_lock, read_package_trailer,
 };
-use machine::{Machine, wire_standard_host_natives};
+use machine::{DloadGate, Machine, wire_standard_host_natives};
 use machine::thread::ThreadProgram;
 use rkyv::rancor::Error;
 
@@ -93,9 +93,13 @@ pub fn execute_archived_program(
     debug: ProgramDebug,
     entry: Option<&Path>,
     ffi_search_paths: Vec<PathBuf>,
+    dload_gate: Option<DloadGate>,
 ) -> bool {
     let mut machine = Machine::<256>::with_operand_capacity(machine::DEFAULT_OPERAND_STACK_SLOTS);
     wire_standard_host_natives(&mut machine);
+    if let Some(gate) = dload_gate {
+        machine.set_dload_gate(gate);
+    }
 
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
     machine.set_ffi_paths(base_dir, ffi_search_paths);
@@ -183,6 +187,7 @@ pub fn try_run_embedded() -> Option<bool> {
     }
 
     let mut ffi_search_paths = Vec::new();
+    let mut dload_gate = None;
     match read_embedded_native_lock(&data, trailer) {
         Ok(Some(lock)) if !lock.entries.is_empty() => {
             if lock.os != std::env::consts::OS || lock.arch != std::env::consts::ARCH {
@@ -196,7 +201,16 @@ pub fn try_run_embedded() -> Option<bool> {
                 exit(1);
             }
             match ensure_native_cache(&lock, &exe) {
-                Ok(dirs) => ffi_search_paths = dirs,
+                Ok(dirs) => {
+                    ffi_search_paths = dirs;
+                    let allow: Vec<&str> = lock.entries.iter().map(|e| e.stem.as_str()).collect();
+                    let pins: Vec<(String, String)> = lock
+                        .entries
+                        .iter()
+                        .map(|e| (e.stem.clone(), e.sha256.clone()))
+                        .collect();
+                    dload_gate = Some(DloadGate::from_consumer(allow, &pins));
+                }
                 Err(msg) => {
                     eprintln!("error: {msg}");
                     exit(1);
@@ -224,6 +238,7 @@ pub fn try_run_embedded() -> Option<bool> {
         debug,
         Some(exe.as_path()),
         ffi_search_paths,
+        dload_gate,
     );
     Some(panicked)
 }
