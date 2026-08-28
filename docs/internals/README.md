@@ -9,7 +9,7 @@ How coil is structured for contributors and embedders. End-user language docs li
 | [Array pins](array-pin.md) | Shipped `ArrayPin` / `IndexPin*` handle (COI-198) |
 | [SIMD](simd.md) | `coil-simd` — stable `std::arch` kernels for packed LA |
 | [Auto-par](auto-par.md) | Purity analysis + capped fork-join for recursive binops |
-| [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal |
+| [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **120**/`stream_attach`, **121**/`stream_park` |
 | [Stack bounds](stack-bounds.md) | Recursion depth analysis and `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |

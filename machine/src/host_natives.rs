@@ -45,8 +45,9 @@ const TIME_REMOVED: &[(&str, usize)] = &[
 /// no-op closure.
 ///
 /// Leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and virtual crypto
-/// slots were dropped; holes collapsed. Virtual time slots are panic stubs so
-/// `stream_attach` / `stream_park` stay 120 / 121. Append-only from this table.
+/// slots were dropped; holes collapsed. Those ids are not reserved stubs.
+/// Virtual time slots are panic stubs so `stream_attach` / `stream_park`
+/// stay HostInvoke 120 / 121. Append-only from this table.
 pub fn build_standard_host_natives(
     mut register_id: impl FnMut(&str, usize),
 ) -> Vec<Arc<dyn NativeFn>> {
@@ -869,6 +870,19 @@ mod tests {
             Some(STREAM_PARK_NATIVE)
         );
         assert_eq!(names.last().map(String::as_str), Some(STREAM_PARK_NATIVE));
+    }
+
+    /// COI-232: 120/121 are live attach/park, not leftover TLS/crypto stubs.
+    #[test]
+    fn stream_attach_and_park_own_hostinvoke_120_and_121() {
+        let mut map = std::collections::HashMap::new();
+        build_standard_host_natives(|name, id| {
+            map.insert(name.to_string(), id);
+        });
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
+        assert!(!map.contains_key("tls_client_enable"));
+        assert!(!map.contains_key("crypto_sha256"));
     }
 
     #[test]
