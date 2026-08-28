@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["time"]
+default = []
 dissect = []
-time = ["machine/time"]
 pratt = []
 
 [dependencies]

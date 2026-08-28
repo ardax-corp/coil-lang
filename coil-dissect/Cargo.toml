@@ -15,5 +15,4 @@ reporting = { path = "../reporting" }
 coil-cli = { path = "../coil-cli", default-features = false }
 
 [features]
-default = ["time"]
-time = ["compiler/time", "coil-cli/time"]
+default = []
