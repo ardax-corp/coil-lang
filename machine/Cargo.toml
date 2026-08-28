@@ -4,9 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-default = ["time"]
+default = []
 debugger = []
-time = ["dep:chrono"]
 vm_profile = []
 
 [dependencies]
@@ -18,7 +17,6 @@ libloading = "0.9"
 libffi = "5.1.1"
 libc = "0.2"
 sha2 = "0.10"
-chrono = { version = "0.4.45", optional = true }
 
 [dev-dependencies]
 libc = "0.2"

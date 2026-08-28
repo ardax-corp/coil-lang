@@ -21,8 +21,6 @@ pub mod reactor;
 pub mod value_eq;
 pub mod vec_ops;
 pub mod thread;
-#[cfg(feature = "time")]
-pub mod time;
 mod vm;
 
 #[cfg(any(test, feature = "debugger"))]
@@ -46,8 +44,6 @@ pub use thread::{
     LiveThreadRegistry, ThreadErrorTag, ThreadProgram, join_undetached_threads,
     new_live_thread_registry,
 };
-#[cfg(feature = "time")]
-pub use time::TIME_WIRING;
 pub use vm::*;
 
 /// Default operand-stack capacity when analysis does not request more.
