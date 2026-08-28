@@ -1139,6 +1139,161 @@ fn main() {
     assert_eq!(output, "35");
 }
 
+/// Soft-skip an FFI-dependent test outside CI. In CI (`CI` env set), skip is a
+/// hard failure so missing `cc` / libffi never silently greens the suite.
+fn ffi_soft_skip(reason: &str) {
+    if std::env::var_os("CI").is_some() {
+        panic!("FFI soft-skip forbidden in CI: {reason}");
+    }
+    eprintln!("skipping: {reason}");
+}
+
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate parent")
+        .to_path_buf()
+}
+
+/// Build `examples/sum.c` into `dir` as the platform `libsum` filename.
+fn build_libsum_into(dir: &Path) -> Option<PathBuf> {
+    let src = workspace_root().join("examples/sum.c");
+    if !src.exists() {
+        ffi_soft_skip(&format!("{} missing", src.display()));
+        return None;
+    }
+    std::fs::create_dir_all(dir).expect("allowed ffi dir");
+    let dest = dir.join(machine::platform_shared_lib_filename("sum"));
+    let mut cmd = std::process::Command::new("cc");
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("-dynamiclib");
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        cmd.arg("-shared").arg("-fPIC");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        cmd.arg("-shared");
+    }
+    match cmd.arg("-O2").arg("-o").arg(&dest).arg(&src).status() {
+        Ok(s) if s.success() && dest.exists() => Some(dest),
+        Ok(s) => {
+            ffi_soft_skip(&format!("cc status {}", s.code().unwrap_or(-1)));
+            None
+        }
+        Err(e) => {
+            ffi_soft_skip(&format!("cc: {e}"));
+            None
+        }
+    }
+}
+
+/// COI-233 worker fixture: `[ffi] search_paths = ["./allowed"]` with libsum
+/// there, and a non-loadable marker at cwd `native/libtls.so` (not a hijack).
+fn run_coi233_worker_ffi_project() -> Option<String> {
+    let manifest = format!(
+        "{}\n[ffi]\nsearch_paths = [\"./allowed\"]\n",
+        manifest_src_and_stdlib()
+    );
+    let files = [
+        (
+            "src/main.hy",
+            r#"
+use ffi::{dload};
+use thread::{join, spawn};
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn worker() -> int {
+    let tls = match dload("tls") {
+        Result::Ok(_) => "tls-loaded",
+        Result::Err(e) => e.message,
+    };
+    write(stdout(), to_bytes(tls));
+    let sum_ok = match dload("sum") {
+        Result::Ok(_) => 1,
+        Result::Err(_) => 0,
+    };
+    return sum_ok;
+}
+
+fn main() {
+    let parent = match dload("sum") {
+        Result::Ok(_) => 1,
+        Result::Err(_) => 0,
+    };
+    let t = spawn(worker)?;
+    let w = join(t)?;
+    write(stdout(), to_bytes(format("|%i%i", parent, w)));
+}
+"#,
+        ),
+        (
+            "native/libtls.so",
+            "coil-security-pin: not a shared library\n",
+        ),
+    ];
+    let (root, entry) = build_project("coi233_worker_ffi", &manifest, &files, "src/main.hy");
+    let Some(libsum) = build_libsum_into(&root.join("allowed")) else {
+        let _ = std::fs::remove_dir_all(&root);
+        return None;
+    };
+    let output = with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        // Host grant: fail-closed `dload` still needs a hashed stem. The pin
+        // is search_paths inheritance, not the consumer allow/lock policy.
+        pipeline.grant_dload_file("sum", libsum);
+        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+            Ok(pair) => pair,
+            Err(()) => {
+                for msg in pipeline.messages() {
+                    eprintln!("PIPELINE ERROR: {}", msg.message());
+                }
+                panic!("compile failed");
+            }
+        };
+        run_bytecode(bytecode, constants, &pipeline)
+    });
+    let _ = std::fs::remove_dir_all(&root);
+    Some(output)
+}
+
+/// COI-233: a worker `dload("tls")` must not take cwd `./native/libtls`.
+#[test]
+fn worker_dload_does_not_search_cwd_native_tls() {
+    let Some(output) = run_coi233_worker_ffi_project() else {
+        return;
+    };
+    let lower = output.to_ascii_lowercase();
+    assert!(
+        !lower.contains("tls-loaded"),
+        "worker must not load cwd ./native/ as a tls fallback, got {output:?}"
+    );
+    assert!(
+        !lower.contains("native/libtls") && !lower.contains("native\\libtls"),
+        "worker dload must not search cwd ./native/libtls, got {output:?}"
+    );
+    assert!(
+        output.ends_with("|10") || output.ends_with("|11"),
+        "parent must dload sum via [ffi] search_paths, got {output:?}"
+    );
+}
+
+/// COI-233: a `thread::spawn` worker must resolve `dload("sum")` from the same
+/// `[ffi] search_paths` as the root graph.
+#[test]
+fn worker_dload_sees_parent_ffi_search_paths() {
+    let Some(output) = run_coi233_worker_ffi_project() else {
+        return;
+    };
+    assert!(
+        output.ends_with("|11"),
+        "parent and worker must both dload sum via [ffi] search_paths, got {output:?}"
+    );
+}
+
 static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct CwdLockGuard(std::sync::MutexGuard<'static, ()>);

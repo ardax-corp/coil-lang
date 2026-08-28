@@ -9,7 +9,7 @@ User code does not name these directly; the compiler emits them:
 | `FfiLoad` | `dload` |
 | `DeclareFFI` | `declare` |
 | `FfiInvoke` | `invoke` |
-| `HostInvoke` | Host-registered closure |
+| `HostInvoke` | Host-registered closure. Standard table in `machine/src/host_natives.rs`. **120** = `stream_attach`, **121** = `stream_park` (live package IO, not leftover TLS/crypto stubs). See [io-reactor.md](io-reactor.md). |
 | `HostInvokeNiche` | Allocation-free niche `Option<T>` Vec native |
 | `OptionNicheToHeap` / `HeapOptionToNiche` | Cross a pointer-niche `Option<T>` boundary |
 | `PairToHeap` / `HeapToPair` | Box or unbox a unary `[payload, tag]` pair |

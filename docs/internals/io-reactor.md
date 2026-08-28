@@ -92,6 +92,24 @@ handshake on a blocking `.so` thread. Stream close and GC send shutdown when
 the fd is still usable, then Drop frees. If the fd is already gone, free-only
 is OK (best-effort close_notify).
 
+## HostInvoke ids (attach / park)
+
+| Native | HostInvoke id | Language |
+|--------|---------------|----------|
+| `stream_attach` | **120** | `Stream.attach` |
+| `stream_park` | **121** | `Stream.park` |
+
+These are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
+Leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and virtual crypto
+slots were **dropped** (archive minor 14); holes collapsed. Regex slots were
+dropped earlier (minor 11). Do not treat COI-37 / COI-209 / COI-215 stub
+reservations as live for these ids.
+
+Virtual-time names still occupy panic stubs earlier in the table so later ids,
+including 120/121, stay put. Do not reclaim or reshuffle HostInvoke ids.
+Source of truth: `machine/src/host_natives.rs`
+(`STREAM_ATTACH_NATIVE` / `STREAM_PARK_NATIVE`).
+
 ## Env / knobs
 
 IO waits inherit the same `Machine` as CPU work; pool size is still

@@ -340,6 +340,32 @@ stem = 'plugin'
     }
 
     #[test]
+    fn load_does_not_write_lockfile() {
+        let dir = std::env::temp_dir().join(format!("coil_lock_no_write_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(!dir.join("coil.lock").exists());
+        let lock = Lockfile::load(&dir);
+        assert!(lock.native_pins.is_empty());
+        assert!(!dir.join("coil.lock").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusted_stem_mapping_does_not_drop_native_pins() {
+        let hash = "ab".repeat(32);
+        let lock = Lockfile::parse(&format!(
+            "[[package]]
+name = 'plugin'
+content_hash = 'tree'
+[[package.native]]
+sha256 = '{hash}'
+"
+        ));
+        assert_eq!(lock.native_pins, vec![("plugin".into(), hash)]);
+    }
+
+    #[test]
     fn trusted_coil_crypto_maps_to_crypto_stem() {
         use crate::manifest::DependencySpec;
         let deps = vec![(

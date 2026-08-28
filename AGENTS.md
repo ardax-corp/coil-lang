@@ -27,7 +27,7 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 ## Invariants (do not break)
 
 - **Append-only opcodes** (`common/src/opcode.rs`). New variants at end → bump archive **minor**, `promise!` in `machine/src/vm.rs`, `instruction_from_u8_covers_last_appended_variant`. ABI break → **major** (reset minor).
-- **Virtual-module natives** via `HostInvoke` — host wiring in `machine/`. Removing natives drops their slots entirely and bumps archive minor (no reserved panic stubs).
+- **Virtual-module natives** via `HostInvoke` — host wiring in `machine/`. Leftover TLS/crypto/regex slots were dropped (holes collapse, archive **minor** bump); they are not reserved panic stubs. Virtual-time names stay as panic stubs so later ids do not move. `stream_attach` / `stream_park` own **120** / **121**.
 - **Feature gates**: debugger `feature = "debugger"`; dissect `feature = "dissect"` on helper binaries, not default `coil`.
 - **Lint gate**: `cargo check --workspace` (not clippy — `Gc::payload_mut` deny).
 
