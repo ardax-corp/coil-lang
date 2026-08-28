@@ -9,7 +9,7 @@ use compiler::OptLevel;
 pub(crate) const DEFAULT_OUT: &str = "out.hyc";
 
 const RESERVED: &[&str] = &[
-    "compile", "run", "test", "package", "dissect", "debug", "fmt", "lsp",
+    "compile", "run", "test", "package", "dissect", "debug", "fmt", "lsp", "natives",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,13 @@ pub(crate) enum Command {
         runner: Option<PathBuf>,
         check_native: bool,
         strip_debug: bool,
+    },
+    /// Dump / list native lock metadata for `spool download`.
+    Natives {
+        /// Packaged executable (omit to use project `[[ffi.native]]`).
+        exe: Option<String>,
+        /// Emit fetch TSV instead of JSON.
+        tsv: bool,
     },
     Dissect {
         filename: String,
@@ -196,6 +203,11 @@ enum RawCommand {
         /// Entry `.hy` file
         file: String,
     },
+    /// Native lock helpers for `spool download`
+    Natives {
+        #[command(subcommand)]
+        action: NativesAction,
+    },
     /// In-memory compile and dump filtered bytecode / IL / AST
     Dissect {
         #[command(flatten)]
@@ -246,6 +258,18 @@ enum RawCommand {
         /// Accepted for LSP clients; ignored
         #[arg(long, hide = true)]
         stdio: bool,
+    },
+}
+
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+enum NativesAction {
+    /// Print the native lock (JSON by default) for a packaged exe or the current project
+    Dump {
+        /// Packaged executable; omit to read `[[ffi.native]]` from the project `coil.toml`
+        file: Option<String>,
+        /// Emit fetch TSV: package, version, filename, url, sha256, size
+        #[arg(long)]
+        tsv: bool,
     },
 }
 
@@ -494,6 +518,15 @@ impl RawCli {
                     profile,
                 )
             }
+            Some(RawCommand::Natives {
+                action: NativesAction::Dump { file, tsv },
+            }) => cli_from(
+                Command::Natives { exe: file, tsv },
+                LogFlags::default(),
+                false,
+                OptLevelFlags::default(),
+                CompileProfileFlags::default(),
+            ),
             Some(RawCommand::Dissect {
                 log,
                 opt,
