@@ -169,3 +169,18 @@ pub fn is_builtin_weak_type(name: &str) -> bool {
 pub fn is_builtin_vec_type(name: &str) -> bool {
     name == BUILTIN_VEC_TYPE
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn time_error_is_not_a_compiler_builtin() {
+        assert!(!is_builtin_enum("TimeError"));
+        let src = include_str!("builtins.rs");
+        assert!(
+            !src.contains("TimeError") && !src.contains("BUILTIN_TIME_ERROR"),
+            "compiler TimeError enum must stay deleted"
+        );
+    }
+}
