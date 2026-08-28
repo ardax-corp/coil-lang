@@ -7,11 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 fn coil_embed_build_args(target_dir: &Path) -> Vec<String> {
-    let mut enabled = Vec::new();
-    if cfg!(feature = "time") {
-        enabled.push("time");
-    }
-    let mut args = vec![
+    vec![
         "build".into(),
         "-q".into(),
         "-p".into(),
@@ -19,12 +15,7 @@ fn coil_embed_build_args(target_dir: &Path) -> Vec<String> {
         "--no-default-features".into(),
         "--target-dir".into(),
         target_dir.display().to_string(),
-    ];
-    if !enabled.is_empty() {
-        args.push("--features".into());
-        args.push(enabled.join(","));
-    }
-    args
+    ]
 }
 
 /// Build `coil-embed` with the same optional features as this `coil` so HostInvoke ids match.
@@ -91,22 +82,11 @@ fn coil_embed_build_args_mirrors_optional_features() {
     );
     assert_eq!(args[5], "--target-dir");
     assert_eq!(args[6], target_dir.display().to_string());
-
-    let mut expected = Vec::new();
-    if cfg!(feature = "time") {
-        expected.push("time");
-    }
-    if expected.is_empty() {
-        assert!(
-            !args.iter().any(|a| a == "--features"),
-            "bare stack must omit --features, got {args:?}"
-        );
-        assert_eq!(args.len(), 7);
-    } else {
-        assert_eq!(args[7], "--features");
-        assert_eq!(args[8], expected.join(","));
-        assert_eq!(args.len(), 9);
-    }
+    assert!(
+        !args.iter().any(|a| a == "--features"),
+        "embed build must omit --features, got {args:?}"
+    );
+    assert_eq!(args.len(), 7);
 }
 
 #[cfg(unix)]
