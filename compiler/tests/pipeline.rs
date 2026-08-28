@@ -7987,7 +7987,7 @@ fn optional_virtual_modules_match_cargo_features() {
     check("use tls::{client};\nfn main() {}\n", false);
 }
 
-/// Root / compiler / machine default features are empty (no virtual time).
+/// Root / compiler / machine / CLI default features are empty (no virtual time).
 #[test]
 fn language_default_features_are_empty() {
     let root = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml"));
@@ -7996,7 +7996,16 @@ fn language_default_features_are_empty() {
         env!("CARGO_MANIFEST_DIR"),
         "/../machine/Cargo.toml"
     ));
-    for (label, toml) in [("root", root), ("compiler", compiler), ("machine", machine)] {
+    let cli = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../coil-cli/Cargo.toml"
+    ));
+    for (label, toml) in [
+        ("root", root),
+        ("compiler", compiler),
+        ("machine", machine),
+        ("cli", cli),
+    ] {
         assert!(
             toml.contains("default = []"),
             "{label} default features must be []"
@@ -8006,10 +8015,22 @@ fn language_default_features_are_empty() {
             "{label} must not declare a time cargo feature"
         );
         assert!(
+            !toml.contains("chrono"),
+            "{label} must not depend on chrono"
+        );
+        assert!(
             !toml.contains("default = [\"crypto\""),
             "{label} default features must not include crypto"
         );
     }
+    let ci = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../.github/workflows/ci.yml"
+    ));
+    assert!(
+        !ci.contains("--features time") && !ci.contains("features time"),
+        "CI must not compile-gate a time cargo feature"
+    );
 }
 
 /// `#[derive(String)]` end-to-end: synthesized `to_string` is callable.

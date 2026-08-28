@@ -1234,6 +1234,8 @@ mod tests {
         assert!(!vm.resolves_use(&["crypto".into()], "*"));
 
         assert!(vm.resolve_item(&["time".into()], "epoch").is_none());
+        assert!(vm.resolve_item(&["time".into()], "Instant").is_none());
+        assert!(vm.resolve_item(&["time".into()], "TimeError").is_none());
         assert!(matches!(
             vm.resolve_item(&["io".into(), "fs".into()], "exists"),
             Some(BuiltinExport::HostFn {
