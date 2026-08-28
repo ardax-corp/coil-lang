@@ -1184,6 +1184,37 @@ mod tests {
     }
 
     #[test]
+    fn parse_ffi_native_array_of_tables() {
+        let src = r#"
+[ffi]
+search_paths = ["./native"]
+
+[[ffi.native]]
+name = "regex"
+version = "0.3.0"
+path = "./native"
+url = "https://example.com/libregex.so"
+requires = ["libpcre2-8.so.0"]
+requires_hint = "pacman -S pcre2"
+
+[[ffi.native]]
+name = "tls"
+package = "coil-tls"
+version = "0.1.0"
+path = "../coil-tls/native"
+url = "https://example.com/libtls.so"
+"#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(m.ffi_search_paths, vec![PathBuf::from("./native")]);
+        assert_eq!(m.ffi_natives.len(), 2);
+        assert_eq!(m.ffi_natives[0].name, "regex");
+        assert_eq!(m.ffi_natives[0].package, "regex");
+        assert_eq!(m.ffi_natives[0].requires, vec!["libpcre2-8.so.0"]);
+        assert_eq!(m.ffi_natives[1].package, "coil-tls");
+        assert_eq!(m.ffi_natives[1].url, "https://example.com/libtls.so");
+    }
+
+    #[test]
     fn load_reads_existing_coil_toml() {
         let tmp = std::env::temp_dir().join("coil_manifest_test_7");
         std::fs::create_dir_all(&tmp).unwrap();

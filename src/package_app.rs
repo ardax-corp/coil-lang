@@ -12,7 +12,6 @@ use common::{
     ffi_library_names_from_bytecode, is_packaged_executable, is_system_ffi_stem,
 };
 use compiler::Pipeline;
-use machine::check_native_libraries;
 use machine::platform_shared_lib_filename;
 use reporting::ErrorCode;
 use rkyv::rancor::Error;
