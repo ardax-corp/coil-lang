@@ -42,10 +42,6 @@ pub const THREAD_MODULE: &str = "thread";
 /// Path-oriented filesystem helpers (`exists`, `realpath`, …).
 pub const IO_FS_MODULE: &str = "io::fs";
 
-/// Wall clock, periods, and formatting (`timestamp`, `sleep_ms`, …).
-#[cfg(feature = "time")]
-pub const TIME_MODULE: &str = "time";
-
 /// Process environment (`args`, `var`, `exec`, …).
 pub const ENV_MODULE: &str = "env";
 
@@ -871,32 +867,6 @@ impl VirtualModules {
         ]));
         modules.insert(ENV_MODULE, env_exports);
 
-        #[cfg(feature = "time")]
-        {
-            let mut time_exports = vec![BuiltinExport::Enum {
-                name: common::BUILTIN_TIME_ERROR_ENUM,
-            }];
-            time_exports.extend(host_exports(&[
-                ("timestamp", "time_timestamp"),
-                ("sleep_ms", "time_sleep_ms"),
-                ("instant_now", "time_instant_now"),
-                ("elapsed_nanos", "time_elapsed_nanos"),
-                ("elapsed_millis", "time_elapsed_millis"),
-                ("period", "time_period"),
-                ("add", "time_add"),
-                ("sub", "time_sub"),
-                ("period_add", "time_period_add"),
-                ("period_sub", "time_period_sub"),
-                ("date", "time_date"),
-                ("date_from_period", "time_date_from_period"),
-                ("date_from_epoch_period", "time_date_from_epoch_period"),
-                ("epoch", "time_epoch"),
-                ("format", "time_format"),
-                ("parse", "time_parse"),
-            ]));
-            modules.insert(TIME_MODULE, time_exports);
-        }
-
         Self { modules }
     }
 
@@ -1258,23 +1228,11 @@ mod tests {
     #[test]
     fn resolves_time_fs_env_crypto_exports() {
         let vm = VirtualModules::new();
-        #[cfg(feature = "time")]
-        assert!(vm.resolves_use(&["time".into()], "*"));
-        #[cfg(not(feature = "time"))]
         assert!(!vm.resolves_use(&["time".into()], "*"));
         assert!(vm.resolves_use(&["io".into(), "fs".into()], "*"));
         assert!(vm.resolves_use(&["env".into()], "*"));
         assert!(!vm.resolves_use(&["crypto".into()], "*"));
 
-        #[cfg(feature = "time")]
-        assert!(matches!(
-            vm.resolve_item(&["time".into()], "epoch"),
-            Some(BuiltinExport::HostFn {
-                surface: "epoch",
-                registry: "time_epoch"
-            })
-        ));
-        #[cfg(not(feature = "time"))]
         assert!(vm.resolve_item(&["time".into()], "epoch").is_none());
         assert!(matches!(
             vm.resolve_item(&["io".into(), "fs".into()], "exists"),
