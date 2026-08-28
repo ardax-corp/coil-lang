@@ -71,6 +71,10 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # `dload("/abs/libplugin.so")` is still stem `plugin`.
 # `[ffi] search_paths` locates files; it is not a grant.
 #
+# `Stream.attach` installs a C vtable on any Stream. That is off by
+# default (`PermissionDenied`). Opt in with `allow_attach = true`.
+# `allow` for `dload` does not grant attach.
+#
 # Every `dload` stem needs `[ffi] allow`, then a matching lock
 # `[[package.native]] sha256` or `trusted = true` on that dep.
 # `crypto`, `tls`, `regex`, and `time` follow the same rule; they have
@@ -93,6 +97,7 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # [ffi]
 # search_paths = ["./.spool/native"]
 # allow = ["plugin"]
+# allow_attach = true
 
 # --------------------------------------------------------------------------
 # Discovery algorithm
@@ -169,6 +174,7 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #   [ffi]
 #   search_paths             # extra dirs for FFI library lookup (not a grant)
 #   allow                    # dload stems; each also needs a lock sha256 or trusted
+#   allow_attach             # opt-in: Stream.attach C vtables (default false)
 #
 #   [package]
 #   name / version           # package identity for spool
