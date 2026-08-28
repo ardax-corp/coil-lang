@@ -1,9 +1,9 @@
-//! Read `coil.lock` native pins for extra `dload` stems.
+//! Read `coil.lock` native pins for `dload` stems.
 //!
 //! Spool owns writing this file. The compiler only extracts
 //! `[[package.native]] sha256` rows keyed by the enclosing package name,
-//! plus `stem`/`lib` so `trusted` deps can skip hash on that extra stem.
-//! First-party stems (`crypto`, `tls`, `regex`, `time`) do not need these pins.
+//! plus `stem`/`lib` so `trusted` deps can skip hash on that stem.
+//! First-party stems (`crypto`, `tls`, `regex`, `time`) use the same pins.
 
 use std::path::Path;
 
@@ -117,7 +117,7 @@ impl Lockfile {
         self.native_pins.as_slice()
     }
 
-    /// Extra `dload` stems whose `[dependencies]` row is `trusted = true`.
+    /// `dload` stems whose `[dependencies]` row is `trusted = true`.
     ///
     /// Includes the dep name, `coil-` strip, and lock `[[package.native]]` stem.
     pub fn trusted_extra_stems(&self, dependencies: &[(String, DependencySpec)]) -> Vec<String> {
@@ -136,7 +136,7 @@ pub(crate) fn dload_stem_for_package(pkg: &str, native_stem: Option<&str>) -> St
     pkg.strip_prefix("coil-").unwrap_or(pkg).to_string()
 }
 
-/// Extra stems that skip native sha256: trusted dep name, coil- strip, lock native stem.
+/// Stems that skip native sha256: trusted dep name, coil- strip, lock native stem.
 pub(crate) fn trusted_extra_stems(
     dependencies: &[(String, DependencySpec)],
     lock: &Lockfile,
@@ -363,5 +363,22 @@ sha256 = '{hash}'
 "
         ));
         assert_eq!(lock.native_pins, vec![("plugin".into(), hash)]);
+    }
+
+    #[test]
+    fn trusted_coil_crypto_maps_to_crypto_stem() {
+        use crate::manifest::DependencySpec;
+        let deps = vec![(
+            "coil-crypto".into(),
+            DependencySpec::Git {
+                url: "https://example.com/coil-crypto.git".into(),
+                version: None,
+                rev: None,
+                trusted: true,
+            },
+        )];
+        let stems = trusted_extra_stems(&deps, &Lockfile::default());
+        assert!(stems.contains(&"coil-crypto".into()));
+        assert!(stems.contains(&"crypto".into()));
     }
 }

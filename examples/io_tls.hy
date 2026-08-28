@@ -6,9 +6,12 @@
 //   roots = ["./src", "../coil-tls/src"]
 //   [ffi]
 //   search_paths = ["../coil-tls/native"]
+//   allow = ["tls"]
 //
-// `tls` is a first-party dload stem: no `[ffi] allow` and no lock hash.
-// search_paths only locates the file. A missing libtls is LibraryNotFound.
+// `tls` needs `[ffi] allow` plus `trusted = true` on the coil-tls dep
+// (or a matching `[[package.native]] sha256`). search_paths only locates
+// the file. Without allow, `dload` is `LibraryDenied`. A missing libtls
+// that passed the gate is `LibraryNotFound`.
 //
 // Then:
 //   use tls::{client, server};

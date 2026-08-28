@@ -66,11 +66,11 @@ pub struct Scripts {
 /// schema only — this crate does not resolve or write a lockfile.
 /// Native `sha256` pins in `coil.lock` are read for the `dload` gate.
 ///
-/// Optional `trusted` (default `false`). When `true` on an extra-stem dep
-/// that is also on `[ffi] allow`, the `dload` gate skips **native** `sha256`
+/// Optional `trusted` (default `false`). When `true` on a dep whose stem
+/// is also on `[ffi] allow`, the `dload` gate skips **native** `sha256`
 /// for that stem only. It is not git `content_hash`, not hooks, not engine,
-/// not an allowlist, and never `dload("c")`. First-party stems already skip
-/// hash; `trusted` on those rows is a no-op at the gate. Spool still does
+/// not an allowlist, and never `dload("c")`. First-party stems
+/// (`crypto`/`tls`/`regex`/`time`) use the same rule. Spool still does
 /// not write native pins (COI-60).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DependencySpec {
@@ -95,6 +95,24 @@ impl DependencySpec {
     }
 }
 
+/// One `[[ffi.native]]` row: a direct shared library for packaging / `spool download`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FfiNativeDecl {
+    /// `dload` stem (e.g. `regex`).
+    pub name: String,
+    /// Cache / spool package name (defaults to `name` when omitted).
+    pub package: String,
+    pub version: String,
+    /// Directory (relative to project root) containing the platform library file.
+    pub path: PathBuf,
+    /// HTTPS URL `spool download` fetches.
+    pub url: String,
+    /// Transitive sonames expected from the OS (diagnostics only).
+    pub requires: Vec<String>,
+    /// Human install hint when a `requires` soname is missing.
+    pub requires_hint: String,
+}
+
 /// Resolved project manifest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
@@ -107,9 +125,11 @@ pub struct Manifest {
     pub entry: Option<PathBuf>,
     /// Extra directories searched when resolving FFI library paths.
     pub ffi_search_paths: Vec<PathBuf>,
-    /// Extra consumer `dload` stems (`[ffi] allow`) beyond crypto/tls/regex/time.
-    /// Extra stems still need a lock hash unless the matching dep is `trusted`.
+    /// Consumer `dload` stems (`[ffi] allow`), including crypto/tls/regex/time.
+    /// Each still needs a lock hash unless the matching dep is `trusted`.
     pub ffi_allow: Vec<String>,
+    /// Direct native artifacts declared under `[[ffi.native]]`.
+    pub ffi_natives: Vec<FfiNativeDecl>,
     /// When false, `env::exec` fails at runtime with `ExecDisabled`.
     pub allow_exec: bool,
     /// Optional `[package]` block (`name` + `version`, plus optional `coil` / `include`).
@@ -130,6 +150,7 @@ impl Default for Manifest {
             entry: None,
             ffi_search_paths: Vec::new(),
             ffi_allow: Vec::new(),
+            ffi_natives: Vec::new(),
             allow_exec: false,
             package: None,
             dependencies: Vec::new(),
@@ -185,6 +206,8 @@ impl Manifest {
         let mut entry: Option<PathBuf> = None;
         let mut ffi_search_paths: Option<Vec<PathBuf>> = None;
         let mut ffi_allow: Option<Vec<String>> = None;
+        let mut ffi_natives: Vec<FfiNativeDecl> = Vec::new();
+        let mut ffi_native_draft: Option<FfiNativeDraft> = None;
         let mut allow_exec: Option<bool> = None;
         let mut package_name: Option<String> = None;
         let mut package_version: Option<String> = None;
@@ -206,9 +229,22 @@ impl Manifest {
                 continue;
             }
 
-            // Section header: `[name]`.
-            if let Some(name) = line.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-                current_section = match name.trim() {
+            // Section header: `[name]` or `[[ffi.native]]`.
+            if line.starts_with('[') && line.ends_with(']') {
+                let inner = &line[1..line.len() - 1];
+                let is_ffi_native_array = inner == "[ffi.native]";
+                if is_ffi_native_array {
+                    if let Some(draft) = ffi_native_draft.take() {
+                        ffi_natives.push(draft.finish(line_num)?);
+                    }
+                    ffi_native_draft = Some(FfiNativeDraft::default());
+                    current_section = Some("ffi.native");
+                    continue;
+                }
+                if let Some(draft) = ffi_native_draft.take() {
+                    ffi_natives.push(draft.finish(line_num)?);
+                }
+                current_section = match inner.trim() {
                     "module" => Some("module"),
                     "entry" => Some("entry"),
                     "ffi" => Some("ffi"),
@@ -290,6 +326,84 @@ impl Manifest {
                         }
                     }
                     ffi_allow = Some(allow);
+                }
+                ("ffi.native", "name") => {
+                    let draft = ffi_native_draft.as_mut().ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: "`name` outside `[[ffi.native]]`".to_string(),
+                    })?;
+                    if draft.name.is_some() {
+                        return Err(ManifestError::Parse {
+                            line: line_num,
+                            message: "duplicate key `ffi.native.name`".to_string(),
+                        });
+                    }
+                    draft.name = Some(parse_string(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected string, got `{value}`"),
+                    })?);
+                }
+                ("ffi.native", "package") => {
+                    let draft = ffi_native_draft.as_mut().ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: "`package` outside `[[ffi.native]]`".to_string(),
+                    })?;
+                    draft.package = Some(parse_string(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected string, got `{value}`"),
+                    })?);
+                }
+                ("ffi.native", "version") => {
+                    let draft = ffi_native_draft.as_mut().ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: "`version` outside `[[ffi.native]]`".to_string(),
+                    })?;
+                    draft.version = Some(parse_string(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected string, got `{value}`"),
+                    })?);
+                }
+                ("ffi.native", "path") => {
+                    let draft = ffi_native_draft.as_mut().ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: "`path` outside `[[ffi.native]]`".to_string(),
+                    })?;
+                    draft.path = Some(PathBuf::from(parse_string(value).ok_or(
+                        ManifestError::Parse {
+                            line: line_num,
+                            message: format!("expected string, got `{value}`"),
+                        },
+                    )?));
+                }
+                ("ffi.native", "url") => {
+                    let draft = ffi_native_draft.as_mut().ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: "`url` outside `[[ffi.native]]`".to_string(),
+                    })?;
+                    draft.url = Some(parse_string(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected string, got `{value}`"),
+                    })?);
+                }
+                ("ffi.native", "requires") => {
+                    let draft = ffi_native_draft.as_mut().ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: "`requires` outside `[[ffi.native]]`".to_string(),
+                    })?;
+                    draft.requires = parse_string_array(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected array of strings, got `{value}`"),
+                    })?;
+                }
+                ("ffi.native", "requires_hint") => {
+                    let draft = ffi_native_draft.as_mut().ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: "`requires_hint` outside `[[ffi.native]]`".to_string(),
+                    })?;
+                    draft.requires_hint = parse_string(value).ok_or(ManifestError::Parse {
+                        line: line_num,
+                        message: format!("expected string, got `{value}`"),
+                    })?;
                 }
                 ("env", "allow_exec") => {
                     let parsed = parse_bool(value).ok_or(ManifestError::Parse {
@@ -407,6 +521,10 @@ impl Manifest {
             }
         }
 
+        if let Some(draft) = ffi_native_draft.take() {
+            ffi_natives.push(draft.finish(source.lines().count().saturating_add(1))?);
+        }
+
         let package = match (saw_package_section, package_name, package_version) {
             (false, None, None) => None,
             (true, None, None) => {
@@ -440,6 +558,7 @@ impl Manifest {
             entry,
             ffi_search_paths: ffi_search_paths.unwrap_or_default(),
             ffi_allow: ffi_allow.unwrap_or_default(),
+            ffi_natives,
             allow_exec: allow_exec.unwrap_or(false),
             package,
             dependencies,
@@ -602,6 +721,48 @@ fn assign_script_path(
     }
     *slot = Some(PathBuf::from(parsed));
     Ok(())
+}
+
+#[derive(Default)]
+struct FfiNativeDraft {
+    name: Option<String>,
+    package: Option<String>,
+    version: Option<String>,
+    path: Option<PathBuf>,
+    url: Option<String>,
+    requires: Vec<String>,
+    requires_hint: String,
+}
+
+impl FfiNativeDraft {
+    fn finish(self, line_num: usize) -> Result<FfiNativeDecl, ManifestError> {
+        let name = self.name.ok_or(ManifestError::Parse {
+            line: line_num,
+            message: "`[[ffi.native]]` missing required key `name`".to_string(),
+        })?;
+        let version = self.version.ok_or(ManifestError::Parse {
+            line: line_num,
+            message: "`[[ffi.native]]` missing required key `version`".to_string(),
+        })?;
+        let path = self.path.ok_or(ManifestError::Parse {
+            line: line_num,
+            message: "`[[ffi.native]]` missing required key `path`".to_string(),
+        })?;
+        let url = self.url.ok_or(ManifestError::Parse {
+            line: line_num,
+            message: "`[[ffi.native]]` missing required key `url`".to_string(),
+        })?;
+        let package = self.package.unwrap_or_else(|| name.clone());
+        Ok(FfiNativeDecl {
+            name,
+            package,
+            version,
+            path,
+            url,
+            requires: self.requires,
+            requires_hint: self.requires_hint,
+        })
+    }
 }
 
 fn parse_bool(value: &str) -> Option<bool> {
@@ -844,6 +1005,7 @@ mod tests {
             entry: None,
             ffi_search_paths: Vec::new(),
             ffi_allow: Vec::new(),
+            ffi_natives: Vec::new(),
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
@@ -944,6 +1106,7 @@ mod tests {
             entry: None,
             ffi_search_paths: Vec::new(),
             ffi_allow: Vec::new(),
+            ffi_natives: Vec::new(),
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
@@ -968,6 +1131,7 @@ mod tests {
             entry: None,
             ffi_search_paths: Vec::new(),
             ffi_allow: Vec::new(),
+            ffi_natives: Vec::new(),
             allow_exec: true,
             package: None,
             dependencies: Vec::new(),
@@ -1017,6 +1181,37 @@ mod tests {
         let m = Manifest::load(&tmp).unwrap();
         assert!(!m.allow_exec);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn parse_ffi_native_array_of_tables() {
+        let src = r#"
+[ffi]
+search_paths = ["./native"]
+
+[[ffi.native]]
+name = "regex"
+version = "0.3.0"
+path = "./native"
+url = "https://example.com/libregex.so"
+requires = ["libpcre2-8.so.0"]
+requires_hint = "pacman -S pcre2"
+
+[[ffi.native]]
+name = "tls"
+package = "coil-tls"
+version = "0.1.0"
+path = "../coil-tls/native"
+url = "https://example.com/libtls.so"
+"#;
+        let m = Manifest::parse(src).unwrap();
+        assert_eq!(m.ffi_search_paths, vec![PathBuf::from("./native")]);
+        assert_eq!(m.ffi_natives.len(), 2);
+        assert_eq!(m.ffi_natives[0].name, "regex");
+        assert_eq!(m.ffi_natives[0].package, "regex");
+        assert_eq!(m.ffi_natives[0].requires, vec!["libpcre2-8.so.0"]);
+        assert_eq!(m.ffi_natives[1].package, "coil-tls");
+        assert_eq!(m.ffi_natives[1].url, "https://example.com/libtls.so");
     }
 
     #[test]

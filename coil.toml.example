@@ -47,11 +47,11 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # [dependencies]
 # http = { git = "https://github.com/coil-lang/http.git", version = "^0.2" }
 # local_http = { path = "../local-http" }
-# # `trusted` is a bool on that git/path row (default false). `true` / `false`
-# # parse; any other type is a parse error. Meaning: that dep skips native
-# # sha256 only. Not git content_hash, not hooks, not engine, never dload("c").
-# # Parser stores the flag; spool does not honor it yet.
-# coil_crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
+# `trusted` is a bool on that git/path row (default false). `true` / `false`
+# parse; any other type is a parse error. Meaning: that dep skips native
+# sha256 only, and only when its stem is also on `[ffi] allow`.
+# Not git content_hash, not hooks, not engine, never dload("c").
+# crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
 
 # --------------------------------------------------------------------------
 # Lifecycle scripts (current project only)
@@ -71,14 +71,21 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # `dload("/abs/libplugin.so")` is still stem `plugin`.
 # `[ffi] search_paths` locates files; it is not a grant.
 #
-# First-party stems `time`, `crypto`, `tls`, and `regex` load with no
-# lock hash and do not need `allow`. They are the bootstrap so spool can
-# later depend on coil-crypto without hashing `crypto` to load `crypto`.
-# A missing first-party library is `LibraryNotFound`, not a deny.
+# Every `dload` stem needs `[ffi] allow`, then a matching lock
+# `[[package.native]] sha256` or `trusted = true` on that dep.
+# `crypto`, `tls`, `regex`, and `time` follow the same rule; they have
+# no skip. A stem without allow is `LibraryDenied`. Allow plus
+# `trusted` when the file is missing is `LibraryNotFound`.
 #
-# Extra stems need both `[ffi] allow` and a matching
-# `[[package.native]] sha256` in `coil.lock`. Allow without a hash, a hash
-# without allow, or a mismatch is deny.
+# coil-crypto bootstrap is allow plus trusted (or a lock hash):
+#
+#   [ffi]
+#   allow = ["crypto"]
+#   [dependencies]
+#   crypto = { git = "https://github.com/ardax-corp/coil-crypto.git", trusted = true }
+#
+# Extra stems use the same rule. Allow without a hash, a hash without
+# allow, or a mismatch is `LibraryDenied`.
 #
 # `dload("c")` / libc aliases stay deny even if listed in `allow` or a
 # lock pin, and even if a dependency row is `trusted`.
@@ -161,7 +168,7 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #
 #   [ffi]
 #   search_paths             # extra dirs for FFI library lookup (not a grant)
-#   allow                    # extra dload stems; each also needs a lock sha256
+#   allow                    # dload stems; each also needs a lock sha256 or trusted
 #
 #   [package]
 #   name / version           # package identity for spool
@@ -174,8 +181,8 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #   [dependencies]
 #   name = { git = "…", version = "…", rev = "…" } | { path = "…" }
 #   trusted                  # optional bool, default false; `true`/`false` only
-#                            # native sha256 skip on that dep only (schema).
-#                            # Parser stores; spool does not honor it yet.
+#                            # native sha256 skip on that dep only, if also on
+#                            # `[ffi] allow` (including crypto/tls/regex/time).
 #                            # Not content_hash / hooks / engine / dload("c")
 #
 # Compiler builtins (prelude, ffi, …) are virtual modules and are

@@ -6,10 +6,11 @@ use std::process::{Command, exit};
 use std::sync::Arc;
 
 use common::{
-    ARCHIVE_VERSION, ArchivedArchivedProgram, Byte, ProgramDebug, archive_version_compatible,
-    embedded_archive_slice, format_archive_version, read_package_trailer,
+    ARCHIVE_VERSION, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
+    archive_version_compatible, default_natives_root, embedded_archive_slice,
+    format_archive_version, read_embedded_native_lock, read_package_trailer,
 };
-use machine::{Machine, wire_standard_host_natives};
+use machine::{DloadGate, Machine, wire_standard_host_natives};
 use machine::thread::ThreadProgram;
 use rkyv::rancor::Error;
 
@@ -83,7 +84,7 @@ pub fn try_load_archive(
 /// Returns `true` when a language-level `panic` aborted.
 ///
 /// FFI struct layouts from `extern struct` are not restored here (not stored in
-/// the archive yet); search paths default to the entry parent only.
+/// the archive yet). `ffi_search_paths` are searched before `entry`'s parent.
 pub fn execute_archived_program(
     bytecode: &[Byte],
     constants: &[u64],
@@ -91,12 +92,17 @@ pub fn execute_archived_program(
     static_slots: u32,
     debug: ProgramDebug,
     entry: Option<&Path>,
+    ffi_search_paths: Vec<PathBuf>,
+    dload_gate: Option<DloadGate>,
 ) -> bool {
     let mut machine = Machine::<256>::with_operand_capacity(machine::DEFAULT_OPERAND_STACK_SLOTS);
     wire_standard_host_natives(&mut machine);
+    if let Some(gate) = dload_gate {
+        machine.set_dload_gate(gate);
+    }
 
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
-    machine.set_ffi_paths(base_dir, Vec::new());
+    machine.set_ffi_paths(base_dir, ffi_search_paths);
 
     machine.set_thread_program(Arc::new(ThreadProgram {
         code: Arc::from(bytecode.to_vec()),
@@ -109,6 +115,36 @@ pub fn execute_archived_program(
     machine.set_program_debug(debug);
     machine.run_raw(bytecode, constants, strings, static_slots);
     machine.panicked()
+}
+
+/// Verify every direct native lock entry exists in the natives cache with matching size.
+fn ensure_native_cache(lock: &NativeLock, exe: &Path) -> Result<Vec<PathBuf>, String> {
+    let root = default_natives_root();
+    let mut dirs = Vec::new();
+    let mut missing = Vec::new();
+    for entry in &lock.entries {
+        let path = NativeLock::entry_cache_path(&root, entry);
+        let dir = NativeLock::entry_cache_dir(&root, entry);
+        if path.is_file() {
+            if let Ok(meta) = std::fs::metadata(&path) {
+                if meta.len() == entry.size {
+                    if !dirs.iter().any(|d: &PathBuf| d == &dir) {
+                        dirs.push(dir);
+                    }
+                    continue;
+                }
+            }
+        }
+        missing.push(format!("{} {} ({})", entry.package, entry.version, entry.filename));
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "Unable to continue: native libraries missing:\n  {}\nRun: spool download {}",
+            missing.join("\n  "),
+            exe.display()
+        ));
+    }
+    Ok(dirs)
 }
 
 /// If this process is a packaged binary, run the embedded program and return `Some(panicked)`.
@@ -150,6 +186,50 @@ pub fn try_run_embedded() -> Option<bool> {
         exit(1);
     }
 
+    let mut ffi_search_paths = Vec::new();
+    let mut dload_gate = None;
+    match read_embedded_native_lock(&data, trailer) {
+        Ok(Some(lock)) if !lock.entries.is_empty() => {
+            if lock.os != std::env::consts::OS || lock.arch != std::env::consts::ARCH {
+                eprintln!(
+                    "error: native lock is for {}-{}, this host is {}-{}",
+                    lock.os,
+                    lock.arch,
+                    std::env::consts::OS,
+                    std::env::consts::ARCH
+                );
+                exit(1);
+            }
+            match ensure_native_cache(&lock, &exe) {
+                Ok(dirs) => {
+                    ffi_search_paths = dirs;
+                    let allow: Vec<&str> = lock.entries.iter().map(|e| e.stem.as_str()).collect();
+                    let pins: Vec<(String, String)> = lock
+                        .entries
+                        .iter()
+                        .map(|e| (e.stem.clone(), e.sha256.clone()))
+                        .collect();
+                    dload_gate = Some(DloadGate::from_consumer(allow, &pins));
+                }
+                Err(msg) => {
+                    eprintln!("error: {msg}");
+                    exit(1);
+                }
+            }
+        }
+        Ok(_) => {}
+        Err(e) => {
+            eprintln!("error: corrupt native lock: {e}");
+            exit(1);
+        }
+    }
+
+    // Prefer cache dirs, then $ORIGIN and $ORIGIN/lib.
+    if let Some(parent) = exe.parent() {
+        ffi_search_paths.push(parent.to_path_buf());
+        ffi_search_paths.push(parent.join("lib"));
+    }
+
     let panicked = execute_archived_program(
         &bytecode,
         &constants,
@@ -157,6 +237,8 @@ pub fn try_run_embedded() -> Option<bool> {
         static_slots,
         debug,
         Some(exe.as_path()),
+        ffi_search_paths,
+        dload_gate,
     );
     Some(panicked)
 }

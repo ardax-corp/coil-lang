@@ -272,7 +272,7 @@ pub struct Machine<const S: usize> {
     base_dir: Option<PathBuf>,
     /// Extra search paths from `coil.toml` `[ffi]`.
     ffi_search_paths: Vec<PathBuf>,
-    /// Fail-closed `dload` policy (production stems + extra allow/hash).
+    /// Fail-closed `dload` policy (allow + lock hash or trusted).
     dload_gate: crate::ffi::DloadGate,
     /// Registered C struct layouts for pass-by-value FFI.
     struct_layouts: Vec<CStructLayout>,
@@ -401,12 +401,12 @@ impl<const S: usize> Machine<S> {
         self.ffi_search_paths = search_paths;
     }
 
-    /// Replace the `dload` gate (default is production stems only).
+    /// Replace the `dload` gate (default is deny-all).
     pub fn set_dload_gate(&mut self, gate: crate::ffi::DloadGate) {
         self.dload_gate = gate;
     }
 
-    /// Host/test extra stems with no lock hash. Does not widen production stems.
+    /// Host/test stems with no lock hash. Does not restore a first-party exemption.
     pub fn set_dload_allowlist<I, St>(&mut self, extra_stems: I)
     where
         I: IntoIterator<Item = St>,

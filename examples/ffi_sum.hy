@@ -15,11 +15,11 @@
 //   Windows: clang -shared -o examples/sum.dll examples/sum.c
 //
 // `dload("sum")` resolves to the platform filename via
-// `[ffi] search_paths` in `coil.toml` (./examples). Extra stems such as
-// `sum` also need `[ffi] allow` plus a matching `[[package.native]]
-// sha256` in coil.lock. First-party `time` / `crypto` / `tls` / `regex`
-// load with no hash. `dload("c")` is always denied; an absolute path
-// is not a bypass.
+// `[ffi] search_paths` in `coil.toml` (./examples). Every stem needs
+// `[ffi] allow` plus a matching `[[package.native]] sha256` or
+// `trusted = true` on that dep — including `time` / `crypto` / `tls` /
+// `regex`. A stem without allow is `LibraryDenied`. `dload("c")` is
+// always denied; an absolute path is not a bypass.
 //
 // Each of dload / declare / invoke returns `Result<_, Error>`;
 // unwrap with match (or `?` in a Result-returning function).

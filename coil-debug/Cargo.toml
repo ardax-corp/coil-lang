@@ -23,5 +23,4 @@ serde_json = "1"
 path = "src/lib.rs"
 
 [features]
-default = ["time"]
-time = ["machine/time", "compiler/time", "coil-cli/time"]
+default = []

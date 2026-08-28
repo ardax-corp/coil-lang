@@ -7,11 +7,7 @@ use std::thread;
 use std::time::Duration;
 
 fn coil_embed_build_args(target_dir: &Path) -> Vec<String> {
-    let mut enabled = Vec::new();
-    if cfg!(feature = "time") {
-        enabled.push("time");
-    }
-    let mut args = vec![
+    vec![
         "build".into(),
         "-q".into(),
         "-p".into(),
@@ -19,12 +15,7 @@ fn coil_embed_build_args(target_dir: &Path) -> Vec<String> {
         "--no-default-features".into(),
         "--target-dir".into(),
         target_dir.display().to_string(),
-    ];
-    if !enabled.is_empty() {
-        args.push("--features".into());
-        args.push(enabled.join(","));
-    }
-    args
+    ]
 }
 
 /// Build `coil-embed` with the same optional features as this `coil` so HostInvoke ids match.
@@ -91,22 +82,11 @@ fn coil_embed_build_args_mirrors_optional_features() {
     );
     assert_eq!(args[5], "--target-dir");
     assert_eq!(args[6], target_dir.display().to_string());
-
-    let mut expected = Vec::new();
-    if cfg!(feature = "time") {
-        expected.push("time");
-    }
-    if expected.is_empty() {
-        assert!(
-            !args.iter().any(|a| a == "--features"),
-            "bare stack must omit --features, got {args:?}"
-        );
-        assert_eq!(args.len(), 7);
-    } else {
-        assert_eq!(args[7], "--features");
-        assert_eq!(args[8], expected.join(","));
-        assert_eq!(args.len(), 9);
-    }
+    assert!(
+        !args.iter().any(|a| a == "--features"),
+        "embed build must omit --features, got {args:?}"
+    );
+    assert_eq!(args.len(), 7);
 }
 
 #[cfg(unix)]
@@ -172,4 +152,204 @@ fn package_fib_embedded_run_prints_55() {
     );
 
     let _ = std::fs::remove_file(&out);
+}
+
+#[test]
+fn package_ffi_without_native_inventory_fails() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed();
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let entry = manifest.join("examples/ffi_sum.hy");
+    let out = std::env::temp_dir().join(format!(
+        "coil_sum_pack_fail_{}{}",
+        std::process::id(),
+        std::env::consts::EXE_SUFFIX
+    ));
+    let _ = std::fs::remove_file(&out);
+
+    let status = Command::new(&bin)
+        .args([
+            "package",
+            entry.to_str().unwrap(),
+            "-o",
+            out.to_str().unwrap(),
+            "--runner",
+            embed.to_str().unwrap(),
+        ])
+        .current_dir(&manifest)
+        .status()
+        .expect("spawn coil package");
+    assert!(
+        !status.success(),
+        "expected package to fail without [[ffi.native]] for sum"
+    );
+    let _ = std::fs::remove_file(&out);
+}
+
+#[cfg(unix)]
+#[test]
+fn package_with_native_lock_requires_spool_download_then_runs() {
+    let bin = std::env::var("CARGO_BIN_EXE_coil")
+        .expect("CARGO_BIN_EXE_coil (run via `cargo test -p coil`)");
+    let embed = build_matching_coil_embed();
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+
+    let tmp = std::env::temp_dir().join(format!("coil_native_pack_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(tmp.join("native")).unwrap();
+    std::fs::create_dir_all(tmp.join("src")).unwrap();
+
+    let lib_name = machine::platform_shared_lib_filename("sum");
+    let so = tmp.join("native").join(&lib_name);
+    let mut cc = Command::new("cc");
+    #[cfg(target_os = "macos")]
+    {
+        cc.arg("-dynamiclib");
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        cc.arg("-shared").arg("-fPIC");
+    }
+    let cc = cc
+        .args([
+            "-O2",
+            "-o",
+            so.to_str().unwrap(),
+            manifest_dir.join("examples/sum.c").to_str().unwrap(),
+        ])
+        .status()
+        .expect("cc");
+    assert!(cc.success(), "failed to build {lib_name}");
+
+    std::fs::write(
+        tmp.join("src/main.hy"),
+        r#"
+use ffi::{declare, dload, invoke};
+use ffi::types::{Int};
+
+fn main() {
+    let lib = match dload("sum") {
+        Result::Ok(h) => h,
+        Result::Err(e) => panic e.message,
+    };
+    let sum_id = match declare(lib, "sum", (Int, Int), Int) {
+        Result::Ok(id) => id,
+        Result::Err(e) => panic e.message,
+    };
+    let n = match invoke(lib, sum_id, (40, 2)) {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    if n != 42 {
+        panic "sum failed";
+    }
+}
+"#,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.join("coil.toml"),
+        r#"
+[module]
+roots = ["./src"]
+
+[ffi]
+search_paths = ["./native"]
+
+[[ffi.native]]
+name = "sum"
+version = "0.0.1"
+path = "./native"
+url = "https://example.com/libsum.so"
+"#,
+    )
+    .unwrap();
+
+    let out = tmp.join(format!("sum-app{}", std::env::consts::EXE_SUFFIX));
+    let packaged = Command::new(&bin)
+        .args([
+            "package",
+            "src/main.hy",
+            "-o",
+            out.to_str().unwrap(),
+            "--runner",
+            embed.to_str().unwrap(),
+        ])
+        .current_dir(&tmp)
+        .output()
+        .expect("package");
+    assert!(
+        packaged.status.success(),
+        "package with [[ffi.native]] should succeed: {}",
+        String::from_utf8_lossy(&packaged.stderr)
+    );
+
+    let dump = Command::new(&bin)
+        .args(["natives", "dump", "--tsv", out.to_str().unwrap()])
+        .output()
+        .expect("natives dump");
+    assert!(dump.status.success(), "natives dump failed");
+    let tsv = String::from_utf8_lossy(&dump.stdout);
+    assert!(
+        tsv.contains(&format!("sum\t0.0.1\t{lib_name}")),
+        "tsv={tsv}"
+    );
+    assert!(tsv.contains("# os="), "missing os comment");
+
+    let natives_root = tmp.join("natives-cache");
+    let run_missing = run_command_with_timeout(
+        {
+            let mut c = Command::new(&out);
+            c.env("COIL_NATIVES_DIR", &natives_root);
+            c
+        },
+        15,
+    );
+    assert!(
+        !run_missing.status.success(),
+        "expected fail without cache"
+    );
+    let err = String::from_utf8_lossy(&run_missing.stderr);
+    assert!(
+        err.contains("spool download") || err.contains("native libraries missing"),
+        "stderr={err}"
+    );
+
+    // Parse sha from dump JSON for cache path.
+    let dump_json = Command::new(&bin)
+        .args(["natives", "dump", out.to_str().unwrap()])
+        .output()
+        .expect("natives dump json");
+    assert!(dump_json.status.success());
+    let json = String::from_utf8_lossy(&dump_json.stdout);
+    let sha = json
+        .split("\"sha256\": \"")
+        .nth(1)
+        .and_then(|s| s.split('"').next())
+        .expect("sha256 in json");
+    let hash16: String = sha.chars().take(16).collect();
+    let dest_dir = natives_root
+        .join("cache")
+        .join("sum")
+        .join("0.0.1")
+        .join(&hash16);
+    std::fs::create_dir_all(&dest_dir).unwrap();
+    std::fs::copy(&so, dest_dir.join(&lib_name)).unwrap();
+
+    let run_ok = run_command_with_timeout(
+        {
+            let mut c = Command::new(&out);
+            c.env("COIL_NATIVES_DIR", &natives_root);
+            c
+        },
+        15,
+    );
+    assert!(
+        run_ok.status.success(),
+        "packaged app failed after cache fill: {}",
+        String::from_utf8_lossy(&run_ok.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&tmp);
 }
