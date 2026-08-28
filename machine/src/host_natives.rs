@@ -969,7 +969,10 @@ mod tests {
         );
         let natives = include_str!("host_natives.rs");
         assert!(
-            !natives.contains("const TIME_WIRING"),
+            !natives.lines().any(|l| {
+                let t = l.trim_start();
+                t.starts_with("const TIME_WIRING") || t.starts_with("pub const TIME_WIRING")
+            }),
             "TIME_WIRING table must not return"
         );
         let cargo = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));

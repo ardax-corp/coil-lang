@@ -178,8 +178,9 @@ mod tests {
     fn time_error_is_not_a_compiler_builtin() {
         assert!(!is_builtin_enum("TimeError"));
         let src = include_str!("builtins.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap_or(src);
         assert!(
-            !src.contains("TimeError") && !src.contains("BUILTIN_TIME_ERROR"),
+            !prod.contains("TimeError") && !prod.contains("BUILTIN_TIME_ERROR"),
             "compiler TimeError enum must stay deleted"
         );
     }
