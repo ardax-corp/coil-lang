@@ -7741,12 +7741,6 @@ fn example_casts_primitive_as_operators() {
     assert_eq!(run_example("examples/casts.hy"), "13true");
 }
 
-#[cfg(feature = "time")]
-#[test]
-fn example_time_epoch_ok() {
-    assert_eq!(run_example("examples/time_demo.hy"), "1");
-}
-
 #[test]
 fn example_ansi_color_prints_red() {
     let output = run_example("examples/ansi_color.hy");
@@ -7754,6 +7748,22 @@ fn example_ansi_color_prints_red() {
         output.contains("red"),
         "expected visible 'red', got {:?}",
         output
+    );
+}
+
+/// Virtual `time` is gone (COI-259); coil-time is a package.
+#[test]
+fn virtual_time_module_does_not_resolve() {
+    let mut pipeline = Pipeline::new();
+    let err = pipeline.compile_src("use time::{epoch};\nfn main() {}\n");
+    assert!(err.is_err(), "expected module-not-found for virtual time");
+    assert!(
+        pipeline.messages().iter().any(|m| {
+            m.code() == Some(compiler::ErrorCode::IoError)
+                || m.message().contains("Module not found")
+        }),
+        "use time without coil-time must surface Module not found / E0900, got {:?}",
+        pipeline.messages()
     );
 }
 
@@ -7943,9 +7953,10 @@ fn example_io_tls_does_not_import_virtual_tls() {
     assert_eq!(run_example("examples/io_tls.hy"), "use-coil-tls");
 }
 
-/// Feature-off `use` of optional virtual modules is a compile error (E0900 /
+/// Feature-off `use` of extracted packages is a compile error (E0900 /
 /// "Module not found"), not a hang. Stays ungated so `--no-default-features`
-/// still exercises it. Virtual crypto / leftover `io::__tls` never resolve.
+/// still exercises it. Virtual crypto / leftover `io::__tls` / virtual time
+/// never resolve.
 #[test]
 fn optional_virtual_modules_match_cargo_features() {
     fn check(src: &str, enabled: bool) {
@@ -7968,7 +7979,7 @@ fn optional_virtual_modules_match_cargo_features() {
             );
         }
     }
-    check("use time::{epoch};\nfn main() {}\n", cfg!(feature = "time"));
+    check("use time::{epoch};\nfn main() {}\n", false);
     check("use crypto::{sha256};\nfn main() {}\n", false);
     check("use io::__tls::client::{enable};\nfn main() {}\n", false);
     check("use regex::{compile};\nfn main() {}\n", false);
@@ -7976,9 +7987,9 @@ fn optional_virtual_modules_match_cargo_features() {
     check("use tls::{client};\nfn main() {}\n", false);
 }
 
-/// Root / compiler / machine default features are `time` only (no virtual crypto).
+/// Root / compiler / machine default features are empty (no virtual time).
 #[test]
-fn language_default_features_are_time_only() {
+fn language_default_features_are_empty() {
     let root = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../Cargo.toml"));
     let compiler = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
     let machine = include_str!(concat!(
@@ -7987,8 +7998,12 @@ fn language_default_features_are_time_only() {
     ));
     for (label, toml) in [("root", root), ("compiler", compiler), ("machine", machine)] {
         assert!(
-            toml.contains("default = [\"time\"]"),
-            "{label} default features must be [\"time\"] only"
+            toml.contains("default = []"),
+            "{label} default features must be []"
+        );
+        assert!(
+            !toml.contains("time = "),
+            "{label} must not declare a time cargo feature"
         );
         assert!(
             !toml.contains("default = [\"crypto\""),

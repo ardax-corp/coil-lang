@@ -59,13 +59,6 @@ pub const MAX_THREAD_SPAWN_ARGS: usize = 16;
 /// Built-in `EnvError` enum name (virtual `env` module).
 pub const BUILTIN_ENV_ERROR_ENUM: &str = "EnvError";
 
-/// Built-in `TimeError` enum name (virtual `time` module).
-pub const BUILTIN_TIME_ERROR_ENUM: &str = "TimeError";
-
-/// `TimeError` variants in tag order.
-pub const BUILTIN_TIME_ERROR_VARIANTS: &[&str] =
-    &["InvalidInput", "Overflow", "ParseError", "Other"];
-
 /// `EnvError` variants in tag order.
 pub const BUILTIN_ENV_ERROR_VARIANTS: &[&str] = &[
     "InvalidInput",
@@ -107,7 +100,6 @@ pub fn is_builtin_enum(name: &str) -> bool {
         || is_builtin_io_error_enum(name)
         || is_builtin_thread_error_enum(name)
         || is_builtin_env_error_enum(name)
-        || is_builtin_time_error_enum(name)
         || is_builtin_ffi_error_enum(name)
         || is_builtin_ffi_error_kind_enum(name)
         || is_builtin_ffi_enum(name)
@@ -123,10 +115,6 @@ pub fn is_builtin_thread_error_enum(name: &str) -> bool {
 
 pub fn is_builtin_env_error_enum(name: &str) -> bool {
     name == BUILTIN_ENV_ERROR_ENUM
-}
-
-pub fn is_builtin_time_error_enum(name: &str) -> bool {
-    name == BUILTIN_TIME_ERROR_ENUM
 }
 
 pub fn is_builtin_ffi_error_enum(name: &str) -> bool {

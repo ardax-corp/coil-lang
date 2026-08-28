@@ -23,14 +23,12 @@ Prefer `--lib --tests --bins` over `--all-targets`: Criterion `[[bench]]` target
 | Feature | Command | Notes |
 |---------|---------|--------|
 | default stack | `cargo test --workspace --lib --tests --bins` | full suite |
-| `no-default` | `cargo test --workspace --lib --tests --bins --no-default-features` | real suite; time tests are `cfg`-skipped |
-| `time` | `cargo check --workspace --lib --tests --bins --no-default-features --features time` | CI compile-gate only |
+| `no-default` | `cargo test --workspace --lib --tests --bins --no-default-features` | real suite (default features are `[]`) |
 | `dissect` | `cargo test --workspace --lib --tests --bins --features dissect` | dissect integration |
 | `debugger` | `cargo test --workspace --lib --tests --bins --features debugger` | debugger paths |
 
 ```bash
 cargo test --workspace --lib --tests --bins --no-default-features
-cargo check --workspace --lib --tests --bins --no-default-features --features time
 cargo test --workspace --lib --tests --bins --features dissect
 ```
 

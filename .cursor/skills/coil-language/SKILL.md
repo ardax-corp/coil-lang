@@ -43,7 +43,7 @@ Every runnable program needs `fn main()` **unless** the file only has `test("…
 
 Implicit imports (no `use` needed): prelude (`prelude`, `prelude::ops`, `prelude::test`, `prelude::math`) — injected by the compiler, not written in source.
 
-Explicit `use` for: `io`, `string`, `ffi`, `thread`, `time`, `env`, `gc`. Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
+Explicit `use` for: `io`, `string`, `ffi`, `thread`, `env`, `gc`. Time: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
 ```coil
 use io::{stdout};
@@ -91,7 +91,8 @@ userland modules. Prelude is auto-injected.
 | `string` | `use string::{format, to_bytes, from_bytes};` | Formatting / UTF-8 bytes |
 | `ffi` | `use ffi::{dload, declare, invoke};` + `use ffi::types::{Int, Ptr};` | Dynamic loading |
 | `thread` | `use thread::{spawn, join, channel, send, recv};` | OS threads, channels, mutex |
-| `time` / `env` | `use time::{timestamp, sleep_ms};` etc. | `time` is Cargo-feature gated (default on); crypto is [coil-crypto](https://github.com/ardax-corp/coil-crypto) |
+| `env` | `use env::{args, var, exec};` | process environment |
+| `time` | `use time::{…}` via [coil-time](https://github.com/ardax-corp/coil-time) | userland package (`dload`); not a virtual module |
 | `gc` | `use gc::{root, weak, collect};` | `Root` / `Weak` pins; class `fn drop()` runs at collect / teardown |
 
 `byte` is 0..=255; integer literals coerce under `byte` / `[byte]` expectations.

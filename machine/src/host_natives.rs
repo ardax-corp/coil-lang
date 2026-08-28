@@ -16,8 +16,27 @@ use crate::{
 
 use crate::vec_ops::VEC_WIRING;
 use crate::GC_WIRING;
-#[cfg(feature = "time")]
-use crate::TIME_WIRING;
+
+/// Removed virtual-time HostInvoke names/arities (COI-257). Same 16 slots as
+/// the old `TIME_WIRING` table, after FS and before ENV, so later ids stay put.
+const TIME_REMOVED: &[(&str, usize)] = &[
+    ("time_timestamp", 0),
+    ("time_sleep_ms", 1),
+    ("time_instant_now", 0),
+    ("time_elapsed_nanos", 1),
+    ("time_elapsed_millis", 1),
+    ("time_period", 9),
+    ("time_add", 2),
+    ("time_sub", 2),
+    ("time_period_add", 2),
+    ("time_period_sub", 2),
+    ("time_date", 0),
+    ("time_date_from_period", 1),
+    ("time_date_from_epoch_period", 1),
+    ("time_epoch", 0),
+    ("time_format", 2),
+    ("time_parse", 2),
+];
 
 /// Build the standard host-native table in stable order.
 ///
@@ -26,15 +45,15 @@ use crate::TIME_WIRING;
 /// no-op closure.
 ///
 /// Leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and virtual crypto
-/// slots were dropped; holes collapsed. Append-only from this table.
+/// slots were dropped; holes collapsed. Virtual time slots are panic stubs so
+/// `stream_attach` / `stream_park` stay 120 / 121. Append-only from this table.
 pub fn build_standard_host_natives(
     mut register_id: impl FnMut(&str, usize),
 ) -> Vec<Arc<dyn NativeFn>> {
     let mut out: Vec<Arc<dyn NativeFn>> = Vec::new();
     push_io_natives(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, FS_WIRING, "fs");
-    #[cfg(feature = "time")]
-    push_wiring(&mut out, &mut register_id, TIME_WIRING, "time");
+    push_removed_time_stubs(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, ENV_WIRING, "env");
     push_prelude_char_ord(&mut out, &mut register_id);
     push_thread_natives(&mut out, &mut register_id);
@@ -120,6 +139,22 @@ fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
 pub fn wire_standard_host_natives<const N: usize>(machine: &mut crate::Machine<N>) {
     for native in build_standard_host_natives(|_name, _id| {}) {
         machine.register_native(native);
+    }
+}
+
+fn push_removed_time_stubs(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    for &(name, arity) in TIME_REMOVED {
+        let args = vec![FfiType::Int; arity];
+        let sig = FfiSignature::from_parts(name.to_string(), args, FfiType::Int)
+            .unwrap_or_else(|_| panic!("removed time stub signature `{name}`"));
+        let id = out.len();
+        register_id(name, id);
+        out.push(Arc::new(HostClosureFn::new(sig, move |_heap, _args| {
+            panic!("removed HostInvoke `{name}` (virtual time is gone)");
+        })));
     }
 }
 
@@ -865,14 +900,10 @@ mod tests {
         assert_eq!(names[pgo + 2], STREAM_PARK_NATIVE);
         assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(pgo + 1));
         assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(pgo + 2));
-        // Default `time` table: attach=120, park=121 (old tls_alpn_protocol id
-        // reused after the hole collapse; the leftover *name* is gone).
-        #[cfg(feature = "time")]
-        {
-            assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
-            assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
-            assert_eq!(pgo, 119);
-        }
+        // Attach/park ids stay put after virtual time became panic stubs.
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
+        assert_eq!(pgo, 119);
         // IO block ends at udp_local_port; leftover TLS 25–28 used to follow it.
         let udp = names
             .iter()
@@ -880,5 +911,41 @@ mod tests {
             .expect("udp_local_port");
         assert_eq!(names[udp + 1], "fs_exists");
         assert_eq!(udp, 24);
+    }
+
+    #[test]
+    fn removed_time_hostinvoke_stubs_keep_names_and_attach_ids() {
+        let mut map = std::collections::HashMap::new();
+        let mut names = Vec::new();
+        let natives = build_standard_host_natives(|name, id| {
+            map.insert(name.to_string(), id);
+            names.push(name.to_string());
+        });
+        let expected: Vec<&str> = TIME_REMOVED.iter().map(|&(n, _)| n).collect();
+        assert_eq!(expected.len(), 16);
+        let fs_end = names
+            .iter()
+            .position(|n| n == "fs_realpath")
+            .expect("fs_realpath");
+        let env_start = names
+            .iter()
+            .position(|n| n == "env_args")
+            .expect("env_args");
+        assert_eq!(env_start, fs_end + 1 + TIME_REMOVED.len());
+        assert_eq!(
+            names[fs_end + 1..env_start]
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for &(name, arity) in TIME_REMOVED {
+            let id = *map.get(name).expect(name);
+            assert_eq!(natives[id].signature().args.len(), arity, "{name}");
+            assert_eq!(natives[id].signature().ret, FfiType::Int, "{name}");
+        }
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
+        assert_eq!(map.get(PGO_HIT_NATIVE).copied(), Some(119));
     }
 }

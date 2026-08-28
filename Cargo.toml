@@ -42,8 +42,7 @@ name = "fib"
 harness = false
 
 [features]
-default = ["time"]
-time = ["machine/time", "compiler/time", "coil-cli/time"]
+default = []
 
 [profile.release]
 opt-level=3

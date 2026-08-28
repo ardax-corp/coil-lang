@@ -485,16 +485,6 @@ impl Checker {
             self.register_builtin_thread_error();
         }
 
-        let needs_time_error = matches!(
-            &export,
-            BuiltinExport::Enum {
-                name: common::BUILTIN_TIME_ERROR_ENUM
-            }
-        ) || host_registry.is_some_and(|r| r.starts_with("time_"));
-        if needs_time_error && !self.enums.contains_key(common::BUILTIN_TIME_ERROR_ENUM) {
-            self.register_builtin_time_error();
-        }
-
         let needs_env_error = matches!(
             &export,
             BuiltinExport::Enum {
@@ -745,13 +735,6 @@ impl Checker {
         self.enum_tags.insert(name.clone(), tag_map);
         self.enum_payloads.insert(name.clone(), payloads);
         self.enum_arities.insert(name, arities);
-    }
-
-    fn register_builtin_time_error(&mut self) {
-        self.register_builtin_unit_enum(
-            common::BUILTIN_TIME_ERROR_ENUM,
-            common::BUILTIN_TIME_ERROR_VARIANTS,
-        );
     }
 
     fn register_builtin_env_error(&mut self) {
@@ -1089,11 +1072,9 @@ impl Checker {
         }
     }
 
-    /// Scheme for `fs_*` / `time_*` / `env_*` pipeline host natives.
+    /// Scheme for `fs_*` / `env_*` pipeline host natives.
     pub fn host_fn_scheme(&mut self, registry: &str, range: Range<usize>) -> Scheme {
         use crate::typechecking::ty::{boolean, record};
-        #[cfg(feature = "time")]
-        use common::BUILTIN_TIME_ERROR_ENUM;
         use common::{BUILTIN_ENV_ERROR_ENUM, BUILTIN_IO_ERROR_ENUM};
 
         let fun = |params: &[Ty], ret: Ty| {
@@ -1103,8 +1084,6 @@ impl Checker {
                 .fold(ret, |acc, p| Ty::Fun(Box::new(p.clone()), Box::new(acc)))
         };
         let io_err = Ty::Con(BUILTIN_IO_ERROR_ENUM.into());
-        #[cfg(feature = "time")]
-        let time_err = Ty::Con(BUILTIN_TIME_ERROR_ENUM.into());
         let env_err = Ty::Con(BUILTIN_ENV_ERROR_ENUM.into());
 
         let res_bool_io = result_app_ty(boolean(), io_err.clone());
@@ -1121,13 +1100,6 @@ impl Checker {
             ]),
             io_err,
         );
-
-        #[cfg(feature = "time")]
-        let res_int_time = result_app_ty(int(), time_err.clone());
-        #[cfg(feature = "time")]
-        let res_string_time = result_app_ty(string(), time_err.clone());
-        #[cfg(feature = "time")]
-        let res_unit_time = result_app_ty(unit_ty(), time_err);
 
         let res_string_env = result_app_ty(string(), env_err.clone());
         let res_strs_env = result_app_ty(vec_app_ty(string()), env_err.clone());
@@ -1146,31 +1118,6 @@ impl Checker {
             }
             "fs_read_link" | "fs_realpath" => fun(&[string()], res_string_io.clone()),
             "fs_list_dir" => fun(&[string()], res_strs_io),
-
-            #[cfg(feature = "time")]
-            "time_timestamp" | "time_instant_now" | "time_epoch" => fun(&[], res_int_time.clone()),
-            #[cfg(feature = "time")]
-            "time_sleep_ms" => fun(&[int()], res_unit_time),
-            #[cfg(feature = "time")]
-            "time_elapsed_nanos"
-            | "time_elapsed_millis"
-            | "time_date_from_period"
-            | "time_date_from_epoch_period" => fun(&[int()], res_int_time.clone()),
-            #[cfg(feature = "time")]
-            "time_add" | "time_sub" | "time_period_add" | "time_period_sub" => {
-                fun(&[int(), int()], res_int_time.clone())
-            }
-            #[cfg(feature = "time")]
-            "time_format" => fun(&[int(), string()], res_string_time.clone()),
-            #[cfg(feature = "time")]
-            "time_parse" => fun(&[string(), string()], res_int_time.clone()),
-            #[cfg(feature = "time")]
-            "time_date" => fun(&[], res_int_time.clone()),
-            #[cfg(feature = "time")]
-            "time_period" => {
-                let params: Vec<Ty> = std::iter::repeat_with(int).take(9).collect();
-                fun(&params, res_int_time)
-            }
 
             "env_args" => fun(&[], res_strs_env),
             "env_var" => fun(&[string()], res_string_env.clone()),
