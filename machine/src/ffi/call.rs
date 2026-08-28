@@ -440,43 +440,56 @@ pub fn invoke_via_libffi(
     let mut struct_bufs: Vec<Vec<u8>> = Vec::new();
     let mut slots: Vec<ArgSlot> = Vec::with_capacity(effective_types.len());
 
-    fn int_from_value(heap: &Heap, value: &Value) -> i64 {
-        crate::io::stream_fd_i64(heap, *value).unwrap_or_else(|| value.as_int())
+    fn value_is_stream(heap: &Heap, value: &Value) -> bool {
+        let v = crate::io::peel_one_boxed(heap, *value);
+        matches!(
+            heap.find_object_by_addr(v.raw() as u64),
+            Some(Object::Stream(_))
+        )
+    }
+
+    fn int_from_value(heap: &Heap, value: &Value) -> Result<i64, FfiError> {
+        if value_is_stream(heap, value) {
+            return Err(FfiError::Unsupported(
+                "FFI integer types do not accept a Stream (no silent fd coercion)".into(),
+            ));
+        }
+        Ok(value.as_int())
     }
 
     for (i, (ty, value)) in effective_types.iter().zip(args.iter()).enumerate() {
         match ty {
             FfiType::Int => {
                 slots.push(ArgSlot::I64(i64_storage.len()));
-                i64_storage.push(int_from_value(ctx.heap(), value));
+                i64_storage.push(int_from_value(ctx.heap(), value)?);
             }
             FfiType::Int8 => {
                 slots.push(ArgSlot::I8(i8_storage.len()));
-                i8_storage.push(int_from_value(ctx.heap(), value) as i8);
+                i8_storage.push(int_from_value(ctx.heap(), value)? as i8);
             }
             FfiType::Int16 => {
                 slots.push(ArgSlot::I16(i16_storage.len()));
-                i16_storage.push(int_from_value(ctx.heap(), value) as i16);
+                i16_storage.push(int_from_value(ctx.heap(), value)? as i16);
             }
             FfiType::Int32 => {
                 slots.push(ArgSlot::I32(i32_storage.len()));
-                i32_storage.push(int_from_value(ctx.heap(), value) as i32);
+                i32_storage.push(int_from_value(ctx.heap(), value)? as i32);
             }
             FfiType::UInt8 => {
                 slots.push(ArgSlot::U8(u8_storage.len()));
-                u8_storage.push(int_from_value(ctx.heap(), value) as u8);
+                u8_storage.push(int_from_value(ctx.heap(), value)? as u8);
             }
             FfiType::UInt16 => {
                 slots.push(ArgSlot::U16(u16_storage.len()));
-                u16_storage.push(int_from_value(ctx.heap(), value) as u16);
+                u16_storage.push(int_from_value(ctx.heap(), value)? as u16);
             }
             FfiType::UInt32 => {
                 slots.push(ArgSlot::U32(u32_storage.len()));
-                u32_storage.push(int_from_value(ctx.heap(), value) as u32);
+                u32_storage.push(int_from_value(ctx.heap(), value)? as u32);
             }
             FfiType::UInt64 => {
                 slots.push(ArgSlot::U64(u64_storage.len()));
-                u64_storage.push(int_from_value(ctx.heap(), value) as u64);
+                u64_storage.push(int_from_value(ctx.heap(), value)? as u64);
             }
             FfiType::Float => {
                 slots.push(ArgSlot::F64(f64_storage.len()));
@@ -953,5 +966,23 @@ mod tests {
         assert!(ret.as_int() > 0);
         let s = unsafe { CStr::from_ptr(buf.as_ptr() as *const c_char) };
         assert_eq!(s.to_string_lossy(), "hello 42");
+    }
+    /// COI-234: `declare(..., Int)` must reject a Stream. Do not inspect an fd.
+    #[test]
+    fn invoke_int_rejects_stream_argument() {
+        extern "C" fn sink(_v: i64) {}
+        let sig = FfiSignature::from_parts("sink", vec![FfiType::Int], FfiType::Void).unwrap();
+        let mut prepared = prepare_cif(&sig, &[]).unwrap();
+        prepared.addr = CodePtr::from_ptr(sink as *mut c_void);
+        let mut heap = Heap::default();
+        let stream = crate::io::stream_stdout(&mut heap).expect("stdout stream");
+        let args = [stream];
+        let mut ctx = InvokeContext::new(&mut heap, &[]);
+        let mut closures = Vec::new();
+        let result = invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closures);
+        assert!(
+            result.is_err(),
+            "FFI Int must not coerce a Stream (no silent fd())"
+        );
     }
 }

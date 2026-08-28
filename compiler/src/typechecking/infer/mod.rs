@@ -394,6 +394,9 @@ pub struct Checker {
     /// Fixed-prefix arity (`nfixed`) for variadic `declare` bindings.
     ffi_fn_nfixed: HashMap<String, usize>,
 
+    /// Declared FFI argument tags for `let id = declare(..., (T, …), …)`.
+    ffi_fn_arg_tags: HashMap<String, Vec<u32>>,
+
     /// `declare` return metadata keyed by `Class::field` (stored fn ids).
     ffi_fn_ret_by_field: HashMap<String, Ty>,
 
@@ -403,8 +406,14 @@ pub struct Checker {
     /// Fixed-prefix arity for [`Self::ffi_fn_ret_by_field`] entries.
     ffi_fn_nfixed_by_field: HashMap<String, usize>,
 
+    /// Declared FFI argument tags keyed by `Class::field`.
+    ffi_fn_arg_tags_by_field: HashMap<String, Vec<u32>>,
+
     /// `invoke` return metadata keyed by `fn_name::param_name` from call sites.
     ffi_fn_param_invoke_ret: HashMap<String, (Ty, bool, usize)>,
+
+    /// Declared FFI argument tags keyed by `fn_name::param_name`.
+    ffi_fn_param_invoke_args: HashMap<String, Vec<u32>>,
 
     /// Enclosing function during body inference (`invoke` param refinement).
     current_function: Option<String>,

@@ -5629,6 +5629,39 @@ fn main() -> Result<(), Error> {
         );
     }
 
+    /// COI-234: `invoke` of a `declare(..., Int)` signature with a Stream must fail.
+    #[test]
+    fn invoke_int_rejects_stream_argument() {
+        let src = r#"
+use ffi::{declare, dload, invoke};
+use ffi::types::{Int};
+use io::{stdout};
+fn main() {
+    let lib = match dload("c") {
+        Result::Ok(h) => h,
+        Result::Err(_) => 0,
+    };
+    let id = match declare(lib, "labs", (Int,), Int) {
+        Result::Ok(id) => id,
+        Result::Err(_) => 0,
+    };
+    let s = stdout();
+    let _ = invoke(lib, id, (s,));
+}
+"#;
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter().any(|m| {
+                m.code() == Some(ErrorCode::TypeMismatch)
+                    || m.message().to_ascii_lowercase().contains("stream")
+            }),
+            "declare(..., Int) with a Stream argument must fail (type error), got: {:?}",
+            msgs.iter()
+                .map(|m| (m.code(), m.message()))
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn ffi_error_kind_field_is_matchable() {
         let src = r#"
