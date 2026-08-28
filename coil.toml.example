@@ -169,7 +169,9 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 #   file                     # optional entry-point path
 #
 #   [env]
-#   allow_exec = true        # opt-in: enable env::exec at runtime (default is false)
+#   allow_exec = true        # opt-in: env::exec only (default false). Not FFI system/execve.
+#   allow_exit = true        # opt-in: env::exit (default false). Independent of allow_exec.
+#   allow_ffi_exec = true    # opt-in: FFI system/execve resolve (default false). Independent of allow_exec.
 #
 #   [ffi]
 #   search_paths             # extra dirs for FFI library lookup (not a grant)
