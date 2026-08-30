@@ -19,6 +19,19 @@ pub(crate) enum PassKind {
     BlockOrder,
 }
 
+/// Result of one named pass. [`collect_delta`] records this when `collect_stats`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PassDelta {
+    pub name: &'static str,
+    pub kind: PassKind,
+    pub changed: bool,
+    pub ops_delta: i64,
+    pub loads_eliminated: usize,
+    pub stores_eliminated: usize,
+    /// Unroll / branch / block-order count returned by the pass body.
+    pub extra: usize,
+}
+
 /// One named pass that mutated the buffer (aggregated by name).
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct PassHit {
@@ -186,45 +199,86 @@ fn count_stores(ops: &[IlOp]) -> usize {
         .count()
 }
 
-/// Run `f` and, when `collect`, record length / load / store deltas.
-pub(crate) fn run_named_pass(
+/// Run `f` and, when `collect`, fill a [`PassDelta`] from before/after ops.
+///
+/// When `collect` is off the buffer is not cloned (same as the old
+/// `run_named_pass`); `changed` is then `false` and iterative opt still
+/// compares the whole round via [`super::PassStats`].
+pub(crate) fn measure_pass(
     ops: &mut Vec<IlOp>,
     collect: bool,
     name: &'static str,
     kind: PassKind,
     f: impl FnOnce(&mut Vec<IlOp>) -> usize,
-) {
+) -> PassDelta {
     if !collect {
-        let _ = f(ops);
-        return;
+        let extra = f(ops);
+        return PassDelta {
+            name,
+            kind,
+            changed: false,
+            ops_delta: 0,
+            loads_eliminated: 0,
+            stores_eliminated: 0,
+            extra,
+        };
     }
     let before = ops.clone();
     let extra = f(ops);
     if *ops == before {
-        return;
+        return PassDelta {
+            name,
+            kind,
+            changed: false,
+            ops_delta: 0,
+            loads_eliminated: 0,
+            stores_eliminated: 0,
+            extra,
+        };
     }
-    let delta = ops.len() as i64 - before.len() as i64;
+    let ops_delta = ops.len() as i64 - before.len() as i64;
     let load_delta = count_loads(ops) as i64 - count_loads(&before) as i64;
     let store_delta = count_stores(ops) as i64 - count_stores(&before) as i64;
-    with_stats(|s| {
-        if delta < 0 {
-            s.ops_eliminated += (-delta) as usize;
+    PassDelta {
+        name,
+        kind,
+        changed: true,
+        ops_delta,
+        loads_eliminated: if load_delta < 0 {
+            (-load_delta) as usize
         } else {
-            s.ops_added += delta as usize;
+            0
+        },
+        stores_eliminated: if store_delta < 0 {
+            (-store_delta) as usize
+        } else {
+            0
+        },
+        extra,
+    }
+}
+
+/// Record a named pass from [`PassDelta`]. No match on pass internals here
+/// beyond the `PassKind` already stored on the delta / table row.
+pub(crate) fn collect_delta(delta: &PassDelta) {
+    if !delta.changed {
+        return;
+    }
+    with_stats(|s| {
+        if delta.ops_delta < 0 {
+            s.ops_eliminated += (-delta.ops_delta) as usize;
+        } else {
+            s.ops_added += delta.ops_delta as usize;
         }
-        if load_delta < 0 {
-            s.loads_eliminated += (-load_delta) as usize;
-        }
-        if store_delta < 0 {
-            s.stores_eliminated += (-store_delta) as usize;
-        }
-        match kind {
+        s.loads_eliminated += delta.loads_eliminated;
+        s.stores_eliminated += delta.stores_eliminated;
+        match delta.kind {
             PassKind::Generic => {}
-            PassKind::Unroll => s.loops_unrolled += extra.max(1),
-            PassKind::Branch => s.branches_optimized += extra.max(1),
-            PassKind::BlockOrder => s.blocks_reordered += extra.max(1),
+            PassKind::Unroll => s.loops_unrolled += delta.extra.max(1),
+            PassKind::Branch => s.branches_optimized += delta.extra.max(1),
+            PassKind::BlockOrder => s.blocks_reordered += delta.extra.max(1),
         }
-        s.add_pass(name, delta);
+        s.add_pass(delta.name, delta.ops_delta);
     });
 }
 
@@ -275,5 +329,29 @@ mod tests {
         assert!(json.contains("\"ops_eliminated\":5"));
         let round: OptStats = serde_json::from_str(&json).unwrap();
         assert_eq!(round, a);
+    }
+
+    #[test]
+    fn collect_delta_records_named_pass_from_pass_delta() {
+        begin_opt_stats();
+        collect_delta(&PassDelta {
+            name: "stack_dce",
+            kind: PassKind::Generic,
+            changed: true,
+            ops_delta: -2,
+            loads_eliminated: 0,
+            stores_eliminated: 0,
+            extra: 0,
+        });
+        let stats = last_opt_stats();
+        assert_eq!(stats.ops_eliminated, 2);
+        assert!(
+            stats
+                .passes
+                .iter()
+                .any(|p| p.name == "stack_dce" && p.applied == 1 && p.ops_delta == -2),
+            "{:?}",
+            stats.passes
+        );
     }
 }
