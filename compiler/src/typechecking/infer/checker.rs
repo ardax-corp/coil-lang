@@ -6,6 +6,7 @@ use parser::ast::{
 };
 use reporting::{ErrorCode, Label, Message};
 
+use crate::typechecking::def_id::DefId;
 use crate::typechecking::env::{Env, TyVarCounter, instantiate_with_kinds};
 use crate::typechecking::generics::{
     AssocTypeDecl, AssocTypeValue, Generics, InstanceDef, TypeClassDef, TypeClassMethodDef,
@@ -48,6 +49,8 @@ impl Checker {
         // ever called. `check_program` pushes a second frame so the
         // first stays around for inspection.
         env.push();
+        let mut def_interner = crate::typechecking::def_id::DefInterner::new();
+        let current_module_id = def_interner.intern_module("");
         let mut checker = Self {
             env,
             counter: TyVarCounter::new(),
@@ -58,6 +61,11 @@ impl Checker {
             virtual_modules: VirtualModules::new(),
             scope_bindings: HashMap::new(),
             disk_imports: HashSet::new(),
+            def_interner,
+            schemes_by_def: HashMap::new(),
+            local_defs: HashMap::new(),
+            def_ids_by_node: HashMap::new(),
+            current_module_id,
             current_match_lhs: None,
             classes: std::collections::HashMap::new(),
             class_type_ids: std::collections::HashMap::new(),
@@ -1445,10 +1453,24 @@ impl Checker {
         // Implicit `use prelude::*; use prelude::ops::*;` — FFI stays out.
         self.inject_prelude_scope();
         self.disk_imports.clear();
+        self.local_defs.clear();
+        self.def_ids_by_node.clear();
+        self.current_module_id = self.def_interner.intern_module(&self.current_module);
 
         // Mint NodeIds for every AST node (pre-walk). The visit order
         // matches `infer`'s recursion, so the IDs line up.
         id::pre_walk(ast, &mut self.ids);
+
+        // Intern top-level defs and bind `use` to the defining DefId.
+        // Discovery already built the file graph (`Pipeline::enqueue_uses`);
+        // this walk does not crawl the filesystem.
+        crate::typechecking::resolve::resolve(
+            &mut self.def_interner,
+            self.current_module_id,
+            ast,
+            &self.virtual_modules,
+            &mut self.local_defs,
+        );
 
         // Forward-declaration pre-pass: walk the AST once and
         // register every `enum` declaration's shape. This must run
@@ -1530,6 +1552,49 @@ impl Checker {
 
     pub fn env_mut(&mut self) -> &mut Env {
         &mut self.env
+    }
+
+    /// Local-name [`DefId`] from the current module's resolve map.
+    pub fn def_id_of(&self, name: &str) -> Option<DefId> {
+        self.local_defs.get(name).copied()
+    }
+
+    /// Interned def for `name` in `module` (namespace path, `""` for entry).
+    pub fn interned_def(&self, module: &str, name: &str) -> Option<DefId> {
+        let mid = self.def_interner.module_id(module)?;
+        self.def_interner.get(mid, name)
+    }
+
+    /// Sidecar lookup: pre-walk [`NodeId`] → interned def.
+    pub fn def_id_at(&self, node: NodeId) -> Option<DefId> {
+        self.def_ids_by_node.get(&node).copied()
+    }
+
+    pub fn def_interner(&self) -> &crate::typechecking::def_id::DefInterner {
+        &self.def_interner
+    }
+
+    fn record_free_fn_scheme(&mut self, name: &str, scheme: Scheme) {
+        if let Some(&id) = self.local_defs.get(name) {
+            self.schemes_by_def.insert(id, scheme);
+        }
+    }
+
+    fn maybe_attach_def_id(&mut self, id: NodeId, expr: &Output) {
+        let name: Option<&str> = match expr.1.as_ref() {
+            Expression::Function { name, .. } => Some(*name),
+            Expression::Class { name, .. } => Some(*name),
+            Expression::EnumDecl { name, .. } => Some(*name),
+            Expression::TypeAlias { name, .. } => Some(*name),
+            Expression::StaticDecl { name, .. } => Some(*name),
+            Expression::Use { name, alias, .. } => Some(alias.as_deref().unwrap_or(name.as_str())),
+            _ => None,
+        };
+        if let Some(n) = name
+            && let Some(&def) = self.local_defs.get(n)
+        {
+            self.def_ids_by_node.insert(id, def);
+        }
     }
 
     /// Borrow the running substitution (useful for diagnostics).
@@ -1922,6 +1987,7 @@ impl Checker {
         // call here consumes the `n`-th ID.
         let id = self.ids.ids()[self.next_id_idx];
         self.next_id_idx += 1;
+        self.maybe_attach_def_id(id, expr);
 
         let ty = self.infer_inner(expr, Some(id));
         self.cache.insert(id, ty.clone());
@@ -4730,10 +4796,24 @@ impl Checker {
 
     #[inline(never)]
     fn lookup_fn_scheme(&self, ident: &str) -> Option<Scheme> {
-        self.env
+        // Proof path: interned free functions resolve by DefId, not the
+        // name string. Env lookup remains a shadowing / forward-stub
+        // fallback (locals, natives, not-yet-recorded schemes).
+        let env_scheme = self
+            .env
             .lookup(ident)
             .cloned()
-            .or_else(|| self.forward_free_fn_schemes.get(ident).cloned())
+            .or_else(|| self.forward_free_fn_schemes.get(ident).cloned());
+        if let Some(&id) = self.local_defs.get(ident)
+            && let Some(def_scheme) = self.schemes_by_def.get(&id)
+        {
+            match &env_scheme {
+                None => return Some(def_scheme.clone()),
+                Some(s) if s == def_scheme => return Some(def_scheme.clone()),
+                Some(_) => return env_scheme,
+            }
+        }
+        env_scheme
     }
 
     fn infer_call_expr(
@@ -10500,7 +10580,7 @@ impl Checker {
 
     /// Return the resolved result type of a registered function.
     pub fn fn_return_ty(&self, fn_name: &str) -> Option<Ty> {
-        let scheme = self.env.lookup(fn_name)?;
+        let scheme = self.lookup_fn_scheme(fn_name)?;
         let mut ty = scheme.ty.clone();
         while let Ty::Fun(_, next) = ty {
             ty = *next;
@@ -12046,8 +12126,9 @@ impl Checker {
                 self.env
                     .insert_top(format!("{owner}::{name}"), Scheme::mono(resolved));
             } else {
-                self.env
-                    .insert_top(name.to_string(), Scheme::mono(resolved));
+                let scheme = Scheme::mono(resolved);
+                self.env.insert_top(name.to_string(), scheme.clone());
+                self.record_free_fn_scheme(name, scheme);
             }
         }
 
@@ -12107,8 +12188,9 @@ impl Checker {
             }
             self.env.insert_top(name.to_string(), scheme.clone());
             if fqn != name {
-                self.env.insert_top(fqn.clone(), scheme);
+                self.env.insert_top(fqn.clone(), scheme.clone());
             }
+            self.record_free_fn_scheme(name, scheme);
 
             // Every constraint is a trailing dictionary argument. Builtin
             // classes use compiler-generated implementation thunks, while

@@ -9,6 +9,7 @@ use std::ops::Range;
 use parser::ast::{Expression, Output, Visibility};
 use reporting::Message;
 
+use crate::typechecking::def_id::{DefId, DefInterner, ModuleId};
 use crate::typechecking::env::{Env, TyVarCounter};
 use crate::typechecking::generics::InstanceDef;
 use crate::typechecking::id::{IdTable, NodeId};
@@ -162,6 +163,18 @@ pub struct Checker {
     /// Like virtual imports, these are file-level globals — not lambda/defer
     /// captures — and must be rebound after `take_and_isolate`.
     disk_imports: HashSet<String>,
+
+    /// Interned module / def identities. Persists across multi-file
+    /// `check_program` so `use` binds the defining module's [`DefId`].
+    def_interner: DefInterner,
+    /// Schemes keyed by interned [`DefId`] (persist across files).
+    schemes_by_def: HashMap<DefId, Scheme>,
+    /// Current-file local name → [`DefId`] (reset each `check_program`).
+    local_defs: HashMap<String, DefId>,
+    /// Sidecar: pre-walk [`NodeId`] → interned def (reset each `check_program`).
+    def_ids_by_node: HashMap<NodeId, DefId>,
+    /// [`ModuleId`] for [`Self::current_module`].
+    current_module_id: ModuleId,
 
     /// Type of the surrounding `match`'s LHS, if any. Used by
     /// [`Expression::Default`] arms.

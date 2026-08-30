@@ -6,10 +6,12 @@
 pub mod aggregate_arith;
 pub mod const_eval;
 pub mod control_flow;
+pub mod def_id;
 pub mod env;
 pub mod generics;
 pub mod id;
 pub mod infer;
+pub mod resolve;
 pub mod kind;
 pub mod loop_par;
 pub mod pretty;
@@ -26,6 +28,7 @@ pub use aggregate_arith::{
 };
 #[allow(unused_imports)] // public API for Matrix helpers
 pub use aggregate_arith::{is_matrix_ty, unwrap_matrix_ty, wrap_matrix_ty};
+pub use def_id::{DefId, DefInterner, DefKind, ModuleId};
 pub use infer::{CStructDef, CallbackSigDef, Checker, ForInInfo, ForInKind};
 #[allow(unused_imports)] // public API for kind-aware callers / tests
 pub use kind::Kind;
