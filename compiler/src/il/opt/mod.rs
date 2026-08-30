@@ -1,5 +1,14 @@
 //! IL optimization passes unlocked by symbolic labels.
 //!
+//! **Driver (D2).** Production opts run from a static table in [`driver`]
+//! (order matches D1 README). Each [`driver::Pass`] returns a
+//! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
+//! on the table row, not a match in the driver loop). PGO instrumenting still
+//! runs cleanup only. [`super::IlModule::optimize_and_flatten`] still defers
+//! `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`, and
+//! `slot_promote_tell` around per-body `cfg_gvn` — those are not folded into
+//! the OptLevel table. Fuse-select stays in `lower_optimized`.
+//!
 //! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
 
 use super::op::IlOp;
@@ -78,44 +87,7 @@ pub struct OptimizeOptions {
     pub pure_call_ctx: Option<super::pure_call::PureCallCtx>,
 }
 
-impl Default for OptimizeOptions {
-    fn default() -> Self {
-        Self {
-            jump_thread: true,
-            dead_block: true,
-            stack_dce: true,
-            mem_fwd: true,
-            copy_prop: true,
-            slot_promote: true,
-            canon: true,
-            // On: spill casts that block float chains; fuse stage0 accepts
-            // LOAD;CONST so the spilled shape becomes FloatChainStore.
-            cast_spill: true,
-            algebraic: true,
-            licm: true,
-            loop_bounds: true,
-            return_convoy: true,
-            clone_shared_return: true,
-            bin_join_convoy: true,
-            multi_op_join_convoy: true,
-            invert_guard_branch: true,
-            slot_promote_tell: true,
-            seek_back_edge: false,
-            loop_unroll: true,
-            loop_unroll_factor: 8,
-            pgo_prioritize_hot_loops: true,
-            invariant_store_elim: true,
-            ssa_gvn: true,
-            escape_analysis: true,
-            branch_optimization: true,
-            block_reordering: true,
-            iterative_optimization: false,
-            max_optimization_iterations: 10,
-            collect_stats: false,
-            pure_call_ctx: None,
-        }
-    }
-}
+// Default is `OptLevel::Standard.options()` (derived from the driver table).
 
 /// One pipeline round: whether the op buffer changed, and its length.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -259,225 +231,7 @@ fn optimize_once_at(
     pool: &mut Vec<u64>,
     next_label: &mut u32,
 ) {
-    let entry_tell = cleanup_once_at(ops, opts, entry_sp, pool);
-    // Instrument compile: counters describe cleanup mid-IR only.
-    if crate::profile::pgo_instrumenting() {
-        return;
-    }
-    crate::profile::prepare_function_profile(ops);
-    decision_once_at(ops, opts, entry_sp, entry_tell, next_label);
-}
-
-/// Profile-agnostic cleanup: peeps that normalize shape without layout/heat.
-fn cleanup_once_at(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    pool: &mut Vec<u64>,
-) -> u32 {
-    let collect = opts.collect_stats;
-    let g = stats::PassKind::Generic;
-    if opts.jump_thread {
-        stats::run_named_pass(ops, collect, "jump_thread", g, |ops| {
-            jump_thread(ops);
-            0
-        });
-    }
-    if opts.dead_block {
-        stats::run_named_pass(ops, collect, "dead_block", g, |ops| {
-            eliminate_dead_blocks(ops);
-            0
-        });
-    }
-    if opts.stack_dce {
-        stats::run_named_pass(ops, collect, "stack_dce", g, |ops| {
-            stack_dce(ops);
-            0
-        });
-    }
-    if opts.mem_fwd {
-        stats::run_named_pass(ops, collect, "mem_fwd", g, |ops| {
-            mem_fwd(ops, entry_sp);
-            0
-        });
-    }
-    let entry_tell = entry_sp.max(0) as u32;
-    if opts.copy_prop {
-        stats::run_named_pass(ops, collect, "copy_prop", g, |ops| {
-            copy_prop(ops, entry_tell);
-            0
-        });
-    }
-    if opts.mem_fwd {
-        stats::run_named_pass(ops, collect, "dead_store", g, |ops| {
-            dead_store_at(ops, entry_tell);
-            0
-        });
-    }
-    if opts.canon {
-        stats::run_named_pass(ops, collect, "canon", g, |ops| {
-            super::canon::canonicalize_operand_order(ops, pool);
-            0
-        });
-    }
-    if opts.algebraic {
-        stats::run_named_pass(ops, collect, "algebraic", g, |ops| {
-            super::algebraic::algebraic_simplify(ops, pool);
-            0
-        });
-    }
-    if opts.cast_spill {
-        stats::run_named_pass(ops, collect, "cast_spill", g, |ops| {
-            super::cast_spill::spill_cast_before_float_chain(ops);
-            0
-        });
-    }
-    entry_tell
-}
-
-/// Profile-sensitive mid opts; branch layout and block reorder stay last.
-fn decision_once_at(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    entry_tell: u32,
-    next_label: &mut u32,
-) {
-    let collect = opts.collect_stats;
-    let g = stats::PassKind::Generic;
-    if opts.licm {
-        let _ = entry_sp;
-        stats::run_named_pass(ops, collect, "licm", g, |ops| {
-            super::licm::set_pgo_prioritize_hot_licm(opts.pgo_prioritize_hot_loops);
-            super::licm::licm(ops);
-            0
-        });
-    }
-    if opts.loop_bounds {
-        stats::run_named_pass(ops, collect, "loop_bounds", g, |ops| {
-            super::bounds::loop_bounds(ops);
-            0
-        });
-    }
-    if opts.loop_unroll {
-        stats::run_named_pass(
-            ops,
-            collect,
-            "loop_unroll",
-            stats::PassKind::Unroll,
-            |ops| {
-                loop_unroll::unroll_loops_pgo(
-                    ops,
-                    opts.loop_unroll_factor,
-                    opts.pgo_prioritize_hot_loops,
-                )
-            },
-        );
-    }
-    if opts.invariant_store_elim {
-        stats::run_named_pass(ops, collect, "invariant_store_elim", g, |ops| {
-            invariant_store_elim::eliminate_invariant_stores(ops, entry_sp);
-            0
-        });
-    }
-    if opts.ssa_gvn {
-        stats::run_named_pass(ops, collect, "ssa_gvn", g, |ops| {
-            super::gvn_ssa::ssa_gvn(ops);
-            0
-        });
-    }
-    // After GVN so scalarized loads can CSE; before slot_promote so new
-    // element slots are eligible for promotion.
-    if opts.escape_analysis {
-        stats::run_named_pass(ops, collect, "escape_analysis", g, |ops| {
-            escape_analysis::escape_analysis_pgo(ops, opts.pgo_prioritize_hot_loops);
-            0
-        });
-    }
-    // After LICM so hoisted `LOAD temp; STORE local` copies become aliases.
-    if opts.slot_promote {
-        stats::run_named_pass(ops, collect, "slot_promote", g, |ops| {
-            slot_promote(ops, entry_tell);
-            dead_store_at(ops, entry_tell);
-            0
-        });
-    }
-    if opts.clone_shared_return {
-        stats::run_named_pass(ops, collect, "clone_shared_return", g, |ops| {
-            clone_shared_return(ops);
-            0
-        });
-    }
-    if opts.return_convoy {
-        stats::run_named_pass(ops, collect, "return_convoy", g, |ops| {
-            return_convoy(ops);
-            0
-        });
-    }
-    if opts.bin_join_convoy {
-        stats::run_named_pass(ops, collect, "bin_join_convoy", g, |ops| {
-            bin_join_convoy(ops);
-            0
-        });
-    }
-    if opts.multi_op_join_convoy {
-        stats::run_named_pass(ops, collect, "multi_op_join_convoy", g, |ops| {
-            multi_op_join_convoy(ops);
-            0
-        });
-    }
-    // Last among shape rewrites: convoy passes match JMP-to-join shapes.
-    if opts.invert_guard_branch {
-        stats::run_named_pass(ops, collect, "invert_guard_branch", g, |ops| {
-            invert_branch_over_jump(ops);
-            0
-        });
-    }
-    if opts.branch_optimization {
-        stats::run_named_pass(
-            ops,
-            collect,
-            "branch_optimization",
-            stats::PassKind::Branch,
-            |ops| {
-                let profile = crate::profile::current_profile();
-                let bp = profile
-                    .as_ref()
-                    .map(|p| crate::profile::branch_profile(ops, p));
-                branch_opt::optimize_branches_at(ops, bp.as_ref(), entry_sp, next_label)
-            },
-        );
-    }
-    if opts.block_reordering {
-        stats::run_named_pass(
-            ops,
-            collect,
-            "block_reordering",
-            stats::PassKind::BlockOrder,
-            |ops| {
-                let profile = crate::profile::current_profile();
-                let bp = profile
-                    .as_ref()
-                    .map(|p| crate::profile::branch_profile(ops, p));
-                block_order::reorder_basic_blocks(ops, bp.as_ref())
-            },
-        );
-    }
-    // After every slot-tracking pass: promotion leaves a slot defined only by
-    // the push that lands on it, which earlier passes would not see.
-    // Seek-normalize first so loop headers join at a Known cursor.
-    if opts.seek_back_edge {
-        stats::run_named_pass(ops, collect, "seek_back_edge", g, |ops| {
-            seek_normalize_back_edges(ops, entry_tell);
-            0
-        });
-    }
-    if opts.slot_promote_tell {
-        stats::run_named_pass(ops, collect, "slot_promote_tell", g, |ops| {
-            slot_promote_at(ops, entry_tell);
-            0
-        });
-    }
+    driver::run_once(ops, opts, entry_sp, pool, next_label);
 }
 
 /// Run [`optimize`] on each [`super::IlFunc`] emitting span; leave prologue and
@@ -545,15 +299,16 @@ pub(crate) fn emitting_range_to_raw(
 
 mod block_order;
 mod branch_opt;
+mod driver;
 mod opt_level;
 mod stats;
-pub use opt_level::OptLevel;
-pub use stats::{OptStats, begin_opt_stats, last_opt_stats};
-pub(crate) use stats::note_function_inlined;
+pub(crate) use block_order::reorder_basic_blocks;
 #[allow(unused_imports)]
 pub use branch_opt::{BranchProfile, optimize_branches};
 pub(crate) use branch_opt::{max_code_label, remap_label_space};
-pub(crate) use block_order::reorder_basic_blocks;
+pub use opt_level::OptLevel;
+pub(crate) use stats::note_function_inlined;
+pub use stats::{OptStats, begin_opt_stats, last_opt_stats};
 
 mod cfg;
 mod convoy;
@@ -564,11 +319,7 @@ mod loop_unroll;
 mod slot_promote;
 
 pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
-use cfg::{eliminate_dead_blocks, invert_branch_over_jump, jump_thread};
 pub(crate) use convoy::multi_op_join_convoy;
-use convoy::{bin_join_convoy, clone_shared_return, return_convoy};
-use dce::{copy_prop, dead_store_at, mem_fwd, stack_dce};
-use slot_promote::slot_promote;
 pub(crate) use slot_promote::{seek_normalize_back_edges, slot_promote_at};
 
 #[cfg(test)]

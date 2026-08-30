@@ -36,25 +36,30 @@ impl OptLevel {
         name.parse()
     }
 
+    /// Production pass names this level enables, in driver / D1 table order.
+    pub fn pass_names(self) -> Vec<&'static str> {
+        use super::driver::PRODUCTION_PASSES;
+        PRODUCTION_PASSES
+            .iter()
+            .filter(|spec| pass_included(self, spec))
+            .map(|spec| spec.name)
+            .collect()
+    }
+
     /// `OptimizeOptions` for this level.
+    ///
+    /// Pass flags are derived from [`Self::pass_names`] via the driver table
+    /// (`dead_store` sets `mem_fwd`). Driver knobs (`pgo_prioritize_hot_loops`,
+    /// iteration cap, …) are not pass names.
     pub fn options(self) -> OptimizeOptions {
-        match self {
-            Self::None => none_opts(),
-            Self::Basic => basic_opts(),
-            Self::Standard => OptimizeOptions::default(),
-            Self::Aggressive => {
-                let mut o = OptimizeOptions::default();
-                o.seek_back_edge = true;
-                o
+        use super::driver::PRODUCTION_PASSES;
+        let mut o = base_knobs(self);
+        for spec in PRODUCTION_PASSES {
+            if pass_included(self, spec) {
+                spec.enable(&mut o);
             }
-            Self::Size => {
-                let mut o = OptimizeOptions::default();
-                o.loop_unroll = false;
-                o.clone_shared_return = false;
-                o
-            }
-            Self::Debug => debug_opts(),
         }
+        o
     }
 
     /// Tiny-inline budgets. Lives here so CLI tests can check mapping without
@@ -145,24 +150,34 @@ fn all_off() -> OptimizeOptions {
     }
 }
 
-fn none_opts() -> OptimizeOptions {
+fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
+    use super::driver::OptFloor;
+    let ceiling = match level {
+        OptLevel::None => OptFloor::None,
+        OptLevel::Basic | OptLevel::Debug => OptFloor::Basic,
+        OptLevel::Standard | OptLevel::Size => OptFloor::Standard,
+        OptLevel::Aggressive => OptFloor::Aggressive,
+    };
+    spec.floor <= ceiling && !(level == OptLevel::Size && spec.omit_from_size)
+}
+
+/// Knobs that are not pass names. Standard/Aggressive/Size keep Default's
+/// `pgo_prioritize_hot_loops`; None/Basic/Debug leave it off.
+fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
-    o.algebraic = true;
+    match level {
+        OptLevel::None | OptLevel::Basic | OptLevel::Debug => {}
+        OptLevel::Standard | OptLevel::Aggressive | OptLevel::Size => {
+            o.pgo_prioritize_hot_loops = true;
+        }
+    }
     o
 }
 
-fn basic_opts() -> OptimizeOptions {
-    let mut o = none_opts();
-    o.jump_thread = true;
-    o.dead_block = true;
-    o.stack_dce = true;
-    o.mem_fwd = true;
-    o.copy_prop = true;
-    o
-}
-
-fn debug_opts() -> OptimizeOptions {
-    basic_opts()
+impl Default for OptimizeOptions {
+    fn default() -> Self {
+        OptLevel::Standard.options()
+    }
 }
 
 #[cfg(test)]
@@ -305,6 +320,41 @@ mod tests {
                 w[0],
                 w[1]
             );
+        }
+    }
+
+    #[test]
+    fn none_pass_names_are_algebraic_only() {
+        assert_eq!(OptLevel::None.pass_names(), vec!["algebraic"]);
+    }
+
+    #[test]
+    fn aggressive_pass_names_are_standard_plus_seek() {
+        let standard = OptLevel::Standard.pass_names();
+        let aggressive = OptLevel::Aggressive.pass_names();
+        let extra: Vec<_> = aggressive
+            .iter()
+            .copied()
+            .filter(|n| !standard.contains(n))
+            .collect();
+        assert_eq!(extra, vec!["seek_back_edge"]);
+        assert!(
+            standard.iter().all(|n| aggressive.contains(n)),
+            "Aggressive must include every Standard name"
+        );
+    }
+
+    #[test]
+    fn size_omits_loop_unroll_and_clone_shared_return() {
+        let names = OptLevel::Size.pass_names();
+        assert!(!names.contains(&"loop_unroll"));
+        assert!(!names.contains(&"clone_shared_return"));
+        let standard = OptLevel::Standard.pass_names();
+        for n in &standard {
+            if *n == "loop_unroll" || *n == "clone_shared_return" {
+                continue;
+            }
+            assert!(names.contains(n), "Size missing {n}");
         }
     }
 
