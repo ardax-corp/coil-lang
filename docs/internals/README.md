@@ -5,6 +5,7 @@ How coil is structured for contributors and embedders. End-user language docs li
 | Document | Contents |
 |----------|----------|
 | [Pipeline](pipeline.md) | Parse → typecheck → codegen → archive → execute |
+| [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Array pins](array-pin.md) | Shipped `ArrayPin` / `IndexPin*` handle (COI-198) |
 | [SIMD](simd.md) | `coil-simd` — stable `std::arch` kernels for packed LA |

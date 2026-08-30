@@ -15,6 +15,8 @@ How a `.hy` program becomes running bytecode on the VM.
 AST + HM → Stack IL (labels) → IL opts → lower/fuse-select → Vec<Byte> → .hyc → VM
 ```
 
+Per-pass IL opt contracts (input / output / refusals / solo tests): [`compiler/src/il/opt/README.md`](../../compiler/src/il/opt/README.md).
+
 ## Optimization levels
 
 `Pipeline::set_opt_level` / CLI `-O` / `--opt-level` select an [`OptLevel`](../../compiler/src/il/opt/opt_level.rs) preset that fills `OptimizeOptions` (and tiny-inline budgets). Default is **Standard** — the same pass set as before this flag existed.
