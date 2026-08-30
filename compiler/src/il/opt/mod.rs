@@ -1,4 +1,6 @@
 //! IL optimization passes unlocked by symbolic labels.
+//!
+//! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
 
 use super::op::IlOp;
 
