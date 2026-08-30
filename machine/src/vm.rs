@@ -3274,19 +3274,27 @@ impl<const S: usize> Machine<S> {
                                             });
                                             return true;
                                         }
+                                    } else {
+                                        // Void natives must still leave a defined TOS.
+                                        self.stack.push(Value::default());
                                     }
                                 }
-                                #[cfg(debug_assertions)]
                                 Err(e) => {
-                                    eprintln!("HostInvoke failed for `{}`: {e}", native.name())
+                                    return self.runtime_panic(
+                                        &format!(
+                                            "HostInvoke failed for `{}`: {e}",
+                                            native.name()
+                                        ),
+                                        ip.saturating_sub(1),
+                                    );
                                 }
-                                #[cfg(not(debug_assertions))]
-                                Err(_) => {}
                             },
-                            #[cfg(debug_assertions)]
-                            None => eprintln!("HostInvoke: unknown native id {fn_id}"),
-                            #[cfg(not(debug_assertions))]
-                            None => {}
+                            None => {
+                                return self.runtime_panic(
+                                    &format!("HostInvoke: unknown native id {fn_id}"),
+                                    ip.saturating_sub(1),
+                                );
+                            }
                         }
                         let allocated = self.heap.live_object_count().saturating_sub(live_before);
                         if allocated > 0 {

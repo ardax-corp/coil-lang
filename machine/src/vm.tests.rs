@@ -2007,6 +2007,149 @@
         );
     }
 
+    /// Unknown native ids trap in debug and release (no silent stack skip).
+    #[test]
+    fn host_invoke_unknown_id_traps() {
+        let mut vm = Machine::<4>::default();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        vm.run(&[
+            Byte::new(Instruction::CONST).with_value_u32(99),
+            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
+            Byte::new(Instruction::HostInvoke).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(vm.panicked(), "unknown HostInvoke id must trap");
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf8");
+        assert!(
+            s.contains("HostInvoke: unknown native id 99"),
+            "missing unknown-id panic: {s:?}"
+        );
+    }
+
+    /// Native `Err` traps via `runtime_panic`; callers must not see Result::Err.
+    #[test]
+    fn host_invoke_native_err_traps() {
+        use crate::ffi::{FfiError, FfiSignatureBuilder};
+        use crate::memory::FfiType;
+
+        let sig = FfiSignatureBuilder::new("boom")
+            .ret(FfiType::Void)
+            .build()
+            .unwrap();
+        let mut vm = Machine::<4>::default();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        let fn_id = vm.register_fn(sig, |_heap, _args| {
+            Err(FfiError::InvalidHandle("native failed".into()))
+        });
+        vm.run(&[
+            Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
+            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
+            Byte::new(Instruction::HostInvoke).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(vm.panicked(), "native Err must trap");
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf8");
+        assert!(
+            s.contains("HostInvoke failed for `boom`"),
+            "missing native-err panic: {s:?}"
+        );
+        assert!(s.contains("native failed"), "missing error text: {s:?}");
+    }
+
+    /// `Ok(None)` without a pending IO park pushes unit so later ops see TOS.
+    #[test]
+    fn host_invoke_void_ok_none_pushes_unit() {
+        use crate::ffi::FfiSignatureBuilder;
+        use crate::memory::FfiType;
+
+        let sig = FfiSignatureBuilder::new("void_ok")
+            .ret(FfiType::Void)
+            .build()
+            .unwrap();
+        let mut vm = Machine::<4>::default();
+        let fn_id = vm.register_fn(sig, |_heap, _args| Ok(None));
+        vm.run(&[
+            Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
+            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
+            Byte::new(Instruction::HostInvoke).with_operand_u32(0),
+            const_int(42),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(!vm.panicked());
+        assert_eq!(vm.pop().as_int(), 42, "CONST after HostInvoke must not be lost");
+        assert_eq!(
+            vm.pop(),
+            Value::default(),
+            "void Ok(None) must push unit"
+        );
+    }
+
+    /// `Ok(None)` + pending park still parks (no push, no panic).
+    #[test]
+    fn host_invoke_ok_none_with_pending_park_parks() {
+        use crate::ffi::FfiSignatureBuilder;
+        use crate::io::{
+            alloc_stream, stream_await_readable, stream_close, stream_set_read_timeout,
+            take_pending_io_park,
+        };
+        use crate::io_handle::NativeHandle;
+        use crate::memory::{FfiType, StreamKind};
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let writer = TcpStream::connect(addr).expect("connect");
+        let (reader, _) = listener.accept().expect("accept");
+
+        let mut vm = Machine::<8>::default();
+        let stream = alloc_stream(vm.heap_mut(), NativeHandle::Tcp(reader), StreamKind::Tcp)
+            .expect("alloc stream");
+        stream_set_read_timeout(vm.heap_mut(), stream, 50).expect("timeout");
+        let _ = take_pending_io_park();
+
+        let sig = FfiSignatureBuilder::new("await_readable")
+            .arg(FfiType::Int)
+            .ret(FfiType::Int)
+            .build()
+            .unwrap();
+        let fn_id = vm.register_fn(sig, |heap, args| {
+            stream_await_readable(heap, args[0])
+                .map_err(|tag| crate::ffi::FfiError::Unsupported(format!("{tag:?}")))
+        });
+
+        vm.push(Value::from(fn_id as i64));
+        vm.push(stream);
+        let code = [
+            Byte::new(Instruction::MakeTuple).with_operand_u32(1),
+            Byte::new(Instruction::HostInvoke).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let paused = vm.execute(&code, &[], 0);
+        assert!(paused, "HostInvoke park must pause execute");
+        assert!(
+            vm.pending_io.is_some(),
+            "pending_io must be set when await parks"
+        );
+        assert!(!vm.panicked(), "park path must not trap");
+        assert_eq!(
+            vm.tell(),
+            0,
+            "park path must not push; wait completion pushes later"
+        );
+        assert!(
+            take_pending_io_park().is_none(),
+            "HostInvoke must consume the park request"
+        );
+
+        let _ = vm.pending_io.take();
+        let _ = stream_close(vm.heap_mut(), stream);
+        drop(writer);
+    }
+
     fn install_program(vm: &mut Machine<512>, code: &[Byte]) {
         vm.program_code = unsafe {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
