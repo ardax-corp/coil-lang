@@ -2080,6 +2080,31 @@ fn main() {
 }
 
 #[test]
+fn static_array_length_mismatch_assignment_errors() {
+    // E1: unify, not zip — [int; 2] must not unify with [int; 8].
+    let (_ty, msgs) = check(
+        r#"
+fn main() {
+    let a: [int; 2] = [1, 2];
+    let b: [int; 8] = a;
+}
+"#,
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("Type mismatch")),
+        "expected type mismatch for [int; 2] vs [int; 8], got: {:?}",
+        msgs
+    );
+    assert!(
+        !msgs
+            .iter()
+            .any(|m| m.contains("cannot zip arrays of length")),
+        "E1 is unify, not zip; unexpected zip diagnostic: {:?}",
+        msgs
+    );
+}
+
+#[test]
 fn dot_length_mismatch_errors() {
     let (_ty, msgs) = check(
         r#"

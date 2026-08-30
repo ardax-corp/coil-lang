@@ -1,10 +1,8 @@
 //! Unification (Robinson's algorithm with occurs check).
 
 use super::env::substitute_vars;
-use super::subst::{Subst, apply_ty, compose};
-use super::ty::{
-    Ty, TyVarId, ftv_ty, option_inner, peel_constructor_refinement, result_ok_err,
-};
+use super::subst::{apply_ty, compose, Subst};
+use super::ty::{ftv_ty, option_inner, peel_constructor_refinement, result_ok_err, Ty, TyVarId};
 
 /// Failure modes for unification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -389,15 +387,10 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
                 length: l2,
             },
         ) => {
-            let len_compatible = matches!(
-                (l1, l2),
-                (super::ty::ArrayLength::Dynamic, _)
-                    | (_, super::ty::ArrayLength::Dynamic)
-                    | (
-                        super::ty::ArrayLength::Static(_),
-                        super::ty::ArrayLength::Static(_)
-                    )
-            );
+            let len_compatible = match (l1, l2) {
+                (super::ty::ArrayLength::Dynamic, _) | (_, super::ty::ArrayLength::Dynamic) => true,
+                (super::ty::ArrayLength::Static(n), super::ty::ArrayLength::Static(m)) => n == m,
+            };
             if !len_compatible {
                 return Err(UnifyError::Mismatch {
                     left: Ty::Array {
@@ -546,7 +539,9 @@ fn bind_var(subst: &Subst, var: TyVarId, ty: Ty) -> Result<Subst, UnifyError> {
 mod tests {
     use super::*;
     use crate::typechecking::subst::apply_ty_prune;
-    use crate::typechecking::ty::{EnumVariantPayloadTy, boolean, float, int, list, string};
+    use crate::typechecking::ty::{
+        array, array_fixed, boolean, float, int, list, string, EnumVariantPayloadTy,
+    };
 
     fn v(i: u32) -> Ty {
         Ty::Var(TyVarId(i))
@@ -1150,5 +1145,25 @@ mod tests {
         );
         assert_eq!(apply_ty_prune(&s, &v(1)), int());
         assert_eq!(apply_ty_prune(&s, &v(2)), string());
+    }
+
+    // ---- Array length unification (E1) ----
+
+    #[test]
+    fn unify_static_array_lengths_equal_succeeds() {
+        assert!(unify(&array_fixed(int(), 2), &array_fixed(int(), 2)).is_ok());
+    }
+
+    #[test]
+    fn unify_static_array_lengths_unequal_is_mismatch() {
+        let err = unify(&array_fixed(int(), 2), &array_fixed(int(), 8)).unwrap_err();
+        assert!(matches!(err, UnifyError::Mismatch { .. }));
+    }
+
+    #[test]
+    fn unify_static_array_with_dynamic_succeeds() {
+        // Dynamic is the unsized join: Static(n) ↔ Dynamic still unifies.
+        assert!(unify(&array_fixed(int(), 2), &array(int())).is_ok());
+        assert!(unify(&array(int()), &array_fixed(int(), 2)).is_ok());
     }
 }
