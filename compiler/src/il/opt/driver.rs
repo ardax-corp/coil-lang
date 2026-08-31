@@ -184,12 +184,12 @@ fn apply_cast_spill(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_
 
 fn apply_licm(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     crate::il::licm::set_pgo_prioritize_hot_licm(opts.pgo_prioritize_hot_loops);
-    crate::il::licm::licm(ops);
+    crate::il::licm::licm_with(ops, opts.pure_call_ctx.as_ref());
     0
 }
 
-fn apply_loop_bounds(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    crate::il::bounds::loop_bounds(ops);
+fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+    crate::il::bounds::loop_bounds_with(ops, opts.pure_call_ctx.as_ref());
     0
 }
 

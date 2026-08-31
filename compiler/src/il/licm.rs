@@ -23,6 +23,11 @@ pub fn set_pgo_prioritize_hot_licm(on: bool) {
 /// concat, and `len`. Also sinks table-indexed `STRING` field keys, CSEs
 /// `LOAD; CastIntToFloat`, and moves invariant `len(a)` ([`bounds`]).
 pub fn licm(ops: &mut Vec<IlOp>) {
+    licm_with(ops, None);
+}
+
+/// [`licm`] with an explicit purity table (no TLS).
+pub fn licm_with(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) {
     if ops.len() < 4 {
         return;
     }
@@ -32,41 +37,41 @@ pub fn licm(ops: &mut Vec<IlOp>) {
     // Each pass clears one loop; a cast hoisted out of an inner loop becomes a
     // candidate in the enclosing one, so iterate until it reaches the outermost
     // level. Progress is monotone toward outer loops, hence the loop-count bound.
-    let mut hoisted = bounds::hoist_loop_invariants(ops);
+    let mut hoisted = bounds::hoist_loop_invariants_with(ops, purity);
     for _ in 0..find_natural_loops(ops).len() + 1 {
         // Triple form first: it migrates an existing materialization outward
         // without leaving a slot-to-slot copy behind.
-        if !(licm_cast_hoist_triple(ops) || licm_cast_int_to_float(ops)) {
+        if !(licm_cast_hoist_triple(ops, purity) || licm_cast_int_to_float(ops, purity)) {
             break;
         }
         hoisted = true;
     }
     // Run after casts so invariant float exprs (e.g. mandelbrot `ci`) see
     // already-hoisted `(y as float)` / `(size as float)` temps.
-    if licm_float_expression_chain(ops) {
+    if licm_float_expression_chain(ops, purity) {
         return;
     }
-    if licm_invariant_expr_chain(ops) {
+    if licm_invariant_expr_chain(ops, purity) {
         return;
     }
     if hoisted {
         return;
     }
-    licm_stack_producers(ops);
+    licm_stack_producers(ops, purity);
 }
 
 /// Hoist a whole `LOAD s; Cast; STORE t` out of a loop, reusing `t` as the
 /// preheader temp. This is both plain LICM for `let f = n as float;` in a loop
 /// body and the follow-up step that carries a previous hoist's materialization
 /// further out — reusing `t` is what avoids leaving a `LOAD new; STORE t` copy.
-fn licm_cast_hoist_triple(ops: &mut Vec<IlOp>) -> bool {
+fn licm_cast_hoist_triple(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
     let mut loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
         }
-        if loop_has_barrier(ops, lp) {
+        if loop_has_barrier(ops, lp, purity) {
             continue;
         }
         let stored = slots_stored_in_loop(ops, lp);
@@ -129,14 +134,14 @@ pub(super) fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> 
 /// CSE every invariant `LOAD slot; CastIntToFloat` in the innermost eligible
 /// loop: one preheader temp per distinct slot, reloaded in the body. Returns
 /// whether anything was rewritten.
-fn licm_cast_int_to_float(ops: &mut Vec<IlOp>) -> bool {
+fn licm_cast_int_to_float(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
     let mut loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
         }
-        if loop_has_barrier(ops, lp) {
+        if loop_has_barrier(ops, lp, purity) {
             continue;
         }
         let stored = slots_stored_in_loop(ops, lp);
@@ -215,7 +220,7 @@ fn is_cast_int_to_float(op: &IlOp) -> bool {
     }
 }
 
-fn licm_stack_producers(ops: &mut Vec<IlOp>) {
+fn licm_stack_producers(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) {
     let info = sp::analyze(ops);
     let loops = ordered_loops(ops);
 
@@ -223,7 +228,7 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>) {
         if !info.sp_before(lp.header).is_known() {
             continue;
         }
-        if loop_has_barrier(ops, &lp) {
+        if loop_has_barrier(ops, &lp, purity) {
             continue;
         }
         let stored = slots_stored_in_loop(ops, &lp);
@@ -285,12 +290,12 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>) {
 ///
 /// Unlike the older single-producer path, the preheader materializes the chain
 /// into a temp slot, so the loop gets a fresh stack value on every iteration.
-fn licm_float_expression_chain(ops: &mut Vec<IlOp>) -> bool {
+fn licm_float_expression_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
     let mut loops = ordered_loops(ops);
 
     for lp in loops {
-        if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp) {
+        if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp, purity) {
             continue;
         }
         let stored = slots_stored_in_loop(ops, &lp);
@@ -330,11 +335,11 @@ fn licm_float_expression_chain(ops: &mut Vec<IlOp>) -> bool {
 /// or have effects). `ArrayLen` stays in the loop when the body can grow or
 /// rebind an array (`ArrayPush`, `MakeArray`, calls) — inlined `Vec::push` is
 /// not a LICM barrier, and hoisting `len(a)` makes `while len(a) < n` hang.
-fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>) -> bool {
+fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
     let mut loops = ordered_loops(ops);
     for lp in loops {
-        if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp) {
+        if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp, purity) {
             continue;
         }
         let stored = slots_stored_in_loop(ops, &lp);
@@ -802,8 +807,12 @@ fn loop_may_change_array_length(ops: &[IlOp], lp: &NaturalLoop) -> bool {
     false
 }
 
-pub(super) fn loop_has_barrier(ops: &[IlOp], lp: &NaturalLoop) -> bool {
-    (lp.header..=lp.latch).any(|i| super::pure_call::op_blocks_licm(&ops[i]))
+pub(super) fn loop_has_barrier(
+    ops: &[IlOp],
+    lp: &NaturalLoop,
+    purity: Option<&super::pure_call::PureCallCtx>,
+) -> bool {
+    (lp.header..=lp.latch).any(|i| super::pure_call::op_blocks_licm(&ops[i], purity))
 }
 
 /// Barriers that block string-key LICM. GetField/SetField are allowed — the

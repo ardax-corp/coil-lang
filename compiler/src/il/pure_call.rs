@@ -6,7 +6,6 @@
 //! cannot prove — host / FFI / `FORMAT`, field get/set, `CallIndirect`,
 //! `ArrayPush` in the callee — stays a barrier.
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use common::{Byte, Instruction};
@@ -47,23 +46,6 @@ impl PureCallCtx {
     }
 }
 
-thread_local! {
-    static PURE_CALL_CTX: RefCell<Option<PureCallCtx>> = const { RefCell::new(None) };
-}
-
-/// Install purity facts for the next [`super::bounds::loop_bounds`] / LICM run.
-pub fn set_pure_call_ctx(ctx: Option<PureCallCtx>) {
-    PURE_CALL_CTX.with(|c| *c.borrow_mut() = ctx);
-}
-
-pub(crate) fn with_pure_call_ctx<R>(f: impl FnOnce(Option<PureCallCtx>) -> R) -> R {
-    PURE_CALL_CTX.with(|c| f(c.borrow().clone()))
-}
-
-fn active_ctx() -> Option<PureCallCtx> {
-    PURE_CALL_CTX.with(|c| c.borrow().clone())
-}
-
 fn call_byte_is_pure(byte: &Byte, ctx: Option<&PureCallCtx>) -> bool {
     if *byte.bytecode() != Instruction::CALL {
         return false;
@@ -73,8 +55,7 @@ fn call_byte_is_pure(byte: &Byte, ctx: Option<&PureCallCtx>) -> bool {
 }
 
 /// True when `op` blocks length-invariance / ArrayLen hoist for an array loop.
-pub fn op_blocks_length_proof(op: &IlOp) -> bool {
-    let ctx = active_ctx();
+pub fn op_blocks_length_proof(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
     match op {
         IlOp::HostInvoke { .. } | IlOp::Print { .. } => true,
         IlOp::GetField { .. } | IlOp::SetField { .. } => true,
@@ -100,7 +81,7 @@ pub fn op_blocks_length_proof(op: &IlOp) -> bool {
             // Resume restores empty pin maps; pins are not saved on ObjCoroutine.
             | Instruction::YieldCoro
             | Instruction::YieldFromCoro => true,
-            Instruction::CALL => !call_byte_is_pure(byte, ctx.as_ref()),
+            Instruction::CALL => !call_byte_is_pure(byte, ctx),
             _ => false,
         },
         _ => false,
@@ -108,8 +89,7 @@ pub fn op_blocks_length_proof(op: &IlOp) -> bool {
 }
 
 /// True when `op` blocks LICM / field-sensitive hoists.
-pub fn op_blocks_licm(op: &IlOp) -> bool {
-    let ctx = active_ctx();
+pub fn op_blocks_licm(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
     match op {
         IlOp::HostInvoke { .. } | IlOp::Print { .. } => true,
         IlOp::SetField { .. } | IlOp::GetField { .. } => true,
@@ -129,7 +109,7 @@ pub fn op_blocks_licm(op: &IlOp) -> bool {
             | Instruction::FfiInvoke
             | Instruction::SetField
             | Instruction::GetField => true,
-            Instruction::CALL => !call_byte_is_pure(byte, ctx.as_ref()),
+            Instruction::CALL => !call_byte_is_pure(byte, ctx),
             _ => false,
         },
         _ => false,
@@ -151,27 +131,24 @@ mod tests {
         let mut ctx = PureCallCtx::default();
         ctx.pure_fns.insert("sq".into());
         ctx.label_callees.insert(7, "sq".into());
-        set_pure_call_ctx(Some(ctx));
         let op = IlOp::Entry {
             kind: EntryKind::Call,
             arity: 1,
             target: Label(7),
             loc: loc(),
         };
-        assert!(!op_blocks_length_proof(&op));
-        set_pure_call_ctx(None);
+        assert!(!op_blocks_length_proof(&op, Some(&ctx)));
     }
 
     #[test]
     fn impure_call_entry_stays_a_barrier() {
-        set_pure_call_ctx(None);
         let op = IlOp::Entry {
             kind: EntryKind::Call,
             arity: 1,
             target: Label(1),
             loc: loc(),
         };
-        assert!(op_blocks_length_proof(&op));
+        assert!(op_blocks_length_proof(&op, None));
     }
 
     #[test]
@@ -179,51 +156,76 @@ mod tests {
         let mut ctx = PureCallCtx::default();
         ctx.pure_fns.insert("sq".into());
         ctx.offset_callees.insert(42, "sq".into());
-        set_pure_call_ctx(Some(ctx));
         let op = IlOp::Byte {
             byte: Byte::new(Instruction::CALL).with_call_packed(1, 42),
             loc: loc(),
         };
-        assert!(!op_blocks_length_proof(&op));
-        set_pure_call_ctx(None);
+        assert!(!op_blocks_length_proof(&op, Some(&ctx)));
     }
 
     #[test]
     fn unknown_call_byte_stays_a_barrier() {
-        set_pure_call_ctx(None);
         let op = IlOp::Byte {
             byte: Byte::new(Instruction::CALL).with_call_packed(1, 42),
             loc: loc(),
         };
-        assert!(op_blocks_length_proof(&op));
+        assert!(op_blocks_length_proof(&op, None));
     }
 
     #[test]
     fn call_indirect_and_field_ops_stay_barriers() {
-        set_pure_call_ctx(None);
-        assert!(op_blocks_length_proof(&IlOp::Byte {
-            byte: Byte::new(Instruction::CallIndirect),
-            loc: loc(),
-        }));
-        assert!(op_blocks_length_proof(&IlOp::GetField { loc: loc() }));
-        assert!(op_blocks_length_proof(&IlOp::SetField { loc: loc() }));
+        assert!(op_blocks_length_proof(
+            &IlOp::Byte {
+                byte: Byte::new(Instruction::CallIndirect),
+                loc: loc(),
+            },
+            None
+        ));
+        assert!(op_blocks_length_proof(&IlOp::GetField { loc: loc() }, None));
+        assert!(op_blocks_length_proof(&IlOp::SetField { loc: loc() }, None));
     }
 
     #[test]
     fn yield_ops_are_length_proof_barriers() {
-        set_pure_call_ctx(None);
-        assert!(op_blocks_length_proof(&IlOp::Byte {
-            byte: Byte::new(Instruction::YieldCoro),
+        assert!(op_blocks_length_proof(
+            &IlOp::Byte {
+                byte: Byte::new(Instruction::YieldCoro),
+                loc: loc(),
+            },
+            None
+        ));
+        assert!(op_blocks_length_proof(
+            &IlOp::Byte {
+                byte: Byte::new(Instruction::YieldFromCoro),
+                loc: loc(),
+            },
+            None
+        ));
+        assert!(op_blocks_length_proof(
+            &IlOp::Byte {
+                byte: Byte::new(Instruction::TailCall).with_call_packed(1, 0),
+                loc: loc(),
+            },
+            None
+        ));
+    }
+
+    #[test]
+    fn two_purity_contexts_on_one_thread_do_not_mix() {
+        let mut pure = PureCallCtx::default();
+        pure.pure_fns.insert("sq".into());
+        pure.label_callees.insert(7, "sq".into());
+        let impure = PureCallCtx::default();
+        let op = IlOp::Entry {
+            kind: EntryKind::Call,
+            arity: 1,
+            target: Label(7),
             loc: loc(),
-        }));
-        assert!(op_blocks_length_proof(&IlOp::Byte {
-            byte: Byte::new(Instruction::YieldFromCoro),
-            loc: loc(),
-        }));
-        assert!(op_blocks_length_proof(&IlOp::Byte {
-            byte: Byte::new(Instruction::TailCall).with_call_packed(1, 0),
-            loc: loc(),
-        }));
+        };
+        assert!(!op_blocks_length_proof(&op, Some(&pure)));
+        assert!(op_blocks_length_proof(&op, Some(&impure)));
+        assert!(op_blocks_licm(&op, Some(&impure)));
+        assert!(!op_blocks_licm(&op, Some(&pure)));
     }
 
     #[test]
