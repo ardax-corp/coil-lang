@@ -449,7 +449,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
         &loaded,
         Some(entry),
         pipeline.ffi_search_path_bufs(),
-        Some(pipeline.build_dload_gate()),
+        Some(crate::host_wire::pipeline_dload_gate(pipeline)),
     ) {
         exit(1);
     }

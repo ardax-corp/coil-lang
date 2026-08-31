@@ -41,7 +41,7 @@ pub use packed_la::{
     packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
 };
 pub use runtime_wire::{VmHostSpec, wire_thread_program, wire_vm_host};
-pub use stream_attach::{AttachedIo, StreamVTable, set_allow_attach, stream_attach, stream_park};
+pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{
     LiveThreadRegistry, ThreadErrorTag, ThreadProgram, join_undetached_threads,
     new_live_thread_registry,

@@ -10,7 +10,7 @@ use crate::env;
 use crate::ffi::DloadGate;
 use crate::memory::CStructLayout;
 use crate::thread::ThreadProgram;
-use crate::{Machine, set_allow_attach};
+use crate::Machine;
 
 /// Inputs the compiler can supply without depending on `machine`.
 pub struct VmHostSpec<'a> {
@@ -52,12 +52,12 @@ pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) 
     for (stem, path) in spec.extra_dload_grants {
         let _ = gate.grant_file(stem, path);
     }
+    gate.set_allow_attach(spec.allow_attach);
     vm.set_dload_gate(gate);
 
     env::set_allow_exec(spec.allow_exec);
     env::set_allow_exit(spec.allow_exit);
     env::set_allow_ffi_exec(spec.allow_ffi_exec);
-    set_allow_attach(spec.allow_attach);
 
     for layout in spec.c_structs {
         vm.register_struct_layout(CStructLayout::from_archive(layout));
