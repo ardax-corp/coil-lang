@@ -4528,6 +4528,33 @@ let _y = nested[0]; \
     }
 
     #[test]
+    fn stack_array_single_byte_string_items_emit_const() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src(
+            r#"
+fn main() {
+    let buf: [byte; 3] = ["H", "i", "\n"];
+    let _x = buf[0];
+}
+"#,
+        );
+        let consts: Vec<u32> = bc
+            .iter()
+            .filter_map(|b| match b.bytecode() {
+                Instruction::CONST => Some(b.operand_u32()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            consts.iter().any(|&v| v == 72)
+                && consts.iter().any(|&v| v == 105)
+                && consts.iter().any(|&v| v == 10),
+            "expected CONST bytes for H/i/newline, got {consts:?}; ops={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn index_with_len_minus_one_stashes_receiver_before_staged_index() {
         use common::Instruction;
         let (bc, _pool) = compile_src(

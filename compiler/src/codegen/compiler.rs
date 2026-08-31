@@ -2950,6 +2950,24 @@ impl Compiler {
         }
     }
 
+    /// Advance `emit_idx` through wrapper nodes and the unwrapped head, without
+    /// emitting. Used when a parent is lowered specially (stack-array init)
+    /// but children are still `do_compile`'d.
+    fn skip_emit_ids_to_unwrapped(&mut self, expr: &Output<'_>) {
+        let mut cur = expr;
+        loop {
+            let _ = self.next_emit_id();
+            match cur.1.as_ref() {
+                Expression::Expr(inner)
+                | Expression::Group(inner)
+                | Expression::Statement(inner)
+                | Expression::ExprStatement(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+    }
+
     /// Emit a multi-slot stack-array init: one Value per slot, store immediately.
     ///
     /// Forward `emit; STORE` (not reverse bulk store) so values never pile into
@@ -2967,6 +2985,11 @@ impl Compiler {
         let rhs_node = unwrap_expr_output(rhs);
         match rhs_node.1.as_ref() {
             Expression::Array(items) if items.len() == n => {
+                // Infer assigned a NodeId to the array (and any wrappers) in
+                // pre-order before the items. This path does not `do_compile`
+                // the array node (no MakeArray), so skip those ids or later
+                // literals in the same fragment steal them (byte_string_lit.hy).
+                self.skip_emit_ids_to_unwrapped(rhs);
                 for (i, item) in items.iter().enumerate() {
                     let mut bc = self.do_compile(item);
                     bytecode.append(&mut bc);
@@ -12317,23 +12340,25 @@ impl Compiler {
                 // array node — otherwise later literals in the same file read
                 // the wrong NodeId (byte_string_lit.hy).
                 let escaped_len = escaped.as_bytes().len();
+                let is_byte_coercion = |ty: &Ty| match ty {
+                    Ty::Con(n) if n == "byte" => true,
+                    Ty::Array { element, length }
+                        if matches!(element.as_ref(), Ty::Con(n) if n == "byte") =>
+                    {
+                        match length {
+                            crate::typechecking::ty::ArrayLength::Static(n) => *n == escaped_len,
+                            crate::typechecking::ty::ArrayLength::Dynamic => true,
+                        }
+                    }
+                    _ => false,
+                };
+                // Prefer this node's sidecar type; if `self_id` drifted onto a
+                // parent (e.g. stack-array `[byte; N]`), ignore a non-matching
+                // type so the string node's span/NodeId can still coerce.
                 let span_ty = self_id
                     .and_then(|id| self.sidecar_ty(id))
-                    .or_else(|| self.sidecar_ty_of(ast))
-                    .filter(|ty| match ty {
-                        Ty::Con(n) if n == "byte" => true,
-                        Ty::Array { element, length }
-                            if matches!(element.as_ref(), Ty::Con(n) if n == "byte") =>
-                        {
-                            match length {
-                                crate::typechecking::ty::ArrayLength::Static(n) => {
-                                    *n == escaped_len
-                                }
-                                crate::typechecking::ty::ArrayLength::Dynamic => true,
-                            }
-                        }
-                        _ => false,
-                    });
+                    .filter(is_byte_coercion)
+                    .or_else(|| self.sidecar_ty_of(ast).filter(is_byte_coercion));
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
                     .as_ref()
