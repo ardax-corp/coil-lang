@@ -15,8 +15,8 @@ pub struct Heap {
     gc_growth_factor: usize,
     strings: Table<()>,
     head: Option<Object>,
-    /// O(1) lookup of live objects by address (updated on alloc/sweep).
-    addr_index: HashMap<u64, Object, AddrHashBuilder>,
+    /// Live addresses only. Kind is in the object header (non-moving GC).
+    live: HashSet<u64, AddrHashBuilder>,
     /// Immortal arity-0 enum singletons keyed by tag (never swept).
     immortal_enums: HashMap<u32, Object, AddrHashBuilder>,
     /// Reused mark-set across collections (avoids alloc per GC).
@@ -38,7 +38,7 @@ impl Default for Heap {
             gc_growth_factor: GC_GROWTH_FACTOR,
             strings: Table::default(),
             head: None,
-            addr_index: HashMap::default(),
+            live: HashSet::default(),
             immortal_enums: HashMap::default(),
             gc_mark_set: HashSet::default(),
             gc_gray: Vec::new(),
@@ -94,10 +94,11 @@ impl Heap {
         let boxed = Box::new(GcData::new(self.head, data));
         let content = Gc::new(boxed);
         let object = map(content);
+        content.set_kind(object.kind());
         let size = object.size();
         self.head = Some(object);
         self.alloc_bytes += size;
-        self.addr_index.insert(object.addr(), object);
+        self.live.insert(object.addr());
         crate::vm::note_heap_alloc();
 
         (object, content)
@@ -193,7 +194,7 @@ impl Heap {
                 prev_obj = curr_obj;
                 curr_obj = next;
             } else {
-                self.addr_index.remove(&curr_ref.addr());
+                self.live.remove(&curr_ref.addr());
                 unsafe { self.dealloc(curr_ref) };
                 curr_obj = next;
                 if let Some(prev_ref) = prev_obj {
@@ -216,7 +217,7 @@ impl Heap {
     /// Number of live heap objects (for GC pressure after `HostInvoke`).
     #[inline]
     pub fn live_object_count(&self) -> usize {
-        self.addr_index.len()
+        self.live.len()
     }
 
     /// True when live heap bytes exceed the collection threshold. [`Self::sweep`]
@@ -447,9 +448,12 @@ impl Heap {
         self.head
     }
 
-    /// Find a heap object by its address (O(1) via addr index).
+    /// Find a heap object by its address (liveness set + header kind).
     pub fn find_object_by_addr(&self, addr: u64) -> Option<Object> {
-        self.addr_index.get(&addr).copied()
+        if addr == 0 || !self.live.contains(&addr) {
+            return None;
+        }
+        unsafe { Object::from_header(addr) }
     }
 
     /// Write back scratch-buffer values into a live `ObjArray`.
@@ -466,7 +470,7 @@ impl Heap {
 
     /// True if `addr` is a live heap object.
     pub fn contains_addr(&self, addr: *mut u8) -> bool {
-        self.addr_index.contains_key(&(addr as u64))
+        self.live.contains(&(addr as u64))
     }
 }
 
@@ -830,6 +834,56 @@ impl Object {
             Self::Mutex(m) => m.as_ptr() as u64,
             Self::RwLock(l) => l.as_ptr() as u64,
         }
+    }
+
+    fn kind(self) -> u8 {
+        match self {
+            Self::String(_) => 1,
+            Self::Instance(_) => 2,
+            Self::Enum(_) => 3,
+            Self::Library(_) => 4,
+            Self::Tuple(_) => 5,
+            Self::Array(_) => 6,
+            Self::Coroutine(_) => 7,
+            Self::Boxed(_) => 8,
+            Self::Root(_) => 9,
+            Self::Weak(_) => 10,
+            Self::PolyFn(_) => 11,
+            Self::Fn(_) => 12,
+            Self::Stream(_) => 13,
+            Self::Thread(_) => 14,
+            Self::Sender(_) => 15,
+            Self::Receiver(_) => 16,
+            Self::Mutex(_) => 17,
+            Self::RwLock(_) => 18,
+        }
+    }
+
+    /// Rebuild a typed handle from a live allocation. The address must be a
+    /// current [`Heap::alloc`] result (non-moving); kind is the header byte.
+    unsafe fn from_header(addr: u64) -> Option<Self> {
+        let header = unsafe { &*(addr as *const GcHeader) };
+        Some(match header.kind.get() {
+            1 => Self::String(unsafe { Gc::from_addr(addr) }),
+            2 => Self::Instance(unsafe { Gc::from_addr(addr) }),
+            3 => Self::Enum(unsafe { Gc::from_addr(addr) }),
+            4 => Self::Library(unsafe { Gc::from_addr(addr) }),
+            5 => Self::Tuple(unsafe { Gc::from_addr(addr) }),
+            6 => Self::Array(unsafe { Gc::from_addr(addr) }),
+            7 => Self::Coroutine(unsafe { Gc::from_addr(addr) }),
+            8 => Self::Boxed(unsafe { Gc::from_addr(addr) }),
+            9 => Self::Root(unsafe { Gc::from_addr(addr) }),
+            10 => Self::Weak(unsafe { Gc::from_addr(addr) }),
+            11 => Self::PolyFn(unsafe { Gc::from_addr(addr) }),
+            12 => Self::Fn(unsafe { Gc::from_addr(addr) }),
+            13 => Self::Stream(unsafe { Gc::from_addr(addr) }),
+            14 => Self::Thread(unsafe { Gc::from_addr(addr) }),
+            15 => Self::Sender(unsafe { Gc::from_addr(addr) }),
+            16 => Self::Receiver(unsafe { Gc::from_addr(addr) }),
+            17 => Self::Mutex(unsafe { Gc::from_addr(addr) }),
+            18 => Self::RwLock(unsafe { Gc::from_addr(addr) }),
+            _ => return None,
+        })
     }
 }
 
@@ -1469,43 +1523,59 @@ pub trait GcSized {
     fn size(&self) -> usize;
 }
 
-pub struct GcData<T> {
+/// Prefix of every managed allocation. Kind reconstructs [`Object`] without
+/// storing a typed handle in the live-set.
+#[repr(C)]
+struct GcHeader {
+    kind: Cell<u8>,
     marked: Cell<bool>,
     next: Cell<Option<Object>>,
+}
+
+#[repr(C)]
+pub struct GcData<T> {
+    header: GcHeader,
     data: T,
 }
 
 impl<T> GcData<T> {
     pub const fn new(next: Option<Object>, data: T) -> Self {
         Self {
-            marked: Cell::new(false),
-            next: Cell::new(next),
+            header: GcHeader {
+                kind: Cell::new(0),
+                marked: Cell::new(false),
+                next: Cell::new(next),
+            },
             data,
         }
     }
 
+    fn set_kind(&self, kind: u8) {
+        self.header.kind.set(kind);
+    }
+
     pub const fn get_next(&self) -> Option<Object> {
-        self.next.get()
+        self.header.next.get()
     }
 
     pub fn set_next(&self, next: Option<Object>) {
-        self.next.set(next);
+        self.header.next.set(next);
     }
 
     pub const fn is_marked(&self) -> bool {
-        self.marked.get()
+        self.header.marked.get()
     }
 
     pub fn mark(&self) -> bool {
-        let is_not_marked = !self.marked.get();
+        let is_not_marked = !self.header.marked.get();
         if is_not_marked {
-            self.marked.set(true);
+            self.header.marked.set(true);
         }
         is_not_marked
     }
 
     pub fn unmark(&self) {
-        self.marked.set(false);
+        self.header.marked.set(false);
     }
 }
 
@@ -1523,7 +1593,7 @@ impl<T> AsMut<T> for GcData<T> {
 
 impl<T: GcSized> GcSized for GcData<T> {
     fn size(&self) -> usize {
-        mem::size_of_val(&self.next) + mem::size_of_val(&self.marked) + self.data.size()
+        mem::size_of::<GcHeader>() + self.data.size()
     }
 }
 
@@ -1557,6 +1627,12 @@ impl<T> Gc<T> {
     #[must_use]
     pub const fn as_ptr(&self) -> *const GcData<T> {
         self.ptr.as_ptr()
+    }
+
+    unsafe fn from_addr(addr: u64) -> Self {
+        Self {
+            ptr: unsafe { NonNull::new_unchecked(addr as *mut GcData<T>) },
+        }
     }
 
     /// Mutable access to the inner payload (single-threaded VM only).
@@ -2145,7 +2221,7 @@ mod tests {
         let (obj, _) = heap.alloc(ObjString::from("gone"), Object::String);
         let addr = obj.addr();
         assert!(heap.find_object_by_addr(addr).is_some());
-        // No roots → sweep removes the object and its addr_index entry.
+        // No roots → sweep removes the object and its live-set entry.
         unsafe { heap.sweep() };
         assert!(
             heap.find_object_by_addr(addr).is_none(),

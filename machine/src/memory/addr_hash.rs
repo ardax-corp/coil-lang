@@ -1,6 +1,6 @@
 //! Fast hasher for integer-keyed VM tables (heap addresses, enum tags).
 //!
-//! `Heap::addr_index` is probed on every `Index` / `GetField` / `ArrayPush`, and
+//! `Heap::live` is probed on every `Index` / `GetField` / `ArrayPush`, and
 //! the default SipHash accounted for ~30% of retired instructions on the nsieve
 //! benchmark. Keys are allocator-chosen addresses and compiler-assigned tags,
 //! never attacker-controlled, so HashDoS resistance buys nothing here.
