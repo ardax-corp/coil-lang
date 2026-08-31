@@ -17,7 +17,7 @@ use common::{
 };
 
 use crate::{
-    CStructLayout, CoroState, Frame, Heap, Member, ObjArray, ObjBoxed, ObjCoroutine, ObjEnum,
+    CStructLayout, CoroState, Frame, GcData, Heap, Member, ObjArray, ObjBoxed, ObjCoroutine, ObjEnum,
     ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object, RefCoroutine, Stack,
 };
 #[cfg(any(test, feature = "debugger"))]
@@ -352,7 +352,7 @@ impl<const S: usize> Machine<S> {
         let mut frame_pins = ArrayVec::default();
         frame_pins.consume();
         let worker_cap = crate::thread::WorkerCap::new();
-        let reactor = crate::reactor::Reactor::new(worker_cap.max());
+        let reactor = crate::reactor::Reactor::new(0);
         let cap = operand_slots.clamp(1, crate::MAX_OPERAND_STACK_SLOTS);
         Self {
             frames,
@@ -809,7 +809,7 @@ impl<const S: usize> Machine<S> {
     // }
 
     /// Free function so `execute` can borrow `frames` and `heap` separately.
-    /// Delegates to [`Heap::find_object_by_addr`] (O(1) addr index).
+    /// Delegates to [`Heap::find_object_by_addr`] (live-set + header kind).
     fn find_object_by_addr(heap: &Heap, addr: u64) -> Option<Object> {
         heap.find_object_by_addr(addr)
     }
@@ -830,21 +830,21 @@ impl<const S: usize> Machine<S> {
         self.frame_pins.get_mut()
     }
 
-    fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Value {
+    fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Option<Value> {
         let len = elements.len();
         if unchecked {
             let idx = index as usize;
             promise!(index >= 0);
             promise!(idx < len);
-            unsafe { *elements.get_unchecked(idx) }
+            Some(unsafe { *elements.get_unchecked(idx) })
         } else if index >= 0 && (index as usize) < len {
-            unsafe { *elements.get_unchecked(index as usize) }
+            Some(unsafe { *elements.get_unchecked(index as usize) })
         } else {
-            Value::from(-1_i64)
+            None
         }
     }
 
-    fn write_indexed(elements: &mut [Value], index: i64, value: Value, unchecked: bool) {
+    fn write_indexed(elements: &mut [Value], index: i64, value: Value, unchecked: bool) -> bool {
         let len = elements.len();
         if unchecked {
             let idx = index as usize;
@@ -853,10 +853,14 @@ impl<const S: usize> Machine<S> {
             unsafe {
                 *elements.get_unchecked_mut(idx) = value;
             }
+            true
         } else if index >= 0 && (index as usize) < len {
             unsafe {
                 *elements.get_unchecked_mut(index as usize) = value;
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -2104,43 +2108,6 @@ impl<const S: usize> Machine<S> {
         self.nested_return.take().unwrap_or_default()
     }
 
-    /// Box a `(payload, tag)` pair-ABI value back into a heap `Option`/`Result`.
-    ///
-    /// `is_option` picks the arity of tag 0: `None` carries nothing, `Ok` carries
-    /// the payload.
-    fn alloc_pair_enum(&mut self, payload: Value, tag: u32, is_option: bool) -> Value {
-        let payload = if is_option && tag == 0 {
-            Vec::new()
-        } else {
-            vec![
-                Self::find_object_by_addr(&self.heap, payload.raw() as u64)
-                    .map(Member::Object)
-                    .unwrap_or(Member::Value(payload)),
-            ]
-        };
-        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
-        Value::from(object.addr())
-    }
-
-    /// Pair-ABI counterpart of [`Self::capture_nested_return`].
-    ///
-    /// A host entry (`spawn`, an FFI/IO callback) has no caller-side
-    /// `PairToHeap`, so the two slots are boxed here; without this the frame
-    /// unwinds past the [`Self::call_function`] entry and execution runs on into
-    /// whatever bytecode follows the callee.
-    #[inline]
-    fn capture_nested_pair_return(&mut self, payload: Value, tag: Value, is_option: bool) -> bool {
-        if unlikely(self.nested_depth > 0) {
-            let nested_target = self.nested_frame_depths.last().copied().unwrap_or(0);
-            if self.frames.len() == nested_target {
-                let boxed = self.alloc_pair_enum(payload, tag.as_int() as u32, is_option);
-                self.nested_return = Some(boxed);
-                return true;
-            }
-        }
-        false
-    }
-
     /// Stash a return value when `execute` runs inside [`Self::call_function`].
     #[inline]
     fn capture_nested_return(&mut self, ret_val: Value) -> bool {
@@ -2283,100 +2250,31 @@ impl<const S: usize> Machine<S> {
                     self.stack.seek(abs);
                 }
                 Instruction::OptionNicheToHeap => {
-                    let value = self.stack.pop();
-                    if value.raw().is_null() {
-                        let object = self.heap.immortal_unit_enum(0);
-                        self.stack.push(Value::from(object.addr()));
-                    } else {
-                        let member = Self::find_object_by_addr(&self.heap, value.raw() as u64)
-                            .map(Member::Object)
-                            .unwrap_or(Member::Value(value));
-                        let (object, _) = self.heap.alloc(
-                            ObjEnum {
-                                tag: 1,
-                                payload: vec![member],
-                            },
-                            Object::Enum,
-                        );
-                        self.stack.push(Value::from(object.addr()));
-                        self.maybe_gc_after_alloc();
-                    }
+                    return self.runtime_panic(
+                        "retired opcode OptionNicheToHeap",
+                        ip.saturating_sub(1),
+                    );
                 }
                 Instruction::HeapOptionToNiche => {
-                    let value = self.stack.pop();
-                    let niche = match Self::find_object_by_addr(&self.heap, value.raw() as u64) {
-                        Some(Object::Enum(gc)) => match gc.as_ref().tag {
-                            0 => Value::default(),
-                            1 => gc
-                                .as_ref()
-                                .payload
-                                .first()
-                                .map(|member| match member {
-                                    Member::Object(object) => Value::from(object.addr()),
-                                    Member::Value(value) => *value,
-                                })
-                                .unwrap_or_default(),
-                            _ => Value::default(),
-                        },
-                        _ => Value::default(),
-                    };
-                    self.stack.push(niche);
+                    return self.runtime_panic(
+                        "retired opcode HeapOptionToNiche",
+                        ip.saturating_sub(1),
+                    );
                 }
                 Instruction::PairJumpIfTag => {
-                    let operands = opcode.operand_u32();
-                    let expected_tag = operands >> 16;
-                    promise!(self.stack.tell() > 0);
-                    if self.stack.peek().as_int() as u32 == expected_tag {
-                        let pool_idx = (operands & 0xFFFF) as usize;
-                        promise!(pool_idx < constants.len());
-                        let target = opcode.jump_if_match_target(constants);
-                        self.stack.pop();
-                        set_jump_target(&mut ip, target, code_len);
-                    }
+                    return self.runtime_panic(
+                        "retired opcode PairJumpIfTag",
+                        ip.saturating_sub(1),
+                    );
                 }
                 Instruction::PairToHeap => {
-                    let tag = self.stack.pop().as_int() as u32;
-                    let payload = self.stack.pop();
-                    let is_option = opcode.operand_u32() & 1 != 0;
-                    let boxed = self.alloc_pair_enum(payload, tag, is_option);
-                    self.stack.push(boxed);
-                    self.maybe_gc_after_alloc();
+                    return self.runtime_panic("retired opcode PairToHeap", ip.saturating_sub(1));
                 }
                 Instruction::HeapToPair => {
-                    let value = self.stack.pop();
-                    let is_option = opcode.operand_u32() & 1 != 0;
-                    let (tag, payload) =
-                        match Self::find_object_by_addr(&self.heap, value.raw() as u64) {
-                            Some(Object::Enum(gc)) => {
-                                let enum_ref = gc.as_ref();
-                                let payload = enum_ref
-                                    .payload
-                                    .first()
-                                    .map(|member| match member {
-                                        Member::Object(object) => Value::from(object.addr()),
-                                        Member::Value(value) => *value,
-                                    })
-                                    .unwrap_or_default();
-                                (enum_ref.tag, payload)
-                            }
-                            _ => (0, Value::default()),
-                        };
-                    self.stack.push(payload);
-                    self.stack.push(Value::from(tag as i64));
-                    let _ = is_option;
+                    return self.runtime_panic("retired opcode HeapToPair", ip.saturating_sub(1));
                 }
                 Instruction::ReturnPair => {
-                    let tag = self.stack.pop();
-                    let payload = self.stack.pop();
-                    if self.capture_nested_pair_return(payload, tag, opcode.operand_u32() & 1 != 0)
-                    {
-                        return false;
-                    }
-                    let return_sp = self.pop_call_frame();
-                    self.stack.seek(return_sp);
-                    self.stack.push(payload);
-                    self.stack.push(tag);
-                    self.after_return(&mut ip, &mut sp);
+                    return self.runtime_panic("retired opcode ReturnPair", ip.saturating_sub(1));
                 }
                 Instruction::LOAD => {
                     let count = opcode.load_store_count();
@@ -2496,8 +2394,8 @@ impl<const S: usize> Machine<S> {
                             params.push(self.stack.pop());
                         }
 
-                        let ptr = self.stack.pop().as_ptr::<ObjString>();
-                        let format_string = (unsafe { &*ptr }).data.as_str();
+                        let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
+                        let format_string = (unsafe { &*ptr }).as_ref().data.as_str();
 
                         let mut message = String::default();
 
@@ -2527,7 +2425,8 @@ impl<const S: usize> Machine<S> {
                                     Some('s') => {
                                         chars.next();
                                         let string_val =
-                                            (unsafe { &*params.pop().as_ptr::<ObjString>() })
+                                            (unsafe { &*params.pop().as_ptr::<GcData<ObjString>>() })
+                                                .as_ref()
                                                 .data
                                                 .as_str();
                                         // Allocated::<crate::String>::new(params.pop().as_ptr());
@@ -2582,8 +2481,8 @@ impl<const S: usize> Machine<S> {
                     self.push_interned_string(text);
                 }
                 Instruction::PRINT => {
-                    let ptr = self.stack.pop().as_ptr::<ObjString>();
-                    let s = unsafe { &*ptr };
+                    let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
+                    let s = unsafe { (*ptr).as_ref() };
                     if let Some(out) = self.output.as_mut() {
                         let _ = write!(out, "{}", s);
                         let _ = out.flush();
@@ -3310,114 +3209,25 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::HostInvokeNiche => {
-                    let tuple_val = self.stack.pop();
-                    let tuple_addr = tuple_val.raw() as u64;
-                    let fn_id = self.stack.pop().as_int() as usize;
-                    let args: Vec<Value> = match Self::find_object_by_addr(&self.heap, tuple_addr) {
-                        Some(Object::Tuple(gc)) => gc.as_ref().elements.clone(),
-                        _ => Vec::new(),
-                    };
-                    let value = match self.natives.get_by_id(fn_id) {
-                        Some(native) if native.name() == "vec_pop" => {
-                            crate::vec_ops::host_vec_pop_niche(&mut self.heap, &args)
-                        }
-                        Some(native) if native.name() == "vec_remove" => {
-                            crate::vec_ops::host_vec_remove_niche(&mut self.heap, &args)
-                        }
-                        Some(native) => match native.invoke(&mut self.heap, &args) {
-                            Ok(Some(value)) => match Self::find_object_by_addr(
-                                &self.heap,
-                                value.raw() as u64,
-                            ) {
-                                Some(Object::Enum(gc)) => gc
-                                    .as_ref()
-                                    .payload
-                                    .first()
-                                    .map(|member| match member {
-                                        Member::Object(object) => Value::from(object.addr()),
-                                        Member::Value(value) => *value,
-                                    })
-                                    .unwrap_or_default(),
-                                _ => Value::default(),
-                            },
-                            _ => Value::default(),
-                        },
-                        None => Value::default(),
-                    };
-                    self.stack.push(value);
+                    return self.runtime_panic(
+                        "retired opcode HostInvokeNiche",
+                        ip.saturating_sub(1),
+                    );
                 }
                 Instruction::FloatChainStore => {
-                    let raw = opcode.operand_u32();
-                    let descriptor_idx = (raw & 0xFFFF) as usize;
-                    let dest = ((raw >> 16) & 0xFF) as usize;
-                    promise!(descriptor_idx < constants.len());
-                    let descriptor = unsafe { *constants.get_unchecked(descriptor_idx) };
-                    let op0 = descriptor as u8;
-                    let lhs0 = (descriptor >> 8) as u8 as usize;
-                    let rhs0 = (descriptor >> 16) as u8 as usize;
-                    let op1 = (descriptor >> 24) as u8;
-                    let rhs1 = (descriptor >> 32) as u8 as usize;
-                    let extended = descriptor & (1u64 << 63) != 0;
-                    let bin = |op: u8, lhs: f64, rhs: f64| match Instruction::from(op) {
-                        Instruction::ADDF => lhs + rhs,
-                        Instruction::SUBF => lhs - rhs,
-                        Instruction::MULF => lhs * rhs,
-                        Instruction::DIVF => lhs / rhs,
-                        Instruction::MODF => lhs % rhs,
-                        _ => f64::NAN,
-                    };
-                    let load_op = |idx: usize, is_const: bool| -> f64 {
-                        if is_const {
-                            promise!(idx < constants.len());
-                            Value::from(unsafe { *constants.get_unchecked(idx) }).as_float()
-                        } else {
-                            promise!(sp + idx < stack_cap);
-                            self.stack[sp + idx].as_float()
-                        }
-                    };
-                    let (lhs0_const, rhs0_const, rhs1_const, rhs2_const, s1_left, s2_left, has_s2) =
-                        if extended {
-                            (
-                                descriptor & (1 << 59) != 0,
-                                descriptor & (1 << 56) != 0,
-                                descriptor & (1 << 57) != 0,
-                                descriptor & (1 << 58) != 0,
-                                descriptor & (1 << 60) != 0,
-                                descriptor & (1 << 61) != 0,
-                                descriptor & (1 << 62) != 0,
-                            )
-                        } else {
-                            (false, false, false, false, false, false, false)
-                        };
-                    let mut acc = bin(
-                        op0,
-                        load_op(lhs0, lhs0_const),
-                        load_op(rhs0, rhs0_const),
+                    return self.runtime_panic(
+                        "retired opcode FloatChainStore",
+                        ip.saturating_sub(1),
                     );
-                    let other1 = load_op(rhs1, rhs1_const);
-                    acc = if s1_left {
-                        bin(op1, other1, acc)
-                    } else {
-                        bin(op1, acc, other1)
-                    };
-                    if has_s2 {
-                        let op2 = (descriptor >> 40) as u8;
-                        let rhs2 = (descriptor >> 48) as u8 as usize;
-                        let other2 = load_op(rhs2, rhs2_const);
-                        acc = if s2_left {
-                            bin(op2, other2, acc)
-                        } else {
-                            bin(op2, acc, other2)
-                        };
-                    }
-                    promise!(sp + dest < stack_cap);
-                    self.stack[sp + dest] = Value::from(acc);
-                    if self.stack.tell() <= sp + dest {
-                        self.stack.seek(sp + dest + 1);
-                    }
                 }
                 // Fused `BinSlotSlot <arith>; CONST pool; CmpJmpf/CmpJmpt` — no stack traffic.
-                Instruction::BinSlotSlotConstJmpf | Instruction::BinSlotSlotConstJmpt => {
+                Instruction::BinSlotSlotConstJmpf => {
+                    return self.runtime_panic(
+                        "retired opcode BinSlotSlotConstJmpf",
+                        ip.saturating_sub(1),
+                    );
+                }
+                Instruction::BinSlotSlotConstJmpt => {
                     let (bin_op, a, desc_idx) = opcode.bin_slot_slot_const_jmpf_parts();
                     promise!(desc_idx < constants.len());
                     let packed = unsafe { *constants.get_unchecked(desc_idx) };
@@ -3459,8 +3269,8 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::Panic => {
                     let panic_ip = ip.saturating_sub(1);
-                    let ptr = self.stack.pop().as_ptr::<ObjString>();
-                    let s = unsafe { &*ptr };
+                    let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
+                    let s = unsafe { (*ptr).as_ref() };
                     let loc_suffix = self
                         .format_panic_location(panic_ip)
                         .map(|loc| format!(" at {loc}"))
@@ -3556,34 +3366,15 @@ impl<const S: usize> Machine<S> {
                     // Arrays dominate Index traffic (Vec); check Array before Tuple.
                     let result = match Self::find_object_by_addr(&self.heap, target_addr) {
                         Some(crate::memory::Object::Array(gc)) => {
-                            let elements = &gc.as_ref().elements;
-                            let len = elements.len();
-                            if unchecked {
-                                let idx = index as usize;
-                                promise!(index >= 0);
-                                promise!(idx < len);
-                                unsafe { *elements.get_unchecked(idx) }
-                            } else if index >= 0 && (index as usize) < len {
-                                unsafe { *elements.get_unchecked(index as usize) }
-                            } else {
-                                Value::from(-1_i64)
-                            }
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
                         Some(crate::memory::Object::Tuple(gc)) => {
-                            let elements = &gc.as_ref().elements;
-                            let len = elements.len();
-                            if unchecked {
-                                let idx = index as usize;
-                                promise!(index >= 0);
-                                promise!(idx < len);
-                                unsafe { *elements.get_unchecked(idx) }
-                            } else if index >= 0 && (index as usize) < len {
-                                unsafe { *elements.get_unchecked(index as usize) }
-                            } else {
-                                Value::from(-1_i64)
-                            }
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
-                        _ => Value::from(-1_i64),
+                        _ => None,
+                    };
+                    let Some(result) = result else {
+                        return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
                     };
                     self.stack.push(result);
                 }
@@ -3598,7 +3389,10 @@ impl<const S: usize> Machine<S> {
                         Some(Object::Tuple(gc)) => {
                             Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
-                        _ => Value::from(-1_i64),
+                        _ => None,
+                    };
+                    let Some(result) = result else {
+                        return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
                     };
                     self.stack.push(result);
                 }
@@ -3640,13 +3434,18 @@ impl<const S: usize> Machine<S> {
                         Some(crate::memory::Object::Instance(gc)) => {
                             match gc.as_ref().get(key) {
                                 Some(crate::memory::Member::Value(v)) => v,
-                                // Heap objects (strings, nested dicts, enums, …)
-                                // — push the address, same as LoadField/Unpack.
                                 Some(crate::memory::Member::Object(o)) => Value::from(o.addr()),
-                                None => Value::from(-1_i64),
+                                None => {
+                                    return self.runtime_panic(
+                                        "no such field",
+                                        ip.saturating_sub(1),
+                                    );
+                                }
                             }
                         }
-                        _ => Value::from(-1_i64),
+                        _ => {
+                            return self.runtime_panic("no such field", ip.saturating_sub(1));
+                        }
                     };
                     self.stack.push(result);
                 }
@@ -3667,6 +3466,8 @@ impl<const S: usize> Machine<S> {
                             crate::memory::Member::Value(value)
                         };
                         gc.as_mut().set(key, member);
+                    } else {
+                        return self.runtime_panic("SetField on non-instance", ip.saturating_sub(1));
                     }
                     self.stack.push(value);
                 }
@@ -3693,7 +3494,15 @@ impl<const S: usize> Machine<S> {
                             unsafe {
                                 *arr.elements.get_unchecked_mut(index as usize) = value;
                             }
+                        } else {
+                            return self
+                                .runtime_panic("index out of bounds", ip.saturating_sub(1));
                         }
+                    } else {
+                        return self.runtime_panic(
+                            "StoreIndex on non-array",
+                            ip.saturating_sub(1),
+                        );
                     }
                     self.stack.push(value);
                 }
@@ -3705,7 +3514,15 @@ impl<const S: usize> Machine<S> {
                     if let Some(Object::Array(mut gc)) = self.current_pins_mut().get(&slot).copied()
                     {
                         let arr = gc.as_mut();
-                        Self::write_indexed(&mut arr.elements, index, value, unchecked);
+                        if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
+                            return self
+                                .runtime_panic("index out of bounds", ip.saturating_sub(1));
+                        }
+                    } else {
+                        return self.runtime_panic(
+                            "StoreIndexPin on non-array",
+                            ip.saturating_sub(1),
+                        );
                     }
                     self.stack.push(value);
                 }
@@ -3728,6 +3545,9 @@ impl<const S: usize> Machine<S> {
                         if old_bytes != new_bytes {
                             self.heap.account_resize(old_bytes, new_bytes);
                         }
+                    } else {
+                        return self
+                            .runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
                     }
                     self.stack.push(target_val);
                 }
@@ -3991,6 +3811,11 @@ impl<const S: usize> Machine<S> {
                         Self::find_object_by_addr(&self.heap, addr)
                     {
                         self.start_yield_from(&mut ip, &mut sp, sub, code);
+                    } else {
+                        return self.runtime_panic(
+                            "yield from invalid coroutine handle",
+                            ip.saturating_sub(1),
+                        );
                     }
                 }
                 Instruction::DoneCoro => {
@@ -4351,7 +4176,7 @@ impl<const S: usize> Machine<S> {
                 | Instruction::DynDiv
                 | Instruction::DynMod => {
                     /// Classify a value into (ValueTag, payload-Value).
-                    /// Uses `Heap::find_object_by_addr` (O(1) via addr index).
+                    /// Uses `Heap::find_object_by_addr` (live-set + header kind).
                     fn classify_dyn(v: Value, heap: &Heap) -> (ValueTag, Value) {
                         let addr = v.raw() as u64;
                         if v.raw().is_null() {
@@ -4413,17 +4238,21 @@ impl<const S: usize> Machine<S> {
                                 Instruction::DynMul => ai.wrapping_mul(bi),
                                 Instruction::DynDiv => {
                                     if bi == 0 {
-                                        0
-                                    } else {
-                                        ai / bi
+                                        return self.runtime_panic(
+                                            "division by zero",
+                                            ip.saturating_sub(1),
+                                        );
                                     }
+                                    ai / bi
                                 }
                                 Instruction::DynMod => {
                                     if bi == 0 {
-                                        0
-                                    } else {
-                                        ai % bi
+                                        return self.runtime_panic(
+                                            "division by zero",
+                                            ip.saturating_sub(1),
+                                        );
                                     }
+                                    ai % bi
                                 }
                                 _ => unreachable!(),
                             };
@@ -4493,7 +4322,9 @@ impl<const S: usize> Machine<S> {
                         print!("{text}");
                     }
                 }
-                _ => return false,
+                _ => {
+                    return self.runtime_panic("unknown opcode", ip.saturating_sub(1));
+                }
             }
         }
         false

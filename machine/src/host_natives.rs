@@ -229,6 +229,14 @@ fn push_wiring(
             .unwrap_or_else(|_| panic!("{label} native signature"));
         let id = out.len();
         register_id(name, id);
+        if name == "vec_insert" {
+            out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
+                crate::vec_ops::host_vec_insert(heap, args)
+                    .map(Some)
+                    .map_err(|msg| FfiError::Unsupported(msg.to_string()))
+            })));
+            continue;
+        }
         out.push(Arc::new(HostClosureFn::new(sig, move |heap, args| {
             Ok(Some(host(heap, args)))
         })));

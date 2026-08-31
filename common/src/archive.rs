@@ -13,7 +13,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use crate::debug::{DebugLoc, ProgramDebug};
 
 /// Archive ABI major. Bump (and reset minor to 0) on incompatible layout/opcode changes.
-pub const ARCHIVE_MAJOR: u16 = 3;
+pub const ARCHIVE_MAJOR: u16 = 4;
 
 /// Archive ABI minor. Bump on additive, append-only bytecode changes.
 ///
@@ -321,10 +321,10 @@ mod tests {
 
     #[test]
     fn archive_version_matches_current_abi() {
-        assert_eq!(ARCHIVE_MAJOR, 3);
+        assert_eq!(ARCHIVE_MAJOR, 4);
         assert_eq!(ARCHIVE_MINOR, 0);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(3, 0));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "3.0");
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 0));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.0");
     }
 
     #[test]
