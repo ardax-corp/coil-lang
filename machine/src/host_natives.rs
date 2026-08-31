@@ -14,8 +14,8 @@ use crate::{
     PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
 };
 
-use crate::vec_ops::VEC_WIRING;
 use crate::GC_WIRING;
+use crate::vec_ops::VEC_WIRING;
 
 /// Removed virtual-time HostInvoke names/arities (COI-257). Same 16 slots as
 /// the old `TIME_WIRING` table, after FS and before ENV, so later ids stay put.
@@ -52,6 +52,14 @@ pub fn build_standard_host_natives(
     mut register_id: impl FnMut(&str, usize),
 ) -> Vec<Arc<dyn NativeFn>> {
     let mut out: Vec<Arc<dyn NativeFn>> = Vec::new();
+    let mut register_id = |name: &str, id: usize| {
+        debug_assert_eq!(
+            common::host_native_id(name),
+            Some(id),
+            "HostInvoke `{name}` id {id} must match common::HOST_NATIVES"
+        );
+        register_id(name, id);
+    };
     push_io_natives(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, FS_WIRING, "fs");
     push_removed_time_stubs(&mut out, &mut register_id);
@@ -72,17 +80,15 @@ pub fn build_standard_host_natives(
     // package-IO hooks (coil-tls uses these via `dload`, not VM TLS natives).
     push_stream_attach(&mut out, &mut register_id);
     push_stream_park(&mut out, &mut register_id);
+    debug_assert_eq!(
+        out.len(),
+        common::HOST_NATIVES.len(),
+        "runtime host table length must match common::HOST_NATIVES"
+    );
     out
 }
 
-/// Registry name for profile-counter HostInvoke (append-only after vec).
-pub const PGO_HIT_NATIVE: &str = "pgo_hit";
-
-/// In-place Stream attach (`Stream.attach`). Append-only after `pgo_hit`.
-pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
-
-/// Park this coro on the stream fd (`Stream.park`). Append-only after attach.
-pub const STREAM_PARK_NATIVE: &str = "stream_park";
+pub use common::{PGO_HIT_NATIVE, STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE};
 
 fn push_pgo_hit(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let sig =
@@ -1042,7 +1048,10 @@ mod tests {
             "TIME_WIRING table must not return"
         );
         let cargo = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"));
-        assert!(!cargo.contains("chrono"), "machine must not depend on chrono");
+        assert!(
+            !cargo.contains("chrono"),
+            "machine must not depend on chrono"
+        );
         assert!(
             !cargo.contains("time = "),
             "machine must not declare a time cargo feature"
@@ -1079,7 +1088,9 @@ mod tests {
         let mut names = Vec::new();
         build_standard_host_natives(|name, _id| names.push(name.to_string()));
         assert!(
-            names.iter().all(|n| n != "time_instant_drop" && n != "instant_drop"),
+            names
+                .iter()
+                .all(|n| n != "time_instant_drop" && n != "instant_drop"),
             "Instant drop must not be a VM host: {names:?}"
         );
         let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -1096,5 +1107,28 @@ mod tests {
             leftover.is_empty(),
             "VM Instant registry must stay gone: {leftover:?}"
         );
+    }
+
+    #[test]
+    fn compiler_catalog_matches_runtime_table() {
+        let mut runtime = Vec::new();
+        let natives = build_standard_host_natives(|name, id| {
+            runtime.push((name.to_string(), id));
+        });
+        let catalog: Vec<(String, usize)> = common::host_native_ids()
+            .map(|(n, id)| (n.to_string(), id))
+            .collect();
+        assert_eq!(
+            runtime, catalog,
+            "compiler ids must equal runtime table ids"
+        );
+        assert_eq!(natives.len(), common::HOST_NATIVES.len());
+        for (native, entry) in natives.iter().zip(common::HOST_NATIVES.iter()) {
+            assert_eq!(native.name(), entry.name);
+            assert_eq!(native.signature().arity(), entry.arity as usize);
+        }
+        assert_eq!(common::host_native_id(PGO_HIT_NATIVE), Some(119));
+        assert_eq!(common::host_native_id(STREAM_ATTACH_NATIVE), Some(120));
+        assert_eq!(common::host_native_id(STREAM_PARK_NATIVE), Some(121));
     }
 }

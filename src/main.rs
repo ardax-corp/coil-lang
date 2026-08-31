@@ -11,6 +11,7 @@ use rkyv::rancor::Error;
 
 mod cli;
 mod package_app;
+mod host_wire;
 
 use cli::{Command, DEFAULT_OUT, parse_args, print_version};
 use package_app::{cmd_package, native_lock_from_project_manifest};
@@ -344,9 +345,8 @@ pub(crate) fn execute_archive(
         .max(machine::DEFAULT_OPERAND_STACK_SLOTS as u32) as usize;
     let entry = entry.map(ffi_entry_path);
     let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
-    pipeline.wire_vm_ffi(&mut machine, entry.as_deref());
-    pipeline.wire_host_natives(&mut machine);
-    pipeline.wire_thread_program(&mut machine, bytecode, constants, strings);
+    crate::host_wire::wire_pipeline_vm(&pipeline, &mut machine, entry.as_deref());
+    crate::host_wire::wire_pipeline_threads(&pipeline, &mut machine, bytecode, constants, strings);
     machine.set_program_debug(debug);
     machine.run_raw(bytecode, constants, strings, static_slots);
     machine.panicked()
@@ -510,8 +510,7 @@ fn run_test_case(
 ) -> bool {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let mut machine = Machine::<256>::default();
-            pipeline.wire_vm_ffi(&mut machine, entry);
-            pipeline.wire_host_natives(&mut machine);
+            crate::host_wire::wire_pipeline_vm(pipeline, &mut machine, entry);
             machine.set_program_debug(pipeline.program_debug());
             machine.init_static_slots(pipeline.static_slot_count());
             machine.load_program(bytecode, constants, strings);

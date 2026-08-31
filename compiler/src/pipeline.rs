@@ -10,6 +10,7 @@ use common::{
     archive_version_compatible, ArchivedArchivedProgram, ArchivedProgram, Byte, Instruction,
     ProgramDebug, ARCHIVE_VERSION,
 };
+#[cfg(any(test, feature = "vm-wire"))]
 use machine::{FfiError, FfiSignature, FfiType, Heap, HostClosureFn, NativeFn};
 use parser::{ast::Expression, Pratt, SimpleSpan};
 use reporting::{
@@ -54,12 +55,11 @@ pub struct Pipeline {
     worklist: VecDeque<WorkItem>,
     /// `use`/`mod` edges for topo-sort compile order (discovery can reorder worklist).
     module_deps: HashMap<PathBuf, Vec<PathBuf>>,
-    /// Native functions registered by the host. The
-    /// pipeline tracks these so it can register them
-    /// with the typechecker when a native call is
-    /// typechecked.
+    /// Native functions registered by the host (tests / extra closures).
+    #[cfg(any(test, feature = "vm-wire"))]
     natives: Vec<NativeDecl>,
-    /// Host Rust closures registered via [`Self::register_host_native`].
+    /// Extra Host Rust closures from [`Self::register_host_native`].
+    #[cfg(any(test, feature = "vm-wire"))]
     host_natives: Vec<std::sync::Arc<dyn NativeFn>>,
     /// The entry file (the file passed to `compile`).
     /// This file is special: it's the program root and
@@ -87,8 +87,8 @@ pub struct Pipeline {
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
     /// (builtin typeclasses + Vec signatures) was ~28% of process startup.
     compiler: std::cell::OnceCell<Compiler>,
-    /// Standard-native name/id pairs, replayed into the compiler when it is
-    /// first built — only the typechecker needs them.
+    /// Standard-native name/id pairs from [`common::HOST_NATIVES`], replayed
+    /// into the compiler when it is first built.
     pending_native_ids: Vec<(String, usize)>,
     /// Owned diagnostic sink (pretty / SARIF / LSP).
     sink: Box<dyn DiagnosticSink>,
@@ -100,6 +100,7 @@ pub struct Pipeline {
 }
 
 /// Native function declaration registered by the host.
+#[cfg(any(test, feature = "vm-wire"))]
 #[derive(Debug, Clone)]
 pub struct NativeDecl {
     pub name: String,
@@ -126,9 +127,9 @@ impl Pipeline {
         self.overlays.remove(file);
     }
     /// Register a host native with an explicit [`FfiSignature`]
-    /// and Rust closure. The signature is forwarded to the HM
-    /// typechecker; the closure is stored for
-    /// [`Self::wire_host_natives`].
+    /// and Rust closure. Test-only; production ids come from
+    /// [`common::HOST_NATIVES`].
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn register_host_native<F>(&mut self, sig: FfiSignature, func: F) -> usize
     where
         F: Fn(&mut Heap, &[common::Value]) -> Result<Option<common::Value>, FfiError>
@@ -140,7 +141,8 @@ impl Pipeline {
             sig.args.iter().copied().map(ffi_type_to_ty).collect();
         let ret = ffi_type_to_ty(sig.ret);
         self.compiler_lazy_mut().register(&sig.name, &params, &ret);
-        let id = self.host_natives.len();
+        let id = common::HOST_NATIVES.len() + self.host_natives.len();
+        self.compiler_lazy_mut().register_native_id(&sig.name, id);
         self.host_natives
             .push(std::sync::Arc::new(HostClosureFn::new(sig, func)));
         id
@@ -149,6 +151,7 @@ impl Pipeline {
     /// Register a native function's type signature (metadata
     /// only — no VM closure). Embedders that supply their own
     /// closures should prefer [`Self::register_host_native`].
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn register_native_function(&mut self, name: String, namespace: String, sig: FfiSignature) {
         let params: Vec<crate::typechecking::ty::Ty> =
             sig.args.iter().copied().map(ffi_type_to_ty).collect();
@@ -161,24 +164,24 @@ impl Pipeline {
         });
     }
 
-    /// Wire host natives registered via [`Self::register_host_native`]
-    /// into the VM. Call before `Machine::run_raw`.
+    /// Wire the standard HostInvoke table plus any extra test natives.
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn wire_host_natives<const N: usize>(&self, machine: &mut machine::Machine<N>) {
+        machine::wire_standard_host_natives(machine);
         for native in &self.host_natives {
             machine.register_native(std::sync::Arc::clone(native));
         }
     }
 
-    /// Register standard host natives (io/fs/env/thread/…) with stable HostInvoke ids.
+    /// Record HostInvoke ids from [`common::HOST_NATIVES`] (no VM closures).
     fn register_standard_host_natives(&mut self) {
-        let mut pending = Vec::new();
-        self.host_natives = machine::build_standard_host_natives(|name, id| {
-            pending.push((name.to_string(), id));
-        });
-        self.pending_native_ids = pending;
+        self.pending_native_ids = common::host_native_ids()
+            .map(|(name, id)| (name.to_string(), id))
+            .collect();
     }
 
     /// Install shared bytecode on `machine` for `thread::spawn` workers.
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn wire_thread_program<const N: usize>(
         &self,
         machine: &mut machine::Machine<N>,
@@ -186,16 +189,15 @@ impl Pipeline {
         constants: &[u64],
         strings: &[String],
     ) {
-        use machine::thread::ThreadProgram;
-        use std::sync::Arc;
-        machine.set_thread_program(Arc::new(ThreadProgram {
-            code: Arc::from(bytecode.to_vec()),
-            constants: Arc::from(constants.to_vec()),
-            strings: Arc::from(strings.to_vec()),
-            static_slot_count: self.static_slot_count(),
-            debug: self.program_debug(),
-            operand_stack_slots: self.operand_stack_slots(),
-        }));
+        machine::wire_thread_program(
+            machine,
+            bytecode,
+            constants,
+            strings,
+            self.static_slot_count(),
+            self.program_debug(),
+            self.operand_stack_slots(),
+        );
     }
 
     /// Bytecode entry offset for a registered function (for tests).
@@ -208,7 +210,7 @@ impl Pipeline {
     /// and `compiler/tests/namespace.rs` that need to
     /// inspect the compiler's diagnostic messages
     /// directly.
-    #[cfg(test)]
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn compiler_mut(&mut self) -> &mut Compiler {
         self.compiler_lazy_mut()
     }
@@ -227,7 +229,7 @@ impl Pipeline {
             }
             c.set_opt_level(self.opt_level);
             c.set_collect_opt_stats(self.collect_opt_stats);
-            if let Some(id) = c.native_id(machine::PGO_HIT_NATIVE) {
+            if let Some(id) = c.native_id(common::PGO_HIT_NATIVE) {
                 crate::profile::set_pgo_native_id(Some(id as i32));
             }
             c
@@ -340,12 +342,47 @@ impl Pipeline {
     }
 
     fn apply_env_grants(m: &Manifest) {
-        machine::env::set_allow_exec(m.allow_exec);
-        machine::env::set_allow_exit(m.allow_exit);
-        machine::env::set_allow_ffi_exec(m.allow_ffi_exec);
+        // Production applies these when the VM is wired (`machine::wire_vm_host`).
+        // Tests still set process-global flags at Pipeline construction.
+        let _ = m;
+        #[cfg(any(test, feature = "vm-wire"))]
+        {
+            machine::env::set_allow_exec(m.allow_exec);
+            machine::env::set_allow_exit(m.allow_exit);
+            machine::env::set_allow_ffi_exec(m.allow_ffi_exec);
+            machine::set_allow_attach(m.allow_attach);
+        }
+    }
+
+    pub fn extra_dload_stems(&self) -> &[String] {
+        &self.extra_dload_stems
+    }
+
+    pub fn extra_dload_grants(&self) -> &[(String, PathBuf)] {
+        &self.extra_dload_grants
+    }
+
+    pub fn dload_native_pins(&self) -> Vec<(String, String)> {
+        crate::lockfile::Lockfile::load(&self.project_root)
+            .native_pins()
+            .to_vec()
+    }
+
+    pub fn dload_trusted_stems(&self) -> Vec<String> {
+        let lock = crate::lockfile::Lockfile::load(&self.project_root);
+        lock.trusted_extra_stems(&self.manifest.dependencies)
+    }
+
+    pub fn c_struct_encodings(&self) -> Vec<(String, Vec<(String, u32)>)> {
+        self.compiler_lazy()
+            .c_structs()
+            .iter()
+            .map(|def| (def.name.clone(), def.fields.clone()))
+            .collect()
     }
 
     /// Fail-closed gate: consumer allow+hash, allow+trusted, and host grants.
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn build_dload_gate(&self) -> machine::DloadGate {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
         let trusted = lock.trusted_extra_stems(&self.manifest.dependencies);
@@ -374,6 +411,7 @@ impl Pipeline {
     }
 
     /// Wire FFI library resolution paths and C struct layouts into the VM.
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn wire_vm_ffi<const N: usize>(
         &self,
         vm: &mut machine::Machine<N>,
@@ -472,7 +510,9 @@ impl Pipeline {
             processed: Vec::new(),
             worklist: VecDeque::new(),
             module_deps: HashMap::new(),
+            #[cfg(any(test, feature = "vm-wire"))]
             natives: Vec::new(),
+            #[cfg(any(test, feature = "vm-wire"))]
             host_natives: Vec::new(),
             entry_file: None,
             source_interner: common::Interner::default(),
@@ -1475,7 +1515,7 @@ impl Pipeline {
     /// Insert `pgo_hit` counters after per-function IL opts (`--pgo-instrument`).
     pub fn set_pgo_instrument(&mut self, on: bool) {
         crate::profile::set_pgo_instrument(on);
-        if let Some(id) = self.compiler_lazy().native_id(machine::PGO_HIT_NATIVE) {
+        if let Some(id) = self.compiler_lazy().native_id(common::PGO_HIT_NATIVE) {
             crate::profile::set_pgo_native_id(Some(id as i32));
         }
     }
@@ -1492,6 +1532,7 @@ impl Pipeline {
     }
 
     /// Borrow host-registered native function metadata.
+    #[cfg(any(test, feature = "vm-wire"))]
     pub fn natives(&self) -> &[NativeDecl] {
         &self.natives
     }
@@ -1584,6 +1625,7 @@ impl Pipeline {
     }
 }
 
+#[cfg(any(test, feature = "vm-wire"))]
 fn ffi_type_to_ty(ty: FfiType) -> crate::typechecking::ty::Ty {
     use crate::typechecking::ty::{array, boolean, float, int, string, unit};
     match ty {
@@ -1795,8 +1837,8 @@ fn main() {
         );
         assert_eq!(
             pipeline.pending_native_ids.len(),
-            pipeline.host_natives.len(),
-            "buffered ids must line up 1:1 with the host-native table"
+            common::HOST_NATIVES.len(),
+            "buffered ids must line up 1:1 with the host catalog"
         );
     }
 
@@ -1845,7 +1887,7 @@ fn main() {
             pipeline.compiler.get().is_none(),
             "wire_host_natives must not initialize the compiler"
         );
-        assert!(!pipeline.host_natives.is_empty());
+        assert_eq!(pipeline.pending_native_ids.len(), common::HOST_NATIVES.len());
     }
 
     /// `register_host_native` forces compiler init; pending standard ids must

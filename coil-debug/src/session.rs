@@ -174,13 +174,36 @@ impl DebugSession {
         let line_index = LineIndex::build(&artifacts.debug, Some(&base_dir));
 
         let mut machine = Machine::<256>::default();
-        pipeline.wire_vm_ffi(&mut machine, Some(&entry_path));
-        pipeline.wire_host_natives(&mut machine);
-        pipeline.wire_thread_program(
+        let pins = pipeline.dload_native_pins();
+        let trusted = pipeline.dload_trusted_stems();
+        let structs = pipeline.c_struct_encodings();
+        let m = pipeline.manifest();
+        machine::wire_vm_host(
+            &mut machine,
+            &machine::VmHostSpec {
+                entry_path: Some(&entry_path),
+                project_root: pipeline.project_root(),
+                ffi_search_paths: &m.ffi_search_paths,
+                ffi_allow: &m.ffi_allow,
+                native_pins: &pins,
+                trusted_stems: &trusted,
+                extra_dload_stems: pipeline.extra_dload_stems(),
+                extra_dload_grants: pipeline.extra_dload_grants(),
+                allow_exec: m.allow_exec,
+                allow_exit: m.allow_exit,
+                allow_ffi_exec: m.allow_ffi_exec,
+                allow_attach: m.allow_attach,
+                c_structs: &structs,
+            },
+        );
+        machine::wire_thread_program(
             &mut machine,
             &artifacts.bytecode,
             &artifacts.constants,
             &artifacts.strings,
+            pipeline.static_slot_count(),
+            pipeline.program_debug(),
+            pipeline.operand_stack_slots(),
         );
         machine.set_program_debug(artifacts.debug.clone());
         machine.attach_debug(DebugController::new());
@@ -247,7 +270,9 @@ impl DebugSession {
             .retain(|b| !source_matches(&b.source, source));
         let mut out = Vec::with_capacity(lines.len());
         for &line in lines {
-            let pcs = self.line_index.pcs_for_line(Some(source), line, &self.entry);
+            let pcs = self
+                .line_index
+                .pcs_for_line(Some(source), line, &self.entry);
             if pcs.is_empty() {
                 out.push(LineBreakpointResult {
                     line,
@@ -318,14 +343,20 @@ impl DebugSession {
             self.sync_vm_breakpoints();
             return Ok(Vec::new());
         }
-        names.iter().map(|n| self.set_function_breakpoint(n)).collect()
+        names
+            .iter()
+            .map(|n| self.set_function_breakpoint(n))
+            .collect()
     }
 
     pub fn set_function_breakpoints(
         &mut self,
         names: &[&str],
     ) -> Result<Vec<BreakpointInfo>, String> {
-        names.iter().map(|n| self.set_function_breakpoint(n)).collect()
+        names
+            .iter()
+            .map(|n| self.set_function_breakpoint(n))
+            .collect()
     }
 
     pub fn break_at(&mut self, arg: &str) -> Result<BreakpointInfo, String> {
@@ -798,7 +829,10 @@ mod tests {
             "reason={reason:?}"
         );
         let frames = session.stack_frames();
-        assert!(frames.len() >= 2, "expected recursive/caller stack, got {frames:?}");
+        assert!(
+            frames.len() >= 2,
+            "expected recursive/caller stack, got {frames:?}"
+        );
         assert!(
             frames[0].name.contains("fib"),
             "top frame should be fib, got {:?}",
@@ -859,7 +893,10 @@ mod tests {
             .replace_function_breakpoints(&["fib"])
             .expect("fn breakpoints");
         assert!(
-            session.breakpoints().iter().any(|b| b.label.contains("fib")),
+            session
+                .breakpoints()
+                .iter()
+                .any(|b| b.label.contains("fib")),
             "expected fib BP"
         );
         session
@@ -910,10 +947,7 @@ mod tests {
             "/workspace/examples/fib.hy"
         ));
         assert!(!source_matches(&None, "fib.hy"));
-        assert!(!source_matches(
-            &Some("other.hy".into()),
-            "fib.hy"
-        ));
+        assert!(!source_matches(&Some("other.hy".into()), "fib.hy"));
     }
 
     #[test]

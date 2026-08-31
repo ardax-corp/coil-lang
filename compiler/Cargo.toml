@@ -7,15 +7,17 @@ edition = "2024"
 default = []
 dissect = []
 pratt = []
+# Test-only: Pipeline VM wire helpers. Production compiler does not depend on machine.
+vm-wire = ["dep:machine"]
 
 [dependencies]
 common = { path = "../common" }
-machine = { path = "../machine", default-features = false }
 parser = { path = "../parser" }
 reporting = { path = "../reporting" }
 rkyv = "0.8.12"
 serde = { version = "1", features = ["derive"] }
 bincode = "1"
+machine = { path = "../machine", optional = true, default-features = false, features = ["vm_profile"] }
 
 [dev-dependencies]
 machine = { path = "../machine", default-features = false, features = ["vm_profile"] }
@@ -26,3 +28,19 @@ serde_json = "1"
 [[test]]
 name = "dissect"
 required-features = ["dissect"]
+
+[[test]]
+name = "pipeline"
+required-features = ["vm-wire"]
+
+[[test]]
+name = "namespace"
+required-features = ["vm-wire"]
+
+[[test]]
+name = "cursor_model"
+required-features = ["vm-wire"]
+
+[[test]]
+name = "perf_metrics"
+required-features = ["vm-wire"]
