@@ -1,17 +1,17 @@
 // Nested `match` on the same Option field copies the field; outer
 // pattern bindings stay in scope in the inner arm.
 class BoxInt {
-    opt: Option<int>,
+    pub opt: Option<int>,
 }
 
 class Node {
-    val: int,
-    left: Option<Node>,
-    right: Option<Node>,
+    pub val: int,
+    pub left: Option<Node>,
+    pub right: Option<Node>,
 }
 
 class Holder {
-    text: Option<string>,
+    pub text: Option<string>,
 }
 
 fn nested_same_field(BoxInt b) -> int {

@@ -9,7 +9,7 @@ trait Bifunctor<F: * -> * -> *> {
 }
 
 impl Bifunctor<Result> {
-    fn tag<A, B>(Result<A, B> xs) -> int {
+    pub fn tag<A, B>(Result<A, B> xs) -> int {
         return 42;
     }
 }

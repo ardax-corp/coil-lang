@@ -61,6 +61,8 @@ pub enum ErrorCode {
     /// Option corrupts native payloads. Inherent methods are monomorphized
     /// and stay valid.
     UnsupportedGenericOptionReturn,
+    /// Private field or inherent method used outside its type's `impl`.
+    PrivateMember,
 
     // --- Enums / match / constructs (E02xx) ---
     DuplicateEnum,
@@ -138,6 +140,7 @@ impl ErrorCode {
             Self::ExpressionNestingTooDeep => "E0125",
             Self::InvalidDrop => "E0126",
             Self::UnsupportedGenericOptionReturn => "E0127",
+            Self::PrivateMember => "E0128",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -208,6 +211,7 @@ impl ErrorCode {
             Self::ExpressionNestingTooDeep => "expression nested too deeply for the compiler",
             Self::InvalidDrop => "invalid drop method",
             Self::UnsupportedGenericOptionReturn => "unsupported free generic Option return",
+            Self::PrivateMember => "private member is not accessible",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -286,6 +290,7 @@ mod tests {
             | ExpressionNestingTooDeep
             | InvalidDrop
             | UnsupportedGenericOptionReturn
+            | PrivateMember
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -346,6 +351,7 @@ mod tests {
             ExpressionNestingTooDeep,
             InvalidDrop,
             UnsupportedGenericOptionReturn,
+            PrivateMember,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,

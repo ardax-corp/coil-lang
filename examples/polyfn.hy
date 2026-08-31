@@ -8,7 +8,7 @@ trait Describable<T> {
 }
 
 impl Describable<int> {
-    fn describe_val(int x) -> int {
+    pub fn describe_val(int x) -> int {
         return x + 1;
     }
 }

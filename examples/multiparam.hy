@@ -9,7 +9,7 @@ trait Convert<A, B> {
 }
 
 impl Convert<int, int> {
-    fn cast(int x) -> int {
+    pub fn cast(int x) -> int {
         return x;
     }
 }

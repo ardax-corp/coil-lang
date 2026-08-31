@@ -976,7 +976,7 @@ mod tests {
     fn does_not_plan_user_trait_ground_call() {
         let plan = plan(
             "trait Describable<T> { fn describe_val(T x) -> int; } \
-             impl Describable<int> { fn describe_val(int x) -> int { return x; } } \
+             impl Describable<int> { pub fn describe_val(int x) -> int { return x; } } \
              fn show<T: Describable>(T x) -> int { return x.describe_val(); } \
              fn main() { show(42); }",
         );
@@ -1015,7 +1015,7 @@ mod tests {
 
         let with_user = plan(
             "trait Tagged<T> { fn tag(T x) -> int; } \
-             impl Tagged<int> { fn tag(int x) -> int { return x; } } \
+             impl Tagged<int> { pub fn tag(int x) -> int { return x; } } \
              fn mix<T: Num + Tagged>(T a, T b) -> T { return a + b; } \
              fn main() { mix(1, 2); }",
         );

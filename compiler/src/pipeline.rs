@@ -2413,7 +2413,7 @@ fn main() -> int {
     fn typecheck_project_sees_derive_eq() {
         let src = r#"
 #[derive(Eq)]
-class Point { x: int, y: int }
+class Point { pub x: int, pub y: int }
 
 fn eq_ok() -> bool {
     return new Point(1, 1) == new Point(1, 1);

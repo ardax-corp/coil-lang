@@ -864,16 +864,27 @@ use string::{format, to_bytes};
 
     #[test]
     fn class_visibility_recorded_for_future_member_access() {
-        // Member access (`x.field`) isn't parsed yet, so we can't write
-        // a true visibility-check test. This test asserts the data is
-        // recorded correctly so the future member-access pass can
-        // enforce it without re-parsing the class.
         let (mut c, _) = check("class Foo { pub age: int, name: String, }");
         let msgs = c.take_messages();
         assert!(msgs.is_empty(), "{:?}", msgs);
         let foo = c.classes.get("Foo").unwrap();
         assert_eq!(foo[0].0, Visibility::Public);
         assert_eq!(foo[1].0, Visibility::Private);
+        assert!(Checker::can_access_member(
+            Visibility::Public,
+            "Foo",
+            None
+        ));
+        assert!(!Checker::can_access_member(
+            Visibility::Private,
+            "Foo",
+            None
+        ));
+        assert!(Checker::can_access_member(
+            Visibility::Private,
+            "Foo",
+            Some("Foo")
+        ));
     }
 
     // ---- Impl blocks ----
@@ -881,7 +892,7 @@ use string::{format, to_bytes};
     #[test]
     fn impl_binds_self_to_owner() {
         // `self` is implicit. The method's type becomes Foo -> Foo.
-        let src = "class Foo { } impl Foo { fn id() -> Foo { return new Foo(); } }";
+        let src = "class Foo { } impl Foo { pub fn id() -> Foo { return new Foo(); } }";
         let (mut c, _) = check(src);
         let msgs = c.take_messages();
         assert!(msgs.is_empty(), "{:?}", msgs);
@@ -900,7 +911,7 @@ use string::{format, to_bytes};
 
     #[test]
     fn impl_method_with_args_prepends_self() {
-        let src = "impl Foo { fn method(int x) -> int { return x; } }";
+        let src = "impl Foo { pub fn method(int x) -> int { return x; } }";
         let (mut c, _) = check(src);
         let msgs = c.take_messages();
         assert!(msgs.is_empty(), "{:?}", msgs);
@@ -952,7 +963,7 @@ use string::{format, to_bytes};
     #[test]
     fn instantiate_returns_class_type() {
         // Positional ctor args match class fields in declaration order.
-        let src = r#"class Foo { name: string, } let x = new Foo("hi"); x"#;
+        let src = r#"class Foo { pub name: string, } let x = new Foo("hi"); x"#;
         let (mut c, _) = check(src);
         let ty = inferred_expr_ty(src);
         let msgs = c.take_messages();
@@ -966,8 +977,8 @@ use string::{format, to_bytes};
     #[test]
     fn class_impl_and_instantiate_combined() {
         let src = r#"
-            class Foo { name: string, }
-            impl Foo { fn sadge() -> int { return 42; } }
+            class Foo { pub name: string, }
+            impl Foo { pub fn sadge() -> int { return 42; } }
             fn main() { let x = new Foo("hi"); }
         "#;
         let (mut c, _) = check(src);
@@ -980,8 +991,8 @@ use string::{format, to_bytes};
     #[test]
     fn class_method_call_typechecks() {
         let src = "\
-            class Point { x: int, y: int, } \
-            impl Point { fn sum() -> int { return self.x + self.y; } } \
+            class Point { pub x: int, pub y: int, } \
+            impl Point { pub fn sum() -> int { return self.x + self.y; } } \
             fn main() { let p = new Point(1, 3); p.sum(); }";
         let (mut c, _) = check(src);
         let msgs = c.take_messages();
@@ -993,7 +1004,7 @@ use string::{format, to_bytes};
     #[test]
     fn generic_class_new_infers_cell_int() {
         let src = "\
-            class Cell<T> { value: T }
+            class Cell<T> { pub value: T }
             fn main() { let c = new Cell(42); }";
         let (mut c, _) = check(src);
         let msgs = c.take_messages();
@@ -1008,9 +1019,9 @@ use string::{format, to_bytes};
     #[test]
     fn generic_class_method_get_returns_int() {
         let src = "\
-            class Cell<T> { value: T }
+            class Cell<T> { pub value: T }
             impl Cell<T> {
-                fn get() -> T { return self.value; }
+                pub fn get() -> T { return self.value; }
             }
             fn main() {
                 let c = new Cell(42);
@@ -1028,7 +1039,7 @@ use string::{format, to_bytes};
 
     #[test]
     fn generic_class_fields_stored_as_param_placeholders() {
-        let (mut c, _) = check("class Cell<T> { value: T }");
+        let (mut c, _) = check("class Cell<T> { pub value: T }");
         let msgs = c.take_messages();
         assert!(msgs.is_empty(), "{:?}", msgs);
         let fields = c.classes.get("Cell").expect("Cell registered");
@@ -1040,7 +1051,7 @@ use string::{format, to_bytes};
     #[test]
     fn class_unknown_field_errors() {
         let src = "\
-            class Point { x: int, } \
+            class Point { pub x: int, } \
             fn main() { let p = new Point(1); p.z; }";
         let (mut c, _) = check(src);
         let msgs = c.take_messages();
@@ -1054,7 +1065,7 @@ use string::{format, to_bytes};
     #[test]
     fn class_ctor_arity_mismatch_errors() {
         let src = "\
-            class Point { x: int, y: int, } \
+            class Point { pub x: int, pub y: int, } \
             fn main() { let p = new Point(1); }";
         let (mut c, _) = check(src);
         let msgs = c.take_messages();
@@ -1067,7 +1078,7 @@ use string::{format, to_bytes};
     fn recursive_method_via_self_binding() {
         // fib uses no self, but `==` is the only comparison the
         // parser currently supports; use that for the branch.
-        let src = "impl Counter { fn tick(int n) -> int { if n == 0 { return 0; } return tick(n - 1) + 1; } }";
+        let src = "impl Counter { pub fn tick(int n) -> int { if n == 0 { return 0; } return tick(n - 1) + 1; } }";
         let (mut c, _) = check(src);
         // We don't require no messages — the outer call site `tick(...)`
         // may have residual issues — but the method should be registered.
@@ -2406,7 +2417,7 @@ fn main() {
     fn record_construct_on_class_tuple_variant_steers_to_tuple_or_record_decl() {
         let msgs = assert_messages(
             r#"
-class JsonObject { x: int }
+class JsonObject { pub x: int }
 enum JsonValue { Obj(JsonObject) }
 fn main() { let _ = JsonValue::Obj { x: 1 }; }
 "#,
@@ -2431,7 +2442,7 @@ fn main() { let _ = JsonValue::Obj { x: 1 }; }
     fn tuple_variant_wrapping_class_typechecks() {
         let (c, _) = check(
             r#"
-class JsonObject { x: int }
+class JsonObject { pub x: int }
 enum JsonValue { Obj(JsonObject) }
 fn main() {
     let o = new JsonObject(1);
@@ -2732,7 +2743,7 @@ fn main() { name_of(1); }
     #[test]
     fn len_accepts_custom_length_impl() {
         let src = r#"
-class Box { value: int }
+class Box { pub value: int }
 impl Length for Box {
     fn len(Box b) -> int { return 1; }
 }
@@ -3294,7 +3305,7 @@ fn main() { size_of("hi"); }
                 fn zero() -> int { return 0; }
             }
             impl Tiny<int> {
-                fn zero() -> int { return 0; }
+                pub fn zero() -> int { return 0; }
             }
         "#;
         let (_c, msgs) = check_warn(src);
@@ -3315,10 +3326,10 @@ fn main() { size_of("hi"); }
                 fn add(int a, int b) -> int;
             }
             impl Tiny<int> {
-                fn add(int a, int b) -> int { return a; }
+                pub fn add(int a, int b) -> int { return a; }
             }
             impl Tiny<int> {
-                fn add(int a, int b) -> int { return b; }
+                pub fn add(int a, int b) -> int { return b; }
             }
         "#;
         let (_c, msgs) = check_warn(src);
@@ -3394,7 +3405,7 @@ fn main() { size_of("hi"); }
                 fn add(int a, int b) -> int;
             }
             impl Tiny<int> {
-                fn add(int a, int b) -> int { return a; }
+                pub fn add(int a, int b) -> int { return a; }
                 fn foo(int a) -> int { return a; }
             }
         "#;
@@ -3429,7 +3440,7 @@ fn main() { size_of("hi"); }
             trait Equal<T> { fn eq_val(T a, T b) -> bool; }
             trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
             impl Ordered<int> {
-                fn lt_val(int a, int b) -> bool { return a < b; }
+                pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
         "#;
         let (_c, msgs) = check_warn(src);
@@ -3453,10 +3464,10 @@ fn main() { size_of("hi"); }
             trait Equal<T> { fn eq_val(T a, T b) -> bool; }
             trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
             impl Equal<int> {
-                fn eq_val(int a, int b) -> bool { return a == b; }
+                pub fn eq_val(int a, int b) -> bool { return a == b; }
             }
             impl Ordered<int> {
-                fn lt_val(int a, int b) -> bool { return a < b; }
+                pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn cmp_eq<T: Ordered>(T a, T b) -> bool {
                 return eq_val(a, b);
@@ -3490,10 +3501,10 @@ fn main() { size_of("hi"); }
             trait Equal<T> { fn eq_val(T a, T b) -> bool; }
             trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
             impl Equal<int> {
-                fn eq_val(int a, int b) -> bool { return a == b; }
+                pub fn eq_val(int a, int b) -> bool { return a == b; }
             }
             impl Ordered<int> {
-                fn lt_val(int a, int b) -> bool { return a < b; }
+                pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn choose<c: * -> Constraint, T: c>(T a, T b) -> int {
                 if lt_val(a, b) { return 0; }
@@ -4206,21 +4217,21 @@ fn dump<T: Ord>(T a, T b) {
     fn for_in_custom_iterator_accepted() {
         let src = r#"
 class Counter {
-    cur: int,
-    end: int,
+    pub cur: int,
+    pub end: int,
 }
 
 impl IntoIterator<Counter> {
     type Item = int;
     type IntoIter = Counter;
-    fn into_iter(Counter c) -> Counter {
+    pub fn into_iter(Counter c) -> Counter {
         return c;
     }
 }
 
 impl Iterator<Counter> {
     type Item = int;
-    fn next(Counter c) -> Option<int> {
+    pub fn next(Counter c) -> Option<int> {
         if c.cur < c.end {
             let v = c.cur;
             c.cur = c.cur + 1;
@@ -4247,11 +4258,11 @@ fn main() {
     #[test]
     fn trait_impl_can_call_inherent_method() {
         let src = r#"
-class Box { v: int }
-class BoxIter { i: int }
+class Box { pub v: int }
+class BoxIter { pub i: int }
 
 impl Box {
-    fn iter() -> BoxIter {
+    pub fn iter() -> BoxIter {
         return new BoxIter(self.v);
     }
 }
@@ -4259,14 +4270,14 @@ impl Box {
 impl IntoIterator<Box> {
     type Item = int;
     type IntoIter = BoxIter;
-    fn into_iter(Box m) -> BoxIter {
+    pub fn into_iter(Box m) -> BoxIter {
         return m.iter();
     }
 }
 
 impl Iterator<BoxIter> {
     type Item = int;
-    fn next(BoxIter it) -> Option<int> {
+    pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
     }
 }
@@ -4287,11 +4298,11 @@ fn main() {
     #[test]
     fn trait_impl_can_call_generic_inherent_method() {
         let src = r#"
-class Map<K, V> { n: int }
-class MapIter<K, V> { n: int }
+class Map<K, V> { pub n: int }
+class MapIter<K, V> { pub n: int }
 
 impl Map<K, V> {
-    fn iter() -> MapIter<K, V> {
+    pub fn iter() -> MapIter<K, V> {
         return new MapIter(self.n);
     }
 }
@@ -4299,14 +4310,14 @@ impl Map<K, V> {
 impl IntoIterator<Map<K, V>> {
     type Item = int;
     type IntoIter = MapIter<K, V>;
-    fn into_iter(Map<K, V> m) -> MapIter<K, V> {
+    pub fn into_iter(Map<K, V> m) -> MapIter<K, V> {
         return m.iter();
     }
 }
 
 impl Iterator<MapIter<K, V>> {
     type Item = int;
-    fn next(MapIter<K, V> it) -> Option<int> {
+    pub fn next(MapIter<K, V> it) -> Option<int> {
         return Option::None;
     }
 }
@@ -4327,26 +4338,26 @@ fn main() {
     #[test]
     fn trait_impl_can_call_inherent_method_declared_later() {
         let src = r#"
-class Box { v: int }
-class BoxIter { i: int }
+class Box { pub v: int }
+class BoxIter { pub i: int }
 
 impl IntoIterator<Box> {
     type Item = int;
     type IntoIter = BoxIter;
-    fn into_iter(Box m) -> BoxIter {
+    pub fn into_iter(Box m) -> BoxIter {
         return m.iter();
     }
 }
 
 impl Box {
-    fn iter() -> BoxIter {
+    pub fn iter() -> BoxIter {
         return new BoxIter(self.v);
     }
 }
 
 impl Iterator<BoxIter> {
     type Item = int;
-    fn next(BoxIter it) -> Option<int> {
+    pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
     }
 }
@@ -4368,20 +4379,20 @@ fn main() {
     #[test]
     fn trait_impl_missing_inherent_method_still_errors() {
         let src = r#"
-class Box { v: int }
-class BoxIter { i: int }
+class Box { pub v: int }
+class BoxIter { pub i: int }
 
 impl IntoIterator<Box> {
     type Item = int;
     type IntoIter = BoxIter;
-    fn into_iter(Box m) -> BoxIter {
+    pub fn into_iter(Box m) -> BoxIter {
         return m.iter();
     }
 }
 
 impl Iterator<BoxIter> {
     type Item = int;
-    fn next(BoxIter it) -> Option<int> {
+    pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
     }
 }
@@ -4405,26 +4416,26 @@ fn main() {
     #[test]
     fn trait_impl_inherent_method_arity_mismatch_still_errors() {
         let src = r#"
-class Box { v: int }
-class BoxIter { i: int }
+class Box { pub v: int }
+class BoxIter { pub i: int }
 
 impl IntoIterator<Box> {
     type Item = int;
     type IntoIter = BoxIter;
-    fn into_iter(Box m) -> BoxIter {
+    pub fn into_iter(Box m) -> BoxIter {
         return m.iter(1);
     }
 }
 
 impl Box {
-    fn iter() -> BoxIter {
+    pub fn iter() -> BoxIter {
         return new BoxIter(self.v);
     }
 }
 
 impl Iterator<BoxIter> {
     type Item = int;
-    fn next(BoxIter it) -> Option<int> {
+    pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
     }
 }
@@ -4448,26 +4459,26 @@ fn main() {
     #[test]
     fn trait_impl_can_call_static_inherent_method_declared_later() {
         let src = r#"
-class Box { v: int }
-class BoxIter { i: int }
+class Box { pub v: int }
+class BoxIter { pub i: int }
 
 impl IntoIterator<Box> {
     type Item = int;
     type IntoIter = BoxIter;
-    fn into_iter(Box m) -> BoxIter {
+    pub fn into_iter(Box m) -> BoxIter {
         return Box::make_iter(m);
     }
 }
 
 impl Box {
-    static fn make_iter(Box m) -> BoxIter {
+    pub static fn make_iter(Box m) -> BoxIter {
         return new BoxIter(m.v);
     }
 }
 
 impl Iterator<BoxIter> {
     type Item = int;
-    fn next(BoxIter it) -> Option<int> {
+    pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
     }
 }
@@ -4490,13 +4501,13 @@ fn main() {
     }
 
     /// Inherent methods must not bind their short name in env (COI-115).
-    /// `impl Path { fn join }` would otherwise shadow `fn join` / `use path::{join}`.
+    /// `impl Path { pub fn join }` would otherwise shadow `fn join` / `use path::{join}`.
     #[test]
     fn inherent_method_does_not_bind_bare_name() {
         let src = r#"
-class P { x: int }
+class P { pub x: int }
 impl P {
-    fn join(P other) -> P {
+    pub fn join(P other) -> P {
         return other;
     }
 }
@@ -4650,9 +4661,9 @@ fn main() -> Result<(), Error> {
     #[test]
     fn impl_method_self_calls_later_helper() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump() -> int { return helper(self.v); }
+    pub fn bump() -> int { return helper(self.v); }
 }
 fn helper(int n) -> int { return n + 1; }
 fn main() {
@@ -4672,9 +4683,9 @@ fn main() {
     fn impl_method_can_call_module_helper_after_impl() {
         let src = r#"
 fn helper(int n) -> int { return n + 1; }
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump(Foo f) -> int { return helper(f.v); }
+    pub fn bump(Foo f) -> int { return helper(f.v); }
 }
 fn main() {
     let f = new Foo(1);
@@ -4692,9 +4703,9 @@ fn main() {
     #[test]
     fn impl_method_can_call_module_helper_before_impl() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump(Foo f) -> int { return helper(f.v); }
+    pub fn bump(Foo f) -> int { return helper(f.v); }
 }
 fn helper(int n) -> int { return n + 1; }
 fn main() {
@@ -4713,9 +4724,9 @@ fn main() {
     #[test]
     fn impl_method_forward_helper_num_bound_rejects_string() {
         let src = r#"
-class Foo { v: string, }
+class Foo { pub v: string, }
 impl Foo {
-    fn bump(Foo f) -> string { return add1(f.v); }
+    pub fn bump(Foo f) -> string { return add1(f.v); }
 }
 fn add1<T: Num>(T n) -> T { return n; }
 fn main() {
@@ -4734,9 +4745,9 @@ fn main() {
     #[test]
     fn impl_method_forward_helper_where_num_rejects_string() {
         let src = r#"
-class Foo { v: string, }
+class Foo { pub v: string, }
 impl Foo {
-    fn bump(Foo f) -> string { return twice(f.v); }
+    pub fn bump(Foo f) -> string { return twice(f.v); }
 }
 fn twice<T>(T n) -> T where Num<T> { return n; }
 fn main() {
@@ -4755,9 +4766,9 @@ fn main() {
     #[test]
     fn impl_method_forward_helper_arity_mismatch() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump(Foo f) -> int { return helper(f.v, 2); }
+    pub fn bump(Foo f) -> int { return helper(f.v, 2); }
 }
 fn helper(int n) -> int { return n + 1; }
 fn main() {
@@ -4776,9 +4787,9 @@ fn main() {
     #[test]
     fn impl_method_forward_helper_type_mismatch() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump(Foo f) -> int { return helper("x"); }
+    pub fn bump(Foo f) -> int { return helper("x"); }
 }
 fn helper(int n) -> int { return n + 1; }
 fn main() {
@@ -4797,9 +4808,9 @@ fn main() {
     #[test]
     fn impl_method_forward_unknown_helper_still_errors() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump(Foo f) -> int { return missing(f.v); }
+    pub fn bump(Foo f) -> int { return missing(f.v); }
 }
 fn main() {
     let f = new Foo(1);
@@ -4817,9 +4828,9 @@ fn main() {
     #[test]
     fn impl_method_forward_nullary_and_inferred_return() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump(Foo f) -> int { return one() + helper(f.v); }
+    pub fn bump(Foo f) -> int { return one() + helper(f.v); }
 }
 fn one() { return 1; }
 fn helper(int n) { return n; }
@@ -4839,9 +4850,9 @@ fn main() {
     #[test]
     fn impl_method_forward_generic_id_helper() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump(Foo f) -> int { return id(f.v); }
+    pub fn bump(Foo f) -> int { return id(f.v); }
 }
 fn id<T>(T x) -> T { return x; }
 fn main() {
@@ -4864,7 +4875,7 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::Float;
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 fn main() -> Result<(), Error> {
@@ -4890,7 +4901,7 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::Float;
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 fn main() -> Result<(), Error> {
@@ -4917,11 +4928,11 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::Float;
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 impl Api {
-    fn load(int lib) -> Result<(), Error> {
+    pub fn load(int lib) -> Result<(), Error> {
         self.id = declare(lib, "f", (), Float)?;
     }
 }
@@ -4955,15 +4966,15 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::Float;
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 impl Api {
-    fn load(int lib) -> Result<(), Error> {
+    pub fn load(int lib) -> Result<(), Error> {
         self.id = declare(lib, "f", (), Float)?;
     }
 
-    fn call(int lib) -> Result<float, Error> {
+    pub fn call(int lib) -> Result<float, Error> {
         let f: float = invoke(lib, self.id, ())?;
         return f;
     }
@@ -4992,11 +5003,11 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::Float;
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 impl Api {
-    fn load(int lib) -> Result<(), Error> {
+    pub fn load(int lib) -> Result<(), Error> {
         self.id = declare(lib, "f", (), Float)?;
     }
 }
@@ -5205,7 +5216,7 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::{Int, Float};
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 fn main() -> Result<(), Error> {
@@ -5232,7 +5243,7 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::{Int, Float};
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 fn main() -> Result<(), Error> {
@@ -5259,7 +5270,7 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::{Int, Float};
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 fn main() -> Result<(), Error> {
@@ -5289,7 +5300,7 @@ use ffi::{declare, dload, invoke, Error};
 use ffi::types::Float;
 
 class Api {
-    id: int,
+    pub id: int,
 }
 
 fn main() -> Result<(), Error> {
@@ -5850,7 +5861,7 @@ fn main() { let r = add("a", "b"); }
     fn discharge_constraints_populates_call_site_dicts_for_user_typeclass() {
         let src = r#"
 trait Describable<T> { fn describe_val(T x) -> int; }
-impl Describable<int> { fn describe_val(int x) -> int { return x; } }
+impl Describable<int> { pub fn describe_val(int x) -> int { return x; } }
 fn show<T: Describable>(T x) -> int { return 0; }
 fn main() { show(42); }
 "#;
@@ -5911,7 +5922,7 @@ fn main() { let r = outer(5); }
     fn multiparam_where_clause_discharges_at_call_site() {
         let src = r#"
 trait Convert<A, B> { fn cast(A x) -> B; }
-impl Convert<int, int> { fn cast(int x) -> int { return x; } }
+impl Convert<int, int> { pub fn cast(int x) -> int { return x; } }
 fn apply_cast<A, B>(A x) -> B where Convert<A, B> { return cast(x); }
 fn main() { let y = apply_cast(42); }
 "#;
@@ -5984,8 +5995,8 @@ fn main() { let y = apply_cast(42); }
     #[test]
     fn prelude_into_method_call_with_expected_type_discharges() {
         let src = r#"
-class Celsius { c: int }
-class Fahrenheit { f: int }
+class Celsius { pub c: int }
+class Fahrenheit { pub f: int }
 impl Into<Fahrenheit> for Celsius {
     fn into(Celsius x) -> Fahrenheit { return new Fahrenheit(x.c); }
 }
@@ -6038,7 +6049,7 @@ fn main() { let w = wrap(42); }
     #[test]
     fn prelude_into_impl_for_builtin_source_is_orphan() {
         let src = r#"
-class Wrapper { v: int }
+class Wrapper { pub v: int }
 impl Into<Wrapper> for int {
     fn into(int x) -> Wrapper { return new Wrapper(x); }
 }
@@ -6054,13 +6065,13 @@ impl Into<Wrapper> for int {
 
     /// Inherent class methods win over prelude trait methods of the same
     /// name when no matching instance exists (Bugbot: ground trait must
-    /// not block `impl Point { fn show() ... }`).
+    /// not block `impl Point { pub fn show() ... }`).
     #[test]
     fn inherent_class_method_wins_over_missing_trait_instance() {
         let src = r#"
-class Point { x: int }
+class Point { pub x: int }
 impl Point {
-    fn show() -> string { return "point"; }
+    pub fn show() -> string { return "point"; }
 }
 fn main() {
     let p = new Point(1);
@@ -6087,9 +6098,9 @@ fn main() {
     #[test]
     fn prelude_into_return_pins_expected_target() {
         let src = r#"
-class Celsius { c: int }
-class Fahrenheit { f: int }
-class Kelvin { k: int }
+class Celsius { pub c: int }
+class Fahrenheit { pub f: int }
+class Kelvin { pub k: int }
 impl Into<Fahrenheit> for Celsius {
     fn into(Celsius x) -> Fahrenheit { return new Fahrenheit(x.c); }
 }
@@ -6130,7 +6141,7 @@ trait Bifunctor<F: * -> * -> *> {
     fn tag<A, B>(F<A, B> xs) -> int;
 }
 impl Bifunctor<Result> {
-    fn tag<A, B>(Result<A, B> xs) -> int { return 42; }
+    pub fn tag<A, B>(Result<A, B> xs) -> int { return 42; }
 }
 fn get_tag<F: * -> * -> *, Bifunctor, A, B>(F<A, B> xs) -> int {
     return tag(xs);
@@ -6155,7 +6166,7 @@ trait Bifunctor<F: * -> * -> *> {
     fn tag<A, B>(F<A, B> xs) -> int;
 }
 impl Bifunctor<Option> {
-    fn tag<A, B>(Option<A> xs) -> int { return 0; }
+    pub fn tag<A, B>(Option<A> xs) -> int { return 0; }
 }
 "#;
         let (mut c, _) = check(src);
@@ -6196,7 +6207,7 @@ trait Collect<C> {
 }
 impl Collect<Option<int>> {
     type Elem = int;
-    fn head(Option<int> xs) -> int {
+    pub fn head(Option<int> xs) -> int {
         return match xs {
             Option::Some(v) => v,
             Option::None => 0,
@@ -6313,7 +6324,7 @@ trait Pointer<P: * -> *> {
 
 impl Pointer<Option> {
     type Ref<T> = T;
-    fn deref<T>(Option<T> ptr) -> T {
+    pub fn deref<T>(Option<T> ptr) -> T {
         return match ptr {
             Option::Some(v) => v,
             Option::None => 0,
@@ -6966,10 +6977,10 @@ fn main() {
     fn method_arity_overloads_select_by_user_argc() {
         let (mut c, _) = check(
             r#"
-class Counter { value: int, }
+class Counter { pub value: int, }
 impl Counter {
-    fn bump(int by) -> int { return self.value + by; }
-    fn bump() -> int { return self.bump(1); }
+    pub fn bump(int by) -> int { return self.value + by; }
+    pub fn bump() -> int { return self.bump(1); }
 }
 fn main() {
     let c = new Counter(10);
@@ -7468,10 +7479,10 @@ fn main() {
 
         c.set_current_module("lib");
         let def = r#"
-class Foo { name: string, }
+class Foo { pub name: string, }
 impl Foo {
-    static fn fresh() -> Foo { return new Foo("x"); }
-    fn len() -> int { return 1; }
+    pub static fn fresh() -> Foo { return new Foo("x"); }
+    pub fn len() -> int { return 1; }
 }
 "#;
         let ast = parser.parse(def).expect("parse def");
@@ -7518,9 +7529,9 @@ fn main() {
 
         c.set_current_module("lib");
         let def = r#"
-class Foo { name: string, }
+class Foo { pub name: string, }
 impl Foo {
-    static fn fresh() -> Foo { return new Foo("x"); }
+    pub static fn fresh() -> Foo { return new Foo("x"); }
 }
 "#;
         let ast = parser.parse(def).expect("parse def");
@@ -7556,9 +7567,9 @@ fn main() {
 
         c.set_current_module("lib");
         let def = r#"
-class Cell<T> { value: T, }
+class Cell<T> { pub value: T, }
 impl Cell<T> {
-    fn get() -> T { return self.value; }
+    pub fn get() -> T { return self.value; }
 }
 "#;
         let ast = parser.parse(def).expect("parse def");
@@ -7793,14 +7804,14 @@ fn main() {
 
         c.set_current_module("a");
         let ast = parser
-            .parse("class Client { n: int, }")
+            .parse("class Client { pub n: int, }")
             .expect("parse a");
         let _ = c.check_program(&ast);
         assert!(c.take_messages().is_empty());
 
         c.set_current_module("b");
         let ast = parser
-            .parse("class Client { n: int, }")
+            .parse("class Client { pub n: int, }")
             .expect("parse b");
         let _ = c.check_program(&ast);
         assert!(c.take_messages().is_empty());
@@ -7989,7 +8000,7 @@ fn main() {
             int()
         );
         assert_eq!(
-            inferred_expr_ty(r#"class Foo { v: int } let x = new Foo(7); x.v"#),
+            inferred_expr_ty(r#"class Foo { pub v: int } let x = new Foo(7); x.v"#),
             int()
         );
     }

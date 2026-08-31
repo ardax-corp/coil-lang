@@ -14,15 +14,15 @@ enum Mode {
 }
 
 class Counter {
-    value: int,
+    pub value: int,
 }
 
 impl Counter {
-    fn get() -> int {
+    pub fn get() -> int {
         return self.value;
     }
 
-    fn describe() -> int {
+    pub fn describe() -> int {
         let m = Mode::Other(self.value);
         return match m {
             Mode::Zero => {

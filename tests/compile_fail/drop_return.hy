@@ -1,5 +1,5 @@
 // Expected: compile failure — fn drop must return unit (E0126).
-class Handle { fd: int }
+class Handle { pub fd: int }
 
 impl Handle {
     fn drop() -> int {

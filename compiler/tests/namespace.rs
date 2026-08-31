@@ -46,7 +46,7 @@ struct SharedBuf {
 }
 
 impl SharedBuf {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 }
@@ -472,7 +472,7 @@ fn orphan_instance_across_modules_is_rejected() {
         (
             "src/main.hy",
             "use iface::{Foreign};\n\
-             impl Foreign<int> { fn id(int x) -> int { return x; } }\n\
+             impl Foreign<int> { pub fn id(int x) -> int { return x; } }\n\
              fn main() { }\n",
         ),
         ("src/iface.hy", "trait Foreign<T> { fn id(T x) -> int; }\n"),
@@ -808,16 +808,16 @@ use thread::{channel, join, send, spawn, Sender, Thread};
 use pool::worker::run_jobs;
 
 class Worker {
-    thread: Thread,
-    tx: Sender,
+    pub thread: Thread,
+    pub tx: Sender,
 }
 
 impl Worker {
-    fn submit(string job) {
+    pub fn submit(string job) {
         send(self.tx, job)?;
     }
 
-    fn join() {
+    pub fn join() {
         join(self.thread)?;
     }
 }
@@ -1056,14 +1056,14 @@ fn main() {
             "src/point.hy",
             r#"
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 impl Point {
-    static fn origin() -> Point {
+    pub static fn origin() -> Point {
         return new Point(0, 0);
     }
-    fn sum() -> int {
+    pub fn sum() -> int {
         return self.x + self.y;
     }
 }
@@ -1097,10 +1097,10 @@ fn main() {
             "src/box.hy",
             r#"
 class Cell<T> {
-    value: T,
+    pub value: T,
 }
 impl Cell<T> {
-    fn get() -> T {
+    pub fn get() -> T {
         return self.value;
     }
 }
@@ -1131,8 +1131,8 @@ fn main() {
 }
 "#,
         ),
-        ("src/left.hy", "class Client { n: int, }\n"),
-        ("src/right.hy", "class Client { n: int, }\n"),
+        ("src/left.hy", "class Client { pub n: int, }\n"),
+        ("src/right.hy", "class Client { pub n: int, }\n"),
     ];
     let (root, entry) = build_project("class_name_collision", &manifest, files, "src/main.hy");
     let output = run_project(&root, &entry);

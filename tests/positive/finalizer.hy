@@ -1,27 +1,27 @@
 use gc::{collect, get, root, weak, upgrade, Root, Weak};
 
 class Handle {
-    fd: int,
+    pub fd: int,
 }
 
 class Resurrect {
-    fd: int,
+    pub fd: int,
 }
 
 class Rooted {
-    fd: int,
+    pub fd: int,
 }
 
 class Fielded {
-    fd: int,
+    pub fd: int,
 }
 
 class Bag {
-    slot: Option<Fielded>,
+    pub slot: Option<Fielded>,
 }
 
 class WeakResurrect {
-    fd: int,
+    pub fd: int,
 }
 
 static let drops: int = 0;
@@ -67,10 +67,10 @@ impl Rooted {
 }
 
 impl Bag {
-    fn put(Fielded h) {
+    pub fn put(Fielded h) {
         self.slot = Option::Some(h);
     }
-    fn fd() -> int {
+    pub fn fd() -> int {
         return match self.slot {
             Option::Some(h) => h.fd,
             Option::None => -1,

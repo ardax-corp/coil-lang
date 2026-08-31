@@ -6,15 +6,15 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 class ItemBox {
-    v: int,
+    pub v: int,
 }
 
 class ItemBoxIter {
-    i: int,
+    pub i: int,
 }
 
 impl ItemBox {
-    fn iter() -> ItemBoxIter {
+    pub fn iter() -> ItemBoxIter {
         return new ItemBoxIter(self.v);
     }
 }
@@ -22,14 +22,14 @@ impl ItemBox {
 impl IntoIterator<ItemBox> {
     type Item = int;
     type IntoIter = ItemBoxIter;
-    fn into_iter(ItemBox m) -> ItemBoxIter {
+    pub fn into_iter(ItemBox m) -> ItemBoxIter {
         return m.iter();
     }
 }
 
 impl Iterator<ItemBoxIter> {
     type Item = int;
-    fn next(ItemBoxIter it) -> Option<int> {
+    pub fn next(ItemBoxIter it) -> Option<int> {
         if it.i == 0 {
             it.i = 1;
             return Option::Some(1);

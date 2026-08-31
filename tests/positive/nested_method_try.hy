@@ -4,7 +4,7 @@
 class Enc {}
 
 impl Enc {
-    fn encode(int n) -> Result<Vec<byte>, string> {
+    pub fn encode(int n) -> Result<Vec<byte>, string> {
         let out: Vec<byte> = Vec::new();
         out.push(n as byte);
         let m = n + 1;
@@ -12,21 +12,21 @@ impl Enc {
         return out;
     }
 
-    fn encode_fail(int _n) -> Result<Vec<byte>, string> {
+    pub fn encode_fail(int _n) -> Result<Vec<byte>, string> {
         raise "boom";
     }
 
-    fn encode_into(int n) -> Result<int, string> {
+    pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
         return len(bytes);
     }
 
-    fn encode_first(int n) -> Result<byte, string> {
+    pub fn encode_first(int n) -> Result<byte, string> {
         let bytes = self.encode(n)?;
         return bytes[0];
     }
 
-    fn encode_into_fail(int n) -> Result<int, string> {
+    pub fn encode_into_fail(int n) -> Result<int, string> {
         let bytes = self.encode_fail(n)?;
         return len(bytes);
     }
@@ -73,15 +73,15 @@ test("nested free-fn try mismatched Result payload") {
 class Client {}
 
 impl Client {
-    fn get() -> Result<int, string> {
+    pub fn get() -> Result<int, string> {
         return self.send()?;
     }
 
-    fn send() -> Result<int, string> {
+    pub fn send() -> Result<int, string> {
         return self.request_send()?;
     }
 
-    fn request_send() -> Result<int, string> {
+    pub fn request_send() -> Result<int, string> {
         return 42;
     }
 }
@@ -95,15 +95,15 @@ test("nested same-Result methods declared later") {
 class ClientFail {}
 
 impl ClientFail {
-    fn get() -> Result<int, string> {
+    pub fn get() -> Result<int, string> {
         return self.send()?;
     }
 
-    fn send() -> Result<int, string> {
+    pub fn send() -> Result<int, string> {
         return self.boom()?;
     }
 
-    fn boom() -> Result<int, string> {
+    pub fn boom() -> Result<int, string> {
         raise "nope";
     }
 }
@@ -121,11 +121,11 @@ test("forward same-Result methods propagate Err") {
 class Counter {}
 
 impl Counter {
-    fn early() -> int {
+    pub fn early() -> int {
         return self.late();
     }
 
-    fn late() -> int {
+    pub fn late() -> int {
         return 7;
     }
 }
@@ -138,12 +138,12 @@ test("forward non-Result instance method call") {
 class EncFwd {}
 
 impl EncFwd {
-    fn encode_into(int n) -> Result<int, string> {
+    pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
         return len(bytes);
     }
 
-    fn encode(int n) -> Result<Vec<byte>, string> {
+    pub fn encode(int n) -> Result<Vec<byte>, string> {
         let out: Vec<byte> = Vec::new();
         out.push(n as byte);
         return out;
@@ -159,11 +159,11 @@ test("forward mismatched-Result method try") {
 class Factory {}
 
 impl Factory {
-    fn make() -> int {
+    pub fn make() -> int {
         return Factory::value();
     }
 
-    static fn value() -> int {
+    pub static fn value() -> int {
         return 9;
     }
 }

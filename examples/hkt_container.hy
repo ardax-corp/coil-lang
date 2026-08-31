@@ -9,7 +9,7 @@ trait Container<F: * -> *> {
 }
 
 impl Container<Option> {
-    fn first<A>(Option<A> xs) -> A {
+    pub fn first<A>(Option<A> xs) -> A {
         return match xs {
             Option::Some(v) => v,
             Option::None => 0,

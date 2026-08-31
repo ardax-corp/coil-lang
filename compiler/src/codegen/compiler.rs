@@ -1263,10 +1263,14 @@ impl Compiler {
     }
 
     /// Free module functions are importable; inherent methods need `pub`.
+    /// Uses [`Checker::can_access_member`] with no impl owner (foreign site).
     fn callee_is_visible_for_inline(&self, lookup: &str) -> bool {
         match self.checker.inherent_method_visibility(lookup) {
-            Some(parser::ast::Visibility::Private) => false,
-            Some(parser::ast::Visibility::Public) | None => true,
+            None => true,
+            Some(vis) => {
+                let owner = lookup.rsplit_once("::").map(|(o, _)| o).unwrap_or("");
+                crate::typechecking::Checker::can_access_member(vis, owner, None)
+            }
         }
     }
 

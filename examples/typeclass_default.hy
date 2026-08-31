@@ -12,7 +12,7 @@ trait Tiny<T> {
 }
 
 impl Tiny<int> {
-    fn base(int x) -> int {
+    pub fn base(int x) -> int {
         return x;
     }
 }

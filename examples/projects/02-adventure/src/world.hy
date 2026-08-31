@@ -5,8 +5,8 @@
 // Dir sentinel 99 = unused (avoid negative relational compares).
 
 class Player {
-    room: int,
-    has_key: int,
+    pub room: int,
+    pub has_key: int,
 }
 
 fn new_player() -> Player {

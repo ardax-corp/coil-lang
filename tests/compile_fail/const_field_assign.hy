@@ -1,7 +1,7 @@
 // Expected: compile failure — cannot assign to const class field.
 class Point {
-    const x: int,
-    y: int,
+    pub const x: int,
+    pub y: int,
 }
 
 fn main() {

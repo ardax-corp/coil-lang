@@ -3,18 +3,18 @@
 // (locals share the operand stack).
 
 class Store<T> {
-    item: T,
-    present: bool,
+    pub item: T,
+    pub present: bool,
 }
 
 impl Store<T> {
-    static fn empty(T dummy) -> Store<T> {
+    pub static fn empty(T dummy) -> Store<T> {
         return new Store(dummy, false);
     }
 }
 
 impl Store<T: Eq> {
-    fn put(T x) -> bool {
+    pub fn put(T x) -> bool {
         if self.present {
             if self.item == x {
                 return false;
@@ -25,7 +25,7 @@ impl Store<T: Eq> {
         return true;
     }
 
-    fn has(T x) -> bool {
+    pub fn has(T x) -> bool {
         if self.present {
             return self.item == x;
         }
@@ -34,21 +34,21 @@ impl Store<T: Eq> {
 }
 
 class Nest<T> {
-    inner: Store<T>,
+    pub inner: Store<T>,
 }
 
 impl Nest<T> {
-    static fn empty(T dummy) -> Nest<T> {
+    pub static fn empty(T dummy) -> Nest<T> {
         return new Nest(Store::empty(dummy));
     }
 }
 
 impl Nest<T: Eq> {
-    fn put(T x) -> bool {
+    pub fn put(T x) -> bool {
         return self.inner.put(x);
     }
 
-    fn has(T x) -> bool {
+    pub fn has(T x) -> bool {
         return self.inner.has(x);
     }
 }

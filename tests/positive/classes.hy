@@ -1,29 +1,29 @@
 // Classes: construction, fields, methods, mutation.
 class Counter {
-    value: int,
+    pub value: int,
 }
 
 impl Counter {
-    fn inc() {
+    pub fn inc() {
         self.value = self.value + 1;
     }
 
-    fn add(int n) {
+    pub fn add(int n) {
         self.value = self.value + n;
     }
 
-    fn get() -> int {
+    pub fn get() -> int {
         return self.value;
     }
 }
 
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 impl Point {
-    fn manhattan() -> int {
+    pub fn manhattan() -> int {
         return self.x + self.y;
     }
 }

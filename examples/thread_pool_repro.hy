@@ -2,16 +2,16 @@ use thread::{Sender, Thread, channel, join, send, spawn};
 use pool::worker::run_jobs;
 
 class Worker {
-    thread: Thread,
-    tx: Sender,
+    pub thread: Thread,
+    pub tx: Sender,
 }
 
 impl Worker {
-    fn submit(string job) {
+    pub fn submit(string job) {
         send(self.tx, job)?;
     }
 
-    fn join() {
+    pub fn join() {
         join(self.thread)?;
     }
 }

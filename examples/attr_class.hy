@@ -8,8 +8,8 @@ attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
 
 #[log(message = "Point ctor")]
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 fn main() {

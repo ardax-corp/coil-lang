@@ -7,21 +7,21 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 class Counter {
-    cur: int,
-    end: int,
+    pub cur: int,
+    pub end: int,
 }
 
 impl IntoIterator<Counter> {
     type Item = int;
     type IntoIter = Counter;
-    fn into_iter(Counter c) -> Counter {
+    pub fn into_iter(Counter c) -> Counter {
         return c;
     }
 }
 
 impl Iterator<Counter> {
     type Item = int;
-    fn next(Counter c) -> Option<int> {
+    pub fn next(Counter c) -> Option<int> {
         if c.cur < c.end {
             let v = c.cur;
             c.cur = c.cur + 1;

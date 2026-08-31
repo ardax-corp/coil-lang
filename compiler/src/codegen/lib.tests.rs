@@ -630,11 +630,11 @@ use string::{format, to_bytes};
         let (bc, _pool) = compile_src(
             r#"
             class Point {
-                x: int,
-                y: int,
+                pub x: int,
+                pub y: int,
             }
             impl Point {
-                fn twice_x() -> int {
+                pub fn twice_x() -> int {
                     return self.x + self.x;
                 }
             }
@@ -1072,7 +1072,7 @@ use string::{format, to_bytes};
             .parse(
                 r#"
                 trait Foo<T> { fn bar(T x) -> T; }
-                impl Foo<int> { fn bar(int x) -> int { return x; } }
+                impl Foo<int> { pub fn bar(int x) -> int { return x; } }
                 fn use_bar<T: Foo>(T x) -> T { return bar(x); }
                 fn main() { use_bar(1); }
                 "#,
@@ -1099,9 +1099,9 @@ use string::{format, to_bytes};
     #[test]
     fn check_program_impl_calls_later_helper_via_compiler_checker() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump() -> int { return helper(self.v); }
+    pub fn bump() -> int { return helper(self.v); }
 }
 fn helper(int n) -> int { return n + 1; }
 fn main() {
@@ -1127,9 +1127,9 @@ fn main() {
     #[test]
     fn compiler_compile_impl_calls_later_helper() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump() -> int { return helper(self.v); }
+    pub fn bump() -> int { return helper(self.v); }
 }
 fn helper(int n) -> int { return n + 1; }
 fn main() {
@@ -1156,10 +1156,10 @@ fn main() {
     #[test]
     fn free_fn_method_call_inside_while_after_sibling_runs() {
         let src = r#"
-class Box { n: int, }
+class Box { pub n: int, }
 impl Box {
-    fn get() -> int { return self.n; }
-    fn bump() { self.n = self.n + 1; }
+    pub fn get() -> int { return self.n; }
+    pub fn bump() { self.n = self.n + 1; }
 }
 fn peek(Box b) -> int { return b.get(); }
 fn thrash(Box b) {
@@ -1198,9 +1198,9 @@ fn main() {
     #[test]
     fn phase1_free_fn_can_call_deferred_method_caller() {
         let src = r#"
-class Box { n: int, }
+class Box { pub n: int, }
 impl Box {
-    fn get() -> int { return self.n; }
+    pub fn get() -> int { return self.n; }
 }
 fn peek(Box b) -> int { return b.get(); }
 fn wrap(Box b) -> int { return peek(b); }
@@ -1244,9 +1244,9 @@ fn main() {
     #[test]
     fn inherent_method_calling_later_helper_runs_via_main() {
         let src = r#"
-class Foo { v: int, }
+class Foo { pub v: int, }
 impl Foo {
-    fn bump() -> int { return helper(self.v); }
+    pub fn bump() -> int { return helper(self.v); }
 }
 fn helper(int n) -> int { return n + 1; }
 fn main() {
@@ -2214,7 +2214,7 @@ i = i + 1; \
     fn for_in_custom_emits_into_iter_and_next_calls() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
-            "class Counter { cur: int, end: int, } \
+            "class Counter { pub cur: int, pub end: int, } \
 impl IntoIterator<Counter> { \
     type Item = int; type IntoIter = Counter; \
     fn into_iter(Counter c) -> Counter { return c; } \
@@ -3769,7 +3769,7 @@ fn run() -> int { return add(1, 2); }
 
     #[test]
     fn cross_module_does_not_inline_private_method() {
-        let util = "class Box { n: int, }\n\
+        let util = "class Box { pub n: int, }\n\
              impl Box {\n\
                fn secret() -> int { return 2; }\n\
                pub fn shown() -> int { return 1; }\n\
@@ -4552,7 +4552,7 @@ fn main() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
             r#"
-class Box { value: int }
+class Box { pub value: int }
 impl Length for Box {
     fn len(Box b) -> int { return 7; }
 }
@@ -5087,7 +5087,7 @@ fn main() {
         use common::Instruction;
         let src = r#"
             trait Showable<T> { fn show_it(T x) -> int; }
-            impl Showable<int> { fn show_it(int x) -> int { return x; } }
+            impl Showable<int> { pub fn show_it(int x) -> int { return x; } }
             fn show<T: Showable>(T x) -> int { return show_it(x); }
             fn capture<T: Showable>(T _w) { return show; }
             fn main() { let f = capture(0); }
@@ -5117,7 +5117,7 @@ fn main() {
         use common::Instruction;
         let src = r#"
             trait Showable<T> { fn show_it(T x) -> int; }
-            impl Showable<int> { fn show_it(int x) -> int { return x; } }
+            impl Showable<int> { pub fn show_it(int x) -> int { return x; } }
             fn show<T: Showable>(T x) -> int { return show_it(x); }
             fn main() { let f = show; }
         "#;
@@ -5144,7 +5144,7 @@ fn main() {
         use common::Instruction;
         let src = r#"
             trait Convert<A, B> { fn cast(A x) -> B; }
-            impl Convert<int, int> { fn cast(int x) -> int { return x; } }
+            impl Convert<int, int> { pub fn cast(int x) -> int { return x; } }
             fn convert_fn<A, B>(A x) -> B where Convert<A, B> { return cast(x); }
             fn capture_convert<A, B>(A _wa, B _wb) where Convert<A, B> { return convert_fn; }
             fn main() { let f = capture_convert(0, 0); }
@@ -5326,7 +5326,7 @@ fn main() { let _ = (new Cell(7)).get(); }
         let (bc, _pool) = compile_src(
             // Declare a user trait with one method.
             "trait Describable<T> { fn describe_val(T x) -> int; } \
-             impl Describable<int> { fn describe_val(int x) -> int { return x; } } \
+             impl Describable<int> { pub fn describe_val(int x) -> int { return x; } } \
              // Generic fn with one user trait constraint.  NOT called as mono.
              fn show<T: Describable>(T x) -> int { return 0; } \
              fn main() { show(42); }",
@@ -5370,8 +5370,8 @@ fn main() { let _ = (new Cell(7)).get(); }
         let (bc, _pool) = compile_src(
             "trait Printable<T> { fn printable_val(T x) -> int; } \
              trait Countable<T> { fn count_val(T x) -> int; } \
-             impl Printable<int> { fn printable_val(int x) -> int { return x; } } \
-             impl Countable<int> { fn count_val(int x) -> int { return x + 1; } } \
+             impl Printable<int> { pub fn printable_val(int x) -> int { return x; } } \
+             impl Countable<int> { pub fn count_val(int x) -> int { return x + 1; } } \
              fn process<T: Printable + Countable>(T x) -> int { return 0; } \
              fn main() { process(5); }",
         );
@@ -5438,7 +5438,7 @@ fn main() { let _ = (new Cell(7)).get(); }
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Describable<T> { fn describe_val(T x) -> int; } \
-             impl Describable<int> { fn describe_val(int x) -> int { return x; } } \
+             impl Describable<int> { pub fn describe_val(int x) -> int { return x; } } \
              fn id_d<T: Describable>(T x) -> T { return x; } \
              fn main() { let y = id_d(7); }",
         );
@@ -5473,7 +5473,7 @@ fn main() { let _ = (new Cell(7)).get(); }
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { fn size(int x) -> int { return x; } } \
+             impl Measurable<int> { pub fn size(int x) -> int { return x; } } \
              fn size_of<T: Measurable>(T x) -> int { return x.size(); } \
              fn main() { size_of(42); }",
         );
@@ -5498,7 +5498,7 @@ fn main() { let _ = (new Cell(7)).get(); }
 
         let (ground, _) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { fn size(int x) -> int { return x + 1; } } \
+             impl Measurable<int> { pub fn size(int x) -> int { return x + 1; } } \
              fn main() { return 41.size(); }",
         );
         assert!(
@@ -5518,7 +5518,7 @@ fn main() { let _ = (new Cell(7)).get(); }
 
         let (generic, _) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { fn size(int x) -> int { return x + 1; } } \
+             impl Measurable<int> { pub fn size(int x) -> int { return x + 1; } } \
              fn size_of<T: Measurable>(T x) -> int { return x.size(); } \
              fn main() { return size_of(41); }",
         );
@@ -5666,7 +5666,7 @@ fn main() { let _ = (new Cell(7)).get(); }
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { fn size(int x) -> int { return x; } } \
+             impl Measurable<int> { pub fn size(int x) -> int { return x; } } \
              fn size_of<T: Measurable>(T x) -> int { return size(x); } \
              fn main() { size_of(42); }",
         );
@@ -5769,7 +5769,7 @@ fn main() { \
         let src = "\
 use ffi::{dload, declare, invoke, Error}; \
 use ffi::types::{Int, Float}; \
-class Api { id: int, } \
+class Api { pub id: int, } \
 fn main() -> Result<(), Error> { \
   let lib = dload(\"noop\")?; \
   let api = new Api(0); \
@@ -6837,7 +6837,7 @@ fn main() {
     fn class_ctor_emits_init_typed() {
         let (bc, _) = compile_src(
             r#"
-class Box { n: int }
+class Box { pub n: int }
 fn main() {
     let b = new Box(1);
     return b.n;
@@ -6861,7 +6861,7 @@ fn main() {
     fn drop_method_registers_finalizer_prologue() {
         let (bc, _) = compile_src(
             r#"
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {}
 }
@@ -7093,7 +7093,7 @@ fn main() {
 class Svc {}
 enum Node { Obj { v: int } }
 impl Svc {
-    fn decode() -> Result<Node, string> {
+    pub fn decode() -> Result<Node, string> {
         return Node::Obj { v: 42 };
     }
 }
@@ -7128,7 +7128,7 @@ fn main() {
             r#"
 class Svc {}
 impl Svc {
-    fn maybe() -> Option<int> {
+    pub fn maybe() -> Option<int> {
         return Option::Some(7);
     }
 }
@@ -7164,7 +7164,7 @@ fn main() {
 class Svc {}
 enum Node { Obj { v: int } }
 impl Svc {
-    fn decode() -> Result<Node, string> {
+    pub fn decode() -> Result<Node, string> {
         return Node::Obj { v: 42 };
     }
 }
@@ -7193,12 +7193,12 @@ fn main() {
             r#"
 class Enc {}
 impl Enc {
-    fn encode(int n) -> Result<Vec<byte>, string> {
+    pub fn encode(int n) -> Result<Vec<byte>, string> {
         let out: Vec<byte> = Vec::new();
         out.push(n as byte);
         return out;
     }
-    fn encode_into(int n) -> Result<int, string> {
+    pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
         return len(bytes);
     }
@@ -7242,11 +7242,11 @@ fn main() {
             r#"
 class EncFwd {}
 impl EncFwd {
-    fn encode_into(int n) -> Result<int, string> {
+    pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
         return len(bytes);
     }
-    fn encode(int n) -> Result<Vec<byte>, string> {
+    pub fn encode(int n) -> Result<Vec<byte>, string> {
         let out: Vec<byte> = Vec::new();
         out.push(n as byte);
         return out;
@@ -7293,10 +7293,10 @@ fn main() {
             r#"
 class Counter {}
 impl Counter {
-    fn early() -> int {
+    pub fn early() -> int {
         return self.late();
     }
-    fn late() -> int {
+    pub fn late() -> int {
         return 7;
     }
 }
@@ -7384,7 +7384,7 @@ fn main() {
         let (bc, _) = compile_src(
             r#"
 class Box {
-    n: int,
+    pub n: int,
 }
 fn main() {
     let x: Option<Box> = Option::None;

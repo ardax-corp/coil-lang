@@ -1,14 +1,14 @@
 // COI-109: inherent methods may call module helpers defined later in the file.
 class Counter {
-    value: int,
+    pub value: int,
 }
 
 impl Counter {
-    fn bump() -> int {
+    pub fn bump() -> int {
         return add_one(self.value);
     }
 
-    fn bump_by(int n) -> int {
+    pub fn bump_by(int n) -> int {
         return add_n(self.value, n);
     }
 }

@@ -5,7 +5,7 @@ class Cell<T> {
 }
 
 impl Cell<T> {
-    fn get() -> Option<T> {
+    pub fn get() -> Option<T> {
         return Option::Some(self.item);
     }
 }

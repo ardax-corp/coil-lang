@@ -3,9 +3,9 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 class TextCounter {
-    cur: int,
-    end: int,
-    text: string,
+    pub cur: int,
+    pub end: int,
+    pub text: string,
 }
 
 impl IntoIterator for TextCounter {

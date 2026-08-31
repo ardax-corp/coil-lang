@@ -3,16 +3,16 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 impl Point {
-    fn sum() -> int {
+    pub fn sum() -> int {
         return self.x + self.y;
     }
 
-    fn twice_x() -> int {
+    pub fn twice_x() -> int {
         return self.x + self.x;
     }
 }

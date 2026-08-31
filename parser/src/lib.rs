@@ -2514,8 +2514,8 @@ impl<'pratt> Pratt<'pratt> {
             })
     }
 
-    /// `[pub] fn name(...) -> ret { body }` — a method declaration
-    /// inside an `impl` block.
+    /// `[#[attr]]* [pub] [#[attr]]* fn name(...) -> ret { body }` — a method
+    /// declaration inside an `impl` block. `pub` may sit before or after attributes.
     fn method_decl<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -2526,11 +2526,18 @@ impl<'pratt> Pratt<'pratt> {
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
         self.docs_prefix()
+            .then(self.attr_list())
             .then(keyword!("pub").or_not())
             .then(self.func_after_docs(stmt))
-            .map_with(|((docs, vis), mut func), e| {
-                if let Expression::Function { docs: d, .. } = func.1.as_mut() {
+            .map_with(|(((docs, attrs_before), vis), mut func), e| {
+                if let Expression::Function {
+                    docs: d, attrs, ..
+                } = func.1.as_mut()
+                {
                     *d = docs;
+                    if !attrs_before.is_empty() {
+                        attrs.splice(0..0, attrs_before);
+                    }
                 }
                 let visibility = if vis.is_some() {
                     Visibility::Public

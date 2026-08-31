@@ -4,8 +4,8 @@ use string::{format, to_bytes};
 static let hits = 0;
 
 class Counter {
-    static count: int = 0,
-    value: int,
+    pub static count: int = 0,
+    pub value: int,
 }
 
 fn main() {

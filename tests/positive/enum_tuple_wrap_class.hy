@@ -1,7 +1,7 @@
 // COI-114: tuple variant may wrap a class (including mutual recursion).
 class JsonObject {
-    keys: Vec<string>,
-    vals: Vec<JsonValue>,
+    pub keys: Vec<string>,
+    pub vals: Vec<JsonValue>,
 }
 
 enum JsonValue {

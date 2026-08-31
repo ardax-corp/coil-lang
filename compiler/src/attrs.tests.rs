@@ -43,7 +43,7 @@
 
     #[test]
     fn derive_hash_class_emits_hash_method() {
-        let (_exp, decls) = expand_src("#[derive(Hash)] class P { x: int, y: int } fn main() {}");
+        let (_exp, decls) = expand_src("#[derive(Hash)] class P { pub x: int, pub y: int } fn main() {}");
         assert!(
             impl_method_names(&decls, "Hash").contains(&"hash".to_string()),
             "expected Hash::hash impl"
@@ -92,7 +92,7 @@
 
     #[test]
     fn derive_serialize_class_emits_serialize_method() {
-        let (_exp, decls) = expand_src("#[derive(Serialize)] class P { x: int } fn main() {}");
+        let (_exp, decls) = expand_src("#[derive(Serialize)] class P { pub x: int } fn main() {}");
         assert!(
             impl_method_names(&decls, "Serialize").contains(&"serialize".to_string()),
             "expected Serialize::serialize on class"
@@ -110,7 +110,7 @@
 
     #[test]
     fn derive_sensitive_emits_marker_impl() {
-        let (_exp, decls) = expand_src("#[derive(Sensitive)] class P { x: int } fn main() {}");
+        let (_exp, decls) = expand_src("#[derive(Sensitive)] class P { pub x: int } fn main() {}");
         assert!(
             decls.iter().any(|n| matches!(
                 n.1.as_ref(),
@@ -123,7 +123,7 @@
 
     #[test]
     fn default_show_string_use_type_name_when_no_derive() {
-        let (_exp, decls) = expand_src("class Point { x: int, y: int } fn main() {}");
+        let (_exp, decls) = expand_src("class Point { pub x: int, pub y: int } fn main() {}");
         assert!(
             impl_method_names(&decls, "Show").contains(&"show".to_string()),
             "expected default Show::show"

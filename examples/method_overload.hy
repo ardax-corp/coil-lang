@@ -2,16 +2,16 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 class Counter {
-    value: int,
+    pub value: int,
 }
 
 impl Counter {
-    fn bump(int by) -> int {
+    pub fn bump(int by) -> int {
         self.value = self.value + by;
         return self.value;
     }
 
-    fn bump() -> int {
+    pub fn bump() -> int {
         return self.bump(1);
     }
 }
