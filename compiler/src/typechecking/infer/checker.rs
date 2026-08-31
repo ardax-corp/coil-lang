@@ -1489,6 +1489,7 @@ impl Checker {
         }
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
+        self.pre_register_typeclass_impls(ast);
         self.pre_process_top_level_uses(ast);
         self.pre_pass_ffi_invoke_param_flow(ast);
 
@@ -4398,7 +4399,17 @@ impl Checker {
             .generics
             .find_overlapping_instance(class, &arg_tys)
             .cloned();
+        let existing_idx = self.generics.instances.iter().position(|inst| {
+            inst.class == class
+                && inst.defined_module == self.current_module
+                && inst.range == range
+        });
         if let Some(existing) = overlapping.as_ref() {
+            let same_decl = existing_idx.is_some_and(|idx| {
+                self.generics.instances[idx].defined_module == existing.defined_module
+                    && self.generics.instances[idx].range == existing.range
+            });
+            if !same_decl {
             let mut msg = Message::error(
                 ErrorCode::GenericTypeError,
                 format!(
@@ -4423,6 +4434,7 @@ impl Checker {
                 ));
             }
             self.messages.push(msg);
+            }
         }
         // Build method_fqns, assoc_tys, and register instance.
         let mut method_fqns = HashMap::new();
@@ -4458,7 +4470,9 @@ impl Checker {
                 );
             }
         }
-        let stub_idx = if class_def.is_some() && !orphaned && overlapping.is_none() {
+        let stub_idx = if let Some(idx) = existing_idx {
+            Some(idx)
+        } else if class_def.is_some() && !orphaned && overlapping.is_none() {
             self.generics.instances.push(InstanceDef {
                 class: class.to_string(),
                 defined_module: self.current_module.clone(),
@@ -13383,6 +13397,90 @@ impl Checker {
                 );
             }
         }
+    }
+
+    /// Register trait instances before the main infer pass so `for` loops
+    /// (and other uses) can resolve `IntoIterator` when the `impl` appears
+    /// later in the file. Method bodies still typecheck in source order.
+    fn pre_register_typeclass_impls(&mut self, ast: &Output) {
+        let children = match ast.1.as_ref() {
+            Expression::Program(c) | Expression::Fragment(c) | Expression::Block(c) => c.as_slice(),
+            _ => return,
+        };
+        let saved_idx = self.next_id_idx;
+        let msg_len = self.messages.len();
+        for child in children {
+            let stmt = Self::pre_pass_unwrap_stmt(child);
+            let Expression::TypeClassImpl {
+                class,
+                args,
+                methods,
+            } = stmt.1.as_ref()
+            else {
+                continue;
+            };
+            let range = stmt.0.into_range();
+            let arg_tys: Vec<Ty> = args.iter().map(|a| self.parse_instance_head(a)).collect();
+            if self
+                .generics
+                .find_overlapping_instance(class, &arg_tys)
+                .is_some()
+            {
+                continue;
+            }
+            let mut method_fqns = HashMap::new();
+            let args_pretty: String = arg_tys
+                .iter()
+                .map(|t| format!("{t}"))
+                .collect::<Vec<_>>()
+                .join("_");
+            let mut assoc_tys: HashMap<String, AssocTypeValue> = HashMap::new();
+            for m in methods {
+                match m.1.as_ref() {
+                    Expression::Function { name, .. } => {
+                        method_fqns.insert(
+                            (*name).to_string(),
+                            format!("{}__{}__{}", class, args_pretty, name),
+                        );
+                    }
+                    Expression::Method(_, body) => {
+                        if let Expression::Function { name, .. } = body.1.as_ref() {
+                            method_fqns.insert(
+                                (*name).to_string(),
+                                format!("{}__{}__{}", class, args_pretty, name),
+                            );
+                        }
+                    }
+                    Expression::AssocTypeDef {
+                        name,
+                        type_params,
+                        ty,
+                    } => {
+                        let resolved = self.parse_type_name(ty);
+                        assoc_tys.insert(
+                            (*name).to_string(),
+                            AssocTypeValue {
+                                params: type_params.iter().map(|tp| tp.name.to_string()).collect(),
+                                param_vars: Vec::new(),
+                                param_kinds: Vec::new(),
+                                ty: resolved,
+                            },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            self.generics.instances.push(InstanceDef {
+                class: (*class).to_string(),
+                defined_module: self.current_module.clone(),
+                range,
+                args: arg_tys,
+                method_fqns,
+                assoc_tys,
+            });
+        }
+        self.next_id_idx = saved_idx;
+        self.messages.truncate(msg_len);
     }
 
     fn stub_inherent_impl_methods(

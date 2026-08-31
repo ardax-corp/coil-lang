@@ -2678,19 +2678,140 @@ impl Compiler {
         self.fn_entry_labels.insert(name, label);
     }
 
-    /// Direct `CALL`, or `Entry{Call}` when the callee body is still ahead.
+    fn impl_method_name<'a>(method: &Output<'a>) -> Option<&'a str> {
+        match method.1.as_ref() {
+            Expression::Function { name, .. } => Some(*name),
+            Expression::Method(_, body) => match body.1.as_ref() {
+                Expression::Function { name, .. } => Some(*name),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Reserve CALL/CodePtr labels for every callable in this program before
+    /// bodies are emitted, so later `impl` methods are never packed as PC 0.
+    fn reserve_program_callable_entries(&mut self, children: &[Output]) {
+        for child in children {
+            match child.1.as_ref() {
+                Expression::Function { name, .. } => {
+                    let qualified = if self.namespace.is_empty() {
+                        name.to_string()
+                    } else {
+                        format!("{}::{}", self.namespace, name)
+                    };
+                    self.reserve_function_entry(qualified);
+                }
+                Expression::Implementation { owner, methods, .. } => {
+                    let owner_key = self.resolve_class_ident(owner);
+                    for method in methods {
+                        if let Some(name) = Self::impl_method_name(method) {
+                            self.reserve_function_entry(format!("{}::{}", owner_key, name));
+                        }
+                    }
+                }
+                Expression::TypeClassImpl {
+                    class,
+                    args,
+                    methods,
+                } => {
+                    let arg_tys: Vec<Ty> = args
+                        .iter()
+                        .map(|arg| self.codegen_instance_head_ty(arg))
+                        .collect();
+                    let ty_part = arg_tys
+                        .iter()
+                        .map(|ty| ty.to_string())
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    for method in methods {
+                        if let Some(method_name) = Self::impl_method_name(method) {
+                            self.reserve_function_entry(format!(
+                                "{}__{}__{}",
+                                class, ty_part, method_name
+                            ));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Direct `CALL`, or `Entry` when the callee body is still ahead.
+    ///
+    /// `dest` must be a fragment that will be appended onto [`Self::bytecode`]
+    /// (not `self.bytecode` itself). Forward refs flush `dest` first so the
+    /// reserved module label is not remapped as fragment-local.
     fn emit_direct_fn_call(&mut self, dest: &mut CodeBuf, name: &str, arity: u32) -> bool {
+        self.emit_named_entry(dest, name, arity, crate::il::EntryKind::Call)
+    }
+
+    fn emit_named_entry(
+        &mut self,
+        dest: &mut CodeBuf,
+        name: &str,
+        arity: u32,
+        kind: crate::il::EntryKind,
+    ) -> bool {
         if let Some(&offset) = self.functions.get(name) {
-            dest.push(Byte::new(Instruction::CALL).with_call_packed(arity, offset as u32));
+            dest.push(Self::packed_entry_byte(kind, arity, offset as u32));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
             self.bytecode.append(dest);
-            self.bytecode
-                .emit_entry(crate::il::EntryKind::Call, arity, label);
+            self.bytecode.emit_entry(kind, arity, label);
             true
         } else {
             false
         }
+    }
+
+    /// Same as [`Self::emit_named_entry`] onto the module buffer.
+    fn emit_named_entry_on_module(
+        &mut self,
+        name: &str,
+        arity: u32,
+        kind: crate::il::EntryKind,
+    ) -> bool {
+        if let Some(&offset) = self.functions.get(name) {
+            self.bytecode
+                .push(Self::packed_entry_byte(kind, arity, offset as u32));
+            true
+        } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
+            self.bytecode.emit_entry(kind, arity, label);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn packed_entry_byte(kind: crate::il::EntryKind, arity: u32, offset: u32) -> Byte {
+        let inst = match kind {
+            crate::il::EntryKind::Call => Instruction::CALL,
+            crate::il::EntryKind::TailCall => Instruction::TailCall,
+            crate::il::EntryKind::MakeCoro => Instruction::MakeCoro,
+            crate::il::EntryKind::CodePtr => Instruction::CodePtr,
+            crate::il::EntryKind::MakePolyFn => Instruction::MakePolyFn,
+        };
+        match kind {
+            crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn => {
+                Byte::new(inst).with_operand_u32(offset)
+            }
+            _ => Byte::new(inst).with_call_packed(arity, offset),
+        }
+    }
+
+    fn missing_call_target(&mut self, name: &str, range: std::ops::Range<usize>) {
+        let mut message = Message::error(
+            ErrorCode::CodegenError,
+            format!("missing function entry `{name}`"),
+            range.clone(),
+        );
+        message.push(DiagLabel::new(
+            format!("no bound or reserved entry for `{name}`"),
+            range,
+        ));
+        self.messages.push(message);
     }
 
     /// Entry label for a registered function, if bound.
@@ -3823,10 +3944,7 @@ impl Compiler {
     }
 
     /// Direct `CALL` when the callee entry is statically known (no stack target).
-    ///
-    /// Prefer this over [`Self::emit_call_indirect`] for ground method / instance
-    /// thunks: same frame ABI, one fewer dispatch, no `CodePtr` materialization.
-    /// Keep `CallIndirect` for PolyFn / locals / dictionary `Index` targets.
+    #[allow(dead_code)]
     fn emit_known_target_call(bytecode: &mut impl EmitBuf, target_offset: u32, arity: u32) {
         bytecode.push(Byte::new(Instruction::CALL).with_call_packed(arity, target_offset));
     }
@@ -4606,9 +4724,9 @@ impl Compiler {
         let Some(fqn) = instance.method_fqns.get(method).cloned() else {
             return false;
         };
-        let Some(&offset) = self.functions.get(&fqn) else {
+        if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
             return false;
-        };
+        }
         // Instance methods use the dictionary ABI: value args are boxed at
         // the call site and unboxed in the method prologue (see
         // `instance_method_unbox_tys` + `compile_function_output_with_name`).
@@ -4629,8 +4747,7 @@ impl Compiler {
         bytecode.push_store_pop(rhs_slot);
         bytecode.push_load(lhs_slot);
         bytecode.push_load(rhs_slot);
-        Self::emit_known_target_call(bytecode, offset as u32, 2);
-        true
+        self.emit_direct_fn_call(bytecode, &fqn, 2)
     }
 
     /// Emit a string literal as a table-indexed `STRING` byte into `self.bytecode`.
@@ -5396,13 +5513,13 @@ impl Compiler {
                 .find_instance("Show", std::slice::from_ref(&lookup_ty))
                 .cloned()
                 && let Some(fqn) = instance.method_fqns.get("show").cloned()
-                && let Some(&offset) = self.functions.get(&fqn)
+                && (self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn))
             {
                 let mut arg_bc = self.do_compile(arg);
                 self.bytecode.append(&mut arg_bc);
                 // Box using the lookup head so enum Constructs get Enum tag.
                 Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
-                Self::emit_known_target_call(&mut self.bytecode, offset as u32, 1);
+                let _ = self.emit_named_entry_on_module(&fqn, 1, crate::il::EntryKind::Call);
                 return;
             }
         }
@@ -5454,10 +5571,11 @@ impl Compiler {
                     .find_instance("Show", std::slice::from_ref(&lookup_ty))
                     .cloned()
                     && let Some(fqn) = instance.method_fqns.get("show").cloned()
-                    && let Some(&offset) = self.functions.get(&fqn)
+                    && (self.functions.contains_key(&fqn)
+                        || self.fn_entry_labels.contains_key(&fqn))
                 {
                     Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
-                    Self::emit_known_target_call(&mut self.bytecode, offset as u32, 1);
+                    let _ = self.emit_named_entry_on_module(&fqn, 1, crate::il::EntryKind::Call);
                 } else {
                     self.bytecode.push(Byte::new(Instruction::STRINGIFY));
                 }
@@ -5608,52 +5726,58 @@ impl Compiler {
     /// methods in declaration order (flattened). Superclass slots are filled
     /// from the matching superclass instance for the same type arguments.
     fn emit_instance_dict(
+        &mut self,
         bytecode: &mut CodeBuf,
         class: &str,
         lookup: &[crate::typechecking::Ty],
-        checker: &Checker,
-        functions: &HashMap<String, usize>,
     ) -> bool {
-        let Some(instance) = checker.generics().find_instance_relaxed(class, lookup) else {
-            return false;
-        };
-        let Some(class_def) = checker.generics().typeclass(&instance.class) else {
-            return false;
-        };
-        let flat = class_def.flattened_methods(checker.generics());
-        let n_methods = flat.len() as u32;
-        for (owner_class, method_def) in &flat {
-            let fqn = if *owner_class == instance.class.as_str() {
-                instance.method_fqns.get(&method_def.name).cloned()
-            } else {
-                checker
-                    .generics()
-                    .find_instance_relaxed(owner_class, lookup)
-                    .and_then(|super_inst| super_inst.method_fqns.get(&method_def.name).cloned())
+        let (fqns, diag_range) = {
+            let Some(instance) = self.checker.generics().find_instance_relaxed(class, lookup) else {
+                return false;
             };
-            let offset = fqn
-                .and_then(|name| functions.get(&name).copied())
-                .unwrap_or(0);
-            bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(offset as u32));
+            let Some(class_def) = self.checker.generics().typeclass(&instance.class) else {
+                return false;
+            };
+            let flat = class_def.flattened_methods(self.checker.generics());
+            let mut fqns = Vec::with_capacity(flat.len());
+            for (owner_class, method_def) in &flat {
+                let fqn = if *owner_class == instance.class.as_str() {
+                    instance.method_fqns.get(&method_def.name).cloned()
+                } else {
+                    self.checker
+                        .generics()
+                        .find_instance_relaxed(owner_class, lookup)
+                        .and_then(|super_inst| super_inst.method_fqns.get(&method_def.name).cloned())
+                };
+                let Some(name) = fqn else {
+                    return false;
+                };
+                if !self.functions.contains_key(&name) && !self.fn_entry_labels.contains_key(&name)
+                {
+                    self.missing_call_target(&name, instance.range.clone());
+                    return false;
+                }
+                fqns.push(name);
+            }
+            (fqns, instance.range.clone())
+        };
+        for name in &fqns {
+            if !self.emit_named_entry(bytecode, name, 0, crate::il::EntryKind::CodePtr) {
+                self.missing_call_target(name, diag_range.clone());
+                return false;
+            }
         }
-        bytecode.push_make_tuple(n_methods);
+        bytecode.push_make_tuple(fqns.len() as u32);
         true
     }
 
     fn emit_existential_pack_recipe(
+        &mut self,
         bytecode: &mut CodeBuf,
         pack: &crate::typechecking::infer::ExistentialPack,
-        checker: &Checker,
-        functions: &HashMap<String, usize>,
     ) {
         Self::emit_box_if_needed(bytecode, &pack.value_ty);
-        if Self::emit_instance_dict(
-            bytecode,
-            &pack.class,
-            std::slice::from_ref(&pack.value_ty),
-            checker,
-            functions,
-        ) {
+        if self.emit_instance_dict(bytecode, &pack.class, std::slice::from_ref(&pack.value_ty)) {
             bytecode.push_make_tuple(2);
         }
     }
@@ -5665,7 +5789,7 @@ impl Compiler {
             .cloned();
         bytecode.append(&mut self.do_compile(expr));
         if let Some(pack) = pack {
-            Self::emit_existential_pack_recipe(bytecode, &pack, &self.checker, &self.functions);
+            self.emit_existential_pack_recipe(bytecode, &pack);
         }
     }
 
@@ -5681,7 +5805,7 @@ impl Compiler {
         self.bytecode.append(&mut expr_bc);
         if let Some(pack) = pack {
             let mut pack_bc = CodeBuf::new();
-            Self::emit_existential_pack_recipe(&mut pack_bc, &pack, &self.checker, &self.functions);
+            self.emit_existential_pack_recipe(&mut pack_bc, &pack);
             self.bytecode.append(&mut pack_bc);
         }
         self.suppress_match_fusion_barrier = prev;
@@ -5794,7 +5918,7 @@ impl Compiler {
     /// same dictionary layout.
     /// Each tuple holds method entry offsets in flattened declaration order
     /// (subclass methods, then superclass methods — Phase 5)
-    /// (`CodePtr <offset>`, or `CodePtr 0` if the FQN is not compiled yet).
+    /// (`CodePtr` / `Entry` to the instance method).
     ///
     /// Instances are resolved from the callee's scheme + concrete argument
     /// types (not `NodeId`), because the pre-walk / infer ID table can be
@@ -5802,16 +5926,15 @@ impl Compiler {
     ///
     /// Returns the number of dict tuples pushed (used to bump CALL arity).
     fn emit_call_site_dicts(
+        &mut self,
         bytecode: &mut CodeBuf,
         fn_name: &str,
         arg_tys: &[crate::typechecking::Ty],
         ret_ty: Option<&crate::typechecking::Ty>,
-        checker: &Checker,
-        functions: &HashMap<String, usize>,
     ) -> usize {
         use crate::typechecking::Ty;
 
-        let Some(scheme) = checker.env().lookup(fn_name).cloned() else {
+        let Some(scheme) = self.checker.env().lookup(fn_name).cloned() else {
             return 0;
         };
         // Map quantified vars → concrete arg types by structurally matching
@@ -5839,11 +5962,12 @@ impl Compiler {
 
         let mut dict_count = 0;
         for constraint in &scheme.constraints {
-            let Some(lookup) = Self::resolve_constraint_lookup(constraint, &var_to_ty, checker)
+            let Some(lookup) =
+                Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)
             else {
                 continue;
             };
-            if Self::emit_instance_dict(bytecode, &constraint.class, &lookup, checker, functions) {
+            if self.emit_instance_dict(bytecode, &constraint.class, &lookup) {
                 dict_count += 1;
             }
         }
@@ -5862,7 +5986,7 @@ impl Compiler {
     /// Returns the dict arity (number of stack slots pushed). Caller always
     /// emits `MakePolyFnCapture` when this is non-zero.
     fn emit_polyfn_escape_dicts(
-        &self,
+        &mut self,
         bytecode: &mut CodeBuf,
         fn_name: &str,
         escape_ty: Option<&crate::typechecking::Ty>,
@@ -5891,14 +6015,8 @@ impl Compiler {
                 let constraint = s.constraints.get(dict_index)?;
                 let lookup =
                     Self::resolve_constraint_lookup(constraint, &var_to_ty, &self.checker)?;
-                Self::emit_instance_dict(
-                    bytecode,
-                    &constraint.class,
-                    &lookup,
-                    &self.checker,
-                    &self.functions,
-                )
-                .then_some(())
+                self.emit_instance_dict(bytecode, &constraint.class, &lookup)
+                    .then_some(())
             });
             if synthesized.is_none() {
                 // Unresolved sentinel — CallIndirect fills from app evidence.
@@ -8503,8 +8621,6 @@ impl Compiler {
         next_fqn: &str,
         item_ty: Option<&Ty>,
     ) {
-        let into_off = self.functions.get(into_iter_fqn).copied().unwrap_or(0) as u32;
-        let next_off = self.functions.get(next_fqn).copied().unwrap_or(0) as u32;
         let none_tag = self
             .checker
             .tag_for(common::BUILTIN_OPTION_ENUM, "None")
@@ -8516,7 +8632,9 @@ impl Compiler {
         let mut iter_bc = self.do_compile(iterable);
         self.bytecode.append(&mut iter_bc);
         self.bytecode.push_box_value(carrier_tag);
-        Self::emit_known_target_call(&mut self.bytecode, into_off, 1);
+        if !self.emit_named_entry_on_module(into_iter_fqn, 1, crate::il::EntryKind::Call) {
+            self.missing_call_target(into_iter_fqn, iterable.0.into_range());
+        }
         self.bytecode.push_store_pop(it_slot);
 
         let _ = self.next_emit_id();
@@ -8529,7 +8647,9 @@ impl Compiler {
 
         self.bytecode.push_load(it_slot);
         self.bytecode.push_box_value(carrier_tag);
-        Self::emit_known_target_call(&mut self.bytecode, next_off, 1);
+        if !self.emit_named_entry_on_module(next_fqn, 1, crate::il::EntryKind::Call) {
+            self.missing_call_target(next_fqn, iterable.0.into_range());
+        }
 
         if niche_next {
             self.bytecode.push(Byte::new(Instruction::DUPLICATE));
@@ -10301,6 +10421,7 @@ impl Compiler {
                 bytecode.append(&mut self.do_compile(value));
             }
             Expression::Program(children) => {
+                self.reserve_program_callable_entries(children);
                 if Self::program_needs_phased_emit(children) {
                     // Emit phases (COI-109): helpers before `impl`, but free fns
                     // that call user `impl` methods (and their callers) must
@@ -11105,15 +11226,17 @@ impl Compiler {
                     .cloned();
                 if let Some(ctor) = ctor_name {
                     let arg_slice = args.as_deref().unwrap_or(&[]);
-                    if let Some(offset) = self.functions.get(ctor.as_str()).copied() {
+                    if self.functions.contains_key(ctor.as_str())
+                        || self.fn_entry_labels.contains_key(ctor.as_str())
+                    {
                         let arity =
                             self.emit_call_args_with_rest(&ctor, arg_slice, &mut bytecode, false);
-                        bytecode.push(
-                            Byte::new(Instruction::CALL).with_call_packed(arity, offset as u32),
-                        );
+                        if !self.emit_direct_fn_call(&mut bytecode, &ctor, arity) {
+                            self.missing_call_target(&ctor, class.0.into_range());
+                        }
                     } else {
                         self.messages.push(Message::error(
-                            ErrorCode::GenericTypeError,
+                            ErrorCode::CodegenError,
                             format!(
                                 "Decorated constructor `{ctor}` for class `{name}` was not found"
                             ),
@@ -14587,10 +14710,15 @@ impl Compiler {
                 .and_then(|dicts| dicts.first())
                 .and_then(|instance| {
                     let fqn = instance.method_fqns.get(*method)?.clone();
-                    let offset = *self.functions.get(&fqn)?;
-                    Some((instance.class.clone(), instance.args.clone(), offset, fqn))
+                    if self.functions.contains_key(&fqn)
+                        || self.fn_entry_labels.contains_key(&fqn)
+                    {
+                        Some((instance.class.clone(), instance.args.clone(), fqn))
+                    } else {
+                        None
+                    }
                 });
-            if let Some((class, inst_args, offset, fqn)) = ground_trait {
+            if let Some((class, inst_args, fqn)) = ground_trait {
                 bytecode.append(&mut self.do_compile(recv));
                 // Box the receiver when the instance method prologue
                 // expects an unbox (same contract as Eq/Ord direct calls).
@@ -14614,16 +14742,12 @@ impl Compiler {
                         nargs += 1;
                     }
                 }
-                if Self::emit_instance_dict(
-                    &mut bytecode,
-                    &class,
-                    &inst_args,
-                    &self.checker,
-                    &self.functions,
-                ) {
+                if self.emit_instance_dict(&mut bytecode, &class, &inst_args) {
                     nargs += 1; // trailing dictionary
                 }
-                Self::emit_known_target_call(&mut bytecode, offset as u32, nargs);
+                if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
+                    self.missing_call_target(&fqn, span.into_range());
+                }
                 self.emit_pair_to_heap_after_call(&mut bytecode, &fqn);
                 return bytecode;
             }
@@ -14714,20 +14838,18 @@ impl Compiler {
                     fqn
                 };
                 if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn) {
-                    let offset = self.functions.get(&fqn).copied().unwrap_or(0);
                     let niche_vec_method = (self.expr_is_niche_option(ast)
                         || self.force_niche_option)
                         && (fqn == format!("{}::pop", common::BUILTIN_VEC_TYPE)
                             || fqn == format!("{}::remove", common::BUILTIN_VEC_TYPE));
-                    let call_offset = if niche_vec_method {
-                        let niche_name = if fqn.ends_with("::pop") {
+                    let call_name = if niche_vec_method {
+                        if fqn.ends_with("::pop") {
                             format!("{}::__niche_pop", common::BUILTIN_VEC_TYPE)
                         } else {
                             format!("{}::__niche_remove", common::BUILTIN_VEC_TYPE)
-                        };
-                        self.functions.get(&niche_name).copied().unwrap_or(offset)
+                        }
                     } else {
-                        offset
+                        fqn.clone()
                     };
                     // Inline `Vec::push` as ArrayPush — avoids CALL/frame for fill loops.
                     // Stage when the value may STORE/Seek (format, match, `new
@@ -14864,34 +14986,18 @@ impl Compiler {
                         }
                         let call_ret_ty = self.codegen_expr_ty(ast);
                         forwarded
-                            + Self::emit_call_site_dicts(
+                            + self.emit_call_site_dicts(
                                 &mut bytecode,
                                 &lookup_name,
                                 &call_arg_tys,
                                 call_ret_ty.as_ref(),
-                                &self.checker,
-                                &self.functions,
                             )
                     } else {
                         0
                     };
                     let call_arity = 1 + nargs + dict_count as u32;
-                    if niche_vec_method {
-                        bytecode.push(
-                            Byte::new(Instruction::CALL)
-                                .with_call_packed(call_arity, call_offset as u32),
-                        );
-                    } else if !self.emit_direct_fn_call(&mut bytecode, &fqn, call_arity) {
-                        let mut message = Message::error(
-                            ErrorCode::UnknownFunction,
-                            "Unknown method".to_string(),
-                            span.into_range(),
-                        );
-                        message.push(DiagLabel::new(
-                            format!("Unable to call unknown method '{}'", fqn),
-                            span.into_range(),
-                        ));
-                        self.messages.push(message);
+                    if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
+                        self.missing_call_target(&call_name, span.into_range());
                     }
                     if !niche_vec_method
                         && (self.expr_is_niche_option(ast) || self.force_niche_option)
@@ -14993,14 +15099,13 @@ impl Compiler {
                         }
                         if let Some(ty) = arg_ty.as_ref()
                             && let Some(fqn) = self.len_instance_method_fqn(ty)
-                            && let Some(&offset) = self.functions.get(&fqn)
+                            && (self.functions.contains_key(&fqn)
+                                || self.fn_entry_labels.contains_key(&fqn))
                         {
                             bytecode.append(&mut self.do_compile(&items[0]));
-                            Self::emit_known_target_call(
-                                &mut bytecode,
-                                offset as u32,
-                                1,
-                            );
+                            if !self.emit_direct_fn_call(&mut bytecode, &fqn, 1) {
+                                self.missing_call_target(&fqn, span.into_range());
+                            }
                             return bytecode;
                         }
                         if structural {
@@ -15148,9 +15253,10 @@ impl Compiler {
                 self.bytecode.push_make_tuple(arity as u32);
                 self.bytecode.push_host_invoke(arity as u32);
                 self.expr_depth = depth_on_entry;
-            } else if let Some(offset) = self.functions.get(&n).copied() {
+            } else if self.functions.contains_key(&n) || self.fn_entry_labels.contains_key(&n) {
+                let offset = self.functions.get(&n).copied();
                 let mono_offset = self.mono_call_offset(&n, args.as_ref());
-                let target_offset = mono_offset.unwrap_or(offset);
+                let target_offset = mono_offset.or(offset);
                 let lookup_name = strip_overload_key(&n).to_string();
                 let pair_kind = self.pair_return_kind(&lookup_name);
                 let is_generic =
@@ -15190,7 +15296,8 @@ impl Compiler {
 
                 // Base-case peel that reads leaf args in place instead of
                 // spilling them; falls through to the spilling peel below.
-                if !is_generic
+                if let Some(off) = target_offset
+                    && !is_generic
                     && !is_instance_method_fqn(&self.checker, &lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
@@ -15198,7 +15305,7 @@ impl Compiler {
                         &n,
                         Some(arg_slice),
                         &mut bytecode,
-                        target_offset as u32,
+                        off as u32,
                     )
                 {
                     return bytecode;
@@ -15207,7 +15314,8 @@ impl Compiler {
                 // Caller-side base-case peel: cmp-jmp before CALL when
                 // the callee opens with fused/unfused compare + imm/slot return.
                 // Instance methods with known entries use CALL (not CallIndirect).
-                if pair_kind.is_none()
+                if let Some(off) = target_offset
+                    && pair_kind.is_none()
                     && !is_generic
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
@@ -15215,7 +15323,7 @@ impl Compiler {
                         &n,
                         Some(arg_slice),
                         &mut bytecode,
-                        target_offset as u32,
+                        off as u32,
                         /*is_indirect=*/ false,
                     )
                 {
@@ -15254,7 +15362,9 @@ impl Compiler {
                                 None
                             }
                         });
-                if let Some(mask) = fill_mask.filter(|_| pair_kind.is_none()) {
+                if let Some(off) = target_offset
+                    && let Some(mask) = fill_mask.filter(|_| pair_kind.is_none())
+                {
                     // Emit filled values in declaration order (already
                     // the order of `flat_arg_slice` after named reorder at TC).
                     for arg in &flat_arg_slice {
@@ -15266,10 +15376,7 @@ impl Compiler {
                     }
                     let n_filled = mask.count_ones();
                     bytecode.push_const(mask as i32);
-                    bytecode.push(
-                        Byte::new(Instruction::CodePtr)
-                            .with_operand_u32(target_offset as u32),
-                    );
+                    bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(off as u32));
                     bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(
                         make_fn_operand(0, n_filled, fa as u32, is_rest),
                     ));
@@ -15326,49 +15433,35 @@ impl Compiler {
                     }
                     let call_ret_ty = self.codegen_expr_ty(ast);
                     forwarded
-                        + Self::emit_call_site_dicts(
+                        + self.emit_call_site_dicts(
                             &mut bytecode,
                             &lookup_name,
                             &call_arg_tys,
                             call_ret_ty.as_ref(),
-                            &self.checker,
-                            &self.functions,
                         )
                 } else {
                     0
                 };
 
                 let arity = value_arity + dict_count as u32;
-                if is_instance_method_fqn(&self.checker, &lookup_name) {
-                    // Ground instance methods have a fixed entry — use CALL
-                    // (dict evidence already pushed as trailing args when needed).
-                    Self::emit_known_target_call(&mut bytecode, target_offset as u32, arity);
-                } else if self.coroutine_fns.contains(&lookup_name)
+                let entry_kind = if self.coroutine_fns.contains(&lookup_name)
                     || self.coroutine_fns.contains(&n)
                 {
-                    bytecode.push(
-                        Byte::new(Instruction::MakeCoro)
-                            .with_call_packed(arity, target_offset as u32),
-                    );
+                    crate::il::EntryKind::MakeCoro
                 } else {
-                    // Packed CALL: arity + target in one opcode.
-                    bytecode.push(
-                        Byte::new(Instruction::CALL)
-                            .with_call_packed(arity, target_offset as u32),
-                    );
+                    crate::il::EntryKind::Call
+                };
+                if let Some(off) = mono_offset {
+                    bytecode.push(Self::packed_entry_byte(entry_kind, arity, off as u32));
+                } else if !self.emit_named_entry(&mut bytecode, &n, arity, entry_kind) {
+                    self.missing_call_target(&n, span.into_range());
                 }
                 let vec_option_call = [
                     format!("{}::pop", common::BUILTIN_VEC_TYPE),
                     format!("{}::remove", common::BUILTIN_VEC_TYPE),
                 ]
                 .iter()
-                .any(|name| {
-                    lookup_name == *name
-                        || self
-                            .functions
-                            .get(name)
-                            .is_some_and(|offset| *offset == target_offset)
-                });
+                .any(|name| lookup_name == *name || n == *name);
                 if (self.expr_is_niche_option(ast) || self.force_niche_option)
                     && vec_option_call
                 {
@@ -15460,13 +15553,11 @@ impl Compiler {
                         }
                     }
                     let call_ret_ty = self.codegen_expr_ty(ast);
-                    dict_count += Self::emit_call_site_dicts(
+                    dict_count += self.emit_call_site_dicts(
                         &mut bytecode,
                         source,
                         &arg_tys,
                         call_ret_ty.as_ref(),
-                        &self.checker,
-                        &self.functions,
                     ) as u32;
                 }
                 // Pack value arity + application dict arity so the VM can
