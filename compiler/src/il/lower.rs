@@ -1,4 +1,8 @@
-//! IL → `Vec<Byte>` lowering with label-safe fusion select.
+//! IL → `Vec<Byte>` lowering: one [`fuse_select`] then PC assign.
+//!
+//! Fuse windows are typed [`IlOp`]. Residual [`IlOp::Byte`] is a cold refuse.
+//! Labels / [`IlOp::JoinLabel`] / [`FuseHint`] are hard barriers (D3). No
+//! post-lower `adjust_target`. Per-function fuse is not production.
 
 use std::collections::HashMap;
 
@@ -30,7 +34,10 @@ pub struct Lowered {
 /// Intermediate slot before PC assignment. Jump targets stay symbolic.
 #[derive(Clone)]
 enum Slot {
+    /// Encoded from a **typed** [`IlOp`] (Load/Const/Bin/…). Fusable.
     Byte(Byte, DebugLoc),
+    /// Residual [`IlOp::Byte`] cold set. Fuse-select refuses any window that includes it.
+    Cold(Byte, DebugLoc),
     Jump(IlJumpKind, Label, DebugLoc, FuseHint),
     Entry(EntryKind, u32, Label, DebugLoc),
     PrologueJmp(DebugLoc),
@@ -69,6 +76,7 @@ impl Slot {
     fn loc(&self) -> DebugLoc {
         match self {
             Slot::Byte(_, l)
+            | Slot::Cold(_, l)
             | Slot::Jump(_, _, l, _)
             | Slot::Entry(_, _, _, l)
             | Slot::PrologueJmp(l)
@@ -154,64 +162,13 @@ pub(crate) fn lower_module_inner(
 
 /// Fuse-select + PC assign for an already-optimized op stream (no IL opts).
 pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
-    assert_no_residual_abs_jumps(ops);
-
-    let mut pre_slots: Vec<Slot> = Vec::with_capacity(ops.len());
-    // For each pre-fusion emitting index, labels that bind to it.
-    let mut binds_at: HashMap<usize, Vec<u32>> = HashMap::new();
-    let mut pending: Vec<u32> = Vec::new();
-
-    for op in ops {
-        match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => pending.push(*id),
-            IlOp::Jump {
-                kind,
-                target,
-                loc,
-                hint,
-            } => {
-                let idx = pre_slots.len();
-                if !pending.is_empty() {
-                    binds_at.insert(idx, std::mem::take(&mut pending));
-                }
-                pre_slots.push(Slot::Jump(*kind, *target, *loc, *hint));
-            }
-            IlOp::Entry {
-                kind,
-                arity,
-                target,
-                loc,
-            } => {
-                let idx = pre_slots.len();
-                if !pending.is_empty() {
-                    binds_at.insert(idx, std::mem::take(&mut pending));
-                }
-                pre_slots.push(Slot::Entry(*kind, *arity, *target, *loc));
-            }
-            IlOp::PrologueJmp { loc } => {
-                let idx = pre_slots.len();
-                if !pending.is_empty() {
-                    binds_at.insert(idx, std::mem::take(&mut pending));
-                }
-                pre_slots.push(Slot::PrologueJmp(*loc));
-            }
-            // Typed hot-set + residual Byte: encode to Slot::Byte for fuse-select.
-            other => {
-                let Some(byte) = other.as_encode_byte() else {
-                    continue;
-                };
-                let idx = pre_slots.len();
-                if !pending.is_empty() {
-                    binds_at.insert(idx, std::mem::take(&mut pending));
-                }
-                pre_slots.push(Slot::Byte(byte, other.loc()));
-            }
-        }
-    }
-    let end_labels = pending;
-
-    let pre_len = pre_slots.len();
-    let (slots, pre_to_post) = fuse_slots_with_origins(pre_slots, pool, &binds_at);
+    let FuseOut {
+        slots,
+        binds_at,
+        end_labels,
+        pre_len,
+        pre_to_post,
+    } = fuse_select(ops, pool);
 
     // Assign in pre-slot order so a rebound label keeps the *last* bind
     // (HashMap iteration order would be nondeterministic).
@@ -252,6 +209,93 @@ pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
     }
 }
 
+/// Named fuse-select pass: typed [`IlOp`] windows, then fused [`Slot`]s.
+///
+/// Called once from [`lower_optimized`] after concat. Not a second lowering:
+/// PC assign / encode still happen in [`lower_optimized`]. Residual
+/// [`IlOp::Byte`] is [`Slot::Cold`] — refused in any multi-op window.
+/// [`IlOp::Label`] / [`IlOp::JoinLabel`] binds and [`FuseHint`] are barriers
+/// (D3 metadata, no dummy ops). Per-function fuse is not production.
+pub(crate) fn fuse_select(ops: &[IlOp], pool: &mut Vec<u64>) -> FuseOut {
+    assert_no_residual_abs_jumps(ops);
+
+    let mut pre_slots: Vec<Slot> = Vec::with_capacity(ops.len());
+    let mut binds_at: HashMap<usize, Vec<u32>> = HashMap::new();
+    let mut pending: Vec<u32> = Vec::new();
+
+    for op in ops {
+        match op {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => pending.push(*id),
+            IlOp::Jump {
+                kind,
+                target,
+                loc,
+                hint,
+            } => {
+                let idx = pre_slots.len();
+                if !pending.is_empty() {
+                    binds_at.insert(idx, std::mem::take(&mut pending));
+                }
+                pre_slots.push(Slot::Jump(*kind, *target, *loc, *hint));
+            }
+            IlOp::Entry {
+                kind,
+                arity,
+                target,
+                loc,
+            } => {
+                let idx = pre_slots.len();
+                if !pending.is_empty() {
+                    binds_at.insert(idx, std::mem::take(&mut pending));
+                }
+                pre_slots.push(Slot::Entry(*kind, *arity, *target, *loc));
+            }
+            IlOp::PrologueJmp { loc } => {
+                let idx = pre_slots.len();
+                if !pending.is_empty() {
+                    binds_at.insert(idx, std::mem::take(&mut pending));
+                }
+                pre_slots.push(Slot::PrologueJmp(*loc));
+            }
+            IlOp::Byte { byte, loc } => {
+                let idx = pre_slots.len();
+                if !pending.is_empty() {
+                    binds_at.insert(idx, std::mem::take(&mut pending));
+                }
+                pre_slots.push(Slot::Cold(*byte, *loc));
+            }
+            other => {
+                let Some(byte) = other.as_encode_byte() else {
+                    continue;
+                };
+                let idx = pre_slots.len();
+                if !pending.is_empty() {
+                    binds_at.insert(idx, std::mem::take(&mut pending));
+                }
+                pre_slots.push(Slot::Byte(byte, other.loc()));
+            }
+        }
+    }
+    let end_labels = pending;
+    let pre_len = pre_slots.len();
+    let (slots, pre_to_post) = fuse_slots_with_origins(pre_slots, pool, &binds_at);
+    FuseOut {
+        slots,
+        binds_at,
+        end_labels,
+        pre_len,
+        pre_to_post,
+    }
+}
+
+pub(crate) struct FuseOut {
+    slots: Vec<Slot>,
+    binds_at: HashMap<usize, Vec<u32>>,
+    end_labels: Vec<u32>,
+    pre_len: usize,
+    pre_to_post: HashMap<usize, usize>,
+}
+
 fn fuse_slots_with_origins(
     slots: Vec<Slot>,
     pool: &mut Vec<u64>,
@@ -274,9 +318,10 @@ fn fuse_slots_with_origins(
         if let Some((f, window)) = try_fuse_slots(&slots[i..], pool) {
             let crosses_label = (1..window).any(|k| binds_at.contains_key(&(i + k)));
             let crosses_abs = (1..window).any(|k| abs_jump_targets.contains(&(i + k)));
+            let has_cold = (0..window).any(|k| matches!(slots[i + k], Slot::Cold(..)));
             let return_at_uncond_join =
                 slot_is_return_fusion(&f) && join_has_unconditional_pred(&slots, i, binds_at);
-            if !crosses_label && !crosses_abs && !return_at_uncond_join {
+            if !crosses_label && !crosses_abs && !has_cold && !return_at_uncond_join {
                 fused = Some((f, window));
             }
         }
@@ -931,7 +976,7 @@ fn join_has_unconditional_pred(
 
 fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -> Byte {
     match slot {
-        Slot::Byte(b, _) => *b,
+        Slot::Byte(b, _) | Slot::Cold(b, _) => *b,
         Slot::PrologueJmp(_) => Byte::new(Instruction::JMP).with_operand_u32(u32::MAX),
         Slot::Jump(kind, target, _, _) => {
             let pc = resolve(labels, *target);
@@ -2215,6 +2260,56 @@ mod tests {
         ];
         let mut pool = Vec::new();
         let _ = lower(&ops, &mut pool);
+    }
+
+    #[test]
+    fn fuse_select_refuses_residual_byte_in_window() {
+        // FORMAT is the documented cold set; it must not join a Load/Const/Bin fuse.
+        let ops = vec![
+            IlOp::Load {
+                slot: 0,
+                loc: DebugLoc::unknown(),
+            },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::FORMAT),
+                loc: DebugLoc::unknown(),
+            },
+            IlOp::Const {
+                imm: 1,
+                loc: DebugLoc::unknown(),
+            },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: DebugLoc::unknown(),
+            },
+            IlOp::Return {
+                loc: DebugLoc::unknown(),
+            },
+        ];
+        let mut pool = Vec::new();
+        let lowered = lower(&ops, &mut pool);
+        assert!(
+            lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::FORMAT),
+            "cold Byte must survive encode"
+        );
+        assert!(
+            lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::LOAD),
+            "Load before FORMAT must not be swallowed into BinSlotImm"
+        );
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::BinSlotImm
+                    || *b.bytecode() == Instruction::BinSlotSlot),
+            "fuse must refuse a window that contains residual Byte"
+        );
     }
 
     /// Typed hot-set ops must encode through lower's `as_encode_byte` path and still fuse.
