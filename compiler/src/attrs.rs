@@ -55,7 +55,7 @@ const DERIVABLE: &[&str] = &[
 const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth"];
 
 /// Result of attribute expansion before typechecking.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct ExpandResult {
     pub messages: Vec<Message>,
     /// Class name → decorated constructor function name.
