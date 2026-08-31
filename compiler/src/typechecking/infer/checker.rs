@@ -17,7 +17,7 @@ use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune, compose};
 use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{ArrayLength, array, array_fixed, tuple as tuple_ty};
 use crate::typechecking::ty::{
-    EnumVariantPayloadTy, Ty, TyVarId, boolean, float, int, is_option_ty, is_result_ty,
+    EnumVariantPayloadTy, Ty, TyVarId, boolean, float, ftv_ty, int, is_option_ty, is_result_ty,
     list, never, option_app_ty, option_inner, option_ty, range_app, range_inclusive_ty, range_ty,
     readonly_ty, result_app_ty, result_ok_err, result_ty, schemaize_payload, schemaize_ty, string,
     strip_readonly, subst_payload_params, subst_ty_params, unit as unit_ty, vec_app_ty,
@@ -11771,6 +11771,47 @@ impl Checker {
     //  Functions (monomorphic recursion)
     // ============================================================
 
+    /// Free generic functions compile one shared body and box type-param
+    /// arguments. `Option::Some(x)` then wraps that box, so a caller that
+    /// expects a native `Option<int>` / `Option<string>` payload is wrong.
+    /// Inherent methods are monomorphized (they unbox `T` at the specialized
+    /// body start) and stay valid.
+    fn reject_free_generic_option_return(
+        &mut self,
+        name: &str,
+        is_generic: bool,
+        param_vars: &[TyVarId],
+        fun_ty: &Ty,
+        range: &Range<usize>,
+    ) {
+        if !is_generic || !self.registering_overloadable_fn {
+            return;
+        }
+        let resolved = apply_ty_prune(&self.subst, fun_ty);
+        let mut ret = &resolved;
+        while let Ty::Fun(_, inner) = ret {
+            ret = inner;
+        }
+        let Some(payload) = option_inner(ret) else {
+            return;
+        };
+        let payload_vars = ftv_ty(&payload);
+        if !param_vars.iter().any(|v| payload_vars.contains(v)) {
+            return;
+        }
+        let mut msg = Message::error(
+            ErrorCode::UnsupportedGenericOptionReturn,
+            format!(
+                "free function `{name}` cannot return Option of a type parameter"
+            ),
+            range.clone(),
+        );
+        msg.with_help(
+            "put this on an inherent `impl` method; a shared generic body boxes T and would wrap that box inside Option".to_string(),
+        );
+        self.messages.push(msg);
+    }
+
     fn infer_function(
         &mut self,
         name: &str,
@@ -12119,6 +12160,7 @@ impl Checker {
         self.fn_option_mode = prev_option_mode;
         fun_ty = Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), self_ty.is_some());
         self.unify(&Ty::Var(alpha), &fun_ty, range, "function type");
+        self.reject_free_generic_option_return(name, is_generic, &param_vars, &fun_ty, range);
 
         if !is_generic {
             let resolved = apply_ty_prune(&self.subst, &fun_ty);

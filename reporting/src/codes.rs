@@ -56,6 +56,11 @@ pub enum ErrorCode {
     ExpressionNestingTooDeep,
     /// Invalid `fn drop(self)` (wrong owner, arity, static, duplicate, …).
     InvalidDrop,
+    /// Free generic `fn f<T>(...) -> Option<U>` where `U` mentions a type
+    /// parameter. A shared generic body boxes `T`; wrapping that box in
+    /// Option corrupts native payloads. Inherent methods are monomorphized
+    /// and stay valid.
+    UnsupportedGenericOptionReturn,
 
     // --- Enums / match / constructs (E02xx) ---
     DuplicateEnum,
@@ -130,6 +135,7 @@ impl ErrorCode {
             Self::DeferNeverRuns => "E0123",
             Self::ExpressionNestingTooDeep => "E0125",
             Self::InvalidDrop => "E0126",
+            Self::UnsupportedGenericOptionReturn => "E0127",
             Self::DuplicateEnum => "E0200",
             Self::DuplicateConstructor => "E0201",
             Self::UnknownEnum => "E0202",
@@ -198,6 +204,7 @@ impl ErrorCode {
             Self::DeferNeverRuns => "defer will never run on function exit",
             Self::ExpressionNestingTooDeep => "expression nested too deeply for the compiler",
             Self::InvalidDrop => "invalid drop method",
+            Self::UnsupportedGenericOptionReturn => "unsupported free generic Option return",
             Self::DuplicateEnum => "duplicate enum",
             Self::DuplicateConstructor => "duplicate constructor",
             Self::UnknownEnum => "unknown enum",
@@ -274,6 +281,7 @@ mod tests {
             | DeferNeverRuns
             | ExpressionNestingTooDeep
             | InvalidDrop
+            | UnsupportedGenericOptionReturn
             | DuplicateEnum
             | DuplicateConstructor
             | UnknownEnum
@@ -332,6 +340,7 @@ mod tests {
             DeferNeverRuns,
             ExpressionNestingTooDeep,
             InvalidDrop,
+            UnsupportedGenericOptionReturn,
             DuplicateEnum,
             DuplicateConstructor,
             UnknownEnum,
