@@ -6,11 +6,10 @@ use common::{Byte, DebugLoc};
 
 use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 
-/// Error from [`IlBuilder::finalize`].
+/// Error from IL finalize / lower.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IlError {
-    /// Reserved for explicit finalize checks; lower currently remaps unbound targets.
-    #[allow(dead_code)]
+    /// A jump or entry targeted a label that was never bound.
     UnboundLabel(Label),
 }
 
