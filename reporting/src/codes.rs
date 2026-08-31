@@ -96,6 +96,8 @@ pub enum ErrorCode {
     UnboundedRecursion,
     /// Proven / attributed recursion depth exceeds the VM operand-stack capacity.
     StackDepthExceeded,
+    /// Monomorphization per-fn or total cap was hit; extra specs were not emitted.
+    MonomorphizeCap,
 
     // --- CLI / I/O (E09xx) ---
     IoError,
@@ -161,6 +163,7 @@ impl ErrorCode {
             Self::CodegenError => "E0801",
             Self::UnboundedRecursion => "E0802",
             Self::StackDepthExceeded => "E0803",
+            Self::MonomorphizeCap => "E0804",
             Self::IoError => "E0900",
             Self::ArchiveVersionMismatch => "E0901",
             Self::InvalidCliFlags => "E0902",
@@ -230,6 +233,7 @@ impl ErrorCode {
             Self::CodegenError => "codegen error",
             Self::UnboundedRecursion => "unbounded recursion depth",
             Self::StackDepthExceeded => "stack depth exceeds VM limit",
+            Self::MonomorphizeCap => "monomorphization specialization cap hit",
             Self::IoError => "I/O error",
             Self::ArchiveVersionMismatch => "bytecode archive version mismatch",
             Self::InvalidCliFlags => "invalid CLI flags",
@@ -307,6 +311,7 @@ mod tests {
             | CodegenError
             | UnboundedRecursion
             | StackDepthExceeded
+            | MonomorphizeCap
             | IoError
             | ArchiveVersionMismatch
             | InvalidCliFlags
@@ -366,6 +371,7 @@ mod tests {
             CodegenError,
             UnboundedRecursion,
             StackDepthExceeded,
+            MonomorphizeCap,
             IoError,
             ArchiveVersionMismatch,
             InvalidCliFlags,

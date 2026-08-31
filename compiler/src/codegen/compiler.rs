@@ -3624,20 +3624,6 @@ impl Compiler {
             .map(|t| apply_ty_prune(self.checker.subst(), t))
     }
 
-    fn mono_ty_from_name(name: &str) -> Ty {
-        if let Some(ty) = parse_mono_ty_name(name) {
-            return ty;
-        }
-        match name {
-            crate::typechecking::ty::INT => Ty::Con(crate::typechecking::ty::INT.into()),
-            crate::typechecking::ty::FLOAT => Ty::Con(crate::typechecking::ty::FLOAT.into()),
-            crate::typechecking::ty::STRING => Ty::Con(crate::typechecking::ty::STRING.into()),
-            crate::typechecking::ty::BOOL => Ty::Con(crate::typechecking::ty::BOOL.into()),
-            crate::typechecking::ty::UNIT => Ty::Con(crate::typechecking::ty::UNIT.into()),
-            other => Ty::Con(other.to_string()),
-        }
-    }
-
     fn discard_statement_value(bytecode: &mut Vec<Byte>) {
         if matches!(
             bytecode.last().map(|b| b.bytecode()),
@@ -7633,11 +7619,22 @@ impl Compiler {
             return;
         }
 
-        let specializations = self
-            .mono_plan
-            .specializations_for_fn(qualified)
-            .cloned()
-            .collect::<Vec<_>>();
+        let def_id = self
+            .checker
+            .def_id_of(source_name)
+            .or_else(|| self.checker.interned_def(&self.namespace, source_name));
+        let specializations = if let Some(id) = def_id {
+            self.mono_plan
+                .specializations_for_def(id)
+                .cloned()
+                .collect::<Vec<_>>()
+        } else {
+            self.mono_plan
+                .specializations_for_fn(qualified)
+                .chain(self.mono_plan.specializations_for_fn(source_name))
+                .cloned()
+                .collect::<Vec<_>>()
+        };
         if specializations.is_empty() {
             return;
         }
@@ -7652,10 +7649,18 @@ impl Compiler {
                 continue;
             }
 
+            let subst_ids = specialization
+                .key
+                .subst
+                .iter()
+                .map(|id| id.0.to_string())
+                .collect::<Vec<_>>()
+                .join("$");
             let mono_name = format!(
-                "{}$mono${}",
+                "{}$mono${}${}",
                 qualified,
-                specialization.key.subst.join("$").replace(' ', "")
+                specialization.key.def_id.raw(),
+                subst_ids
             );
             let (clone_offset, _) = self.bind_function_entry(mono_name);
             self.mono_offsets
@@ -7704,8 +7709,10 @@ impl Compiler {
     ) -> HashMap<String, Ty> {
         let mut type_param_tys = HashMap::new();
         for (idx, tp) in type_params.iter().enumerate() {
-            if let Some(ty_name) = key.subst.get(idx) {
-                type_param_tys.insert(tp.name, Self::mono_ty_from_name(ty_name));
+            if let Some(&ty_id) = key.subst.get(idx)
+                && let Some(ty) = self.mono_plan.intern.get(ty_id)
+            {
+                type_param_tys.insert(tp.name, ty.clone());
             }
         }
 
@@ -7743,7 +7750,7 @@ impl Compiler {
         let (fixed, rest, pack_rest) = self.split_call_args_for_rest(fn_name, args);
         let mut arg_types = Vec::with_capacity(fixed.len() + usize::from(pack_rest));
         for arg in &fixed {
-            arg_types.push(crate::monomorphize::ground_type_name(&self.checker, arg)?);
+            arg_types.push(crate::monomorphize::ground_ty(&self.checker, arg)?);
         }
         if pack_rest {
             if rest.is_empty() {
@@ -7756,9 +7763,9 @@ impl Compiler {
                 // type param. Fallback: skip mono (shared body).
                 return None;
             }
-            let elem = crate::monomorphize::ground_type_name(&self.checker, &rest[0])?;
+            let elem = crate::monomorphize::ground_ty(&self.checker, &rest[0])?;
             for arg in rest.iter().skip(1) {
-                if crate::monomorphize::ground_type_name(&self.checker, arg)? != elem {
+                if crate::monomorphize::ground_ty(&self.checker, arg)? != elem {
                     return None;
                 }
             }
@@ -15593,7 +15600,22 @@ impl Compiler {
         // after prologue HALT / prelude RETURN (reachability is
         // label-based until entry-aware DCE).
         self.bytecode.bind_fresh_entry();
-        self.mono_plan = crate::monomorphize::plan_monomorphization(module, ast, &self.checker);
+        self.mono_plan = crate::monomorphize::run_monomorphize_pass(module, ast, &self.checker);
+        for hit in &self.mono_plan.cap_hits {
+            let kind = if hit.per_fn {
+                "per-function"
+            } else {
+                "total"
+            };
+            self.messages.push(Message::warn(
+                ErrorCode::MonomorphizeCap,
+                format!(
+                    "monomorphization {kind} cap hit for `{}`; using shared generic body",
+                    hit.fn_name
+                ),
+                hit.call_span.start..hit.call_span.end,
+            ));
+        }
 
         let mut program = self.do_compile(ast);
         self.namespace = ns.to_string();

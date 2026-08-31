@@ -11,21 +11,56 @@ use parser::{
     ast::{Expression, Output, TypeParam},
 };
 
-use crate::typechecking::{Checker, Ty};
+use crate::typechecking::{Checker, DefId, Ty};
+use crate::typechecking::subst::apply_ty_prune;
 
 pub const MAX_SPECIALIZATIONS_PER_FN: usize = 8;
 pub const MAX_TOTAL_SPECIALIZATIONS: usize = 64;
 
+/// Interned type identity for monomorphize keys (not `Ty::to_string()`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct TyId(pub u32);
+
+#[derive(Clone, Debug, Default)]
+pub struct TyInterner {
+    tys: Vec<Ty>,
+    ids: HashMap<Ty, TyId>,
+}
+
+impl PartialEq for TyInterner {
+    fn eq(&self, other: &Self) -> bool {
+        self.tys == other.tys
+    }
+}
+impl Eq for TyInterner {}
+
+impl TyInterner {
+    pub fn intern(&mut self, ty: Ty) -> TyId {
+        if let Some(&id) = self.ids.get(&ty) {
+            return id;
+        }
+        let id = TyId(self.tys.len() as u32);
+        self.ids.insert(ty.clone(), id);
+        self.tys.push(ty);
+        id
+    }
+
+    pub fn get(&self, id: TyId) -> Option<&Ty> {
+        self.tys.get(id.0 as usize)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MonoKey {
-    pub fn_name: String,
-    pub subst: Vec<String>,
+    pub def_id: DefId,
+    pub subst: Vec<TyId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonoSpecialization {
     pub key: MonoKey,
-    pub arg_types: Vec<String>,
+    pub fn_name: String,
+    pub arg_types: Vec<TyId>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,11 +69,20 @@ pub struct MonoRetarget {
     pub key: MonoKey,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MonoCapHit {
+    pub call_span: parser::SimpleSpan,
+    pub fn_name: String,
+    pub per_fn: bool,
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct MonoPlan {
+    pub intern: TyInterner,
     pub specializations: Vec<MonoSpecialization>,
     pub retargets: Vec<MonoRetarget>,
     pub escaped_generic_fns: BTreeSet<String>,
+    pub cap_hits: Vec<MonoCapHit>,
 }
 
 impl MonoPlan {
@@ -46,14 +90,24 @@ impl MonoPlan {
         self.specializations.is_empty()
     }
 
+    pub fn ty(&self, id: TyId) -> Option<&Ty> {
+        self.intern.get(id)
+    }
+
     pub fn specialization_for_call(
         &self,
         fn_name: &str,
-        arg_types: &[String],
+        arg_types: &[Ty],
     ) -> Option<&MonoSpecialization> {
-        self.specializations
-            .iter()
-            .find(|spec| spec.key.fn_name == fn_name && spec.arg_types == arg_types)
+        self.specializations.iter().find(|spec| {
+            spec.fn_name == fn_name
+                && spec.arg_types.len() == arg_types.len()
+                && spec
+                    .arg_types
+                    .iter()
+                    .zip(arg_types)
+                    .all(|(id, ty)| self.intern.get(*id) == Some(ty))
+        })
     }
 
     pub fn specializations_for_fn<'a>(
@@ -62,12 +116,20 @@ impl MonoPlan {
     ) -> impl Iterator<Item = &'a MonoSpecialization> + 'a {
         self.specializations
             .iter()
-            .filter(move |spec| spec.key.fn_name == fn_name)
+            .filter(move |spec| spec.fn_name == fn_name)
+    }
+
+    pub fn specializations_for_def(&self, def_id: DefId) -> impl Iterator<Item = &MonoSpecialization> {
+        self.specializations
+            .iter()
+            .filter(move |spec| spec.key.def_id == def_id)
     }
 }
 
 #[derive(Clone, Debug)]
 struct GenericFnSig {
+    def_id: DefId,
+    fn_name: String,
     type_params: Vec<String>,
     type_param_bounds: Vec<Vec<String>>,
     /// For each formal: which type-parameter index it references (if any).
@@ -82,33 +144,43 @@ struct MonoCandidate {
     specialization: MonoSpecialization,
 }
 
-/// Build a monomorphization plan for ground, bounded generic call sites.
+/// Explicit monomorphize pass: after check, before emit.
 ///
 /// Only generic functions whose type parameters carry at least one **opcode**
 /// bound (`Num` / `Ord` / `Eq` and operator supertraits) are specialized.
 /// Unbounded `id<T>` stays on the shared `BoxValue`/`UnboxValue` path. User
 /// traits, `Show`, and `Length` stay on dictionary passing (COI-78).
-pub fn plan_monomorphization(module: &str, ast: &Output, checker: &Checker) -> MonoPlan {
+/// Keys are [`DefId`] + interned [`Ty`] ids from checker subst, not Display.
+pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> MonoPlan {
+    let mut intern = TyInterner::default();
     let mut sigs = HashMap::new();
-    collect_generic_functions(module, ast, &mut sigs);
+    collect_generic_functions(module, ast, checker, &mut sigs);
 
     let mut escaped = BTreeSet::new();
     collect_escaped_generic_refs(ast, &sigs, false, &mut escaped);
 
     let mut candidates = Vec::new();
-    collect_candidates(ast, checker, &sigs, &mut candidates);
+    collect_candidates(ast, checker, &sigs, &mut intern, &mut candidates);
 
-    let (specializations, retargets) = apply_caps(candidates);
+    let (specializations, retargets, cap_hits) = apply_caps(candidates);
     MonoPlan {
+        intern,
         specializations,
         retargets,
         escaped_generic_fns: escaped,
+        cap_hits,
     }
+}
+
+/// Alias kept for in-crate tests.
+pub fn plan_monomorphization(module: &str, ast: &Output, checker: &Checker) -> MonoPlan {
+    run_monomorphize_pass(module, ast, checker)
 }
 
 fn collect_generic_functions(
     module: &str,
     node: &Output,
+    checker: &Checker,
     sigs: &mut HashMap<String, GenericFnSig>,
 ) {
     match node.1.as_ref() {
@@ -121,18 +193,25 @@ fn collect_generic_functions(
             ..
         } => {
             if !type_params.is_empty() {
-                let sig = signature_from_function(type_params, args);
-                sigs.insert(name.to_string(), sig.clone());
-                if !module.is_empty() {
-                    sigs.insert(format!("{module}::{name}"), sig);
+                if let Some(def_id) = checker
+                    .def_id_of(name)
+                    .or_else(|| checker.interned_def(module, name))
+                {
+                    let mut sig = signature_from_function(type_params, args);
+                    sig.def_id = def_id;
+                    sig.fn_name = (*name).to_string();
+                    sigs.insert(name.to_string(), sig.clone());
+                    if !module.is_empty() {
+                        sigs.insert(format!("{module}::{name}"), sig);
+                    }
                 }
             }
             if let Some(body) = body {
-                collect_generic_functions(module, body, sigs);
+                collect_generic_functions(module, body, checker, sigs);
             }
         }
         _ => walk_children(node, &mut |child| {
-            collect_generic_functions(module, child, sigs)
+            collect_generic_functions(module, child, checker, sigs)
         }),
     }
 }
@@ -162,6 +241,8 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
     }
 
     GenericFnSig {
+        def_id: DefId::from_u32(0),
+        fn_name: String::new(),
         type_params: type_param_names,
         type_param_bounds,
         param_type_params,
@@ -182,13 +263,14 @@ fn collect_candidates(
     node: &Output,
     checker: &Checker,
     sigs: &HashMap<String, GenericFnSig>,
+    intern: &mut TyInterner,
     out: &mut Vec<MonoCandidate>,
 ) {
     if let Expression::Call { name, args } = node.1.as_ref() {
         if let Expression::Identifier(fn_name) = name.1.as_ref()
             && let Some(sig) = sigs.get(*fn_name)
             && let Some(specialization) =
-                candidate_for_call(*fn_name, sig, args.as_deref(), checker)
+                candidate_for_call(*fn_name, sig, args.as_deref(), checker, intern)
         {
             out.push(MonoCandidate {
                 span: node.0,
@@ -197,14 +279,14 @@ fn collect_candidates(
         }
         if let Some(args) = args {
             for arg in args {
-                collect_candidates(arg, checker, sigs, out);
+                collect_candidates(arg, checker, sigs, intern, out);
             }
         }
         return;
     }
 
     walk_children(node, &mut |child| {
-        collect_candidates(child, checker, sigs, out)
+        collect_candidates(child, checker, sigs, intern, out)
     });
 }
 
@@ -213,6 +295,7 @@ fn candidate_for_call(
     sig: &GenericFnSig,
     args: Option<&[Output]>,
     checker: &Checker,
+    intern: &mut TyInterner,
 ) -> Option<MonoSpecialization> {
     if sig.type_params.is_empty() || sig.type_param_bounds.iter().all(|bounds| bounds.is_empty()) {
         return None;
@@ -253,15 +336,15 @@ fn candidate_for_call(
         return None;
     }
 
-    let mut subst: Vec<Option<String>> = vec![None; sig.type_params.len()];
+    let mut subst: Vec<Option<Ty>> = vec![None; sig.type_params.len()];
     let mut arg_types = Vec::with_capacity(sig.param_type_params.len());
 
-    let bind = |subst: &mut [Option<String>], tp_idx: Option<usize>, arg_ty: &str| -> Option<()> {
+    let bind = |subst: &mut [Option<Ty>], tp_idx: Option<usize>, arg_ty: &Ty| -> Option<()> {
         if let Some(tp_idx) = tp_idx {
             match &subst[tp_idx] {
                 Some(existing) if existing != arg_ty => return None,
                 Some(_) => {}
-                None => subst[tp_idx] = Some(arg_ty.to_string()),
+                None => subst[tp_idx] = Some(arg_ty.clone()),
             }
         }
         Some(())
@@ -273,7 +356,7 @@ fn candidate_for_call(
         sig.param_type_params.as_slice()
     };
     for (arg, tp_idx) in fixed_args.iter().zip(fixed_tps.iter()) {
-        let arg_ty = ground_type_name(checker, arg)?;
+        let arg_ty = ground_ty(checker, arg)?;
         bind(&mut subst, *tp_idx, &arg_ty)?;
         arg_types.push(arg_ty);
     }
@@ -286,9 +369,9 @@ fn candidate_for_call(
             let elem = rest_tp.and_then(|i| subst[i].clone())?;
             arg_types.push(elem);
         } else {
-            let mut elem_ty: Option<String> = None;
+            let mut elem_ty: Option<Ty> = None;
             for arg in &rest_args {
-                let t = ground_type_name(checker, arg)?;
+                let t = ground_ty(checker, arg)?;
                 match &elem_ty {
                     None => elem_ty = Some(t.clone()),
                     Some(prev) if prev != &t => return None,
@@ -304,12 +387,19 @@ fn candidate_for_call(
     }
 
     let subst = subst.into_iter().collect::<Option<Vec<_>>>()?;
+    let subst_ids: Vec<TyId> = subst.into_iter().map(|ty| intern.intern(ty)).collect();
+    let arg_ids: Vec<TyId> = arg_types.into_iter().map(|ty| intern.intern(ty)).collect();
     Some(MonoSpecialization {
         key: MonoKey {
-            fn_name: fn_name.to_string(),
-            subst,
+            def_id: sig.def_id,
+            subst: subst_ids,
         },
-        arg_types,
+        fn_name: if sig.fn_name.is_empty() {
+            fn_name.to_string()
+        } else {
+            sig.fn_name.clone()
+        },
+        arg_types: arg_ids,
     })
 }
 
@@ -373,121 +463,62 @@ fn split_call_args_for_mono<'a>(
     }
 }
 
-pub fn ground_type_name(checker: &Checker, expr: &Output) -> Option<String> {
+/// Ground type from checker subst (literals only as a fallback). Not Display.
+pub fn ground_ty(checker: &Checker, expr: &Output) -> Option<Ty> {
     match expr.1.as_ref() {
-        Expression::Integer(_) => Some("int".to_string()),
-        Expression::Float(_) => Some("float".to_string()),
-        Expression::String(_) => Some("string".to_string()),
-        Expression::Bool(_) => Some("bool".to_string()),
-        Expression::Identifier(name) => checker.codegen_var_type(name).and_then(|ty| {
-            concrete_ty_name(&crate::typechecking::subst::apply_ty_prune(
-                checker.subst(),
-                ty,
-            ))
-        }),
+        Expression::NamedArg(_, inner)
+        | Expression::Group(inner)
+        | Expression::Expr(inner)
+        | Expression::Statement(inner) => return ground_ty(checker, inner),
+        _ => {}
+    }
+
+    if let Some(ty) = checker.lookup_for_codegen_span(expr.0.start, expr.0.end) {
+        if let Some(ty) = concrete_ty(&ty) {
+            return Some(ty);
+        }
+    }
+
+    match expr.1.as_ref() {
+        Expression::Integer(_) => Some(Ty::Con("int".into())),
+        Expression::Float(_) => Some(Ty::Con("float".into())),
+        Expression::String(_) => Some(Ty::Con("string".into())),
+        Expression::Bool(_) => Some(Ty::Con("bool".into())),
+        Expression::Identifier(name) => checker
+            .codegen_var_type(name)
+            .and_then(|ty| concrete_ty(&apply_ty_prune(checker.subst(), ty))),
         Expression::Tuple(items) => {
-            let mut parts = Vec::with_capacity(items.len());
+            let mut elems = Vec::with_capacity(items.len());
             for it in items {
-                parts.push(ground_type_name(checker, it)?);
+                elems.push(ground_ty(checker, it)?);
             }
-            // Homogeneous only — matches numeric-tower mono keys.
-            if parts.is_empty() || parts.iter().any(|p| p != &parts[0]) {
+            if elems.is_empty() {
                 return None;
             }
-            Some(format!("({})", parts.join(", ")))
+            Some(Ty::Tuple(elems))
         }
         Expression::Array(items) => {
             if items.is_empty() {
                 return None;
             }
-            let elem = ground_type_name(checker, &items[0])?;
+            let elem = ground_ty(checker, &items[0])?;
             if items
                 .iter()
-                .any(|it| ground_type_name(checker, it).as_ref() != Some(&elem))
+                .any(|it| ground_ty(checker, it).as_ref() != Some(&elem))
             {
                 return None;
             }
-            Some(format!("[{}; {}]", elem, items.len()))
+            Some(crate::typechecking::ty::array_fixed(elem, items.len()))
         }
-        Expression::NamedArg(_, inner)
-        | Expression::Group(inner)
-        | Expression::Expr(inner)
-        | Expression::Statement(inner) => ground_type_name(checker, inner),
         _ => None,
     }
 }
 
-fn concrete_ty_name(ty: &Ty) -> Option<String> {
+fn concrete_ty(ty: &Ty) -> Option<Ty> {
     if contains_var(ty) || matches!(ty, Ty::Fun(_, _)) {
         return None;
     }
-    Some(ty.to_string())
-}
-
-/// Parse a monomorphization key fragment produced by [`ground_type_name`] /
-/// [`concrete_ty_name`] back into a [`Ty`].
-pub fn parse_mono_ty_name(name: &str) -> Option<Ty> {
-    let name = name.trim();
-    match name {
-        "int" => return Some(Ty::Con("int".into())),
-        "float" => return Some(Ty::Con("float".into())),
-        "string" => return Some(Ty::Con("string".into())),
-        "bool" => return Some(Ty::Con("bool".into())),
-        "unit" | "()" => return Some(Ty::Con("unit".into())),
-        _ => {}
-    }
-    if let Some(inner) = name.strip_prefix('(').and_then(|s| s.strip_suffix(')')) {
-        let parts: Vec<&str> = if inner.trim().is_empty() {
-            Vec::new()
-        } else {
-            split_top_level_commas(inner)
-        };
-        if parts.is_empty() {
-            return None;
-        }
-        let mut elems = Vec::with_capacity(parts.len());
-        for p in parts {
-            elems.push(parse_mono_ty_name(p.trim())?);
-        }
-        return Some(Ty::Tuple(elems));
-    }
-    if let Some(inner) = name.strip_prefix('[').and_then(|s| s.strip_suffix(']')) {
-        if let Some((elem_s, n_s)) = inner.rsplit_once(';') {
-            let elem = parse_mono_ty_name(elem_s.trim())?;
-            let n: usize = n_s.trim().parse().ok()?;
-            return Some(crate::typechecking::ty::array_fixed(elem, n));
-        }
-        let elem = parse_mono_ty_name(inner.trim())?;
-        return Some(crate::typechecking::ty::array(elem));
-    }
-    // Nominal / other constructors — leave as Con.
-    if name
-        .chars()
-        .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-    {
-        return Some(Ty::Con(name.to_string()));
-    }
-    None
-}
-
-fn split_top_level_commas(s: &str) -> Vec<&str> {
-    let mut parts = Vec::new();
-    let mut start = 0;
-    let mut depth = 0i32;
-    for (i, ch) in s.char_indices() {
-        match ch {
-            '(' | '[' | '{' | '<' => depth += 1,
-            ')' | ']' | '}' | '>' => depth -= 1,
-            ',' if depth == 0 => {
-                parts.push(&s[start..i]);
-                start = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(&s[start..]);
-    parts
+    Some(ty.clone())
 }
 
 fn contains_var(ty: &Ty) -> bool {
@@ -515,34 +546,51 @@ fn contains_var(ty: &Ty) -> bool {
     }
 }
 
-fn apply_caps(candidates: Vec<MonoCandidate>) -> (Vec<MonoSpecialization>, Vec<MonoRetarget>) {
+fn apply_caps(
+    candidates: Vec<MonoCandidate>,
+) -> (
+    Vec<MonoSpecialization>,
+    Vec<MonoRetarget>,
+    Vec<MonoCapHit>,
+) {
     let mut seen = BTreeSet::new();
-    let mut per_fn: BTreeMap<String, usize> = BTreeMap::new();
+    let mut per_fn: BTreeMap<DefId, usize> = BTreeMap::new();
     let mut specializations = Vec::new();
     let mut retargets = Vec::new();
+    let mut cap_hits = Vec::new();
 
     for candidate in candidates {
-        if specializations.len() >= MAX_TOTAL_SPECIALIZATIONS {
+        let key = candidate.specialization.key.clone();
+        if seen.contains(&key) {
+            retargets.push(MonoRetarget {
+                call_span_start: candidate.span.start,
+                key,
+            });
             continue;
         }
 
-        let key = candidate.specialization.key.clone();
-        let count = per_fn.entry(key.fn_name.clone()).or_default();
-        if !seen.contains(&key) {
-            if *count >= MAX_SPECIALIZATIONS_PER_FN {
-                continue;
-            }
-            *count += 1;
-            seen.insert(key.clone());
-            specializations.push(candidate.specialization.clone());
+        let count = per_fn.entry(key.def_id).or_default();
+        let per_fn_hit = *count >= MAX_SPECIALIZATIONS_PER_FN;
+        let total_hit = specializations.len() >= MAX_TOTAL_SPECIALIZATIONS;
+        if per_fn_hit || total_hit {
+            cap_hits.push(MonoCapHit {
+                call_span: candidate.span,
+                fn_name: candidate.specialization.fn_name.clone(),
+                per_fn: per_fn_hit,
+            });
+            continue;
         }
+
+        *count += 1;
+        seen.insert(key.clone());
+        specializations.push(candidate.specialization.clone());
         retargets.push(MonoRetarget {
             call_span_start: candidate.span.start,
             key,
         });
     }
 
-    (specializations, retargets)
+    (specializations, retargets, cap_hits)
 }
 
 fn collect_escaped_generic_refs(
@@ -865,10 +913,22 @@ mod tests {
              fn main() { write(stdout(), to_bytes(format(\"%i\", add(1, 2)))); }",
         );
         assert_eq!(plan.specializations.len(), 1);
-        assert_eq!(plan.specializations[0].key.fn_name, "add");
-        assert_eq!(plan.specializations[0].key.subst, vec!["int"]);
-        assert_eq!(plan.specializations[0].arg_types, vec!["int", "int"]);
+        assert_eq!(plan.specializations[0].fn_name, "add");
+        assert_eq!(
+            plan.ty(plan.specializations[0].key.subst[0]),
+            Some(&Ty::Con("int".into()))
+        );
+        assert_eq!(plan.specializations[0].arg_types.len(), 2);
+        assert_eq!(
+            plan.ty(plan.specializations[0].arg_types[0]),
+            Some(&Ty::Con("int".into()))
+        );
+        assert_eq!(
+            plan.ty(plan.specializations[0].arg_types[1]),
+            Some(&Ty::Con("int".into()))
+        );
         assert_eq!(plan.retargets.len(), 1);
+        assert!(plan.cap_hits.is_empty());
     }
 
     #[test]
@@ -880,9 +940,16 @@ mod tests {
              fn main() { write(stdout(), to_bytes(format(\"%i\", twice_first(21)))); }",
         );
         assert_eq!(plan.specializations.len(), 1);
-        assert_eq!(plan.specializations[0].key.fn_name, "twice_first");
-        assert_eq!(plan.specializations[0].key.subst, vec!["int"]);
-        assert_eq!(plan.specializations[0].arg_types, vec!["int"]);
+        assert_eq!(plan.specializations[0].fn_name, "twice_first");
+        assert_eq!(
+            plan.ty(plan.specializations[0].key.subst[0]),
+            Some(&Ty::Con("int".into()))
+        );
+        assert_eq!(plan.specializations[0].arg_types.len(), 1);
+        assert_eq!(
+            plan.ty(plan.specializations[0].arg_types[0]),
+            Some(&Ty::Con("int".into()))
+        );
     }
 
     #[test]
@@ -892,8 +959,11 @@ mod tests {
              fn main() { write(stdout(), to_bytes(format(\"%i\", add(b: 2, a: 1)))); }",
         );
         assert_eq!(plan.specializations.len(), 1);
-        assert_eq!(plan.specializations[0].key.subst, vec!["int"]);
-        assert_eq!(plan.specializations[0].arg_types, vec!["int", "int"]);
+        assert_eq!(
+            plan.ty(plan.specializations[0].key.subst[0]),
+            Some(&Ty::Con("int".into()))
+        );
+        assert_eq!(plan.specializations[0].arg_types.len(), 2);
     }
 
     #[test]
@@ -963,16 +1033,22 @@ mod tests {
              fn main() { less(1, 2); }",
         );
         assert_eq!(ord.specializations.len(), 1);
-        assert_eq!(ord.specializations[0].key.fn_name, "less");
-        assert_eq!(ord.specializations[0].key.subst, vec!["int"]);
+        assert_eq!(ord.specializations[0].fn_name, "less");
+        assert_eq!(
+            ord.ty(ord.specializations[0].key.subst[0]),
+            Some(&Ty::Con("int".into()))
+        );
 
         let eq = plan(
             "fn same<T: Eq>(T a, T b) -> bool { return a == b; } \
              fn main() { same(1, 1); }",
         );
         assert_eq!(eq.specializations.len(), 1);
-        assert_eq!(eq.specializations[0].key.fn_name, "same");
-        assert_eq!(eq.specializations[0].key.subst, vec!["int"]);
+        assert_eq!(eq.specializations[0].fn_name, "same");
+        assert_eq!(
+            eq.ty(eq.specializations[0].key.subst[0]),
+            Some(&Ty::Con("int".into()))
+        );
     }
 
     #[test]
@@ -992,43 +1068,43 @@ mod tests {
         assert!(plan.specializations.is_empty());
     }
 
+    fn dummy_candidate(i: usize, def: u32, fn_name: &str) -> MonoCandidate {
+        MonoCandidate {
+            span: SimpleSpan::from(i..i + 1),
+            specialization: MonoSpecialization {
+                key: MonoKey {
+                    def_id: DefId::from_u32(def),
+                    subst: vec![TyId(i as u32)],
+                },
+                fn_name: fn_name.to_string(),
+                arg_types: vec![TyId(i as u32)],
+            },
+        }
+    }
+
     #[test]
     fn per_function_cap_limits_specializations() {
         let candidates = (0..(MAX_SPECIALIZATIONS_PER_FN + 2))
-            .map(|i| MonoCandidate {
-                span: SimpleSpan::from(i..i + 1),
-                specialization: MonoSpecialization {
-                    key: MonoKey {
-                        fn_name: "f".to_string(),
-                        subst: vec![format!("T{i}")],
-                    },
-                    arg_types: vec![format!("T{i}")],
-                },
-            })
+            .map(|i| dummy_candidate(i, 1, "f"))
             .collect();
 
-        let (specializations, retargets) = apply_caps(candidates);
+        let (specializations, retargets, cap_hits) = apply_caps(candidates);
         assert_eq!(specializations.len(), MAX_SPECIALIZATIONS_PER_FN);
         assert_eq!(retargets.len(), MAX_SPECIALIZATIONS_PER_FN);
+        assert_eq!(cap_hits.len(), 2);
+        assert!(cap_hits.iter().all(|h| h.per_fn));
     }
 
     #[test]
     fn total_cap_limits_specializations() {
         let candidates = (0..(MAX_TOTAL_SPECIALIZATIONS + 2))
-            .map(|i| MonoCandidate {
-                span: SimpleSpan::from(i..i + 1),
-                specialization: MonoSpecialization {
-                    key: MonoKey {
-                        fn_name: format!("f{i}"),
-                        subst: vec!["int".to_string()],
-                    },
-                    arg_types: vec!["int".to_string()],
-                },
-            })
+            .map(|i| dummy_candidate(i, i as u32 + 1, &format!("f{i}")))
             .collect();
 
-        let (specializations, retargets) = apply_caps(candidates);
+        let (specializations, retargets, cap_hits) = apply_caps(candidates);
         assert_eq!(specializations.len(), MAX_TOTAL_SPECIALIZATIONS);
         assert_eq!(retargets.len(), MAX_TOTAL_SPECIALIZATIONS);
+        assert_eq!(cap_hits.len(), 2);
+        assert!(cap_hits.iter().all(|h| !h.per_fn));
     }
 }

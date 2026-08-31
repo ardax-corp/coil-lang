@@ -25,6 +25,10 @@ impl DefId {
     pub fn raw(self) -> u32 {
         self.0
     }
+
+    pub(crate) fn from_u32(raw: u32) -> Self {
+        Self(raw)
+    }
 }
 
 /// Kind of interned definition (metadata; not part of the intern key).
