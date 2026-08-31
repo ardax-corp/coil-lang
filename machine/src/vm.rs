@@ -803,10 +803,7 @@ impl<const S: usize> Machine<S> {
 
     #[allow(dead_code)]
     fn value_to_string(&self, v: &Value) -> String {
-        self.heap
-            .cstr_from_addr(v.raw() as u64)
-            .map(|s| unsafe { std::ffi::CStr::from_ptr(s).to_string_lossy().into_owned() })
-            .unwrap_or_default()
+        Self::object_string_value(&self.heap, v)
     }
 
     fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {

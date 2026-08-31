@@ -26,6 +26,8 @@ pub struct Heap {
     gc_root_objects: Vec<Object>,
     gc_roots: Vec<u64>,
     gc_dangling_strings: Vec<RefString>,
+    /// CString arena for the current FFI invoke (reset after each call).
+    ffi_strings: Vec<std::ffi::CString>,
 }
 
 impl Default for Heap {
@@ -43,21 +45,44 @@ impl Default for Heap {
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
             gc_dangling_strings: Vec::new(),
+            ffi_strings: Vec::new(),
         }
     }
 }
 
 impl Heap {
-    /// Look up a heap string by address and return a NUL-terminated C string
-    /// for FFI. The returned pointer is leaked for the duration of the call.
-    #[must_use]
-    pub fn cstr_from_addr(&self, addr: u64) -> Option<*const std::os::raw::c_char> {
-        if let Some(crate::memory::Object::String(gc)) = self.find_object_by_addr(addr) {
-            let s: std::ffi::CString = std::ffi::CString::new(gc.as_ref().data.as_bytes()).ok()?;
-            let boxed: &'static std::ffi::CString = Box::leak(Box::new(s));
-            return Some(boxed.as_ptr());
-        }
-        None
+    /// Drop interned C strings from the last FFI invoke.
+    pub fn reset_ffi_strings(&mut self) {
+        self.ffi_strings.clear();
+    }
+
+    /// Number of live interned CString boxes (tests; leak detector).
+    pub fn ffi_string_live_count(&self) -> usize {
+        self.ffi_strings.len()
+    }
+
+    /// Intern bytes as a NUL-terminated C string for this invoke.
+    /// Errors on an interior NUL.
+    pub fn intern_ffi_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) -> Result<*const std::os::raw::c_char, ()> {
+        let s = std::ffi::CString::new(bytes).map_err(|_| ())?;
+        self.ffi_strings.push(s);
+        Ok(self.ffi_strings.last().unwrap().as_ptr())
+    }
+
+    /// Look up a heap string and intern it in the FFI arena (no `Box::leak`).
+    /// `Ok(None)` if `addr` is not a string. `Err(())` on interior NUL.
+    pub fn cstr_from_addr(
+        &mut self,
+        addr: u64,
+    ) -> Result<Option<*const std::os::raw::c_char>, ()> {
+        let bytes = match self.find_object_by_addr(addr) {
+            Some(crate::memory::Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
+            _ => return Ok(None),
+        };
+        Ok(Some(self.intern_ffi_bytes(&bytes)?))
     }
 
     /// Allocates an object and returns its handle. The object is pushed to the
@@ -1399,6 +1424,28 @@ impl FfiType {
 pub struct CStructLayout {
     pub name: String,
     pub fields: Vec<(String, FfiType)>,
+    pub offsets: Vec<usize>,
+    pub size: usize,
+    pub align: usize,
+}
+
+impl CStructLayout {
+    pub fn from_archive(layout: &common::CStructLayout) -> Self {
+        Self {
+            name: layout.name.clone(),
+            fields: layout
+                .fields
+                .iter()
+                .map(|(n, enc)| {
+                    let (tag, aux) = common::decode_tag_operand(*enc);
+                    (n.clone(), FfiType::from_tag(tag, aux))
+                })
+                .collect(),
+            offsets: layout.offsets.iter().map(|&o| o as usize).collect(),
+            size: layout.size as usize,
+            align: layout.align as usize,
+        }
+    }
 }
 
 impl GcSized for ObjLibrary {
@@ -2119,17 +2166,23 @@ mod tests {
 
         let ptr = heap
             .cstr_from_addr(s_obj.addr())
+            .expect("string addr must intern")
             .expect("string addr must yield a cstr");
         let got = unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .expect("utf8");
         assert_eq!(got, "coil");
+        assert_eq!(heap.ffi_string_live_count(), 1);
+        heap.reset_ffi_strings();
+        assert_eq!(heap.ffi_string_live_count(), 0);
 
         assert!(
-            heap.cstr_from_addr(arr_obj.addr()).is_none(),
+            heap.cstr_from_addr(arr_obj.addr())
+                .expect("type miss is Ok")
+                .is_none(),
             "non-string live addr must miss"
         );
-        assert!(heap.cstr_from_addr(0).is_none());
+        assert!(heap.cstr_from_addr(0).expect("null is Ok").is_none());
     }
 
     #[test]
@@ -2137,9 +2190,10 @@ mod tests {
         let mut heap = Heap::default();
         let (obj, _) = heap.alloc(ObjString::from("a\0b"), Object::String);
         assert!(
-            heap.cstr_from_addr(obj.addr()).is_none(),
+            heap.cstr_from_addr(obj.addr()).is_err(),
             "embedded NUL cannot become a CString"
         );
+        assert_eq!(heap.ffi_string_live_count(), 0);
     }
 
     #[test]

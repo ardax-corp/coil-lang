@@ -70,6 +70,8 @@ pub enum FfiError {
     SymbolDenied {
         name: String,
     },
+    /// FFI string argument contained an interior NUL.
+    InteriorNul,
 }
 
 impl std::fmt::Display for FfiError {
@@ -104,6 +106,7 @@ impl std::fmt::Display for FfiError {
                     "FFI symbol `{name}` denied: process exec requires [env] allow_ffi_exec"
                 )
             }
+            Self::InteriorNul => write!(f, "FFI string contains an interior NUL"),
         }
     }
 }

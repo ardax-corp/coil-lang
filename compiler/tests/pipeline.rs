@@ -9138,6 +9138,7 @@ fn main() {
         source_files: pipeline.program_debug().source_files,
         debug_locs: pipeline.program_debug().debug_locs,
         fn_symbols: Vec::new(),
+        struct_layouts: Vec::new(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

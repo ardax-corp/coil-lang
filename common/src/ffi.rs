@@ -75,6 +75,15 @@ pub fn encode_tag_operand(tag: u32, aux: u32) -> u32 {
     }
 }
 
+/// Inverse of [`encode_tag_operand`].
+pub fn decode_tag_operand(enc: u32) -> (u32, u32) {
+    if enc <= tag::STRUCT {
+        (enc, 0)
+    } else {
+        (enc & 0xFFFF, enc >> 16)
+    }
+}
+
 /// Tag for a built-in `FFIType::Variant` name.
 pub fn tag_from_variant_name(variant_name: &str) -> Option<u32> {
     BUILTIN_FFI_TYPE_VARIANTS
@@ -98,5 +107,17 @@ mod tests {
     fn type_name_aliases_resolve() {
         assert_eq!(tag_from_type_name("int32"), Some(tag::INT32));
         assert_eq!(tag_from_type_name("pointer"), Some(tag::PTR));
+    }
+
+    #[test]
+    fn encode_decode_tag_operand_round_trip() {
+        assert_eq!(
+            decode_tag_operand(encode_tag_operand(tag::INT, 0)),
+            (tag::INT, 0)
+        );
+        assert_eq!(
+            decode_tag_operand(encode_tag_operand(tag::STRUCT, 3)),
+            (tag::STRUCT, 3)
+        );
     }
 }

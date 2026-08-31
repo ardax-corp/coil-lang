@@ -358,7 +358,7 @@ impl Pipeline {
         vm: &mut machine::Machine<N>,
         entry_path: Option<&std::path::Path>,
     ) {
-        use machine::{CStructLayout, FfiType};
+        use machine::CStructLayout;
         let base_dir = entry_path
             .and_then(|p| p.parent())
             .map(std::path::PathBuf::from);
@@ -371,24 +371,29 @@ impl Pipeline {
         vm.set_ffi_paths(base_dir, search);
         vm.set_dload_gate(self.build_dload_gate());
         Self::apply_env_grants(&self.manifest);
-        for def in self.compiler_lazy().c_structs() {
-            let fields = def
-                .fields
-                .iter()
-                .map(|(name, enc)| {
-                    let (tag, aux) = if *enc <= common::tag::STRUCT {
-                        (*enc, 0)
-                    } else {
-                        (*enc & 0xFFFF, *enc >> 16)
-                    };
-                    (name.clone(), FfiType::from_tag(tag, aux))
-                })
-                .collect();
-            vm.register_struct_layout(CStructLayout {
-                name: def.name.clone(),
-                fields,
-            });
+        for layout in self.archived_struct_layouts() {
+            vm.register_struct_layout(CStructLayout::from_archive(&layout));
         }
+    }
+
+    /// Compute C align/pad once for every `extern struct` (declaration order).
+    pub fn archived_struct_layouts(&self) -> Vec<common::CStructLayout> {
+        let defs = self.compiler_lazy().c_structs().iter().map(|d| {
+            (d.name.clone(), d.fields.clone())
+        });
+        common::compute_c_struct_layouts(defs).unwrap_or_default()
+    }
+
+    pub fn ffi_search_path_bufs(&self) -> Vec<std::path::PathBuf> {
+        self.manifest
+            .ffi_search_paths
+            .iter()
+            .map(|p| self.project_root.join(p))
+            .collect()
+    }
+
+    pub fn apply_runtime_grants(&self) {
+        Self::apply_env_grants(&self.manifest);
     }
 
     /// Walk up from `start` looking for a directory that contains
@@ -1158,6 +1163,7 @@ impl Pipeline {
             source_files: self.compiler_lazy().source_files_list(),
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
+            struct_layouts: self.archived_struct_layouts(),
             bytecode: self.bytecode,
         };
 

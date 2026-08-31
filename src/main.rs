@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::exit;
 
-use coil_cli::{LoadErr, dispatch_helper, try_load_archive};
+use coil_cli::{LoadErr, dispatch_helper, execute_archived_program, try_load_archive};
 use common::{ARCHIVE_VERSION, ArchivedProgram, Byte, ProgramDebug, format_archive_version};
 use compiler::{OptLevel, Pipeline};
 use machine::Machine;
@@ -148,6 +148,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
         source_files: debug.source_files,
         debug_locs: debug.debug_locs,
         fn_symbols: debug.fn_symbols,
+        struct_layouts: pipeline.archived_struct_layouts(),
     };
 
     let bytes = match rkyv::to_bytes::<Error>(&program) {
@@ -408,7 +409,7 @@ fn cmd_compile(
 }
 
 fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
-    let (bytecode, constants, strings, static_slots, debug) = match try_load_archive(archive) {
+    let loaded = match try_load_archive(archive) {
         Ok(ok) => ok,
         Err(LoadErr::Missing) => fail_and_exit(
             pipeline,
@@ -431,7 +432,7 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
         ),
     };
 
-    maybe_warn_stale_archive(pipeline, archive, &debug);
+    maybe_warn_stale_archive(pipeline, archive, &loaded.debug);
 
     if let Err(e) = pipeline.finish_reporting() {
         pipeline.emit_spanless_warning(
@@ -443,15 +444,12 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
 
     // Weak base_dir: archive parent, for relative FFI dload paths.
     let entry = Path::new(archive);
-    if execute_archive(
-        pipeline,
-        &bytecode,
-        &constants,
-        &strings,
-        static_slots,
-        debug,
+    pipeline.apply_runtime_grants();
+    if execute_archived_program(
+        &loaded,
         Some(entry),
-        machine::DEFAULT_OPERAND_STACK_SLOTS as u32,
+        pipeline.ffi_search_path_bufs(),
+        Some(pipeline.build_dload_gate()),
     ) {
         exit(1);
     }
@@ -926,6 +924,7 @@ mod tests {
             source_files: vec![],
             debug_locs: vec![common::DebugLoc::unknown()],
             fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
         })
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
@@ -946,14 +945,15 @@ mod tests {
             source_files: vec![],
             debug_locs: vec![common::DebugLoc::unknown()],
             fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
         std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();
-        let (bc, constants, strings, _, _) =
-            try_load_archive(ok_path.to_str().unwrap()).expect("ok archive");
-        assert_eq!(constants, vec![42]);
-        assert!(strings.is_empty());
-        assert_eq!(bc.len(), 1);
+        let loaded = try_load_archive(ok_path.to_str().unwrap()).expect("ok archive");
+        assert_eq!(loaded.constants, vec![42]);
+        assert!(loaded.strings.is_empty());
+        assert_eq!(loaded.bytecode.len(), 1);
+        assert!(loaded.struct_layouts.is_empty());
         let _ = std::fs::remove_file(&ok_path);
     }
 

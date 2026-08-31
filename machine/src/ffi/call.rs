@@ -1,6 +1,6 @@
 //! libffi call preparation and invocation.
 
-use std::ffi::{c_char, c_void, CStr, CString};
+use std::ffi::{c_char, c_void, CStr};
 
 use common::Value;
 use libffi::middle::{Arg, Cif, CodePtr, Type};
@@ -155,12 +155,32 @@ pub fn resolve_symbol(library: &libloading::Library, symbol: &str) -> Result<Cod
     Ok(CodePtr::from_ptr(ptr))
 }
 
-fn read_c_string_ptr(heap: &Heap, value: &Value) -> *const c_char {
+fn intern_string_arg(heap: &mut Heap, value: &Value) -> Result<*const c_char, FfiError> {
     let raw = value.raw() as u64;
     if raw == 0 {
-        return std::ptr::null();
+        return heap
+            .intern_ffi_bytes(b"")
+            .map_err(|_| FfiError::InteriorNul);
     }
-    heap.cstr_from_addr(raw).unwrap_or(std::ptr::null())
+    match heap.cstr_from_addr(raw) {
+        Ok(Some(p)) => Ok(p),
+        Ok(None) => heap
+            .intern_ffi_bytes(b"")
+            .map_err(|_| FfiError::InteriorNul),
+        Err(()) => Err(FfiError::InteriorNul),
+    }
+}
+
+struct FfiStringReset {
+    heap: *mut Heap,
+}
+
+impl Drop for FfiStringReset {
+    fn drop(&mut self) {
+        unsafe {
+            (*self.heap).reset_ffi_strings();
+        }
+    }
 }
 
 fn member_to_value(member: &Member) -> Value {
@@ -188,37 +208,56 @@ fn instance_field(heap: &mut Heap, addr: u64, fname: &str) -> Result<Value, FfiE
     }
 }
 
-fn append_field_bytes(
-    out: &mut Vec<u8>,
+fn put_bytes(buf: &mut [u8], offset: usize, src: &[u8]) -> Result<(), FfiError> {
+    let end = offset
+        .checked_add(src.len())
+        .ok_or_else(|| FfiError::Unsupported("struct field offset overflow".into()))?;
+    if end > buf.len() {
+        return Err(FfiError::Unsupported("struct pack buffer too small".into()));
+    }
+    buf[offset..end].copy_from_slice(src);
+    Ok(())
+}
+
+fn write_field_at(
+    buf: &mut [u8],
+    offset: usize,
     val: &Value,
     fty: FfiType,
     heap: &mut Heap,
     layouts: &[CStructLayout],
 ) -> Result<(), FfiError> {
     match fty {
-        FfiType::Int => out.extend_from_slice(&val.as_int().to_ne_bytes()),
-        FfiType::Int8 => out.push(val.as_int() as i8 as u8),
-        FfiType::Int16 => out.extend_from_slice(&(val.as_int() as i16).to_ne_bytes()),
-        FfiType::Int32 => out.extend_from_slice(&(val.as_int() as i32).to_ne_bytes()),
-        FfiType::UInt8 => out.push(val.as_int() as u8),
-        FfiType::UInt16 => out.extend_from_slice(&(val.as_int() as u16).to_ne_bytes()),
-        FfiType::UInt32 => out.extend_from_slice(&(val.as_int() as u32).to_ne_bytes()),
-        FfiType::UInt64 => out.extend_from_slice(&(val.as_int() as u64).to_ne_bytes()),
-        FfiType::Float => out.extend_from_slice(&val.as_float().to_ne_bytes()),
-        FfiType::Bool => out.push(if val.as_bool() { 1 } else { 0 }),
+        FfiType::Int => put_bytes(buf, offset, &val.as_int().to_ne_bytes()),
+        FfiType::Int8 => put_bytes(buf, offset, &[val.as_int() as i8 as u8]),
+        FfiType::Int16 => put_bytes(buf, offset, &(val.as_int() as i16).to_ne_bytes()),
+        FfiType::Int32 => put_bytes(buf, offset, &(val.as_int() as i32).to_ne_bytes()),
+        FfiType::UInt8 => put_bytes(buf, offset, &[val.as_int() as u8]),
+        FfiType::UInt16 => put_bytes(buf, offset, &(val.as_int() as u16).to_ne_bytes()),
+        FfiType::UInt32 => put_bytes(buf, offset, &(val.as_int() as u32).to_ne_bytes()),
+        FfiType::UInt64 => put_bytes(buf, offset, &(val.as_int() as u64).to_ne_bytes()),
+        FfiType::Float => put_bytes(buf, offset, &val.as_float().to_ne_bytes()),
+        FfiType::Bool => put_bytes(buf, offset, &[if val.as_bool() { 1 } else { 0 }]),
+        FfiType::Ptr | FfiType::Callback(_) => {
+            put_bytes(buf, offset, &(val.raw() as u64).to_ne_bytes())
+        }
+        FfiType::String => {
+            let p = intern_string_arg(heap, val)? as usize as u64;
+            put_bytes(buf, offset, &p.to_ne_bytes())
+        }
         FfiType::Struct(id) => {
             let sub = layouts
                 .get(id as usize)
-                .ok_or_else(|| FfiError::Unsupported(format!("unknown nested struct id {id}")))?;
-            pack_struct(heap, val, sub, layouts, out)?;
+                .ok_or_else(|| FfiError::Unsupported(format!("unknown nested struct id {id}")))?
+                .clone();
+            let mut nested = Vec::new();
+            pack_struct(heap, val, &sub, layouts, &mut nested)?;
+            put_bytes(buf, offset, &nested)
         }
-        _ => {
-            return Err(FfiError::Unsupported(format!(
-                "field type `{fty:?}` not supported in struct pack"
-            )));
-        }
+        other => Err(FfiError::Unsupported(format!(
+            "field type `{other:?}` not supported in struct pack"
+        ))),
     }
-    Ok(())
 }
 
 fn pack_struct(
@@ -229,10 +268,15 @@ fn pack_struct(
     out: &mut Vec<u8>,
 ) -> Result<(), FfiError> {
     out.clear();
+    out.resize(layout.size, 0);
     let addr = value.raw() as u64;
-    for (fname, fty) in &layout.fields {
+    for (i, (fname, fty)) in layout.fields.iter().enumerate() {
+        let off = *layout
+            .offsets
+            .get(i)
+            .ok_or_else(|| FfiError::Unsupported("struct layout missing field offset".into()))?;
         let val = instance_field(heap, addr, fname)?;
-        append_field_bytes(out, &val, *fty, heap, layouts)?;
+        write_field_at(out, off, &val, *fty, heap, layouts)?;
     }
     Ok(())
 }
@@ -257,12 +301,8 @@ fn field_byte_size(fty: FfiType, layouts: &[CStructLayout]) -> Result<usize, Ffi
     })
 }
 
-fn struct_byte_size(layout: &CStructLayout, layouts: &[CStructLayout]) -> Result<usize, FfiError> {
-    let mut total = 0usize;
-    for (_, fty) in &layout.fields {
-        total += field_byte_size(*fty, layouts)?;
-    }
-    Ok(total)
+fn struct_byte_size(layout: &CStructLayout, _layouts: &[CStructLayout]) -> Result<usize, FfiError> {
+    Ok(layout.size)
 }
 
 fn read_field_bytes(
@@ -313,10 +353,12 @@ fn unpack_struct(
 ) -> Result<Value, FfiError> {
     use crate::memory::ObjInstance;
     let (obj, mut gc) = heap.alloc(ObjInstance::default(), Object::Instance);
-    let mut offset = 0usize;
-    for (fname, fty) in &layout.fields {
-        let (val, nbytes) = read_field_bytes(buf, offset, *fty, heap, layouts)?;
-        offset += nbytes;
+    for (i, (fname, fty)) in layout.fields.iter().enumerate() {
+        let off = *layout
+            .offsets
+            .get(i)
+            .ok_or_else(|| FfiError::Unsupported("struct layout missing field offset".into()))?;
+        let (val, _nbytes) = read_field_bytes(buf, off, *fty, heap, layouts)?;
         let key = heap.intern(fname.clone());
         let member = match heap.find_object_by_addr(val.raw() as u64) {
             Some(o) => Member::Object(o),
@@ -368,6 +410,8 @@ pub fn invoke_via_libffi(
     ctx: &mut InvokeContext,
     _callback_closures: &mut Vec<*mut c_void>,
 ) -> Result<Option<Value>, FfiError> {
+    ctx.heap().reset_ffi_strings();
+    let _reset = FfiStringReset { heap: ctx.heap };
     let nfixed = sig.arity();
     let effective_types: Vec<FfiType> = if sig.variadic {
         if args.len() < nfixed {
@@ -429,6 +473,7 @@ pub fn invoke_via_libffi(
         U64(usize),
         F64(usize),
         Ptr(usize),
+        Struct(usize),
     }
 
     let mut i64_storage: Vec<i64> = Vec::new();
@@ -440,7 +485,6 @@ pub fn invoke_via_libffi(
     let mut u32_storage: Vec<u32> = Vec::new();
     let mut u64_storage: Vec<u64> = Vec::new();
     let mut f64_storage: Vec<f64> = Vec::new();
-    let mut str_storage: Vec<CString> = Vec::new();
     let mut ptr_storage: Vec<*mut c_void> = Vec::new();
     let mut array_buffers: Vec<Vec<i64>> = Vec::new();
     let mut array_copy_back: Vec<(u64, usize)> = Vec::new();
@@ -507,16 +551,9 @@ pub fn invoke_via_libffi(
                 u8_storage.push(if value.as_bool() { 1 } else { 0 });
             }
             FfiType::String => {
-                let heap = ctx.heap();
-                let ptr = read_c_string_ptr(heap, value);
-                if ptr.is_null() {
-                    str_storage.push(CString::new("").unwrap());
-                } else {
-                    let s = unsafe { CStr::from_ptr(ptr) };
-                    str_storage.push(CString::new(s.to_bytes()).unwrap_or_default());
-                }
+                let ptr = intern_string_arg(ctx.heap(), value)?;
                 slots.push(ArgSlot::Ptr(ptr_storage.len()));
-                ptr_storage.push(str_storage.last().unwrap().as_ptr() as *mut c_void);
+                ptr_storage.push(ptr as *mut c_void);
             }
             FfiType::Ptr => {
                 let (ptr, heap_addr) =
@@ -540,8 +577,7 @@ pub fn invoke_via_libffi(
                 let mut buf = Vec::new();
                 pack_struct(ctx.heap(), value, &layout, &layouts, &mut buf)?;
                 struct_bufs.push(buf);
-                slots.push(ArgSlot::Ptr(ptr_storage.len()));
-                ptr_storage.push(struct_bufs.last().unwrap().as_ptr() as *mut c_void);
+                slots.push(ArgSlot::Struct(struct_bufs.len() - 1));
             }
             FfiType::Void => return Err(FfiError::VoidArgument { index: i }),
         }
@@ -560,6 +596,10 @@ pub fn invoke_via_libffi(
             ArgSlot::U64(i) => Arg::new(&u64_storage[i]),
             ArgSlot::F64(i) => Arg::new(&f64_storage[i]),
             ArgSlot::Ptr(i) => Arg::new(&ptr_storage[i]),
+            ArgSlot::Struct(i) => {
+                // CIF type is the struct; libffi wants a pointer to the bytes.
+                Arg::new(unsafe { &*struct_bufs[i].as_ptr() })
+            }
         })
         .collect();
 
@@ -626,7 +666,7 @@ pub fn invoke_via_libffi(
                 .clone();
             let nbytes = struct_byte_size(&layout, &layouts)?;
             // libffi may write at least a full register; pad the buffer.
-            let buf_len = nbytes.max(std::mem::size_of::<usize>());
+            let buf_len = nbytes.max(16);
             let mut ret_buf = vec![0u8; buf_len];
             unsafe {
                 libffi::raw::ffi_call(
@@ -1039,5 +1079,157 @@ mod tests {
             result.is_err(),
             "FFI Int must not coerce a Stream (no silent fd())"
         );
+    }
+
+    fn layout_from_fields(name: &str, fields: Vec<(String, FfiType)>) -> CStructLayout {
+        let encoded: Vec<(String, u32)> = fields
+            .iter()
+            .map(|(n, ty)| (n.clone(), common::encode_tag_operand(ty.tag(), ty.aux())))
+            .collect();
+        let archived = common::compute_c_struct_layout(name.into(), encoded, &[]).unwrap();
+        CStructLayout::from_archive(&archived)
+    }
+
+    fn instance_int(heap: &mut Heap, addr: u64, name: &str) -> i64 {
+        instance_field(heap, addr, name).unwrap().as_int()
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Padded {
+        a: u8,
+        b: i32,
+        c: u8,
+    }
+
+    extern "C" fn check_padded(p: Padded) -> i64 {
+        if p.a == 1 && p.b == 0x11223344 && p.c == 7 {
+            1
+        } else {
+            0
+        }
+    }
+
+    #[test]
+    fn padded_struct_round_trip_matches_repr_c() {
+        assert_eq!(std::mem::size_of::<Padded>(), 12);
+        let layout = layout_from_fields(
+            "Padded",
+            vec![
+                ("a".into(), FfiType::UInt8),
+                ("b".into(), FfiType::Int32),
+                ("c".into(), FfiType::UInt8),
+            ],
+        );
+        assert_eq!(layout.offsets, vec![0, 4, 8]);
+        assert_eq!(layout.size, 12);
+        assert_eq!(layout.align, 4);
+
+        let mut heap = Heap::default();
+        let ka = heap.intern("a".into());
+        let kb = heap.intern("b".into());
+        let kc = heap.intern("c".into());
+        let (obj, mut gc) = heap.alloc(crate::memory::ObjInstance::default(), Object::Instance);
+        {
+            let inst = gc.as_mut();
+            inst.set(ka, Member::Value(Value::from(1i64)));
+            inst.set(kb, Member::Value(Value::from(0x11223344i64)));
+            inst.set(kc, Member::Value(Value::from(7i64)));
+        }
+        let value = Value::from(obj.addr());
+        let mut packed = Vec::new();
+        pack_struct(
+            &mut heap,
+            &value,
+            &layout,
+            std::slice::from_ref(&layout),
+            &mut packed,
+        )
+        .unwrap();
+        assert_eq!(packed.len(), 12);
+        // Field bytes only: #[repr(C)] padding is uninitialized on a
+        // Rust struct literal, so we do not memcmp the whole object.
+        assert_eq!(packed[0], 1);
+        assert_eq!(&packed[4..8], &0x11223344i32.to_ne_bytes());
+        assert_eq!(packed[8], 7);
+
+        let unpacked =
+            unpack_struct(&mut heap, &layout, std::slice::from_ref(&layout), &packed).unwrap();
+        let uaddr = unpacked.raw() as u64;
+        assert_eq!(instance_int(&mut heap, uaddr, "a"), 1);
+        assert_eq!(instance_int(&mut heap, uaddr, "b"), 0x11223344);
+        assert_eq!(instance_int(&mut heap, uaddr, "c"), 7);
+
+        let layouts = vec![layout];
+        let sig = FfiSignature::from_parts("check_padded", vec![FfiType::Struct(0)], FfiType::Int)
+            .unwrap();
+        let mut prepared = prepare_cif(&sig, &layouts).unwrap();
+        prepared.addr = CodePtr::from_ptr(check_padded as *mut c_void);
+        let args = [value];
+        let mut ctx = InvokeContext::new(&mut heap, &layouts);
+        let mut closures = Vec::new();
+        let ret = invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closures)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ret.as_int(), 1, "libffi must pass the padded C layout");
+    }
+
+    #[test]
+    fn invoke_string_interior_nul_is_error() {
+        extern "C" fn sink(_s: *const c_char) {}
+        let sig = FfiSignature::from_parts("sink", vec![FfiType::String], FfiType::Void).unwrap();
+        let mut prepared = prepare_cif(&sig, &[]).unwrap();
+        prepared.addr = CodePtr::from_ptr(sink as *mut c_void);
+        let mut heap = Heap::default();
+        let (obj, _) = heap.alloc(ObjString::from("a\0b"), Object::String);
+        let args = [Value::from(obj.addr())];
+        let mut ctx = InvokeContext::new(&mut heap, &[]);
+        let mut closures = Vec::new();
+        let err =
+            invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closures).unwrap_err();
+        assert!(matches!(err, FfiError::InteriorNul));
+        assert_eq!(heap.ffi_string_live_count(), 0);
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    #[test]
+    fn tight_ffi_string_loop_resets_cstring_arena() {
+        let lib = match open_libc_ungated() {
+            Some(l) => l,
+            None => {
+                if std::env::var_os("CI").is_some() {
+                    panic!("FFI soft-skip forbidden in CI: libc not reachable via dlopen");
+                }
+                eprintln!("skipping: libc not reachable via dlopen");
+                return;
+            }
+        };
+        let sig = FfiSignature::from_parts("strlen", vec![FfiType::String], FfiType::Int).unwrap();
+        let prepared = match prepare_cif_for_symbol(&sig, &lib, "strlen", &[]) {
+            Ok(p) => p,
+            Err(e) => {
+                if std::env::var_os("CI").is_some() {
+                    panic!("FFI soft-skip forbidden in CI: {e}");
+                }
+                eprintln!("skipping: {e}");
+                return;
+            }
+        };
+        let mut heap = Heap::default();
+        let (obj, _gc) = heap.alloc(ObjString::from("hello"), Object::String);
+        let args = [Value::from(obj.addr())];
+        for _ in 0..10_000 {
+            let mut ctx = InvokeContext::new(&mut heap, &[]);
+            let mut closures = Vec::new();
+            let ret = invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closures)
+                .unwrap()
+                .unwrap();
+            assert_eq!(ret.as_int(), 5);
+            assert_eq!(
+                heap.ffi_string_live_count(),
+                0,
+                "CString arena must reset after each invoke"
+            );
+        }
     }
 }

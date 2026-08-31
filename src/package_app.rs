@@ -7,9 +7,9 @@ use std::process::exit;
 
 use coil_cli::resolve_default_runner;
 use common::{
-    ARCHIVE_VERSION, ArchivedArchivedProgram, ArchivedProgram, Byte, NativeLock, NativeLockEntry,
-    PACKAGE_FLAG_USES_FFI, append_package_payload_with_natives, bytecode_uses_ffi,
-    ffi_library_names_from_bytecode, is_packaged_executable, is_system_ffi_stem,
+    append_package_payload_with_natives, bytecode_uses_ffi, ffi_library_names_from_bytecode,
+    is_packaged_executable, is_system_ffi_stem, ArchivedArchivedProgram, ArchivedProgram, Byte,
+    NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
 use compiler::Pipeline;
 use machine::platform_shared_lib_filename;
@@ -40,6 +40,7 @@ fn compile_program_archive_bytes(
         source_files,
         debug_locs,
         fn_symbols: Vec::new(),
+        struct_layouts: pipeline.archived_struct_layouts(),
     };
     rkyv::to_bytes::<Error>(&program)
         .map(|b| b.as_slice().to_vec())
@@ -67,7 +68,8 @@ fn make_executable(path: &Path) {
 fn make_executable(_path: &Path) {}
 
 fn sha256_hex_file(path: &Path) -> Result<(String, u64), String> {
-    let mut f = fs::File::open(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
+    let mut f =
+        fs::File::open(path).map_err(|e| format!("cannot read `{}`: {e}", path.display()))?;
     let mut hasher = Sha256::new();
     let mut buf = [0u8; 64 * 1024];
     let mut size = 0u64;
@@ -106,15 +108,12 @@ pub fn build_native_lock(
         if is_system_ffi_stem(stem) {
             continue;
         }
-        let decl = natives
-            .iter()
-            .find(|n| n.name == *stem)
-            .ok_or_else(|| {
-                format!(
-                    "FFI library `{stem}` is loaded but not declared in `[[ffi.native]]`; \
+        let decl = natives.iter().find(|n| n.name == *stem).ok_or_else(|| {
+            format!(
+                "FFI library `{stem}` is loaded but not declared in `[[ffi.native]]`; \
                      add a row with name/version/path/url (system libs like `c` need no entry)"
-                )
-            })?;
+            )
+        })?;
         let filename = platform_shared_lib_filename(&decl.name);
         let lib_path = root.join(&decl.path).join(&filename);
         if !lib_path.is_file() {
@@ -365,6 +364,7 @@ mod tests {
             source_files: vec![],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&too_new).unwrap();
         assert!(matches!(
@@ -381,6 +381,7 @@ mod tests {
             source_files: vec![],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&other_minor).unwrap();
         assert!(matches!(
@@ -400,6 +401,7 @@ mod tests {
             source_files: vec![],
             debug_locs: vec![],
             fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
         let mut prefixed = vec![0u8; 1];

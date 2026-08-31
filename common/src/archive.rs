@@ -13,7 +13,7 @@ use rkyv::{Archive, Deserialize, Serialize};
 use crate::debug::{DebugLoc, ProgramDebug};
 
 /// Archive ABI major. Bump (and reset minor to 0) on incompatible layout/opcode changes.
-pub const ARCHIVE_MAJOR: u16 = 2;
+pub const ARCHIVE_MAJOR: u16 = 3;
 
 /// Archive ABI minor. Bump on additive, append-only bytecode changes.
 ///
@@ -34,7 +34,10 @@ pub const ARCHIVE_MAJOR: u16 = 2;
 /// 14 — drop leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and
 ///      virtual crypto HostInvoke slots; holes collapse. Package IO is
 ///      `stream_attach` / `stream_park` only. coil-crypto is a `dload` package.
-pub const ARCHIVE_MINOR: u16 = 14;
+///
+/// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
+/// execute can restore `extern struct` layouts. rkyv schema change.
+pub const ARCHIVE_MINOR: u16 = 0;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -67,6 +70,99 @@ pub fn format_archive_version(version: u32) -> String {
     format!("{}.{}", archive_major(version), archive_minor(version))
 }
 
+/// Persisted C struct layout (SysV-style align and trailing pad).
+///
+/// Computed once at compile and restored on execute. Field `enc` values are
+/// [`crate::encode_tag_operand`] integers.
+#[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct CStructLayout {
+    pub name: String,
+    /// `(field name, encoded FFI tag operand)`.
+    pub fields: Vec<(String, u32)>,
+    /// Byte offset of each field (same length as `fields`).
+    pub offsets: Vec<u32>,
+    pub size: u32,
+    pub align: u32,
+}
+
+fn align_up(n: u32, align: u32) -> u32 {
+    if align <= 1 {
+        n
+    } else {
+        n.div_ceil(align) * align
+    }
+}
+
+fn c_scalar_size_align(tag: u32) -> Option<(u32, u32)> {
+    use crate::ffi::tag as t;
+    let ptr = std::mem::size_of::<*const ()>() as u32;
+    match tag {
+        x if x == t::BOOL || x == t::INT8 || x == t::UINT8 => Some((1, 1)),
+        x if x == t::INT16 || x == t::UINT16 => Some((2, 2)),
+        x if x == t::INT32 || x == t::UINT32 => Some((4, 4)),
+        x if x == t::INT
+            || x == t::UINT64
+            || x == t::FLOAT
+            || x == t::PTR
+            || x == t::STRING
+            || x == t::CALLBACK =>
+        {
+            Some((ptr, ptr))
+        }
+        _ => None,
+    }
+}
+
+fn field_size_align(enc: u32, prior: &[CStructLayout]) -> Result<(u32, u32), String> {
+    let (tag, aux) = crate::ffi::decode_tag_operand(enc);
+    if tag == crate::ffi::tag::STRUCT {
+        let nested = prior
+            .get(aux as usize)
+            .ok_or_else(|| format!("unknown nested struct layout id {aux}"))?;
+        return Ok((nested.size, nested.align));
+    }
+    c_scalar_size_align(tag).ok_or_else(|| format!("FFI tag {tag} cannot be a C struct field"))
+}
+
+/// Compute C align/pad for `fields` against already-computed `prior` layouts.
+pub fn compute_c_struct_layout(
+    name: String,
+    fields: Vec<(String, u32)>,
+    prior: &[CStructLayout],
+) -> Result<CStructLayout, String> {
+    let mut offsets = Vec::with_capacity(fields.len());
+    let mut off = 0u32;
+    let mut max_align = 1u32;
+    for (_, enc) in &fields {
+        let (sz, al) = field_size_align(*enc, prior)?;
+        max_align = max_align.max(al);
+        off = align_up(off, al);
+        offsets.push(off);
+        off += sz;
+    }
+    let size = align_up(off, max_align);
+    Ok(CStructLayout {
+        name,
+        fields,
+        offsets,
+        size,
+        align: max_align,
+    })
+}
+
+/// Compute layouts for a sequence of `extern struct` defs (declaration order).
+pub fn compute_c_struct_layouts(
+    defs: impl IntoIterator<Item = (String, Vec<(String, u32)>)>,
+) -> Result<Vec<CStructLayout>, String> {
+    let mut out = Vec::new();
+    for (name, fields) in defs {
+        let layout = compute_c_struct_layout(name, fields, &out)?;
+        out.push(layout);
+    }
+    Ok(out)
+}
+
 /// Serialized program with constant pool and bytecode.
 #[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
 #[rkyv(compare(PartialEq))]
@@ -87,6 +183,8 @@ pub struct ArchivedProgram {
     pub debug_locs: Vec<DebugLoc>,
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
     pub fn_symbols: Vec<crate::debug::FnDebugSym>,
+    /// `extern struct` C layouts (align/pad), restored on packaged / `.hyc` execute.
+    pub struct_layouts: Vec<CStructLayout>,
 }
 
 pub use crate::opcode::Byte;
@@ -143,6 +241,7 @@ mod tests {
                 DebugLoc::unknown(),
             ],
             fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -177,6 +276,7 @@ mod tests {
                     entry_pc: 4,
                 },
             ],
+            struct_layouts: Vec::new(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -192,16 +292,19 @@ mod tests {
 
     #[test]
     fn archive_version_matches_current_abi() {
-        assert_eq!(ARCHIVE_MAJOR, 2);
-        assert_eq!(ARCHIVE_MINOR, 14);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(2, 14));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "2.14");
+        assert_eq!(ARCHIVE_MAJOR, 3);
+        assert_eq!(ARCHIVE_MINOR, 0);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(3, 0));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "3.0");
     }
 
     #[test]
     fn archive_rejects_older_major() {
         let runtime = ARCHIVE_VERSION;
-        assert!(!archive_version_compatible(pack_archive_version(1, 99), runtime));
+        assert!(!archive_version_compatible(
+            pack_archive_version(1, 99),
+            runtime
+        ));
     }
 
     #[test]
@@ -240,5 +343,80 @@ mod tests {
             pack_archive_version(7, 9),
             pack_archive_version(7, 1)
         ));
+    }
+
+    #[test]
+    fn padded_u8_i32_u8_is_size_12_align_4() {
+        use crate::ffi::{encode_tag_operand, tag};
+        let fields = vec![
+            ("a".into(), encode_tag_operand(tag::UINT8, 0)),
+            ("b".into(), encode_tag_operand(tag::INT32, 0)),
+            ("c".into(), encode_tag_operand(tag::UINT8, 0)),
+        ];
+        let layout = compute_c_struct_layout("Padded".into(), fields, &[]).unwrap();
+        assert_eq!(layout.offsets, vec![0, 4, 8]);
+        assert_eq!(layout.size, 12);
+        assert_eq!(layout.align, 4);
+    }
+
+    #[test]
+    fn archive_round_trip_preserves_struct_layouts() {
+        use crate::ffi::{encode_tag_operand, tag};
+
+        let layout = compute_c_struct_layout(
+            "Padded".into(),
+            vec![
+                ("a".into(), encode_tag_operand(tag::UINT8, 0)),
+                ("b".into(), encode_tag_operand(tag::INT32, 0)),
+                ("c".into(), encode_tag_operand(tag::UINT8, 0)),
+            ],
+            &[],
+        )
+        .unwrap();
+        let program = ArchivedProgram {
+            version: ARCHIVE_VERSION,
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: vec![Byte::new(Instruction::HALT)],
+            source_files: vec![],
+            debug_locs: vec![DebugLoc::unknown()],
+            fn_symbols: Vec::new(),
+            struct_layouts: vec![layout.clone()],
+        };
+        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+        let archived =
+            rkyv::access::<ArchivedArchivedProgram, Error>(bytes.as_slice()).expect("access");
+        let back: ArchivedProgram =
+            rkyv::deserialize::<ArchivedProgram, Error>(archived).expect("deserialize");
+        assert_eq!(back.struct_layouts, vec![layout]);
+        assert_eq!(back.struct_layouts[0].offsets, vec![0, 4, 8]);
+        assert_eq!(back.struct_layouts[0].size, 12);
+        assert_eq!(back.struct_layouts[0].align, 4);
+    }
+
+    #[test]
+    fn nested_struct_aligns_to_inner_max() {
+        use crate::ffi::{encode_tag_operand, tag};
+        let inner = compute_c_struct_layout(
+            "Inner".into(),
+            vec![("x".into(), encode_tag_operand(tag::INT, 0))],
+            &[],
+        )
+        .unwrap();
+        assert_eq!(inner.size, 8);
+        assert_eq!(inner.align, 8);
+        let outer = compute_c_struct_layout(
+            "Outer".into(),
+            vec![
+                ("a".into(), encode_tag_operand(tag::UINT8, 0)),
+                ("inner".into(), encode_tag_operand(tag::STRUCT, 0)),
+            ],
+            std::slice::from_ref(&inner),
+        )
+        .unwrap();
+        assert_eq!(outer.offsets, vec![0, 8]);
+        assert_eq!(outer.size, 16);
+        assert_eq!(outer.align, 8);
     }
 }
