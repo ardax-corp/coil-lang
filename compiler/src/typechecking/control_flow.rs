@@ -157,18 +157,6 @@ fn walk(
             infinite
         }
 
-        Expression::For { cond, body, .. } => {
-            let infinite = eval_bool_const(cond, lookup) == Some(true) && !may_break(body, 0);
-            walk(
-                body,
-                lookup,
-                pending_defers,
-                messages,
-                inside_infinite || infinite,
-            );
-            infinite
-        }
-
         Expression::Defer { body, .. } => {
             // Body of defer is a separate thunk; not function-exit for the outer fn.
             let _ = walk(body, lookup, &mut Vec::new(), messages, false);
@@ -191,9 +179,6 @@ pub fn is_infinite_loop(expr: &Output<'_>, lookup: &dyn Fn(&str) -> Option<Const
             iterable,
             body,
         } => eval_bool_const(iterable, lookup) == Some(true) && !may_break(body, 0),
-        Expression::For { cond, body, .. } => {
-            eval_bool_const(cond, lookup) == Some(true) && !may_break(body, 0)
-        }
         _ => false,
     }
 }
@@ -221,7 +206,7 @@ fn may_break(expr: &Output<'_>, depth: usize) -> bool {
         Expression::If(branches) => branches.iter().any(|b| may_break(b, depth)),
         Expression::Branch(_, body) => may_break(body, depth),
         Expression::Match { arms, .. } => arms.iter().any(|a| may_break(&a.body, depth)),
-        Expression::Loop { body, .. } | Expression::For { body, .. } => may_break(body, depth + 1),
+        Expression::Loop { body, .. } => may_break(body, depth + 1),
         Expression::Defer { body, .. } => may_break(body, depth),
         _ => false,
     }

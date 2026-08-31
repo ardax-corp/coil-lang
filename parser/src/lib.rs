@@ -430,6 +430,7 @@ impl<'pratt> Pratt<'pratt> {
                 self.construct(expr.clone()),
                 self.qualified_access(),
                 self.readonly_instantiate(expr.clone()),
+                self.new_readonly_removed(),
                 self.instantiate(expr.clone()),
                 // float comes before int so that `1.0` is parsed as a
                 // float, not an `int` `1` followed by a stray `.0`.
@@ -683,10 +684,9 @@ impl<'pratt> Pratt<'pratt> {
                 ),
                 postfix(
                     Precedence::Primary as u16,
-                    choice((
-                        expr.clone().map(Some).delimited_by(op!('['), op!(']')),
-                        op!('[').ignore_then(op!(']')).to(None),
-                    )),
+                    expr.clone()
+                        .map(Some)
+                        .delimited_by(op!('['), op!(']')),
                     |lhs, index, e| (e.span(), Box::new(Expression::Index(lhs, index))),
                 ),
                 postfix(
@@ -1088,7 +1088,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(self.arg_list())
             .then(op!("->").ignore_then(self.type_annotation()).or_not())
             .then(self.where_clause())
-            .then(choice((self.block(stmt).map(Some), op!(";").to(None))))
+            .then(self.block(stmt).labelled("function body `{ ... }`"))
             .map_with(|full, e| {
                 let (
                     (
@@ -1112,7 +1112,7 @@ impl<'pratt> Pratt<'pratt> {
                         args,
                         returns,
                         where_constraints,
-                        body,
+                        body: Some(body),
                     }),
                 )
             })
@@ -1211,6 +1211,20 @@ impl<'pratt> Pratt<'pratt> {
             })
     }
 
+    fn c_style_for_removed(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        keyword!("for")
+            .ignore_then(op!("("))
+            .try_map(|_, span| {
+                Err::<Output<'pratt>, _>(Rich::custom(
+                    span,
+                    "C-style `for` loops were removed; use `while` or `for x in`",
+                ))
+            })
+    }
+
     fn for_<
         S: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -1224,32 +1238,9 @@ impl<'pratt> Pratt<'pratt> {
         expr: E,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        // C-style: `for (init?; cond; step?) { body }`
-        let init = choice((self.variable(expr.clone()), expr.clone())).or_not();
-        let step = expr.clone().or_not();
-        let c_style = init
-            .then_ignore(op!(";"))
-            .then(expr.clone())
-            .then_ignore(op!(";"))
-            .then(step)
-            .delimited_by(op!("("), op!(")"))
-            .then(self.block(stmt.clone()))
-            .map_with(|(((init, cond), step), body), e| {
-                (
-                    e.span(),
-                    Box::new(Expression::For {
-                        init,
-                        cond,
-                        step,
-                        body,
-                    }),
-                )
-            });
-
         // For-in: `for x in expr { body }` → Loop { identifier: Some(x), … }
-        let for_in = text::ident()
-            .padded()
-            .map_with(output!(Identifier))
+        keyword!("for")
+            .ignore_then(text::ident().padded().map_with(output!(Identifier)))
             .then_ignore(keyword!("in"))
             .then(expr)
             .then(self.block(stmt))
@@ -1262,10 +1253,7 @@ impl<'pratt> Pratt<'pratt> {
                         body,
                     }),
                 )
-            });
-
-        // Prefer the paren form so `for (…)` never misparses as for-in.
-        keyword!("for").ignore_then(choice((c_style, for_in)))
+            })
     }
 
     fn if_<
@@ -1506,6 +1494,7 @@ impl<'pratt> Pratt<'pratt> {
             choice((
                 self.break_(),
                 self.continue_(),
+                self.c_style_for_removed(),
                 self.for_(stmt.clone(), expr.clone()),
                 self.while_(stmt.clone(), expr.clone()),
                 self.if_(stmt.clone(), expr.clone()),
@@ -1544,21 +1533,14 @@ impl<'pratt> Pratt<'pratt> {
         //  - `typeclass_decl` before `type_alias` so `trait` keyword
         //    is not confused with a user identifier.
         //  - `trait_impl_for_block` (`impl Trait for T` / `impl Trait<A,B> for T`)
-        //    is tried before other `impl` forms so `for` is unambiguous.
-        //  - `impl_block` handles inherent impls and simple trait impls
-        //    (`impl Num<int>`, `impl Show<Point>`) via the type-arg heuristic.
-        //  - `typeclass_impl_block` is the fallback for complex type-annotation
-        //    args (e.g. `impl Foo<Option<int>>`) that `type_param_list()` inside
-        //    `impl_block` cannot parse.  Chumsky 0.12 backtracks on failure, so
-        //    `impl_block` failing (after consuming `impl Name`) causes `choice` to
-        //    retry with `typeclass_impl_block`.
+        //    is the only trait-instance form.
+        //  - `impl_block` is inherent impls only (`impl Cell`, `impl Cell<T>`).
         choice((
             self.static_decl(),
             self.class(),
             self.typeclass_decl(stmt.clone()),
             self.trait_impl_for_block(stmt.clone()),
             self.impl_block(stmt.clone()),
-            self.typeclass_impl_block(stmt.clone()),
             self.test_case(stmt.clone()),
             self.attr_decl(),
             self.func(stmt.clone()),
@@ -2166,7 +2148,22 @@ impl<'pratt> Pratt<'pratt> {
         ))
     }
 
-    /// `new readonly Class(args)` or `readonly new Class(args)`.
+    /// Reject postfix `new readonly Class(...)`.
+    fn new_readonly_removed(
+        &self,
+    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
+    {
+        keyword!("new")
+            .ignore_then(keyword!("readonly"))
+            .try_map(|_, span| {
+                Err::<Output<'pratt>, _>(Rich::custom(
+                    span,
+                    "`readonly` is a prefix: write `readonly new Class(...)`",
+                ))
+            })
+    }
+
+    /// `readonly new Class(args)`.
     fn readonly_instantiate<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -2176,23 +2173,8 @@ impl<'pratt> Pratt<'pratt> {
         expr: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        let new_then_class = keyword!("new")
-            .ignore_then(text::ident())
-            .then(self.params(expr.clone()));
-        let readonly_new = keyword!("readonly")
-            .ignore_then(new_then_class.clone())
-            .map_with(|(class, args), e| {
-                let class_output = (e.span(), Box::new(Expression::Identifier(class)));
-                (
-                    e.span(),
-                    Box::new(Expression::Readonly((
-                        e.span(),
-                        Box::new(Expression::Instantiate(class_output, args)),
-                    ))),
-                )
-            });
-        let new_readonly = keyword!("new")
-            .ignore_then(keyword!("readonly"))
+        keyword!("readonly")
+            .ignore_then(keyword!("new"))
             .ignore_then(text::ident())
             .then(self.params(expr))
             .map_with(|(class, args), e| {
@@ -2204,8 +2186,7 @@ impl<'pratt> Pratt<'pratt> {
                         Box::new(Expression::Instantiate(class_output, args)),
                     ))),
                 )
-            });
-        choice((readonly_new, new_readonly))
+            })
     }
 
     /// `trait Name<T, U: Bound> { type Elem; fn sig(…) -> ret; fn default(…) { body } }`
@@ -2337,23 +2318,8 @@ impl<'pratt> Pratt<'pratt> {
             })
     }
 
-    /// Inherent `impl` block OR typeclass instance.
-    ///
-    /// After `impl Name`, an optional `<…>` section is parsed via
-    /// `type_param_list()`.  The result is classified at map time:
-    ///
-    /// - No `<…>` → `Implementation` (inherent, no type params).
-    /// - `<T>`, `<T: Num>` (type-parameter shape) → `Implementation`.
-    /// - `<int>`, `<string>`, `<Point>`, etc. (concrete type args) →
-    ///   `TypeClassImpl`.
-    ///
-    /// A bare angle-bracket name is treated as a type parameter when it has
-    /// bounds (`T: Num`) or is a single uppercase letter (`T`, `U`). Multi-
-    /// character names without bounds (`Point`, `int`) are concrete instance
-    /// heads — including user enums for `impl Show<Point>`.
-    ///
-    /// For complex type-annotation args (e.g. `impl Foo<Option<int>>`),
-    /// `typeclass_impl_block` is the fallback when `impl_block` fails to parse.
+    /// Inherent `impl` only: `impl Cell { … }` / `impl Cell<T> { … }` / `impl Cell<T: Num>`.
+    /// Trait instances use [`Self::trait_impl_for_block`] (`impl Trait for Type`).
     fn impl_block<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
             + Clone
@@ -2363,151 +2329,40 @@ impl<'pratt> Pratt<'pratt> {
         stmt: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        // Known lowercase primitive type names — these can never be TypeParam
-        // names; if they appear inside `<>`, the block is a typeclass impl.
-        const PRIMITIVES: &[&str] = &["int", "float", "string", "bool", "void", "unit"];
-
-        // Associated type definition: `type Elem = int;` / `type Ref<T> = T;`
-        let assoc_def = keyword!("type")
-            .ignore_then(text::ident().padded())
-            .then(self.type_param_list())
-            .then_ignore(op!("="))
-            .then(self.type_annotation())
-            .then_ignore(op!(";"))
-            .map_with(|((name, type_params), ty), e| {
-                (
-                    e.span(),
-                    Box::new(Expression::AssocTypeDef {
-                        name,
-                        type_params,
-                        ty: Box::new(ty),
-                    }),
-                )
-            });
+        const PRIMITIVES: &[&str] = &["int", "float", "string", "bool", "void", "unit", "byte"];
 
         keyword!("impl")
             .ignore_then(text::ident())
             .then(self.type_param_list())
             .then(
-                // Methods (and assoc type defs for typeclass impls) are
-                // separated by juxtaposition (newlines / whitespace), not commas.
-                choice((assoc_def, self.method_decl(stmt)))
+                self.method_decl(stmt)
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(op!("{"), op!("}")),
             )
-            .map_with(|((name, type_params), methods), e| {
-                // Classify by inspecting parsed param names.
+            .validate(|((name, type_params), methods), e, emitter| {
                 let looks_like_type_param = |p: &TypeParam<'_>| -> bool {
                     if PRIMITIVES.contains(&p.name) {
                         return false;
                     }
-                    // Bounded names are always type parameters (`T: Num`).
                     if !p.bounds.is_empty() {
                         return true;
                     }
-                    // Single uppercase letter (`T`, `U`) — type-parameter shape.
                     let mut chars = p.name.chars();
                     matches!(chars.next(), Some(c) if c.is_uppercase()) && chars.next().is_none()
                 };
-                let is_typeclass_impl = !type_params.is_empty()
-                    && type_params.iter().any(|p| !looks_like_type_param(p));
-                if is_typeclass_impl {
-                    // e.g. `impl Num<int>` / `impl Show<Point>` → typeclass instance.
-                    // Re-wrap each param name as a bare Type annotation.
-                    let args = type_params
-                        .into_iter()
-                        .map(|p| (e.span(), Box::new(Expression::Type(p.name))))
-                        .collect();
-                    (
+                if type_params.iter().any(|p| !looks_like_type_param(p)) {
+                    emitter.emit(Rich::custom(
                         e.span(),
-                        Box::new(Expression::TypeClassImpl {
-                            class: name,
-                            args,
-                            methods,
-                        }),
-                    )
-                } else {
-                    // e.g. `impl Cell {}` or `impl Cell<T>` or `impl Cell<T: Num>`.
-                    (
-                        e.span(),
-                        Box::new(Expression::Implementation {
-                            what: "",
-                            owner: name,
-                            type_params,
-                            methods,
-                        }),
-                    )
+                        "trait instances use `impl Trait for Type`",
+                    ));
                 }
-            })
-    }
-
-    /// Typeclass-impl block for complex type-annotation arguments, e.g.
-    /// `impl Foo<Option<int>> { … }`.
-    ///
-    /// Each angle-bracket item is parsed as a full `type_annotation`, so
-    /// this parser handles any well-formed type, including generics.  It is
-    /// registered BEFORE `impl_block` in `declaration()` so that it wins for
-    /// cases that `type_param_list` cannot represent.
-    ///
-    /// Bare uppercase idents (which look like type params) are accepted here
-    /// too — if the user writes `impl Foo<T>` and `T` is ambiguous this
-    /// parser will win only when it appears before `impl_block` in the
-    /// `choice`; that ordering is intentional (inherent impls prefer
-    /// `impl_block`).
-    fn typeclass_impl_block<
-        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-    >(
-        &self,
-        stmt: T,
-    ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
-        // Associated type definition: `type Elem = int;` / `type Ref<T> = T;`
-        let assoc_def = keyword!("type")
-            .ignore_then(text::ident().padded())
-            .then(self.type_param_list())
-            .then_ignore(op!("="))
-            .then(self.type_annotation())
-            .then_ignore(op!(";"))
-            .map_with(|((name, type_params), ty), e| {
                 (
                     e.span(),
-                    Box::new(Expression::AssocTypeDef {
-                        name,
+                    Box::new(Expression::Implementation {
+                        what: "",
+                        owner: name,
                         type_params,
-                        ty: Box::new(ty),
-                    }),
-                )
-            });
-
-        keyword!("impl")
-            .ignore_then(text::ident())
-            .then(
-                // Require a non-empty `<` type_annotation+ `>` — without
-                // angle brackets this parser doesn't match and falls through
-                // to `impl_block`.
-                self.type_annotation()
-                    .padded()
-                    .separated_by(op!(","))
-                    .allow_trailing()
-                    .at_least(1)
-                    .collect::<Vec<_>>()
-                    .delimited_by(op!("<"), op!(">")),
-            )
-            .then(
-                choice((assoc_def, self.method_decl(stmt)))
-                    .repeated()
-                    .collect::<Vec<_>>()
-                    .delimited_by(op!("{"), op!("}")),
-            )
-            .map_with(|((class, args), methods), e| {
-                (
-                    e.span(),
-                    Box::new(Expression::TypeClassImpl {
-                        class,
-                        args,
                         methods,
                     }),
                 )
@@ -2872,21 +2727,6 @@ impl<'pratt> Pratt<'pratt> {
             .labelled("array")
     }
 
-    /// `target[index]` postfix indexing helper. The actual
-    /// wiring lives at the `pratt` call site below; this
-    /// method is unused and reserved for future expansion
-    /// (e.g., for explicit `slice(i, j)` syntax).
-    #[allow(dead_code)]
-    fn index_postfix_disabled<
-        T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
-            + Clone
-            + 'pratt,
-    >(
-        &self,
-        _expr: T,
-    ) {
-    }
-
     /// Qualified constructor `EnumName::Variant(...)`. Must appear before `call` in the atom choice.
     fn construct<
         T: Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>>
@@ -3167,11 +3007,17 @@ impl<'pratt> Pratt<'pratt> {
                 just("_")
                     .padded()
                     .map_with(|_, e| (e.span(), Pattern::Wildcard)),
-                keyword!("default").map_with(|_, e| (e.span(), Pattern::Wildcard)),
                 constructor,
-                text::ident()
-                    .padded()
-                    .map_with(|name, e| (e.span(), Pattern::Binding { name })),
+                text::ident().padded().try_map(|name, span| {
+                    if name == "default" {
+                        Err(Rich::custom(
+                            span,
+                            "match wildcard is `_`; `default` is not a pattern keyword",
+                        ))
+                    } else {
+                        Ok((span, Pattern::Binding { name }))
+                    }
+                }),
             ))
         })
     }

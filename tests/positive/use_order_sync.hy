@@ -7,5 +7,5 @@ use io::sync::{write_all};
 use string::{to_bytes};
 
 fn main() {
-    write_all(stdout(), to_bytes(Path::from("ok").as_str()))?;
+    write_all(stdout(), to_bytes("ok"))?;
 }

@@ -321,21 +321,6 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
             }
             EnumConstructPayload::Unit => {}
         },
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(i) = init {
-                collect_nested_fns(i, facts);
-            }
-            collect_nested_fns(cond, facts);
-            if let Some(s) = step {
-                collect_nested_fns(s, facts);
-            }
-            collect_nested_fns(body, facts);
-        }
         Expression::Loop {
             identifier,
             iterable,
@@ -507,21 +492,6 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
             }
             EnumConstructPayload::Unit => {}
         },
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(i) = init {
-                walk_body(i, facts);
-            }
-            walk_body(cond, facts);
-            if let Some(s) = step {
-                walk_body(s, facts);
-            }
-            walk_body(body, facts);
-        }
         Expression::Loop {
             identifier,
             iterable,

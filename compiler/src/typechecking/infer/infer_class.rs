@@ -286,10 +286,26 @@ impl Checker {
                 && inst.defined_module == self.current_module
                 && inst.range == range
         });
+        let existing_idx = existing_idx.or_else(|| {
+            overlapping.as_ref().and_then(|existing| {
+                if existing.defined_module == self.current_module
+                    && existing.range.start == usize::MAX
+                {
+                    self.generics.instances.iter().position(|inst| {
+                        inst.class == existing.class
+                            && inst.defined_module == existing.defined_module
+                            && inst.range.start == usize::MAX
+                    })
+                } else {
+                    None
+                }
+            })
+        });
         let same_decl = overlapping.as_ref().is_some_and(|existing| {
             existing_idx.is_some_and(|idx| {
                 self.generics.instances[idx].defined_module == existing.defined_module
-                    && self.generics.instances[idx].range == existing.range
+                    && (self.generics.instances[idx].range == existing.range
+                        || self.generics.instances[idx].range.start == usize::MAX)
             })
         });
         if let Some(existing) = overlapping.as_ref() {
@@ -698,6 +714,7 @@ impl Checker {
                 self.generics.instances[idx].method_fqns = method_fqns;
                 self.generics.instances[idx].assoc_tys = assoc_tys;
                 self.generics.instances[idx].args = arg_tys.clone();
+                self.generics.instances[idx].range = range.clone();
             }
         } else if !invalid_instance {
             self.generics.instances.push(InstanceDef {

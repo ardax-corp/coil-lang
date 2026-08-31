@@ -18,46 +18,56 @@ test("while never enters") {
     assert(x == 0)?;
 }
 
-test("c-style for sum") {
+test("while sum") {
     let sum = 0;
-    for (let i = 0; i < 5; i = i + 1) {
+    let i = 0;
+    while i < 5 {
         sum = sum + i;
+        i = i + 1;
     }
     assert(sum == 10)?;
 }
 
-test("for continue skips") {
+test("while continue skips") {
     let sum = 0;
-    for (let i = 0; i < 6; i = i + 1) {
+    let i = 0;
+    while i < 6 {
         if i == 3 {
+            i = i + 1;
             continue;
         }
         sum = sum + i;
+        i = i + 1;
     }
     assert(sum == 12)?; // 0+1+2+4+5
 }
 
-test("for break exits early") {
+test("while break exits early") {
     let sum = 0;
-    for (let i = 0; i < 100; i = i + 1) {
+    let i = 0;
+    while i < 100 {
         if i == 4 {
             break;
         }
         sum = sum + i;
+        i = i + 1;
     }
     assert(sum == 6)?; // 0+1+2+3
 }
 
-test("for continue and break together") {
+test("while continue and break together") {
     let sum = 0;
-    for (let i = 0; i < 10; i = i + 1) {
+    let i = 0;
+    while i < 10 {
         if i == 3 {
+            i = i + 1;
             continue;
         }
         if i == 7 {
             break;
         }
         sum = sum + i;
+        i = i + 1;
     }
     assert(sum == 18)?; // 0+1+2+4+5+6
 }
@@ -74,10 +84,14 @@ test("postfix increment in loop") {
 
 test("nested loops") {
     let total = 0;
-    for (let i = 0; i < 3; i = i + 1) {
-        for (let j = 0; j < 3; j = j + 1) {
+    let i = 0;
+    while i < 3 {
+        let j = 0;
+        while j < 3 {
             total = total + 1;
+            j = j + 1;
         }
+        i = i + 1;
     }
     assert(total == 9)?;
 }

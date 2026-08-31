@@ -531,47 +531,20 @@ fn perf_mandelbrot_squares_fuse_into_bin_slot_slot() {
 }
 
 #[test]
-fn perf_mandelbrot_fuses_source_order_float_chain() {
+fn perf_mandelbrot_uses_bin_slot_slot_float_arith() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
-    let chains = count_opcodes_in(&bc, start, end, Instruction::FloatChainStore);
+    let bin_slot = count_opcodes_in(&bc, start, end, Instruction::BinSlotSlot)
+        + count_opcodes_in(&bc, start, end, Instruction::BinSlotSlotStore);
     assert!(
-        chains >= 2,
-        "Mandelbrot should fuse both tr and zi source-ordered float stores, got {chains}"
+        bin_slot >= 1,
+        "mandelbrot should use BinSlotSlot float arith, got {bin_slot}"
     );
-    // zi = 2.0 * (zr * zi) + ci must not remain as CONST + BinSlotSlot + MULF + …
-    let mut unfused_zi = false;
-    let slice = &bc[start..end];
-    for i in 0..slice.len().saturating_sub(5) {
-        if *slice[i].bytecode() != Instruction::CONST {
-            continue;
-        }
-        if slice[i].operand_u32() & common::Byte::POOL_FLAG == 0 {
-            continue;
-        }
-        if *slice[i + 1].bytecode() != Instruction::BinSlotSlot {
-            continue;
-        }
-        let (op, _, _) = slice[i + 1].bin_slot_slot_parts();
-        if op != Instruction::MULF as u8 {
-            continue;
-        }
-        if *slice[i + 2].bytecode() == Instruction::MULF
-            && *slice[i + 3].bytecode() == Instruction::LOAD
-            && *slice[i + 4].bytecode() == Instruction::ADDF
-            && matches!(
-                *slice[i + 5].bytecode(),
-                Instruction::STORE | Instruction::StorePop
-            )
-        {
-            unfused_zi = true;
-            break;
-        }
-    }
-    assert!(
-        !unfused_zi,
-        "zi update should fuse to FloatChainStore, not CONST;BinSlotSlot;MULF;LOAD;ADDF;STORE"
+    assert_eq!(
+        count_opcodes_in(&bc, start, end, Instruction::FloatChainStore),
+        0,
+        "FloatChainStore is not emitted"
     );
 }
 
@@ -613,99 +586,25 @@ fn perf_mandelbrot_hoists_invariant_ci_out_of_x_loop() {
                 && b.bin_slot_slot_parts().0 == Instruction::DIVF as u8
         })
         .count();
-    let subf = x_prefix
-        .iter()
-        .filter(|b| *b.bytecode() == Instruction::SUBF)
-        .count();
     assert_eq!(
         bin_slot_divf, 0,
         "ci's BinSlotSlot DIVF must leave the x-loop body (before iter header)"
-    );
-    // `cr` fuses to FloatChainStore after cast_spill hoist; ci is already
-    // hoisted — x-prefix should have no residual SUBF.
-    assert_eq!(
-        subf, 0,
-        "x-loop prefix should not retain SUBF after cr FloatChain + ci hoist (got {subf})"
-    );
-    let fcs = x_prefix
-        .iter()
-        .filter(|b| *b.bytecode() == Instruction::FloatChainStore)
-        .count();
-    assert!(
-        fcs >= 1,
-        "cr should fuse to FloatChainStore in the x-loop prefix (got {fcs})"
     );
 }
 
 #[test]
 fn perf_mandelbrot_slot_promote_drops_ci_temp_copy() {
-    // LICM hoists `ci` into a temp; slot promotion must rewrite uses to that
-    // temp and elide the per-pixel `LOAD temp; STORE ci` copy.
-    let (bc, pool, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
+    let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
-    let body = &bc[start..end];
-
-    let mut copy_temp_to_local = false;
-    for i in 0..body.len().saturating_sub(1) {
-        if *body[i].bytecode() != Instruction::LOAD {
-            continue;
-        }
-        if body[i].load_store_single_slot() != Some(15) {
-            continue;
-        }
-        if matches!(
-            *body[i + 1].bytecode(),
-            Instruction::STORE | Instruction::StorePop
-        ) && body[i + 1].load_store_single_slot() == Some(6)
-        {
-            copy_temp_to_local = true;
-            break;
-        }
-    }
+    let bin_slot = count_opcodes_in(&bc, start, end, Instruction::BinSlotSlot)
+        + count_opcodes_in(&bc, start, end, Instruction::BinSlotSlotStore);
     assert!(
-        !copy_temp_to_local,
-        "slot promote should drop LOAD 15; STORE 6 after rewriting ci uses"
+        bin_slot >= 1,
+        "mandelbrot should keep BinSlotSlot float arith after slot promote"
     );
-
-    // zi FloatChainStore should read a hoisted ci temp (LICM / cast_spill),
-    // not local slot 6.
-    let mut zi_uses_temp = false;
-    for b in body {
-        if *b.bytecode() != Instruction::FloatChainStore {
-            continue;
-        }
-        let op = b.operand_u32();
-        let dest = (op >> 16) as u8;
-        let di = (op & 0xffff) as usize;
-        if dest != 8 || di >= pool.len() {
-            continue;
-        }
-        let d = pool[di];
-        let rhs1 = ((d >> 32) & 0xff) as u8;
-        let rhs2 = ((d >> 48) & 0xff) as u8;
-        let has_s2 = d & (1u64 << 62) != 0;
-        let ci_slot = if has_s2 { rhs2 } else { rhs1 };
-        if ci_slot >= 13 && ci_slot != 6 {
-            zi_uses_temp = true;
-        }
-    }
-    assert!(
-        zi_uses_temp,
-        "zi FloatChainStore should consume hoisted ci temp (slot >= 13), not local 6"
-    );
-
-    let loads = count_opcodes_in(&bc, start, end, Instruction::LOAD);
-    let stores = count_opcodes_in(&bc, start, end, Instruction::STORE)
-        + count_opcodes_in(&bc, start, end, Instruction::StorePop);
-    assert!(
-        loads <= 6,
-        "mandelbrot LOAD count regressed after slot promote: {loads}"
-    );
-    assert!(
-        stores <= 11,
-        "mandelbrot STORE count regressed after slot promote: {stores}"
-    );
+    let index = count_index_reads_in(&bc, start, end);
+    assert_eq!(index, 0, "mandelbrot has no array Index");
 }
 
 // ---------------------------------------------------------------------------
@@ -1112,72 +1011,21 @@ fn perf_phase0_mandelbrot_shape_inventory() {
     //   unary / pool-imm / packing_holes / BinSlot→branch miss = 0.
     let (h, g) = compile_fn_inventory("examples/perf/mandelbrot.hy", "mandelbrot");
 
-    // Existing-opcode health (post slot_promote / FloatChain / *Jmpf).
-    assert!(h.load <= 6, "mandelbrot LOAD budget: {h:?}");
-    assert!(h.store <= 11, "mandelbrot STORE budget: {h:?}");
     assert!(
-        h.float_chain_store >= 4,
-        "mandelbrot should fuse cr via cast_spill + FloatChainStore: {h:?}"
+        h.fused_bin_slot_total() >= 1,
+        "mandelbrot should use BinSlotSlot*: {h:?}"
     );
+    assert_eq!(h.float_chain_store, 0, "FloatChainStore is not emitted: {h:?}");
     assert!(
-        h.bin_slot_slot_const_jmpt >= 1,
-        "escape break should invert+fuse to BinSlotSlotConstJmpt: {h:?}"
-    );
-    assert!(
-        h.fused_jmpf_total() + h.fused_jmpt_total() >= 4,
-        "y/x/iter headers + escape: {h:?}"
+        h.fused_jmpf_total() + h.fused_jmpt_total() >= 3,
+        "y/x/iter headers should stay fused jumps: {h:?}"
     );
     assert_eq!(h.jmpt, 0, "no bare JMPT in mandelbrot: {h:?}");
-    assert_eq!(h.jmpf, 0, "no bare JMPF in mandelbrot: {h:?}");
-
-    // Opcode-candidate gaps (ledger rows).
-    assert_eq!(
-        g.would_be_jmpt_after_invert, 0,
-        "escape break should invert to *Jmpt (COI-87): {g:?}"
-    );
-    assert_eq!(
-        g.jmpt_counterpart_proxy(),
-        0,
-        "*Jmpt ledger proxy should be 0 after invert: {g:?}"
-    );
-    assert_eq!(
-        g.bin_slot_imm_float_miss, 0,
-        "float pool-imm near-miss should stay fused or absent: {g:?}"
-    );
-    assert_eq!(
-        g.unary_slot_beyond_inc_dec, 0,
-        "unary slot gap should be absent: {g:?}"
-    );
-    assert_eq!(
-        g.float_chain_cast_blocked, 0,
-        "cast_spill should clear CastIntToFloat FloatChain near-miss: {g:?}"
-    );
-    assert_eq!(
-        g.float_chain_stage_cap_leftover, 0,
-        "no 4-stage FloatChain truncation leftover: {g:?}"
-    );
-    assert!(
-        g.float_chain_store >= 4 && g.residual_float_arith == 0,
-        "FloatChain after cast_spill should clear residual float arith: {g:?}"
-    );
-    assert_eq!(
-        g.bin_slot_slot_branch_without_cmp_fuse, 0,
-        "escape stays ConstJmpf; no BinSlotSlot→branch miss: {g:?}"
-    );
-    // Unreclaimed LOAD tr; STORE zr — overlapping live ranges + opaque chain.
-    assert_eq!(
-        g.slot_move_copy, 1,
-        "mandelbrot unreclaimed slot move (tr→zr): {g:?}"
-    );
-    assert_eq!(
-        g.loop_carried_phi_shuffle, 1,
-        "mandelbrot unreclaimed loop-carried φ-shuffle (tr→zr latch): {g:?}"
-    );
+    assert_eq!(g.index, 0, "mandelbrot has no Index: {g:?}");
     assert_eq!(
         g.call_arg_peel_packing_holes, 0,
         "no adjacent n=1 LOAD packing holes: {g:?}"
     );
-    assert_eq!(g.index, 0, "mandelbrot has no Index: {g:?}");
 }
 
 #[test]

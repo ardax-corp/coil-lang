@@ -166,7 +166,7 @@ impl Scan<'_> {
                 }
                 None => self.walk_loop_body(ast, body, consts),
             },
-            Expression::Loop { body, .. } | Expression::For { body, .. } => {
+            Expression::Loop { body, .. } => {
                 self.walk_loop_body(ast, body, consts);
             }
             _ => {}
@@ -503,19 +503,6 @@ fn collect_assigned(ast: &Output<'_>, out: &mut HashSet<String>) {
             collect_assigned(scrutinee, out);
             for arm in arms {
                 collect_assigned(&arm.body, out);
-            }
-        }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            for part in [init.as_ref(), Some(cond), step.as_ref(), Some(body)]
-                .into_iter()
-                .flatten()
-            {
-                collect_assigned(part, out);
             }
         }
         Expression::Loop { iterable, body, .. } => {

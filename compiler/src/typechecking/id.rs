@@ -307,22 +307,6 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
             pre_walk(body, table);
         }
 
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(init) = init {
-                pre_walk(init, table);
-            }
-            pre_walk(cond, table);
-            pre_walk(body, table);
-            if let Some(step) = step {
-                pre_walk(step, table);
-            }
-        }
-
         // Patterns have no NodeId; walk bodies only (lockstep with infer).
         Expression::Match { scrutinee, arms } => {
             pre_walk(scrutinee, table);

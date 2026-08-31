@@ -2423,12 +2423,13 @@ fn main() {}
         );
     }
 
-    /// `#[ffi]` signature-only fns become ExternBlock on typecheck too.
+    /// Compile-time FFI via `extern "lib"` is visible to typecheck.
     #[test]
     fn typecheck_project_sees_ffi() {
         let src = r#"
-#[ffi(lib = "c")]
-fn c_abs(int x) -> int;
+extern "c" {
+    fn c_abs(int x) -> int;
+}
 
 fn main() {}
 "#;
@@ -2436,21 +2437,19 @@ fn main() {}
         let errors = typecheck_errors(&file);
         assert!(
             errors.is_empty(),
-            "#[ffi] signature should be visible to typecheck_project, got {errors:?}"
+            "extern signature should be visible to typecheck_project, got {errors:?}"
         );
     }
 
-    /// Expand diagnostics fire on typecheck (signature-only without #[ffi]).
+    /// Expand diagnostics fire on typecheck (orphan signature-only fn).
     #[test]
     fn typecheck_project_runs_attr_expand() {
-        let src = "fn foo() -> int; fn main() {}";
+        let src = "#[ffi(lib = \"c\")] fn foo() -> int { return 0; } fn main() {}";
         let (_dir, file) = temp_hy("expand", src);
         let errors = typecheck_errors(&file);
         assert!(
-            errors
-                .iter()
-                .any(|m| m.contains("Signature-only function requires `#[ffi(...)]`")),
-            "typecheck_project must expand attrs, got {errors:?}"
+            errors.iter().any(|m| m.contains("`#[ffi]` is not supported")),
+            "typecheck_project must reject #[ffi], got {errors:?}"
         );
     }
 }

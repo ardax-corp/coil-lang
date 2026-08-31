@@ -210,8 +210,10 @@ impl IlModule {
         // operand-height at the latch, so it also waits until after GVN.
         let run_slot_promote_tell = per.slot_promote_tell;
         let run_seek_back_edge = per.seek_back_edge;
+        let run_ssa_gvn = per.ssa_gvn;
         per.slot_promote_tell = false;
         per.seek_back_edge = false;
+        per.ssa_gvn = false;
 
         if self.funcs.is_empty() {
             let (mut ops, remap, func_maps) = self.to_flat();
@@ -246,12 +248,15 @@ impl IlModule {
                 crate::profile::instrument_for_pgo_named_mut(&mut body.ops, &body.meta.name);
                 continue;
             }
-            super::gvn::cfg_gvn_with(&mut body.ops, per.ssa_gvn);
+            super::gvn::cfg_gvn_with(&mut body.ops, false);
             if run_seek_back_edge {
                 opt::seek_normalize_back_edges(&mut body.ops, body.meta.entry_sp);
             }
             if run_slot_promote_tell {
                 opt::slot_promote_at(&mut body.ops, body.meta.entry_sp);
+            }
+            if run_ssa_gvn {
+                super::gvn::ssa_gvn(&mut body.ops);
             }
         }
 

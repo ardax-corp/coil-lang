@@ -73,21 +73,4 @@ test("nested array index") {
     assert(a[1][0] == 3)?;
 }
 
-// Runtime Index / StoreIndex contract (coil-website /docs/references/arrays):
-// variable OOB read → -1; OOB write → no-op (no panic).
-test("variable oob index yields minus one") {
-    let a = [10, 20, 30];
-    let hi = 3;
-    let neg = 0 - 1;
-    assert(a[hi] == -1)?;
-    assert(a[neg] == -1)?;
-}
-
-test("variable oob store is noop") {
-    let a = [10, 20, 30];
-    let hi = 99;
-    a[hi] = 7;
-    assert(a[0] == 10)?;
-    assert(a[1] == 20)?;
-    assert(a[2] == 30)?;
-}
+// Runtime Index / StoreIndex panic on OOB (constant-index OOB is a compile error).

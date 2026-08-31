@@ -859,6 +859,9 @@ pub struct Compiler {
     /// True while compiling an `impl` method — Function resets locals
     /// and reserves slot 0 for `self`.
     compiling_method: bool,
+    /// True while lowering a monomorphized clone. Bound-method hints still
+    /// point at `__dictN`; the clone has ground types and must CALL instead.
+    compiling_mono_clone: bool,
 
     /// True while compiling a function whose return type is inferred
     /// as `Result<T, E>` via `raise` / `?` (wrap bare `return` in `Ok`).
@@ -1020,6 +1023,7 @@ impl Default for Compiler {
             decorated_class_ctors: HashMap::new(),
             active_fn_name: None,
             compiling_method: false,
+            compiling_mono_clone: false,
             compiling_result_mode: false,
             compiling_result_ok_is_result: false,
             force_heap_option: false,

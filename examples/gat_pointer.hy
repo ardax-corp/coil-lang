@@ -13,7 +13,7 @@ trait Pointer<P: * -> *> {
     fn deref<T>(P<T> ptr) -> Ref<T>;
 }
 
-impl Pointer<Option> {
+impl Pointer for Option {
     type Ref<T> = T;
     pub fn deref<T>(Option<T> ptr) -> T {
         return match ptr {

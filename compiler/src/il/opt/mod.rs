@@ -5,8 +5,8 @@
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
 //! on the table row, not a match in the driver loop). PGO instrumenting still
 //! runs cleanup only. [`super::IlModule::optimize_and_flatten`] still defers
-//! `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`, and
-//! `slot_promote_tell` around per-body `cfg_gvn` — those are not folded into
+//! `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
+//! `slot_promote_tell`, and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
 //! the OptLevel table. Fuse-select stays in `lower_optimized`.
 //!
 //! Per-pass contracts (input, output, refusals, solo tests): see `README.md` in this directory.
@@ -52,9 +52,9 @@ pub struct OptimizeOptions {
     /// slot out of the frame. Runs last, after every slot-tracking pass.
     pub slot_promote_tell: bool,
     /// `Seek` the latch of a natural loop back to the forward-edge cursor when
-    /// that makes the header `Known` and exposes in-loop self-stores (COI-97).
-    /// Off: innermost mandelbrot has no such self-stores; outer-loop Seek
-    /// splits FloatChainStore fuse windows.
+    /// that makes the header `Known` and exposes in-loop self-stores.
+    /// Aggressive-only: Seek poisons operand-height at the latch (cursor), not
+    /// to protect fused opcodes.
     pub seek_back_edge: bool,
     /// Full-unroll counted natural loops with a known trip count ≤ 8.
     pub loop_unroll: bool,

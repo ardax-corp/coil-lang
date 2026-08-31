@@ -472,7 +472,7 @@ fn orphan_instance_across_modules_is_rejected() {
         (
             "src/main.hy",
             "use iface::{Foreign};\n\
-             impl Foreign<int> { pub fn id(int x) -> int { return x; } }\n\
+             impl Foreign for int { pub fn id(int x) -> int { return x; } }\n\
              fn main() { }\n",
         ),
         ("src/iface.hy", "trait Foreign<T> { fn id(T x) -> int; }\n"),

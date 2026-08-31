@@ -628,22 +628,7 @@ impl Scan<'_> {
                     }
                 }
             }
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                if let Some(i) = init {
-                    self.walk(i, on_return);
-                }
-                self.walk(cond, on_return);
-                if let Some(s) = step {
-                    self.walk(s, on_return);
-                }
-                self.walk_guarded(body, on_return, ParGuard::Opaque);
-            }
-            Expression::Loop { iterable, body, .. } => {
+        Expression::Loop { iterable, body, .. } => {
                 self.walk(iterable, on_return);
                 self.walk_guarded(body, on_return, ParGuard::Opaque);
             }
@@ -746,17 +731,6 @@ fn contains_return(ast: &Output<'_>) -> bool {
         }
         Expression::Match { scrutinee, arms } => {
             contains_return(scrutinee) || arms.iter().any(|a| contains_return(&a.body))
-        }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            init.as_ref().is_some_and(contains_return)
-                || contains_return(cond)
-                || step.as_ref().is_some_and(contains_return)
-                || contains_return(body)
         }
         Expression::Loop { iterable, body, .. } => {
             contains_return(iterable) || contains_return(body)
@@ -1083,21 +1057,6 @@ fn collect_const_calls(
             for arm in arms {
                 collect_const_calls(&arm.body, work, out);
             }
-        }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(i) = init {
-                collect_const_calls(i, work, out);
-            }
-            collect_const_calls(cond, work, out);
-            if let Some(s) = step {
-                collect_const_calls(s, work, out);
-            }
-            collect_const_calls(body, work, out);
         }
         Expression::Loop {
             identifier,

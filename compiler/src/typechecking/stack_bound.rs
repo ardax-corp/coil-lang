@@ -603,21 +603,6 @@ fn walk_self_calls<'a>(
                 walk_self_calls(&arm.body, fn_name, out);
             }
         }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(i) = init {
-                walk_self_calls(i, fn_name, out);
-            }
-            walk_self_calls(cond, fn_name, out);
-            if let Some(s) = step {
-                walk_self_calls(s, fn_name, out);
-            }
-            walk_self_calls(body, fn_name, out);
-        }
         Expression::Loop {
             identifier,
             iterable,
@@ -1307,57 +1292,6 @@ fn walk_entry_sites(
                     dynamic,
                 );
             }
-        }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(i) = init {
-                walk_entry_sites(
-                    i,
-                    inside,
-                    recursive,
-                    shapes,
-                    wrapper_consts,
-                    env,
-                    consts,
-                    dynamic,
-                );
-            }
-            walk_entry_sites(
-                cond,
-                inside,
-                recursive,
-                shapes,
-                wrapper_consts,
-                env,
-                consts,
-                dynamic,
-            );
-            if let Some(s) = step {
-                walk_entry_sites(
-                    s,
-                    inside,
-                    recursive,
-                    shapes,
-                    wrapper_consts,
-                    env,
-                    consts,
-                    dynamic,
-                );
-            }
-            walk_entry_sites(
-                body,
-                inside,
-                recursive,
-                shapes,
-                wrapper_consts,
-                env,
-                consts,
-                dynamic,
-            );
         }
         Expression::Loop {
             identifier,

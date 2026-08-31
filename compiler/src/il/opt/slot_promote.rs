@@ -24,10 +24,10 @@
 //!   `s`) and a unique in-loop reaching def of `t` can be redirected to `s`
 //!   without interfering with a live `s`. Opaque/`Byte` between refuse; true
 //!   φ merges (multi-pred) refuse. Mandelbrot `tr`/`zr` stays refused.
-//! - Seek-normalize (COI-97, flag off): `Seek` the latch of an innermost
-//!   raising loop to the forward-edge cursor, then drop in-loop self-stores.
-//!   Mandelbrot's inner body has none; outer-loop Seek splits FloatChainStore.
-//!   `Seek` is `tell::Set` and does not refuse the body.
+//! - Seek-normalize (COI-97, flag off on Standard): `Seek` the latch of an
+//!   innermost raising loop to the forward-edge cursor, then drop in-loop
+//!   self-stores. Off on Standard because the header cursor is `Unknown` without
+//!   Seek — not to protect fused opcodes. `Aggressive` / `-O3` turns it on.
 //! - Uses `il::tell` known-cursor as a gate on LOAD→producer replacement
 //!   (same proof surface as `copy_prop`); dead stores are left to
 //!   `dead_store_at` except for the alias-elide cleanup above.

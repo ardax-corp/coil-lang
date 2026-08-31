@@ -8,7 +8,7 @@ trait Container<F: * -> *> {
     fn first<A>(F<A> xs) -> A;
 }
 
-impl Container<Option> {
+impl Container for Option {
     pub fn first<A>(Option<A> xs) -> A {
         return match xs {
             Option::Some(v) => v,

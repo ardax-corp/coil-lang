@@ -42,14 +42,20 @@ impl Checker {
         self.registering_overloadable_fn = self.current_typeclass.is_none();
 
         let test_desc = parser::ast::attr_test_desc(attrs, name);
-        let prev_test_result_mode = if let Some(desc) = &test_desc {
-            self.test_case_names.push(desc.clone());
-            let prev = self.fn_result_mode.take();
-            self.fn_result_mode = Some((unit_ty(), string()));
-            prev
-        } else {
-            None
-        };
+        if test_desc.is_some() {
+            self.messages.push({
+                let mut m = Message::error(
+                    ErrorCode::GenericTypeError,
+                    "`#[test]` on `fn` is not supported; use `test(\"desc\") { … }`".to_string(),
+                    range.clone(),
+                );
+                m.push(Label::new(
+                    "write a harness test case instead of decorating a function".to_string(),
+                    range.clone(),
+                ));
+                m
+            });
+        }
 
         self.infer_function(
             name,
@@ -64,11 +70,6 @@ impl Checker {
             None,
             false,
         );
-
-        if test_desc.is_some() {
-            self.result_mode_fns.insert(name.to_string());
-            self.fn_result_mode = prev_test_result_mode;
-        }
 
         self.registering_overloadable_fn = prev_overloadable;
         unit_ty()
@@ -173,7 +174,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 "Function declaration must have a body".into(),
                 range.clone(),
-                Some("add a block `{ … }` or use `#[ffi(...)]` for foreign declarations".into()),
+                Some("add a block `{ … }` or declare FFI with `extern \"lib\" { fn …; }`".into()),
             );
         };
         // Set up type parameter environment.
@@ -397,10 +398,24 @@ impl Checker {
                     .as_ref()
                     .map(|t| apply_ty_prune(&self.subst, t))
                     .unwrap_or_else(unit_ty);
-                // Unit / open vars may fall through (codegen emits a unit
-                // epilogue with defers). Concrete non-unit returns must exit.
-                let allow_fallthrough = matches!(&ret, Ty::Var(_))
-                    || matches!(&ret, Ty::Con(n) if n == "unknown")
+                // Unannotated / still-open returns that fall through are unit,
+                // not an invented typed value (codegen used to emit `CONST 0`).
+                if matches!(&ret, Ty::Var(_)) {
+                    self.unify(&ret, &unit_ty(), &range, "missing return");
+                } else if self.fn_result_mode.is_some()
+                    && let Some((ok, _)) = result_ok_err(&ret)
+                {
+                    let ok = apply_ty_prune(&self.subst, &ok);
+                    if matches!(&ok, Ty::Var(_)) {
+                        self.unify(&ok, &unit_ty(), &range, "missing return");
+                    }
+                }
+                let ret = self
+                    .current_return_ty
+                    .as_ref()
+                    .map(|t| apply_ty_prune(&self.subst, t))
+                    .unwrap_or_else(unit_ty);
+                let allow_fallthrough = matches!(&ret, Ty::Con(n) if n == "unknown")
                     || matches!(&ret, Ty::Never)
                     || matches!(&ret, Ty::Con(n) if n == crate::typechecking::ty::UNIT)
                     || matches!(&ret, Ty::Tuple(items) if items.is_empty())
@@ -408,8 +423,7 @@ impl Checker {
                         && result_ok_err(&ret)
                             .map(|(ok, _)| {
                                 let ok = apply_ty_prune(&self.subst, &ok);
-                                matches!(&ok, Ty::Var(_))
-                                    || matches!(&ok, Ty::Con(n) if n == crate::typechecking::ty::UNIT)
+                                matches!(&ok, Ty::Con(n) if n == crate::typechecking::ty::UNIT)
                                     || matches!(&ok, Ty::Tuple(items) if items.is_empty())
                             })
                             .unwrap_or(false));

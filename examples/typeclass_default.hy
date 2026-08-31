@@ -11,7 +11,7 @@ trait Tiny<T> {
     }
 }
 
-impl Tiny<int> {
+impl Tiny for int {
     pub fn base(int x) -> int {
         return x;
     }

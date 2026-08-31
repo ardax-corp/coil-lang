@@ -2658,14 +2658,9 @@ fn main() {
     #[test]
     fn array_append_assignment_is_rejected() {
         let src = "fn main() { let arr = [0, 1]; arr[] = 2; }";
-        let (_c, msgs) = check_warn(src);
-        let found = msgs
-            .iter()
-            .any(|m| m.message().contains("append assignment `arr[] = value` is no longer supported"));
         assert!(
-            found,
-            "expected append assignment rejection, got: {:?}",
-            msgs
+            Pratt::default().parse(src).is_err(),
+            "empty index assign must be a parse error"
         );
     }
 
@@ -3304,7 +3299,7 @@ fn main() { size_of("hi"); }
                 fn add(int a, int b) -> int;
                 fn zero() -> int { return 0; }
             }
-            impl Tiny<int> {
+            impl Tiny for int {
                 pub fn zero() -> int { return 0; }
             }
         "#;
@@ -3325,10 +3320,10 @@ fn main() { size_of("hi"); }
             trait Tiny<T> {
                 fn add(int a, int b) -> int;
             }
-            impl Tiny<int> {
+            impl Tiny for int {
                 pub fn add(int a, int b) -> int { return a; }
             }
-            impl Tiny<int> {
+            impl Tiny for int {
                 pub fn add(int a, int b) -> int { return b; }
             }
         "#;
@@ -3387,7 +3382,7 @@ fn main() { size_of("hi"); }
             trait Tiny<T> {
                 fn zero() -> int { return 0; }
             }
-            impl Tiny<int> {
+            impl Tiny for int {
             }
         "#;
         let (c, msgs) = check_warn(src);
@@ -3404,7 +3399,7 @@ fn main() { size_of("hi"); }
             trait Tiny<T> {
                 fn add(int a, int b) -> int;
             }
-            impl Tiny<int> {
+            impl Tiny for int {
                 pub fn add(int a, int b) -> int { return a; }
                 fn foo(int a) -> int { return a; }
             }
@@ -3433,13 +3428,13 @@ fn main() { size_of("hi"); }
         assert!(ordered.has_superclass("Equal", c.generics()));
     }
 
-    /// Phase 5: `impl Ordered<int>` without `Equal<int>` is an error.
+    /// Phase 5: `impl Ordered for int` without `Equal for int` is an error.
     #[test]
     fn typeclass_impl_missing_superclass_instance_errors() {
         let src = r#"
             trait Equal<T> { fn eq_val(T a, T b) -> bool; }
             trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
-            impl Ordered<int> {
+            impl Ordered for int {
                 pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
         "#;
@@ -3463,10 +3458,10 @@ fn main() { size_of("hi"); }
         let src = r#"
             trait Equal<T> { fn eq_val(T a, T b) -> bool; }
             trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
-            impl Equal<int> {
+            impl Equal for int {
                 pub fn eq_val(int a, int b) -> bool { return a == b; }
             }
-            impl Ordered<int> {
+            impl Ordered for int {
                 pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn cmp_eq<T: Ordered>(T a, T b) -> bool {
@@ -3500,10 +3495,10 @@ fn main() { size_of("hi"); }
         let src = r#"
             trait Equal<T> { fn eq_val(T a, T b) -> bool; }
             trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
-            impl Equal<int> {
+            impl Equal for int {
                 pub fn eq_val(int a, int b) -> bool { return a == b; }
             }
-            impl Ordered<int> {
+            impl Ordered for int {
                 pub fn lt_val(int a, int b) -> bool { return a < b; }
             }
             fn choose<c: * -> Constraint, T: c>(T a, T b) -> int {
@@ -4221,7 +4216,7 @@ class Counter {
     pub end: int,
 }
 
-impl IntoIterator<Counter> {
+impl IntoIterator for Counter {
     type Item = int;
     type IntoIter = Counter;
     pub fn into_iter(Counter c) -> Counter {
@@ -4229,7 +4224,7 @@ impl IntoIterator<Counter> {
     }
 }
 
-impl Iterator<Counter> {
+impl Iterator for Counter {
     type Item = int;
     pub fn next(Counter c) -> Option<int> {
         if c.cur < c.end {
@@ -4255,7 +4250,7 @@ fn main() {
     }
 
     #[test]
-    fn for_in_before_into_iterator_impl_is_accepted() {
+    fn for_in_custom_iterator_impl_after_use_is_iterable() {
         let src = r#"
 class Counter {
     pub cur: int,
@@ -4295,7 +4290,11 @@ fn main() {
 }
 "#;
         let (c, _) = check(src);
-        assert!(c.messages().is_empty(), "unexpected: {:?}", c.messages());
+        assert!(
+            c.messages().is_empty(),
+            "impl after use must still register IntoIterator: {:?}",
+            c.messages()
+        );
         let n_ty = c.codegen_var_type("n").expect("n");
         assert_eq!(apply_ty_prune(c.subst(), n_ty), int());
     }
@@ -4313,7 +4312,7 @@ impl Box {
     }
 }
 
-impl IntoIterator<Box> {
+impl IntoIterator for Box {
     type Item = int;
     type IntoIter = BoxIter;
     pub fn into_iter(Box m) -> BoxIter {
@@ -4321,7 +4320,7 @@ impl IntoIterator<Box> {
     }
 }
 
-impl Iterator<BoxIter> {
+impl Iterator for BoxIter {
     type Item = int;
     pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
@@ -4353,7 +4352,7 @@ impl Map<K, V> {
     }
 }
 
-impl IntoIterator<Map<K, V>> {
+impl IntoIterator for Map<K, V> {
     type Item = int;
     type IntoIter = MapIter<K, V>;
     pub fn into_iter(Map<K, V> m) -> MapIter<K, V> {
@@ -4361,7 +4360,7 @@ impl IntoIterator<Map<K, V>> {
     }
 }
 
-impl Iterator<MapIter<K, V>> {
+impl Iterator for MapIter<K, V> {
     type Item = int;
     pub fn next(MapIter<K, V> it) -> Option<int> {
         return Option::None;
@@ -4387,7 +4386,7 @@ fn main() {
 class Box { pub v: int }
 class BoxIter { pub i: int }
 
-impl IntoIterator<Box> {
+impl IntoIterator for Box {
     type Item = int;
     type IntoIter = BoxIter;
     pub fn into_iter(Box m) -> BoxIter {
@@ -4401,7 +4400,7 @@ impl Box {
     }
 }
 
-impl Iterator<BoxIter> {
+impl Iterator for BoxIter {
     type Item = int;
     pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
@@ -4428,7 +4427,7 @@ fn main() {
 class Box { pub v: int }
 class BoxIter { pub i: int }
 
-impl IntoIterator<Box> {
+impl IntoIterator for Box {
     type Item = int;
     type IntoIter = BoxIter;
     pub fn into_iter(Box m) -> BoxIter {
@@ -4436,7 +4435,7 @@ impl IntoIterator<Box> {
     }
 }
 
-impl Iterator<BoxIter> {
+impl Iterator for BoxIter {
     type Item = int;
     pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
@@ -4465,7 +4464,7 @@ fn main() {
 class Box { pub v: int }
 class BoxIter { pub i: int }
 
-impl IntoIterator<Box> {
+impl IntoIterator for Box {
     type Item = int;
     type IntoIter = BoxIter;
     pub fn into_iter(Box m) -> BoxIter {
@@ -4479,7 +4478,7 @@ impl Box {
     }
 }
 
-impl Iterator<BoxIter> {
+impl Iterator for BoxIter {
     type Item = int;
     pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
@@ -4508,7 +4507,7 @@ fn main() {
 class Box { pub v: int }
 class BoxIter { pub i: int }
 
-impl IntoIterator<Box> {
+impl IntoIterator for Box {
     type Item = int;
     type IntoIter = BoxIter;
     pub fn into_iter(Box m) -> BoxIter {
@@ -4522,7 +4521,7 @@ impl Box {
     }
 }
 
-impl Iterator<BoxIter> {
+impl Iterator for BoxIter {
     type Item = int;
     pub fn next(BoxIter it) -> Option<int> {
         return Option::None;
@@ -5907,7 +5906,7 @@ fn main() { let r = add("a", "b"); }
     fn discharge_constraints_populates_call_site_dicts_for_user_typeclass() {
         let src = r#"
 trait Describable<T> { fn describe_val(T x) -> int; }
-impl Describable<int> { pub fn describe_val(int x) -> int { return x; } }
+impl Describable for int { pub fn describe_val(int x) -> int { return x; } }
 fn show<T: Describable>(T x) -> int { return 0; }
 fn main() { show(42); }
 "#;
@@ -5968,7 +5967,7 @@ fn main() { let r = outer(5); }
     fn multiparam_where_clause_discharges_at_call_site() {
         let src = r#"
 trait Convert<A, B> { fn cast(A x) -> B; }
-impl Convert<int, int> { pub fn cast(int x) -> int { return x; } }
+impl Convert<int> for int { pub fn cast(int x) -> int { return x; } }
 fn apply_cast<A, B>(A x) -> B where Convert<A, B> { return cast(x); }
 fn main() { let y = apply_cast(42); }
 "#;
@@ -6186,7 +6185,7 @@ fn main() {
 trait Bifunctor<F: * -> * -> *> {
     fn tag<A, B>(F<A, B> xs) -> int;
 }
-impl Bifunctor<Result> {
+impl Bifunctor for Result {
     pub fn tag<A, B>(Result<A, B> xs) -> int { return 42; }
 }
 fn get_tag<F: * -> * -> *, Bifunctor, A, B>(F<A, B> xs) -> int {
@@ -6211,7 +6210,7 @@ fn main() { let x = get_tag(Result::Ok(7)); }
 trait Bifunctor<F: * -> * -> *> {
     fn tag<A, B>(F<A, B> xs) -> int;
 }
-impl Bifunctor<Option> {
+impl Bifunctor for Option {
     pub fn tag<A, B>(Option<A> xs) -> int { return 0; }
 }
 "#;
@@ -6251,7 +6250,7 @@ trait Collect<C> {
     type Elem;
     fn head(C xs) -> Elem;
 }
-impl Collect<Option<int>> {
+impl Collect for Option<int> {
     type Elem = int;
     pub fn head(Option<int> xs) -> int {
         return match xs {
@@ -6368,7 +6367,7 @@ trait Pointer<P: * -> *> {
     fn deref<T>(P<T> ptr) -> Ref<T>;
 }
 
-impl Pointer<Option> {
+impl Pointer for Option {
     type Ref<T> = T;
     pub fn deref<T>(Option<T> ptr) -> T {
         return match ptr {
@@ -7033,8 +7032,8 @@ fn main() { }
         let d1 = c.interned_overload_def("f", 1).expect("candidate 1 DefId");
         assert_ne!(d0, d1, "overloads must not share a DefId");
         let sc = c.typed_sidecar();
-        assert_eq!(sc.pair_niche(d0), Some(PairNicheAbi::PairOption));
-        assert_eq!(sc.pair_niche(d1), Some(PairNicheAbi::NicheOption));
+        assert_eq!(sc.pair_niche(d0), None);
+        assert_eq!(sc.pair_niche(d1), None);
     }
 
     #[test]

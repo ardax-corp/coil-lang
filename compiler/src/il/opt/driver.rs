@@ -6,8 +6,8 @@
 //! records — `PassKind` is data on the row, not a match in the loop.
 //!
 //! `IlModule::optimize_and_flatten` still defers `multi_op_join_convoy`,
-//! `invert_guard_branch`, `seek_back_edge`, and `slot_promote_tell` around
-//! per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
+//! `invert_guard_branch`, `seek_back_edge`, `slot_promote_tell`, and `ssa_gvn`
+//! around per-body `cfg_gvn`. Those are not folded into this table. Fuse-select stays
 //! in `lower_optimized`.
 
 use super::super::op::IlOp;
@@ -447,17 +447,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: apply_invariant_store_elim,
     },
     PassSpec {
-        name: "ssa_gvn",
-        phase: Phase::Decision,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.ssa_gvn,
-        set_flag: |o| o.ssa_gvn = true,
-        apply: apply_ssa_gvn,
-    },
-    PassSpec {
         name: "escape_analysis",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -578,6 +567,17 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         set_flag: |o| o.slot_promote_tell = true,
         apply: apply_slot_promote_tell,
     },
+    PassSpec {
+        name: "ssa_gvn",
+        phase: Phase::Decision,
+        kind: PassKind::Generic,
+        floor: OptFloor::Standard,
+        omit_from_size: false,
+        seed_entry_tell_after: false,
+        gate: |o| o.ssa_gvn,
+        set_flag: |o| o.ssa_gvn = true,
+        apply: apply_ssa_gvn,
+    },
 ];
 
 /// D1 README production order (cleanup then decision).
@@ -595,7 +595,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "loop_bounds",
     "loop_unroll",
     "invariant_store_elim",
-    "ssa_gvn",
     "escape_analysis",
     "slot_promote",
     "clone_shared_return",
@@ -607,6 +606,7 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "block_reordering",
     "seek_back_edge",
     "slot_promote_tell",
+    "ssa_gvn",
 ];
 
 #[cfg(test)]
@@ -641,12 +641,10 @@ mod tests {
                 "dead_store",
                 "canon",
                 "algebraic",
-                "cast_spill",
                 "licm",
                 "loop_bounds",
                 "loop_unroll",
                 "invariant_store_elim",
-                "ssa_gvn",
                 "escape_analysis",
                 "slot_promote",
                 "clone_shared_return",
@@ -657,6 +655,7 @@ mod tests {
                 "branch_optimization",
                 "block_reordering",
                 "slot_promote_tell",
+                "ssa_gvn",
             ]
         );
     }

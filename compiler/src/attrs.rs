@@ -1,8 +1,8 @@
-//! Attribute expansion (`#[derive(...)]`, `#[ffi(...)]`, etc.).
+//! Attribute expansion (`#[derive(...)]`, user `attr`, etc.).
 //!
-//! Runs before the ID pre-walk and typechecking: desugars `#[ffi]` signature-only
-//! functions into `ExternBlock` nodes and expands `#[derive]` into synthetic
-//! `TypeClassImpl` siblings.
+//! Runs before the ID pre-walk and typechecking: expands `#[derive]` into
+//! synthetic `TypeClassImpl` siblings. Compile-time FFI is `extern "lib" { fn …; }`
+//! only — `#[ffi]` is rejected.
 
 use std::collections::{HashMap, HashSet};
 
@@ -91,12 +91,6 @@ pub fn expand_program(ast: &mut Output<'_>) -> ExpandResult {
     }
 }
 
-struct FfiMeta<'a> {
-    lib: String,
-    symbol: Option<&'a str>,
-    variadic: bool,
-}
-
 fn derive_traits_from_attrs<'a>(attrs: &[Attribute<'a>]) -> Vec<&'a str> {
     let mut out = Vec::new();
     for attr in attrs {
@@ -136,10 +130,10 @@ fn validate_attrs(
                 span.into_range(),
             ));
         }
-        if attr.name == "test" && target != "function" {
+        if attr.name == "test" {
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
-                format!("Attribute `test` is not valid on {}", target),
+                "`#[test]` is not supported; use `test(\"desc\") { … }`".to_string(),
                 span.into_range(),
             ));
         }
@@ -158,86 +152,6 @@ fn validate_attrs(
             ));
         }
     }
-}
-
-fn parse_ffi_attr<'a>(
-    attrs: &[Attribute<'a>],
-    messages: &mut Vec<Message>,
-    span: SimpleSpan,
-) -> Option<FfiMeta<'a>> {
-    let ffi_attr = attrs.iter().find(|a| a.name == "ffi")?;
-    let AttrArgs::KeyValues(kvs) = &ffi_attr.args else {
-        messages.push(Message::error(
-            ErrorCode::GenericTypeError,
-            "Attribute `ffi` requires key/value arguments: `#[ffi(lib = \"c\", name = \"sym\")]`"
-                .to_string(),
-            span.into_range(),
-        ));
-        return None;
-    };
-    let mut lib: Option<String> = None;
-    let mut symbol: Option<&'a str> = None;
-    let mut variadic = false;
-    for (key, lit) in kvs {
-        match *key {
-            "lib" => match lit {
-                AttrLit::String(s) => lib = Some((*s).to_string()),
-                _ => messages.push(Message::error(
-                    ErrorCode::GenericTypeError,
-                    "`ffi` attribute `lib` must be a string literal".to_string(),
-                    span.into_range(),
-                )),
-            },
-            "name" => match lit {
-                AttrLit::String(s) => symbol = Some(s),
-                _ => messages.push(Message::error(
-                    ErrorCode::GenericTypeError,
-                    "`ffi` attribute `name` must be a string literal".to_string(),
-                    span.into_range(),
-                )),
-            },
-            "variadic" => match lit {
-                AttrLit::Bool(b) => variadic = *b,
-                _ => messages.push(Message::error(
-                    ErrorCode::GenericTypeError,
-                    "`ffi` attribute `variadic` must be `true` or `false`".to_string(),
-                    span.into_range(),
-                )),
-            },
-            other => messages.push(Message::error(
-                ErrorCode::GenericTypeError,
-                format!("Unknown key `{}` in `#[ffi(...)]`", other),
-                span.into_range(),
-            )),
-        }
-    }
-    let lib = lib.or_else(|| {
-        messages.push(Message::error(
-            ErrorCode::GenericTypeError,
-            "`#[ffi(...)]` requires `lib = \"...\"`".to_string(),
-            span.into_range(),
-        ));
-        None
-    })?;
-    Some(FfiMeta {
-        lib,
-        symbol,
-        variadic,
-    })
-}
-
-fn make_extern_block<'a>(
-    span: SimpleSpan,
-    library: String,
-    decl: ExternFunction<'a>,
-) -> Output<'a> {
-    at(
-        span,
-        Expression::ExternBlock {
-            library,
-            declarations: vec![decl],
-        },
-    )
 }
 
 fn collect_and_desugar_attr_decls(
@@ -369,17 +283,6 @@ fn attr_body_crosses_yield(body: &Output<'_>) -> bool {
             Expression::Match { scrutinee, arms } => {
                 walk(scrutinee, false)
                     || arms.iter().any(|arm| walk(&arm.body, false))
-            }
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                init.as_ref().is_some_and(|e| walk(e, false))
-                    || walk(cond, false)
-                    || step.as_ref().is_some_and(|e| walk(e, false))
-                    || walk(body, false)
             }
             Expression::Loop { iterable, body, .. } => walk(iterable, false) || walk(body, false),
             Expression::Add(l, r)
@@ -695,21 +598,6 @@ fn collect_free_idents<'a>(
             for arm in arms {
                 collect_free_idents(&arm.body, bound, free);
             }
-        }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(i) = init {
-                collect_free_idents(i, bound, free);
-            }
-            collect_free_idents(cond, bound, free);
-            if let Some(s) = step {
-                collect_free_idents(s, bound, free);
-            }
-            collect_free_idents(body, bound, free);
         }
         Expression::Loop {
             identifier,
@@ -1257,20 +1145,6 @@ fn rewrite_expr_inline<'a>(
                 },
             )
         }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => at(
-            span,
-            Expression::For {
-                init: init.as_ref().map(|e| rw(e)),
-                cond: rw(cond),
-                step: step.as_ref().map(|e| rw(e)),
-                body: rw(body),
-            },
-        ),
         Expression::Loop {
             identifier,
             iterable,
@@ -1893,7 +1767,7 @@ fn expand_decls<'a>(
     while i < decls.len() {
         let span = decls[i].0;
 
-        // `#[ffi]` signature-only function -> `extern` block lowering input.
+        // Compile-time FFI is `extern "lib" { fn …; }` only.
         if let Expression::Function {
             docs: _,
             attrs,
@@ -1954,46 +1828,16 @@ fn expand_decls<'a>(
                     );
                 }
             }
-            if is_ffi_sig {
-                if let Some(ffi) = parse_ffi_attr(attrs, &mut messages, span) {
-                    if *is_coro {
-                        messages.push(Message::error(
-                            ErrorCode::GenericTypeError,
-                            "`#[ffi]` cannot be applied to `async fn`".to_string(),
-                            span.into_range(),
-                        ));
-                    } else if attrs.iter().any(|a| a.name == "test") {
-                        messages.push(Message::error(
-                            ErrorCode::GenericTypeError,
-                            "`#[ffi]` cannot be combined with `#[test]`".to_string(),
-                            span.into_range(),
-                        ));
-                    } else {
-                        let zs_name = *name;
-                        let c_sym = ffi.symbol.unwrap_or(zs_name);
-                        let extern_fn = ExternFunction {
-                            name: zs_name,
-                            symbol: if c_sym != zs_name { Some(c_sym) } else { None },
-                            args: args.clone(),
-                            returns: returns.clone(),
-                            variadic: ffi.variadic,
-                        };
-                        decls[i] = make_extern_block(span, ffi.lib, extern_fn);
-                        i += 1;
-                        continue;
-                    }
-                } else if !attrs.iter().any(|a| a.name == "ffi") {
-                    messages.push(Message::error(
-                        ErrorCode::GenericTypeError,
-                        "Signature-only function requires `#[ffi(...)]`".to_string(),
-                        span.into_range(),
-                    ));
-                }
-            } else if attrs.iter().any(|a| a.name == "ffi") {
+            if attrs.iter().any(|a| a.name == "ffi") {
                 messages.push(Message::error(
                     ErrorCode::GenericTypeError,
-                    "`#[ffi]` requires a signature-only function (`fn name(...) -> T;`)"
-                        .to_string(),
+                    "`#[ffi]` is not supported; use `extern \"lib\" { fn …; }`".to_string(),
+                    span.into_range(),
+                ));
+            } else if is_ffi_sig {
+                messages.push(Message::error(
+                    ErrorCode::GenericTypeError,
+                    "Signature-only function requires `extern \"lib\" { fn …; }`".to_string(),
                     span.into_range(),
                 ));
             }

@@ -334,46 +334,28 @@
 
     // ── typeclass impl (primitive type args) ───────────────────────────────────
 
-    /// `impl Num<int> { fn add(int a, int b) -> int {} }` → `TypeClassImpl`.
     #[test]
-    fn typeclass_impl_with_primitive_type_arg_parses() {
-        match decl_ast!("impl Num<int> { fn add(int a, int b) -> int {} }") {
+    fn typeclass_impl_uses_for_form() {
+        match decl_ast!("impl Num for int { fn add(int a, int b) -> int {} }") {
             Expression::TypeClassImpl { class, args, .. } => {
                 assert_eq!(class, "Num");
                 assert_eq!(args.len(), 1);
-                // The single arg should be `Type("int")`.
                 assert!(matches!(args[0].1.as_ref(), Expression::Type("int")));
             }
             other => panic!("expected TypeClassImpl, got {:?}", other),
         }
     }
 
-    /// `impl Show<string> { fn show(string s) -> string {} }` — string arg.
     #[test]
-    fn typeclass_impl_with_string_type_arg_parses() {
-        match decl_ast!("impl Show<string> { fn show(string s) -> string {} }") {
-            Expression::TypeClassImpl { class, args, .. } => {
-                assert_eq!(class, "Show");
-                assert_eq!(args.len(), 1);
-                assert!(matches!(args[0].1.as_ref(), Expression::Type("string")));
-            }
-            other => panic!("expected TypeClassImpl, got {:?}", other),
-        }
-    }
-
-    /// `impl Show<Point> { … }` — user enum / multi-char concrete type arg
-    /// must parse as `TypeClassImpl`, not an inherent `Implementation` for a
-    /// class named `Show` (Phase 4 `%v` / Show).
-    #[test]
-    fn typeclass_impl_with_user_type_arg_parses() {
-        match decl_ast!("impl Show<Point> { fn show(Point p) -> string {} }") {
-            Expression::TypeClassImpl { class, args, .. } => {
-                assert_eq!(class, "Show");
-                assert_eq!(args.len(), 1);
-                assert!(matches!(args[0].1.as_ref(), Expression::Type("Point")));
-            }
-            other => panic!("expected TypeClassImpl, got {:?}", other),
-        }
+    fn typeclass_angle_form_is_rejected() {
+        let result = Pratt::default()
+            .declaration()
+            .parse("impl Num<int> { fn add(int a, int b) -> int {} }")
+            .into_result();
+        assert!(
+            result.is_err(),
+            "expected `impl Trait<Type>` to fail; use `impl Trait for Type`"
+        );
     }
 
     // ── typeclass decl ─────────────────────────────────────────────────────────
@@ -697,11 +679,10 @@
         );
     }
 
-    /// TypeClassImpl Display: `impl Num<int> { … }`
+    /// TypeClassImpl Display: `impl Num for int { … }`
     #[test]
     fn typeclass_impl_display_round_trips() {
-        // Display prefers the Self-first `for` form.
-        let s = stmt!("impl Num<int> {}");
+        let s = stmt!("impl Num for int {}");
         assert_eq!(s, "impl Num for int {  }");
     }
 
@@ -804,7 +785,7 @@
     #[test]
     fn assoc_type_def_in_impl_parses() {
         match decl_ast!(
-            "impl Collect<Option<int>> { type Elem = int; fn head(Option<int> xs) -> int { return 0; } }"
+            "impl Collect for Option<int> { type Elem = int; fn head(Option<int> xs) -> int { return 0; } }"
         ) {
             Expression::TypeClassImpl { methods, .. } => {
                 assert!(
@@ -842,7 +823,7 @@
     #[test]
     fn generic_assoc_type_def_in_impl_parses() {
         match decl_ast!(
-            "impl Pointer<Box> { type Ref<T> = T; fn get<T>(Box p) -> T { return 0; } }"
+            "impl Pointer for Box { type Ref<T> = T; fn get<T>(Box p) -> T { return 0; } }"
         ) {
             Expression::TypeClassImpl { methods, .. } => {
                 let assoc = methods.iter().find_map(|m| match m.1.as_ref() {
@@ -943,19 +924,15 @@
     }
 
     #[test]
-    fn ffi_attr_signature_only_fn_parses() {
-        match decl_ast!("#[ffi(lib = \"c\", name = \"strlen\")] fn strlen(string s) -> int;") {
-            Expression::Function {
-                docs: _,
-                attrs, name, body, ..
-            } => {
-                assert_eq!(name, "strlen");
-                assert!(body.is_none());
-                assert_eq!(attrs.len(), 1);
-                assert_eq!(attrs[0].name, "ffi");
-            }
-            other => panic!("expected Function, got {:?}", other),
-        }
+    fn signature_only_fn_is_parse_error() {
+        assert!(
+            Pratt::default()
+                .declaration()
+                .parse("fn strlen(string s) -> int;")
+                .into_result()
+                .is_err(),
+            "orphan signature-only fn must be a parse error"
+        );
     }
 
     #[test]

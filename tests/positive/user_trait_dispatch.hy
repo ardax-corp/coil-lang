@@ -1,12 +1,12 @@
-// COI-78: user-trait method at a ground type vs the same trait under a
-// generic bound must agree on the result. Dispatch differs (CALL vs
-// dictionary CallIndirect) but the ABI is one dictionary convention.
+// Ground user-trait methods emit CALL. The same method under an open
+// generic bound uses dictionary CallIndirect. Ground calls to those
+// generics specialize to CALL; dictionaries stay on the shared body.
 
 trait Measurable<T> {
     fn size(T x) -> int;
 }
 
-impl Measurable<int> {
+impl Measurable for int {
     pub fn size(int x) -> int {
         return x + 1;
     }
@@ -26,7 +26,7 @@ trait PairOps<T> {
     fn right(T x) -> int;
 }
 
-impl PairOps<int> {
+impl PairOps for int {
     pub fn left(int x) -> int {
         return x;
     }
@@ -56,6 +56,6 @@ test("multi-method user trait via dictionary") {
     assert(pair_right_of(3) == 13)?;
 }
 
-test("Length bound stays on dictionary ABI") {
+test("Length bound specializes at a ground call") {
     assert(len_of("ab") == 2)?;
 }

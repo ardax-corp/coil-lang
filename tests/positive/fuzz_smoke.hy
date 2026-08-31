@@ -42,12 +42,12 @@ test("dict with array field") {
     assert(d.xs[2] == 3)?;
 }
 
-test("match with default keyword") {
+test("match with wildcard") {
     let n = Tiny::C;
     let r = match n {
         Tiny::A => 10,
         Tiny::B => 20,
-        default => 99,
+        _ => 99,
     };
     assert(r == 99)?;
 }

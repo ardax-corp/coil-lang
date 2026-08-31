@@ -1,4 +1,4 @@
-// Expected: compile failure — free generic Option return (E0127).
+// Expected: E0127 — free generic `Option<T>` return is still a codegen hole.
 fn some_of<T>(T x) -> Option<T> {
     return Option::Some(x);
 }
