@@ -10,13 +10,13 @@ User code does not name these directly; the compiler emits them:
 | `DeclareFFI` | `declare` |
 | `FfiInvoke` | `invoke` |
 | `HostInvoke` | Host-registered closure. Standard table in `machine/src/host_natives.rs`. **120** = `stream_attach`, **121** = `stream_park` (live package IO, not leftover TLS/crypto stubs). See [io-reactor.md](io-reactor.md). |
-| `HostInvokeNiche` | Allocation-free niche `Option<T>` Vec native |
-| `OptionNicheToHeap` / `HeapOptionToNiche` | Cross a pointer-niche `Option<T>` boundary |
-| `PairToHeap` / `HeapToPair` | Box or unbox a unary `[payload, tag]` pair |
-| `ReturnPair` | Return a unary pair without changing `Value` |
+| `HostInvokeNiche` | Tombstone (archive major 4); panics if executed |
+| `OptionNicheToHeap` / `HeapOptionToNiche` | Tombstone (archive major 4); panics if executed |
+| `PairToHeap` / `HeapToPair` | Tombstone (archive major 4); panics if executed |
+| `ReturnPair` | Tombstone (archive major 4); panics if executed |
 | `Panic` | Abort after writing `panic: <msg>` |
-| `FloatChainStore` | Execute two or three source-ordered float stages and store (slots and/or const-pool operands; no FMA/reassoc) |
-| `BinSlotSlotConstJmpf` | `BinSlotSlot` float-arith + pool `CONST` + float `CmpJmpf` in one dispatch (e.g. mandelbrot `|z|² > 4`) |
+| `FloatChainStore` | Tombstone (not emitted; panics on major 4) |
+| `BinSlotSlotConstJmpf` | Tombstone (not emitted; panics on major 4) |
 | `CmpJmpt` / `BinSlotImmJmpt` / `LogNotJmpt` / `BinSlotSlotJmpt` / `BinSlotSlotConstJmpt` | Jump-if-true twins of the `*Jmpf` family (same packing; fused invert of `*Jmpf; JMP`) |
 | `IndexUnchecked` / `StoreIndexUnchecked` | Bounds-proofed array access from `il::bounds` counted-loop analysis |
 | `ArrayPin` / `IndexPin*` / `StoreIndexPin*` | Pinned array indexing: `ArrayPin` caches the array in the frame pin table; `IndexPin*` / `StoreIndexPin*` skip per-site `find_object_by_addr`. Layout: [array-pin.md](array-pin.md) |
