@@ -6974,6 +6974,24 @@ fn main() {
     }
 
     #[test]
+    fn overload_option_returns_keep_distinct_sidecar_abis() {
+        let (c, _) = check(
+            r#"
+class HeapItem { pub n: int, }
+fn f() -> Option<int> { return None; }
+fn f(int x) -> Option<HeapItem> { return None; }
+fn main() { }
+"#,
+        );
+        let d0 = c.interned_overload_def("f", 0).expect("candidate 0 DefId");
+        let d1 = c.interned_overload_def("f", 1).expect("candidate 1 DefId");
+        assert_ne!(d0, d1, "overloads must not share a DefId");
+        let sc = c.typed_sidecar();
+        assert_eq!(sc.pair_niche(d0), Some(PairNicheAbi::PairOption));
+        assert_eq!(sc.pair_niche(d1), Some(PairNicheAbi::NicheOption));
+    }
+
+    #[test]
     fn method_arity_overloads_select_by_user_argc() {
         let (mut c, _) = check(
             r#"

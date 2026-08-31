@@ -3922,7 +3922,15 @@ impl Compiler {
     }
 
     fn sidecar_pair_niche(&self, name: &str) -> Option<PairNicheAbi> {
-        self.typed_sidecar.pair_niche(self.def_id_for_name(name)?)
+        if let Some((base, cand)) = super::overload_key_parts(name) {
+            if let Some(def) = self.checker.interned_overload_def(base, cand) {
+                if let Some(abi) = self.typed_sidecar.pair_niche(def) {
+                    return Some(abi);
+                }
+            }
+        }
+        let bare = super::strip_overload_key(name);
+        self.typed_sidecar.pair_niche(self.def_id_for_name(bare)?)
     }
 
     fn sidecar_ffi_tags(&self, name: &str) -> Option<&[u32]> {

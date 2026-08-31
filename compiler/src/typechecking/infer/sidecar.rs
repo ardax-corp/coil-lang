@@ -122,6 +122,17 @@ impl Checker {
                 }
             }
         }
+        for (key, cands) in &self.overload_sets {
+            for c in cands {
+                let Some(def) = self.interned_overload_def(key, c.id) else {
+                    continue;
+                };
+                let ty = apply_ty_prune(subst, &c.scheme.ty);
+                if let Some(abi) = pair_niche_for_scheme_ty(&ty, |n| self.is_class(n)) {
+                    pair_niche.insert(def, abi);
+                }
+            }
+        }
 
         let mut tys_by_span = HashMap::with_capacity(self.codegen_types_by_span.len());
         for (&span, ty) in &self.codegen_types_by_span {

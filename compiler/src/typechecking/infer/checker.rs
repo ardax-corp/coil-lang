@@ -1574,6 +1574,32 @@ impl Checker {
         self.def_interner.get(mid, name)
     }
 
+    fn split_overload_intern_key<'a>(&self, key: &'a str) -> (crate::typechecking::ModuleId, &'a str) {
+        if let Some((path, name)) = key.rsplit_once("::")
+            && let Some(mid) = self.def_interner.module_id(path)
+        {
+            return (mid, name);
+        }
+        (self.current_module_id, key)
+    }
+
+    fn intern_overload_def(&mut self, key: &str, candidate: u32) -> DefId {
+        let (module, name) = self.split_overload_intern_key(key);
+        self.def_interner.intern_overload(
+            module,
+            crate::typechecking::DefKind::Fn,
+            name,
+            candidate,
+        )
+    }
+
+    /// [`DefId`] for one overload candidate (`0` is the set representative).
+    pub fn interned_overload_def(&self, name: &str, candidate: u32) -> Option<DefId> {
+        let (module, intern_name) = self.split_overload_intern_key(name);
+        self.def_interner
+            .get_overload(module, intern_name, candidate)
+    }
+
     /// Sidecar lookup: pre-walk [`NodeId`] → interned def.
     pub fn def_id_at(&self, node: NodeId) -> Option<DefId> {
         self.def_ids_by_node.get(&node).copied()
@@ -12383,10 +12409,14 @@ impl Checker {
         mut new_candidate: OverloadCandidate,
         range: &Range<usize>,
     ) {
-        let candidates = self.overload_sets.entry(key.to_string()).or_default();
-        new_candidate.id = candidates.len() as u32;
+        new_candidate.id = self
+            .overload_sets
+            .get(key)
+            .map(|c| c.len() as u32)
+            .unwrap_or(0);
         let mut conflict = false;
-        for existing in candidates.iter() {
+        let existing_list = self.overload_sets.get(key).cloned().unwrap_or_default();
+        for existing in &existing_list {
             let overlap = if existing.is_rest && new_candidate.is_rest {
                 true
             } else if !existing.is_rest && !new_candidate.is_rest {
@@ -12445,6 +12475,9 @@ impl Checker {
             }
         }
         if !conflict {
+            let def = self.intern_overload_def(key, new_candidate.id);
+            self.schemes_by_def
+                .insert(def, new_candidate.scheme.clone());
             self.overload_decl_by_span.insert(
                 (range.start, range.end),
                 (
@@ -12453,7 +12486,10 @@ impl Checker {
                     new_candidate.is_rest,
                 ),
             );
-            candidates.push(new_candidate);
+            self.overload_sets
+                .entry(key.to_string())
+                .or_default()
+                .push(new_candidate);
         }
     }
 
