@@ -1,6 +1,6 @@
 # coil
 
-Statically typed scripting language with Hindley–Milner inference. Source files use the `.hy` extension; compiled archives are `.hyc`.
+Statically typed scripting language with explicit generics and constraint-based inference. Source files use the `.hy` extension; compiled archives are `.hyc`.
 
 ## Install
 

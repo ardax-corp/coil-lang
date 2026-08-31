@@ -767,7 +767,7 @@ pub struct Compiler {
     messages: Vec<Message>,
     context: Context,
     // --
-    /// Hindley–Milner checker. Run once per `compile` via
+    /// Type checker. Run once per `compile` via
     /// `Checker::check_program`; its cache is consulted by `do_compile`
     /// to pick `ADD` vs `ADDF`, `==` vs `==` (floats), etc.
     checker: crate::typechecking::Checker,
