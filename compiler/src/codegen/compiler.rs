@@ -50,6 +50,51 @@ impl Compiler {
         self.messages.extend(self.checker.take_messages());
     }
 
+    /// Record `#[derive]` constructor aliases from attribute expansion.
+    pub(crate) fn apply_expand_result(
+        &mut self,
+        module: &str,
+        expand: crate::attrs::ExpandResult,
+    ) {
+        self.messages.extend(expand.messages);
+        for (k, v) in expand.decorated_class_ctors {
+            let key = if module.is_empty() {
+                k
+            } else {
+                format!("{module}::{k}")
+            };
+            let ctor_fn = if module.is_empty() {
+                v
+            } else {
+                format!("{module}::{v}")
+            };
+            self.decorated_class_ctors.insert(key, ctor_fn);
+        }
+    }
+
+    /// Expand `#[derive]` / `#[ffi]` then typecheck. Does not parse or emit.
+    pub fn expand_and_check<'a>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'a>>),
+    ) {
+        let expand = crate::attrs::expand_program(ast);
+        self.apply_expand_result(module, expand);
+        self.typecheck_module(module, ast);
+    }
+
+    /// Parse, expand attributes, typecheck. Shared by pipeline compile and
+    /// `typecheck_project` / LSP.
+    pub fn parse_expand_check<'a>(
+        &mut self,
+        module: &str,
+        src: &'a str,
+    ) -> Result<(SimpleSpan, Box<Expression<'a>>), reporting::Message> {
+        let mut ast = parser::Pratt::default().parse(src)?;
+        self.expand_and_check(module, &mut ast);
+        Ok(ast)
+    }
+
     pub fn constants(&self) -> &[u64] {
         &self.constants
     }
@@ -15433,6 +15478,7 @@ impl Compiler {
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+        prepared: bool,
     ) {
         let ns = self.namespace.clone();
         self.namespace = module.to_string();
@@ -15478,29 +15524,17 @@ impl Compiler {
         self.mono_codegen_var_types.clear();
         self.test_cases.clear();
         self.user_main_defined = false;
-        if !self.include_tests {
-            crate::strip_tests::strip_test_declarations(ast);
+        if !prepared {
+            if !self.include_tests {
+                crate::strip_tests::strip_test_declarations(ast);
+            }
+            // Expand `derive` / `ffi` then check (see `expand_and_check`).
+            self.expand_and_check(module, ast);
+        } else {
+            self.checker.set_current_module(module);
+            // Check already ran via `parse_expand_check` / `typecheck_module`.
+            self.typed_sidecar = self.checker.typed_sidecar();
         }
-        self.checker.set_current_module(module);
-        // Expand `derive` clauses to synthetic `impl` AST before the
-        // ID pre-walk / typecheck (see `crate::attrs::expand_program`).
-        let expand = crate::attrs::expand_program(ast);
-        self.messages.extend(expand.messages);
-        for (k, v) in expand.decorated_class_ctors {
-            let key = if module.is_empty() {
-                k
-            } else {
-                format!("{module}::{k}")
-            };
-            let ctor_fn = if module.is_empty() {
-                v
-            } else {
-                format!("{module}::{v}")
-            };
-            self.decorated_class_ctors.insert(key, ctor_fn);
-        }
-        let _program_ty = self.checker.check_program(ast);
-        self.typed_sidecar = self.checker.typed_sidecar();
         // Recursion depth / `#[max_depth]` — independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
         self.messages.extend(stack_bound.messages);
@@ -15898,7 +15932,7 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) -> Vec<Byte> {
-        self.compile_unfused(module, ast);
+        self.compile_unfused(module, ast, false);
         self.finalize_bytecode();
         self.bytecode.clone_bytes()
     }
@@ -15912,8 +15946,28 @@ impl Compiler {
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
     ) -> Vec<Byte> {
+        self.compile_module_inner(module, ast, false)
+    }
+
+    /// Like [`Self::compile_module`], but skip strip / expand / check.
+    ///
+    /// Used after [`Self::parse_expand_check`] / pipeline `parse_expand_check_file`.
+    pub fn compile_prepared_module<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+    ) -> Vec<Byte> {
+        self.compile_module_inner(module, ast, true)
+    }
+
+    fn compile_module_inner<'compiler>(
+        &mut self,
+        module: &str,
+        ast: &mut (SimpleSpan, Box<Expression<'compiler>>),
+        prepared: bool,
+    ) -> Vec<Byte> {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            self.compile_unfused(module, ast);
+            self.compile_unfused(module, ast, prepared);
         }));
         if let Err(payload) = result
             && payload
