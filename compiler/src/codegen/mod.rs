@@ -639,6 +639,13 @@ fn strip_overload_key(name: &str) -> &str {
     }
 }
 
+/// `(unmangled name, candidate id)` for `foo#1.0` / `foo#rest1.2`.
+fn overload_key_parts(name: &str) -> Option<(&str, u32)> {
+    let i = name.rfind('#')?;
+    let id = name[i + 1..].rsplit('.').next()?.parse().ok()?;
+    Some((&name[..i], id))
+}
+
 /// `MakeFn` operand: `[7:0]=n_cap [15:8]=n_filled [23:16]=arity [24]=is_rest`.
 ///
 /// `n_cap` and `n_filled` are packed into 8-bit fields (max 255). Callers with
@@ -1329,4 +1336,5 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 }
 
 mod compiler;
+mod emit_loop;
 mod inline_cost;

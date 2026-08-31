@@ -30,8 +30,8 @@ test("nested array index") {
 }
 "#;
     let (c, bc) = compile_tests(src);
-    let f0 = c.get_function("__zs_test_0");
-    let f1 = c.get_function("__zs_test_1");
+    let f0 = c.get_function("__zs_test_0").expect("__zs_test_0");
+    let f1 = c.get_function("__zs_test_1").expect("__zs_test_1");
     let body = &bc[f0..f1];
     // `len(a)` const-folds to CONST 4 (no LOAD/POP of `a` needed). A later
     // test reuses name `a` with outer length 2 — that must not poison this fold.

@@ -1,6 +1,6 @@
 //! Host-backed OS threads, channels, and locks (isolate `Machine` per thread).
 
-use std::cell::RefCell;
+use std::cell::{RefCell, UnsafeCell};
 use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
@@ -8,6 +8,9 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::thread;
+
+use parking_lot::RawMutex;
+use parking_lot::lock_api::RawMutex as RawMutexOps;
 
 /// Per-root-VM registry of undetached spawns (shared with nested workers via
 /// [`ThreadSpawnContext`]). Process-global storage was wrong: parallel tests /
@@ -318,16 +321,46 @@ impl ChannelInner {
     }
 }
 
-/// Host mutex cell (`with_lock` / bare `lock`).
+/// Host mutex cell (`with_lock` / bare `lock`). Guard-free RawMutex: panic
+/// between lock and unlock cannot UAF a `MutexGuard`.
 pub struct MutexInner {
-    pub cell: Mutex<PortableValue>,
+    lock: RawMutex,
+    value: UnsafeCell<PortableValue>,
 }
+
+unsafe impl Send for MutexInner {}
+unsafe impl Sync for MutexInner {}
 
 impl MutexInner {
     fn new(initial: PortableValue) -> Self {
         Self {
-            cell: Mutex::new(initial),
+            lock: RawMutex::INIT,
+            value: UnsafeCell::new(initial),
         }
+    }
+
+    fn lock(&self) {
+        self.lock.lock();
+    }
+
+    fn try_lock(&self) -> bool {
+        self.lock.try_lock()
+    }
+
+    pub(crate) unsafe fn unlock(&self) {
+        unsafe { self.lock.unlock() }
+    }
+
+    unsafe fn value_mut(&self) -> &mut PortableValue {
+        unsafe { &mut *self.value.get() }
+    }
+}
+
+struct RawUnlock<'a>(&'a MutexInner);
+
+impl Drop for RawUnlock<'_> {
+    fn drop(&mut self) {
+        unsafe { self.0.unlock() }
     }
 }
 
@@ -345,8 +378,7 @@ impl RwLockInner {
 }
 
 thread_local! {
-    static HELD_MUTEX: RefCell<Option<(u64, MutexGuard<'static, PortableValue>)>> =
-        RefCell::new(None);
+    static HELD_MUTEX: RefCell<Option<(u64, Arc<MutexInner>)>> = const { RefCell::new(None) };
 }
 
 /// Per-`execute` host VM binding (any `Machine<const N>` frame depth).
@@ -357,6 +389,10 @@ pub(crate) struct MachineHostState {
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
     dload_gate: crate::ffi::DloadGate,
+    allow_exec: bool,
+    allow_exit: bool,
+    allow_ffi_exec: bool,
+    pgo: crate::pgo::PgoCounters,
 }
 
 thread_local! {
@@ -374,6 +410,10 @@ impl HostStateGuard {
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
         let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
         let dload_gate = vm.dload_gate().clone();
+        let allow_exec = vm.allow_exec();
+        let allow_exit = vm.allow_exit();
+        let allow_ffi_exec = vm.allow_ffi_exec();
+        let pgo = vm.pgo_counters().clone();
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
                 raw: (vm as *mut Machine<N>).cast(),
@@ -382,6 +422,10 @@ impl HostStateGuard {
                 io_reactor,
                 cpu_reactor,
                 dload_gate,
+                allow_exec,
+                allow_exit,
+                allow_ffi_exec,
+                pgo,
             });
         });
         Self { prev }
@@ -470,6 +514,43 @@ pub(crate) fn host_allow_attach() -> bool {
             .as_ref()
             .is_some_and(|s| s.dload_gate.allow_attach())
     })
+}
+
+pub(crate) fn host_allow_exec() -> bool {
+    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_exec))
+}
+
+pub(crate) fn host_allow_exit() -> bool {
+    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_exit))
+}
+
+pub(crate) fn host_allow_ffi_exec() -> bool {
+    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_ffi_exec))
+}
+
+pub(crate) fn host_pgo_hit(packed: i64) {
+    HOST_STATE.with(|c| {
+        if let Some(s) = c.borrow().as_ref() {
+            s.pgo.hit(packed);
+        }
+    });
+}
+
+pub(crate) fn host_pgo_snapshot() -> crate::pgo::PgoSnapshot {
+    HOST_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|s| s.pgo.snapshot())
+            .unwrap_or_default()
+    })
+}
+
+pub(crate) fn host_pgo_reset() {
+    HOST_STATE.with(|c| {
+        if let Some(s) = c.borrow().as_ref() {
+            s.pgo.reset();
+        }
+    });
 }
 
 /// Code pointer must be a symbol in a file the bound gate would hashed-dload.
@@ -926,6 +1007,10 @@ pub struct ThreadSpawnContext {
     pub ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` gate (allow + lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,
+    pub allow_exec: bool,
+    pub allow_exit: bool,
+    pub allow_ffi_exec: bool,
+    pub pgo: crate::pgo::PgoCounters,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -941,6 +1026,10 @@ impl Clone for ThreadSpawnContext {
             ffi_base_dir: self.ffi_base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
+            allow_exec: self.allow_exec,
+            allow_exit: self.allow_exit,
+            allow_ffi_exec: self.allow_ffi_exec,
+            pgo: self.pgo.clone(),
         }
     }
 }
@@ -1156,11 +1245,12 @@ fn try_host_with_lock(
         return Err(ThreadErrorTag::Other);
     };
     let inner = Arc::clone(&gc.as_ref().inner);
-    let mut guard = inner.cell.lock().map_err(|_| ThreadErrorTag::Poisoned)?;
-    let t_val = portable_to_value(heap, guard.clone())?;
+    inner.lock();
+    let _unlock = RawUnlock(&inner);
+    let t_val = portable_to_value(heap, unsafe { inner.value_mut().clone() })?;
     let ret = host_call_function(entry, &[t_val])?;
     let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
-    *guard = value_to_portable(heap, new_t)?;
+    *unsafe { inner.value_mut() } = value_to_portable(heap, new_t)?;
     Ok(out_r)
 }
 
@@ -1184,25 +1274,14 @@ fn try_host_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
-    let addr = Arc::as_ptr(&gc.as_ref().inner) as u64;
-    let guard = gc
-        .as_ref()
-        .inner
-        .cell
-        .lock()
-        .map_err(|_| ThreadErrorTag::Poisoned)?;
-    let extended = unsafe {
-        // Store guard in thread-local until `unlock`; lifetime extended to `'static`
-        // because the guard cannot outlive this OS thread.
-        std::mem::transmute::<MutexGuard<'_, PortableValue>, MutexGuard<'static, PortableValue>>(
-            guard,
-        )
-    };
+    let inner = Arc::clone(&gc.as_ref().inner);
+    let addr = Arc::as_ptr(&inner) as u64;
     HELD_MUTEX.with(|h| {
         if h.borrow().is_some() {
             return Err(ThreadErrorTag::Other);
         }
-        *h.borrow_mut() = Some((addr, extended));
+        inner.lock();
+        *h.borrow_mut() = Some((addr, Arc::clone(&inner)));
         Ok(())
     })
 }
@@ -1220,8 +1299,14 @@ fn try_host_unlock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> {
     HELD_MUTEX.with(|h| {
         let mut slot = h.borrow_mut();
         match slot.take() {
-            Some((held_addr, _guard)) if held_addr == addr => Ok(()),
-            Some(_) => Err(ThreadErrorTag::Other),
+            Some((held_addr, inner)) if held_addr == addr => {
+                unsafe { inner.unlock() };
+                Ok(())
+            }
+            Some((held_addr, inner)) => {
+                *slot = Some((held_addr, inner));
+                Err(ThreadErrorTag::Other)
+            }
             None => Err(ThreadErrorTag::Other),
         }
     })
@@ -1236,26 +1321,19 @@ fn try_host_try_lock(heap: &mut Heap, mtx: Value) -> Result<(), ThreadErrorTag> 
     let Some(Object::Mutex(gc)) = heap.find_object_by_addr(mtx.raw() as u64) else {
         return Err(ThreadErrorTag::Other);
     };
-    let addr = Arc::as_ptr(&gc.as_ref().inner) as u64;
-    match gc.as_ref().inner.cell.try_lock() {
-        Ok(guard) => {
-            let extended = unsafe {
-                std::mem::transmute::<
-                    MutexGuard<'_, PortableValue>,
-                    MutexGuard<'static, PortableValue>,
-                >(guard)
-            };
-            HELD_MUTEX.with(|h| {
-                if h.borrow().is_some() {
-                    return Err(ThreadErrorTag::Other);
-                }
-                *h.borrow_mut() = Some((addr, extended));
-                Ok(())
-            })
-        }
-        Err(std::sync::TryLockError::WouldBlock) => Err(ThreadErrorTag::WouldBlock),
-        Err(std::sync::TryLockError::Poisoned(_)) => Err(ThreadErrorTag::Poisoned),
+    let inner = Arc::clone(&gc.as_ref().inner);
+    let addr = Arc::as_ptr(&inner) as u64;
+    if !inner.try_lock() {
+        return Err(ThreadErrorTag::WouldBlock);
     }
+    HELD_MUTEX.with(|h| {
+        if h.borrow().is_some() {
+            unsafe { inner.unlock() };
+            return Err(ThreadErrorTag::Other);
+        }
+        *h.borrow_mut() = Some((addr, inner));
+        Ok(())
+    })
 }
 
 pub fn host_rwlock(heap: &mut Heap, args: &[Value]) -> Value {
@@ -1797,5 +1875,20 @@ mod tests {
         let mut heap = Heap::default();
         let v = portable_to_value(&mut heap, pv).unwrap();
         assert_eq!(v.as_int(), 99);
+    }
+
+    #[test]
+    fn mutex_lock_panic_does_not_uaf() {
+        let inner = Arc::new(MutexInner::new(PortableValue::Immediate(1)));
+        let held = Arc::clone(&inner);
+        let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            held.lock();
+            panic!("between lock and unlock");
+        }));
+        assert!(panicked.is_err());
+        // Arc kept the cell alive; unlocking the still-held RawMutex must not UAF.
+        unsafe { inner.unlock() };
+        assert!(inner.try_lock());
+        unsafe { inner.unlock() };
     }
 }

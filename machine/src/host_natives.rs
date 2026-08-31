@@ -53,7 +53,7 @@ pub fn build_standard_host_natives(
 ) -> Vec<Arc<dyn NativeFn>> {
     let mut out: Vec<Arc<dyn NativeFn>> = Vec::new();
     let mut register_id = |name: &str, id: usize| {
-        debug_assert_eq!(
+        assert_eq!(
             common::host_native_id(name),
             Some(id),
             "HostInvoke `{name}` id {id} must match common::HOST_NATIVES"
@@ -80,7 +80,7 @@ pub fn build_standard_host_natives(
     // package-IO hooks (coil-tls uses these via `dload`, not VM TLS natives).
     push_stream_attach(&mut out, &mut register_id);
     push_stream_park(&mut out, &mut register_id);
-    debug_assert_eq!(
+    assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
         "runtime host table length must match common::HOST_NATIVES"

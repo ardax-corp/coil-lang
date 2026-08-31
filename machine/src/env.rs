@@ -1,37 +1,21 @@
 //! Host process environment: argv, env vars, cwd, exec (no shell).
 
 use std::process::Command;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
 
 use crate::io::{alloc_result_err, alloc_result_ok};
 use crate::memory::{Heap, Member, ObjArray, Object};
 
-/// When false, [`host_exec`] returns `ExecDisabled`. Set from `coil.toml` `[env] allow_exec`.
-pub static ALLOW_EXEC: AtomicBool = AtomicBool::new(false);
+/// Runtime gate for `env::exec`. Prefer [`crate::Machine::set_env_grants`].
+/// No-op: grants live on the bound [`crate::thread::HostStateGuard`] Machine.
+pub fn set_allow_exec(_allow: bool) {}
 
-/// When false, [`host_exit`] panics instead of terminating. Set from `[env] allow_exit`.
-pub static ALLOW_EXIT: AtomicBool = AtomicBool::new(false);
+/// Runtime gate for `env::exit`. Prefer [`crate::Machine::set_env_grants`].
+pub fn set_allow_exit(_allow: bool) {}
 
-/// When false, FFI `system` / `execve` (and aliases) are denied at symbol resolve.
-/// Set from `[env] allow_ffi_exec`. Independent of [`ALLOW_EXEC`].
-pub static ALLOW_FFI_EXEC: AtomicBool = AtomicBool::new(false);
-
-/// Runtime gate for `env::exec` (from project manifest).
-pub fn set_allow_exec(allow: bool) {
-    ALLOW_EXEC.store(allow, Ordering::Relaxed);
-}
-
-/// Runtime gate for `env::exit` (from project manifest).
-pub fn set_allow_exit(allow: bool) {
-    ALLOW_EXIT.store(allow, Ordering::Relaxed);
-}
-
-/// Runtime gate for FFI process-exec symbols (`system`, `execve`, …).
-pub fn set_allow_ffi_exec(allow: bool) {
-    ALLOW_FFI_EXEC.store(allow, Ordering::Relaxed);
-}
+/// Runtime gate for FFI process-exec symbols. Prefer [`crate::Machine::set_env_grants`].
+pub fn set_allow_ffi_exec(_allow: bool) {}
 
 /// True when `name` is a libc/CRT process-exec symbol (not `env::exec`).
 pub fn is_ffi_exec_symbol(name: &str) -> bool {
@@ -254,10 +238,11 @@ fn try_host_set_cwd(heap: &mut Heap, args: &[Value]) -> Result<(), EnvErrorTag> 
 
 /// Terminates the process (`std::process::exit`). Never returns when granted.
 ///
-/// Denied unless `[env] allow_exit = true`. [`ALLOW_EXEC`] does not grant this.
-pub fn host_exit(_heap: &mut Heap, args: &[Value]) -> Value {
-    if !ALLOW_EXIT.load(Ordering::Relaxed) {
-        panic!("env::exit denied; set [env] allow_exit = true in coil.toml");
+/// Denied unless the bound Machine has `[env] allow_exit`. Returns
+/// [`EnvErrorTag::ExecDisabled`] (same as denied exec). `allow_exec` does not grant this.
+pub fn host_exit(heap: &mut Heap, args: &[Value]) -> Value {
+    if !crate::thread::host_allow_exit() {
+        return alloc_result_env_err(heap, EnvErrorTag::ExecDisabled);
     }
     let code = if args.is_empty() { 0 } else { args[0].as_int() };
     std::process::exit(code as i32);
@@ -270,7 +255,7 @@ pub fn host_exec(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 fn try_host_exec(heap: &mut Heap, args: &[Value]) -> Result<i64, EnvErrorTag> {
-    if !ALLOW_EXEC.load(Ordering::Relaxed) {
+    if !crate::thread::host_allow_exec() {
         return Err(EnvErrorTag::ExecDisabled);
     }
     if args.len() != 2 {
@@ -281,7 +266,7 @@ fn try_host_exec(heap: &mut Heap, args: &[Value]) -> Result<i64, EnvErrorTag> {
         return Err(EnvErrorTag::InvalidInput);
     }
     let argv = value_as_string_array(heap, args[1])?;
-    // Inherits VM cwd + env; runtime gate is `ALLOW_EXEC` / coil.toml
+    // Inherits VM cwd + env; runtime gate is the bound Machine's
     // `[env] allow_exec` (compile still warns on `exec` / `exit`).
     let status = Command::new(&program)
         .args(&argv)
@@ -418,48 +403,46 @@ mod tests {
         assert_eq!(enum_tag(&heap, r), Some(0));
     }
 
+    fn with_env_grants<R>(
+        allow_exec: bool,
+        allow_exit: bool,
+        allow_ffi_exec: bool,
+        f: impl FnOnce() -> R,
+    ) -> R {
+        let mut vm = crate::Machine::<8>::default();
+        vm.set_env_grants(allow_exec, allow_exit, allow_ffi_exec);
+        let _g = crate::thread::HostStateGuard::enter(&mut vm);
+        f()
+    }
+
     #[test]
     fn ffi_exec_symbols_are_denied_without_allow_ffi_exec() {
-        let _guard = ENV_TEST_GUARD.lock().expect("env test mutex");
-        let prev_exec = ALLOW_EXEC.load(Ordering::Relaxed);
-        let prev_ffi = ALLOW_FFI_EXEC.load(Ordering::Relaxed);
-        ALLOW_EXEC.store(true, Ordering::Relaxed);
-        ALLOW_FFI_EXEC.store(false, Ordering::Relaxed);
         assert!(is_ffi_exec_symbol("system"));
         assert!(is_ffi_exec_symbol("execve"));
         assert!(is_ffi_exec_symbol("_wsystem"));
         assert!(!is_ffi_exec_symbol("strlen"));
-        assert!(
-            is_ffi_exec_symbol("system") && !ALLOW_FFI_EXEC.load(Ordering::Relaxed),
-            "allow_exec must not grant FFI system/execve"
-        );
-        ALLOW_FFI_EXEC.store(true, Ordering::Relaxed);
-        assert!(ALLOW_FFI_EXEC.load(Ordering::Relaxed));
-        ALLOW_EXEC.store(prev_exec, Ordering::Relaxed);
-        ALLOW_FFI_EXEC.store(prev_ffi, Ordering::Relaxed);
+        with_env_grants(true, false, false, || {
+            assert!(
+                !crate::thread::host_allow_ffi_exec(),
+                "allow_exec must not grant FFI system/execve"
+            );
+        });
+        with_env_grants(false, false, true, || {
+            assert!(crate::thread::host_allow_ffi_exec());
+        });
     }
 
     #[test]
     fn host_exit_denied_when_flag_off() {
-        let _guard = ENV_TEST_GUARD.lock().expect("env test mutex");
-        let prev_exit = ALLOW_EXIT.load(Ordering::Relaxed);
-        let prev_exec = ALLOW_EXEC.load(Ordering::Relaxed);
-        ALLOW_EXIT.store(false, Ordering::Relaxed);
-        ALLOW_EXEC.store(true, Ordering::Relaxed);
-        let panicked = std::panic::catch_unwind(|| {
-            let mut heap = Heap::default();
-            let _ = host_exit(&mut heap, &[Value::from(0_i64)]);
+        let mut heap = Heap::default();
+        let r = with_env_grants(true, false, false, || {
+            host_exit(&mut heap, &[Value::from(0_i64)])
         });
-        ALLOW_EXIT.store(prev_exit, Ordering::Relaxed);
-        ALLOW_EXEC.store(prev_exec, Ordering::Relaxed);
-        assert!(panicked.is_err(), "env::exit must not run without allow_exit");
+        assert_eq!(result_err_tag(&heap, r), EnvErrorTag::ExecDisabled);
     }
 
     #[test]
     fn host_exec_disabled_when_flag_off() {
-        let _guard = ENV_TEST_GUARD.lock().expect("env test mutex");
-        let prev = ALLOW_EXEC.load(Ordering::Relaxed);
-        ALLOW_EXEC.store(false, Ordering::Relaxed);
         let mut heap = Heap::default();
         let prog = heap.intern("true".into());
         let args = make_string_array(&mut heap, &[]);
@@ -468,23 +451,49 @@ mod tests {
             &[Value::from(prog.as_ptr() as *mut u8 as u64), args],
         );
         assert_eq!(result_err_tag(&heap, r), EnvErrorTag::ExecDisabled);
-        ALLOW_EXEC.store(prev, Ordering::Relaxed);
+    }
+
+    #[test]
+    fn env_grants_do_not_leak_across_machines() {
+        let mut allow = crate::Machine::<8>::default();
+        allow.set_env_grants(true, false, false);
+        let mut deny = crate::Machine::<8>::default();
+        deny.set_env_grants(false, false, false);
+        {
+            let _g = crate::thread::HostStateGuard::enter(&mut allow);
+            assert!(crate::thread::host_allow_exec());
+            assert!(!crate::thread::host_allow_exit());
+        }
+        {
+            let _g = crate::thread::HostStateGuard::enter(&mut deny);
+            assert!(!crate::thread::host_allow_exec());
+            assert!(!crate::thread::host_allow_ffi_exec());
+        }
+        assert!(allow.allow_exec());
+        assert!(!deny.allow_exec());
+    }
+
+    #[test]
+    fn default_machine_and_archive_path_are_deny_all() {
+        let m = crate::Machine::<8>::default();
+        assert!(!m.allow_exec());
+        assert!(!m.allow_exit());
+        assert!(!m.allow_ffi_exec());
     }
 
     #[test]
     #[cfg(unix)]
     fn host_exec_true_returns_zero() {
         let _guard = ENV_TEST_GUARD.lock().expect("env test mutex");
-        let prev = ALLOW_EXEC.load(Ordering::Relaxed);
-        ALLOW_EXEC.store(true, Ordering::Relaxed);
         let mut heap = Heap::default();
         let prog = heap.intern("true".into());
         let args = make_string_array(&mut heap, &[]);
-        let r = host_exec(
-            &mut heap,
-            &[Value::from(prog.as_ptr() as *mut u8 as u64), args],
-        );
-        ALLOW_EXEC.store(prev, Ordering::Relaxed);
+        let r = with_env_grants(true, false, false, || {
+            host_exec(
+                &mut heap,
+                &[Value::from(prog.as_ptr() as *mut u8 as u64), args],
+            )
+        });
         if enum_tag(&heap, r) != Some(0) {
             // Sandboxed CI may block spawning subprocesses.
             let tag = result_err_tag(&heap, r);

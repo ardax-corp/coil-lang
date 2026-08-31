@@ -49,8 +49,10 @@ pub enum DefKind {
 pub struct DefInterner {
     modules: HashMap<String, ModuleId>,
     module_names: Vec<String>,
-    /// module raw id → name → DefId
+    /// module raw id → name → DefId (overload *set* representative)
     defs: HashMap<u32, HashMap<String, DefId>>,
+    /// `(module, name, candidate_id)` → DefId for ABI sidecars (overloads).
+    overload_defs: HashMap<(u32, String, u32), DefId>,
     infos: Vec<DefInfo>,
 }
 
@@ -89,6 +91,7 @@ impl DefInterner {
 
     /// Intern a top-level def. Re-interning the same `(module, name)`
     /// returns the original [`DefId`]; `kind` is kept from the first insert.
+    /// This id is the overload *set* representative (`local_defs` short name).
     pub fn intern(&mut self, module: ModuleId, kind: DefKind, name: &str) -> DefId {
         if let Some(&id) = self.defs.get(&module.0).and_then(|m| m.get(name)) {
             return id;
@@ -104,11 +107,57 @@ impl DefInterner {
             kind,
             name: name.to_string(),
         });
+        self.overload_defs
+            .entry((module.0, name.to_string(), 0))
+            .or_insert(id);
+        id
+    }
+
+    /// Distinct [`DefId`] for one overload candidate. Candidate `0` is the
+    /// set representative from [`intern`].
+    pub fn intern_overload(
+        &mut self,
+        module: ModuleId,
+        kind: DefKind,
+        name: &str,
+        candidate: u32,
+    ) -> DefId {
+        if let Some(&id) = self
+            .overload_defs
+            .get(&(module.0, name.to_string(), candidate))
+        {
+            return id;
+        }
+        if candidate == 0 {
+            return self.intern(module, kind, name);
+        }
+        let id = DefId(self.infos.len() as u32);
+        self.overload_defs
+            .insert((module.0, name.to_string(), candidate), id);
+        self.infos.push(DefInfo {
+            id,
+            module,
+            kind,
+            name: name.to_string(),
+        });
         id
     }
 
     pub fn get(&self, module: ModuleId, name: &str) -> Option<DefId> {
         self.defs.get(&module.0)?.get(name).copied()
+    }
+
+    pub fn get_overload(&self, module: ModuleId, name: &str, candidate: u32) -> Option<DefId> {
+        self.overload_defs
+            .get(&(module.0, name.to_string(), candidate))
+            .copied()
+            .or_else(|| {
+                if candidate == 0 {
+                    self.get(module, name)
+                } else {
+                    None
+                }
+            })
     }
 
     pub fn info(&self, id: DefId) -> Option<&DefInfo> {
@@ -141,6 +190,19 @@ mod tests {
         assert_ne!(foo, bar);
         assert_eq!(intern.info(foo).unwrap().name, "foo");
         assert_eq!(intern.info(bar).unwrap().name, "bar");
+    }
+
+    #[test]
+    fn intern_overloads_get_distinct_def_ids() {
+        let mut intern = DefInterner::new();
+        let m = intern.intern_module("a");
+        let set = intern.intern(m, DefKind::Fn, "f");
+        let c0 = intern.intern_overload(m, DefKind::Fn, "f", 0);
+        let c1 = intern.intern_overload(m, DefKind::Fn, "f", 1);
+        assert_eq!(c0, set);
+        assert_ne!(c1, set);
+        assert_eq!(intern.get(m, "f"), Some(set));
+        assert_eq!(intern.get_overload(m, "f", 1), Some(c1));
     }
 
     #[test]

@@ -4,6 +4,7 @@
 //! the expanded AST for the rest of the session so `parse → expand → check`
 //! is one function for both compile and `typecheck_project`.
 
+use std::pin::Pin;
 use std::path::{Path, PathBuf};
 
 use parser::{Pratt, ast::Output};
@@ -11,7 +12,7 @@ use reporting::Message;
 
 use crate::attrs::{ExpandResult, expand_program};
 
-/// Source plus expanded AST for one file. `ast` borrows `source` (and
+/// Source plus expanded AST for one file. `ast` borrows pinned `source` (and
 /// `'static` strings leaked by attr expand). Field order drops `ast` first.
 pub struct CachedAst {
     ast: Option<Output<'static>>,
@@ -19,15 +20,16 @@ pub struct CachedAst {
     parse_error: Option<Message>,
     expanded: bool,
     checked: bool,
-    source: String,
+    source: Pin<Box<str>>,
 }
 
 impl CachedAst {
     pub fn parse(source: String) -> Self {
-        match Pratt::default().parse(source.as_str()) {
+        let source = Pin::from(source.into_boxed_str());
+        match Pratt::default().parse(&*source) {
             Ok(ast) => {
-                // SAFETY: `ast` only borrows `source`. `String` move does not
-                // reallocate. `ast` is dropped before `source`.
+                // SAFETY: `ast` borrows the pinned `Box<str>`. The pin is never
+                // moved out of this struct; `ast` is dropped first.
                 let ast = unsafe { extend_ast_lifetime(ast) };
                 Self {
                     ast: Some(ast),
@@ -123,6 +125,7 @@ impl AstCache {
     }
 }
 
+/// SAFETY: caller pins the source `Box<str>` for longer than `ast`.
 unsafe fn extend_ast_lifetime(ast: Output<'_>) -> Output<'static> {
     unsafe { std::mem::transmute(ast) }
 }

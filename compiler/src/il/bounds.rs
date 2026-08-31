@@ -13,6 +13,7 @@ use std::collections::{HashMap, HashSet};
 use common::{Byte, Instruction};
 
 use super::op::{IlJumpKind, IlOp, Label};
+use super::pure_call::PureCallCtx;
 use super::sp;
 
 thread_local! {
@@ -72,6 +73,11 @@ fn note_array_len_hoist() {
 
 /// Hoist invariant ArrayLen materializations and record index proofs.
 pub fn loop_bounds(ops: &mut Vec<IlOp>) {
+    loop_bounds_with(ops, None);
+}
+
+/// [`loop_bounds`] with an explicit purity table (no TLS).
+pub fn loop_bounds_with(ops: &mut Vec<IlOp>, purity: Option<&PureCallCtx>) {
     let mut stats = BoundsStats::new();
     if ops.len() < 4 {
         return;
@@ -79,13 +85,13 @@ pub fn loop_bounds(ops: &mut Vec<IlOp>) {
 
     // Hoist one triple per call; iterate like cast LICM for nested loops.
     for _ in 0..find_natural_loops(ops).len().saturating_add(1) {
-        if !hoist_array_len(ops, &mut stats) {
+        if !hoist_array_len(ops, &mut stats, purity) {
             break;
         }
     }
 
-    rewrite_proven_index_ops(ops, &mut stats);
-    rewrite_array_pins(ops, &mut stats);
+    rewrite_proven_index_ops(ops, &mut stats, purity);
+    rewrite_array_pins(ops, &mut stats, purity);
     LAST_STATS.with(|c| {
         let mut acc = c.borrow_mut();
         acc.array_len_hoists = acc.array_len_hoists.saturating_add(stats.array_len_hoists);
@@ -258,7 +264,7 @@ fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> usize {
 }
 
 /// True when the loop may change `arr_slot`'s length or rebind the slot.
-fn array_length_sensitive(ops: &[IlOp], lp: &NaturalLoop, arr_slot: u32) -> bool {
+fn array_length_sensitive(ops: &[IlOp], lp: &NaturalLoop, arr_slot: u32, purity: Option<&PureCallCtx>) -> bool {
     let stored = slots_stored_in_loop(ops, lp);
     if stored.contains(&arr_slot) {
         return true;
@@ -272,7 +278,7 @@ fn array_length_sensitive(ops: &[IlOp], lp: &NaturalLoop, arr_slot: u32) -> bool
         if matches!(op, IlOp::MakeArray { .. } | IlOp::Print { .. }) {
             return true;
         }
-        if super::pure_call::op_blocks_length_proof(op) {
+        if super::pure_call::op_blocks_length_proof(op, purity) {
             return true;
         }
         if matches!(op, IlOp::Byte { byte, .. }
@@ -287,12 +293,12 @@ fn array_length_sensitive(ops: &[IlOp], lp: &NaturalLoop, arr_slot: u32) -> bool
     false
 }
 
-fn loop_has_hard_barrier(ops: &[IlOp], lp: &NaturalLoop) -> bool {
-    (lp.header..=lp.latch).any(|i| super::pure_call::op_blocks_length_proof(&ops[i]))
+fn loop_has_hard_barrier(ops: &[IlOp], lp: &NaturalLoop, purity: Option<&PureCallCtx>) -> bool {
+    (lp.header..=lp.latch).any(|i| super::pure_call::op_blocks_length_proof(&ops[i], purity))
 }
 
 /// Hoist one `LOAD arr; ArrayLen; STORE len` when `arr` is length-invariant.
-fn hoist_array_len(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) -> bool {
+fn hoist_array_len(ops: &mut Vec<IlOp>, stats: &mut BoundsStats, purity: Option<&PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
     let mut loops = find_natural_loops(ops);
     loops.sort_by_key(|l| std::cmp::Reverse(l.header));
@@ -301,7 +307,7 @@ fn hoist_array_len(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) -> bool {
             continue;
         }
         // ArrayLen hoist allows StoreIndex / Index; refuse host/call barriers.
-        if loop_has_hard_barrier(ops, lp) {
+        if loop_has_hard_barrier(ops, lp, purity) {
             continue;
         }
         let mut found: Option<(usize, u32, u32)> = None;
@@ -311,7 +317,7 @@ fn hoist_array_len(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) -> bool {
                 && is_array_len(&ops[i + 1])
                 && let IlOp::StorePop { slot: len, .. } = &ops[i + 2]
                 && store_count_in_loop(ops, lp, *len) == 1
-                && !array_length_sensitive(ops, lp, *arr)
+                && !array_length_sensitive(ops, lp, *arr, purity)
             {
                 found = Some((i, *arr, *len));
                 break;
@@ -438,7 +444,7 @@ fn array_len_defs(ops: &[IlOp]) -> HashMap<u32, u32> {
 }
 
 /// Detect `idx < bound` header exits and non-negative +1 index updates.
-fn detect_counted_loops(ops: &[IlOp], len_of: &HashMap<u32, u32>) -> Vec<CountedLoop> {
+fn detect_counted_loops(ops: &[IlOp], len_of: &HashMap<u32, u32>, purity: Option<&PureCallCtx>) -> Vec<CountedLoop> {
     let mut out = Vec::new();
     for lp in find_natural_loops(ops) {
         let Some((cmp_slot, bound_slot)) = header_lt_bound(ops, &lp) else {
@@ -456,13 +462,13 @@ fn detect_counted_loops(ops: &[IlOp], len_of: &HashMap<u32, u32>) -> Vec<Counted
         }
         let mut len_arrays = HashSet::new();
         if let Some(&arr) = len_of.get(&bound_slot)
-            && !array_length_sensitive(ops, &lp, arr)
+            && !array_length_sensitive(ops, &lp, arr, purity)
         {
             len_arrays.insert(arr);
         }
         // Fill-loop equality: bound equals length of arrays filled `0..bound`.
         for arr in fill_equal_arrays(ops, lp.header, bound_slot) {
-            if !array_length_sensitive(ops, &lp, arr) {
+            if !array_length_sensitive(ops, &lp, arr, purity) {
                 len_arrays.insert(arr);
             }
         }
@@ -878,7 +884,7 @@ fn array_starts_empty(ops: &[IlOp], header: usize, arr_slot: u32) -> bool {
 }
 
 /// Pin invariant arrays and rewrite in-loop `Index` / `StoreIndex` to pinned forms.
-fn rewrite_array_pins(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) {
+fn rewrite_array_pins(ops: &mut Vec<IlOp>, stats: &mut BoundsStats, purity: Option<&PureCallCtx>) {
     enum PinSite {
         Read { unchecked: bool },
         Write { unchecked: bool },
@@ -901,10 +907,10 @@ fn rewrite_array_pins(ops: &mut Vec<IlOp>, stats: &mut BoundsStats) {
     }
 
     let len_of = array_len_defs(ops);
-    let counted = detect_counted_loops(ops, &len_of);
+    let counted = detect_counted_loops(ops, &len_of, purity);
     for cl in &counted {
         for &arr in &cl.len_arrays {
-            if array_length_sensitive(ops, &cl.lp, arr) {
+            if array_length_sensitive(ops, &cl.lp, arr, purity) {
                 continue;
             }
             let mut sites = Vec::new();
@@ -1012,9 +1018,9 @@ fn store_loads_arr(ops: &[IlOp], store_op: usize) -> Option<u32> {
     }
 }
 
-fn rewrite_proven_index_ops(ops: &mut [IlOp], stats: &mut BoundsStats) {
+fn rewrite_proven_index_ops(ops: &mut [IlOp], stats: &mut BoundsStats, purity: Option<&PureCallCtx>) {
     let len_of = array_len_defs(ops);
-    let counted = detect_counted_loops(ops, &len_of);
+    let counted = detect_counted_loops(ops, &len_of, purity);
     if counted.is_empty() {
         for op in ops {
             if matches!(op, IlOp::Index { .. }) {
@@ -1172,6 +1178,10 @@ mod hoist {
 
     /// Per-loop array facts, innermost loop first.
     pub(super) fn loop_array_facts(ops: &[IlOp]) -> Vec<LoopArrayFacts> {
+        loop_array_facts_with(ops, None)
+    }
+
+    pub(super) fn loop_array_facts_with(ops: &[IlOp], purity: Option<&crate::il::pure_call::PureCallCtx>) -> Vec<LoopArrayFacts> {
         let info = sp::analyze(ops);
         let mut loops = find_natural_loops(ops);
         loops.sort_by_key(|l| std::cmp::Reverse(l.header));
@@ -1191,7 +1201,7 @@ mod hoist {
                     facts.refusal = Some(Refusal::HeaderSpUnknown);
                     return facts;
                 }
-                if loop_has_barrier(ops, lp) || !loop_is_modelled(ops, lp) {
+                if loop_has_barrier(ops, lp, purity) || !loop_is_modelled(ops, lp) {
                     facts.refusal = Some(Refusal::OpaqueOp);
                     return facts;
                 }
@@ -1235,11 +1245,18 @@ mod hoist {
     /// alias-safe loops that materialize them. Returns whether anything was
     /// rewritten.
     pub(crate) fn hoist_loop_invariants(ops: &mut Vec<IlOp>) -> bool {
+        hoist_loop_invariants_with(ops, None)
+    }
+
+    pub(crate) fn hoist_loop_invariants_with(
+        ops: &mut Vec<IlOp>,
+        purity: Option<&crate::il::pure_call::PureCallCtx>,
+    ) -> bool {
         let mut changed = false;
         // One hoist per pass invalidates indices, and a run carried out of an inner
         // loop becomes a candidate in the enclosing one — hence the per-loop budget.
         for _ in 0..find_natural_loops(ops).len().saturating_mul(4) + 4 {
-            if !hoist_one(ops) {
+            if !hoist_one(ops, purity) {
                 break;
             }
             changed = true;
@@ -1247,8 +1264,11 @@ mod hoist {
         changed
     }
 
-    fn hoist_one(ops: &mut Vec<IlOp>) -> bool {
-        for f in &loop_array_facts(ops) {
+    fn hoist_one(
+        ops: &mut Vec<IlOp>,
+        purity: Option<&crate::il::pure_call::PureCallCtx>,
+    ) -> bool {
+        for f in &loop_array_facts_with(ops, purity) {
             let candidates = [
                 f.len_hoist.map(|t| (t.at, 3, t.len_slot, true)),
                 f.operand_hoist.map(|c| (c.at, 2, c.slot, false)),
@@ -1865,7 +1885,7 @@ mod hoist {
     }
 }
 
-pub(super) use hoist::hoist_loop_invariants;
+pub(super) use hoist::hoist_loop_invariants_with;
 
 #[cfg(test)]
 mod tests {
@@ -2817,13 +2837,12 @@ mod tests {
     #[test]
     fn pure_call_in_loop_allows_array_len_hoist() {
         use crate::il::op::EntryKind;
-        use super::super::pure_call::{PureCallCtx, set_pure_call_ctx};
+        use super::super::pure_call::PureCallCtx;
 
         reset_bounds_stats();
         let mut ctx = PureCallCtx::default();
         ctx.pure_fns.insert("sq".into());
         ctx.label_callees.insert(9, "sq".into());
-        set_pure_call_ctx(Some(ctx));
 
         let mut ops = vec![
             IlOp::Const { imm: 0, loc: loc() },
@@ -2878,8 +2897,7 @@ mod tests {
             IlOp::Label(Label(1)),
             IlOp::Halt { loc: loc() },
         ];
-        loop_bounds(&mut ops);
-        set_pure_call_ctx(None);
+        loop_bounds_with(&mut ops, Some(&ctx));
         let stats = last_bounds_stats();
         assert!(
             stats.array_len_hoists >= 1,
@@ -2900,9 +2918,7 @@ mod tests {
 
     #[test]
     fn impure_call_in_loop_refuses_array_len_hoist() {
-        use super::super::pure_call::set_pure_call_ctx;
         reset_bounds_stats();
-        set_pure_call_ctx(None);
         let mut ops = vec![
             IlOp::Const { imm: 0, loc: loc() },
             IlOp::StorePop { slot: 1, loc: loc() },
@@ -2974,9 +2990,7 @@ mod tests {
 
     #[test]
     fn yield_in_loop_refuses_length_proof_and_pin() {
-        use super::super::pure_call::set_pure_call_ctx;
         reset_bounds_stats();
-        set_pure_call_ctx(None);
         let mut ops = vec![
             IlOp::Const { imm: 0, loc: loc() },
             IlOp::StorePop { slot: 1, loc: loc() },
@@ -3057,9 +3071,7 @@ mod tests {
 
     #[test]
     fn field_ops_in_loop_refuse_length_proof() {
-        use super::super::pure_call::set_pure_call_ctx;
         reset_bounds_stats();
-        set_pure_call_ctx(None);
         let mut ops = vec![
             IlOp::Const { imm: 0, loc: loc() },
             IlOp::StorePop { slot: 1, loc: loc() },

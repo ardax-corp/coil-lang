@@ -48,12 +48,10 @@ pub struct LoopParSite {
     /// Reduction accumulator: a const-initialized local of an enclosing scope.
     pub acc: String,
     pub op: LoopReduceOp,
-    /// Span of the induction variable in the loop condition.
-    pub index_span: (usize, usize),
-    /// Span of `e` in `acc = acc ⊕ e`. Codegen resolves both spans against the
-    /// checker to confirm the reduction is integral — reassociating floats
-    /// would change results.
-    pub reduce_span: (usize, usize),
+    /// Pointer of the induction identifier's `Expression` (sidecar lookup).
+    pub index_expr_ptr: usize,
+    /// Pointer of `e` in `acc = acc ⊕ e`.
+    pub reduce_expr_ptr: usize,
 }
 
 impl LoopParSite {
@@ -182,7 +180,7 @@ impl Scan<'_> {
         body: &Output<'_>,
         consts: &ConstLocals,
     ) -> Option<LoopParSite> {
-        let (index, index_span, bound, inclusive) = counted_bound(cond, consts)?;
+        let (index, index_expr_ptr, bound, inclusive) = counted_bound(cond, consts)?;
         let begin = *consts.get(&index)?;
         let end = if inclusive {
             bound.checked_add(1)?
@@ -256,8 +254,8 @@ impl Scan<'_> {
             end,
             acc: acc.to_string(),
             op,
-            index_span,
-            reduce_span: (reduce_expr.0.start, reduce_expr.0.end),
+            index_expr_ptr,
+            reduce_expr_ptr: std::ptr::from_ref(reduce_expr) as *const Output<'_> as usize,
         })
     }
 
@@ -383,7 +381,7 @@ fn compound_reduce_op(op: AssignOp) -> Option<LoopReduceOp> {
 fn counted_bound(
     cond: &Output<'_>,
     consts: &ConstLocals,
-) -> Option<(String, (usize, usize), i64, bool)> {
+) -> Option<(String, usize, i64, bool)> {
     let cond = peel(cond);
     let (lhs, rhs, inclusive) = match cond.1.as_ref() {
         Expression::Le(a, b) => (a, b, false),
@@ -399,7 +397,7 @@ fn counted_bound(
     };
     Some((
         index.to_string(),
-        (lhs.0.start, lhs.0.end),
+        std::ptr::from_ref(lhs) as *const Output<'_> as usize,
         bound,
         inclusive,
     ))

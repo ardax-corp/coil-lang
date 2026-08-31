@@ -4254,6 +4254,52 @@ fn main() {
         assert_eq!(apply_ty_prune(c.subst(), y_ty), int());
     }
 
+    #[test]
+    fn for_in_before_into_iterator_impl_is_accepted() {
+        let src = r#"
+class Counter {
+    pub cur: int,
+    pub end: int,
+}
+
+fn consume(Counter c) -> int {
+    let s = 0;
+    for x in c {
+        s = s + x;
+    }
+    return s;
+}
+
+impl IntoIterator for Counter {
+    type Item = int;
+    type IntoIter = Counter;
+    pub fn into_iter(Counter c) -> Counter {
+        return c;
+    }
+}
+
+impl Iterator for Counter {
+    type Item = int;
+    pub fn next(Counter c) -> Option<int> {
+        if c.cur < c.end {
+            let v = c.cur;
+            c.cur = c.cur + 1;
+            return Option::Some(v);
+        }
+        return Option::None;
+    }
+}
+
+fn main() {
+    let n = consume(new Counter(0, 3));
+}
+"#;
+        let (c, _) = check(src);
+        assert!(c.messages().is_empty(), "unexpected: {:?}", c.messages());
+        let n_ty = c.codegen_var_type("n").expect("n");
+        assert_eq!(apply_ty_prune(c.subst(), n_ty), int());
+    }
+
     /// COI-115: `impl Trait<T>` bodies must see inherent `impl T` methods.
     #[test]
     fn trait_impl_can_call_inherent_method() {
@@ -6971,6 +7017,24 @@ fn main() {
             msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
         );
         assert_eq!(c.overload_candidates("f").map(|v| v.len()), Some(2));
+    }
+
+    #[test]
+    fn overload_option_returns_keep_distinct_sidecar_abis() {
+        let (c, _) = check(
+            r#"
+class HeapItem { pub n: int, }
+fn f() -> Option<int> { return None; }
+fn f(int x) -> Option<HeapItem> { return None; }
+fn main() { }
+"#,
+        );
+        let d0 = c.interned_overload_def("f", 0).expect("candidate 0 DefId");
+        let d1 = c.interned_overload_def("f", 1).expect("candidate 1 DefId");
+        assert_ne!(d0, d1, "overloads must not share a DefId");
+        let sc = c.typed_sidecar();
+        assert_eq!(sc.pair_niche(d0), Some(PairNicheAbi::PairOption));
+        assert_eq!(sc.pair_niche(d1), Some(PairNicheAbi::NicheOption));
     }
 
     #[test]

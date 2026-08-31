@@ -37,6 +37,7 @@ pub enum PairNicheAbi {
 #[derive(Clone, Debug, Default)]
 pub struct TypedSidecar {
     tys: HashMap<NodeId, Ty>,
+    tys_by_span: HashMap<(usize, usize), Ty>,
     def_ids: HashMap<NodeId, DefId>,
     overloads: HashMap<NodeId, SelectedOverload>,
     dicts: HashMap<NodeId, Vec<InstanceDef>>,
@@ -48,6 +49,10 @@ pub struct TypedSidecar {
 impl TypedSidecar {
     pub fn ty(&self, id: NodeId) -> Option<&Ty> {
         self.tys.get(&id)
+    }
+
+    pub fn ty_at_span(&self, start: usize, end: usize) -> Option<&Ty> {
+        self.tys_by_span.get(&(start, end))
     }
 
     pub fn def_id(&self, id: NodeId) -> Option<DefId> {
@@ -117,9 +122,26 @@ impl Checker {
                 }
             }
         }
+        for (key, cands) in &self.overload_sets {
+            for c in cands {
+                let Some(def) = self.interned_overload_def(key, c.id) else {
+                    continue;
+                };
+                let ty = apply_ty_prune(subst, &c.scheme.ty);
+                if let Some(abi) = pair_niche_for_scheme_ty(&ty, |n| self.is_class(n)) {
+                    pair_niche.insert(def, abi);
+                }
+            }
+        }
+
+        let mut tys_by_span = HashMap::with_capacity(self.codegen_types_by_span.len());
+        for (&span, ty) in &self.codegen_types_by_span {
+            tys_by_span.insert(span, apply_ty_prune(subst, ty));
+        }
 
         TypedSidecar {
             tys,
+            tys_by_span,
             def_ids: self.def_ids_by_node.clone(),
             overloads,
             dicts: self.call_site_dicts.clone(),

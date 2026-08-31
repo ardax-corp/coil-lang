@@ -135,9 +135,7 @@ pub fn prepare_cif_for_symbol(
 }
 
 pub fn resolve_symbol(library: &libloading::Library, symbol: &str) -> Result<CodePtr, FfiError> {
-    if crate::env::is_ffi_exec_symbol(symbol)
-        && !crate::env::ALLOW_FFI_EXEC.load(std::sync::atomic::Ordering::Relaxed)
-    {
+    if crate::env::is_ffi_exec_symbol(symbol) && !crate::thread::host_allow_ffi_exec() {
         return Err(FfiError::SymbolDenied {
             name: symbol.to_string(),
         });
@@ -810,15 +808,9 @@ mod tests {
 
     #[test]
     fn resolve_symbol_denies_system_without_allow_ffi_exec() {
-        let prev = crate::env::ALLOW_FFI_EXEC.load(std::sync::atomic::Ordering::Relaxed);
-        crate::env::ALLOW_FFI_EXEC.store(false, std::sync::atomic::Ordering::Relaxed);
-        let prev_exec = crate::env::ALLOW_EXEC.load(std::sync::atomic::Ordering::Relaxed);
-        crate::env::ALLOW_EXEC.store(true, std::sync::atomic::Ordering::Relaxed);
         let err = match open_libc_ungated() {
             Some(lib) => resolve_symbol(&lib, "system"),
             None => {
-                crate::env::ALLOW_EXEC.store(prev_exec, std::sync::atomic::Ordering::Relaxed);
-                crate::env::ALLOW_FFI_EXEC.store(prev, std::sync::atomic::Ordering::Relaxed);
                 if std::env::var_os("CI").is_some() {
                     panic!("FFI soft-skip forbidden in CI: libc not reachable via dlopen");
                 }
@@ -826,8 +818,6 @@ mod tests {
                 return;
             }
         };
-        crate::env::ALLOW_EXEC.store(prev_exec, std::sync::atomic::Ordering::Relaxed);
-        crate::env::ALLOW_FFI_EXEC.store(prev, std::sync::atomic::Ordering::Relaxed);
         match err {
             Err(FfiError::SymbolDenied { name }) => assert_eq!(name, "system"),
             other => panic!("expected SymbolDenied for system, got {other:?}"),
@@ -836,12 +826,9 @@ mod tests {
 
     #[test]
     fn resolve_symbol_denies_execve_without_allow_ffi_exec() {
-        let prev = crate::env::ALLOW_FFI_EXEC.load(std::sync::atomic::Ordering::Relaxed);
-        crate::env::ALLOW_FFI_EXEC.store(false, std::sync::atomic::Ordering::Relaxed);
         let err = match open_libc_ungated() {
             Some(lib) => resolve_symbol(&lib, "execve"),
             None => {
-                crate::env::ALLOW_FFI_EXEC.store(prev, std::sync::atomic::Ordering::Relaxed);
                 if std::env::var_os("CI").is_some() {
                     panic!("FFI soft-skip forbidden in CI: libc not reachable via dlopen");
                 }
@@ -849,7 +836,6 @@ mod tests {
                 return;
             }
         };
-        crate::env::ALLOW_FFI_EXEC.store(prev, std::sync::atomic::Ordering::Relaxed);
         match err {
             Err(FfiError::SymbolDenied { name }) => assert_eq!(name, "execve"),
             other => panic!("expected SymbolDenied for execve, got {other:?}"),

@@ -120,7 +120,10 @@
         let (bytecode, constants) = pipeline
             .compile_src_from_file(path.to_str().unwrap())
             .expect("compile");
-        let bump_off = pipeline.compiler_mut().get_function("Counter::bump");
+        let bump_off = pipeline
+            .compiler_mut()
+            .get_function("Counter::bump")
+            .expect("Counter::bump");
         assert!(
             bytecode.iter().any(|b| {
                 matches!(b.bytecode(), Instruction::CALL) && b.call_parts().1 == bump_off
@@ -202,9 +205,9 @@ test("two") { assert(true)?; }
         assert_eq!(compiler.test_cases()[0].0, "one");
         assert_eq!(compiler.test_cases()[1].0, "two");
 
-        let syn0 = compiler.get_function("__zs_test_0");
-        let syn1 = compiler.get_function("__zs_test_1");
-        let main_off = compiler.get_function("main");
+        let syn0 = compiler.get_function("__zs_test_0").expect("__zs_test_0");
+        let syn1 = compiler.get_function("__zs_test_1").expect("__zs_test_1");
+        let main_off = compiler.get_function("main").expect("main");
         assert!(syn0 < bc.len(), "__zs_test_0 offset out of range");
         assert!(syn1 < bc.len(), "__zs_test_1 offset out of range");
         assert!(main_off < bc.len(), "virtual main offset out of range");
@@ -2317,12 +2320,46 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
             .collect::<Vec<_>>()
             .join("\n");
         assert!(
-            rendered.contains("break outside of loop"),
-            "expected break diagnostic, got {rendered}"
+            compiler
+                .get_messages()
+                .iter()
+                .any(|m| m.code() == Some(ErrorCode::CodegenError)
+                    && m.message().contains("break outside of loop")),
+            "expected CodegenError for break, got {rendered}"
         );
         assert!(
-            rendered.contains("continue outside of loop"),
-            "expected continue diagnostic, got {rendered}"
+            compiler
+                .get_messages()
+                .iter()
+                .any(|m| m.code() == Some(ErrorCode::CodegenError)
+                    && m.message().contains("continue outside of loop")),
+            "expected CodegenError for continue, got {rendered}"
+        );
+    }
+
+    #[test]
+    fn missing_decorated_ctor_emits_codegen_error() {
+        let mut ast = Pratt::default()
+            .parse("class C { x: int }\nfn main() { let _c = new C(1); }")
+            .expect("parse failed");
+        let mut compiler = Compiler::default();
+        compiler
+            .decorated_class_ctors
+            .insert("C".into(), "C__ctor".into());
+        compiler.compile("", &mut ast);
+        let rendered = compiler
+            .get_messages()
+            .iter()
+            .map(|m| format!("{:?}", m))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            compiler
+                .get_messages()
+                .iter()
+                .any(|m| m.code() == Some(ErrorCode::CodegenError)
+                    && m.message().contains("Decorated constructor")),
+            "expected CodegenError for missing decorated ctor, got {rendered}"
         );
     }
 
@@ -4395,7 +4432,10 @@ let _ = take(a); \
 }",
             )
             .expect("compile");
-        let main_off = pipeline.compiler_mut().get_function("main") as usize;
+        let main_off = pipeline
+            .compiler_mut()
+            .get_function("main")
+            .expect("main");
         let main_bc = &bc[main_off..];
         assert!(
             !main_bc
@@ -4459,7 +4499,10 @@ let _y = nested[0]; \
 }",
             )
             .expect("compile");
-        let main_off = pipeline.compiler_mut().get_function("main") as usize;
+        let main_off = pipeline
+            .compiler_mut()
+            .get_function("main")
+            .expect("main");
         let main_bc = &bc[main_off..];
         // Nested inners → MakeArray; outer nested spine is stack (no third MakeArray
         // for the outer literal). Escape of nested[0] may MakeArray the outer row
@@ -4481,6 +4524,33 @@ let _y = nested[0]; \
                 .any(|b| matches!(b.bytecode(), Instruction::Index)),
             "const index on stack float array should avoid Index; ops={:?}",
             main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stack_array_single_byte_string_items_emit_const() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src(
+            r#"
+fn main() {
+    let buf: [byte; 3] = ["H", "i", "\n"];
+    let _x = buf[0];
+}
+"#,
+        );
+        let consts: Vec<u32> = bc
+            .iter()
+            .filter_map(|b| match b.bytecode() {
+                Instruction::CONST => Some(b.operand_u32()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            consts.iter().any(|&v| v == 72)
+                && consts.iter().any(|&v| v == 105)
+                && consts.iter().any(|&v| v == 10),
+            "expected CONST bytes for H/i/newline, got {consts:?}; ops={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
 

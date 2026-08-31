@@ -2852,6 +2852,13 @@ fn example_for_in_custom_prints_012() {
     assert_eq!(output, "012");
 }
 
+/// Impl methods are defined after the `for` user; CALL must not pack PC 0.
+#[test]
+fn for_in_impl_after_loop_still_iterates() {
+    let output = run_example("tests/positive/for_in_impl_after.hy");
+    assert_eq!(output, "3");
+}
+
 #[test]
 fn example_range_prints_01234012356() {
     // 0..5 → 01234; 0..=3 → 0123; 10..0 empty; byte 5..=6 → 56;

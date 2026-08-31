@@ -2,16 +2,16 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{exit, Command};
+use std::process::{Command, exit};
 use std::sync::Arc;
 
 use common::{
+    ARCHIVE_VERSION, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
     archive_version_compatible, default_natives_root, embedded_archive_slice,
     format_archive_version, read_embedded_native_lock, read_package_trailer,
-    ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug, ARCHIVE_VERSION,
 };
 use machine::thread::ThreadProgram;
-use machine::{wire_standard_host_natives, DloadGate, Machine};
+use machine::{DloadGate, Machine, wire_standard_host_natives};
 use rkyv::rancor::Error;
 
 /// Errors loading a `.hyc` / embedded archive blob.
@@ -23,7 +23,6 @@ pub enum LoadErr {
 }
 
 /// Owned archive payload restored by CLI and packaged execute.
-#[derive(Debug)]
 pub struct LoadedArchive {
     pub bytecode: Vec<Byte>,
     pub constants: Vec<u64>,
@@ -94,6 +93,10 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 ///
 /// Restores [`common::CStructLayout`] from the archive (CLI `.hyc` and packaged
 /// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
+///
+/// Exec/exit/FFI-exec grants are **not** stored in `.hyc`. This path is deny-all
+/// unless `dload_gate` already encodes attach. In-memory `coil` still applies
+/// `[env]` via `wire_vm_host`.
 pub fn execute_archived_program(
     loaded: &LoadedArchive,
     entry: Option<&Path>,

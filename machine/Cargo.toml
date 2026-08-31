@@ -17,6 +17,7 @@ libloading = "0.9"
 libffi = "5.1.1"
 libc = "0.2"
 sha2 = "0.10"
+parking_lot = "0.12"
 
 [dev-dependencies]
 libc = "0.2"

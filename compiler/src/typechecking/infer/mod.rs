@@ -325,6 +325,7 @@ pub struct Checker {
     bound_display_calls_by_span: HashMap<(usize, usize), BoundDisplayCall>,
 
     /// Expressions whose result must be packed as `(boxed_value, dict)`.
+    existential_packs: HashMap<NodeId, ExistentialPack>,
     existential_packs_by_span: HashMap<(usize, usize), ExistentialPack>,
 
     /// Calls dispatched through an existential argument/receiver dictionary.
