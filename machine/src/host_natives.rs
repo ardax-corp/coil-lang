@@ -10,7 +10,7 @@ use common::Value;
 use crate::math_libm::MATH_LIBM_WIRING;
 use crate::{
     packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
-    FfiSignature, FfiType, HostClosureFn, NativeFn, ENV_WIRING, FS_WIRING, PACKED_DOT,
+    FfiError, FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, ENV_WIRING, FS_WIRING, PACKED_DOT,
     PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
 };
 
@@ -63,6 +63,7 @@ pub fn build_standard_host_natives(
     push_io_wait_ready(&mut out, &mut register_id);
     push_io_write_from(&mut out, &mut register_id);
     push_wiring(&mut out, &mut register_id, GC_WIRING, "gc");
+    push_gc_host_ops(&mut out, &mut register_id);
     push_math_libm(&mut out, &mut register_id);
     // Append-only after math_libm: Vec helpers.
     push_wiring(&mut out, &mut register_id, VEC_WIRING, "vec");
@@ -157,6 +158,45 @@ fn push_removed_time_stubs(
             panic!("removed HostInvoke `{name}` (virtual time is gone)");
         })));
     }
+}
+
+fn push_gc_host_ops(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    let collect_sig = FfiSignature::from_parts(
+        crate::GC_COLLECT_NATIVE.to_string(),
+        vec![],
+        FfiType::Int,
+    )
+    .expect("gc_collect signature");
+    let collect_id = out.len();
+    register_id(crate::GC_COLLECT_NATIVE, collect_id);
+    out.push(Arc::new(
+        HostClosureFn::new(collect_sig, |_heap, _args| {
+            Err(FfiError::Unsupported(
+                "gc_collect is HostOp::Collect (VM hook only)".into(),
+            ))
+        })
+        .with_host_op(HostOp::Collect),
+    ));
+
+    let register_sig = FfiSignature::from_parts(
+        crate::GC_REGISTER_FINALIZER_NATIVE.to_string(),
+        vec![FfiType::Int, FfiType::Int],
+        FfiType::Int,
+    )
+    .expect("gc_register_finalizer signature");
+    let register_id_n = out.len();
+    register_id(crate::GC_REGISTER_FINALIZER_NATIVE, register_id_n);
+    out.push(Arc::new(
+        HostClosureFn::new(register_sig, |_heap, _args| {
+            Err(FfiError::Unsupported(
+                "gc_register_finalizer is HostOp::RegisterFinalizer (VM hook only)".into(),
+            ))
+        })
+        .with_host_op(HostOp::RegisterFinalizer),
+    ));
 }
 
 fn push_wiring(

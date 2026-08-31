@@ -17,7 +17,7 @@ pub use closure::{OwnedClosure, VmCallFn, callback_cif, make_int_callback};
 pub use error::{FfiErrorKindTag, alloc_ffi_error, alloc_ffi_error_kind, alloc_result_ffi_err};
 pub use gate::DloadGate;
 pub use libloading::Library;
-pub use registry::{HostClosureFn, NativeFn, Natives};
+pub use registry::{HostClosureFn, HostOp, NativeFn, Natives};
 pub use resolve::{
     DLOAD_PRODUCTION_STEMS, dload_request_stem, is_libc_alias, is_production_dload_stem,
     library_candidates, platform_shared_lib_filename, resolve_library,

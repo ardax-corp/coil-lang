@@ -6914,7 +6914,11 @@ use string::{to_bytes};
 
 fn main() {
     let r = root([7, 8]);
-    let w = weak(get(r));
+    let inner = match get(r) {
+        Option::Some(v) => v,
+        Option::None => { return; }
+    };
+    let w = weak(inner);
     let out = match upgrade(w) {
         Option::Some(_) => "some",
         Option::None => "none",
@@ -7250,13 +7254,19 @@ fn main() {
     make();
     collect();
     let fd = match kept {
-        Option::Some(r) => get(r).fd,
+        Option::Some(r) => match get(r) {
+            Option::Some(h) => h.fd,
+            Option::None => -1,
+        },
         Option::None => -1,
     };
     let after_first = drops;
     collect();
     let fd2 = match kept {
-        Option::Some(r) => get(r).fd,
+        Option::Some(r) => match get(r) {
+            Option::Some(h) => h.fd,
+            Option::None => -1,
+        },
         Option::None => -1,
     };
     write(stdout(), to_bytes(format("%i%i%i%i", after_first, drops, fd, fd2)));
@@ -7394,7 +7404,11 @@ use string::{to_bytes};
 
 fn main() {
     let r = root([9, 8, 7]);
-    let w = weak(get(r));
+    let inner = match get(r) {
+        Option::Some(v) => v,
+        Option::None => { return; }
+    };
+    let w = weak(inner);
     let _freed = collect();
     let out = match upgrade(w) {
         Option::Some(_) => "some",
@@ -7434,7 +7448,11 @@ use string::{to_bytes};
 
 fn only_weak() {
     let r = root("temp");
-    let w = weak(get(r));
+    let v = match get(r) {
+        Option::Some(x) => x,
+        Option::None => { return weak(""); }
+    };
+    let w = weak(v);
     let _ = unroot(r);
     return w;
 }

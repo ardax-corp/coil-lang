@@ -308,6 +308,48 @@ impl Heap {
         self.gc_gray = gray;
     }
 
+    /// Mark a `Value` if it is a live heap pointer.
+    pub fn mark_value(&self, v: Value, gray: &mut Vec<Object>) {
+        let addr = v.raw() as u64;
+        if addr == 0 {
+            return;
+        }
+        if let Some(child) = self.find_object_by_addr(addr) {
+            child.mark(gray);
+        }
+    }
+
+    /// Mark `root_addrs` and walk children via [`Object::mark_references`].
+    pub fn mark_from_roots(&mut self, root_addrs: &[u64]) {
+        self.gc_mark_set.clear();
+        self.gc_mark_set.extend(root_addrs.iter().copied());
+        let mut gray = std::mem::take(&mut self.gc_gray);
+        gray.clear();
+        let mut current = self.head;
+        while let Some(reference) = current {
+            if !reference.is_marked() && self.gc_mark_set.contains(&reference.addr()) {
+                reference.mark(&mut gray);
+            }
+            current = reference.get_next();
+        }
+        while let Some(obj) = gray.pop() {
+            obj.mark_references(self, &mut gray);
+        }
+        self.gc_gray = gray;
+    }
+
+    /// Complete collect without a `Machine`: mark `extra_roots` plus immortal
+    /// enums, clear dead weaks, sweep.
+    pub fn collect(&mut self, extra_roots: &[u64]) {
+        let mut roots = self.take_gc_roots();
+        roots.extend_from_slice(extra_roots);
+        self.mark_from_roots(&roots);
+        self.clear_dead_weaks();
+        // SAFETY: mark_from_roots marked every reachable object.
+        unsafe { self.sweep() };
+        self.restore_gc_roots(roots);
+    }
+
     /// Clear [`Object::Weak`] handles whose referents were not marked.
     ///
     /// Must run after the mark phase and before [`Self::sweep`] so upgrades
@@ -612,7 +654,12 @@ impl Object {
     }
 
     /// Mark direct heap references held by this object.
-    pub fn mark_references(&self, grey_objects: &mut Vec<Self>) {
+    ///
+    /// Aggregates that store raw [`Value`]s (arrays, tuples, fn captures,
+    /// coroutine stacks) resolve those addresses through `heap`. Stream attach
+    /// state is host-side (A4); channel payloads are PortableValue copies,
+    /// not this-heap pointers.
+    pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
         match self {
             Self::String(_) => {}
             Self::Instance(i) => i.as_ref().fields.iter().for_each(|(k, v)| {
@@ -630,21 +677,37 @@ impl Object {
                 }
             }
             Self::Library(_) => {}
-            // Array/Tuple store raw `Value` element pointers (not `Member`).
-            // Transitive marking walks those addresses in
-            // `Machine::gc_collect`'s grey-stack loop via
-            // `mark_aggregate_elements`. Coroutine `saved_stack` /
-            // `yield_from` are rooted in the same place.
-            Self::Tuple(_) => {}
-            Self::Array(_) => {}
-            Self::Coroutine(_) => {}
+            Self::Tuple(t) => {
+                for v in &t.as_ref().elements {
+                    heap.mark_value(*v, grey_objects);
+                }
+            }
+            Self::Array(a) => {
+                for v in &a.as_ref().elements {
+                    heap.mark_value(*v, grey_objects);
+                }
+            }
+            Self::Coroutine(c) => {
+                let coro = c.as_ref();
+                let mask = coro.saved_live_mask;
+                for (i, v) in coro.saved_stack.iter().enumerate() {
+                    if mask != 0 && i < 64 && mask & (1u64 << i) == 0 {
+                        continue;
+                    }
+                    heap.mark_value(*v, grey_objects);
+                }
+                heap.mark_value(coro.pending_send, grey_objects);
+                if let Some(delegate) = &coro.yield_from {
+                    Object::Coroutine(*delegate).mark(grey_objects);
+                }
+            }
             Self::Boxed(b) => {
                 if let Member::Object(o) = &b.as_ref().payload {
                     o.mark(grey_objects);
                 }
             }
             Self::Root(r) => {
-                if let Member::Object(o) = &r.as_ref().payload {
+                if let Some(Member::Object(o)) = &r.as_ref().payload {
                     o.mark(grey_objects);
                 }
             }
@@ -656,10 +719,11 @@ impl Object {
                     }
                 }
             }
-            Self::Fn(_) => {
-                // `captures` / `captured_args` are raw `Value`s (like Array
-                // elements); Machine::gc_collect traces them via the root set
-                // when the ObjFn itself is reachable.
+            Self::Fn(f) => {
+                let f = f.as_ref();
+                for v in f.captures.iter().chain(f.captured_args.iter()) {
+                    heap.mark_value(*v, grey_objects);
+                }
             }
             Self::Stream(_) => {}
             Self::Thread(_) => {}
@@ -957,8 +1021,8 @@ pub struct ObjBoxed {
 
 /// Explicit strong GC pin: keeps `payload` alive while this object is reachable.
 pub struct ObjRoot {
-    /// Rooted value; cleared to `Member::Value(0)` after [`crate::gc_handles`] unroot.
-    pub payload: Member,
+    /// Rooted value; `None` after [`crate::gc_handles`] unroot.
+    pub payload: Option<Member>,
 }
 
 /// Non-rooting handle to a value; cleared when the referent is unmarked.
@@ -1812,7 +1876,7 @@ mod tests {
         //    payload (which holds the string pointer).
         let mut gray = Vec::new();
         heap.trace(&[enum_addr]);
-        enum_obj.mark_references(&mut gray);
+        enum_obj.mark_references(&heap, &mut gray);
 
         // 4. Sweep — anything not marked is deallocated.
         unsafe { heap.sweep() };
@@ -1860,14 +1924,14 @@ mod tests {
         // the inner enum.
         let mut gray = Vec::new();
         heap.trace(&[outer_addr]);
-        outer_obj.mark_references(&mut gray);
+        outer_obj.mark_references(&heap, &mut gray);
 
         // Drain the grey stack — each newly-marked object should
         // also have its references traced. For the inner enum
         // (empty payload) this is a no-op, but we still call it to
         // exercise the arm.
         while let Some(obj) = gray.pop() {
-            obj.mark_references(&mut gray);
+            obj.mark_references(&heap, &mut gray);
         }
 
         // Sweep.
@@ -1957,7 +2021,7 @@ mod tests {
         heap.set_gc_threshold_for_test(0);
         assert!(heap.should_collect());
         heap.trace(&[keep_addr]);
-        keep.mark_references(&mut Vec::new());
+        keep.mark_references(&heap, &mut Vec::new());
         unsafe { heap.sweep() };
 
         assert!(
@@ -2139,7 +2203,7 @@ mod tests {
         // First collection: only `keep` is a root.
         heap.trace(&[keep_addr]);
         let mut gray = Vec::new();
-        keep.mark_references(&mut gray);
+        keep.mark_references(&heap, &mut gray);
         unsafe { heap.sweep() };
 
         let live = live_object_addrs(&heap);

@@ -1267,9 +1267,9 @@
 
         let mut gray = Vec::new();
         heap.trace(&[outer_obj.addr()]);
-        outer_obj.mark_references(&mut gray);
+        outer_obj.mark_references(&heap, &mut gray);
         while let Some(o) = gray.pop() {
-            o.mark_references(&mut gray);
+            o.mark_references(&heap, &mut gray);
         }
 
         // Sweep — anything not marked is deallocated.

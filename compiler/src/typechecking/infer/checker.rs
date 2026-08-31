@@ -1065,7 +1065,7 @@ impl Checker {
                 Scheme::poly(
                     vec![t],
                     vec![],
-                    fun(&[root_app_ty(Ty::Var(t))], Ty::Var(t)),
+                    fun(&[root_app_ty(Ty::Var(t))], option_app_ty(Ty::Var(t))),
                 )
             }
             GcBuiltin::Weak => {

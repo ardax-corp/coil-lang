@@ -2562,8 +2562,8 @@ fn gc_root_get_roundtrip_typechecks() {
 use gc::{get, root, upgrade, weak};
 fn main() {
     let r = root(1);
-    let n: int = get(r);
-    let w = weak(n);
+    let n: Option<int> = get(r);
+    let w = weak(1);
     let _ = upgrade(w);
 }
 "#,

@@ -198,14 +198,20 @@ test("storing self into Root from drop resurrects") {
     collect();
     assert(root_drops == 1)?;
     let fd = match kept_root {
-        Option::Some(r) => get(r).fd,
+        Option::Some(r) => match get(r) {
+            Option::Some(h) => h.fd,
+            Option::None => -1,
+        },
         Option::None => -1,
     };
     assert(fd == 42)?;
     collect();
     assert(root_drops == 1)?;
     let fd2 = match kept_root {
-        Option::Some(r) => get(r).fd,
+        Option::Some(r) => match get(r) {
+            Option::Some(h) => h.fd,
+            Option::None => -1,
+        },
         Option::None => -1,
     };
     assert(fd2 == 42)?;

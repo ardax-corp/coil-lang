@@ -8,16 +8,29 @@ use crate::memory::{FfiType, Heap};
 
 use super::signature::{FfiError, FfiSignature};
 
+/// Discriminant for HostInvoke specials. Checked instead of `name().to_string()`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostOp {
+    #[default]
+    Ordinary,
+    Collect,
+    RegisterFinalizer,
+}
+
 pub trait NativeFn: Send + Sync {
     fn name(&self) -> &str;
     fn signature(&self) -> &FfiSignature;
     fn invoke(&self, heap: &mut Heap, args: &[Value]) -> Result<Option<Value>, FfiError>;
+    fn host_op(&self) -> HostOp {
+        HostOp::Ordinary
+    }
 }
 
 pub struct HostClosureFn {
     signature: FfiSignature,
     /// When set, accept `min_args..=max_args` instead of exact `signature.arity()`.
     arity_range: Option<(usize, usize)>,
+    host_op: HostOp,
     func: Arc<dyn Fn(&mut Heap, &[Value]) -> Result<Option<Value>, FfiError> + Send + Sync>,
 }
 
@@ -29,8 +42,14 @@ impl HostClosureFn {
         Self {
             signature,
             arity_range: None,
+            host_op: HostOp::Ordinary,
             func: Arc::new(func),
         }
+    }
+
+    pub fn with_host_op(mut self, host_op: HostOp) -> Self {
+        self.host_op = host_op;
+        self
     }
 
     /// Host native that accepts a variable number of arguments (inclusive range).
@@ -46,6 +65,7 @@ impl HostClosureFn {
         Self {
             signature,
             arity_range: Some((min_args, max_args)),
+            host_op: HostOp::Ordinary,
             func: Arc::new(func),
         }
     }
@@ -68,6 +88,10 @@ impl NativeFn for HostClosureFn {
 
     fn signature(&self) -> &FfiSignature {
         &self.signature
+    }
+
+    fn host_op(&self) -> HostOp {
+        self.host_op
     }
 
     fn invoke(&self, heap: &mut Heap, args: &[Value]) -> Result<Option<Value>, FfiError> {

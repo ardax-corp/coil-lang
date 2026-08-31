@@ -5,12 +5,19 @@ use string::{format, to_bytes};
 
 fn main() {
     let r = root("pinned");
-    let w = weak(get(r));
+    let inner = match get(r) {
+        Option::Some(s) => s,
+        Option::None => "gone",
+    };
+    let w = weak(inner);
     let label = match upgrade(w) {
         Option::Some(s) => s,
         Option::None => "gone",
     };
     write_all(stdout(), to_bytes(label));
-    let taken = unroot(r);
+    let taken = match unroot(r) {
+        Option::Some(s) => s,
+        Option::None => "gone",
+    };
     write_all(stdout(), to_bytes(format("\n%s", taken)));
 }

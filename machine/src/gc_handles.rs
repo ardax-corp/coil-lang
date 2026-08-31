@@ -31,33 +31,34 @@ pub fn host_gc_root(heap: &mut Heap, args: &[Value]) -> Value {
     let v = args.first().copied().unwrap_or(Value::from(0i64));
     let (obj, _) = heap.alloc(
         ObjRoot {
-            payload: member_from_value(heap, v),
+            payload: Some(member_from_value(heap, v)),
         },
         Object::Root,
     );
     Value::from(obj.addr())
 }
 
-/// `gc::get(root) -> T` — read the pinned value without releasing the pin.
+/// `gc::get(root) -> Option<T>` — read the pinned value without releasing the pin.
 pub fn host_gc_get(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
-        Some(Object::Root(gc)) => member_to_value(&gc.as_ref().payload),
-        _ => Value::from(0i64),
+        Some(Object::Root(gc)) => match &gc.as_ref().payload {
+            Some(m) => alloc_option_some(heap, member_to_value(m)),
+            None => alloc_option_none(heap),
+        },
+        _ => alloc_option_none(heap),
     }
 }
 
-/// `gc::unroot(root) -> T` — take the payload and clear the pin.
+/// `gc::unroot(root) -> Option<T>` — take the payload and clear the pin.
 pub fn host_gc_unroot(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
-        Some(Object::Root(gc)) => {
-            let root = gc.payload_mut();
-            let v = member_to_value(&root.payload);
-            root.payload = Member::Value(Value::from(0i64));
-            v
-        }
-        _ => Value::from(0i64),
+        Some(Object::Root(gc)) => match gc.payload_mut().payload.take() {
+            Some(m) => alloc_option_some(heap, member_to_value(&m)),
+            None => alloc_option_none(heap),
+        },
+        _ => alloc_option_none(heap),
     }
 }
 
@@ -99,29 +100,18 @@ pub fn host_gc_heap_bytes(heap: &mut Heap, _args: &[Value]) -> Value {
     Value::from(heap.size() as i64)
 }
 
-/// Registry name for [`host_gc_collect_stub`]; the VM HostInvoke path runs a
-/// real stack-rooted collect when it sees this name.
+/// Registry name for `gc::collect`. HostInvoke runs a full collect via
+/// [`crate::HostOp::Collect`], not a heap-only stub.
 pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 
-/// Stub for `gc::collect()` — the VM replaces this with a full collect.
-///
-/// Returns `0` if somehow invoked without the VM special-case (unit tests).
-pub fn host_gc_collect_stub(_heap: &mut Heap, _args: &[Value]) -> Value {
-    Value::from(0i64)
-}
-
-/// Registry name for [`host_gc_register_finalizer_stub`]; the VM HostInvoke
-/// path records `type_id → drop PC` when it sees this name.
+/// Registry name for `gc::register_finalizer`. HostInvoke records
+/// `type_id → drop PC` via [`crate::HostOp::RegisterFinalizer`].
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
-/// Stub for compiler prologue registration — the VM replaces this.
-pub fn host_gc_register_finalizer_stub(_heap: &mut Heap, _args: &[Value]) -> Value {
-    Value::from(0i64)
-}
-
-/// Registry names / arities for [`crate::host_natives::build_standard_host_natives`].
+/// Ordinary `gc_*` natives (collect / register_finalizer are HostOp, not here).
 ///
-/// Append-only: keep prior ids stable.
+/// Append-only: keep prior ids stable. Collect and register_finalizer are
+/// registered immediately after this table.
 pub const GC_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
     ("gc_root", 1, host_gc_root),
     ("gc_unroot", 1, host_gc_unroot),
@@ -129,8 +119,6 @@ pub const GC_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
     ("gc_weak", 1, host_gc_weak),
     ("gc_upgrade", 1, host_gc_upgrade),
     ("gc_heap_bytes", 0, host_gc_heap_bytes),
-    (GC_COLLECT_NATIVE, 0, host_gc_collect_stub),
-    (GC_REGISTER_FINALIZER_NATIVE, 2, host_gc_register_finalizer_stub),
 ];
 
 #[cfg(test)]
@@ -143,47 +131,22 @@ mod tests {
     }
 
     fn force_collect(heap: &mut Heap, keep: &[Value]) {
-        let mut roots: Vec<u64> = keep
+        let roots: Vec<u64> = keep
             .iter()
             .map(|v| v.raw() as u64)
             .filter(|&a| a != 0 && heap.find_object_by_addr(a).is_some())
             .collect();
-        // Also keep Root/Weak handles themselves when passed in `keep`.
-        heap.trace(&roots);
-        let mut gray = Vec::new();
-        let mut root_objects = Vec::new();
-        let mut current = heap.head_for_lookup();
-        while let Some(reference) = current {
-            if reference.is_marked() {
-                root_objects.push(reference);
+        heap.collect(&roots);
+    }
+
+    fn option_payload(heap: &Heap, opt: Value) -> Option<Value> {
+        match heap.find_object_by_addr(opt.raw() as u64) {
+            Some(Object::Enum(gc)) if gc.as_ref().tag == 1 => {
+                Some(member_to_value(&gc.as_ref().payload[0]))
             }
-            current = reference.get_next();
+            Some(Object::Enum(gc)) if gc.as_ref().tag == 0 => None,
+            _ => panic!("expected Option"),
         }
-        for root in &root_objects {
-            root.mark_references(&mut gray);
-            if let Object::Array(gc) = root {
-                for v in &gc.as_ref().elements {
-                    let addr = v.raw() as u64;
-                    if let Some(obj) = heap.find_object_by_addr(addr) {
-                        obj.mark(&mut gray);
-                    }
-                }
-            }
-        }
-        while let Some(obj) = gray.pop() {
-            obj.mark_references(&mut gray);
-            if let Object::Array(gc) = obj {
-                for v in &gc.as_ref().elements {
-                    let addr = v.raw() as u64;
-                    if let Some(o) = heap.find_object_by_addr(addr) {
-                        o.mark(&mut gray);
-                    }
-                }
-            }
-        }
-        heap.clear_dead_weaks();
-        unsafe { heap.sweep() };
-        let _ = &mut roots;
     }
 
     #[test]
@@ -193,7 +156,8 @@ mod tests {
         let root = host_gc_root(&mut heap, &[s]);
         // Drop the only direct reference to the string; Root should keep it.
         force_collect(&mut heap, &[root]);
-        let got = host_gc_get(&mut heap, &[root]);
+        let got_opt = host_gc_get(&mut heap, &[root]);
+        let got = option_payload(&heap, got_opt).expect("rooted string");
         match heap.find_object_by_addr(got.raw() as u64) {
             Some(Object::String(gc)) => assert_eq!(gc.as_ref().data, "pinned"),
             _ => panic!("expected rooted string to survive"),
@@ -205,7 +169,8 @@ mod tests {
         let mut heap = Heap::default();
         let s = intern(&mut heap, "gone");
         let root = host_gc_root(&mut heap, &[s]);
-        let taken = host_gc_unroot(&mut heap, &[root]);
+        let taken_opt = host_gc_unroot(&mut heap, &[root]);
+        let taken = option_payload(&heap, taken_opt).expect("unroot payload");
         assert_eq!(
             heap.find_object_by_addr(taken.raw() as u64)
                 .map(|o| matches!(o, Object::String(_))),
@@ -281,10 +246,14 @@ mod tests {
     fn get_and_unroot_reject_non_root_handles() {
         let mut heap = Heap::default();
         let s = intern(&mut heap, "not-a-root");
-        assert_eq!(host_gc_get(&mut heap, &[s]).as_int(), 0);
-        assert_eq!(host_gc_unroot(&mut heap, &[s]).as_int(), 0);
-        assert_eq!(host_gc_get(&mut heap, &[Value::from(0i64)]).as_int(), 0);
-        assert_eq!(host_gc_unroot(&mut heap, &[]).as_int(), 0);
+        let o1 = host_gc_get(&mut heap, &[s]);
+        assert!(option_payload(&heap, o1).is_none());
+        let o2 = host_gc_unroot(&mut heap, &[s]);
+        assert!(option_payload(&heap, o2).is_none());
+        let o3 = host_gc_get(&mut heap, &[Value::from(0i64)]);
+        assert!(option_payload(&heap, o3).is_none());
+        let o4 = host_gc_unroot(&mut heap, &[]);
+        assert!(option_payload(&heap, o4).is_none());
     }
 
     #[test]
@@ -304,13 +273,17 @@ mod tests {
     }
 
     #[test]
-    fn get_after_unroot_returns_zero() {
+    fn get_after_unroot_returns_none() {
         let mut heap = Heap::default();
         let root = host_gc_root(&mut heap, &[Value::from(99i64)]);
-        assert_eq!(host_gc_get(&mut heap, &[root]).as_int(), 99);
-        assert_eq!(host_gc_unroot(&mut heap, &[root]).as_int(), 99);
-        assert_eq!(host_gc_get(&mut heap, &[root]).as_int(), 0);
-        assert_eq!(host_gc_unroot(&mut heap, &[root]).as_int(), 0);
+        let g = host_gc_get(&mut heap, &[root]);
+        assert_eq!(option_payload(&heap, g).unwrap().as_int(), 99);
+        let u = host_gc_unroot(&mut heap, &[root]);
+        assert_eq!(option_payload(&heap, u).unwrap().as_int(), 99);
+        let g2 = host_gc_get(&mut heap, &[root]);
+        assert!(option_payload(&heap, g2).is_none());
+        let u2 = host_gc_unroot(&mut heap, &[root]);
+        assert!(option_payload(&heap, u2).is_none());
     }
 
     #[test]
@@ -318,7 +291,8 @@ mod tests {
         let mut heap = Heap::default();
         let root = host_gc_root(&mut heap, &[Value::from(42i64)]);
         force_collect(&mut heap, &[root]);
-        assert_eq!(host_gc_get(&mut heap, &[root]).as_int(), 42);
+        let g = host_gc_get(&mut heap, &[root]);
+        assert_eq!(option_payload(&heap, g).unwrap().as_int(), 42);
     }
 
     /// Dead weaks are cleared after mark and before sweep so upgrades never
@@ -344,7 +318,7 @@ mod tests {
 
     #[test]
     fn gc_wiring_names_and_arities_are_stable() {
-        assert_eq!(GC_WIRING.len(), 8);
+        assert_eq!(GC_WIRING.len(), 6);
         let expected = [
             ("gc_root", 1),
             ("gc_unroot", 1),
@@ -352,8 +326,6 @@ mod tests {
             ("gc_weak", 1),
             ("gc_upgrade", 1),
             ("gc_heap_bytes", 0),
-            (GC_COLLECT_NATIVE, 0),
-            (GC_REGISTER_FINALIZER_NATIVE, 2),
         ];
         for (i, (name, arity)) in expected.iter().enumerate() {
             assert_eq!(GC_WIRING[i].0, *name);
@@ -362,8 +334,44 @@ mod tests {
     }
 
     #[test]
-    fn collect_stub_returns_zero_without_vm_special_case() {
+    fn collect_keeps_array_children() {
         let mut heap = Heap::default();
-        assert_eq!(host_gc_collect_stub(&mut heap, &[]).as_int(), 0);
+        let s = intern(&mut heap, "kid");
+        let (arr, _) = heap.alloc(
+            crate::memory::ObjArray {
+                elements: vec![s],
+            },
+            Object::Array,
+        );
+        heap.collect(&[arr.addr()]);
+        assert!(
+            heap.find_object_by_addr(arr.addr()).is_some(),
+            "array root must live"
+        );
+        assert!(
+            heap.find_object_by_addr(s.raw() as u64).is_some(),
+            "array child must live without Machine tracing"
+        );
+    }
+
+    #[test]
+    fn collect_and_register_are_host_op_not_stubs() {
+        use crate::HostOp;
+        let natives = crate::host_natives::build_standard_host_natives(|_, _| {});
+        let collect = natives
+            .iter()
+            .find(|n| n.name() == GC_COLLECT_NATIVE)
+            .expect("gc_collect");
+        let register = natives
+            .iter()
+            .find(|n| n.name() == GC_REGISTER_FINALIZER_NATIVE)
+            .expect("gc_register_finalizer");
+        assert_eq!(collect.host_op(), HostOp::Collect);
+        assert_eq!(register.host_op(), HostOp::RegisterFinalizer);
+        let mut heap = Heap::default();
+        assert!(collect.invoke(&mut heap, &[]).is_err());
+        assert!(register
+            .invoke(&mut heap, &[Value::from(0i64), Value::from(0i64)])
+            .is_err());
     }
 }
