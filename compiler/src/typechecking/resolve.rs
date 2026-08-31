@@ -1,7 +1,7 @@
 //! Bind `use` / `mod` to interned [`DefId`]s.
 //!
 //! Runs after parse / [`Pipeline::enqueue_uses`](crate::pipeline::Pipeline)
-//! discovery, at the start of check. Does **not** crawl the filesystem —
+//! discovery, at the start of check. Does **not** crawl the filesystem â
 //! the file graph is already built; this walk only intern defs in the
 //! current AST and alias imported names to DefIds minted when the
 //! defining module was resolved (dependency order).
@@ -76,7 +76,8 @@ fn intern_items(
         }
         Expression::ExternBlock { declarations, .. } => {
             for decl in declarations {
-                let _ = interner.intern(module, DefKind::Ffi, decl.name);
+                let id = interner.intern(module, DefKind::Ffi, decl.name);
+                local_defs.entry(decl.name.to_string()).or_insert(id);
             }
         }
         Expression::Implementation { owner, methods, .. } => {
@@ -138,10 +139,7 @@ fn bind_uses(
                 return;
             }
             let module_ns = path.join("::");
-            let Some(mid) = interner.module_id(&module_ns) else {
-                return;
-            };
-            let Some(id) = interner.get(mid, name) else {
+            let Some(id) = lookup_imported_def(interner, &module_ns, name) else {
                 return;
             };
             let local = alias.clone().unwrap_or_else(|| name.clone());
@@ -150,6 +148,29 @@ fn bind_uses(
         }
         _ => {}
     }
+}
+
+/// DefId for `use path::name`.
+///
+/// Two disk layouts share the same `use` syntax:
+/// - item-in-module: `foo.hy` + `fn sadge` → module `foo`, name `sadge`
+/// - one-item-per-file: `foo/sadge.hy` + `fn sadge` → module `foo::sadge`, name `sadge`
+///
+/// Brace `use foo::{sadge}` is the first; bare `use foo::sadge` is often the
+/// second. Prefer the defining module that actually interned the name.
+fn lookup_imported_def(interner: &DefInterner, module_ns: &str, name: &str) -> Option<DefId> {
+    if let Some(mid) = interner.module_id(module_ns)
+        && let Some(id) = interner.get(mid, name)
+    {
+        return Some(id);
+    }
+    let file_ns = if module_ns.is_empty() {
+        name.to_string()
+    } else {
+        format!("{module_ns}::{name}")
+    };
+    let mid = interner.module_id(&file_ns)?;
+    interner.get(mid, name)
 }
 
 #[cfg(test)]
@@ -214,5 +235,107 @@ mod tests {
         );
         let imported = *entry_locals.get("add").expect("imported add");
         assert_eq!(imported, defined);
+    }
+
+    #[test]
+    fn resolve_use_binds_one_item_per_file_def() {
+        let def_ast = parse("fn sadge() {}\n");
+        let use_ast = parse("use foo::sadge;\nfn main() { sadge(); }\n");
+        let mut intern = DefInterner::new();
+        let file_mod = intern.intern_module("foo::sadge");
+        let entry = intern.intern_module("");
+        let mut def_locals = HashMap::new();
+        resolve(
+            &mut intern,
+            file_mod,
+            &def_ast,
+            &VirtualModules::new(),
+            &mut def_locals,
+        );
+        let defined = *def_locals.get("sadge").expect("defining sadge");
+        let mut entry_locals = HashMap::new();
+        resolve(
+            &mut intern,
+            entry,
+            &use_ast,
+            &VirtualModules::new(),
+            &mut entry_locals,
+        );
+        let imported = *entry_locals.get("sadge").expect("imported sadge");
+        assert_eq!(imported, defined);
+    }
+
+    #[test]
+    fn resolve_use_alias_binds_one_item_per_file_def() {
+        let def_ast = parse("fn sadge() {}\n");
+        let use_ast = parse("use foo::sadge as f;\nfn main() { f(); }\n");
+        let mut intern = DefInterner::new();
+        let file_mod = intern.intern_module("foo::sadge");
+        let entry = intern.intern_module("");
+        let mut def_locals = HashMap::new();
+        resolve(
+            &mut intern,
+            file_mod,
+            &def_ast,
+            &VirtualModules::new(),
+            &mut def_locals,
+        );
+        let defined = *def_locals.get("sadge").expect("defining sadge");
+        let mut entry_locals = HashMap::new();
+        resolve(
+            &mut intern,
+            entry,
+            &use_ast,
+            &VirtualModules::new(),
+            &mut entry_locals,
+        );
+        let imported = *entry_locals.get("f").expect("imported alias f");
+        assert_eq!(imported, defined);
+        assert!(entry_locals.get("sadge").is_none());
+    }
+
+    #[test]
+    fn resolve_use_binds_nested_one_item_per_file_def() {
+        let def_ast = parse("fn read() {}\n");
+        let use_ast = parse("use lib::io::read;\nfn main() { read(); }\n");
+        let mut intern = DefInterner::new();
+        let file_mod = intern.intern_module("lib::io::read");
+        let entry = intern.intern_module("");
+        let mut def_locals = HashMap::new();
+        resolve(
+            &mut intern,
+            file_mod,
+            &def_ast,
+            &VirtualModules::new(),
+            &mut def_locals,
+        );
+        let defined = *def_locals.get("read").expect("defining read");
+        let mut entry_locals = HashMap::new();
+        resolve(
+            &mut intern,
+            entry,
+            &use_ast,
+            &VirtualModules::new(),
+            &mut entry_locals,
+        );
+        let imported = *entry_locals.get("read").expect("imported read");
+        assert_eq!(imported, defined);
+    }
+
+    #[test]
+    fn resolve_interns_extern_fn_into_local_defs() {
+        let ast = parse(
+            "extern \"c\" {\n    fn strlen(string s) -> int;\n}\nfn run() {}\n",
+        );
+        let mut intern = DefInterner::new();
+        let m = intern.intern_module("ffi_mod::sys");
+        let mut local = HashMap::new();
+        resolve(&mut intern, m, &ast, &VirtualModules::new(), &mut local);
+        let strlen = *local.get("strlen").expect("extern strlen interned");
+        let run = *local.get("run").expect("run interned");
+        assert_ne!(strlen, run);
+        let info = intern.info(strlen).expect("strlen DefInfo");
+        assert_eq!(info.kind, DefKind::Ffi);
+        assert_eq!(info.name, "strlen");
     }
 }

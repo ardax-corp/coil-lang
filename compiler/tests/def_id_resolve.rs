@@ -63,3 +63,66 @@ fn imported_fn_def_id_matches_defining_module() {
         .expect("entry `main` should have a DefId");
     assert_ne!(imported, main_id);
 }
+
+#[test]
+fn imported_one_item_per_file_def_id_matches_defining_module() {
+    let files = [
+        (
+            "src/foo/sadge.hy",
+            "fn sadge() {}\n",
+        ),
+        (
+            "src/main.hy",
+            "use foo::sadge;\nfn main() {\n    sadge();\n}\n",
+        ),
+    ];
+    let (_root, entry) = build_project("use_file_per_item", &files, "src/main.hy");
+    let mut pipeline = Pipeline::new();
+    if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+        for msg in pipeline.messages() {
+            eprintln!("PIPELINE ERROR: {}", msg.message());
+        }
+        panic!("compile failed");
+    }
+    let checker = pipeline.compiler().checker();
+    let imported = checker
+        .def_id_of("sadge")
+        .expect("imported `sadge` should have a DefId");
+    let defined = checker
+        .interned_def("foo::sadge", "sadge")
+        .expect("defining module `foo::sadge::sadge` should be interned");
+    assert_eq!(
+        imported, defined,
+        "use foo::sadge must bind the one-item-per-file DefId"
+    );
+}
+
+#[test]
+fn imported_alias_one_item_per_file_def_id_matches_defining_module() {
+    let files = [
+        ("src/foo/sadge.hy", "fn sadge() {}\n"),
+        (
+            "src/main.hy",
+            "use foo::sadge as f;\nfn main() {\n    f();\n}\n",
+        ),
+    ];
+    let (_root, entry) = build_project("use_file_per_item_alias", &files, "src/main.hy");
+    let mut pipeline = Pipeline::new();
+    if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+        for msg in pipeline.messages() {
+            eprintln!("PIPELINE ERROR: {}", msg.message());
+        }
+        panic!("compile failed");
+    }
+    let checker = pipeline.compiler().checker();
+    let imported = checker
+        .def_id_of("f")
+        .expect("imported alias `f` should have a DefId");
+    let defined = checker
+        .interned_def("foo::sadge", "sadge")
+        .expect("defining module `foo::sadge::sadge` should be interned");
+    assert_eq!(
+        imported, defined,
+        "use foo::sadge as f must bind the defining DefId"
+    );
+}
