@@ -2116,6 +2116,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Const { imm: 1, loc: loc() },
@@ -2126,6 +2127,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
             ]
         }
@@ -2276,6 +2278,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Const { imm: 1, loc: loc() },
@@ -2284,6 +2287,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
             ];
             assert_eq!(
@@ -2308,6 +2312,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Const { imm: 1, loc: loc() },
@@ -2316,6 +2321,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
             ];
             seek_normalize_back_edges(&mut ops, 2);
@@ -2329,12 +2335,14 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
                     target: Label(1),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(1)),
                 IlOp::Const { imm: 1, loc: loc() },
@@ -2345,6 +2353,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(1),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Const { imm: 1, loc: loc() },
                 IlOp::StorePop { slot: 2, loc: loc() },
@@ -2352,6 +2361,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
             ]
         }
@@ -2379,6 +2389,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Load { slot: 0, loc: loc() },
@@ -2391,6 +2402,7 @@ mod tell {
                     kind: IlJumpKind::JumpIfFalse,
                     target: Label(1),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Const { imm: 1, loc: loc() },
                 IlOp::StorePop { slot: 2, loc: loc() },
@@ -2400,6 +2412,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(1)),
                 IlOp::Return { loc: loc() },
@@ -2418,6 +2431,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Load { slot: 0, loc: loc() },
@@ -2430,6 +2444,7 @@ mod tell {
                     kind: IlJumpKind::JumpIfFalse,
                     target: Label(2),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Const { imm: 1, loc: loc() },
                 IlOp::StorePop { slot: 2, loc: loc() },
@@ -2439,12 +2454,14 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(2)),
                 IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
                     target: Label(1),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(1)),
                 IlOp::Load { slot: 0, loc: loc() },
@@ -2457,6 +2474,7 @@ mod tell {
                     kind: IlJumpKind::JumpIfFalse,
                     target: Label(3),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Const { imm: 1, loc: loc() },
                 IlOp::StorePop { slot: 2, loc: loc() },
@@ -2466,6 +2484,7 @@ mod tell {
                     kind: IlJumpKind::Unconditional,
                     target: Label(1),
                     loc: loc(),
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(3)),
                 IlOp::Return { loc: loc() },
@@ -2569,17 +2588,20 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(2)),
             IlOp::Load {
@@ -2627,6 +2649,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         slot_promote(&mut ops, 3);
@@ -2644,6 +2667,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::StorePop {
@@ -2654,6 +2678,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 2, loc: loc() },
@@ -2696,6 +2721,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         slot_promote(&mut ops, 7);
@@ -2987,6 +3013,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load { slot: 5, loc: loc() },
@@ -3067,6 +3094,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 7, loc: loc() },
             IlOp::StorePop {
@@ -3077,6 +3105,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load {
@@ -3091,6 +3120,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(2)),
             IlOp::Return { loc: loc() },
@@ -3148,6 +3178,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load {
@@ -3162,6 +3193,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         slot_promote(&mut ops, 3);
@@ -3199,6 +3231,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::StorePop {
@@ -3209,6 +3242,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(3),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(2)),
             IlOp::Const { imm: 2, loc: loc() },
@@ -3229,6 +3263,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         slot_promote(&mut ops, 3);
@@ -3296,6 +3331,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load {
@@ -3572,6 +3608,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 7, loc: loc() },
             IlOp::StorePop {
@@ -3597,6 +3634,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Return { loc: loc() },

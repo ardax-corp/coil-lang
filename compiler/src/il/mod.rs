@@ -6,9 +6,9 @@
 
 mod algebraic;
 mod bounds;
+mod builder;
 mod canon;
 mod cast_spill;
-mod builder;
 mod codebuf;
 mod emit_buf;
 mod func;
@@ -18,16 +18,16 @@ mod licm;
 mod lower;
 mod module;
 mod op;
-mod pure_call;
 pub(crate) mod opt;
+mod pure_call;
 mod sp;
 pub mod tell;
 mod treeshake;
 
 pub use bounds::{BoundsStats, last_bounds_stats};
-pub use pure_call::PureCallCtx;
 pub use canon::{CanonStats, last_canon_stats};
 pub use opt::OptLevel;
+pub use pure_call::PureCallCtx;
 
 pub use builder::{IlBuilder, IlError};
 pub use codebuf::CodeBuf;
@@ -36,5 +36,5 @@ pub use func::IlFunc;
 #[allow(unused_imports)]
 pub use lower::{Lowered, lower, lower_module, lower_with_funcs};
 pub use module::IlModule;
-pub use op::{EntryKind, IlJumpKind, IlOp, Label};
+pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, JoinClass, Label};
 pub use treeshake::{TreeshakeInput, prune_unused_functions};

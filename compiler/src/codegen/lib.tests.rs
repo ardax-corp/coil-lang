@@ -3424,6 +3424,7 @@ fn main() {
                     kind: IlJumpKind::JumpIfFalse,
                     target,
                     loc: DebugLoc::unknown(),
+                    hint: Default::default(),
                 },
                 IlOp::Load {
                     slot: 1,
@@ -3807,6 +3808,7 @@ fn run() -> int { return add(1, 2); }
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -4048,6 +4050,7 @@ fn run() -> int { return add(1, 2); }
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 0,

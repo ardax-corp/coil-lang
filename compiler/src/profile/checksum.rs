@@ -76,6 +76,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Return { loc: loc() },
             IlOp::Label(Label(1)),

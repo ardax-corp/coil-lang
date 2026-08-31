@@ -4,21 +4,21 @@ use std::{
 };
 
 use common::{
-    Byte, DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, Value, ValueTag, encode_tag_operand,
-    likely, tag, unlikely,
+    Byte, DEBUG_FILE_UNKNOWN, DebugLoc, FnDebugSym, Instruction, Interner, Value, ValueTag,
+    encode_tag_operand, likely, tag, unlikely,
 };
 use reporting::Label as DiagLabel;
 
 use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
-use crate::il::{CodeBuf, EmitBuf, EntryKind, IlJumpKind, IlOp, Label as IlLabel};
+use crate::il::{CodeBuf, EmitBuf, EntryKind, FuseHint, IlJumpKind, IlOp, Label as IlLabel};
 use crate::monomorphize::{MonoKey, MonoPlan, parse_mono_ty_name};
-use reporting::{ErrorCode, Message};
 use crate::typechecking::{Checker, Ty};
 use parser::{
     SimpleSpan,
     ast::{Expression, MatchArm, Output, Pattern, PatternPayload},
 };
+use reporting::{ErrorCode, Message};
 
 /// Max native recursion depth for [`compiler::Compiler::do_compile`]. Chosen
 /// well under what a debug-build stack of a few MiB can hold even with
@@ -301,12 +301,7 @@ fn arm_has_runtime_test(arm: &MatchArm) -> bool {
                 PatternPayload::Unit => false,
                 PatternPayload::Tuple(parts) => parts
                     .iter()
-                    .any(|p| {
-                        matches!(
-                            p.1,
-                            Pattern::Binding { .. } | Pattern::Constructor { .. }
-                        )
-                    }),
+                    .any(|p| matches!(p.1, Pattern::Binding { .. } | Pattern::Constructor { .. })),
                 PatternPayload::Record(fields) => fields.iter().any(|f| {
                     matches!(
                         f.pattern.1,
@@ -661,11 +656,9 @@ fn make_fn_operand(n_cap: u32, n_filled: u32, arity: u32, is_rest: bool) -> u32 
 fn fn_arity_from_args(args: &Output<'_>) -> (usize, bool) {
     match args.1.as_ref() {
         Expression::Fragment(children) => {
-            let has_rest = children
-                .last()
-                .is_some_and(|c| {
-                    matches!(c.1.as_ref(), Expression::Argument { is_rest: true, .. })
-                });
+            let has_rest = children.last().is_some_and(|c| {
+                matches!(c.1.as_ref(), Expression::Argument { is_rest: true, .. })
+            });
             let n = children
                 .iter()
                 .filter(|c| matches!(c.1.as_ref(), Expression::Argument { .. }))
@@ -939,9 +932,9 @@ pub struct Compiler {
     /// Debug: FQN → user-facing local/param name → frame slot (last write wins).
     fn_debug_locals: HashMap<String, HashMap<String, u32>>,
 
-    /// When true, [`Expression::Match`] omits the trailing `DUPLICATE; POP`
-    /// fusion barrier. Set while compiling a match whose value is consumed
-    /// immediately by `StorePop` / `StoreStatic` (e.g. `let x = match …`).
+    /// When true, [`Expression::Match`] binds `end` as a plain label instead of
+    /// a value-join (`JoinLabel`). Set while compiling a match whose value is
+    /// consumed immediately by `StorePop` / `StoreStatic` (e.g. `let x = match …`).
     suppress_match_fusion_barrier: bool,
 
     /// Self-recursive pure function names eligible for auto fork-join.
@@ -1294,7 +1287,6 @@ fn emit_pattern_binding<'compiler>(
     }
 }
 
-
 fn unwrap_expr_output<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
     match expr.1.as_ref() {
         Expression::Expr(inner)
@@ -1335,4 +1327,3 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 
 mod compiler;
 mod inline_cost;
-

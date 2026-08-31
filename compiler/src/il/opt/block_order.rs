@@ -26,7 +26,7 @@ pub fn build_block_graph(ops: &[IlOp]) -> BlockGraph {
     let mut leaders = vec![false; n];
     leaders[0] = true;
     for (i, op) in ops.iter().enumerate() {
-        if matches!(op, IlOp::Label(_)) {
+        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
             leaders[i] = true;
         }
         if ends_block(op) && i + 1 < n {
@@ -160,7 +160,7 @@ fn profile_says_hot_entry(
     let labels: Vec<u32> = ops[start..end]
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -187,7 +187,7 @@ fn targeted_by_uncond(ops: &[IlOp], start: usize, end: usize) -> bool {
     let labels: Vec<u32> = ops[start..end]
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -213,7 +213,7 @@ fn label_to_block(ops: &[IlOp], blocks: &[(usize, usize)]) -> std::collections::
     let mut map = std::collections::HashMap::new();
     for (bi, &(s, e)) in blocks.iter().enumerate() {
         for op in &ops[s..e] {
-            if let IlOp::Label(Label(id)) = op {
+            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
                 map.insert(*id, bi);
             }
         }
@@ -285,6 +285,7 @@ mod tests {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(id),
             loc: loc(),
+            hint: Default::default(),
         }
     }
 
@@ -293,6 +294,7 @@ mod tests {
             kind: IlJumpKind::Unconditional,
             target: Label(id),
             loc: loc(),
+            hint: Default::default(),
         }
     }
 
@@ -336,14 +338,14 @@ mod tests {
         let labels: Vec<u32> = ops
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .collect();
         assert_eq!(labels, vec![2, 1], "join (2) before cold (1)");
         assert!(matches!(ops[0], IlOp::Jump { kind: IlJumpKind::JumpIfFalse, target: Label(1), .. }));
         assert!(ops.iter().any(|op| matches!(op, IlOp::Const { imm: 3, .. })));
-        let last_real = ops.iter().rev().find(|op| !matches!(op, IlOp::Label(_)));
+        let last_real = ops.iter().rev().find(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)));
         assert!(matches!(last_real, Some(IlOp::Return { .. })));
     }
 
@@ -412,7 +414,7 @@ mod tests {
         let before_labels: Vec<u32> = ops
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .collect();
@@ -420,7 +422,7 @@ mod tests {
         let after: Vec<u32> = ops
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .collect();

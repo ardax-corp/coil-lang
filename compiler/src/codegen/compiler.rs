@@ -1580,6 +1580,7 @@ impl Compiler {
             kind: IlJumpKind::JumpIfFalse,
             target: do_call,
             loc: DebugLoc::unknown(),
+            hint: Default::default(),
         });
         // Base-case then-arm value.
         if !self.emit_peel_remapped_op(&peel.then_value, &temps) {
@@ -1589,6 +1590,7 @@ impl Compiler {
             kind: IlJumpKind::Unconditional,
             target: join,
             loc: DebugLoc::unknown(),
+            hint: Default::default(),
         });
         self.bytecode.bind_label(do_call);
         for &tmp in &temps {
@@ -1724,12 +1726,14 @@ impl Compiler {
             kind: IlJumpKind::JumpIfFalse,
             target: do_call,
             loc: DebugLoc::unknown(),
+            hint: Default::default(),
         });
         self.emit_peel_remat_op(&plan.then_value, &argv);
         self.bytecode.push_op(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
             target: join,
             loc: DebugLoc::unknown(),
+            hint: Default::default(),
         });
         self.bytecode.bind_label(do_call);
         for bytes in &argv {
@@ -2320,12 +2324,17 @@ impl Compiler {
                     let mapped = ensure_label(l.0, &mut self.bytecode);
                     self.bytecode.bind_label(mapped);
                 }
-                IlOp::Jump { kind, target, loc } => {
+                IlOp::JoinLabel(l) => {
+                    let mapped = ensure_label(l.0, &mut self.bytecode);
+                    self.bytecode.bind_join_label(mapped);
+                }
+                IlOp::Jump { kind, target, loc, hint } => {
                     let mapped = ensure_label(target.0, &mut self.bytecode);
                     self.bytecode.push_op(IlOp::Jump {
                         kind: *kind,
                         target: mapped,
                         loc: *loc,
+                        hint: *hint,
                     });
                 }
                 IlOp::Entry {
@@ -2357,6 +2366,7 @@ impl Compiler {
                         kind: IlJumpKind::Unconditional,
                         target: end_label,
                         loc: DebugLoc::unknown(),
+                        hint: Default::default(),
                     });
                     saw_value = true;
                 }
@@ -2369,6 +2379,7 @@ impl Compiler {
                         kind: IlJumpKind::Unconditional,
                         target: end_label,
                         loc: DebugLoc::unknown(),
+                        hint: Default::default(),
                     });
                     saw_value = true;
                 }
@@ -2384,6 +2395,7 @@ impl Compiler {
                         kind: IlJumpKind::Unconditional,
                         target: end_label,
                         loc: DebugLoc::unknown(),
+                        hint: Default::default(),
                     });
                     saw_value = true;
                 }
@@ -2402,6 +2414,7 @@ impl Compiler {
                         kind: IlJumpKind::Unconditional,
                         target: end_label,
                         loc: DebugLoc::unknown(),
+                        hint: Default::default(),
                     });
                     saw_value = true;
                 }
@@ -2473,6 +2486,7 @@ impl Compiler {
                                     kind: IlJumpKind::Unconditional,
                                     target: end_label,
                                     loc: DebugLoc::unknown(),
+                                    hint: Default::default(),
                                 });
                                 saw_value = true;
                             }
@@ -2482,6 +2496,7 @@ impl Compiler {
                                     kind: IlJumpKind::Unconditional,
                                     target: end_label,
                                     loc: DebugLoc::unknown(),
+                                    hint: Default::default(),
                                 });
                                 saw_value = true;
                             }
@@ -2494,6 +2509,7 @@ impl Compiler {
                                     kind: IlJumpKind::Unconditional,
                                     target: end_label,
                                     loc: DebugLoc::unknown(),
+                                    hint: Default::default(),
                                 });
                                 saw_value = true;
                             }
@@ -2507,6 +2523,7 @@ impl Compiler {
                                     kind: IlJumpKind::Unconditional,
                                     target: end_label,
                                     loc: DebugLoc::unknown(),
+                                    hint: Default::default(),
                                 });
                                 saw_value = true;
                             }
@@ -12952,10 +12969,10 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Instruction::DUPLICATE));
                     self.bytecode.push_const(success_tag as i32);
                     self.bytecode.push(Byte::new(Instruction::EQ));
-                    self.bytecode.push(Byte::new(Instruction::NOOP));
-                    bb.emit_jump_to(
+                    bb.emit_jump_to_hinted(
                         failure,
                         BbJumpKind::JumpIfFalse,
+                        FuseHint::nofuse_value_under_jmp(),
                         self.bytecode.il_mut(),
                     );
                     self.bytecode.push_pop();
@@ -12970,10 +12987,10 @@ impl Compiler {
                 } else if self.expr_is_niche_option(inner) {
                     self.bytecode.push(Byte::new(Instruction::DUPLICATE));
                     self.bytecode.push(Byte::new(Instruction::LogNot));
-                    self.bytecode.push(Byte::new(Instruction::NOOP));
-                    bb.emit_jump_to(
+                    bb.emit_jump_to_hinted(
                         success,
                         BbJumpKind::JumpIfFalse,
+                        FuseHint::nofuse_value_under_jmp(),
                         self.bytecode.il_mut(),
                     );
                     if self.compiling_pair_mode {
@@ -13091,10 +13108,10 @@ impl Compiler {
                     self.bytecode.push(Byte::new(Instruction::DUPLICATE));
                     self.bytecode.push_const(success_tag as i32);
                     self.bytecode.push(Byte::new(Instruction::EQ));
-                    self.bytecode.push(Byte::new(Instruction::NOOP));
-                    bb.emit_jump_to(
+                    bb.emit_jump_to_hinted(
                         failure,
                         BbJumpKind::JumpIfFalse,
+                        FuseHint::nofuse_value_under_jmp(),
                         self.bytecode.il_mut(),
                     );
                     self.bytecode.push_pop();
@@ -13109,10 +13126,10 @@ impl Compiler {
                 } else if niche_lhs {
                     self.bytecode.push(Byte::new(Instruction::DUPLICATE));
                     self.bytecode.push(Byte::new(Instruction::LogNot));
-                    self.bytecode.push(Byte::new(Instruction::NOOP));
-                    bb.emit_jump_to(
+                    bb.emit_jump_to_hinted(
                         success,
                         BbJumpKind::JumpIfFalse,
+                        FuseHint::nofuse_value_under_jmp(),
                         self.bytecode.il_mut(),
                     );
                     self.bytecode.push_pop();
@@ -13364,10 +13381,10 @@ impl Compiler {
         self.bytecode.push(Byte::new(Instruction::DUPLICATE));
         self.bytecode.push_const(first.0 as i32);
         self.bytecode.push(Byte::new(Instruction::EQ));
-        self.bytecode.push(Byte::new(Instruction::NOOP));
-        bb.emit_jump_to(
+        bb.emit_jump_to_hinted(
             fallback,
             BbJumpKind::JumpIfFalse,
+            FuseHint::nofuse_value_under_jmp(),
             self.bytecode.il_mut(),
         );
         self.bytecode.push_pop(); // tag
@@ -14164,14 +14181,14 @@ impl Compiler {
                 }
             }
 
-            // Peephole / fuse-select safety: DUPLICATE;POP at the join
-            // (omitted for binding matches — see suppress_match_fusion_barrier).
-            // Label binds are also IL fusion barriers for return-match sites.
-            if !self.suppress_match_fusion_barrier {
-                self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-                self.bytecode.push_pop();
+            // Value-join bind so fuse-select / invert-guard do not eat the
+            // match (replaces the dummy DUPLICATE;POP barrier). Omitted when
+            // StorePop consumes the match immediately.
+            if self.suppress_match_fusion_barrier {
+                bb.bind_label(end_label, self.bytecode.il_mut());
+            } else {
+                bb.bind_join_label(end_label, self.bytecode.il_mut());
             }
-            bb.bind_label(end_label, self.bytecode.il_mut());
 
             // Validate: every label that had a
             // pending jump is bound.

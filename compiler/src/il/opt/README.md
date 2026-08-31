@@ -536,12 +536,19 @@ instrumenting). Inner `ssa_gvn` follows the `ssa_gvn` flag.
   survive as IL.
 - **Refusals:** Window that would pull a **label** or **abs-jump target** onto a
   non-first op; `*Return` fusion when window[0] is an **unconditional join**
-  (stacked arm value must be popped). Residual abs JMP as `Byte` panics.
-  Per-function fuse-select is not production (measured no win).
+  (stacked arm value must be popped). **`FuseHint`** on the cond-jump
+  (`nofuse` / `ValueUnderJmp`) refuses `*Jmpf`/`*Jmpt` fusion (pair-`?` /
+  pair-match keep `EQ;JMPF`). A **`JoinLabel`** bind is a value join: same
+  window-break as a label, including `CONST;RETURN`. Residual abs JMP as
+  `Byte` panics. Per-function fuse-select is not production (measured no win).
+  Dummy `NOOP` / `DUP;POP` barriers are not used (D3). Fuse-select stays in
+  lower (not D4).
 - **Tests:** `il/lower.rs` `lower_fuses_bin_slot_slot`, `lower_fuses_bin_slot_imm`,
   `lower_fuses_const_return_imm`, `lower_fuses_load_const_add_store_to_bin_slot_imm_store`,
-  `lower_fuses_two_stage_float_chain_store`. Cast-spill → fuse:
-  `cast_spill_feeds_float_chain_store`.
+  `lower_fuses_two_stage_float_chain_store`, `lower_refuses_cmp_jmpf_when_jump_is_nofuse`,
+  `lower_refuses_const_return_across_value_join`. Cast-spill → fuse:
+  `cast_spill_feeds_float_chain_store`. Invert-guard: `opt/convoy.tests.rs`
+  `invert_guard_refuses_value_under_jmp_hint`.
 
 ---
 

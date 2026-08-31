@@ -148,7 +148,7 @@ fn float_chain_store_after(ops: &[IlOp], cast_i: usize) -> Option<usize> {
         }
         if matches!(
             op,
-            IlOp::Jump { .. } | IlOp::Label(_) | IlOp::Return { .. } | IlOp::Halt { .. }
+            IlOp::Jump { .. } | IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Return { .. } | IlOp::Halt { .. }
         ) {
             return None;
         }
@@ -487,6 +487,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::ConstPool {

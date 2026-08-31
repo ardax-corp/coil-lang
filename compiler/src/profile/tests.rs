@@ -13,6 +13,7 @@ fn jmpf(id: u32) -> IlOp {
         kind: IlJumpKind::JumpIfFalse,
         target: Label(id),
         loc: loc(),
+        hint: Default::default(),
     }
 }
 
@@ -21,6 +22,7 @@ fn jmp(id: u32) -> IlOp {
         kind: IlJumpKind::Unconditional,
         target: Label(id),
         loc: loc(),
+        hint: Default::default(),
     }
 }
 

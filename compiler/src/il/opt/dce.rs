@@ -28,11 +28,7 @@ fn stack_dce_once(ops: &mut Vec<IlOp>) -> bool {
     let mut i = 0;
     while i < ops.len() {
         if i + 1 < ops.len()
-            && let IlOp::MakeEnum {
-                tag,
-                arity,
-                ..
-            } = &ops[i]
+            && let IlOp::MakeEnum { tag, arity, .. } = &ops[i]
         {
             let arity = *arity as usize;
             match &ops[i + 1] {
@@ -56,16 +52,17 @@ fn stack_dce_once(ops: &mut Vec<IlOp>) -> bool {
                 IlOp::Jump {
                     kind:
                         IlJumpKind::JumpIfMatch {
-                            tag: expected_tag,
-                            ..
+                            tag: expected_tag, ..
                         },
                     target,
                     loc: jump_loc,
+                    ..
                 } if arity == 1 && u32::from(*tag) == *expected_tag => {
                     out.push(IlOp::Jump {
                         kind: IlJumpKind::Unconditional,
                         target: *target,
                         loc: *jump_loc,
+                        hint: Default::default(),
                     });
                     i += 2;
                     continue;
@@ -224,7 +221,8 @@ fn invalidate_copy_slot(bindings: &mut HashMap<u32, CopyBinding>, slot: u32) {
 fn copy_prop_barrier(op: &IlOp) -> bool {
     matches!(
         op,
-        IlOp::Label(_)
+        IlOp::Label(_) | IlOp::JoinLabel(_)
+            | IlOp::JoinLabel(_)
             | IlOp::Jump { .. }
             | IlOp::Entry { .. }
             | IlOp::HostInvoke { .. }
@@ -324,7 +322,9 @@ fn slot_used_by(op: &IlOp, slot: u32) -> bool {
                 let (_op, s, _) = byte.bin_slot_imm_parts();
                 s as u32 == slot
             }
-            Instruction::BinSlotImmStore | Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
+            Instruction::BinSlotImmStore
+            | Instruction::BinSlotImmJmpf
+            | Instruction::BinSlotImmJmpt => {
                 let (_op, s, _) = byte.bin_slot_imm_store_parts();
                 s as u32 == slot
             }
@@ -394,7 +394,8 @@ fn is_store_barrier(op: &IlOp) -> bool {
             | IlOp::SetField { .. }
             | IlOp::Byte { .. }
             | IlOp::Jump { .. }
-            | IlOp::Label(_)
+            | IlOp::Label(_) | IlOp::JoinLabel(_)
+            | IlOp::JoinLabel(_)
             | IlOp::Return { .. }
             | IlOp::Halt { .. }
             | IlOp::LoadReturnSlot { .. }
@@ -406,7 +407,11 @@ fn is_store_barrier(op: &IlOp) -> bool {
 fn is_control_edge_barrier(op: &IlOp) -> bool {
     matches!(
         op,
-        IlOp::Jump { .. } | IlOp::Label(_) | IlOp::Return { .. } | IlOp::Halt { .. }
+        IlOp::Jump { .. }
+            | IlOp::Label(_) | IlOp::JoinLabel(_)
+            | IlOp::JoinLabel(_)
+            | IlOp::Return { .. }
+            | IlOp::Halt { .. }
     )
 }
 
@@ -494,7 +499,11 @@ pub(super) fn dead_store_at(ops: &mut Vec<IlOp>, entry_tell: u32) {
                 if is_control_edge_barrier(&ops[j]) {
                     // Return/Halt end the region; Jump/Label only keep the
                     // store when a later load of `slot` exists in the body.
-                    if matches!(&ops[j], IlOp::Jump { .. } | IlOp::Label(_)) && !never_read {
+                    if matches!(
+                        &ops[j],
+                        IlOp::Jump { .. } | IlOp::Label(_) | IlOp::JoinLabel(_)
+                    ) && !never_read
+                    {
                         used = true;
                     }
                     break;

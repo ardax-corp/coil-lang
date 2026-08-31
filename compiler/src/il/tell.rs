@@ -427,7 +427,7 @@ pub fn analyze_il_at(ops: &[IlOp], entry_tell: u32) -> TellInfo {
         .iter()
         .enumerate()
         .filter_map(|(idx, op)| match op {
-            IlOp::Label(label) => Some((label.0, idx)),
+            IlOp::Label(label) | IlOp::JoinLabel(label) => Some((label.0, idx)),
             _ => None,
         })
         .collect();
@@ -879,6 +879,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Return { loc },
             IlOp::Label(Label(0)),
@@ -1008,6 +1009,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Return { loc },
@@ -1015,12 +1017,12 @@ mod tests {
         ];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
-        let (start, end) = il_fn_raw_range(&ops, &lowered.pre_to_post, 0, lowered.bytecode.len())
-            .expect("range");
+        let (start, end) =
+            il_fn_raw_range(&ops, &lowered.pre_to_post, 0, lowered.bytecode.len()).expect("range");
         assert_eq!(start, 0, "leading Label must be included");
         assert_eq!(end, ops.len(), "trailing Label must be included");
-        assert!(matches!(ops[start], IlOp::Label(_)));
-        assert!(matches!(ops[end - 1], IlOp::Label(_)));
+        assert!(matches!(ops[start], IlOp::Label(_) | IlOp::JoinLabel(_)));
+        assert!(matches!(ops[end - 1], IlOp::Label(_) | IlOp::JoinLabel(_)));
     }
 
     /// Fused windows share one post-PC; only the window head is compared.
@@ -1029,10 +1031,7 @@ mod tests {
     #[test]
     fn diff_il_skips_fused_window_tails_sharing_post_pc() {
         let loc = common::DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Const { imm: 7, loc },
-            IlOp::Return { loc },
-        ];
+        let ops = vec![IlOp::Const { imm: 7, loc }, IlOp::Return { loc }];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
         assert_eq!(lowered.bytecode.len(), 1, "Const;Return must fuse");
@@ -1110,10 +1109,7 @@ mod tests {
     #[test]
     fn diff_il_skips_ranges_without_entry_seeds() {
         let loc = common::DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Const { imm: 1, loc },
-            IlOp::Return { loc },
-        ];
+        let ops = vec![IlOp::Const { imm: 1, loc }, IlOp::Return { loc }];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
         let ranges = vec![("f".to_string(), 0, lowered.bytecode.len())];
@@ -1139,6 +1135,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 2 },
                 target: Label(0),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Return { loc },
             IlOp::Label(Label(0)),
@@ -1158,7 +1155,10 @@ mod tests {
             &seeds,
         );
         assert!(report.mismatches.is_empty(), "{:?}", report.mismatches);
-        assert!(report.known > 0, "IL Known on fall-through / taken must still count");
+        assert!(
+            report.known > 0,
+            "IL Known on fall-through / taken must still count"
+        );
     }
 
     /// `MakeCoro` shares `call_arity_delta` with `Call` — keep them locked together.
@@ -1208,6 +1208,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 2 },
                 target: Label(0),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Return { loc },
             IlOp::Label(Label(0)),

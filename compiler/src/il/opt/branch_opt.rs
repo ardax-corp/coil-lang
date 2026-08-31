@@ -33,7 +33,7 @@ pub(crate) fn next_fresh_label(ops: &[IlOp]) -> u32 {
 
 fn code_label_id(op: &IlOp) -> Option<u32> {
     match op {
-        IlOp::Label(Label(id)) => Some(*id),
+        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
         IlOp::Jump { target, .. } | IlOp::Entry { target, .. } => Some(target.0),
         _ => None,
     }
@@ -63,7 +63,7 @@ pub(crate) fn remap_label_space(
     }
     let mut map = HashMap::<u32, u32>::new();
     for op in ops {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             map.entry(*id).or_insert_with(|| {
                 let n = *next_label;
                 *next_label = next_label.saturating_add(1);
@@ -78,10 +78,17 @@ pub(crate) fn remap_label_space(
         .iter()
         .map(|op| match op {
             IlOp::Label(Label(id)) => IlOp::Label(Label(map[id])),
-            IlOp::Jump { kind, target, loc } => IlOp::Jump {
+            IlOp::JoinLabel(Label(id)) => IlOp::JoinLabel(Label(map[id])),
+            IlOp::Jump {
+                kind,
+                target,
+                loc,
+                hint,
+            } => IlOp::Jump {
                 kind: *kind,
                 target: Label(remap_label_target(target.0, &map, prior_labels)),
                 loc: *loc,
+                hint: *hint,
             },
             IlOp::Entry {
                 kind,
@@ -139,9 +146,7 @@ fn invert_one_cold_fallthrough(
     let targets = label_index(ops);
     for i in 0..ops.len() {
         let IlOp::Jump {
-            kind,
-            target,
-            loc,
+            kind, target, loc, ..
         } = ops[i]
         else {
             continue;
@@ -185,6 +190,7 @@ fn invert_one_cold_fallthrough(
             kind: inverted,
             target: fresh,
             loc,
+            hint: Default::default(),
         });
         out.extend_from_slice(&ops[lab_i..]);
         out.push(IlOp::Label(fresh));
@@ -216,7 +222,10 @@ fn profile_forbids_invert(
 }
 
 fn is_cold_region(ops: &[IlOp]) -> bool {
-    if ops.iter().any(|op| matches!(op, IlOp::Label(_))) {
+    if ops
+        .iter()
+        .any(|op| matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+    {
         return false;
     }
     if ops.iter().any(is_jump) {
@@ -226,13 +235,14 @@ fn is_cold_region(ops: &[IlOp]) -> bool {
 }
 
 fn region_defines_labels(ops: &[IlOp]) -> bool {
-    ops.iter().any(|op| matches!(op, IlOp::Label(_)))
+    ops.iter()
+        .any(|op| matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
 }
 
 fn suffix_cannot_fall_into_moved_cold(suffix: &[IlOp]) -> bool {
     let mut last_real = None;
     for op in suffix {
-        if matches!(op, IlOp::Label(_)) {
+        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
             continue;
         }
         last_real = Some(op);
@@ -271,7 +281,7 @@ fn is_jump(op: &IlOp) -> bool {
 fn label_index(ops: &[IlOp]) -> HashMap<u32, usize> {
     let mut map = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             map.insert(*id, i);
         }
     }
@@ -339,6 +349,7 @@ mod tests {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(id),
             loc: loc(),
+            hint: Default::default(),
         }
     }
 
@@ -347,6 +358,7 @@ mod tests {
             kind: IlJumpKind::JumpIfTrue,
             target: Label(id),
             loc: loc(),
+            hint: Default::default(),
         }
     }
 
@@ -359,23 +371,12 @@ mod tests {
     }
 
     fn c(n: i32) -> IlOp {
-        IlOp::Const {
-            imm: n,
-            loc: loc(),
-        }
+        IlOp::Const { imm: n, loc: loc() }
     }
 
     #[test]
     fn heuristic_moves_return_off_jmpf_fallthrough() {
-        let mut ops = vec![
-            c(0),
-            jmpf(1),
-            c(1),
-            ret(),
-            label(1),
-            c(2),
-            ret(),
-        ];
+        let mut ops = vec![c(0), jmpf(1), c(1), ret(), label(1), c(2), ret()];
         optimize_branches(&mut ops, None);
         assert!(
             matches!(
@@ -447,6 +448,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             label(1),
             ret(),

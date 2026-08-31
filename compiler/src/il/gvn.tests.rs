@@ -43,11 +43,13 @@ fn diamond_recompute_at_join() -> Vec<IlOp> {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Jump {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(1)),
         IlOp::Const { imm: 9, loc: loc() },
@@ -56,6 +58,7 @@ fn diamond_recompute_at_join() -> Vec<IlOp> {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(2)),
         IlOp::Load {
@@ -116,6 +119,7 @@ fn ssa_gvn_cse_at_join_when_preds_agree() {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Load {
             slot: 0,
@@ -137,6 +141,7 @@ fn ssa_gvn_cse_at_join_when_preds_agree() {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(1)),
         IlOp::Load {
@@ -159,6 +164,7 @@ fn ssa_gvn_cse_at_join_when_preds_agree() {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(2)),
         IlOp::Load {
@@ -282,11 +288,13 @@ fn ssa_gvn_skips_join_when_operand_phi_disagrees() {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Jump {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(1)),
         IlOp::Const {
@@ -301,6 +309,7 @@ fn ssa_gvn_skips_join_when_operand_phi_disagrees() {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(2)),
         IlOp::Load {
@@ -348,11 +357,13 @@ fn build_ssa_records_phi_on_disagreeing_join() {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Jump {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(1)),
         IlOp::Const { imm: 2, loc: loc() },
@@ -364,6 +375,7 @@ fn build_ssa_records_phi_on_disagreeing_join() {
             kind: IlJumpKind::Unconditional,
             target: Label(2),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(2)),
         IlOp::Halt { loc: loc() },
