@@ -175,7 +175,7 @@ impl Compiler {
         }
     }
 
-    fn loc_for_span(&mut self, span: SimpleSpan) -> DebugLoc {
+    fn loc_from_span(&mut self, span: SimpleSpan) -> DebugLoc {
         let file = self.intern_source_file();
         if file == DEBUG_FILE_UNKNOWN {
             return DebugLoc::unknown();
@@ -205,7 +205,7 @@ impl Compiler {
 
     fn emit_byte(&mut self, span: SimpleSpan, b: Byte) {
         self.pad_debug_locs();
-        let loc = self.loc_for_span(span);
+        let loc = self.loc_from_span(span);
         self.bytecode.push(b);
         self.debug_locs.push(loc);
     }
@@ -214,7 +214,7 @@ impl Compiler {
         if bytes.is_empty() {
             return;
         }
-        let loc = self.loc_for_span(span);
+        let loc = self.loc_from_span(span);
         for op in bytes.il_mut().ops_mut() {
             op.set_loc(loc);
         }
@@ -3094,11 +3094,7 @@ impl Compiler {
                     }
                     continue;
                 }
-                let ty = self.codegen_expr_ty(inner).or_else(|| {
-                    self.checker
-                        .lookup_for_codegen_span(inner.0.start, inner.0.end)
-                        .map(|t| apply_ty_prune(self.checker.subst(), &t))
-                });
+                let ty = self.codegen_expr_ty(inner);
                 let Some(ty) = ty else {
                     out.push(arg.clone());
                     continue;
@@ -3726,12 +3722,23 @@ impl Compiler {
         id
     }
 
+    fn node_id_of(&self, node: &Output<'_>) -> Option<crate::typechecking::id::NodeId> {
+        self.checker.id_table().id_of_output(node)
+    }
+
     /// Type from the B2 sidecar (NodeId), falling back to the checker cache.
     fn sidecar_ty(&self, id: crate::typechecking::id::NodeId) -> Option<Ty> {
         self.typed_sidecar
             .ty(id)
             .cloned()
             .or_else(|| self.checker.lookup_at(id))
+    }
+
+    fn sidecar_ty_of(&self, node: &Output<'_>) -> Option<Ty> {
+        self.typed_sidecar
+            .ty_at_span(node.0.start, node.0.end)
+            .cloned()
+            .or_else(|| self.node_id_of(node).and_then(|id| self.sidecar_ty(id)))
     }
 
     /// Extern setup is keyed by the declaration's short name (and, after
@@ -3792,12 +3799,15 @@ impl Compiler {
         start: usize,
         end: usize,
     ) -> Option<(usize, bool, u32)> {
-        if let Some(id) = node
-            && let Some(o) = self.typed_sidecar.overload(id)
-        {
-            return Some((o.fixed_arity, o.is_rest, o.candidate_id));
+        if let Some(id) = node {
+            if let Some(o) = self.typed_sidecar.overload(id) {
+                return Some((o.fixed_arity, o.is_rest, o.candidate_id));
+            }
+            if let Some(o) = self.checker.selected_overload_at_id(id) {
+                return Some(o);
+            }
         }
-        self.checker.selected_overload_at(start, end)
+        self.checker.selected_overload_span(start, end)
     }
 
     fn sidecar_for_in(
@@ -3806,9 +3816,15 @@ impl Compiler {
         start: usize,
         end: usize,
     ) -> Option<ForInInfo> {
-        node.and_then(|id| self.typed_sidecar.for_in(id).cloned())
-            .or_else(|| node.and_then(|id| self.checker.for_in_info_at(id).cloned()))
-            .or_else(|| self.checker.for_in_info_for_span(start, end).cloned())
+        if let Some(id) = node {
+            if let Some(info) = self.typed_sidecar.for_in(id).cloned() {
+                return Some(info);
+            }
+            if let Some(info) = self.checker.for_in_info_at(id).cloned() {
+                return Some(info);
+            }
+        }
+        self.checker.for_in_info_span(start, end).cloned()
     }
 
     fn sidecar_dicts(
@@ -3825,7 +3841,84 @@ impl Compiler {
                 return Some(dicts);
             }
         }
-        self.checker.call_dicts_for_span(start, end)
+        self.checker.call_dicts_span(start, end)
+    }
+
+    fn bound_operator_hint(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<crate::typechecking::infer::BoundOperatorCall> {
+        node.and_then(|id| self.checker.bound_operator_call_at(id))
+            .cloned()
+            .or_else(|| self.checker.bound_operator_call_span(start, end).cloned())
+    }
+
+    fn bound_method_hint(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<crate::typechecking::infer::BoundMethodCall> {
+        node.and_then(|id| self.checker.bound_method_call_at(id))
+            .cloned()
+            .or_else(|| self.checker.bound_method_call_span(start, end).cloned())
+    }
+
+    fn bound_display_hint(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<crate::typechecking::infer::BoundDisplayCall> {
+        node.and_then(|id| self.checker.bound_display_call_at(id))
+            .cloned()
+            .or_else(|| self.checker.bound_display_call_span(start, end).cloned())
+    }
+
+    fn existential_pack_hint(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        expr: &Output<'_>,
+    ) -> Option<crate::typechecking::infer::ExistentialPack> {
+        node.and_then(|id| self.checker.existential_pack_at(id))
+            .cloned()
+            .or_else(|| {
+                self.checker
+                    .existential_pack_span(expr.0.start, expr.0.end)
+                    .cloned()
+            })
+    }
+
+    fn existential_method_hint(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<crate::typechecking::infer::ExistentialMethodCall> {
+        node.and_then(|id| self.checker.existential_method_call_at(id))
+            .cloned()
+            .or_else(|| {
+                self.checker
+                    .existential_method_call_span(start, end)
+                    .cloned()
+            })
+    }
+
+    fn forwarded_dicts_hint(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<Vec<usize>> {
+        node.and_then(|id| self.checker.forwarded_dicts_at(id))
+            .map(<[usize]>::to_vec)
+            .or_else(|| {
+                self.checker
+                    .forwarded_dicts_span(start, end)
+                    .map(<[usize]>::to_vec)
+            })
     }
 
     fn sidecar_pair_niche(&self, name: &str) -> Option<PairNicheAbi> {
@@ -3877,10 +3970,7 @@ impl Compiler {
                 return Some(apply_ty_prune(self.checker.subst(), ty));
             }
         }
-        if let Some(ty) = self
-            .checker
-            .lookup_for_codegen_span(node.0.start, node.0.end)
-        {
+        if let Some(ty) = self.sidecar_ty_of(node) {
             return Some(ty);
         }
         self.checker
@@ -3991,8 +4081,8 @@ impl Compiler {
 
         let info = self_id
             .and_then(|id| self.checker.aggregate_arith_at(id))
-            .or_else(|| self.checker.aggregate_arith_for_span(span_start, span_end))
             .cloned()
+            .or_else(|| self.checker.aggregate_arith_span(span_start, span_end).cloned())
             .or_else(|| self.recover_aggregate_arith(lhs, rhs, fallback_op));
         let Some(info) = info else {
             return false;
@@ -4868,12 +4958,7 @@ impl Compiler {
     }
 
     fn show_format_arg_ty(&self, arg: &Output) -> Option<Ty> {
-        let span = arg.0.into_range();
-        let span_ty = self
-            .checker
-            .lookup_for_codegen_span(span.start, span.end)
-            .map(|t| crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &t));
-        match span_ty {
+        match self.sidecar_ty_of(arg) {
             Some(Ty::Var(_)) | None => self.codegen_expr_ty(arg),
             Some(other) => Some(other),
         }
@@ -5469,10 +5554,8 @@ impl Compiler {
     /// Lower one `%v` argument to a string via the `Show` dictionary /
     /// concrete instance method, leaving an `ObjString` on the stack.
     fn emit_show_for_format_arg(&mut self, arg: &Output) {
-        let span = arg.0.into_range();
         if let Some((dict_index, method_slot)) = self
-            .checker
-            .bound_display_call_for_span(span.start, span.end)
+            .bound_display_hint(self.node_id_of(arg), arg.0.start, arg.0.end)
             .map(|h| (h.dict_index, h.method_slot))
         {
             let dict_name = format!("__dict{}", dict_index);
@@ -5783,10 +5866,7 @@ impl Compiler {
     }
 
     fn append_with_existential_pack(&mut self, bytecode: &mut CodeBuf, expr: &Output) {
-        let pack = self
-            .checker
-            .existential_pack_for_span(expr.0.start, expr.0.end)
-            .cloned();
+        let pack = self.existential_pack_hint(self.node_id_of(expr), expr);
         bytecode.append(&mut self.do_compile(expr));
         if let Some(pack) = pack {
             self.emit_existential_pack_recipe(bytecode, &pack);
@@ -5797,10 +5877,7 @@ impl Compiler {
     fn emit_binding_rhs(&mut self, expr: &Output) {
         let prev = self.suppress_match_fusion_barrier;
         self.suppress_match_fusion_barrier = true;
-        let pack = self
-            .checker
-            .existential_pack_for_span(expr.0.start, expr.0.end)
-            .cloned();
+        let pack = self.existential_pack_hint(self.node_id_of(expr), expr);
         let mut expr_bc = self.do_compile(expr);
         self.bytecode.append(&mut expr_bc);
         if let Some(pack) = pack {
@@ -6424,7 +6501,7 @@ impl Compiler {
         };
         // Reassociating a float reduction changes results, so both the
         // induction variable and the per-iteration value must be `int`.
-        if !self.span_ty_is_int(site.index_span) || !self.span_ty_is_int(site.reduce_span) {
+        if !self.ptr_ty_is_int(site.index_expr_ptr) || !self.ptr_ty_is_int(site.reduce_expr_ptr) {
             return false;
         }
         let (Some(index_slot), Some(acc_slot)) = (
@@ -6593,12 +6670,12 @@ impl Compiler {
         entry
     }
 
-    /// Whether the checker inferred `int` for the expression at `span`.
-    fn span_ty_is_int(&self, span: (usize, usize)) -> bool {
-        matches!(
-            self.checker.lookup_for_codegen_span(span.0, span.1),
-            Some(Ty::Con(ref c)) if c == "int"
-        )
+    /// Whether the checker inferred `int` for the expression at `ptr`.
+    fn ptr_ty_is_int(&self, ptr: usize) -> bool {
+        let Some(id) = self.checker.id_table().id_of_ptr(ptr) else {
+            return false;
+        };
+        matches!(self.sidecar_ty(id), Some(Ty::Con(ref c)) if c == "int")
     }
 
     /// Push an `int` constant onto [`Self::bytecode`]; inline `CONST` cannot
@@ -7748,9 +7825,7 @@ impl Compiler {
     fn local_polyfn_var_ty(&self, local: &str, span: Option<(usize, usize)>) -> Option<Ty> {
         use crate::typechecking::subst::apply_ty_prune;
         if let Some((start, end)) = span {
-            if let Some(ty) = self.checker.lookup_for_codegen_span(start, end) {
-                return Some(apply_ty_prune(self.checker.subst(), &ty));
-            }
+            let _ = (start, end);
         }
         for frame in self.mono_codegen_var_types.iter().rev() {
             if let Some(ty) = frame.get(local) {
@@ -9054,15 +9129,20 @@ impl Compiler {
     }
 
     fn codegen_expr_ty(&self, node: &Output) -> Option<Ty> {
-        let resolved = match node.1.as_ref() {
-            Expression::NamedArg(_, value) => return self.codegen_expr_ty(value),
+        if let Expression::NamedArg(_, value) = node.1.as_ref() {
+            return self.codegen_expr_ty(value);
+        }
+        if let Expression::Identifier(_) = node.1.as_ref() {
+            return self.codegen_ident_ty(node);
+        }
+        if let Some(ty) = self.sidecar_ty_of(node) {
+            return Some(ty);
+        }
+        match node.1.as_ref() {
             Expression::Integer(_) => Some(Ty::Con(crate::typechecking::ty::INT.into())),
             Expression::Float(_) => Some(Ty::Con(crate::typechecking::ty::FLOAT.into())),
             Expression::Bool(_) => Some(Ty::Con(crate::typechecking::ty::BOOL.into())),
-            Expression::String(_) => self
-                .checker
-                .lookup_for_codegen_span(node.0.start, node.0.end)
-                .or_else(|| Some(Ty::Con(crate::typechecking::ty::STRING.into()))),
+            Expression::String(_) => Some(Ty::Con(crate::typechecking::ty::STRING.into())),
             Expression::Tuple(items) => {
                 let mut tys = Vec::with_capacity(items.len());
                 for item in items {
@@ -9079,18 +9159,9 @@ impl Compiler {
                 Some(Ty::Record { fields: tys })
             }
             Expression::Identifier(_) => self.codegen_ident_ty(node),
-            // `Construct` / `Instantiate` must NOT collapse to a bare
-            // `Ty::Con(name)`: generic apps like `Option::Some(42)` are
-            // `Option<int>` (`Ty::App`), and call-site dictionary emission
-            // keys off that full type (`Collect<Option<int>>`). Falling
-            // through to `lookup_for_codegen_span` preserves the HM result.
             Expression::Instantiate(class, _) => match class.1.as_ref() {
                 Expression::Identifier(name) | Expression::Type(name) => {
-                    // Non-generic `new Class(...)` is exactly `Con(Class)`.
-                    // Prefer the span cache when present (covers `Class<T>`).
-                    self.checker
-                        .lookup_for_codegen_span(node.0.start, node.0.end)
-                        .or_else(|| Some(Ty::Con(self.resolve_class_ident(name))))
+                    Some(Ty::Con(self.resolve_class_ident(name)))
                 }
                 _ => None,
             },
@@ -9143,11 +9214,7 @@ impl Compiler {
             | Expression::Statement(inner)
             | Expression::ExprStatement(inner) => self.codegen_expr_ty(inner),
             _ => None,
-        };
-        resolved.or_else(|| {
-            self.checker
-                .lookup_for_codegen_span(node.0.start, node.0.end)
-        })
+        }
     }
 
     fn binop_for_assign_op(op: parser::ast::AssignOp, is_float: bool) -> Instruction {
@@ -9769,8 +9836,8 @@ impl Compiler {
     ) -> bool {
         let Some(info) = self_id
             .and_then(|id| self.checker.linear_algebra_at(id))
-            .or_else(|| self.checker.linear_algebra_for_span(span_start, span_end))
             .cloned()
+            .or_else(|| self.checker.linear_algebra_span(span_start, span_end).cloned())
         else {
             return false;
         };
@@ -9810,8 +9877,8 @@ impl Compiler {
 
         let Some(info) = self_id
             .and_then(|id| self.checker.linear_algebra_at(id))
-            .or_else(|| self.checker.linear_algebra_for_span(span_start, span_end))
             .cloned()
+            .or_else(|| self.checker.linear_algebra_span(span_start, span_end).cloned())
         else {
             return;
         };
@@ -10550,12 +10617,7 @@ impl Compiler {
                             let bind_ty = self
                                 .expr_codegen_ty(rhs_node)
                                 .or_else(|| self.codegen_expr_ty(&children[1]))
-                                .or_else(|| {
-                                    self.checker.lookup_for_codegen_span(
-                                        children[0].0.start,
-                                        children[0].0.end,
-                                    )
-                                });
+                                .or_else(|| self.sidecar_ty_of(&children[0]));
                             let fixed_n = bind_ty
                                 .as_ref()
                                 .and_then(|ty| Self::stack_array_bind_len(ty));
@@ -11881,13 +11943,7 @@ impl Compiler {
                 // be bound. (Allocated-but-unused labels are allowed.)
             }
             Expression::Le(lhs, rhs) => {
-                let hint = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned();
+                let hint = self.bound_operator_hint(self_id, span.start, span.end);
                 if let Some(hint) = hint
                     && self.emit_bound_operator_call(
                         &mut bytecode,
@@ -11912,13 +11968,7 @@ impl Compiler {
                 }
             }
             Expression::Gt(lhs, rhs) => {
-                let hint = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned();
+                let hint = self.bound_operator_hint(self_id, span.start, span.end);
                 if let Some(hint) = hint
                     && self.emit_bound_operator_call(
                         &mut bytecode,
@@ -11943,13 +11993,7 @@ impl Compiler {
                 }
             }
             Expression::Leq(lhs, rhs) => {
-                let hint = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned();
+                let hint = self.bound_operator_hint(self_id, span.start, span.end);
                 if let Some(hint) = hint
                     && self.emit_bound_operator_call(
                         &mut bytecode,
@@ -11974,13 +12018,7 @@ impl Compiler {
                 }
             }
             Expression::Geq(lhs, rhs) => {
-                let hint = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned();
+                let hint = self.bound_operator_hint(self_id, span.start, span.end);
                 if let Some(hint) = hint
                     && self.emit_bound_operator_call(
                         &mut bytecode,
@@ -12005,13 +12043,7 @@ impl Compiler {
                 }
             }
             Expression::Eq(lhs, rhs) => {
-                let hint = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned();
+                let hint = self.bound_operator_hint(self_id, span.start, span.end);
                 if let Some(hint) = hint
                     && self.emit_bound_operator_call(
                         &mut bytecode,
@@ -12097,13 +12129,7 @@ impl Compiler {
                         bytecode.append(&mut self.do_compile(rhs));
                     }
                     bytecode.push(Byte::new(Instruction::FORMAT).with_operand_u32(2));
-                } else if let Some(hint) = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned()
+                } else if let Some(hint) = self.bound_operator_hint(self_id, span.start, span.end)
                     && self.emit_bound_operator_call(
                         &mut bytecode,
                         lhs,
@@ -12145,13 +12171,7 @@ impl Compiler {
                 ) {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
-                } else if let Some(hint) = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned()
+                } else if let Some(hint) = self.bound_operator_hint(self_id, span.start, span.end)
                     && self.emit_bound_operator_call(
                         &mut bytecode,
                         lhs,
@@ -12201,13 +12221,7 @@ impl Compiler {
                     // (non-primitive `T * 2^n` must not emit int SHL).
                     // `try_emit_folded_expr` also const-folds literal×literal and
                     // identity-reduces `* 1` before bound/primitive fallback.
-                    let bound_mul = self_id
-                        .and_then(|id| self.checker.bound_operator_call_at(id))
-                        .or_else(|| {
-                            self.checker
-                                .bound_operator_call_for_span(span.start, span.end)
-                        })
-                        .cloned();
+                    let bound_mul = self.bound_operator_hint(self_id, span.start, span.end);
                     if self.try_emit_folded_expr(ast, &mut bytecode, bound_mul.is_none()) {
                         // Intentional empty body: the emit/try_emit call in the
                         // condition already wrote bytecode as a side effect.
@@ -12270,13 +12284,7 @@ impl Compiler {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
                 } else {
-                    let bound_div = self_id
-                        .and_then(|id| self.checker.bound_operator_call_at(id))
-                        .or_else(|| {
-                            self.checker
-                                .bound_operator_call_for_span(span.start, span.end)
-                        })
-                        .cloned();
+                    let bound_div = self.bound_operator_hint(self_id, span.start, span.end);
                     if self.try_emit_folded_expr(ast, &mut bytecode, bound_div.is_none()) {
                         // Const-fold, `/ 1`, or `byte / 2^n` → SHR.
                     } else if let Some(hint) = bound_div
@@ -12364,13 +12372,7 @@ impl Compiler {
                 binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::OR));
             }
             Expression::Neq(lhs, rhs) => {
-                let hint = self_id
-                    .and_then(|id| self.checker.bound_operator_call_at(id))
-                    .or_else(|| {
-                        self.checker
-                            .bound_operator_call_for_span(span.start, span.end)
-                    })
-                    .cloned();
+                let hint = self.bound_operator_hint(self_id, span.start, span.end);
                 if let Some(hint) = hint
                     && self.emit_bound_operator_call(
                         &mut bytecode,
@@ -12411,6 +12413,7 @@ impl Compiler {
                 let escaped_len = escaped.as_bytes().len();
                 let span_ty = self_id
                     .and_then(|id| self.sidecar_ty(id))
+                    .or_else(|| self.sidecar_ty_of(ast))
                     .filter(|ty| match ty {
                         Ty::Con(n) if n == "byte" => true,
                         Ty::Array { element, length }
@@ -12424,10 +12427,6 @@ impl Compiler {
                             }
                         }
                         _ => false,
-                    })
-                    .or_else(|| {
-                        self.checker
-                            .lookup_for_codegen_span(span.start, span.end)
                     });
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
@@ -13174,7 +13173,7 @@ impl Compiler {
                     Self::emit_result_err(&mut self.bytecode);
                 }
                 self.pad_debug_locs();
-                let loc = self.loc_for_span(*span);
+                let loc = self.loc_from_span(*span);
                 if self.compiling_pair_mode {
                     self.push_return_pair();
                 } else {
@@ -13309,10 +13308,7 @@ impl Compiler {
                 use crate::typechecking::subst::apply_ty_prune;
                 use crate::typechecking::ty::{ArrayLength, Ty};
 
-                let dst_ty = self
-                    .checker
-                    .lookup_for_codegen_span(span.start, span.end)
-                    .map(|ty| apply_ty_prune(self.checker.subst(), &ty));
+                let dst_ty = self_id.and_then(|id| self.sidecar_ty(id));
                 let src_ty = self.codegen_expr_ty(expr);
                 let string_to_bytes = matches!(
                     (src_ty.as_ref(), dst_ty.as_ref()),
@@ -14640,13 +14636,7 @@ impl Compiler {
             return bytecode;
         }
 
-        if let Some(hint) = self_id
-            .and_then(|id| self.checker.existential_method_call_at(id))
-            .or_else(|| {
-                self.checker
-                    .existential_method_call_for_span(span.start, span.end)
-            })
-            .cloned()
+        if let Some(hint) = self.existential_method_hint(self_id, span.start, span.end)
         {
             if self.emit_existential_method_call(&mut bytecode, name, args.as_ref(), &hint)
             {
@@ -14654,13 +14644,7 @@ impl Compiler {
             }
         }
 
-        if let Some(hint) = self_id
-            .and_then(|id| self.checker.bound_method_call_at(id))
-            .or_else(|| {
-                self.checker
-                    .bound_method_call_for_span(span.start, span.end)
-            })
-            .cloned()
+        if let Some(hint) = self.bound_method_hint(self_id, span.start, span.end)
         {
             if hint.has_receiver
                 && let Expression::Access(recv, _) = name.1.as_ref()
@@ -14959,21 +14943,23 @@ impl Compiler {
                             call_arg_tys.push(ty);
                         }
                         for arg in &fixed {
-                            call_arg_tys.push(self.codegen_expr_ty(arg).expect(
-                                "typechecked method argument must have a codegen type",
-                            ));
+                            match self.codegen_expr_ty(arg) {
+                                Some(ty) => call_arg_tys.push(ty),
+                                None => {
+                                    self.messages.push(Message::error(
+                                        ErrorCode::CodegenError,
+                                        "missing sidecar type for generic method argument"
+                                            .to_string(),
+                                        arg.0.into_range(),
+                                    ));
+                                }
+                            }
                         }
                         if pack_rest {
                             call_arg_tys.push(self.synthesize_rest_array_ty(&rest));
                         }
                         let mut forwarded = 0;
-                        if let Some(indices) = self_id
-                            .and_then(|id| self.checker.forwarded_dicts_at(id))
-                            .or_else(|| {
-                                self.checker
-                                    .forwarded_dicts_for_span(span.start, span.end)
-                            })
-                            .map(<[usize]>::to_vec)
+                        if let Some(indices) = self.forwarded_dicts_hint(self_id, span.start, span.end)
                         {
                             for dict_index in indices {
                                 if let Some(slot) =
@@ -15401,26 +15387,27 @@ impl Compiler {
                 let dict_count = if is_generic {
                     let (fixed, rest, pack_rest) =
                         self.split_call_args_for_rest(&lookup_name, arg_slice);
-                    let mut call_arg_tys: Vec<crate::typechecking::Ty> = fixed
-                        .iter()
-                        .map(|arg| {
-                            self.codegen_expr_ty(arg).expect(
-                                "typechecked call argument must have a codegen type",
-                            )
-                        })
-                        .collect();
+                    let mut call_arg_tys: Vec<crate::typechecking::Ty> = Vec::new();
+                    for arg in &fixed {
+                        match self.codegen_expr_ty(arg) {
+                            Some(ty) => call_arg_tys.push(ty),
+                            None => {
+                                self.messages.push(Message::error(
+                                    ErrorCode::CodegenError,
+                                    "missing sidecar type for generic call argument".to_string(),
+                                    arg.0.into_range(),
+                                ));
+                            }
+                        }
+                    }
                     // Rest-only generics (`T... xs`) have empty `fixed`;
                     // bind `T` from the packed `[T]` / `[T; N]` arg.
                     if pack_rest {
                         call_arg_tys.push(self.synthesize_rest_array_ty(&rest));
                     }
                     let mut forwarded = 0;
-                    if let Some(indices) = self_id
-                        .and_then(|id| self.checker.forwarded_dicts_at(id))
-                        .or_else(|| {
-                            self.checker.forwarded_dicts_for_span(span.start, span.end)
-                        })
-                        .map(<[usize]>::to_vec)
+                    if let Some(indices) =
+                        self.forwarded_dicts_hint(self_id, span.start, span.end)
                     {
                         for dict_index in indices {
                             if let Some(slot) =
@@ -15536,12 +15523,8 @@ impl Compiler {
                 }
                 let mut dict_count = 0u32;
                 if let Some(source) = polyfn_source.as_ref() {
-                    if let Some(indices) = self_id
-                        .and_then(|id| self.checker.forwarded_dicts_at(id))
-                        .or_else(|| {
-                            self.checker.forwarded_dicts_for_span(span.start, span.end)
-                        })
-                        .map(<[usize]>::to_vec)
+                    if let Some(indices) =
+                        self.forwarded_dicts_hint(self_id, span.start, span.end)
                     {
                         for dict_index in indices {
                             if let Some(dict_slot) =
@@ -15701,6 +15684,21 @@ impl Compiler {
             self.checker.set_current_module(module);
             // Check already ran via `parse_expand_check` / `typecheck_module`.
             self.typed_sidecar = self.checker.typed_sidecar();
+        }
+        {
+            let mut recount = crate::typechecking::id::IdTable::new();
+            crate::typechecking::id::pre_walk(ast, &mut recount);
+            let checked = self.checker.id_table().len();
+            if checked != 0 && recount.len() != checked {
+                self.messages.push(Message::error(
+                    ErrorCode::CodegenError,
+                    format!(
+                        "emit NodeId table length {checked} does not match pre-walk {}",
+                        recount.len()
+                    ),
+                    ast.0.into_range(),
+                ));
+            }
         }
         // Recursion depth / `#[max_depth]` — independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);

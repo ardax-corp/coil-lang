@@ -109,6 +109,7 @@ impl Checker {
             linear_algebra_by_span: HashMap::new(),
             bound_display_calls: HashMap::new(),
             bound_display_calls_by_span: HashMap::new(),
+            existential_packs: HashMap::new(),
             existential_packs_by_span: HashMap::new(),
             existential_method_calls: HashMap::new(),
             existential_method_calls_by_span: HashMap::new(),
@@ -1382,6 +1383,7 @@ impl Checker {
         self.linear_algebra_by_span.clear();
         self.bound_display_calls.clear();
         self.bound_display_calls_by_span.clear();
+        self.existential_packs.clear();
         self.existential_packs_by_span.clear();
         self.existential_method_calls.clear();
         self.existential_method_calls_by_span.clear();
@@ -1489,7 +1491,6 @@ impl Checker {
         }
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
-        self.pre_register_typeclass_impls(ast);
         self.pre_process_top_level_uses(ast);
         self.pre_pass_ffi_invoke_param_flow(ast);
 
@@ -4812,6 +4813,7 @@ impl Checker {
             } else {
                 self.generics.instances[idx].method_fqns = method_fqns;
                 self.generics.instances[idx].assoc_tys = assoc_tys;
+                self.generics.instances[idx].args = arg_tys.clone();
             }
         } else if !invalid_instance {
             self.generics.instances.push(InstanceDef {
@@ -5971,6 +5973,10 @@ impl Checker {
         end: usize,
     ) -> Option<&BoundDisplayCall> {
         self.bound_display_calls_by_span.get(&(start, end))
+    }
+
+    pub fn existential_pack_at(&self, id: NodeId) -> Option<&ExistentialPack> {
+        self.existential_packs.get(&id)
     }
 
     pub fn existential_pack_for_span(&self, start: usize, end: usize) -> Option<&ExistentialPack> {
@@ -8586,13 +8592,15 @@ impl Checker {
                 match self.find_unique_instance(class, std::slice::from_ref(&lookup_ty), range) {
                     Ok(Some(_)) => {
                         if let Some(expr) = expr {
-                            self.existential_packs_by_span.insert(
-                                (expr.0.start, expr.0.end),
-                                ExistentialPack {
-                                    class: class.clone(),
-                                    value_ty: lookup_ty,
-                                },
-                            );
+                            let pack = ExistentialPack {
+                                class: class.clone(),
+                                value_ty: lookup_ty,
+                            };
+                            if let Some(id) = self.ids.id_of_output(expr) {
+                                self.existential_packs.insert(id, pack.clone());
+                            }
+                            self.existential_packs_by_span
+                                .insert((expr.0.start, expr.0.end), pack);
                         }
                         expected
                     }
@@ -12828,6 +12836,66 @@ impl Checker {
         self.selected_overloads_by_span.get(&(start, end)).copied()
     }
 
+    pub fn call_dicts_span(&self, start: usize, end: usize) -> Option<&[InstanceDef]> {
+        self.call_dicts_for_span(start, end)
+    }
+
+    pub fn for_in_info_span(&self, start: usize, end: usize) -> Option<&ForInInfo> {
+        self.for_in_info_for_span(start, end)
+    }
+
+    pub fn bound_operator_call_span(&self, start: usize, end: usize) -> Option<&BoundOperatorCall> {
+        self.bound_operator_call_for_span(start, end)
+    }
+
+    pub fn bound_method_call_span(&self, start: usize, end: usize) -> Option<&BoundMethodCall> {
+        self.bound_method_call_for_span(start, end)
+    }
+
+    pub fn bound_display_call_span(&self, start: usize, end: usize) -> Option<&BoundDisplayCall> {
+        self.bound_display_call_for_span(start, end)
+    }
+
+    pub fn existential_pack_span(&self, start: usize, end: usize) -> Option<&ExistentialPack> {
+        self.existential_pack_for_span(start, end)
+    }
+
+    pub fn existential_method_call_span(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<&ExistentialMethodCall> {
+        self.existential_method_call_for_span(start, end)
+    }
+
+    pub fn forwarded_dicts_span(&self, start: usize, end: usize) -> Option<&[usize]> {
+        self.forwarded_dicts_for_span(start, end)
+    }
+
+    pub fn aggregate_arith_span(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<&crate::typechecking::aggregate_arith::AggregateArithInfo> {
+        self.aggregate_arith_for_span(start, end)
+    }
+
+    pub fn linear_algebra_span(
+        &self,
+        start: usize,
+        end: usize,
+    ) -> Option<&crate::typechecking::aggregate_arith::LinearAlgebraInfo> {
+        self.linear_algebra_for_span(start, end)
+    }
+
+    pub fn selected_overload_span(&self, start: usize, end: usize) -> Option<(usize, bool, u32)> {
+        self.selected_overload_at(start, end)
+    }
+
+    pub fn selected_overload_at_id(&self, id: NodeId) -> Option<(usize, bool, u32)> {
+        self.selected_overloads.get(&id).copied()
+    }
+
     /// Declaration-site overload identity for mangling the function table key.
     pub fn overload_decl_at(&self, start: usize, end: usize) -> Option<(u32, usize, bool)> {
         self.overload_decl_by_span.get(&(start, end)).copied()
@@ -13420,7 +13488,7 @@ impl Checker {
                 continue;
             };
             let range = stmt.0.into_range();
-            let arg_tys: Vec<Ty> = args.iter().map(|a| self.parse_instance_head(a)).collect();
+            let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
             if self
                 .generics
                 .find_overlapping_instance(class, &arg_tys)
@@ -13456,7 +13524,7 @@ impl Checker {
                         type_params,
                         ty,
                     } => {
-                        let resolved = self.parse_type_name(ty);
+                        let resolved = self.ast_instance_head_ty(ty);
                         assoc_tys.insert(
                             (*name).to_string(),
                             AssocTypeValue {
@@ -13481,6 +13549,34 @@ impl Checker {
         }
         self.next_id_idx = saved_idx;
         self.messages.truncate(msg_len);
+    }
+
+    /// Shape-only instance head for the trait-impl pre-pass (no ID consumption).
+    fn ast_instance_head_ty(&self, arg: &Output) -> Ty {
+        match arg.1.as_ref() {
+            Expression::Type(name) | Expression::Identifier(name) => {
+                match name.to_ascii_lowercase().as_str() {
+                    "int" => int(),
+                    "float" => float(),
+                    "string" => string(),
+                    "bool" => boolean(),
+                    "void" | "unit" => unit_ty(),
+                    "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
+                    "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
+                    _ => Ty::Con((*name).to_string()),
+                }
+            }
+            Expression::TypeApp { name, args } => {
+                let head = match name.to_ascii_lowercase().as_str() {
+                    "option" => Ty::Con(common::BUILTIN_OPTION_ENUM.into()),
+                    "result" => Ty::Con(common::BUILTIN_RESULT_ENUM.into()),
+                    _ => Ty::Con((*name).to_string()),
+                };
+                let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
+                Ty::App(Box::new(head), arg_tys)
+            }
+            _ => Ty::Con("unknown".into()),
+        }
     }
 
     fn stub_inherent_impl_methods(

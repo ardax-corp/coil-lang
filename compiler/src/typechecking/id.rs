@@ -3,7 +3,9 @@
 //! The pre-walk and [`Checker::infer`](super::infer::Checker::infer) both
 //! visit the AST in pre-order, so the n-th infer call consumes the n-th ID.
 
-use parser::ast::{EnumConstructPayload, EnumVariantPayload, Output, Pattern, PatternPayload};
+use std::collections::HashMap;
+
+use parser::ast::{EnumConstructPayload, EnumVariantPayload, Expression, Output, Pattern, PatternPayload};
 
 /// Stable identifier for an AST node (minted in pre-walk visit order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -19,6 +21,9 @@ impl NodeId {
 #[derive(Debug, Default, Clone)]
 pub struct IdTable {
     ids: Vec<NodeId>,
+    /// Heap pointer of each node's `Expression` → minted id (stable for the
+    /// AST lifetime). Lets emit look up sidecar facts without source spans.
+    by_expr_ptr: HashMap<usize, NodeId>,
 }
 
 impl IdTable {
@@ -30,6 +35,23 @@ impl IdTable {
         let id = NodeId(self.ids.len() as u32);
         self.ids.push(id);
         id
+    }
+
+    pub fn record_output(&mut self, node: &Output<'_>, id: NodeId) {
+        self.by_expr_ptr
+            .insert(std::ptr::from_ref(node) as *const Output<'_> as usize, id);
+    }
+
+    pub fn id_of_ptr(&self, ptr: usize) -> Option<NodeId> {
+        self.by_expr_ptr.get(&ptr).copied()
+    }
+
+    pub fn id_of_expr(&self, expr: &Expression<'_>) -> Option<NodeId> {
+        self.id_of_ptr(std::ptr::from_ref(expr) as *const Expression<'_> as usize)
+    }
+
+    pub fn id_of_output(&self, node: &Output<'_>) -> Option<NodeId> {
+        self.id_of_ptr(std::ptr::from_ref(node) as *const Output<'_> as usize)
     }
 
     pub fn len(&self) -> usize {
@@ -47,7 +69,8 @@ impl IdTable {
 
 /// Pre-order walk: mint one ID per node, then recurse into children.
 pub fn pre_walk(node: &Output, table: &mut IdTable) {
-    table.push();
+    let id = table.push();
+    table.record_output(node, id);
     pre_walk_children(node, table);
 }
 

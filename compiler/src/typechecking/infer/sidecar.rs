@@ -37,6 +37,7 @@ pub enum PairNicheAbi {
 #[derive(Clone, Debug, Default)]
 pub struct TypedSidecar {
     tys: HashMap<NodeId, Ty>,
+    tys_by_span: HashMap<(usize, usize), Ty>,
     def_ids: HashMap<NodeId, DefId>,
     overloads: HashMap<NodeId, SelectedOverload>,
     dicts: HashMap<NodeId, Vec<InstanceDef>>,
@@ -48,6 +49,10 @@ pub struct TypedSidecar {
 impl TypedSidecar {
     pub fn ty(&self, id: NodeId) -> Option<&Ty> {
         self.tys.get(&id)
+    }
+
+    pub fn ty_at_span(&self, start: usize, end: usize) -> Option<&Ty> {
+        self.tys_by_span.get(&(start, end))
     }
 
     pub fn def_id(&self, id: NodeId) -> Option<DefId> {
@@ -118,8 +123,14 @@ impl Checker {
             }
         }
 
+        let mut tys_by_span = HashMap::with_capacity(self.codegen_types_by_span.len());
+        for (&span, ty) in &self.codegen_types_by_span {
+            tys_by_span.insert(span, apply_ty_prune(subst, ty));
+        }
+
         TypedSidecar {
             tys,
+            tys_by_span,
             def_ids: self.def_ids_by_node.clone(),
             overloads,
             dicts: self.call_site_dicts.clone(),
