@@ -4,48 +4,27 @@
 //! [`crate::il::IlBuilder`] so targets stay symbolic until lower time.
 //! `bind_label` is idempotent (last bind wins).
 
-use crate::il::{IlBuilder, IlError};
+use crate::il::IlBuilder;
 
 pub use crate::il::{IlJumpKind as JumpKind, Label};
-
-/// Result of [`BlockBuilder::finalize`].
-pub type BlockError = IlError;
 
 /// Thin control-flow helper over an [`IlBuilder`].
 ///
 /// Does not own the IL stream — jumps and binds go to the caller's builder.
-pub struct BlockBuilder {
-    /// Labels allocated through this builder (for finalize checks).
-    allocated: Vec<Label>,
-    /// Labels that were targeted by a jump from this builder.
-    targeted: Vec<Label>,
-    /// Labels bound through this builder.
-    bound: Vec<Label>,
-}
-
-impl Default for BlockBuilder {
-    fn default() -> Self {
-        Self::new()
-    }
-}
+/// Unbound labels fail at lower ([`crate::il::try_lower`]), not here.
+#[derive(Default)]
+pub struct BlockBuilder;
 
 impl BlockBuilder {
     pub fn new() -> Self {
-        Self {
-            allocated: Vec::new(),
-            targeted: Vec::new(),
-            bound: Vec::new(),
-        }
+        Self
     }
 
     pub fn fresh_label(&mut self, il: &mut IlBuilder) -> Label {
-        let l = il.fresh_label();
-        self.allocated.push(l);
-        l
+        il.fresh_label()
     }
 
     pub fn emit_jump_to(&mut self, target: Label, kind: JumpKind, il: &mut IlBuilder) {
-        self.targeted.push(target);
         il.emit_jump(kind, target);
     }
 
@@ -56,38 +35,24 @@ impl BlockBuilder {
         hint: crate::il::FuseHint,
         il: &mut IlBuilder,
     ) {
-        self.targeted.push(target);
         il.emit_jump_hinted(kind, target, common::DebugLoc::unknown(), hint);
     }
 
     /// Bind `label` at the current IL position (next emitting op).
     pub fn bind_label(&mut self, label: Label, il: &mut IlBuilder) {
-        self.bound.push(label);
         il.bind_label(label);
     }
 
     /// Bind `label` as a value-producing join.
     pub fn bind_join_label(&mut self, label: Label, il: &mut IlBuilder) {
-        self.bound.push(label);
         il.bind_join_label(label);
-    }
-
-    pub fn finalize(self) -> Result<(), BlockError> {
-        for t in &self.targeted {
-            if !self.bound.iter().any(|b| b.id() == t.id()) {
-                // May have been bound via another builder sharing the same IL
-                // (e.g. match rebind). Defer to IlBuilder::finalize_labels.
-                let _ = t;
-            }
-        }
-        Ok(())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::il::lower;
+    use crate::il::{IlError, lower, try_lower};
     use common::{Byte, Instruction, Value};
 
     fn const_int(value: i64) -> Byte {
@@ -104,7 +69,6 @@ mod tests {
         il.push_byte(const_int(2));
         bb.bind_label(l, &mut il);
         il.push_byte(const_int(3));
-        bb.finalize().unwrap();
 
         let mut pool = Vec::new();
         let lowered = lower(il.ops(), &mut pool);
@@ -112,6 +76,30 @@ mod tests {
         // `dead_block` drops the fall-through CONST 2 after JMP.
         assert_eq!(lowered.bytecode[1].operand_u32(), 2);
         assert_eq!(lowered.bytecode.len(), 3);
+    }
+
+
+    #[test]
+    fn missing_bind_fails_and_does_not_emit_jmp_to_pc_zero() {
+        let mut il = IlBuilder::new();
+        let mut bb = BlockBuilder::new();
+        let l = bb.fresh_label(&mut il);
+        il.push_byte(const_int(1));
+        bb.emit_jump_to(l, JumpKind::Unconditional, &mut il);
+        il.push_byte(const_int(2));
+        // no bind_label
+
+        assert!(matches!(
+            il.finalize_labels(),
+            Err(IlError::UnboundLabel(lab)) if lab == l
+        ));
+
+        let mut pool = Vec::new();
+        let Err(err) = try_lower(il.ops(), &mut pool) else {
+            panic!("unbound label must fail compile, not emit JMP 0");
+        };
+        assert!(matches!(err, IlError::UnboundLabel(lab) if lab == l));
+        // No bytecode produced, so no JMP to PC 0.
     }
 
     #[test]

@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use common::{Byte, DebugLoc, Instruction};
 
 use super::func::IlFunc;
+use super::builder::IlError;
 use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 use super::opt;
 
@@ -124,19 +125,39 @@ pub fn assert_no_residual_abs_jumps(ops: &[IlOp]) {
 /// lowers through [`lower_module`].
 #[allow(dead_code)] // used by unit tests / re-exports
 pub fn lower(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
-    lower_with_funcs(ops, &[], pool)
+    try_lower(ops, pool).unwrap_or_else(|e| panic!("{e}"))
+}
+
+/// Lower `ops`, returning [`IlError::UnboundLabel`] instead of emitting JMP to PC 0.
+pub fn try_lower(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlError> {
+    try_lower_with_funcs(ops, &[], pool)
 }
 
 /// Rebuild [`super::IlModule`] from flat ops + spans, then [`lower_module`].
 pub fn lower_with_funcs(ops: &[IlOp], funcs: &[IlFunc], pool: &mut Vec<u64>) -> Lowered {
+    try_lower_with_funcs(ops, funcs, pool).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn try_lower_with_funcs(
+    ops: &[IlOp],
+    funcs: &[IlFunc],
+    pool: &mut Vec<u64>,
+) -> Result<Lowered, IlError> {
     let mut module = super::IlModule::from_flat(ops, funcs);
-    lower_module(&mut module, pool)
+    try_lower_module(&mut module, pool)
 }
 
 /// Optimize an owning [`super::IlModule`] and lower once (fuse-select + PC assign).
 ///
 /// Pipeline: per-body opts/GVN → concat → whole-buffer multi_op → single lower.
 pub fn lower_module(module: &mut super::IlModule, pool: &mut Vec<u64>) -> Lowered {
+    try_lower_module(module, pool).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn try_lower_module(
+    module: &mut super::IlModule,
+    pool: &mut Vec<u64>,
+) -> Result<Lowered, IlError> {
     lower_module_inner(module, pool, false, &opt::OptimizeOptions::default())
 }
 
@@ -146,22 +167,26 @@ pub(crate) fn lower_module_inner(
     pool: &mut Vec<u64>,
     capture_ops: bool,
     opts: &opt::OptimizeOptions,
-) -> Lowered {
+) -> Result<Lowered, IlError> {
     super::bounds::reset_bounds_stats();
     super::canon::reset_canon_stats();
     super::pure_call::set_pure_call_ctx(opts.pure_call_ctx.clone());
     let (flat, label_remap, func_label_maps) = module.optimize_and_flatten(opts, pool);
-    let mut lowered = lower_optimized(&flat, pool);
+    let mut lowered = try_lower_optimized(&flat, pool)?;
     lowered.label_remap = label_remap;
     lowered.func_label_maps = func_label_maps;
     if capture_ops {
         lowered.pre_fuse_ops = Some(flat);
     }
-    lowered
+    Ok(lowered)
 }
 
 /// Fuse-select + PC assign for an already-optimized op stream (no IL opts).
 pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
+    try_lower_optimized(ops, pool).unwrap_or_else(|e| panic!("{e}"))
+}
+
+fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlError> {
     let FuseOut {
         slots,
         binds_at,
@@ -188,7 +213,7 @@ pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
     let mut bytecode = Vec::with_capacity(slots.len());
     let mut debug_locs = Vec::with_capacity(slots.len());
     for slot in &slots {
-        bytecode.push(encode_slot(slot, &label_pcs, pool));
+        bytecode.push(encode_slot(slot, &label_pcs, pool)?);
         debug_locs.push(slot.loc());
     }
 
@@ -197,7 +222,7 @@ pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
     remap_absolute_targets(&mut bytecode, pool, &pre_to_post, slots.len());
 
     let code_len = bytecode.len();
-    Lowered {
+    Ok(Lowered {
         bytecode,
         debug_locs,
         label_pcs,
@@ -206,7 +231,7 @@ pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
         label_remap: HashMap::new(),
         func_label_maps: Vec::new(),
         pre_fuse_ops: None,
-    }
+    })
 }
 
 /// Named fuse-select pass: typed [`IlOp`] windows, then fused [`Slot`]s.
@@ -974,12 +999,16 @@ fn join_has_unconditional_pred(
     false
 }
 
-fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -> Byte {
-    match slot {
+fn encode_slot(
+    slot: &Slot,
+    labels: &HashMap<u32, usize>,
+    pool: &mut Vec<u64>,
+) -> Result<Byte, IlError> {
+    Ok(match slot {
         Slot::Byte(b, _) | Slot::Cold(b, _) => *b,
         Slot::PrologueJmp(_) => Byte::new(Instruction::JMP).with_operand_u32(u32::MAX),
         Slot::Jump(kind, target, _, _) => {
-            let pc = resolve(labels, *target);
+            let pc = resolve(labels, *target)?;
             match kind {
                 IlJumpKind::Unconditional => Byte::new(Instruction::JMP).with_operand_u32(pc),
                 IlJumpKind::JumpIfFalse => Byte::new(Instruction::JMPF).with_operand_u32(pc),
@@ -992,7 +1021,7 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
             }
         }
         Slot::Entry(kind, arity, target, _) => {
-            let pc = resolve(labels, *target);
+            let pc = resolve(labels, *target)?;
             match kind {
                 EntryKind::Call => Byte::new(Instruction::CALL).with_call_packed(*arity, pc),
                 EntryKind::TailCall => {
@@ -1006,7 +1035,7 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
             }
         }
         Slot::CmpJmpf(op, target, _, if_true) => {
-            let pc = resolve(labels, *target);
+            let pc = resolve(labels, *target)?;
             let insn = if *if_true {
                 Instruction::CmpJmpt
             } else {
@@ -1021,7 +1050,7 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
             }
         }
         Slot::LogNotJmpf(target, _, if_true) => {
-            let pc = resolve(labels, *target);
+            let pc = resolve(labels, *target)?;
             let insn = if *if_true {
                 Instruction::LogNotJmpt
             } else {
@@ -1043,7 +1072,7 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
             if_true,
             ..
         } => {
-            let pc = resolve(labels, *target);
+            let pc = resolve(labels, *target)?;
             let idx = pool.len();
             pool.push(((pc as u64) << 32) | (*imm as u16 as u32 as u64));
             let insn = if *if_true {
@@ -1061,7 +1090,7 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
             if_true,
             ..
         } => {
-            let pc = resolve(labels, *target);
+            let pc = resolve(labels, *target)?;
             let idx = pool.len();
             pool.push(((pc as u64) << 32) | (*b as u64));
             let insn = if *if_true {
@@ -1081,7 +1110,7 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
             if_true,
             ..
         } => {
-            let pc = resolve(labels, *target);
+            let pc = resolve(labels, *target)?;
             let idx = pool.len();
             pool.push(Byte::pack_bin_slot_slot_const_jmpf_desc(
                 *b,
@@ -1096,11 +1125,15 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
             };
             Byte::new(insn).with_bin_slot_slot_const_jmpf(*bin_op, *a, idx as u16)
         }
-    }
+    })
 }
 
-fn resolve(labels: &HashMap<u32, usize>, target: Label) -> u32 {
-    *labels.get(&target.0).unwrap_or(&0) as u32
+fn resolve(labels: &HashMap<u32, usize>, target: Label) -> Result<u32, IlError> {
+    labels
+        .get(&target.0)
+        .copied()
+        .map(|pc| pc as u32)
+        .ok_or(IlError::UnboundLabel(target))
 }
 
 /// Remap residual absolute jump targets that still use pre-fusion indices.
@@ -1435,6 +1468,26 @@ mod tests {
         assert_eq!(lowered.bytecode.len(), 3);
         assert_eq!(lowered.bytecode[0].operand_u32(), 1);
         assert!(matches!(*lowered.bytecode[2].bytecode(), Instruction::HALT));
+    }
+
+    #[test]
+    fn missing_bind_fails_compile_and_does_not_jmp_pc_zero() {
+        let mut il = IlBuilder::new();
+        let missing = il.fresh_label();
+        il.emit_jump(IlJumpKind::Unconditional, missing);
+        il.push_byte(Byte::new(Instruction::HALT));
+
+        assert!(matches!(
+            il.finalize_labels(),
+            Err(IlError::UnboundLabel(l)) if l == missing
+        ));
+
+        let mut pool = Vec::new();
+        let Err(err) = try_lower(il.ops(), &mut pool) else {
+            panic!("unbound label must fail compile, not emit JMP 0");
+        };
+        assert!(matches!(err, IlError::UnboundLabel(l) if l == missing));
+        // No Lowered bytecode, so no JMP targeting PC 0.
     }
 
     #[test]
@@ -2523,7 +2576,8 @@ mod tests {
             &mut pool,
             false,
             &crate::il::opt::OptimizeOptions::default(),
-        );
+        )
+        .expect("well-formed IL");
         assert!(plain.pre_fuse_ops.is_none());
 
         let mut module = crate::il::IlModule::from_flat(&ops, &[]);
@@ -2532,7 +2586,8 @@ mod tests {
             &mut pool,
             true,
             &crate::il::opt::OptimizeOptions::default(),
-        );
+        )
+        .expect("well-formed IL");
         let snap = captured
             .pre_fuse_ops
             .as_ref()

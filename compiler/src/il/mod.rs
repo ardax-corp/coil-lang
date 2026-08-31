@@ -36,7 +36,7 @@ pub use codebuf::CodeBuf;
 pub use emit_buf::EmitBuf;
 pub use func::IlFunc;
 #[allow(unused_imports)]
-pub use lower::{Lowered, lower, lower_module, lower_with_funcs};
+pub use lower::{Lowered, lower, lower_module, lower_with_funcs, try_lower};
 pub use module::IlModule;
 pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, JoinClass, Label};
 pub use treeshake::{TreeshakeInput, prune_unused_functions};

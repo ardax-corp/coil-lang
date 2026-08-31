@@ -4310,8 +4310,6 @@ impl Compiler {
         bb.emit_jump_to(loop_top, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(end, self.bytecode.il_mut());
         self.bytecode.push_load(out);
-        bb.finalize()
-            .expect("BlockBuilder::finalize: dynamic unary array labels bound");
     }
 
     fn emit_dynamic_broadcast_array(
@@ -4385,8 +4383,6 @@ impl Compiler {
         bb.emit_jump_to(loop_top, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(end, self.bytecode.il_mut());
         self.bytecode.push_load(out);
-        bb.finalize()
-            .expect("BlockBuilder::finalize: dynamic broadcast array labels bound");
     }
 
     /// Recover aggregate arith info from mono/codegen var types when the
@@ -4958,8 +4954,6 @@ impl Compiler {
         self.bytecode.push_load_field(1);
         self.bytecode.push(Byte::new(Instruction::Panic));
         bb.bind_label(success, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: FFI Result unwrap success label bound");
     }
 
     /// True when `expr` is a `match` (after peeling `Expr` wrappers).
@@ -6142,8 +6136,6 @@ impl Compiler {
         self.emit_par_combine(&plan);
 
         bb.bind_label(done, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: par-spec labels bound");
 
         self.bytecode.push_return();
 
@@ -6429,8 +6421,6 @@ impl Compiler {
         self.bytecode.push_const(end);
         self.bytecode.push_store_pop(index_slot);
 
-        bb.finalize()
-            .expect("BlockBuilder::finalize: loop-IPA labels bound");
         true
     }
 
@@ -6472,8 +6462,6 @@ impl Compiler {
         self.bytecode.append(&mut body_bc);
         bb.emit_jump_to(top, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: loop-IPA worker labels bound");
 
         self.bytecode.push_load(ACC_SLOT);
         self.bytecode.push_return();
@@ -7041,8 +7029,6 @@ impl Compiler {
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: range to_vec labels bound");
 
         self.bytecode.push_load(3);
         self.bytecode.push_return();
@@ -8291,8 +8277,6 @@ impl Compiler {
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: for-in array labels bound");
     }
 
     /// Homogeneous tuple → temp `[A; N]` via Index, then array for-in.
@@ -8457,8 +8441,6 @@ impl Compiler {
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: for-in range labels bound");
     }
 
     /// Coroutine for-in: resume → bind; skip body when `done` (completion
@@ -8501,8 +8483,6 @@ impl Compiler {
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: for-in coro labels bound");
     }
 
     /// User `IntoIterator` / `Iterator`: `into_iter` then `next` → Option.
@@ -8588,8 +8568,6 @@ impl Compiler {
         if niche_next {
             self.bytecode.push_pop();
         }
-        bb.finalize()
-            .expect("BlockBuilder::finalize: for-in custom labels bound");
     }
 
     /// Replace `new Class(args).field` with the selected constructor argument.
@@ -10132,8 +10110,6 @@ impl Compiler {
         }
         Self::emit_result_err(&mut self.bytecode);
         bb.bind_label(end, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: assert labels bound");
     }
 
     /// Drive `block_on(coro)`: resume until `done`, leave completion value on stack.
@@ -10172,8 +10148,6 @@ impl Compiler {
         bb.emit_jump_to(top, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(done_exit, self.bytecode.il_mut());
         self.bytecode.push_load(value_slot);
-        bb.finalize()
-            .expect("BlockBuilder::finalize: block_on labels bound");
     }
 
     /// Emit a synthetic `main` that runs every harness test case in one VM
@@ -10256,8 +10230,6 @@ impl Compiler {
         self.bytecode.push_const(0);
         self.bytecode.push_return();
 
-        bb.finalize()
-            .expect("BlockBuilder::finalize: virtual test main labels bound");
         let body_end = self.bytecode.len();
         self.record_fn_span("main".to_string(), body_start, body_end);
         let entry = self.fn_entry_labels.get("main").copied();
@@ -10774,7 +10746,6 @@ impl Compiler {
                 self.context.variables = prev_fn_vars;
 
                 bb.bind_label(after, self.bytecode.il_mut());
-                let _ = bb.finalize();
 
                 for cap in captures {
                     if let Some(slot) = self.lookup_slot(cap) {
@@ -11277,8 +11248,6 @@ impl Compiler {
                     bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
                     bb.bind_label(exit_label, self.bytecode.il_mut());
 
-                    bb.finalize()
-                        .expect("BlockBuilder::finalize: all targeted labels bound");
                 }
             }
             // --- C-style for codegen ---
@@ -11369,8 +11338,6 @@ impl Compiler {
                 bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
                 bb.bind_label(exit_label, self.bytecode.il_mut());
 
-                bb.finalize()
-                    .expect("BlockBuilder::finalize: all targeted labels bound");
             }
             Expression::Break => {
                 if let Some((_, break_label)) = self.loop_stack.last().copied() {
@@ -11418,8 +11385,6 @@ impl Compiler {
                 self.bytecode.push_return();
 
                 bb.bind_label(after, self.bytecode.il_mut());
-                bb.finalize()
-                    .expect("BlockBuilder::finalize: defer after label bound");
             }
             Expression::Call { name, args } => bytecode.append(&mut self.compile_call_expr(name, args, ast, self_id, span)),
             Expression::Argument { ty, name: n, .. } => {
@@ -11787,8 +11752,6 @@ impl Compiler {
 
                 // Validate: every label that had a pending jump must
                 // be bound. (Allocated-but-unused labels are allowed.)
-                bb.finalize()
-                    .expect("BlockBuilder::finalize: all targeted labels bound");
             }
             Expression::Le(lhs, rhs) => {
                 let hint = self_id
@@ -13213,8 +13176,6 @@ impl Compiler {
                     self.bytecode.push_return();
                     bb.bind_label(success, self.bytecode.il_mut());
                 }
-                bb.finalize()
-                    .expect("BlockBuilder::finalize: Try success label bound");
                 // Payload left on stack for the caller (e.g. StorePop).
             }
             Expression::Cast(expr, ty_ann) => {
@@ -13337,8 +13298,6 @@ impl Compiler {
                 }
                 // Success: payload already on stack from JumpIfMatch.
                 bb.bind_label(end, self.bytecode.il_mut());
-                bb.finalize()
-                    .expect("BlockBuilder::finalize: Coalesce labels bound");
             }
             Expression::OptionalAccess(receiver, field) => {
                 // `opt?.field` → None if opt is None, else Some(opt.field).
@@ -13394,8 +13353,6 @@ impl Compiler {
                         self.bytecode.push_load_field(0);
                     }
                     bb.bind_label(end, self.bytecode.il_mut());
-                    bb.finalize()
-                        .expect("BlockBuilder::finalize: niche OptionalAccess labels bound");
                     return bytecode;
                 }
 
@@ -13470,8 +13427,6 @@ impl Compiler {
                 }
                 Self::emit_ok_or_some_wrap(&mut self.bytecode, true);
                 bb.bind_label(end, self.bytecode.il_mut());
-                bb.finalize()
-                    .expect("BlockBuilder::finalize: OptionalAccess labels bound");
             }
             Expression::TypeApp { args, .. } => {
                 // Type-position only — consume child IDs, emit no bytes.
@@ -13589,8 +13544,6 @@ impl Compiler {
         }
         self.compile_pair_match_body(&arms[1], second.1, second_slot);
         bb.bind_label(end, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: pair match labels bound");
         true
     }
 
@@ -13759,8 +13712,6 @@ impl Compiler {
         self.compile_niche_match_body(&arms[fallback_index], fallback_binding, fallback_slot);
 
         bb.bind_label(end_label, self.bytecode.il_mut());
-        bb.finalize()
-            .expect("BlockBuilder::finalize: niche option labels bound");
         true
     }
 
@@ -14374,8 +14325,6 @@ impl Compiler {
 
             // Validate: every label that had a
             // pending jump is bound.
-            bb.finalize()
-                .expect("BlockBuilder::finalize: all targeted labels bound");
         }
         bytecode
     }
