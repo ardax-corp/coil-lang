@@ -2256,17 +2256,9 @@
         use crate::ffi::FfiSignature;
         use crate::memory::FfiType;
 
-        let lib_name = crate::ffi::platform_shared_lib_filename("sum");
-        let lib_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples")
-            .join(&lib_name);
-        if !lib_path.exists() {
-            if std::env::var_os("CI").is_some() {
-                panic!("FFI soft-skip forbidden in CI: {lib_name} not built");
-            }
-            eprintln!("skipping: {lib_name} not built");
+        let Some((lib_name, lib_path)) = crate::ffi::require_examples_libsum() else {
             return;
-        }
+        };
 
         let mut vm = Machine::<512>::default();
         vm.dload_gate_mut()
@@ -2324,17 +2316,9 @@
         use crate::memory::FfiType;
         use std::ffi::c_void;
 
-        let lib_name = crate::ffi::platform_shared_lib_filename("sum");
-        let lib_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../examples")
-            .join(&lib_name);
-        if !lib_path.exists() {
-            if std::env::var_os("CI").is_some() {
-                panic!("FFI soft-skip forbidden in CI: {lib_name} not built");
-            }
-            eprintln!("skipping: {lib_name} not built");
+        let Some((lib_name, lib_path)) = crate::ffi::require_examples_libsum() else {
             return;
-        }
+        };
         let mut gate = crate::ffi::DloadGate::deny_all();
         gate.grant_file("sum", &lib_path)
             .unwrap_or_else(|e| panic!("grant {lib_name}: {e}"));
