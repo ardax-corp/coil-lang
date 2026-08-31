@@ -1157,9 +1157,9 @@ impl Pipeline {
             return;
         }
 
-        // Module compilation emits unfused absolute-offset bytecode.
-        // Finalize (peephole fusion + CodePtr/MakePolyFn relocation) once
-        // on the linked buffer, then sync the pipeline output.
+        // Modules emit labeled stack IL. `finalize_bytecode` tree-shakes,
+        // runs IL opts, then a single lower (fuse-select + label → PC).
+        // No post-lower peephole; production abs JMP is rejected in lower.
         self.compiler_lazy_mut().finalize_bytecode();
         self.bytecode = self.compiler_lazy().bytecode_vec();
 
@@ -1354,7 +1354,7 @@ impl Pipeline {
             return Err(());
         }
 
-        // Final-link peephole fusion (see `Pipeline::compile`).
+        // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
         self.compiler_lazy_mut().finalize_bytecode();
         self.bytecode = self.compiler_lazy_mut().bytecode_vec();
 
