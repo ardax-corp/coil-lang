@@ -78,6 +78,7 @@ impl Checker {
             infer_depth: 0,
             cache: std::collections::HashMap::new(),
             codegen_types_by_span: HashMap::new(),
+            node_ids_by_span: HashMap::new(),
             codegen_var_types: std::collections::HashMap::new(),
             polyfn_binding_spans: std::collections::HashSet::new(),
             codegen_var_types_scopes: Vec::new(),
@@ -1342,6 +1343,7 @@ impl Checker {
         self.infer_depth = 0;
         self.cache.clear();
         self.codegen_types_by_span.clear();
+        self.node_ids_by_span.clear();
         self.codegen_var_types.clear();
         self.polyfn_binding_spans.clear();
         self.codegen_var_types_scopes.clear();
@@ -1990,6 +1992,8 @@ impl Checker {
         let id = self.ids.ids()[self.next_id_idx];
         self.next_id_idx += 1;
         self.maybe_attach_def_id(id, expr);
+        self.node_ids_by_span
+            .insert((expr.0.start, expr.0.end), id);
 
         let ty = self.infer_inner(expr, Some(id));
         self.cache.insert(id, ty.clone());
@@ -8714,8 +8718,9 @@ impl Checker {
         if crate::codegen::string_literal_as_single_byte(s).is_err() {
             return false;
         }
-        self.codegen_types_by_span.insert(
-            (node.0.start, node.0.end),
+        self.retarget_node_ty(
+            node.0.start,
+            node.0.end,
             crate::typechecking::ty::byte(),
         );
         true
@@ -8742,9 +8747,15 @@ impl Checker {
                 crate::typechecking::ty::array_fixed(crate::typechecking::ty::byte(), bytes.len())
             }
         };
-        self.codegen_types_by_span
-            .insert((node.0.start, node.0.end), ty);
+        self.retarget_node_ty(node.0.start, node.0.end, ty);
         true
+    }
+
+    fn retarget_node_ty(&mut self, start: usize, end: usize, ty: Ty) {
+        self.codegen_types_by_span.insert((start, end), ty.clone());
+        if let Some(&id) = self.node_ids_by_span.get(&(start, end)) {
+            self.cache.insert(id, ty);
+        }
     }
 
     fn string_literal_byte_mismatch(&mut self, raw: &str, range: &Range<usize>) -> Ty {

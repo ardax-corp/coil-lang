@@ -12202,8 +12202,31 @@ impl Compiler {
             }
             Expression::String(str) => {
                 let escaped = unescape_coil_string(str);
-                // B2 proof: this path reads the NodeId sidecar, not the span map.
-                let span_ty = self_id.and_then(|id| self.sidecar_ty(id));
+                // Sidecar first (B2). Span fallback covers emit_idx drift when
+                // stack-array init compiles items without `do_compile` of the
+                // array node — otherwise later literals in the same file read
+                // the wrong NodeId (byte_string_lit.hy).
+                let escaped_len = escaped.as_bytes().len();
+                let span_ty = self_id
+                    .and_then(|id| self.sidecar_ty(id))
+                    .filter(|ty| match ty {
+                        Ty::Con(n) if n == "byte" => true,
+                        Ty::Array { element, length }
+                            if matches!(element.as_ref(), Ty::Con(n) if n == "byte") =>
+                        {
+                            match length {
+                                crate::typechecking::ty::ArrayLength::Static(n) => {
+                                    *n == escaped_len
+                                }
+                                crate::typechecking::ty::ArrayLength::Dynamic => true,
+                            }
+                        }
+                        _ => false,
+                    })
+                    .or_else(|| {
+                        self.checker
+                            .lookup_for_codegen_span(span.start, span.end)
+                    });
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
                     .as_ref()

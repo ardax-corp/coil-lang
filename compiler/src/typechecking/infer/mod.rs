@@ -215,6 +215,8 @@ pub struct Checker {
 
     /// Source-span fallback for codegen when pre-walk IDs are misaligned.
     codegen_types_by_span: HashMap<(usize, usize), Ty>,
+    /// Span → NodeId so post-infer coercions can retarget `cache` (B2 sidecar).
+    node_ids_by_span: HashMap<(usize, usize), NodeId>,
 
     /// Variable types for codegen when infer cache is misaligned in function bodies.
     codegen_var_types: std::collections::HashMap<String, Ty>,
