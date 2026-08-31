@@ -342,15 +342,9 @@ impl Pipeline {
     }
 
     fn apply_env_grants(m: &Manifest) {
-        // Production applies these when the VM is wired (`machine::wire_vm_host`).
-        // Tests still set process-global flags at Pipeline construction.
+        // Applied per-Machine in `machine::wire_vm_host` / `set_env_grants`.
+        // Archives (`coil run` / `coil-embed`) stay deny-all.
         let _ = m;
-        #[cfg(any(test, feature = "vm-wire"))]
-        {
-            machine::env::set_allow_exec(m.allow_exec);
-            machine::env::set_allow_exit(m.allow_exit);
-            machine::env::set_allow_ffi_exec(m.allow_ffi_exec);
-        }
     }
 
     pub fn extra_dload_stems(&self) -> &[String] {

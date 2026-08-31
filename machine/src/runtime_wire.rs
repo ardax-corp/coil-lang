@@ -6,7 +6,6 @@ use std::sync::Arc;
 
 use common::{Byte, ProgramDebug};
 
-use crate::env;
 use crate::ffi::DloadGate;
 use crate::memory::CStructLayout;
 use crate::thread::ThreadProgram;
@@ -55,9 +54,7 @@ pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) 
     gate.set_allow_attach(spec.allow_attach);
     vm.set_dload_gate(gate);
 
-    env::set_allow_exec(spec.allow_exec);
-    env::set_allow_exit(spec.allow_exit);
-    env::set_allow_ffi_exec(spec.allow_ffi_exec);
+    vm.set_env_grants(spec.allow_exec, spec.allow_exit, spec.allow_ffi_exec);
 
     for layout in spec.c_structs {
         vm.register_struct_layout(CStructLayout::from_archive(layout));

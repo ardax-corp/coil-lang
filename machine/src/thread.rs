@@ -357,6 +357,9 @@ pub(crate) struct MachineHostState {
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
     dload_gate: crate::ffi::DloadGate,
+    allow_exec: bool,
+    allow_exit: bool,
+    allow_ffi_exec: bool,
 }
 
 thread_local! {
@@ -374,6 +377,9 @@ impl HostStateGuard {
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
         let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
         let dload_gate = vm.dload_gate().clone();
+        let allow_exec = vm.allow_exec();
+        let allow_exit = vm.allow_exit();
+        let allow_ffi_exec = vm.allow_ffi_exec();
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
                 raw: (vm as *mut Machine<N>).cast(),
@@ -382,6 +388,9 @@ impl HostStateGuard {
                 io_reactor,
                 cpu_reactor,
                 dload_gate,
+                allow_exec,
+                allow_exit,
+                allow_ffi_exec,
             });
         });
         Self { prev }
@@ -470,6 +479,18 @@ pub(crate) fn host_allow_attach() -> bool {
             .as_ref()
             .is_some_and(|s| s.dload_gate.allow_attach())
     })
+}
+
+pub(crate) fn host_allow_exec() -> bool {
+    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_exec))
+}
+
+pub(crate) fn host_allow_exit() -> bool {
+    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_exit))
+}
+
+pub(crate) fn host_allow_ffi_exec() -> bool {
+    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_ffi_exec))
 }
 
 /// Code pointer must be a symbol in a file the bound gate would hashed-dload.
@@ -926,6 +947,9 @@ pub struct ThreadSpawnContext {
     pub ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` gate (allow + lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,
+    pub allow_exec: bool,
+    pub allow_exit: bool,
+    pub allow_ffi_exec: bool,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -941,6 +965,9 @@ impl Clone for ThreadSpawnContext {
             ffi_base_dir: self.ffi_base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
+            allow_exec: self.allow_exec,
+            allow_exit: self.allow_exit,
+            allow_ffi_exec: self.allow_ffi_exec,
         }
     }
 }

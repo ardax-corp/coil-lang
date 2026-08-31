@@ -255,6 +255,35 @@ mod tests {
     }
 
     #[test]
+    fn archive_abi_omits_env_grants() {
+        // Exhaustive destructure: grants stay off `.hyc` (no rkyv major).
+        let _ = |p: &ArchivedProgram| {
+            let ArchivedProgram {
+                version,
+                static_slot_count,
+                constants,
+                strings,
+                bytecode,
+                source_files,
+                debug_locs,
+                fn_symbols,
+                struct_layouts,
+            } = p;
+            let _ = (
+                version,
+                static_slot_count,
+                constants,
+                strings,
+                bytecode,
+                source_files,
+                debug_locs,
+                fn_symbols,
+                struct_layouts,
+            );
+        };
+    }
+
+    #[test]
     fn archive_round_trip_preserves_fn_symbols() {
         use crate::debug::FnDebugSym;
 

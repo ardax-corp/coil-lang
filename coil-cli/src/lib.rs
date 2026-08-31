@@ -94,6 +94,10 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 ///
 /// Restores [`common::CStructLayout`] from the archive (CLI `.hyc` and packaged
 /// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
+///
+/// Exec/exit/FFI-exec grants are **not** stored in `.hyc`. This path is deny-all
+/// unless `dload_gate` already encodes attach. In-memory `coil` still applies
+/// `[env]` via `wire_vm_host`.
 pub fn execute_archived_program(
     loaded: &LoadedArchive,
     entry: Option<&Path>,
