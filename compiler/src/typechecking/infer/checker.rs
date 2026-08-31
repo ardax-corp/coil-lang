@@ -11645,6 +11645,8 @@ impl Checker {
                     // Codegen looks up overload_decl_at on the Function span.
                     // Method.0 includes a leading pub, so using it misses and
                     // every overload falls back to id 0 (wrong selected body).
+                    let fn_range = body.0.into_range();
+                    let method_range = method.0.into_range();
                     self.register_overload_candidate(
                         &fqn,
                         OverloadCandidate {
@@ -11654,8 +11656,18 @@ impl Checker {
                             scheme: scheme.clone(),
                             param_names,
                         },
-                        &body.0.into_range(),
+                        &fn_range,
                     );
+                    // Alias the Method wrapper span (docs/attrs/pub) so a
+                    // walker that still keys off method.0 hits the same id.
+                    if let Some(id) = self
+                        .overload_decl_by_span
+                        .get(&(fn_range.start, fn_range.end))
+                        .copied()
+                    {
+                        self.overload_decl_by_span
+                            .insert((method_range.start, method_range.end), id);
+                    }
                     if *is_static {
                         self.static_methods
                             .entry(owner_key.clone())
