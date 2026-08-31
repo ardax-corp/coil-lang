@@ -3857,18 +3857,22 @@ fn run() -> int { return add(1, 2); }
             Byte::new(Instruction::BinReturn).with_bin_return(Instruction::ADD as u8),
         )];
         assert!(Compiler::is_tiny_inline_il(&ops));
-        let mut out = Vec::new();
+        let mut out = crate::il::CodeBuf::new();
         assert!(Compiler::expand_bin_return_for_inline(
             &ops[0].as_plain_byte().unwrap(),
             &[10, 11],
             &mut out
         ));
         assert_eq!(out.len(), 3);
-        assert_eq!(*out[0].bytecode(), Instruction::LOAD);
-        assert_eq!(out[0].load_store_single_slot(), Some(10));
-        assert_eq!(*out[1].bytecode(), Instruction::LOAD);
-        assert_eq!(out[1].load_store_single_slot(), Some(11));
-        assert_eq!(*out[2].bytecode(), Instruction::ADD);
+        assert!(matches!(out.ops()[0], IlOp::Load { slot: 10, .. }));
+        assert!(matches!(out.ops()[1], IlOp::Load { slot: 11, .. }));
+        assert!(matches!(
+            out.ops()[2],
+            IlOp::Bin {
+                op: Instruction::ADD,
+                ..
+            }
+        ));
     }
 
     #[test]

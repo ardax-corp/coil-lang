@@ -289,10 +289,10 @@ impl IlBuilder {
         }
     }
 
-    pub fn append(&mut self, other: &mut IlBuilder) {
+    pub fn append(&mut self, other: &mut IlBuilder) -> BTreeMap<u32, u32> {
         // Merge label id spaces: remap other's labels to fresh ids.
         if other.ops.is_empty() {
-            return;
+            return BTreeMap::new();
         }
         let mut remap: BTreeMap<u32, u32> = BTreeMap::new();
         let mut map_label = |id: u32, me: &mut Self| -> u32 {
@@ -348,6 +348,7 @@ impl IlBuilder {
             }
         }
         other.clear();
+        remap
     }
 
     /// Append another builder that shares this builder's label namespace

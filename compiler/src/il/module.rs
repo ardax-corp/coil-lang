@@ -1,5 +1,6 @@
 //! Per-function IL module: owning view rebuilt at finalize from flat emit.
 //!
+//! Cheap split of one [`super::CodeBuf`] — not a second IL language.
 //! Codegen keeps a flat [`super::CodeBuf`] stream. At lower time the buffer is
 //! split into owned function bodies (plus prologue / glue / epilogue), opts and
 //! CFG GVN run per body, then the stream is concatenated for whole-buffer

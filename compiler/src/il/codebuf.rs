@@ -204,8 +204,58 @@ impl CodeBuf {
         }
     }
 
-    pub fn append(&mut self, other: &mut Vec<Byte>) {
-        self.extend(other.drain(..));
+    /// Merge `other`'s IL onto this buffer. Labels in `other` are remapped.
+    /// Packed CALL/CodePtr Bytes in the suffix are rewritten using this
+    /// buffer's entry map (local fragments have an empty map, so `push`
+    /// would not rewrite).
+    pub fn append(&mut self, other: &mut CodeBuf) {
+        if other.il.is_empty() && other.entry_at_offset.is_empty() && other.funcs.is_empty() {
+            other.clear();
+            return;
+        }
+        self.invalidate_lowered();
+        let base = self.len();
+        let remap = self.il.append(&mut other.il);
+        for (pc, label) in other.entry_at_offset.drain() {
+            let nid = remap.get(&label.0).copied().unwrap_or(label.0);
+            self.entry_at_offset.insert(pc + base, Label(nid));
+        }
+        for mut f in other.funcs.drain(..) {
+            f.code_start += base;
+            f.code_end += base;
+            if let Some(Label(id)) = f.entry {
+                f.entry = Some(Label(remap.get(&id).copied().unwrap_or(id)));
+            }
+            self.funcs.push(f);
+        }
+        self.rewrite_abs_entries_from(base);
+        other.clear();
+    }
+
+    fn rewrite_abs_entries_from(&mut self, from_code: usize) {
+        let mut emitting = 0usize;
+        let mut rewrites = Vec::new();
+        for (i, op) in self.il.ops().iter().enumerate() {
+            if !op.emits_code() {
+                continue;
+            }
+            if emitting >= from_code {
+                if let IlOp::Byte { byte, loc } = op {
+                    if let Some((kind, arity, label)) = self.entry_from_abs_byte(*byte) {
+                        rewrites.push((i, kind, arity, label, *loc));
+                    }
+                }
+            }
+            emitting += 1;
+        }
+        for (i, kind, arity, target, loc) in rewrites {
+            self.il.ops_mut()[i] = IlOp::Entry {
+                kind,
+                arity,
+                target,
+                loc,
+            };
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -416,6 +466,7 @@ impl CodeBuf {
         self.il.push_prologue_jmp();
     }
 
+    #[allow(dead_code)]
     pub fn splice_bytes_at(&mut self, code_pos: usize, bytes: Vec<Byte>) {
         let mut inserted = IlBuilder::new();
         inserted.extend_bytes(bytes);
@@ -676,6 +727,14 @@ impl CodeBuf {
         }
         None
     }
+
+    /// Remove the last emitting op (labels after it are left in place).
+    pub fn pop_last_emitting(&mut self) -> Option<IlOp> {
+        self.invalidate_lowered();
+        let ops = self.il.ops_mut();
+        let idx = ops.iter().rposition(|op| op.emits_code())?;
+        Some(ops.remove(idx))
+    }
 }
 
 #[cfg(test)]
@@ -755,6 +814,28 @@ mod tests {
         assert!(matches!(ops[1], IlOp::Const { imm: 9, .. }));
         assert!(matches!(ops[2], IlOp::Load { slot: 0, .. }));
         assert!(matches!(ops[3], IlOp::Const { imm: 2, .. }));
+    }
+
+    #[test]
+    fn append_concatenates_typed_ops_and_remaps_labels() {
+        let mut dest = CodeBuf::new();
+        dest.push_const(1);
+        let mut src = CodeBuf::new();
+        let lab = src.il_mut().fresh_label();
+        src.il_mut().emit_jump(IlJumpKind::Unconditional, lab);
+        src.il_mut().bind_label(lab);
+        src.push_const(2);
+        dest.append(&mut src);
+        assert!(src.is_empty());
+        let ops = dest.ops();
+        assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
+        assert!(matches!(ops[1], IlOp::Jump { .. }));
+        assert!(matches!(ops[2], IlOp::Label(_)));
+        assert!(matches!(ops[3], IlOp::Const { imm: 2, .. }));
+        match (&ops[1], &ops[2]) {
+            (IlOp::Jump { target, .. }, IlOp::Label(bound)) => assert_eq!(target, bound),
+            _ => panic!("expected remapped jump/label"),
+        }
     }
 
     #[test]
