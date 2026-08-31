@@ -1,3 +1,4 @@
+mod ast_cache;
 mod attrs;
 mod block_builder;
 mod const_fold;

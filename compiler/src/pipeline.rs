@@ -72,6 +72,8 @@ pub struct Pipeline {
     source_cache: Vec<Option<String>>,
     /// Unsaved editor buffers keyed by their normalized path.
     overlays: HashMap<PathBuf, String>,
+    /// Parsed + expanded AST per file (discover / compile / typecheck).
+    ast_cache: crate::ast_cache::AstCache,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
@@ -114,11 +116,13 @@ impl Default for Pipeline {
 impl Pipeline {
     /// Override a source file with in-memory text until [`Self::clear_file_text`].
     pub fn set_file_text(&mut self, file: PathBuf, text: String) {
+        self.ast_cache.remove(&file);
         self.overlays.insert(file, text);
     }
 
     /// Remove an in-memory source override.
     pub fn clear_file_text(&mut self, file: &Path) {
+        self.ast_cache.remove(file);
         self.overlays.remove(file);
     }
     /// Register a host native with an explicit [`FfiSignature`]
@@ -255,27 +259,13 @@ impl Pipeline {
             self.manifest = Manifest::load(&root).unwrap_or_default();
             Self::apply_env_grants(&self.manifest);
         }
-        self.failed = false;
-        self.processed.clear();
-        self.worklist.clear();
-        self.module_deps.clear();
+        self.reset_session();
         self.entry_file = Some(file.to_path_buf());
         self.enqueue_file(file.to_path_buf());
         self.discover_all();
 
         let mut results = Vec::new();
         for item in self.worklist_in_dependency_order() {
-            let source = match self.read_source(&item.file) {
-                Some(source) => source,
-                None => continue,
-            };
-            let ast = match Pratt::default().parse(source.as_str()) {
-                Ok(ast) => ast,
-                Err(message) => {
-                    results.push((item.file, vec![message]));
-                    continue;
-                }
-            };
             let namespace = if self.entry_file.as_ref() == Some(&item.file) {
                 String::new()
             } else {
@@ -284,7 +274,11 @@ impl Pipeline {
                     .unwrap_or_default()
             };
             let before = self.compiler_lazy_mut().get_messages().len();
-            self.compiler_lazy_mut().typecheck_module(&namespace, &ast);
+            if !self.parse_expand_check_file(&item.file, &namespace, false) {
+                let extra = self.compiler_lazy_mut().get_messages()[before..].to_vec();
+                results.push((item.file, extra));
+                continue;
+            }
             let messages = self.compiler_lazy_mut().get_messages()[before..].to_vec();
             results.push((item.file, messages));
         }
@@ -458,6 +452,7 @@ impl Pipeline {
             source_interner: common::Interner::default(),
             source_cache: Vec::new(),
             overlays: HashMap::new(),
+            ast_cache: crate::ast_cache::AstCache::default(),
             include_tests: false,
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
@@ -862,6 +857,81 @@ impl Pipeline {
         }
     }
 
+    fn reset_session(&mut self) {
+        self.failed = false;
+        self.processed.clear();
+        self.worklist.clear();
+        self.module_deps.clear();
+        self.ast_cache.clear();
+    }
+
+    /// Parse (and expand) `file` into [`Self::ast_cache`]. Returns false on I/O.
+    fn fill_ast_cache(&mut self, file: &Path) -> bool {
+        if let Some(cached) = self.ast_cache.get(file) {
+            if let Some(overlay) = self.overlays.get(file) {
+                if cached.source() == overlay.as_str() {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+        let Some(source) = self.read_source(file) else {
+            return false;
+        };
+        let mut cached = crate::ast_cache::CachedAst::parse(source);
+        let _ = cached.expand_if_needed();
+        self.ast_cache.insert(file.to_path_buf(), cached);
+        true
+    }
+
+    /// Parse → expand → check one file. Used by compile and `typecheck_project`.
+    fn parse_expand_check_file(
+        &mut self,
+        file: &Path,
+        module: &str,
+        strip_tests: bool,
+    ) -> bool {
+        if !self.fill_ast_cache(file) {
+            self.emit_spanless_error(
+                ErrorCode::IoError,
+                format!("Failed to read file `{}`", file.display()),
+            );
+            self.failed = true;
+            return false;
+        }
+        if let Some(err) = self
+            .ast_cache
+            .get(file)
+            .and_then(|c| c.parse_error().cloned())
+        {
+            let src = self.ast_cache.get(file).unwrap().source().to_string();
+            self.emit_message(file, &src, &err);
+            self.failed = true;
+            return false;
+        }
+        if self.ast_cache.get(file).is_some_and(|c| c.checked()) {
+            return true;
+        }
+        let _ = self.compiler_lazy_mut();
+        let compiler = self.compiler.get_mut().expect("compiler initialized");
+        let cached = self.ast_cache.get_mut(file).expect("filled");
+        if strip_tests && let Some(ast) = cached.ast_mut() {
+            crate::strip_tests::strip_test_declarations(ast);
+        }
+        if cached.expanded() {
+            let expand = cached.take_expand();
+            compiler.apply_expand_result(module, expand);
+            if let Some(ast) = cached.ast_mut() {
+                compiler.typecheck_module(module, ast);
+            }
+        } else if let Some(ast) = cached.ast_mut() {
+            compiler.expand_and_check(module, ast);
+        }
+        cached.mark_checked();
+        true
+    }
+
     /// Discovery pass: walk the worklist front-to-back,
     /// parsing each file and enqueueing its
     /// `use`/`mod` dependencies. We don't compile
@@ -921,36 +991,40 @@ impl Pipeline {
                 continue;
             }
             already_scanned.push(file.clone());
-            // Read the source (cached after the first
-            // call). The `compile_file` pass reuses the
-            // same cached source, so the file is only
-            // read from disk once per pipeline.
-            let src = match self.read_source(&file) {
-                Some(s) => s,
-                None => {
-                    self.emit_spanless_error(
-                        ErrorCode::IoError,
-                        format!("Failed to read file `{}`", file.display()),
-                    );
-                    self.failed = true;
-                    continue;
-                }
-            };
-            let parser = Pratt::default();
-            let ast = match parser.parse(src.as_str()) {
-                Ok(ast) => ast,
-                Err(errors) => {
-                    // Emit once here. Do NOT re-enqueue: compile_file
-                    // would parse again and duplicate the same report.
-                    self.emit_message(&file, src.as_str(), &errors);
-                    self.failed = true;
-                    continue;
-                }
-            };
+            if !self.fill_ast_cache(&file) {
+                self.emit_spanless_error(
+                    ErrorCode::IoError,
+                    format!("Failed to read file `{}`", file.display()),
+                );
+                self.failed = true;
+                continue;
+            }
+            if let Some(err) = self
+                .ast_cache
+                .get(&file)
+                .and_then(|c| c.parse_error().cloned())
+            {
+                // Emit once here. Do NOT re-enqueue: compile_file
+                // would parse again and duplicate the same report.
+                let src = self.ast_cache.get(&file).unwrap().source().to_string();
+                self.emit_message(&file, &src, &err);
+                self.failed = true;
+                continue;
+            }
             // Re-enqueue only after a successful parse so the compile
             // pass can topo-sort dependencies ahead of callers.
             self.worklist.push_back(item);
-            self.enqueue_uses(&file, src.as_str(), &ast);
+            let src = self.ast_cache.get(&file).unwrap().source().to_string();
+            let ast_ptr = self
+                .ast_cache
+                .get(&file)
+                .and_then(|c| c.ast())
+                .map(|a| a as *const _);
+            if let Some(ptr) = ast_ptr {
+                // SAFETY: enqueue_uses mutates worklist / processed / deps / the
+                // sink, not `ast_cache`. The pointer stays valid for this call.
+                self.enqueue_uses(&file, &src, unsafe { &*ptr });
+            }
             // Only stop when every worklist entry has been
             // scanned. Length-stable checks alone are wrong:
             // scanning the first of two deps (`use a::*; use
@@ -967,8 +1041,8 @@ impl Pipeline {
         }
     }
 
-    /// Compile a single file: parse, enqueue uses, and
-    /// invoke the compiler. Called once per WorkItem.
+    /// Compile a single file. Parse/expand/check come from
+    /// [`Self::parse_expand_check_file`] (shared with typecheck).
     fn compile_file(&mut self, item: WorkItem, is_entry: bool) {
         let file = item.file.clone();
         // The ENTRY file is special: it's the program root
@@ -989,63 +1063,40 @@ impl Pipeline {
             })
         };
 
-        let src = match self.read_source(&file) {
-            Some(s) => s,
-            None => {
-                self.emit_spanless_error(
-                    ErrorCode::IoError,
-                    format!("Failed to read file `{}`", file.display()),
-                );
-                self.failed = true;
-                return;
-            }
-        };
-
-        let parser = Pratt::default();
-        let mut ast = match parser.parse(src.as_str()) {
-            Ok(ast) => ast,
-            Err(errors) => {
-                self.emit_message(&file, src.as_str(), &errors);
-                self.failed = true;
-                return;
-            }
-        };
-
-        // Note: `enqueue_uses` was already called by
-        // `discover_all` in the pre-pass. The
-        // worklist is fully populated. We just
-        // compile now.
+        if !self.parse_expand_check_file(&file, &namespace, !self.include_tests) {
+            self.failed = true;
+            return;
+        }
 
         let rel = file
             .strip_prefix(&self.project_root)
             .unwrap_or(&file)
             .to_path_buf();
-        self.compiler_lazy_mut().set_source_file(rel);
+        let _ = self.compiler_lazy_mut();
+        self.compiler
+            .get_mut()
+            .expect("compiler initialized")
+            .set_source_file(rel);
 
-        // Compile the file. The compiler's `namespace`
-        // field is set to the file's derived namespace.
-        // We use `compile_module` (not `compile`) so the
-        // returned bytes are ONLY the new bytes (not the
-        // cumulative bytecode, which would duplicate
-        // the prologue on the second call). See
-        // `Compiler::compile_module` for the operand
-        // adjustment details.
-        //
-        // Callee IL spans stay on the shared `Compiler` so a later
-        // file can tiny-inline small helpers from a dependency
-        // without archive-level metadata (COI-125).
-        let bytecode = self
-            .compiler_lazy_mut()
-            .compile_module(namespace.as_str(), &mut ast);
+        // `compile_prepared_module`: expand/check already ran.
+        let bytecode = {
+            let compiler = self.compiler.get_mut().expect("compiler initialized");
+            let cached = self
+                .ast_cache
+                .get_mut(&file)
+                .expect("parse_expand_check_file filled cache");
+            let ast = cached.ast_mut().expect("parsed");
+            compiler.compile_prepared_module(namespace.as_str(), ast)
+        };
 
-        // Append this file's bytecode to the running
-        // output. Each file's bytecode is independent;
-        // the linker (the prologue's JMP) connects them
-        // via function-name lookup at call time.
         self.bytecode.extend(bytecode);
 
-        // Surface any newly emitted compiler diagnostics.
-        let file_id = self.sink.register_source(&file, src.as_str());
+        let src = self
+            .ast_cache
+            .get(&file)
+            .map(|c| c.source().to_string())
+            .unwrap_or_default();
+        let file_id = self.sink.register_source(&file, &src);
         self.emit_new_messages(file_id);
         if self.had_errors() {
             self.failed = true;
@@ -1154,10 +1205,7 @@ impl Pipeline {
             }
         };
 
-        self.failed = false;
-        self.processed.clear();
-        self.worklist.clear();
-        self.module_deps.clear();
+        self.reset_session();
         self.entry_file = None;
         self.begin_compile_opt_stats();
 
@@ -1260,10 +1308,7 @@ impl Pipeline {
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
             Self::apply_env_grants(&self.manifest);
         }
-        self.failed = false;
-        self.processed.clear();
-        self.worklist.clear();
-        self.module_deps.clear();
+        self.reset_session();
         self.entry_file = Some(entry.clone());
         self.begin_compile_opt_stats();
         self.enqueue_file(entry);
@@ -1313,10 +1358,7 @@ impl Pipeline {
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
             Self::apply_env_grants(&self.manifest);
         }
-        self.failed = false;
-        self.processed.clear();
-        self.worklist.clear();
-        self.module_deps.clear();
+        self.reset_session();
         self.entry_file = Some(entry.clone());
         self.begin_compile_opt_stats();
         self.enqueue_file(entry);
@@ -2262,6 +2304,87 @@ fn main() -> int {
                 .iter()
                 .map(|b| b.bytecode().mnemonic())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    fn temp_hy(name: &str, src: &str) -> (std::path::PathBuf, std::path::PathBuf) {
+        let pid = std::process::id();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let dir = std::env::temp_dir().join(format!("coil_b4_{name}_{pid}_{nanos}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let file = dir.join("main.hy");
+        std::fs::write(&file, src).expect("write");
+        (dir, file)
+    }
+
+    fn typecheck_errors(file: &std::path::Path) -> Vec<String> {
+        let mut pipeline = Pipeline::new();
+        let results = pipeline.typecheck_project(file);
+        assert!(
+            results.iter().any(|(p, _)| p == file),
+            "typecheck_project must return the entry file, got {results:?}"
+        );
+        results
+            .into_iter()
+            .flat_map(|(_, msgs)| msgs)
+            .filter(|m| *m.kind() == MessageKind::ERROR)
+            .map(|m| m.message().to_string())
+            .collect()
+    }
+
+    /// `#[derive]` expansion must run on the typecheck path (not compile-only).
+    #[test]
+    fn typecheck_project_sees_derive_eq() {
+        let src = r#"
+#[derive(Eq)]
+class Point { x: int, y: int }
+
+fn eq_ok() -> bool {
+    return new Point(1, 1) == new Point(1, 1);
+}
+
+fn main() {}
+"#;
+        let (_dir, file) = temp_hy("derive", src);
+        let errors = typecheck_errors(&file);
+        assert!(
+            errors.is_empty(),
+            "derived Eq should be visible to typecheck_project, got {errors:?}"
+        );
+    }
+
+    /// `#[ffi]` signature-only fns become ExternBlock on typecheck too.
+    #[test]
+    fn typecheck_project_sees_ffi() {
+        let src = r#"
+#[ffi(lib = "c")]
+fn c_abs(int x) -> int;
+
+fn main() {}
+"#;
+        let (_dir, file) = temp_hy("ffi", src);
+        let errors = typecheck_errors(&file);
+        assert!(
+            errors.is_empty(),
+            "#[ffi] signature should be visible to typecheck_project, got {errors:?}"
+        );
+    }
+
+    /// Expand diagnostics fire on typecheck (signature-only without #[ffi]).
+    #[test]
+    fn typecheck_project_runs_attr_expand() {
+        let src = "fn foo() -> int; fn main() {}";
+        let (_dir, file) = temp_hy("expand", src);
+        let errors = typecheck_errors(&file);
+        assert!(
+            errors
+                .iter()
+                .any(|m| m.contains("Signature-only function requires `#[ffi(...)]`")),
+            "typecheck_project must expand attrs, got {errors:?}"
         );
     }
 }
