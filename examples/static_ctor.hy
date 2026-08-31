@@ -13,8 +13,8 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 impl Point {
@@ -22,14 +22,14 @@ impl Point {
         return new Point(x, y);
     }
 
-    fn sum() -> int {
+    pub fn sum() -> int {
         return self.x + self.y;
     }
 }
 
 class Counter {
-    static count: int = 0,
-    id: int,
+    pub static count: int = 0,
+    pub id: int,
 }
 
 impl Counter {

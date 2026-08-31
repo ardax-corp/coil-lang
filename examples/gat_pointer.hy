@@ -15,7 +15,7 @@ trait Pointer<P: * -> *> {
 
 impl Pointer<Option> {
     type Ref<T> = T;
-    fn deref<T>(Option<T> ptr) -> T {
+    pub fn deref<T>(Option<T> ptr) -> T {
         return match ptr {
             Option::Some(v) => v,
             Option::None => 0,

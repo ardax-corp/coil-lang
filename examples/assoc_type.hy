@@ -16,7 +16,7 @@ trait Collect<C> {
 
 impl Collect<Option<int>> {
     type Elem = int;
-    fn head(Option<int> xs) -> int {
+    pub fn head(Option<int> xs) -> int {
         return match xs {
             Option::Some(v) => v,
             Option::None => 0,

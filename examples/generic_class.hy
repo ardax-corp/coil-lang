@@ -6,11 +6,11 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 class Cell<T> {
-    value: T
+    pub value: T
 }
 
 impl Cell<T> {
-    fn get() -> T {
+    pub fn get() -> T {
         return self.value;
     }
 }

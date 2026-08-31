@@ -39,7 +39,7 @@ struct SharedBuf {
 }
 
 impl SharedBuf {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -536,8 +536,8 @@ fn const_class_field_reads_after_construction() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    const x: int,
-    y: int,
+    pub const x: int,
+    pub y: int,
 }
 
 fn main() {
@@ -603,12 +603,12 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 class ThreadWrapper {
-    thread: Thread,
-    channel: Sender,
+    pub thread: Thread,
+    pub channel: Sender,
 }
 
 impl ThreadWrapper {
-    fn send(string msg) {
+    pub fn send(string msg) {
         send(self.channel, msg)?;
     }
 }
@@ -640,11 +640,11 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 class Worker {
-    tx: Sender,
+    pub tx: Sender,
 }
 
 impl Worker {
-    fn push(string msg) {
+    pub fn push(string msg) {
         send((self).tx, msg)?;
     }
 }
@@ -673,7 +673,7 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 class Worker {
-    tx: Sender,
+    pub tx: Sender,
 }
 
 fn main() {
@@ -694,12 +694,12 @@ fn inline_new_method_call_works() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 impl Point {
-    fn sum() -> int {
+    pub fn sum() -> int {
         return self.x + self.y;
     }
 }
@@ -829,8 +829,8 @@ fn inline_into_receiver_prints_32() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Celsius { c: int }
-class Fahrenheit { f: int }
+class Celsius { pub c: int }
+class Fahrenheit { pub f: int }
 impl Into<Fahrenheit> for Celsius {
     fn into(Celsius x) -> Fahrenheit {
         return new Fahrenheit(x.c * 2 + 32);
@@ -851,9 +851,9 @@ fn return_into_pins_target_prints_32() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Celsius { c: int }
-class Fahrenheit { f: int }
-class Kelvin { k: int }
+class Celsius { pub c: int }
+class Fahrenheit { pub f: int }
+class Kelvin { pub k: int }
 impl Into<Fahrenheit> for Celsius {
     fn into(Celsius x) -> Fahrenheit {
         return new Fahrenheit(x.c * 2 + 32);
@@ -964,7 +964,7 @@ use string::{format, to_bytes};
             fn describe_val(T x) -> int;
         }
         impl Describable<int> {
-            fn describe_val(int x) -> int { return x + 1; }
+            pub fn describe_val(int x) -> int { return x + 1; }
         }
         fn show<T: Describable>(T x) -> int {
             return describe_val(x);
@@ -1021,7 +1021,7 @@ use string::{format, to_bytes};
             fn describe_val(T x) -> int;
         }
         impl Describable<int> {
-            fn describe_val(int x) -> int { return x + 1; }
+            pub fn describe_val(int x) -> int { return x + 1; }
         }
         fn show<T: Describable>(T x) -> int {
             return describe_val(x);
@@ -1053,7 +1053,7 @@ use string::{format, to_bytes};
             fn cast(A x) -> B;
         }
         impl Convert<int, int> {
-            fn cast(int x) -> int { return x; }
+            pub fn cast(int x) -> int { return x; }
         }
         fn convert_fn<A, B>(A x) -> B where Convert<A, B> {
             return cast(x);
@@ -1539,8 +1539,8 @@ enum LockPackage {
 }
 
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 fn quote(string s) -> string {
@@ -3640,12 +3640,12 @@ attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
 }
 
 class Counter {
-    n: int,
+    pub n: int,
 }
 
 impl Counter {
     #[log(message = "bump")]
-    fn bump() -> int {
+    pub fn bump() -> int {
         return self.n;
     }
 }
@@ -4357,11 +4357,11 @@ enum Status {
 }
 
 class Box {
-    status: Status,
+    pub status: Status,
 }
 
 impl Box {
-    fn get() -> Status {
+    pub fn get() -> Status {
         return self.status;
     }
 }
@@ -6142,8 +6142,8 @@ fn copy_prop_preserves_field_aliases() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 fn sum(Point point) -> int {
     let alias = point;
@@ -6261,8 +6261,8 @@ fn direct_class_field_access_avoids_temporary_object() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 fn main() {
     let x = new Point(5, 6).x;
@@ -6306,8 +6306,8 @@ fn direct_class_second_field_access_avoids_temporary_object() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 fn main() {
     write(stdout(), to_bytes(format("%i", new Point(5, 6).y)));
@@ -6354,8 +6354,8 @@ fn grouped_direct_class_field_access_avoids_temporary_object() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 fn main() {
     write(stdout(), to_bytes(format("%i", (new Point(5, 6)).x)));
@@ -6404,8 +6404,8 @@ fn named_local_class_stays_heap_allocated() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 fn main() {
     let p = new Point(5, 6);
@@ -6456,7 +6456,7 @@ fn drop_class_temp_field_access_still_allocates() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {}
 }
@@ -6530,12 +6530,12 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 class BoxInt {
-    opt: Option<int>,
+    pub opt: Option<int>,
 }
 
 class Node {
-    val: int,
-    left: Option<Node>,
+    pub val: int,
+    pub left: Option<Node>,
 }
 
 fn nested_boxed(BoxInt b) -> int {
@@ -6587,7 +6587,7 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 
 class BoxInt {
-    opt: Option<int>,
+    pub opt: Option<int>,
 }
 
 enum Choice {
@@ -6703,20 +6703,20 @@ fn custom_iterator_uses_pointer_niche_option() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class TextCounter {
-    cur: int,
-    end: int,
-    text: string,
+    pub cur: int,
+    pub end: int,
+    pub text: string,
 }
 impl IntoIterator<TextCounter> {
     type Item = string;
     type IntoIter = TextCounter;
-    fn into_iter(TextCounter value) -> TextCounter {
+    pub fn into_iter(TextCounter value) -> TextCounter {
         return value;
     }
 }
 impl Iterator<TextCounter> {
     type Item = string;
-    fn next(TextCounter value) -> Option<string> {
+    pub fn next(TextCounter value) -> Option<string> {
         if value.cur < value.end {
             value.cur = value.cur + 1;
             return Option::Some(value.text);
@@ -6742,23 +6742,23 @@ fn trait_impl_calls_inherent_method_declared_later() {
         r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-class ItemBox { v: int }
-class ItemBoxIter { i: int }
+class ItemBox { pub v: int }
+class ItemBoxIter { pub i: int }
 impl ItemBox {
-    fn iter() -> ItemBoxIter {
+    pub fn iter() -> ItemBoxIter {
         return new ItemBoxIter(self.v);
     }
 }
 impl IntoIterator<ItemBox> {
     type Item = int;
     type IntoIter = ItemBoxIter;
-    fn into_iter(ItemBox m) -> ItemBoxIter {
+    pub fn into_iter(ItemBox m) -> ItemBoxIter {
         return m.iter();
     }
 }
 impl Iterator<ItemBoxIter> {
     type Item = int;
-    fn next(ItemBoxIter it) -> Option<int> {
+    pub fn next(ItemBoxIter it) -> Option<int> {
         if it.i == 0 {
             it.i = 1;
             return Option::Some(1);
@@ -6784,23 +6784,23 @@ fn trait_impl_calls_static_inherent_method_declared_later() {
         r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-class ItemBox { v: int }
-class ItemBoxIter { i: int }
+class ItemBox { pub v: int }
+class ItemBoxIter { pub i: int }
 impl ItemBox {
-    static fn make_iter(ItemBox m) -> ItemBoxIter {
+    pub static fn make_iter(ItemBox m) -> ItemBoxIter {
         return new ItemBoxIter(m.v);
     }
 }
 impl IntoIterator<ItemBox> {
     type Item = int;
     type IntoIter = ItemBoxIter;
-    fn into_iter(ItemBox m) -> ItemBoxIter {
+    pub fn into_iter(ItemBox m) -> ItemBoxIter {
         return ItemBox::make_iter(m);
     }
 }
 impl Iterator<ItemBoxIter> {
     type Item = int;
-    fn next(ItemBoxIter it) -> Option<int> {
+    pub fn next(ItemBoxIter it) -> Option<int> {
         if it.i == 0 {
             it.i = 1;
             return Option::Some(7);
@@ -6948,7 +6948,7 @@ use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
 static let drops: int = 0;
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {
         drops = drops + 1;
@@ -6975,7 +6975,7 @@ use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
 static let drops: int = 0;
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {
         drops = drops + 1;
@@ -7001,7 +7001,7 @@ use gc::{collect, root};
 use io::{stdout, write};
 use string::{format, to_bytes};
 static let drops: int = 0;
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {
         drops = drops + 1;
@@ -7026,7 +7026,7 @@ use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
 static let drops: int = 0;
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {
         collect();
@@ -7054,13 +7054,13 @@ use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
 static let drops: int = 0;
-class Boom { fd: int }
+class Boom { pub fd: int }
 impl Boom {
     fn drop() {
         panic "boom";
     }
 }
-class Ok { fd: int }
+class Ok { pub fd: int }
 impl Ok {
     fn drop() {
         drops = drops + 1;
@@ -7090,7 +7090,7 @@ fn gc_finalizer_runs_on_teardown() {
 use io::{stdout, write};
 use string::{to_bytes};
 static let drops: int = 0;
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {
         write(stdout(), to_bytes("closed"));
@@ -7115,7 +7115,7 @@ fn gc_finalizer_can_upgrade_weak_then_clears() {
 use gc::{collect, weak, upgrade, Weak};
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Handle { fd: int }
+class Handle { pub fd: int }
 static let during: int = 0;
 static let held: Option<Weak<Handle>> = Option::None;
 impl Handle {
@@ -7159,7 +7159,7 @@ fn gc_finalizer_storing_self_resurrects_once() {
 use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Handle { fd: int }
+class Handle { pub fd: int }
 static let drops: int = 0;
 static let kept: Option<Handle> = Option::None;
 impl Handle {
@@ -7201,7 +7201,7 @@ fn gc_explicit_drop_store_self_stays_once() {
 use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Handle { fd: int }
+class Handle { pub fd: int }
 static let drops: int = 0;
 static let kept: Option<Handle> = Option::None;
 impl Handle {
@@ -7238,7 +7238,7 @@ fn gc_finalizer_store_self_into_root_resurrects() {
 use gc::{collect, get, root, Root};
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Handle { fd: int }
+class Handle { pub fd: int }
 static let drops: int = 0;
 static let kept: Option<Root<Handle>> = Option::None;
 impl Handle {
@@ -7285,18 +7285,18 @@ use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Handle {
-    fd: int,
+    pub fd: int,
 }
 class Bag {
-    slot: Option<Handle>,
+    pub slot: Option<Handle>,
 }
 static let drops: int = 0;
 static let bag: Option<Bag> = Option::None;
 impl Bag {
-    fn put(Handle h) {
+    pub fn put(Handle h) {
         self.slot = Option::Some(h);
     }
-    fn fd() -> int {
+    pub fn fd() -> int {
         return match self.slot {
             Option::Some(h) => h.fd,
             Option::None => -1,
@@ -7343,7 +7343,7 @@ fn gc_finalizer_resurrection_keeps_weak_upgradable() {
 use gc::{collect, weak, upgrade, Weak};
 use io::{stdout, write};
 use string::{format, to_bytes};
-class Handle { fd: int }
+class Handle { pub fd: int }
 static let drops: int = 0;
 static let kept: Option<Handle> = Option::None;
 static let held: Option<Weak<Handle>> = Option::None;
@@ -8943,8 +8943,8 @@ fn set_field_and_store_index_statements_pop_value() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 fn main() {
     let p = new Point(0, 0);
@@ -8982,8 +8982,8 @@ fn repeated_field_key_reuses_prologue_temp() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 fn twice(Point p) -> int {
     return p.x + p.x;
@@ -9644,13 +9644,13 @@ test("bind free fn") {
 class Svc {}
 enum Node { Obj { v: int } }
 impl Svc {
-    fn decode() -> Result<Node, string> {
+    pub fn decode() -> Result<Node, string> {
         return Node::Obj { v: 42 };
     }
-    fn fail() -> Result<Node, string> {
+    pub fn fail() -> Result<Node, string> {
         raise "boom";
     }
-    fn maybe(int flag) -> Option<int> {
+    pub fn maybe(int flag) -> Option<int> {
         if flag == 0 {
             return Option::None;
         }
@@ -9716,25 +9716,25 @@ fn nested_method_try_preserves_inner_result_payload() {
 class Enc {
 }
 impl Enc {
-    fn encode(int n) -> Result<Vec<byte>, string> {
+    pub fn encode(int n) -> Result<Vec<byte>, string> {
         let out: Vec<byte> = Vec::new();
         out.push(n as byte);
         let m = n + 1;
         out.push(m as byte);
         return out;
     }
-    fn encode_fail(int _n) -> Result<Vec<byte>, string> {
+    pub fn encode_fail(int _n) -> Result<Vec<byte>, string> {
         raise "boom";
     }
-    fn encode_into(int n) -> Result<int, string> {
+    pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
         return len(bytes);
     }
-    fn encode_first(int n) -> Result<byte, string> {
+    pub fn encode_first(int n) -> Result<byte, string> {
         let bytes = self.encode(n)?;
         return bytes[0];
     }
-    fn encode_into_fail(int n) -> Result<int, string> {
+    pub fn encode_into_fail(int n) -> Result<int, string> {
         let bytes = self.encode_fail(n)?;
         return len(bytes);
     }
@@ -9774,13 +9774,13 @@ test("nested free-fn try mismatched Result") {
 class Client {
 }
 impl Client {
-    fn get() -> Result<int, string> {
+    pub fn get() -> Result<int, string> {
         return self.send()?;
     }
-    fn send() -> Result<int, string> {
+    pub fn send() -> Result<int, string> {
         return self.request_send()?;
     }
-    fn request_send() -> Result<int, string> {
+    pub fn request_send() -> Result<int, string> {
         return 42;
     }
 }
@@ -9792,13 +9792,13 @@ test("nested same-Result methods declared later") {
 class ClientFail {
 }
 impl ClientFail {
-    fn get() -> Result<int, string> {
+    pub fn get() -> Result<int, string> {
         return self.send()?;
     }
-    fn send() -> Result<int, string> {
+    pub fn send() -> Result<int, string> {
         return self.boom()?;
     }
-    fn boom() -> Result<int, string> {
+    pub fn boom() -> Result<int, string> {
         raise "nope";
     }
 }
@@ -9814,10 +9814,10 @@ test("forward same-Result methods propagate Err") {
 class Counter {
 }
 impl Counter {
-    fn early() -> int {
+    pub fn early() -> int {
         return self.late();
     }
-    fn late() -> int {
+    pub fn late() -> int {
         return 7;
     }
 }
@@ -9828,11 +9828,11 @@ test("forward non-Result instance method call") {
 class EncFwd {
 }
 impl EncFwd {
-    fn encode_into(int n) -> Result<int, string> {
+    pub fn encode_into(int n) -> Result<int, string> {
         let bytes = self.encode(n)?;
         return len(bytes);
     }
-    fn encode(int n) -> Result<Vec<byte>, string> {
+    pub fn encode(int n) -> Result<Vec<byte>, string> {
         let out: Vec<byte> = Vec::new();
         out.push(n as byte);
         return out;
@@ -9846,10 +9846,10 @@ test("forward mismatched-Result method try") {
 class Factory {
 }
 impl Factory {
-    fn make() -> int {
+    pub fn make() -> int {
         return Factory::value();
     }
-    static fn value() -> int {
+    pub static fn value() -> int {
         return 9;
     }
 }

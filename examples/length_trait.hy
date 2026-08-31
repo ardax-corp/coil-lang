@@ -10,8 +10,8 @@ use io::sync::{write_all};
 use string::{format, to_bytes};
 
 class Pair {
-    a: int,
-    b: int,
+    pub a: int,
+    pub b: int,
 }
 
 impl Length for Pair {

@@ -7,7 +7,7 @@ trait Measurable<T> {
 }
 
 impl Measurable<int> {
-    fn size(int x) -> int {
+    pub fn size(int x) -> int {
         return x + 1;
     }
 }
@@ -27,10 +27,10 @@ trait PairOps<T> {
 }
 
 impl PairOps<int> {
-    fn left(int x) -> int {
+    pub fn left(int x) -> int {
         return x;
     }
-    fn right(int x) -> int {
+    pub fn right(int x) -> int {
         return x + 10;
     }
 }

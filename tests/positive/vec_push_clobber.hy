@@ -7,11 +7,11 @@ enum LockPackage {
 }
 
 class LockRecord {
-    name: string,
-    git: string,
-    tag: string,
-    rev: string,
-    hash: string,
+    pub name: string,
+    pub git: string,
+    pub tag: string,
+    pub rev: string,
+    pub hash: string,
 }
 
 fn quote(string s) -> string {

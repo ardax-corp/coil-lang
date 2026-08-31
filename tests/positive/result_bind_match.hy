@@ -7,15 +7,15 @@ enum Node {
 }
 
 impl Svc {
-    fn decode() -> Result<Node, string> {
+    pub fn decode() -> Result<Node, string> {
         return Node::Obj { v: 42 };
     }
 
-    fn fail() -> Result<Node, string> {
+    pub fn fail() -> Result<Node, string> {
         raise "boom";
     }
 
-    fn maybe(int flag) -> Option<int> {
+    pub fn maybe(int flag) -> Option<int> {
         if flag == 0 {
             return Option::None;
         }

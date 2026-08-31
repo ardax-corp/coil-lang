@@ -626,8 +626,8 @@ fn function_with_explicit_return_type_checks() {
 
 #[test]
 fn class_declaration_typechecks() {
-    // `class Foo { name: String }` registers `Foo` as a type constructor.
-    let (_ty, msgs) = check("class Foo { name: String, }");
+    // `class Foo { pub name: String }` registers `Foo` as a type constructor.
+    let (_ty, msgs) = check("class Foo { pub name: String, }");
     assert!(
         msgs.is_empty(),
         "class declaration should type-check, got: {:?}",
@@ -1089,7 +1089,7 @@ fn hkt_instance_rejects_applied_type_argument() {
             fn first<A>(F<A> xs) -> A;
         }
         impl Container<Option<int>> {
-            fn first<A>(Option<A> xs) -> A {
+            pub fn first<A>(Option<A> xs) -> A {
                 return match xs {
                     Option::Some(v) => v,
                     Option::None => 0,
@@ -1172,7 +1172,7 @@ fn superclass_impl_requires_superclass_instance() {
         trait Equal<T> { fn eq_val(T a, T b) -> bool; }
         trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
         impl Ordered<int> {
-            fn lt_val(int a, int b) -> bool { return a < b; }
+            pub fn lt_val(int a, int b) -> bool { return a < b; }
         }
         "#,
     );
@@ -1196,7 +1196,7 @@ fn assoc_type_missing_in_impl_errors() {
             fn head(C xs) -> Elem;
         }
         impl Collect<int> {
-            fn head(int xs) -> int { return xs; }
+            pub fn head(int xs) -> int { return xs; }
         }
         "#,
     );
@@ -1298,7 +1298,7 @@ fn orphan_instance_for_foreign_class_and_structural_type_errors() {
     let (_ty, msgs) = check(
         r#"
         impl Show<(int, int)> {
-            fn show((int, int) x) -> string { return ""; }
+            pub fn show((int, int) x) -> string { return ""; }
         }
         "#,
     );
@@ -1316,7 +1316,7 @@ fn orphan_instance_for_foreign_class_and_structural_type_errors() {
 fn into_impl_for_builtin_source_is_orphan() {
     let (_ty, msgs) = check(
         r#"
-        class Wrapper { v: int }
+        class Wrapper { pub v: int }
         impl Into<Wrapper> for int {
             fn into(int x) -> Wrapper { return new Wrapper(x); }
         }
@@ -1335,10 +1335,10 @@ fn overlapping_typeclass_instance_names_new_and_existing_instances() {
         r#"
         trait Tiny<T> { fn id(T x) -> T; }
         impl Tiny<int> {
-            fn id(int x) -> int { return x; }
+            pub fn id(int x) -> int { return x; }
         }
         impl Tiny<int> {
-            fn id(int x) -> int { return x; }
+            pub fn id(int x) -> int { return x; }
         }
         "#,
     );
@@ -1400,7 +1400,7 @@ fn derive_generic_enum_reports_diagnostic() {
 
 #[test]
 fn derive_generic_class_reports_diagnostic() {
-    let msgs = compile_messages("#[derive(Eq)] class Cell<T> { value: T } fn main() {}");
+    let msgs = compile_messages("#[derive(Eq)] class Cell<T> { pub value: T } fn main() {}");
     assert!(
         msgs.iter().any(|m| {
             m.contains("Cannot derive traits for generic class `Cell`")
@@ -1838,8 +1838,8 @@ fn readonly_external_field_assign_errors() {
     let msgs = check_messages(
         r#"
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 fn main() {
@@ -1906,8 +1906,8 @@ fn const_class_field_assign_errors() {
     let msgs = check_messages(
         r#"
 class Point {
-    const x: int,
-    y: int,
+    pub const x: int,
+    pub y: int,
 }
 
 fn main() {
@@ -2388,8 +2388,8 @@ fn static_method_called_on_instance_errors() {
     let (_ty, msgs) = check(
         r#"
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 impl Point {
     pub static fn origin() -> Point {
@@ -2415,8 +2415,8 @@ fn instance_method_via_class_path_errors() {
     let (_ty, msgs) = check(
         r#"
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 impl Point {
     pub fn sum() -> int {
@@ -2441,8 +2441,8 @@ fn static_constructor_via_class_path_typechecks() {
     let (_ty, msgs) = check(
         r#"
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 impl Point {
     pub static fn new(int x, int y) -> Point {
@@ -2472,12 +2472,12 @@ fn method_named_send_does_not_shadow_thread_send() {
 use thread::{send, Sender, Thread};
 
 class ThreadWrapper {
-    thread: Thread,
-    channel: Sender,
+    pub thread: Thread,
+    pub channel: Sender,
 }
 
 impl ThreadWrapper {
-    fn send(int data) {
+    pub fn send(int data) {
         send(self.channel, data)?;
     }
 }
@@ -2499,12 +2499,12 @@ fn self_channel_field_passes_sender_to_thread_send() {
 use thread::{send, Sender, Thread};
 
 class ThreadWrapper {
-    thread: Thread,
-    channel: Sender,
+    pub thread: Thread,
+    pub channel: Sender,
 }
 
 impl ThreadWrapper {
-    fn push(int data) {
+    pub fn push(int data) {
         send(self.channel, data)?;
     }
 }
@@ -2579,7 +2579,7 @@ fn main() {
 fn drop_method_typechecks() {
     let (_ty, msgs) = check(
         r#"
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {}
 }
@@ -2614,7 +2614,7 @@ fn drop_rejects_static_and_arity() {
     let ast = parser::Pratt::default()
         .parse(
             r#"
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     static fn drop() {}
 }
@@ -2637,7 +2637,7 @@ fn drop_rejects_extra_arity() {
     let ast = parser::Pratt::default()
         .parse(
             r#"
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop(int x) {}
 }
@@ -2660,7 +2660,7 @@ fn drop_rejects_duplicate() {
     let ast = parser::Pratt::default()
         .parse(
             r#"
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() {}
     fn drop() {}
@@ -2706,7 +2706,7 @@ fn drop_rejects_non_unit_return() {
     let ast = parser::Pratt::default()
         .parse(
             r#"
-class Handle { fd: int }
+class Handle { pub fd: int }
 impl Handle {
     fn drop() -> int { return 0; }
 }
@@ -2825,7 +2825,7 @@ fn method_generic_option_return_is_ok() {
         r#"
 class Cell<T> { item: T }
 impl Cell<T> {
-    fn get() -> Option<T> {
+    pub fn get() -> Option<T> {
         return Option::Some(self.item);
     }
 }
@@ -2839,6 +2839,93 @@ fn main() {
         !msgs.iter()
             .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
         "inherent method Option return must typecheck; got: {:?}",
+        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn private_field_access_has_stable_code() {
+    let msgs = check_messages(
+        r#"
+class Box { n: int }
+fn main() {
+    let b = new Box(1);
+    let _ = b.n;
+}
+"#,
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::PrivateMember)),
+        "expected PrivateMember (E0128) for field, got: {:?}",
+        msgs.iter().map(|m| m.code()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn private_method_access_has_stable_code() {
+    let msgs = check_messages(
+        r#"
+class Box { n: int }
+impl Box {
+    fn secret() -> int { return self.n; }
+}
+fn main() {
+    let b = new Box(1);
+    let _ = b.secret();
+}
+"#,
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::PrivateMember)),
+        "expected PrivateMember (E0128) for method, got: {:?}",
+        msgs.iter().map(|m| m.code()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn impl_can_access_private_members() {
+    let msgs = check_messages(
+        r#"
+class Box { n: int }
+impl Box {
+    fn secret() -> int { return self.n; }
+    pub fn get() -> int { return self.secret(); }
+}
+fn main() {
+    let b = new Box(1);
+    let _ = b.get();
+}
+"#,
+    );
+    assert!(
+        !msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::PrivateMember)),
+        "impl should see private members; got: {:?}",
+        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn pub_members_accessible_from_free_fn() {
+    let msgs = check_messages(
+        r#"
+class Box { pub n: int }
+impl Box {
+    pub fn get() -> int { return self.n; }
+}
+fn main() {
+    let b = new Box(1);
+    let _ = b.n;
+    let _ = b.get();
+}
+"#,
+    );
+    assert!(
+        !msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::PrivateMember)),
+        "pub members should be visible; got: {:?}",
         msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
     );
 }

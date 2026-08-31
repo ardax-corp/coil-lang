@@ -19,7 +19,7 @@ enum Point {
 
 #[derive(Show, Eq)]
 class Cell {
-    value: int,
+    pub value: int,
 }
 
 fn main() {

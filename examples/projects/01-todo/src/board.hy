@@ -5,9 +5,9 @@
 // Index 0 is a sentinel Task — real tasks live at indices 1..len-1.
 
 class Task {
-    id: int,
-    title: string,
-    status: int,
+    pub id: int,
+    pub title: string,
+    pub status: int,
 }
 
 fn empty_board() -> Vec<Task> {

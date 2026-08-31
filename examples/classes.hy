@@ -10,16 +10,16 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 impl Point {
-    fn sum() -> int {
+    pub fn sum() -> int {
         return self.x + self.y;
     }
 
-    fn set_x(int n) {
+    pub fn set_x(int n) {
         self.x = n;
     }
 }

@@ -2,8 +2,8 @@
 // File open/read/write stays in `main.hy` for clarity (deps may also call IO).
 
 class SaveData {
-    room: int,
-    has_key: int,
+    pub room: int,
+    pub has_key: int,
 }
 
 fn encode_save(int room, int has_key) -> Vec<byte> {

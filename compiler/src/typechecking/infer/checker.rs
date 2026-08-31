@@ -4877,6 +4877,7 @@ impl Checker {
                         .and_then(|m| m.get(*method))
                         .is_some()
                 {
+                    self.check_inherent_method_access(owner, method, &range);
                     if *method == "to_vec" {
                         self.constrain_range_to_vec(owner, &resolved, &range);
                     }
@@ -5073,6 +5074,7 @@ impl Checker {
                     .and_then(|m| m.get(*method))
                     .is_some()
             {
+                self.check_inherent_method_access(owner, method, &range);
                 if *method == "to_vec" {
                     self.constrain_range_to_vec(owner, &resolved, &range);
                 }
@@ -11731,7 +11733,7 @@ impl Checker {
                 range,
             );
         };
-        let Some((_, _, fty)) = fields.iter().find(|(_, fname, _)| fname == field) else {
+        let Some((vis, _, fty)) = fields.iter().find(|(_, fname, _)| fname == field) else {
             let known: Vec<&str> = fields.iter().map(|(_, n, _)| n.as_str()).collect();
             return self.error_with_help(
                 ErrorCode::UnknownField,
@@ -11740,7 +11742,11 @@ impl Checker {
                 Some(format!("the class has fields: {}", known.join(", "))),
             );
         };
+        let vis = *vis;
         let fty = fty.clone();
+        if !self.member_is_accessible(vis, class) {
+            self.report_private_member("field", class, field, range.clone());
+        }
         let params = self
             .generics
             .generic_type_ctors
@@ -16458,7 +16464,19 @@ impl Checker {
             }
             Ty::Con(name) => {
                 if let Some(fty) = self.class_field_ty(name, field) {
-                    fty.clone()
+                    let vis = self.classes.get(name).and_then(|fields| {
+                        fields
+                            .iter()
+                            .find(|(_, fname, _)| fname == field)
+                            .map(|(v, _, _)| *v)
+                    });
+                    let fty = fty.clone();
+                    if let Some(vis) = vis
+                        && !self.member_is_accessible(vis, name)
+                    {
+                        self.report_private_member("field", name, field, range.clone());
+                    }
+                    fty
                 } else if let Some(fty) = self.field_type_for(name, field) {
                     fty
                 } else {
@@ -17068,6 +17086,7 @@ impl Checker {
         let owner = self
             .resolve_class_key(owner)
             .unwrap_or_else(|| owner.to_string());
+        self.check_inherent_method_access(&owner, method, &range);
         let fqn = format!("{}::{}", owner, method);
         let scheme = self
             .methods
@@ -17153,6 +17172,61 @@ impl Checker {
     pub fn inherent_method_visibility(&self, fqn: &str) -> Option<Visibility> {
         let (owner, method) = fqn.rsplit_once("::")?;
         self.methods.get(owner)?.get(method).map(|(vis, _)| *vis)
+    }
+
+    /// Shared visibility query (typecheck + inliner).
+    ///
+    /// `pub` members are visible everywhere. Private inherent members are
+    /// visible only from the owner's `impl` (`from_impl_owner == Some(owner)`).
+    /// Pass `from_impl_owner = None` for a foreign site (free functions, the
+    /// inliner): private then fails. Top-level functions are not inherent
+    /// members and are universally exportable.
+    pub fn can_access_member(
+        vis: Visibility,
+        owner_key: &str,
+        from_impl_owner: Option<&str>,
+    ) -> bool {
+        matches!(vis, Visibility::Public) || from_impl_owner == Some(owner_key)
+    }
+
+    fn member_is_accessible(&self, vis: Visibility, owner_key: &str) -> bool {
+        Self::can_access_member(vis, owner_key, self.impl_owner.as_deref())
+    }
+
+    fn report_private_member(
+        &mut self,
+        kind: &str,
+        owner: &str,
+        name: &str,
+        range: Range<usize>,
+    ) {
+        let mut msg = Message::error(
+            ErrorCode::PrivateMember,
+            format!("cannot access private {kind} `{name}` of `{owner}`"),
+            range,
+        );
+        msg.with_help(format!(
+            "declare it `pub` to use it outside `{owner}`'s impl"
+        ));
+        self.messages.push(msg);
+    }
+
+    fn check_inherent_method_access(&mut self, owner: &str, method: &str, range: &Range<usize>) {
+        // `fn drop` stays private (inliner will not inline it) but is a
+        // lifecycle hook: users and the GC may call `obj.drop()` (COI-79).
+        if method == "drop" {
+            return;
+        }
+        let vis = self
+            .methods
+            .get(owner)
+            .and_then(|m| m.get(method))
+            .map(|(v, _)| *v);
+        if let Some(vis) = vis
+            && !self.member_is_accessible(vis, owner)
+        {
+            self.report_private_member("method", owner, method, range.clone());
+        }
     }
 
     /// Number of *user-defined* trait dict slots expected by a generic

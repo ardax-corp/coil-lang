@@ -1,5 +1,5 @@
 class Holder {
-    text: string,
+    pub text: string,
 }
 
 fn optional_text(Option<Holder> value) -> Option<string> {

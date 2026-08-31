@@ -10,7 +10,7 @@ use string::{to_bytes};
 static let log: string = "";
 
 class Handle {
-    fd: int,
+    pub fd: int,
 }
 
 impl Handle {

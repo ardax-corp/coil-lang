@@ -8,11 +8,11 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 class Celsius {
-    c: int,
+    pub c: int,
 }
 
 class Fahrenheit {
-    f: int,
+    pub f: int,
 }
 
 impl Into<Fahrenheit> for Celsius {

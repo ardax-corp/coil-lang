@@ -6,8 +6,8 @@
 use string::{to_bytes};
 
 class Cmd {
-    kind: int,
-    dir: int,
+    pub kind: int,
+    pub dir: int,
 }
 
 fn bytes_eq(Vec<byte> a, Vec<byte> b) -> int {

@@ -619,10 +619,10 @@ fn main() { return; }
         let ast = parse_ast(
             r#"
 class T {
-    x: int,
+    pub x: int,
 }
 impl T {
-    fn join() -> int {
+    pub fn join() -> int {
         return join(self);
     }
 }

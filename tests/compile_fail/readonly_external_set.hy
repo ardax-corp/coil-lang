@@ -1,7 +1,7 @@
 // Expected: compile failure — external mutation of readonly value.
 class Point {
-    x: int,
-    y: int,
+    pub x: int,
+    pub y: int,
 }
 
 fn main() {
