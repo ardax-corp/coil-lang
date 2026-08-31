@@ -41,7 +41,7 @@ coil/
 ├── parser/     # Pratt parser, AST
 ├── compiler/   # HM typechecker, stack IL codegen, pipeline
 ├── machine/    # VM, heap/GC, FFI, host natives
-├── coil-*/     # CLI helpers (debug, dissect, fmt, lsp, embed)
+├── coil-*/     # CLI helpers (debug, dissect, fmt, lsp) and coil-embed (packaged-app runner, not an embed library)
 ├── examples/   # Runnable demos
 ├── tests/      # Integration tests (`coil test`)
 └── docs/       # Contributor internals

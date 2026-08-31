@@ -118,18 +118,12 @@ roots = ["./src", "./vendor", "../coil-stdlib/src"]
 # `./src/foo/bar.hy` is named `foo::bar::baz`.
 #
 # --------------------------------------------------------------------------
-# Glob imports
+# Glob imports (not implemented)
 # --------------------------------------------------------------------------
 #
-# `use foo::bar::*;` loads `foo/bar.hy` and brings every top-level
-# item from that file into scope by its bare name:
-#
-#     use foo::bar::*;
-#     fn main() {
-#         some_helper();   // from foo/bar.hy
-#     }
-#
-# Glob imports are file-scoped — they do not reach into `foo/bar/`.
+# `use foo::bar::*;` is parsed, then rejected (E0124). Named, aliased,
+# and brace-group imports work. A glob that brings every top-level
+# item into scope is not implemented.
 #
 # --------------------------------------------------------------------------
 # Brace-group imports

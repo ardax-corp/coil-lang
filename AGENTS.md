@@ -20,7 +20,7 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 - Prefer compiler virtual modules over userland for core interpreter machinery; extracted features (regex, TLS, HTTP, collections) live in separate repos (`ardax-corp/coil-regex`, `coil-tls`, `coil-http`, `coil-stdlib`).
 - **Userland package tests** — demos, native builds, and integration tests for extracted packages stay in their repos, not coil-lang `compiler/tests` or CI.
 - **VM vs `.hy` tests** — prefer `.hy` language tests (`tests/positive/`, `coil test`) over Rust VM bytecode tests when coverage overlaps; remove duplicates.
-- `cargo build` builds `coil` + `coil-debug` / `coil-dissect` / `coil-fmt` / `coil-lsp` / `coil-embed` (`coil package` defaults to embed).
+- `cargo build` builds `coil` + `coil-debug` / `coil-dissect` / `coil-fmt` / `coil-lsp` / `coil-embed`. `coil-embed` is the packaged-app runner (`coil package` prefers it); not an embed-the-VM library.
 - IL inspection: `coil dissect` — no verbose debug-build dumps.
 - `coil fmt`: preserve `//` and `///`; wrap long lines; trailing commas on multi-line lists.
 
