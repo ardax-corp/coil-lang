@@ -1336,4 +1336,5 @@ fn extract_enum_name(ty: &crate::typechecking::ty::Ty) -> Option<String> {
 }
 
 mod compiler;
+mod emit_loop;
 mod inline_cost;
