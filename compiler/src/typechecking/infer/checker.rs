@@ -11642,6 +11642,9 @@ impl Checker {
                     } else {
                         param_names.len()
                     };
+                    // Codegen looks up overload_decl_at on the Function span.
+                    // Method.0 includes a leading pub, so using it misses and
+                    // every overload falls back to id 0 (wrong selected body).
                     self.register_overload_candidate(
                         &fqn,
                         OverloadCandidate {
@@ -11651,7 +11654,7 @@ impl Checker {
                             scheme: scheme.clone(),
                             param_names,
                         },
-                        &method.0.into_range(),
+                        &body.0.into_range(),
                     );
                     if *is_static {
                         self.static_methods
