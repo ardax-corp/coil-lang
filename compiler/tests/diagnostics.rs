@@ -1088,7 +1088,7 @@ fn hkt_instance_rejects_applied_type_argument() {
         trait Container<F: * -> *> {
             fn first<A>(F<A> xs) -> A;
         }
-        impl Container<Option<int>> {
+        impl Container for Option<int> {
             pub fn first<A>(Option<A> xs) -> A {
                 return match xs {
                     Option::Some(v) => v,
@@ -1171,7 +1171,7 @@ fn superclass_impl_requires_superclass_instance() {
         r#"
         trait Equal<T> { fn eq_val(T a, T b) -> bool; }
         trait Ordered<T: Equal> { fn lt_val(T a, T b) -> bool; }
-        impl Ordered<int> {
+        impl Ordered for int {
             pub fn lt_val(int a, int b) -> bool { return a < b; }
         }
         "#,
@@ -1195,7 +1195,7 @@ fn assoc_type_missing_in_impl_errors() {
             type Elem;
             fn head(C xs) -> Elem;
         }
-        impl Collect<int> {
+        impl Collect for int {
             pub fn head(int xs) -> int { return xs; }
         }
         "#,
@@ -1218,7 +1218,7 @@ fn assoc_type_unknown_in_impl_errors() {
             type Elem;
             fn head(C xs) -> Elem;
         }
-        impl Collect<int> {
+        impl Collect for int {
             type Elem = int;
             type Extra = int;
             fn head(int xs) -> int { return xs; }
@@ -1242,7 +1242,7 @@ fn gat_impl_wrong_number_of_params_errors() {
             type Ref<T>;
             fn deref<T>(P<T> ptr) -> Ref<T>;
         }
-        impl Pointer<Option> {
+        impl Pointer for Option {
             type Ref = int;
             fn deref<T>(Option<T> ptr) -> T { return 0; }
         }
@@ -1297,7 +1297,7 @@ fn duplicate_typeclass_errors() {
 fn orphan_instance_for_foreign_class_and_structural_type_errors() {
     let (_ty, msgs) = check(
         r#"
-        impl Show<(int, int)> {
+        impl Show for (int, int) {
             pub fn show((int, int) x) -> string { return ""; }
         }
         "#,
@@ -1334,10 +1334,10 @@ fn overlapping_typeclass_instance_names_new_and_existing_instances() {
     let (_ty, msgs) = check(
         r#"
         trait Tiny<T> { fn id(T x) -> T; }
-        impl Tiny<int> {
+        impl Tiny for int {
             pub fn id(int x) -> int { return x; }
         }
-        impl Tiny<int> {
+        impl Tiny for int {
             pub fn id(int x) -> int { return x; }
         }
         "#,
@@ -1428,20 +1428,17 @@ fn ffi_attr_with_body_reports_diagnostic() {
     );
     assert!(
         msgs.iter()
-            .any(|m| m.contains("requires a signature-only function")),
-        "expected ffi-with-body diagnostic, got: {:?}",
+            .any(|m| m.contains("`#[ffi]` is not supported")),
+        "expected #[ffi] rejected diagnostic, got: {:?}",
         msgs
     );
 }
 
 #[test]
-fn signature_only_without_ffi_reports_diagnostic() {
-    let msgs = compile_messages("fn foo() -> int; fn main() {}");
+fn signature_only_without_extern_is_parse_error() {
     assert!(
-        msgs.iter()
-            .any(|m| m.contains("Signature-only function requires `#[ffi(...)]`")),
-        "expected signature-only diagnostic, got: {:?}",
-        msgs
+        Pratt::default().parse("fn foo() -> int; fn main() {}").is_err(),
+        "orphan signature-only fn must be a parse error"
     );
 }
 
@@ -1450,7 +1447,7 @@ fn test_attr_on_enum_reports_diagnostic() {
     let msgs = compile_messages("#[test] enum E { A } fn main() {}");
     assert!(
         msgs.iter()
-            .any(|m| m.contains("Attribute `test` is not valid on enum")),
+            .any(|m| m.contains("`#[test]` is not supported")),
         "expected test-on-enum diagnostic, got: {:?}",
         msgs
     );
@@ -1465,15 +1462,13 @@ attr log<T>(fn(...args) -> T target, string message, ...args) -> T {
 }
 #[log(message = "x")]
 #[ffi(lib = "c")]
-fn strlen(string s) -> int;
+fn strlen(string s) -> int { return 0; }
 fn main() {}
 "#,
     );
     assert!(
-        msgs.iter().any(|m| {
-            m.contains("User-defined attribute `log` cannot be applied to FFI functions")
-        }),
-        "expected user-attr-on-ffi diagnostic, got: {:?}",
+        msgs.iter().any(|m| m.contains("`#[ffi]` is not supported")),
+        "expected #[ffi] rejected diagnostic, got: {:?}",
         msgs
     );
 }
@@ -1598,7 +1593,7 @@ fn ffi_combined_with_test_reports_diagnostic() {
             r#"
 #[ffi(lib = "c")]
 #[test]
-fn strlen(string s) -> int;
+fn strlen(string s) -> int { return 0; }
 fn main() {}
 "#,
         )
@@ -1613,8 +1608,8 @@ fn main() {}
         .collect();
     assert!(
         msgs.iter()
-            .any(|m| m.contains("`#[ffi]` cannot be combined with `#[test]`")),
-        "expected ffi+test combination diagnostic, got: {:?}",
+            .any(|m| m.contains("`#[ffi]` is not supported") || m.contains("`#[test]` is not supported")),
+        "expected #[ffi]/#[test] rejected diagnostic, got: {:?}",
         msgs
     );
 }
@@ -1843,7 +1838,7 @@ class Point {
 }
 
 fn main() {
-    let p = new readonly Point(1, 2);
+    let p = readonly new Point(1, 2);
     p.x = 10;
 }
 "#,
@@ -1862,21 +1857,18 @@ fn main() {
 
 #[test]
 fn readonly_array_append_errors() {
-    let msgs = check_messages(
-        r#"
+    let src = r#"
 fn main() {
     let xs = readonly [1, 2, 3];
     xs[] = 4;
 }
-"#,
-    );
+"#;
+    let err = parser::Pratt::default()
+        .parse(src)
+        .expect_err("empty index assign must be a parse error");
     assert!(
-        msgs.iter().any(|m| {
-            m.message()
-                .contains("append assignment `arr[] = value` is no longer supported")
-        }),
-        "expected append-assignment rejection, got: {:?}",
-        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        err.message().contains("]") || format!("{err:?}").contains("]"),
+        "expected parse error for `xs[] =`, got: {err:?}"
     );
 }
 
@@ -1928,21 +1920,18 @@ fn main() {
 
 #[test]
 fn array_append_on_non_array_errors() {
-    let msgs = check_messages(
-        r#"
+    let src = r#"
 fn main() {
     let x = 1;
     x[] = 2;
 }
-"#,
-    );
+"#;
+    let err = parser::Pratt::default()
+        .parse(src)
+        .expect_err("empty index assign must be a parse error");
     assert!(
-        msgs.iter().any(|m| {
-            m.message()
-                .contains("append assignment `arr[] = value` is no longer supported")
-        }),
-        "expected append-assignment rejection, got: {:?}",
-        msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        err.message().contains("]") || format!("{err:?}").contains("]"),
+        "expected parse error for `x[] =`, got: {err:?}"
     );
 }
 
@@ -2788,7 +2777,7 @@ fn free_generic_option_return_has_stable_code() {
     assert!(
         msgs.iter()
             .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
-        "expected UnsupportedGenericOptionReturn (E0127), got: {:?}",
+        "expected E0127 for free generic Option<T> return, got: {:?}",
         msgs.iter().map(|m| m.code()).collect::<Vec<_>>()
     );
 }
@@ -2801,7 +2790,7 @@ fn free_generic_option_return_inferred_has_stable_code() {
     assert!(
         msgs.iter()
             .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
-        "inferred Option<T> return must also be E0127, got: {:?}",
+        "expected E0127 for inferred Option<T> return, got: {:?}",
         msgs.iter().map(|m| m.code()).collect::<Vec<_>>()
     );
 }

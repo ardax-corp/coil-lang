@@ -11,7 +11,7 @@ class Counter {
     pub end: int,
 }
 
-impl IntoIterator<Counter> {
+impl IntoIterator for Counter {
     type Item = int;
     type IntoIter = Counter;
     pub fn into_iter(Counter c) -> Counter {
@@ -19,7 +19,7 @@ impl IntoIterator<Counter> {
     }
 }
 
-impl Iterator<Counter> {
+impl Iterator for Counter {
     type Item = int;
     pub fn next(Counter c) -> Option<int> {
         if c.cur < c.end {

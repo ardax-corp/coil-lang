@@ -40,3 +40,13 @@ Codegen / match / `STORE`: `.cursor/skills/coil-contributor/reference.md`. Pipel
 ## Cloud agents
 
 Pre-installed: `poop`, `valgrind`, `heaptrack`, `hyperfine`, `lua` (`.cursor/Dockerfile`). Use `--release` for benchmarks.
+
+## Learned User Preferences
+
+- Aim for a regular language: one spelling per construct; do not add case-specific optimization workarounds that only serve a bench.
+- Dual syntax: drop C-style `for (init; cond; step)` (keep `while` and `for x in`); canonical length is `x.len()` with free `len()` as prelude sugar; canonical `readonly` is before the value (`readonly new C(...)`, `readonly [...]`).
+- Linear tickets: one PR per issue, base on `main`, babysit until CI is green and merged before starting the next.
+
+## Learned Workspace Facts
+
+- Regularity target: one Option/Result ABI, one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. Fuse opcodes are debt — rewrite existing ops rather than growing bench-shaped fuses.

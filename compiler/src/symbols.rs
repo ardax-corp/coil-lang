@@ -289,21 +289,6 @@ impl SymbolIndex {
                     visit_output(index, file, args);
                     visit_output(index, file, body);
                 }
-                Expression::For {
-                    init,
-                    cond,
-                    step,
-                    body,
-                } => {
-                    if let Some(init) = init {
-                        visit_output(index, file, init);
-                    }
-                    visit_output(index, file, cond);
-                    if let Some(step) = step {
-                        visit_output(index, file, step);
-                    }
-                    visit_output(index, file, body);
-                }
                 Expression::Loop {
                     identifier,
                     iterable,

@@ -678,25 +678,6 @@ impl Formatter {
                     self.fmt_block_or_inline(body);
                 }
             }
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                self.push_str("for (");
-                if let Some(i) = init {
-                    self.fmt_output(i);
-                }
-                self.push_str("; ");
-                self.fmt_output(cond);
-                self.push_str("; ");
-                if let Some(s) = step {
-                    self.fmt_output(s);
-                }
-                self.push_str(") ");
-                self.fmt_block_or_inline(body);
-            }
 
             Expression::Match { scrutinee, arms } => {
                 self.push_str("match ");
@@ -1865,8 +1846,7 @@ fn stmt_needs_semicolon(expr: &Expression<'_>) -> bool {
         Expression::ExprStatement(_)
             | Expression::If(_)
             | Expression::Block(_)
-            | Expression::Loop { .. }
-            | Expression::For { .. }
+            |             Expression::Loop { .. }
             | Expression::Defer { .. }
     )
 }

@@ -26,7 +26,7 @@ mod sp;
 pub mod tell;
 mod treeshake;
 
-pub use bounds::{BoundsStats, last_bounds_stats};
+pub use bounds::{BoundsStats, LoopHeaderProof, last_bounds_stats};
 pub use canon::{CanonStats, last_canon_stats};
 pub use opt::OptLevel;
 pub use pure_call::PureCallCtx;

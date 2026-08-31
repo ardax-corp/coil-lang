@@ -77,7 +77,7 @@ impl Compiler {
         }
     }
 
-    /// Expand `#[derive]` / `#[ffi]` then typecheck. Does not parse or emit.
+    /// Expand `#[derive]` then typecheck. Does not parse or emit.
     pub fn expand_and_check<'a>(
         &mut self,
         module: &str,
@@ -3001,6 +3001,7 @@ impl Compiler {
                 if let Some((src_base, src_n)) = self.stack_array_info(src)
                     && src_n == n
                 {
+                    self.skip_emit_ids_to_unwrapped(rhs);
                     for i in 0..n {
                         bytecode.push_load(src_base + i as u32);
                         bytecode.push_store_pop(base + i as u32);
@@ -3991,6 +3992,89 @@ impl Compiler {
         bytecode.push_index();
         bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(3));
         true
+    }
+
+    /// Direct `CALL` (or structural `ArrayLen`) for a bound method inside a
+    /// monomorphized clone, where `__dictN` is not in the frame.
+    fn try_emit_ground_bound_method(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        name: &Output,
+        args: Option<&Vec<Output>>,
+        hint: &crate::typechecking::infer::BoundMethodCall,
+    ) -> bool {
+        use crate::typechecking::subst::apply_ty_prune;
+        let method = match name.1.as_ref() {
+            Expression::Identifier(n) => *n,
+            Expression::Access(_, m) => *m,
+            Expression::QualifiedAccess { member, .. } => *member,
+            _ => return false,
+        };
+        let mut arg_nodes: Vec<&Output> = Vec::new();
+        if hint.has_receiver
+            && let Expression::Access(recv, _) = name.1.as_ref()
+        {
+            arg_nodes.push(recv);
+        }
+        if let Some(items) = args {
+            for arg in items {
+                arg_nodes.push(arg);
+            }
+        }
+        let mut arg_tys = Vec::with_capacity(arg_nodes.len());
+        for node in &arg_nodes {
+            let Some(ty) = self.codegen_expr_ty(node) else {
+                return false;
+            };
+            arg_tys.push(apply_ty_prune(self.checker.subst(), &ty));
+        }
+        if method == "len"
+            && arg_tys
+                .first()
+                .is_some_and(Checker::is_structural_len_ty_for_codegen)
+        {
+            bytecode.append(&mut self.do_compile(arg_nodes[0]));
+            bytecode.push(Byte::new(Instruction::ArrayLen));
+            return true;
+        }
+        let Some(class_def) = self.checker.generics().typeclass(&hint.class) else {
+            return false;
+        };
+        let nparams = class_def.type_params.len().max(1);
+        let lookup_n = nparams.min(arg_tys.len());
+        if lookup_n == 0 {
+            return false;
+        }
+        let lookup: Vec<Ty> = arg_tys[..lookup_n]
+            .iter()
+            .map(Self::show_lookup_ty_for_instance)
+            .collect();
+        let Some(instance) = self
+            .checker
+            .generics()
+            .find_instance_relaxed(&hint.class, &lookup)
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(fqn) = instance.method_fqns.get(method).cloned() else {
+            return false;
+        };
+        if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
+            return false;
+        }
+        let mut temps = Vec::with_capacity(arg_nodes.len());
+        for (node, ty) in arg_nodes.iter().zip(arg_tys.iter()) {
+            bytecode.append(&mut self.do_compile(node));
+            Self::emit_box_if_needed(bytecode, ty);
+            let tmp = self.alloc_temp_slot();
+            bytecode.push_store_pop(tmp);
+            temps.push(tmp);
+        }
+        for tmp in &temps {
+            bytecode.push_load(*tmp);
+        }
+        self.emit_direct_fn_call(bytecode, &fqn, temps.len() as u32)
     }
 
     /// Emit element-wise / broadcast aggregate arithmetic when the typechecker
@@ -5184,18 +5268,6 @@ impl Compiler {
                         .is_some_and(|id| Self::walk_expr_calls(id, pred))
                     || Self::walk_expr_calls(body, pred)
             }
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                init.as_ref()
-                    .is_some_and(|i| Self::walk_expr_calls(i, pred))
-                    || Self::walk_expr_calls(cond, pred)
-                    || step.as_ref().is_some_and(|s| Self::walk_expr_calls(s, pred))
-                    || Self::walk_expr_calls(body, pred)
-            }
             Expression::Expr(inner)
             | Expression::Group(inner)
             | Expression::Statement(inner)
@@ -5375,20 +5447,6 @@ impl Compiler {
                         || identifier.as_ref().is_some_and(|id| {
                             body_calls_later_fn(id, impl_idx, free_fn_pos)
                         })
-                        || body_calls_later_fn(body, impl_idx, free_fn_pos)
-                }
-                Expression::For {
-                    init,
-                    cond,
-                    step,
-                    body,
-                } => {
-                    init.as_ref()
-                        .is_some_and(|i| body_calls_later_fn(i, impl_idx, free_fn_pos))
-                        || body_calls_later_fn(cond, impl_idx, free_fn_pos)
-                        || step
-                            .as_ref()
-                            .is_some_and(|s| body_calls_later_fn(s, impl_idx, free_fn_pos))
                         || body_calls_later_fn(body, impl_idx, free_fn_pos)
                 }
                 Expression::Expr(inner)
@@ -6958,31 +7016,6 @@ impl Compiler {
                 .push_host_invoke(slots.len() as u32);
             compiler.bytecode.push_return();
         };
-        let emit_host_niche =
-            |compiler: &mut Self, fqn: String, native: &str, slots: &[u32]| {
-                if compiler.functions.contains_key(&fqn) {
-                    return;
-                }
-                let Some(native_id) = compiler.native_id(native) else {
-                    return;
-                };
-                compiler.bind_function_entry(fqn);
-                compiler
-                    .bytecode
-                    .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
-                for &slot in slots {
-                    compiler.bytecode.push_load(slot);
-                }
-                compiler
-                    .bytecode
-                    .push_make_tuple(slots.len() as u32);
-                compiler
-                    .bytecode
-                    .push(Byte::new(Instruction::HostInvokeNiche).with_operand_u32(
-                        slots.len() as u32,
-                    ));
-                compiler.bytecode.push_return();
-            };
 
         // static fn new() -> Vec<T>
         {
@@ -7032,13 +7065,6 @@ impl Compiler {
         emit_host(self, format!("{owner}::remove"), "vec_remove", &[0, 1]);
         emit_host(self, format!("{owner}::reserve"), "vec_reserve", &[0, 1]);
         emit_host(self, format!("{owner}::insert"), "vec_insert", &[0, 1, 2]);
-        emit_host_niche(self, format!("{owner}::__niche_pop"), "vec_pop", &[0]);
-        emit_host_niche(
-            self,
-            format!("{owner}::__niche_remove"),
-            "vec_remove",
-            &[0, 1],
-        );
         self.emit_range_method_thunks();
     }
 
@@ -7306,25 +7332,7 @@ impl Compiler {
             .insert(name.to_string(), kind);
     }
 
-    fn compute_pair_return_kind(&self, name: &str) -> Option<bool> {
-        if self.coroutine_fns.contains(name) {
-            return None;
-        }
-        let ret = self
-            .checker
-            .fn_return_ty(name)
-            .or_else(|| self.fn_return_ty(name))?;
-        if let Some((ok, err)) = crate::typechecking::ty::result_ok_err(&ret) {
-            return Self::pair_value_ty_supported(&ok)
-                .then_some(false)
-                .filter(|_| Self::pair_value_ty_supported(&err));
-        }
-        if let Some(inner) = crate::typechecking::ty::option_inner(&ret) {
-            if self.niche_option_inner_ty(&ret).is_some() {
-                return None;
-            }
-            return Self::pair_value_ty_supported(&inner).then_some(true);
-        }
+    fn compute_pair_return_kind(&self, _name: &str) -> Option<bool> {
         None
     }
 
@@ -7387,24 +7395,8 @@ impl Compiler {
 
     /// `Some(is_option)` when the expression is emitted in the pair ABI, i.e. it
     /// leaves `[payload, tag]` rather than a heap enum.
-    fn expr_pair_producer_kind(&self, expr: &Output) -> Option<bool> {
-        match expr.1.as_ref() {
-            Expression::Construct {
-                enum_name,
-                variant_name,
-                ..
-            } => {
-                let is_option = common::is_builtin_option_enum(enum_name);
-                ((is_option || common::is_builtin_result_enum(enum_name))
-                    && self.checker.arity_for(enum_name, variant_name).is_some_and(|n| n <= 1))
-                    .then_some(is_option)
-            }
-            Expression::Call { name, .. } => self.pair_call_kind(name),
-            Expression::Group(inner) | Expression::Expr(inner) => {
-                self.expr_pair_producer_kind(inner)
-            }
-            _ => None,
-        }
+    fn expr_pair_producer_kind(&self, _expr: &Output) -> Option<bool> {
+        None
     }
 
     /// True when the expression yields a pair that *is* the enclosing function's
@@ -7464,25 +7456,11 @@ impl Compiler {
             .or_else(|| self.fn_return_ty(name))
     }
 
-    fn expr_pair_enum_kind(&self, expr: &Output) -> Option<bool> {
-        let ty = self.codegen_expr_ty(expr)?;
-        if crate::typechecking::ty::result_ok_err(&ty).is_some() {
-            return Some(false);
-        }
-        if crate::typechecking::ty::option_inner(&ty).is_some()
-            && self.niche_option_inner_ty(&ty).is_none()
-        {
-            return Some(true);
-        }
+    fn expr_pair_enum_kind(&self, _expr: &Output) -> Option<bool> {
         None
     }
 
-    fn emit_host_option_boundary(&mut self, expr: &Output) {
-        if self.expr_is_niche_option(expr) {
-            self.bytecode
-                .push(Byte::new(Instruction::HeapOptionToNiche));
-        }
-    }
+    fn emit_host_option_boundary(&mut self, _expr: &Output) {}
 
     /// Emit defers + unit fall-through return when a body does not end in a return.
     ///
@@ -7538,9 +7516,6 @@ impl Compiler {
     }
 
     fn emit_generic_arg_box(&self, bytecode: &mut impl EmitBuf, ty: &Ty) {
-        if self.niche_option_inner_ty(ty).is_some() {
-            bytecode.push(Byte::new(Instruction::OptionNicheToHeap));
-        }
         Self::emit_box_if_needed(bytecode, ty);
     }
 
@@ -7928,10 +7903,12 @@ impl Compiler {
             let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
             let prev_result_mode = self.compiling_result_mode;
             let prev_result_ok_is_result = self.compiling_result_ok_is_result;
+            let prev_mono_clone = self.compiling_mono_clone;
             self.context.variables = Interner::default();
             self.compiling_result_mode = self.checker.fn_is_result_mode(source_name);
             self.compiling_result_ok_is_result =
                 self.checker.fn_result_ok_is_result(source_name);
+            self.compiling_mono_clone = true;
             self.mono_codegen_var_types.push(overrides);
 
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
@@ -7951,6 +7928,7 @@ impl Compiler {
             self.mono_codegen_var_types.pop();
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
+            self.compiling_mono_clone = prev_mono_clone;
             self.field_key_slots = prev_field_keys;
             self.context.variables = prev_fn_vars;
             self.polyfn_vars = prev_fn_polyfn_vars;
@@ -8623,14 +8601,13 @@ impl Compiler {
         binding_name: &str,
         into_iter_fqn: &str,
         next_fqn: &str,
-        item_ty: Option<&Ty>,
+        _item_ty: Option<&Ty>,
     ) {
         let none_tag = self
             .checker
             .tag_for(common::BUILTIN_OPTION_ENUM, "None")
             .unwrap_or(0);
         let carrier_tag = ValueTag::Instance as u32;
-        let niche_next = item_ty.is_some_and(|ty| Self::niche_heap_only_ty(ty, &self.checker));
 
         let it_slot = self.alloc_temp_slot();
         let mut iter_bc = self.do_compile(iterable);
@@ -8655,28 +8632,18 @@ impl Compiler {
             self.missing_call_target(next_fqn, iterable.0.into_range());
         }
 
-        if niche_next {
-            self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-            self.bytecode.push(Byte::new(Instruction::LogNot));
-            bb.emit_jump_to(
-                exit_label,
-                BbJumpKind::JumpIfTrue,
-                self.bytecode.il_mut(),
-            );
-        } else {
-            // `Option::None` → exit (JumpIfMatch pops unit None).
-            bb.emit_jump_to(
-                exit_label,
-                BbJumpKind::JumpIfMatch {
-                    tag: none_tag,
-                    arity: 0,
-                },
-                self.bytecode.il_mut(),
-            );
-            // Fall-through: Some(v) — unpack payload into binding.
-            self.bytecode
-                .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
-        }
+        // `Option::None` → exit (JumpIfMatch pops unit None).
+        bb.emit_jump_to(
+            exit_label,
+            BbJumpKind::JumpIfMatch {
+                tag: none_tag,
+                arity: 0,
+            },
+            self.bytecode.il_mut(),
+        );
+        // Fall-through: Some(v) — unpack payload into binding.
+        self.bytecode
+            .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
         self.bytecode.push_store_pop(binding_slot);
 
         self.loop_stack.push((top_label, exit_label));
@@ -8693,9 +8660,6 @@ impl Compiler {
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
-        if niche_next {
-            self.bytecode.push_pop();
-        }
     }
 
     /// Replace `new Class(args).field` with the selected constructor argument.
@@ -8870,21 +8834,6 @@ impl Compiler {
                         Self::count_field_key_uses(a, counts);
                     }
                 }
-            }
-            For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                if let Some(i) = init {
-                    Self::count_field_key_uses(i, counts);
-                }
-                Self::count_field_key_uses(cond, counts);
-                if let Some(s) = step {
-                    Self::count_field_key_uses(s, counts);
-                }
-                Self::count_field_key_uses(body, counts);
             }
             Loop {
                 identifier,
@@ -9663,25 +9612,12 @@ impl Compiler {
     ///
     /// Only ground heap values qualify: immediates and stack-shaped
     /// aggregates keep the existing boxed enum representation.
-    fn niche_option_inner_ty(&self, ty: &Ty) -> Option<Ty> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{is_option_ty, option_inner};
-
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        if !is_option_ty(&ty) {
-            return None;
-        }
-        let inner = option_inner(&ty)?;
-        if Self::niche_heap_only_ty(&inner, &self.checker) {
-            Some(inner)
-        } else {
-            None
-        }
+    fn niche_option_inner_ty(&self, _ty: &Ty) -> Option<Ty> {
+        None
     }
 
-    fn expr_is_niche_option(&self, expr: &Output) -> bool {
-        self.codegen_expr_ty(expr)
-            .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+    fn expr_is_niche_option(&self, _expr: &Output) -> bool {
+        false
     }
 
     fn is_option_construct(expr: &Output) -> bool {
@@ -10567,6 +10503,9 @@ impl Compiler {
                                     _ => false,
                                 };
                                 if can_stack {
+                                    // Binder is a leaf (`Variable` / `Constant`); consume
+                                    // its NodeId so array elements see their own sidecar.
+                                    let _ = self.next_emit_id();
                                     let base = self.alloc_stack_array_slots(&name, n);
                                     let ok = self.try_emit_stack_array_init(
                                         &mut bytecode,
@@ -10679,9 +10618,6 @@ impl Compiler {
                 // Overloads share the unmangled FQN; do not mirror arity
                 // under `qualified` (last decl would win and poison
                 // fallbacks that lack `selected_overload_at`).
-                if let Some(desc) = parser::ast::attr_test_desc(attrs, name) {
-                    self.test_cases.push((desc, fn_offset));
-                }
                 if *is_coro {
                     self.coroutine_fns.insert(qualified.clone());
                 }
@@ -11367,95 +11303,6 @@ impl Compiler {
                     bb.bind_label(exit_label, self.bytecode.il_mut());
 
                 }
-            }
-            // --- C-style for codegen ---
-            // Layout: init, [top] cond, JMPF→exit, body, [continue] step, JMP→top, [exit]
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                if let Some(trips) =
-                    crate::const_fold::for_loop_trip_count(init.as_ref(), cond, step.as_ref())
-                    && !crate::const_fold::body_has_loop_control(body)
-                {
-                    // Pre-walk order is init → cond → body → step. Emit init,
-                    // discard cond (IDs only), then for each trip restore the
-                    // emit cursor and emit body + step so the induction
-                    // variable advances (e.g. `s = s + i` for `i < 4` → 6).
-                    if let Some(init) = init {
-                        let mut init_bc = self.do_compile(init);
-                        Self::discard_statement_value(&mut init_bc);
-                        self.bytecode.append(&mut init_bc);
-                    }
-                    self.discard_compile(cond);
-                    let body_start_idx = self.emit_idx;
-                    for _ in 0..trips {
-                        self.emit_idx = body_start_idx;
-                        let mut body_bc = self.do_compile(body);
-                        self.bytecode.append(&mut body_bc);
-                        if let Some(step) = step {
-                            let mut step_bc = self.do_compile(step);
-                            Self::discard_statement_value(&mut step_bc);
-                            self.bytecode.append(&mut step_bc);
-                        }
-                    }
-                    return bytecode;
-                }
-                if let Some(ConstValue::Bool(false)) = crate::const_fold::eval_expr(cond, self.const_env())
-                {
-                    if let Some(init) = init {
-                        let mut init_bc = self.do_compile(init);
-                        Self::discard_statement_value(&mut init_bc);
-                        self.bytecode.append(&mut init_bc);
-                    }
-                    self.discard_compile(cond);
-                    if let Some(step) = step {
-                        self.discard_compile(step);
-                    }
-                    self.discard_compile(body);
-                    return bytecode;
-                }
-                if let Some(init) = init {
-                    let mut init_bc = self.do_compile(init);
-                    Self::discard_statement_value(&mut init_bc);
-                    self.bytecode.append(&mut init_bc);
-                }
-
-                let mut bb = BlockBuilder::new();
-                let top_label = bb.fresh_label(self.bytecode.il_mut());
-                let continue_label = bb.fresh_label(self.bytecode.il_mut());
-                let exit_label = bb.fresh_label(self.bytecode.il_mut());
-                bb.bind_label(top_label, self.bytecode.il_mut());
-
-                let mut cond_bc = self.do_compile(cond);
-                self.bytecode.append(&mut cond_bc);
-
-                bb.emit_jump_to(exit_label, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
-
-                self.loop_stack.push((continue_label, exit_label));
-                self.loop_bbs.push(bb);
-                let mut body_bc = self.do_compile(body);
-                self.bytecode.append(&mut body_bc);
-                let mut bb = self
-                    .loop_bbs
-                    .pop()
-                    .expect("loop builder stack balanced for for");
-                self.loop_stack
-                    .pop()
-                    .expect("loop label stack balanced for for");
-                bb.bind_label(continue_label, self.bytecode.il_mut());
-
-                if let Some(step) = step {
-                    let mut step_bc = self.do_compile(step);
-                    Self::discard_statement_value(&mut step_bc);
-                    self.bytecode.append(&mut step_bc);
-                }
-
-                bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
-                bb.bind_label(exit_label, self.bytecode.il_mut());
-
             }
             Expression::Break => {
                 if let Some((_, break_label)) = self.loop_stack.last().copied() {
@@ -12335,12 +12182,12 @@ impl Compiler {
             }
             Expression::String(str) => {
                 let escaped = unescape_coil_string(str);
-                // Sidecar first (B2). Span fallback covers emit_idx drift when
-                // stack-array init compiles items without `do_compile` of the
-                // array node — otherwise later literals in the same file read
-                // the wrong NodeId (byte_string_lit.hy).
+                // Prefer this node's sidecar (pointer / span) over `emit_idx`.
+                // Stack-array init used to skip the array NodeId so sequential
+                // lookup returned the parent `[byte; N]` and `or_else` never
+                // ran — elements emitted as heap strings (byte_string_lit.hy).
                 let escaped_len = escaped.as_bytes().len();
-                let is_byte_coercion = |ty: &Ty| match ty {
+                let is_byte_or_bytes = |ty: &Ty| match ty {
                     Ty::Con(n) if n == "byte" => true,
                     Ty::Array { element, length }
                         if matches!(element.as_ref(), Ty::Con(n) if n == "byte") =>
@@ -12352,13 +12199,19 @@ impl Compiler {
                     }
                     _ => false,
                 };
-                // Prefer this node's sidecar type; if `self_id` drifted onto a
-                // parent (e.g. stack-array `[byte; N]`), ignore a non-matching
-                // type so the string node's span/NodeId can still coerce.
-                let span_ty = self_id
+                // Prefer this node's sidecar (pointer / span) over `emit_idx`.
+                // If `self_id` drifted onto a parent `[byte; N]`, ignore a
+                // non-matching type so the string node's span/NodeId can still coerce.
+                let span_ty = self
+                    .node_id_of(ast)
                     .and_then(|id| self.sidecar_ty(id))
-                    .filter(is_byte_coercion)
-                    .or_else(|| self.sidecar_ty_of(ast).filter(is_byte_coercion));
+                    .filter(is_byte_or_bytes)
+                    .or_else(|| self.sidecar_ty_of(ast).filter(is_byte_or_bytes))
+                    .or_else(|| {
+                        self_id
+                            .and_then(|id| self.sidecar_ty(id))
+                            .filter(is_byte_or_bytes)
+                    });
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
                     .as_ref()
@@ -12458,11 +12311,19 @@ impl Compiler {
                     // Value left on stack for expression result; ExprStatement POPs.
                 }
                 Expression::Index(arr, None) => {
-                    // Unreachable when typecheck rejects `arr[] =`; kept for
-                    // AST completeness. Prefer `vec.push(value)` for `Vec`.
-                    bytecode.append(&mut self.do_compile(arr));
-                    self.append_binding_rhs(&mut bytecode, value);
-                    bytecode.push(Byte::new(Instruction::ArrayPush));
+                    let _ = arr;
+                    self.messages.push({
+                        let mut m = Message::error(
+                            ErrorCode::InvalidAssignment,
+                            "append assignment `arr[] = value` is not supported".to_string(),
+                            lhs.0.into_range(),
+                        );
+                        m.push(DiagLabel::new(
+                            "use `vec.push(value)` on a `Vec<T>`".to_string(),
+                            lhs.0.into_range(),
+                        ));
+                        m
+                    });
                 }
                 Expression::Index(arr, Some(idx)) => {
                     if let Expression::Identifier(name) = arr.1.as_ref()
@@ -12552,6 +12413,9 @@ impl Compiler {
                             }
                             // Multi-slot stack array: rewrite slots in place.
                             if let Some((base, n)) = self.stack_array_info(name) {
+                                // Assignment: `name` Identifier is pre-walked
+                                // before `value`; consume it when we skip emit.
+                                let _ = self.next_emit_id();
                                 let ok = self.try_emit_stack_array_init(
                                     &mut bytecode,
                                     value,
@@ -13275,11 +13139,7 @@ impl Compiler {
                 // `a ?? b` → Ok/Some payload, else evaluate b.
                 let is_option = self.expr_is_option(lhs);
                 let success_tag: u32 = if is_option { 1 } else { 0 };
-                let niche_lhs = self.expr_is_niche_option(lhs)
-                    || (is_option
-                        && self
-                            .codegen_expr_ty(rhs)
-                            .is_some_and(|ty| Self::niche_heap_only_ty(&ty, &self.checker)));
+                let niche_lhs = self.expr_is_niche_option(lhs);
 
                 let direct_pair_lhs = matches!(
                     lhs.1.as_ref(),

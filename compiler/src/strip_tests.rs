@@ -84,7 +84,7 @@ fn main() { }
             .parse(
                 r#"
 #[test]
-fn sig_only();
+fn sig_only() { assert(true)?; }
 fn main() { }
 "#,
             )

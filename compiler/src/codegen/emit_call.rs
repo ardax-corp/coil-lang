@@ -196,18 +196,18 @@ impl Compiler {
 
         if let Some(hint) = self.bound_method_hint(self_id, span.start, span.end)
         {
-            if hint.has_receiver
-                && let Expression::Access(recv, _) = name.1.as_ref()
-            {
-                bytecode.append(&mut self.do_compile(recv));
-            }
-            if let Some(items) = args {
-                for arg in items {
-                    self.append_with_existential_pack(&mut bytecode, arg);
-                }
-            }
             let dict_name = format!("__dict{}", hint.dict_index);
             if let Some(dict_slot) = self.lookup_slot(&dict_name) {
+                if hint.has_receiver
+                    && let Expression::Access(recv, _) = name.1.as_ref()
+                {
+                    bytecode.append(&mut self.do_compile(recv));
+                }
+                if let Some(items) = args {
+                    for arg in items {
+                        self.append_with_existential_pack(&mut bytecode, arg);
+                    }
+                }
                 // Hidden trailing dictionary argument for sibling/default
                 // dispatch inside the selected implementation.
                 bytecode.push_load(dict_slot);
@@ -218,7 +218,19 @@ impl Compiler {
                     Byte::new(Instruction::CallIndirect)
                         .with_operand_u32(hint.arity as u32 + 1),
                 );
-            } else {
+                return bytecode;
+            }
+            if self.compiling_mono_clone
+                && self.try_emit_ground_bound_method(
+                    &mut bytecode,
+                    name,
+                    args.as_ref(),
+                    &hint,
+                )
+            {
+                return bytecode;
+            }
+            if !self.compiling_mono_clone {
                 let mut message = Message::error(
                     ErrorCode::UnknownFunction,
                     "Missing trait dictionary".to_string(),
@@ -229,8 +241,8 @@ impl Compiler {
                     span.into_range(),
                 ));
                 self.messages.push(message);
+                return bytecode;
             }
-            return bytecode;
         }
 
         // Method call: `recv.method(args)`.
@@ -931,9 +943,8 @@ impl Compiler {
                 // per constraint after the value args. Each dict is a
                 // MakeTuple of method code offsets (CodePtr per method in
                 // declaration order). Builtin and user instances share this
-                // ABI; ground Num/Ord/Eq calls may still monomorphize away
-                // from the shared body. User-trait / Show / Length bounds
-                // always take this path (COI-78).
+                // ABI; ground calls may still monomorphize away from the
+                // shared body. Dictionaries are for generic bodies only.
                 let dict_count = if is_generic {
                     let (fixed, rest, pack_rest) =
                         self.split_call_args_for_rest(&lookup_name, arg_slice);

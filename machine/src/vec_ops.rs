@@ -63,37 +63,25 @@ pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     }
 }
 
-/// Niche form of `v.pop()`: `0` is `None`, otherwise the element value.
-pub fn host_vec_pop_niche(heap: &mut Heap, args: &[Value]) -> Value {
-    let handle = args.first().copied().unwrap_or(Value::default());
-    match heap.find_object_by_addr(handle.raw() as u64) {
-        Some(Object::Array(mut gc)) => gc.as_mut().elements.pop().unwrap_or_default(),
-        _ => Value::default(),
-    }
-}
-
-/// `v.insert(i, x) -> ()` — clamps out-of-range `i` to `len` (append).
-pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Value {
+/// `v.insert(i, x) -> ()` — panics when `i` is out of range (not clamped).
+pub fn host_vec_insert(heap: &mut Heap, args: &[Value]) -> Result<Value, &'static str> {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     let index = args.get(1).map(|v| v.as_int()).unwrap_or(0);
     let value = args.get(2).copied().unwrap_or(Value::from(0i64));
-    if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) {
-        let old_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
-        let len = gc.as_ref().elements.len();
-        let i = if index < 0 {
-            0usize
-        } else if (index as usize) > len {
-            len
-        } else {
-            index as usize
-        };
-        gc.as_mut().elements.insert(i, value);
-        let new_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
-        if old_bytes != new_bytes {
-            heap.account_resize(old_bytes, new_bytes);
-        }
+    let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) else {
+        return Err("Vec::insert on non-array");
+    };
+    let old_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
+    let len = gc.as_ref().elements.len();
+    if index < 0 || (index as usize) > len {
+        return Err("index out of bounds");
     }
-    Value::from(0i64)
+    gc.as_mut().elements.insert(index as usize, value);
+    let new_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
+    if old_bytes != new_bytes {
+        heap.account_resize(old_bytes, new_bytes);
+    }
+    Ok(Value::from(0i64))
 }
 
 /// `v.remove(i) -> Option<T>`
@@ -111,23 +99,6 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
             }
         }
         _ => alloc_option_none(heap),
-    }
-}
-
-/// Niche form of `v.remove(i)`: `0` is `None`, otherwise the removed value.
-pub fn host_vec_remove_niche(heap: &mut Heap, args: &[Value]) -> Value {
-    let handle = args.first().copied().unwrap_or(Value::default());
-    let index = args.get(1).map(|v| v.as_int()).unwrap_or(-1);
-    match heap.find_object_by_addr(handle.raw() as u64) {
-        Some(Object::Array(mut gc)) => {
-            let len = gc.as_ref().elements.len();
-            if index < 0 || (index as usize) >= len {
-                Value::default()
-            } else {
-                gc.as_mut().elements.remove(index as usize)
-            }
-        }
-        _ => Value::default(),
     }
 }
 
@@ -149,10 +120,14 @@ pub const VEC_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
     ("vec_reserve", 2, host_vec_reserve),
     ("vec_clear", 1, host_vec_clear),
     ("vec_pop", 1, host_vec_pop),
-    ("vec_insert", 3, host_vec_insert),
+    ("vec_insert", 3, host_vec_insert_unused),
     ("vec_remove", 2, host_vec_remove),
     ("vec_from_array", 1, host_vec_from_array),
 ];
+
+fn host_vec_insert_unused(_heap: &mut Heap, _args: &[Value]) -> Value {
+    unreachable!("vec_insert is special-cased in host_natives::push_wiring")
+}
 
 #[cfg(test)]
 mod tests {
@@ -215,18 +190,26 @@ mod tests {
     }
 
     #[test]
-    fn insert_clamps_negative_and_past_end() {
+    fn insert_in_range_and_rejects_oob() {
         let mut heap = Heap::default();
         let v = make_array(&mut heap, &[2, 3]);
         host_vec_insert(
             &mut heap,
-            &[v, Value::from(-5i64), Value::from(1i64)],
-        );
+            &[v, Value::from(0i64), Value::from(1i64)],
+        )
+        .expect("insert at 0");
         host_vec_insert(
             &mut heap,
-            &[v, Value::from(99i64), Value::from(4i64)],
-        );
+            &[v, Value::from(3i64), Value::from(4i64)],
+        )
+        .expect("append at len");
         assert_eq!(array_ints(&heap, v), vec![1, 2, 3, 4]);
+        assert!(
+            host_vec_insert(&mut heap, &[v, Value::from(-1i64), Value::from(0i64)]).is_err()
+        );
+        assert!(
+            host_vec_insert(&mut heap, &[v, Value::from(99i64), Value::from(0i64)]).is_err()
+        );
     }
 
     #[test]

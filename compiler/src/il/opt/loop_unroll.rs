@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use common::Instruction;
 
+use super::super::bounds::LoopHeaderProof;
 use super::super::op::{IlJumpKind, IlOp, Label};
 
 /// Hard cap, matching [`crate::const_fold`] C-style / range trip counts.
@@ -131,7 +132,7 @@ fn classify_counted_loop(
     if header + 2 >= latch {
         return None;
     }
-    let (index_slot, bound, inclusive, jmpf) = match_header_cmp(ops, header + 1, latch)?;
+    let (index_slot, bound, proof, jmpf) = match_header_cmp(ops, header + 1, latch)?;
     if header_has_foreign_jumps(ops, header, latch, header_label) {
         return None;
     }
@@ -153,10 +154,9 @@ fn classify_counted_loop(
     if bound < 0 {
         return None;
     }
-    let trips = if inclusive {
-        bound.checked_add(1)?
-    } else {
-        bound
+    let trips = match proof {
+        LoopHeaderProof::TripCount => bound.checked_add(1)?,
+        LoopHeaderProof::StrictBound => bound,
     };
     if trips <= 0 || trips > MAX_UNROLL_TRIPS as i32 {
         return None;
@@ -181,16 +181,20 @@ fn slot_stored_in(ops: &[IlOp], lo: usize, latch: usize, slot: u32) -> bool {
     false
 }
 
-fn match_header_cmp(ops: &[IlOp], start: usize, latch: usize) -> Option<(u32, i32, bool, usize)> {
+fn match_header_cmp(
+    ops: &[IlOp],
+    start: usize,
+    latch: usize,
+) -> Option<(u32, i32, LoopHeaderProof, usize)> {
     // Load i; Const k; LE/LEQ; JMPF
     if start + 3 < latch
         && let IlOp::Load { slot: idx, .. } = &ops[start]
         && let IlOp::Const { imm: k, .. } = &ops[start + 1]
-        && let Some(inclusive) = cmp_is_lt_or_leq(&ops[start + 2])
+        && let Some(proof) = cmp_header_proof(&ops[start + 2])
         && is_jmpf(&ops[start + 3])
         && jump_is_forward(ops, start + 3, latch)
     {
-        return Some((*idx, *k, inclusive, start + 3));
+        return Some((*idx, *k, proof, start + 3));
     }
     // Const k; Load i; GT; JMPF  →  k > i  ≡  i < k
     if start + 3 < latch
@@ -200,13 +204,13 @@ fn match_header_cmp(ops: &[IlOp], start: usize, latch: usize) -> Option<(u32, i3
         && is_jmpf(&ops[start + 3])
         && jump_is_forward(ops, start + 3, latch)
     {
-        return Some((*idx, *k, false, start + 3));
+        return Some((*idx, *k, LoopHeaderProof::StrictBound, start + 3));
     }
     // Load i; Load b; LE/LEQ; JMPF  with b a preheader const
     if start + 3 < latch
         && let IlOp::Load { slot: idx, .. } = &ops[start]
         && let IlOp::Load { slot: bound, .. } = &ops[start + 1]
-        && let Some(inclusive) = cmp_is_lt_or_leq(&ops[start + 2])
+        && let Some(proof) = cmp_header_proof(&ops[start + 2])
         && is_jmpf(&ops[start + 3])
         && jump_is_forward(ops, start + 3, latch)
     {
@@ -214,7 +218,7 @@ fn match_header_cmp(ops: &[IlOp], start: usize, latch: usize) -> Option<(u32, i3
             return None;
         }
         let k = last_const_store_before(ops, start, *bound)?;
-        return Some((*idx, k, inclusive, start + 3));
+        return Some((*idx, k, proof, start + 3));
     }
     // BinSlotImm LE/LEQ i, k ; JMPF
     if start + 1 < latch
@@ -223,28 +227,38 @@ fn match_header_cmp(ops: &[IlOp], start: usize, latch: usize) -> Option<(u32, i3
         && jump_is_forward(ops, start + 1, latch)
     {
         if *op == Instruction::LE as u8 {
-            return Some((*slot as u32, *imm as i32, false, start + 1));
+            return Some((
+                *slot as u32,
+                *imm as i32,
+                LoopHeaderProof::StrictBound,
+                start + 1,
+            ));
         }
         if *op == Instruction::LEQ as u8 {
-            return Some((*slot as u32, *imm as i32, true, start + 1));
+            return Some((
+                *slot as u32,
+                *imm as i32,
+                LoopHeaderProof::TripCount,
+                start + 1,
+            ));
         }
     }
     None
 }
 
-fn cmp_is_lt_or_leq(op: &IlOp) -> Option<bool> {
+fn cmp_header_proof(op: &IlOp) -> Option<LoopHeaderProof> {
     match op {
         IlOp::Bin {
             op: Instruction::LE,
             ..
-        } => Some(false),
+        } => Some(LoopHeaderProof::StrictBound),
         IlOp::Bin {
             op: Instruction::LEQ,
             ..
-        } => Some(true),
+        } => Some(LoopHeaderProof::TripCount),
         other => other.as_encode_byte().and_then(|b| match *b.bytecode() {
-            Instruction::LE => Some(false),
-            Instruction::LEQ => Some(true),
+            Instruction::LE => Some(LoopHeaderProof::StrictBound),
+            Instruction::LEQ => Some(LoopHeaderProof::TripCount),
             _ => None,
         }),
     }

@@ -19,7 +19,7 @@ impl ItemBox {
     }
 }
 
-impl IntoIterator<ItemBox> {
+impl IntoIterator for ItemBox {
     type Item = int;
     type IntoIter = ItemBoxIter;
     pub fn into_iter(ItemBox m) -> ItemBoxIter {
@@ -27,7 +27,7 @@ impl IntoIterator<ItemBox> {
     }
 }
 
-impl Iterator<ItemBoxIter> {
+impl Iterator for ItemBoxIter {
     type Item = int;
     pub fn next(ItemBoxIter it) -> Option<int> {
         if it.i == 0 {

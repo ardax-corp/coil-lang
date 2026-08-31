@@ -29,20 +29,13 @@ test("pop some and none") {
     assert(empty)?;
 }
 
-test("insert mid and clamp") {
+test("insert mid") {
     let v = Vec::from([1, 3]);
     v.insert(1, 2);
     assert(v.len() == 3)?;
     assert(v[0] == 1)?;
     assert(v[1] == 2)?;
     assert(v[2] == 3)?;
-
-    v.insert(-1, 0);
-    assert(v[0] == 0)?;
-    assert(v.len() == 4)?;
-
-    v.insert(100, 9);
-    assert(v[v.len() - 1] == 9)?;
 }
 
 test("remove some and oob none") {
@@ -92,19 +85,6 @@ test("from copies independently") {
     assert(fixed[0] == 1)?;
     assert(v[0] == 9)?;
     assert(v.len() == 3)?;
-}
-
-// Same Index / StoreIndex OOB contract as fixed arrays (arrays.md).
-test("vec variable oob index and store") {
-    let v = Vec::from([1, 2]);
-    let hi = 5;
-    let neg = 0 - 1;
-    assert(v[hi] == -1)?;
-    assert(v[neg] == -1)?;
-    v[hi] = 42;
-    assert(v[0] == 1)?;
-    assert(v[1] == 2)?;
-    assert(v.len() == 2)?;
 }
 
 test("fixed local escapes to callee") {

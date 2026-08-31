@@ -61,7 +61,7 @@ fn syntax_shape(kind: u8, a: i32, b: i32) -> String {
             "fn main() {{ let i = 0; while i < 3 {{ i = i + 1; }} write_all(stdout(), to_bytes(format(\"%i\", i))); }}\n"
         ),
         8 => format!(
-            "fn main() {{ for (let i = 0; i < 3; i = i + 1) {{ write_all(stdout(), to_bytes(format(\"%i\", i))); }} }}\n"
+            "fn main() {{ let i = 0; while i < 3 {{ write_all(stdout(), to_bytes(format(\"%i\", i))); i = i + 1; }} }}\n"
         ),
         9 => format!(
             "fn main() {{ write_all(stdout(), to_bytes(format(\"%s\", \"a\" + \"b\"))); write_all(stdout(), to_bytes(format(\"%i\", {a}))); }}\n"

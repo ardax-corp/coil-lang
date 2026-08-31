@@ -10,7 +10,7 @@ trait Describable<T> {
     fn describe_val(T x) -> int;
 }
 
-impl Describable<int> {
+impl Describable for int {
     pub fn describe_val(int x) -> int {
         return x + 1;
     }

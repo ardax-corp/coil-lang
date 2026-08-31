@@ -17,13 +17,13 @@ trait Ordered<T: Equal> {
     fn lt_val(T a, T b) -> bool;
 }
 
-impl Equal<int> {
+impl Equal for int {
     pub fn eq_val(int a, int b) -> bool {
         return a == b;
     }
 }
 
-impl Ordered<int> {
+impl Ordered for int {
     pub fn lt_val(int a, int b) -> bool {
         return a < b;
     }

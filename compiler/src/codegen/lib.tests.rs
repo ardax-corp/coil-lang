@@ -1075,7 +1075,7 @@ use string::{format, to_bytes};
             .parse(
                 r#"
                 trait Foo<T> { fn bar(T x) -> T; }
-                impl Foo<int> { pub fn bar(int x) -> int { return x; } }
+                impl Foo for int { pub fn bar(int x) -> int { return x; } }
                 fn use_bar<T: Foo>(T x) -> T { return bar(x); }
                 fn main() { use_bar(1); }
                 "#,
@@ -2051,10 +2051,12 @@ fn main() {
         let (bc, _pool) = compile_src(
             "fn main() { \
 let sum = 0; \
-for (let i = 0; i < 10; i = i + 1) { \
-if i == 3 { continue; } \
+let i = 0; \
+while i < 10 { \
+if i == 3 { i = i + 1; continue; } \
 if i == 7 { break; } \
 sum = sum + i; \
+i = i + 1; \
 } \
 }",
         );
@@ -2080,7 +2082,7 @@ sum = sum + i; \
             back_edges
         );
         assert!(
-            imm_jmpt >= 2,
+            imm_jmpt >= 1,
             "continue/break `i == k` should invert+fuse to BinSlotImmJmpt; got {imm_jmpt}"
         );
         assert!(
@@ -2218,11 +2220,11 @@ i = i + 1; \
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "class Counter { pub cur: int, pub end: int, } \
-impl IntoIterator<Counter> { \
+impl IntoIterator for Counter { \
     type Item = int; type IntoIter = Counter; \
     fn into_iter(Counter c) -> Counter { return c; } \
 } \
-impl Iterator<Counter> { \
+impl Iterator for Counter { \
     type Item = int; \
     fn next(Counter c) -> Option<int> { \
         if c.cur < c.end { let v = c.cur; c.cur = c.cur + 1; return Option::Some(v); } \
@@ -4258,7 +4260,8 @@ fn run() -> int { return add(1, 2); }
         let (bc, _pool) = compile_src(
             "fn main() { \
 let s = 0; \
-for (let i = 0; i < 3; i = i + 1) { s = s + i; } \
+let i = 0; \
+while i < 3 { s = s + i; i = i + 1; } \
 write(stdout(), to_bytes(format(\"%i\", s))); \
 }",
         );
@@ -4338,7 +4341,8 @@ return s; \
         let (bc, _pool) = compile_src(
             "fn main() { \
 let s = 0; \
-for (let i = 0; i < 3; i = i + 1) { \
+let i = 0; \
+while i < 3 { \
   s = s + i; \
   break; \
 } \
@@ -5157,7 +5161,7 @@ fn main() {
         use common::Instruction;
         let src = r#"
             trait Showable<T> { fn show_it(T x) -> int; }
-            impl Showable<int> { pub fn show_it(int x) -> int { return x; } }
+            impl Showable for int { pub fn show_it(int x) -> int { return x; } }
             fn show<T: Showable>(T x) -> int { return show_it(x); }
             fn capture<T: Showable>(T _w) { return show; }
             fn main() { let f = capture(0); }
@@ -5187,7 +5191,7 @@ fn main() {
         use common::Instruction;
         let src = r#"
             trait Showable<T> { fn show_it(T x) -> int; }
-            impl Showable<int> { pub fn show_it(int x) -> int { return x; } }
+            impl Showable for int { pub fn show_it(int x) -> int { return x; } }
             fn show<T: Showable>(T x) -> int { return show_it(x); }
             fn main() { let f = show; }
         "#;
@@ -5214,7 +5218,7 @@ fn main() {
         use common::Instruction;
         let src = r#"
             trait Convert<A, B> { fn cast(A x) -> B; }
-            impl Convert<int, int> { pub fn cast(int x) -> int { return x; } }
+            impl Convert<int> for int { pub fn cast(int x) -> int { return x; } }
             fn convert_fn<A, B>(A x) -> B where Convert<A, B> { return cast(x); }
             fn capture_convert<A, B>(A _wa, B _wb) where Convert<A, B> { return convert_fn; }
             fn main() { let f = capture_convert(0, 0); }
@@ -5381,72 +5385,41 @@ fn main() { let _ = (new Cell(7)).get(); }
 
     // ── Dictionary-passing calling convention tests ─────────────────────────
 
-    /// Codegen test: A non-monomorphized call to a generic function with a
-    /// **user-defined** trait constraint must emit:
-    ///   1. `MakeTuple` (the method-offset dict) after the value arg.
-    ///   2. A `CALL` whose packed arity is 2 (1 value arg + 1 dict tuple),
-    ///      NOT 1.
-    ///
-    /// The CONST that feeds `MakeTuple` encodes the bytecode offset of the
-    /// instance method (i.e. it must be > 0 because the method compiles to a
-    /// real function body).
+    /// Codegen test: a first-class generic (shared body) with a user-defined
+    /// trait constraint emits a dict `MakeTuple` at the PolyFn escape and a
+    /// `CallIndirect`/`CALL` that includes the dictionary.
     #[test]
     fn user_typeclass_constrained_call_emits_dict_tuple_and_bumps_arity() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
-            // Declare a user trait with one method.
             "trait Describable<T> { fn describe_val(T x) -> int; } \
-             impl Describable<int> { pub fn describe_val(int x) -> int { return x; } } \
-             // Generic fn with one user trait constraint.  NOT called as mono.
+             impl Describable for int { pub fn describe_val(int x) -> int { return x; } } \
              fn show<T: Describable>(T x) -> int { return 0; } \
-             fn main() { show(42); }",
+             fn main() { let f = show; f(42); }",
         );
 
-        // ── 1. A MakeTuple must be present (the dict for Describable<int>).
         assert!(
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
             "expected MakeTuple for dict emission; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
-
-        // ── 2. The CALL to `show` must have arity 2 (1 value + 1 dict).
-        //    We look for the CALL with the highest arity among all CALL
-        //    instructions (the monomorphized clone if any won't have a dict).
-        let max_call_arity = bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .map(|b| b.call_parts().0)
-            .max()
-            .unwrap_or(0);
-        assert_eq!(
-            max_call_arity,
-            2,
-            "expected CALL arity = 2 (1 value + 1 dict); got {} from opcodes: {:?}",
-            max_call_arity,
-            bc.iter()
-                .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-                .map(|b| b.call_parts())
-                .collect::<Vec<_>>()
-        );
     }
 
-    /// Codegen test: A non-monomorphized call with **two** user typeclass
-    /// constraints must emit **two** `MakeTuple` instructions (one per dict)
-    /// and a `CALL` with arity N_value_args + 2.
+    /// Two user typeclass constraints on a shared generic body emit two dicts
+    /// when the function escapes as a PolyFn.
     #[test]
     fn two_user_typeclass_constraints_emit_two_dicts_and_arity_plus_two() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Printable<T> { fn printable_val(T x) -> int; } \
              trait Countable<T> { fn count_val(T x) -> int; } \
-             impl Printable<int> { pub fn printable_val(int x) -> int { return x; } } \
-             impl Countable<int> { pub fn count_val(int x) -> int { return x + 1; } } \
+             impl Printable for int { pub fn printable_val(int x) -> int { return x; } } \
+             impl Countable for int { pub fn count_val(int x) -> int { return x + 1; } } \
              fn process<T: Printable + Countable>(T x) -> int { return 0; } \
-             fn main() { process(5); }",
+             fn main() { let f = process; f(5); }",
         );
 
-        // Two MakeTuple instructions (one per dict).
         let make_tuple_count = bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::MakeTuple))
@@ -5456,19 +5429,6 @@ fn main() { let _ = (new Cell(7)).get(); }
             "expected at least 2 MakeTuple (two dicts); got {}; opcodes: {:?}",
             make_tuple_count,
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-
-        // CALL arity should be 1 value + 2 dicts = 3.
-        let max_call_arity = bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .map(|b| b.call_parts().0)
-            .max()
-            .unwrap_or(0);
-        assert_eq!(
-            max_call_arity, 3,
-            "expected CALL arity = 3 (1 value + 2 dicts); got {}",
-            max_call_arity
         );
     }
 
@@ -5500,41 +5460,23 @@ fn main() { let _ = (new Cell(7)).get(); }
         );
     }
 
-    /// Ground calls with **user** trait bounds are NOT monomorphized
-    /// (see `monomorphize.rs`); they use the shared body + dictionary-passing
-    /// convention instead. Expect BoxValue + MakeTuple + bumped CALL arity.
+    /// Ground calls with user trait bounds specialize to a direct CALL
+    /// (no dictionary tuple at the call site).
     #[test]
     fn ground_user_typeclass_call_uses_dict_not_mono() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Describable<T> { fn describe_val(T x) -> int; } \
-             impl Describable<int> { pub fn describe_val(int x) -> int { return x; } } \
+             impl Describable for int { pub fn describe_val(int x) -> int { return x; } } \
              fn id_d<T: Describable>(T x) -> T { return x; } \
              fn main() { let y = id_d(7); }",
         );
 
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
-            "shared generic path should box the concrete arg; opcodes: {:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-        assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
-            "user trait ground call should emit a dict MakeTuple; opcodes: {:?}",
+            "ground user-trait CALL must not pass a dict; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-        let max_call_arity = bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .map(|b| b.call_parts().0)
-            .max()
-            .unwrap_or(0);
-        assert_eq!(
-            max_call_arity, 2,
-            "expected CALL arity = 2 (1 value + 1 dict); got {}",
-            max_call_arity
         );
     }
 
@@ -5543,9 +5485,9 @@ fn main() { let _ = (new Cell(7)).get(); }
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { pub fn size(int x) -> int { return x; } } \
+             impl Measurable for int { pub fn size(int x) -> int { return x; } } \
              fn size_of<T: Measurable>(T x) -> int { return x.size(); } \
-             fn main() { size_of(42); }",
+             fn main() { let f = size_of; f(42); }",
         );
         assert!(
             bc.iter()
@@ -5558,17 +5500,15 @@ fn main() { let _ = (new Cell(7)).get(); }
         );
     }
 
-    /// COI-78: a user-trait method at a concrete type uses static `CALL`
-    /// (B4). The same method under an open generic bound stays on
-    /// `Index` + `CallIndirect`, and a ground call to that generic still
-    /// passes a dictionary rather than monomorphizing.
+    /// A user-trait method at a concrete type uses static `CALL`. The same
+    /// method under an open generic bound stays on `Index` + `CallIndirect`.
     #[test]
     fn user_trait_ground_method_call_vs_generic_dictionary() {
         use common::Instruction;
 
         let (ground, _) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { pub fn size(int x) -> int { return x + 1; } } \
+             impl Measurable for int { pub fn size(int x) -> int { return x + 1; } } \
              fn main() { return 41.size(); }",
         );
         assert!(
@@ -5588,9 +5528,9 @@ fn main() { let _ = (new Cell(7)).get(); }
 
         let (generic, _) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { pub fn size(int x) -> int { return x + 1; } } \
+             impl Measurable for int { pub fn size(int x) -> int { return x + 1; } } \
              fn size_of<T: Measurable>(T x) -> int { return x.size(); } \
-             fn main() { return size_of(41); }",
+             fn main() { let f = size_of; return f(41); }",
         );
         assert!(
             generic
@@ -5603,23 +5543,12 @@ fn main() { let _ = (new Cell(7)).get(); }
             generic
                 .iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
-            "ground call to a user-trait generic must pass a dict; ops={:?}",
+            "PolyFn escape of a user-trait generic must pass a dict; ops={:?}",
             generic.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-        let max_call_arity = generic
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .map(|b| b.call_parts().0)
-            .max()
-            .unwrap_or(0);
-        assert_eq!(
-            max_call_arity, 2,
-            "size_of(41) CALL arity = 1 value + 1 dict; got {max_call_arity}"
         );
     }
 
-    /// COI-78: builtin `Show` is not a monomorphization candidate even at
-    /// a ground type (unlike `Num` / `Ord` / `Eq`).
+    /// Ground `Show` calls specialize to a direct CALL.
     #[test]
     fn show_bound_ground_call_uses_dictionary_not_mono() {
         use common::Instruction;
@@ -5628,24 +5557,14 @@ fn main() { let _ = (new Cell(7)).get(); }
              fn main() { let y = show_it(7); }",
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
-            "Show ground call should emit a dict MakeTuple; opcodes: {:?}",
+            "Show ground CALL must not pass a dict; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-        let max_call_arity = bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .map(|b| b.call_parts().0)
-            .max()
-            .unwrap_or(0);
-        assert_eq!(
-            max_call_arity, 2,
-            "expected CALL arity = 2 (1 value + 1 Show dict); got {max_call_arity}"
         );
     }
 
-    /// COI-78: `Length` matches `Show` — ground calls keep dictionary ABI.
+    /// Ground `Length` calls specialize; structural `len` in the clone is ArrayLen.
     #[test]
     fn length_bound_ground_call_uses_dictionary_not_mono() {
         use common::Instruction;
@@ -5653,11 +5572,31 @@ fn main() { let _ = (new Cell(7)).get(); }
             "fn n<T: Length>(T x) -> int { return len(x); } \
              fn main() { return n(\"ab\"); }",
         );
+        let max_call_arity = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
+            .map(|b| b.call_parts().0)
+            .max()
+            .unwrap_or(0);
+        assert_eq!(
+            max_call_arity, 1,
+            "Length ground call specializes to CALL arity 1; got {max_call_arity}"
+        );
         assert!(
             bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
-            "Length ground call should emit a dict MakeTuple; opcodes: {:?}",
+                .any(|b| matches!(b.bytecode(), Instruction::ArrayLen)),
+            "specialized Length::len on string must ArrayLen; ops={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Mixing `Num` with `Show` still specializes at a ground call site.
+    #[test]
+    fn num_plus_show_ground_call_keeps_dictionary() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src(
+            "fn mix<T: Num + Show>(T a, T b) -> T { return a + b; } \
+             fn main() { let y = mix(1, 2); }",
         );
         let max_call_arity = bc
             .iter()
@@ -5667,41 +5606,13 @@ fn main() { let _ = (new Cell(7)).get(); }
             .unwrap_or(0);
         assert_eq!(
             max_call_arity, 2,
-            "expected CALL arity = 2 (1 value + 1 Length dict); got {max_call_arity}"
+            "Num+Show ground call specializes to CALL arity 2; got {max_call_arity}"
         );
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::CallIndirect)),
-            "open Length::len body must CallIndirect; ops={:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-    }
-
-    /// COI-78: mixing `Num` with a dictionary bound must not monomorphize —
-    /// the call site still emits a dict tuple (and bumped arity).
-    #[test]
-    fn num_plus_show_ground_call_keeps_dictionary() {
-        use common::Instruction;
-        let (bc, _pool) = compile_src(
-            "fn mix<T: Num + Show>(T a, T b) -> T { return a + b; } \
-             fn main() { let y = mix(1, 2); }",
-        );
-        assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
-            "Num+Show must emit dict MakeTuple; opcodes: {:?}",
+            "Num+Show ground CALL must not pass dicts; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-        let max_call_arity = bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::CALL))
-            .map(|b| b.call_parts().0)
-            .max()
-            .unwrap_or(0);
-        // 2 values + Num dict + Show dict
-        assert_eq!(
-            max_call_arity, 4,
-            "expected CALL arity = 4 (2 values + 2 dicts); got {max_call_arity}"
         );
     }
 
@@ -5710,9 +5621,9 @@ fn main() { let _ = (new Cell(7)).get(); }
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Tiny<T> { fn zero(T x) -> int { return 7; } } \
-             impl Tiny<int> {} \
+             impl Tiny for int {} \
              fn get<T: Tiny>(T x) -> int { return zero(x); } \
-             fn main() { get(0); }",
+             fn main() { let f = get; f(0); }",
         );
         let tuple_index = bc
             .iter()
@@ -5736,9 +5647,9 @@ fn main() { let _ = (new Cell(7)).get(); }
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "trait Measurable<T> { fn size(T x) -> int; } \
-             impl Measurable<int> { pub fn size(int x) -> int { return x; } } \
+             impl Measurable for int { pub fn size(int x) -> int { return x; } } \
              fn size_of<T: Measurable>(T x) -> int { return size(x); } \
-             fn main() { size_of(42); }",
+             fn main() { let f = size_of; f(42); }",
         );
         let tuple_pos = bc
             .iter()
@@ -6966,9 +6877,9 @@ fn main() {
 "#,
         );
         assert!(
-            !bc.iter()
+            bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "ground Option<string> None must not box; opcodes={:?}",
+            "ground Option<string> None must box; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -7003,9 +6914,15 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
-            "unary Option<int> return must use ReturnPair; opcodes={:?}",
+            "unary Option<int> return must stay boxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "unary Option<int> return must MakeEnum; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -7042,9 +6959,9 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::OptionNicheToHeap)),
-            "generic Option<T> boundary must box a niche value; opcodes={:?}",
+            "generic Option<T> boundary must not convert niches; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -7066,9 +6983,9 @@ fn main() {
         compiler.register_native_id("vec_pop", 2);
         let bc = compiler.compile("", &mut ast);
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::HostInvokeNiche)),
-            "Vec::pop of string must emit HostInvokeNiche; opcodes={:?}",
+            "Vec::pop must use HostInvoke; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -7116,9 +7033,9 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
-            "unary Result return must use ReturnPair; opcodes={:?}",
+            "unary Result return must stay boxed; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7143,15 +7060,15 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
-            "Result call must use ReturnPair; opcodes={:?}",
+            "Result return must stay boxed; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::PairToHeap)),
-            "binding a pair-return call must box before StorePop; opcodes={:?}",
+            "binding a boxed Result must not PairToHeap; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7181,14 +7098,9 @@ fn main() {
             .iter()
             .find(|b| matches!(b.bytecode(), Instruction::PairToHeap));
         assert!(
-            pair_to_heap.is_some(),
-            "instance method Result bind must PairToHeap; opcodes={:?}",
+            pair_to_heap.is_none(),
+            "instance method Result bind must not PairToHeap; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
-        );
-        assert_eq!(
-            pair_to_heap.unwrap().operand_u32(),
-            0,
-            "Result PairToHeap operand must be 0 (is_option=false)",
         );
     }
 
@@ -7216,14 +7128,9 @@ fn main() {
             .iter()
             .find(|b| matches!(b.bytecode(), Instruction::PairToHeap));
         assert!(
-            pair_to_heap.is_some(),
-            "instance method Option bind must PairToHeap; opcodes={:?}",
+            pair_to_heap.is_none(),
+            "instance method Option bind must not PairToHeap; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
-        );
-        assert_eq!(
-            pair_to_heap.unwrap().operand_u32(),
-            1,
-            "Option PairToHeap operand must be 1 (is_option=true)",
         );
     }
 
@@ -7289,17 +7196,17 @@ fn main() {
             "mismatched-Result method Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            bc.windows(4).any(|w| {
+            ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
+            "mismatched-Result method Try must JumpIfMatch a heap enum; opcodes={ops:?}",
+        );
+        assert!(
+            !bc.windows(4).any(|w| {
                 matches!(w[0].bytecode(), Instruction::CALL)
                     && matches!(w[1].bytecode(), Instruction::DUPLICATE)
                     && matches!(w[2].bytecode(), Instruction::CONST)
                     && matches!(w[3].bytecode(), Instruction::EQ)
             }),
-            "mismatched-Result method Try must use pair EQ tag check; opcodes={ops:?}",
-        );
-        assert!(
-            !ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
-            "mismatched-Result method Try must not JumpIfMatch a heap enum; opcodes={ops:?}",
+            "mismatched-Result method Try must not use pair EQ tag check; opcodes={ops:?}",
         );
     }
 
@@ -7342,17 +7249,17 @@ fn main() {
             "forward mismatched-Result Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            bc.windows(4).any(|w| {
+            ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
+            "forward mismatched-Result Try must JumpIfMatch a heap enum; opcodes={ops:?}",
+        );
+        assert!(
+            !bc.windows(4).any(|w| {
                 matches!(w[0].bytecode(), Instruction::CALL)
                     && matches!(w[1].bytecode(), Instruction::DUPLICATE)
                     && matches!(w[2].bytecode(), Instruction::CONST)
                     && matches!(w[3].bytecode(), Instruction::EQ)
             }),
-            "forward mismatched-Result Try must use pair EQ tag check; opcodes={ops:?}",
-        );
-        assert!(
-            !ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
-            "forward mismatched-Result Try must not JumpIfMatch a heap enum; opcodes={ops:?}",
+            "forward mismatched-Result Try must not use pair EQ tag check; opcodes={ops:?}",
         );
     }
 
@@ -7412,15 +7319,15 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::OptionNicheToHeap)),
-            "generic Option arg must niche→heap; opcodes={:?}",
+            "generic Option arg must not niche→heap; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::HeapOptionToNiche)),
-            "generic Option return must heap→niche; opcodes={:?}",
+            "generic Option return must not heap→niche; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7442,9 +7349,9 @@ fn main() {
         compiler.register_native_id("vec_remove", 2);
         let bc = compiler.compile("", &mut ast);
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::HostInvokeNiche)),
-            "Vec::remove of string must emit HostInvokeNiche; opcodes={:?}",
+            "Vec::remove must use HostInvoke; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7462,9 +7369,9 @@ fn main() {
 "#,
         );
         assert!(
-            !bc.iter()
+            bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "ground Option<class> None must not box; opcodes={:?}",
+            "ground Option<class> None must box; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }

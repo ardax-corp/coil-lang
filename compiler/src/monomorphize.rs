@@ -146,10 +146,10 @@ struct MonoCandidate {
 
 /// Explicit monomorphize pass: after check, before emit.
 ///
-/// Only generic functions whose type parameters carry at least one **opcode**
-/// bound (`Num` / `Ord` / `Eq` and operator supertraits) are specialized.
-/// Unbounded `id<T>` stays on the shared `BoxValue`/`UnboxValue` path. User
-/// traits, `Show`, and `Length` stay on dictionary passing (COI-78).
+/// Generic functions with ground type arguments specialize to a direct CALL.
+/// Unbounded `id<T>` stays on the shared `BoxValue`/`UnboxValue` path.
+/// Dictionaries stay on the shared generic body when a type argument is still
+/// a parameter (PolyFn / CallIndirect).
 /// Keys are [`DefId`] + interned [`Ty`] ids from checker subst, not Display.
 pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> MonoPlan {
     let mut intern = TyInterner::default();
@@ -301,20 +301,8 @@ fn candidate_for_call(
         return None;
     }
 
-    // Dictionary bodies are not specialized (COI-78):
-    // - user-defined typeclasses always use dict tuples
-    // - `Show` / `Length` always use dict / CallIndirect; specializing them
-    //   leaves call sites with an open `Ty::Var`
-    // Num / Ord / Eq still monomorphize so arithmetic becomes direct opcodes.
-    let requires_dictionary_body = sig.type_param_bounds.iter().any(|bounds| {
-        bounds
-            .iter()
-            .any(|b| b == "Show" || b == "Length" || !Checker::is_builtin_class(b))
-    });
-    if requires_dictionary_body {
-        return None;
-    }
-
+    // Ground calls specialize to a direct CALL. Dictionaries stay on the
+    // shared generic body when a type argument is still a parameter.
     let args = args.unwrap_or(&[]);
     let has_rest = sig.param_is_rest.last().copied().unwrap_or(false);
     let fixed_count = if has_rest {
@@ -733,21 +721,6 @@ where
             }
             f(body);
         }
-        Expression::For {
-            init,
-            cond,
-            step,
-            body,
-        } => {
-            if let Some(init) = init {
-                f(init);
-            }
-            f(cond);
-            if let Some(step) = step {
-                f(step);
-            }
-            f(body);
-        }
         Expression::Match { scrutinee, arms } => {
             f(scrutinee);
             for arm in arms {
@@ -973,55 +946,58 @@ mod tests {
     }
 
     #[test]
-    fn does_not_plan_user_trait_ground_call() {
+    fn plans_user_trait_ground_call() {
         let plan = plan(
             "trait Describable<T> { fn describe_val(T x) -> int; } \
-             impl Describable<int> { pub fn describe_val(int x) -> int { return x; } } \
+             impl Describable for int { pub fn describe_val(int x) -> int { return x; } } \
              fn show<T: Describable>(T x) -> int { return x.describe_val(); } \
              fn main() { show(42); }",
         );
-        assert!(
-            plan.specializations.is_empty(),
-            "user-trait generics stay on dictionaries: {plan:?}"
+        assert_eq!(
+            plan.specializations.len(),
+            1,
+            "ground user-trait calls specialize to CALL: {plan:?}"
         );
     }
 
     #[test]
-    fn does_not_plan_show_or_length_ground_call() {
+    fn plans_show_or_length_ground_call() {
         let show = plan("fn show_it<T: Show>(T x) -> T { return x; } fn main() { show_it(1); }");
-        assert!(
-            show.specializations.is_empty(),
-            "Show stays on dictionaries: {show:?}"
+        assert_eq!(
+            show.specializations.len(),
+            1,
+            "Show ground calls specialize: {show:?}"
         );
         let length = plan("fn n<T: Length>(T x) -> int { return 0; } fn main() { n(\"ab\"); }");
-        assert!(
-            length.specializations.is_empty(),
-            "Length stays on dictionaries: {length:?}"
+        assert_eq!(
+            length.specializations.len(),
+            1,
+            "Length ground calls specialize: {length:?}"
         );
     }
 
-    /// COI-78: a dictionary bound anywhere on the signature blocks mono, even
-    /// when a sibling `Num` bound would otherwise specialize.
     #[test]
-    fn does_not_plan_when_num_mixed_with_show_or_user_trait() {
+    fn plans_when_num_mixed_with_show_or_user_trait() {
         let with_show = plan(
             "fn mix<T: Num + Show>(T a, T b) -> T { return a + b; } \
              fn main() { mix(1, 2); }",
         );
-        assert!(
-            with_show.specializations.is_empty(),
-            "Num+Show must stay on dictionaries: {with_show:?}"
+        assert_eq!(
+            with_show.specializations.len(),
+            1,
+            "Num+Show ground calls specialize: {with_show:?}"
         );
 
         let with_user = plan(
             "trait Tagged<T> { fn tag(T x) -> int; } \
-             impl Tagged<int> { pub fn tag(int x) -> int { return x; } } \
+             impl Tagged for int { pub fn tag(int x) -> int { return x; } } \
              fn mix<T: Num + Tagged>(T a, T b) -> T { return a + b; } \
              fn main() { mix(1, 2); }",
         );
-        assert!(
-            with_user.specializations.is_empty(),
-            "Num+user-trait must stay on dictionaries: {with_user:?}"
+        assert_eq!(
+            with_user.specializations.len(),
+            1,
+            "Num+user-trait ground calls specialize: {with_user:?}"
         );
     }
 

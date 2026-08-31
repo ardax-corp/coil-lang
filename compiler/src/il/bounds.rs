@@ -197,6 +197,16 @@ fn is_array_push(op: &IlOp) -> bool {
     }
 }
 
+/// Why a counted-loop header compares the induction variable to a bound.
+///
+/// Unroll may use [`Self::TripCount`] (`i <= n`). Bounds proofs for `Index`
+/// require [`Self::StrictBound`] (`i < n`); `i <= len` is OOB at `i == len`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LoopHeaderProof {
+    StrictBound,
+    TripCount,
+}
+
 fn is_le_cmp(op: &IlOp) -> bool {
     matches!(op, IlOp::Bin { op: Instruction::LE, .. })
         || op

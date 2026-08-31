@@ -152,6 +152,9 @@ fn all_off() -> OptimizeOptions {
 
 fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
     use super::driver::OptFloor;
+    if spec.name == "cast_spill" {
+        return false;
+    }
     let ceiling = match level {
         OptLevel::None => OptFloor::None,
         OptLevel::Basic | OptLevel::Debug => OptFloor::Basic,
@@ -161,17 +164,9 @@ fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
     spec.floor <= ceiling && !(level == OptLevel::Size && spec.omit_from_size)
 }
 
-/// Knobs that are not pass names. Standard/Aggressive/Size keep Default's
-/// `pgo_prioritize_hot_loops`; None/Basic/Debug leave it off.
-fn base_knobs(level: OptLevel) -> OptimizeOptions {
-    let mut o = all_off();
-    match level {
-        OptLevel::None | OptLevel::Basic | OptLevel::Debug => {}
-        OptLevel::Standard | OptLevel::Aggressive | OptLevel::Size => {
-            o.pgo_prioritize_hot_loops = true;
-        }
-    }
-    o
+/// Knobs that are not pass names. Heat-ordered PGO stays off until a matrix win exists.
+fn base_knobs(_level: OptLevel) -> OptimizeOptions {
+    all_off()
 }
 
 impl Default for OptimizeOptions {

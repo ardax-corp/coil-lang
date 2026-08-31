@@ -19,7 +19,7 @@ field       rec.field (chained)
 match       match e { pat => expr, … }
 if          if cond { … } else { … }
 block       { stmts; expr }
-lambda      use (T x) => expr   // first-class fn values
+lambda      fn (T x) use (y) => expr   // first-class fn values
 array lit   [1, 2, 3]
 tuple       (a, b)
 dict        { key: val, … }
@@ -91,17 +91,16 @@ match opt {
 | Attribute | Target |
 |-----------|--------|
 | `#[derive(Show, Eq, Ord)]` | `enum`, `class` |
-| `#[test]` / `#[test("desc")]` | `fn` with body |
-| `#[ffi(lib=…, name=…)]` | signature-only `fn` → extern lowering |
 | User `attr` | `fn`, methods, `class` — must forward `...args` to `target(...args)` |
+
+Tests are `test("desc") { … }` statements, not `#[test]` on `fn`.
 
 ## FFI quick patterns
 
 Compile-time (no `use ffi`):
 
 ```coil
-extern {
-    #[link(name = "c")]
+extern "c" {
     fn strlen(string s) -> int;
 }
 ```

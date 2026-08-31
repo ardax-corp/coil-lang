@@ -83,7 +83,7 @@ impl Fielded {
         field_drops = field_drops + 1;
         match bag {
             Option::Some(b) => b.put(self),
-            Option::None => (),
+            Option::None => {},
         };
     }
 }

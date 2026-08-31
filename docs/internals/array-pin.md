@@ -41,7 +41,7 @@ the array's **local slot** (the `ArrayPin` operand). Values are `Object`
 
 `ArrayPin` does the one `find_object_by_addr` for that slot: pop the stack-top
 address, and if it is `Object::Array`, insert that `Gc` under the operand
-slot. Non-array targets are a silent no-op (later `IndexPin*` yield `-1`).
+slot. Non-array targets are a silent no-op (later `IndexPin*` **panic**).
 Tuples are never inserted; the `IndexPin` tuple arm is only reachable from
 hand-written bytecode.
 
@@ -103,10 +103,11 @@ loop body does not tail-call.
 ## GC
 
 The heap is **non-moving mark-and-sweep**. `Heap::alloc` leaks a `Box<GcData<T>>`
-onto an intrusive list and records it in `addr_index`. `sweep` unlinks unmarked
-cells and drops them; it does not relocate `GcData`. Addresses stored in
-`Value` and `Gc` pointers stay valid for the object's lifetime
-(`machine/src/memory/heap.rs`).
+onto an intrusive list. A `kind` byte in the `GcHeader` reconstructs `Object`;
+`live` is a `HashSet<u64>` for liveness only (not a typed handle table).
+`sweep` unlinks unmarked cells and drops them; it does not relocate `GcData`.
+Addresses stored in `Value` and `Gc` pointers stay valid for the object's
+lifetime (`machine/src/memory/heap.rs`).
 
 `collect_vm_root_addrs` walks every `frame_pins` map and pushes `obj.addr()`
 next to the operand stack, statics, and coroutine saved stacks. Automatic GC
@@ -138,8 +139,8 @@ No hole found where GC frees a pinned `Gc` while `IndexPin*` still holds it.
 
 ## What still pays `find_object_by_addr`
 
-`addr_index` is `HashMap<u64, Object, AddrHashBuilder>` — an O(1) fmix64 probe,
-not a list walk (`machine/src/memory/addr_hash.rs`). Unpinned `Index` still
+`live` is `HashSet<u64, AddrHashBuilder>` plus a header kind byte — an O(1) fmix64
+probe, not a list walk (`machine/src/memory/addr_hash.rs`). Unpinned `Index` still
 pays that probe plus the in-VM range test.
 
 | Site | Why it still hashes |
@@ -176,7 +177,7 @@ A generation / moving-GC stamp is unused while sweep is non-moving.
 `YieldCoro` / `YieldFromCoro` are length-proof barriers
 (`op_blocks_length_proof` in `compiler/src/il/pure_call.rs`), same family as
 `TailCall`. Resume pushes a **fresh empty** pin map; a pin emitted in a
-yielding counted loop would miss after the first suspend (`IndexPin*` → `-1`).
+yielding counted loop would miss after the first suspend (`IndexPin*` **panic**).
 Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
 `IndexPin*` / `IndexUnchecked`. Pins are not persisted on `ObjCoroutine`.
 

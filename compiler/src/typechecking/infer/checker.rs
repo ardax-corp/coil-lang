@@ -1498,6 +1498,7 @@ impl Checker {
         }
         self.pre_collect_free_function_param_names(ast);
         self.pre_register_inherent_methods(ast);
+        self.pre_register_typeclass_impls(ast);
         self.pre_process_top_level_uses(ast);
         self.pre_pass_ffi_invoke_param_flow(ast);
 
@@ -2589,29 +2590,6 @@ impl Checker {
                     }
                 }
             }
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                if let Some(init) = init {
-                    let _ = self.infer(init);
-                }
-                let cond_ty = self.infer(cond);
-                self.unify(&cond_ty, &boolean(), &cond.0.into_range(), "for condition");
-                let _ = self.infer(body);
-                if let Some(step) = step {
-                    let _ = self.infer(step);
-                }
-                let lookup = |name: &str| self.const_fold_env.get(name).copied();
-                if crate::typechecking::control_flow::is_infinite_loop(expr, &lookup) {
-                    never()
-                } else {
-                    unit_ty()
-                }
-            }
-
             // ---- Return ----
             Expression::Return(e) | Expression::ImplicitReturn(e) => {
                 // Push the declared return type as expected so ground trait
@@ -4252,6 +4230,7 @@ impl Checker {
                                 method_slot,
                                 arity: arg_tys.len(),
                                 has_receiver: true,
+                                class: class.clone(),
                             },
                         );
                     }
@@ -4262,6 +4241,7 @@ impl Checker {
                             method_slot,
                             arity: arg_tys.len(),
                             has_receiver: true,
+                            class: class.clone(),
                         },
                     );
                     let result = self.apply_function(
@@ -4984,6 +4964,7 @@ impl Checker {
                             method_slot,
                             arity: arg_tys.len(),
                             has_receiver: false,
+                            class: class.clone(),
                         },
                     );
                 }
@@ -4994,6 +4975,7 @@ impl Checker {
                         method_slot,
                         arity: arg_tys.len(),
                         has_receiver: false,
+                        class: class.clone(),
                     },
                 );
                 let result = self.apply_function(
@@ -6423,8 +6405,7 @@ impl Checker {
         list(first_ty)
     }
 
-    /// `len(x)` — structural length for arrays/tuples/dicts/strings, otherwise
-    /// `Length::len` typeclass dispatch (active bound or concrete instance).
+    /// `len(x)` — prelude sugar for `x.len()` (structural ArrayLen / Length).
     fn infer_len_call(
         &mut self,
         args: Option<&[Output]>,
@@ -6440,7 +6421,7 @@ impl Checker {
                 ErrorCode::ConstructorArity,
                 format!("len expects 1 argument, got {}", args.len()),
                 range,
-                Some("use `len(value)`".to_string()),
+                Some("use `value.len()`".to_string()),
             );
         }
 
@@ -6461,7 +6442,7 @@ impl Checker {
                 ErrorCode::ConstructorArity,
                 format!("len expects 1 argument, got {}", args.len()),
                 range,
-                Some("use `len(value: …)`".to_string()),
+                Some("use `value.len()`".to_string()),
             );
         }
         self.finish_len_call(tys[0].clone(), args, id, range)
@@ -6522,6 +6503,7 @@ impl Checker {
                     method_slot,
                     arity: 1,
                     has_receiver: false,
+                    class: class.clone(),
                 };
                 if let Some(call_id) = id {
                     self.bound_method_calls.insert(call_id, hint.clone());
@@ -10831,6 +10813,9 @@ impl Checker {
         fun_ty: &Ty,
         range: &Range<usize>,
     ) {
+        // Shared generic bodies box `T`. Wrapping that box in `Option` /
+        // matching it as `Option<int>` is still a residual codegen hole
+        // (E0127). Inherent methods are monomorphized and stay valid.
         if !is_generic || !self.registering_overloadable_fn {
             return;
         }
@@ -10848,9 +10833,7 @@ impl Checker {
         }
         let mut msg = Message::error(
             ErrorCode::UnsupportedGenericOptionReturn,
-            format!(
-                "free function `{name}` cannot return Option of a type parameter"
-            ),
+            format!("free function `{name}` cannot return Option of a type parameter"),
             range.clone(),
         );
         msg.with_help(
@@ -11889,7 +11872,6 @@ impl Checker {
             else {
                 continue;
             };
-            let range = stmt.0.into_range();
             let arg_tys: Vec<Ty> = args.iter().map(|a| self.ast_instance_head_ty(a)).collect();
             if self
                 .generics
@@ -11943,7 +11925,8 @@ impl Checker {
             self.generics.instances.push(InstanceDef {
                 class: (*class).to_string(),
                 defined_module: self.current_module.clone(),
-                range,
+                // Sentinel until `infer_typeclass_impl` claims this stub.
+                range: usize::MAX..usize::MAX,
                 args: arg_tys,
                 method_fqns,
                 assoc_tys,
@@ -12273,21 +12256,6 @@ impl Checker {
                     self.pre_pass_ffi_invoke_param_flow_walk(identifier, local_class_scopes);
                 }
                 self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
-            }
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                if let Some(init) = init {
-                    self.pre_pass_ffi_invoke_param_flow_walk(init, local_class_scopes);
-                }
-                self.pre_pass_ffi_invoke_param_flow_walk(cond, local_class_scopes);
-                self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
-                if let Some(step) = step {
-                    self.pre_pass_ffi_invoke_param_flow_walk(step, local_class_scopes);
-                }
             }
             Expression::Match { scrutinee, arms } => {
                 self.pre_pass_ffi_invoke_param_flow_walk(scrutinee, local_class_scopes);
@@ -12945,22 +12913,6 @@ impl Checker {
                     self.pre_register_enums_walk(i, errors);
                 }
                 self.pre_register_enums_walk(body, errors);
-            }
-
-            Expression::For {
-                init,
-                cond,
-                step,
-                body,
-            } => {
-                if let Some(init) = init {
-                    self.pre_register_enums_walk(init, errors);
-                }
-                self.pre_register_enums_walk(cond, errors);
-                self.pre_register_enums_walk(body, errors);
-                if let Some(step) = step {
-                    self.pre_register_enums_walk(step, errors);
-                }
             }
 
             Expression::Match { scrutinee, arms } => {
@@ -15060,7 +15012,7 @@ impl Checker {
                             ),
                             iterable_range.clone(),
                             Some(format!(
-                                "add `impl Iterator<{}>` with matching `type Item`",
+                                "add `impl Iterator for {}` with matching `type Item`",
                                 into_iter_ty
                             )),
                         );
@@ -15475,11 +15427,11 @@ impl Checker {
         self.fn_dict_arity.get(fn_name).copied().unwrap_or(0)
     }
 
-    /// True for compiler-built-in typeclasses (Num / Ord / Eq / Show).
+    /// True for compiler-built-in typeclasses (operators, Show/Length/Hash, derive targets).
     ///
     /// These still use the dictionary ABI in shared generic bodies. Ground
-    /// Num/Ord/Eq calls may monomorphize to direct opcodes; `Show` does not
-    /// (see `monomorphize::candidate_for_call`).
+    /// method/function calls monomorphize to a direct `CALL`; operators on
+    /// ground numeric/eq/ord types still lower to opcodes.
     pub fn is_builtin_class(class: &str) -> bool {
         matches!(
             class,
@@ -15496,6 +15448,15 @@ impl Checker {
                 | "Eq"
                 | "Show"
                 | "Length"
+                | "Hash"
+                | "Default"
+                | "Serialize"
+                | "Deserialize"
+                | "Send"
+                | "String"
+                | "Sensitive"
+                | "Iterator"
+                | "IntoIterator"
         )
     }
 

@@ -963,7 +963,7 @@ use string::{format, to_bytes};
         trait Describable<T> {
             fn describe_val(T x) -> int;
         }
-        impl Describable<int> {
+        impl Describable for int {
             pub fn describe_val(int x) -> int { return x + 1; }
         }
         fn show<T: Describable>(T x) -> int {
@@ -1020,7 +1020,7 @@ use string::{format, to_bytes};
         trait Describable<T> {
             fn describe_val(T x) -> int;
         }
-        impl Describable<int> {
+        impl Describable for int {
             pub fn describe_val(int x) -> int { return x + 1; }
         }
         fn show<T: Describable>(T x) -> int {
@@ -1052,7 +1052,7 @@ use string::{format, to_bytes};
         trait Convert<A, B> {
             fn cast(A x) -> B;
         }
-        impl Convert<int, int> {
+        impl Convert<int> for int {
             pub fn cast(int x) -> int { return x; }
         }
         fn convert_fn<A, B>(A x) -> B where Convert<A, B> {
@@ -3691,7 +3691,7 @@ fn attr_test_fn_discovered_by_harness() {
         let ret = machine.call_function(*offset, &[]);
         assert!(
             !machine.panicked() && machine.result_is_ok(ret),
-            "#[test] case should pass"
+            "test case should pass"
         );
     }
 }
@@ -4631,8 +4631,7 @@ fn production_compile_strips_harness_declarations() {
             r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-#[test]
-fn hidden() { assert(false)?; }
+test("hidden") { assert(false)?; }
 test("also hidden") { assert(false)?; }
 fn main() { write(stdout(), to_bytes("ok")); }
 "#,
@@ -4650,8 +4649,7 @@ fn main() { write(stdout(), to_bytes("ok")); }
 fn include_tests_flag_embeds_harness_metadata() {
     let (pipeline, _bc, _constants) = compile_src_with_tests(
         r#"
-#[test("via attr")]
-fn from_attr() { assert(true)?; }
+test("via attr") { assert(true)?; }
 test("via block") { assert(true)?; }
 "#,
     );
@@ -4882,7 +4880,8 @@ attr wrap_if<T>(fn(...args) -> T target, ...args) -> T {
 }
 
 attr wrap_for<T>(fn(...args) -> T target, ...args) -> T {
-    for (let i = 0; i < 1; i = i + 1) {
+    let i = 0;
+    while i < 1 {
         return target(...args);
     }
     return 0;
@@ -4989,8 +4988,10 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
     let s = 0;
-    for (let i = 0; i < 4; i = i + 1) {
+    let i = 0;
+    while i < 4 {
         s = s + i;
+        i = i + 1;
     }
     write(stdout(), to_bytes(format("%i", s)));
 }
@@ -5104,8 +5105,10 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
     let s = 0;
-    for (let i = 0; i <= 2; i = i + 1) {
+    let i = 0;
+    while i <= 2 {
         s = s + i;
+        i = i + 1;
     }
     write(stdout(), to_bytes(format("%i", s)));
 }
@@ -5142,7 +5145,8 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
     let s = 0;
-    for (let i = 0; i < 5; i = i + 1) {
+    let i = 0;
+    while i < 5 {
         s = s + i;
         break;
     }
@@ -5163,10 +5167,12 @@ use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
     let sum = 0;
-    for (let i = 0; i < 10; i = i + 1) {
-        if i == 3 { continue; }
+    let i = 0;
+    while i < 10 {
+        if i == 3 { i = i + 1; continue; }
         if i == 7 { break; }
         sum = sum + i;
+        i = i + 1;
     }
     write(stdout(), to_bytes(format("%i", sum)));
 }
@@ -6714,14 +6720,14 @@ class TextCounter {
     pub end: int,
     pub text: string,
 }
-impl IntoIterator<TextCounter> {
+impl IntoIterator for TextCounter {
     type Item = string;
     type IntoIter = TextCounter;
     pub fn into_iter(TextCounter value) -> TextCounter {
         return value;
     }
 }
-impl Iterator<TextCounter> {
+impl Iterator for TextCounter {
     type Item = string;
     pub fn next(TextCounter value) -> Option<string> {
         if value.cur < value.end {
@@ -6756,14 +6762,14 @@ impl ItemBox {
         return new ItemBoxIter(self.v);
     }
 }
-impl IntoIterator<ItemBox> {
+impl IntoIterator for ItemBox {
     type Item = int;
     type IntoIter = ItemBoxIter;
     pub fn into_iter(ItemBox m) -> ItemBoxIter {
         return m.iter();
     }
 }
-impl Iterator<ItemBoxIter> {
+impl Iterator for ItemBoxIter {
     type Item = int;
     pub fn next(ItemBoxIter it) -> Option<int> {
         if it.i == 0 {
@@ -6798,14 +6804,14 @@ impl ItemBox {
         return new ItemBoxIter(m.v);
     }
 }
-impl IntoIterator<ItemBox> {
+impl IntoIterator for ItemBox {
     type Item = int;
     type IntoIter = ItemBoxIter;
     pub fn into_iter(ItemBox m) -> ItemBoxIter {
         return ItemBox::make_iter(m);
     }
 }
-impl Iterator<ItemBoxIter> {
+impl Iterator for ItemBoxIter {
     type Item = int;
     pub fn next(ItemBoxIter it) -> Option<int> {
         if it.i == 0 {

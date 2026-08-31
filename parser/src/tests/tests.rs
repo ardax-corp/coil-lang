@@ -272,52 +272,24 @@
 
     #[test]
     fn c_style_for_parses_let_init_and_step() {
-        let ast = decl_ast!("for (let i = 0; i < 10; i = i + 1) { continue; }");
-        match ast {
-            Expression::Statement(inner) => match inner.1.as_ref() {
-                Expression::For {
-                    init,
-                    cond,
-                    step,
-                    body,
-                } => {
-                    assert!(matches!(
-                        init.as_ref().map(|i| i.1.as_ref()),
-                        Some(Expression::Fragment(_))
-                    ));
-                    assert!(matches!(cond.1.as_ref(), Expression::Expr(_)));
-                    assert!(matches!(
-                        step.as_ref().map(|s| s.1.as_ref()),
-                        Some(Expression::Expr(_))
-                    ));
-                    assert!(matches!(body.1.as_ref(), Expression::Block(_)));
-                }
-                other => panic!("expected for statement, got {:?}", other),
-            },
-            other => panic!("expected statement wrapper, got {:?}", other),
-        }
+        let src = "for (let i = 0; i < 10; i = i + 1) { continue; }";
+        let result = Pratt::default().declaration().parse(src).into_result();
+        assert!(
+            result.is_err(),
+            "expected parse to fail for C-style for, got {:?}",
+            result
+        );
     }
 
     #[test]
     fn c_style_for_allows_empty_init_and_step() {
-        let ast = decl_ast!("for (; keep_going; ) { break; }");
-        match ast {
-            Expression::Statement(inner) => match inner.1.as_ref() {
-                Expression::For {
-                    init,
-                    cond,
-                    step,
-                    body,
-                } => {
-                    assert!(init.is_none());
-                    assert!(matches!(cond.1.as_ref(), Expression::Expr(_)));
-                    assert!(step.is_none());
-                    assert!(matches!(body.1.as_ref(), Expression::Block(_)));
-                }
-                other => panic!("expected for statement, got {:?}", other),
-            },
-            other => panic!("expected statement wrapper, got {:?}", other),
-        }
+        let src = "for (; keep_going; ) { break; }";
+        let result = Pratt::default().declaration().parse(src).into_result();
+        assert!(
+            result.is_err(),
+            "expected parse to fail for C-style for, got {:?}",
+            result
+        );
     }
 
     #[test]
@@ -801,26 +773,13 @@
     }
 
     #[test]
-    fn wildcard_and_default_both_parse_to_wildcard() {
+    fn wildcard_parses() {
         let ast1 = expr_ast!("match x { _ => 0 }");
         let inner1 = match ast1 {
             Expression::Expr(e) => e.1.as_ref().clone(),
             other => other,
         };
         match inner1 {
-            Expression::Match { arms, .. } => {
-                assert_eq!(arms.len(), 1);
-                assert!(matches!(arms[0].pattern.1, Pattern::Wildcard));
-            }
-            other => panic!("expected Match, got {:?}", other),
-        }
-
-        let ast2 = expr_ast!("match x { default => 0 }");
-        let inner2 = match ast2 {
-            Expression::Expr(e) => e.1.as_ref().clone(),
-            other => other,
-        };
-        match inner2 {
             Expression::Match { arms, .. } => {
                 assert_eq!(arms.len(), 1);
                 assert!(matches!(arms[0].pattern.1, Pattern::Wildcard));
@@ -2164,34 +2123,13 @@
     }
 
     #[test]
-    fn parse_array_append_assignment() {
+    fn parse_array_append_assignment_is_rejected() {
         let src = "a[] = 3;";
-        let ast = Pratt::default()
-            .parse(src)
-            .expect("parse append assignment");
-        fn find_append(e: &Expression<'_>) -> bool {
-            match e {
-                Expression::Assignment(lhs, _) => {
-                    let mut cur = lhs.1.as_ref();
-                    while let Expression::Expr(inner) = cur {
-                        cur = inner.1.as_ref();
-                    }
-                    matches!(cur, Expression::Index(_, None))
-                }
-                Expression::Program(items)
-                | Expression::Fragment(items)
-                | Expression::Block(items) => items.iter().any(|i| find_append(i.1.as_ref())),
-                Expression::Expr(inner)
-                | Expression::Group(inner)
-                | Expression::Statement(inner)
-                | Expression::ExprStatement(inner) => find_append(inner.1.as_ref()),
-                _ => false,
-            }
-        }
+        let result = Pratt::default().parse(src);
         assert!(
-            find_append(ast.1.as_ref()),
-            "expected Assignment(Index(_, None), …) for `a[] = 3`, got {:?}",
-            ast.1
+            result.is_err(),
+            "expected parse to fail for `a[] = 3`, got {:?}",
+            result
         );
     }
 
@@ -2228,38 +2166,43 @@
     }
 
     #[test]
-    fn parse_readonly_new_and_new_readonly_instantiate() {
-        for src in ["readonly new Point(1, 2);", "new readonly Point(1, 2);"] {
-            let ast = Pratt::default()
-                .parse(src)
-                .unwrap_or_else(|e| panic!("parse `{src}` failed: {e:?}"));
-            fn find_readonly_new(e: &Expression<'_>) -> bool {
-                match e {
-                    Expression::Readonly(inner) => {
-                        let mut cur = inner.1.as_ref();
-                        while let Expression::Expr(inner) = cur {
-                            cur = inner.1.as_ref();
-                        }
-                        matches!(cur, Expression::Instantiate(_, _))
+    fn parse_readonly_new_instantiate() {
+        let src = "readonly new Point(1, 2);";
+        let ast = Pratt::default()
+            .parse(src)
+            .unwrap_or_else(|e| panic!("parse `{src}` failed: {e:?}"));
+        fn find_readonly_new(e: &Expression<'_>) -> bool {
+            match e {
+                Expression::Readonly(inner) => {
+                    let mut cur = inner.1.as_ref();
+                    while let Expression::Expr(inner) = cur {
+                        cur = inner.1.as_ref();
                     }
-                    Expression::Program(items)
-                    | Expression::Fragment(items)
-                    | Expression::Block(items) => {
-                        items.iter().any(|i| find_readonly_new(i.1.as_ref()))
-                    }
-                    Expression::Expr(inner)
-                    | Expression::Group(inner)
-                    | Expression::Statement(inner)
-                    | Expression::ExprStatement(inner) => find_readonly_new(inner.1.as_ref()),
-                    _ => false,
+                    matches!(cur, Expression::Instantiate(_, _))
                 }
+                Expression::Program(items)
+                | Expression::Fragment(items)
+                | Expression::Block(items) => {
+                    items.iter().any(|i| find_readonly_new(i.1.as_ref()))
+                }
+                Expression::Expr(inner)
+                | Expression::Group(inner)
+                | Expression::Statement(inner)
+                | Expression::ExprStatement(inner) => find_readonly_new(inner.1.as_ref()),
+                _ => false,
             }
-            assert!(
-                find_readonly_new(ast.1.as_ref()),
-                "expected Readonly(Instantiate) for `{src}`, got {:?}",
-                ast.1
-            );
         }
+        assert!(
+            find_readonly_new(ast.1.as_ref()),
+            "expected Readonly(Instantiate) for `{src}`, got {:?}",
+            ast.1
+        );
+        assert!(
+            Pratt::default()
+                .parse("new readonly Point(1, 2);")
+                .is_err(),
+            "postfix `new readonly` is not valid"
+        );
     }
 
     #[test]

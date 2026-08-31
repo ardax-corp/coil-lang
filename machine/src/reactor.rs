@@ -47,7 +47,7 @@ pub struct Reactor {
     stealers: RwLock<Vec<Stealer<Job>>>,
     sleep: Mutex<()>,
     sleep_cvar: Condvar,
-    n_workers: usize,
+    n_workers: AtomicUsize,
     started: OnceLock<()>,
     inflight: AtomicUsize,
     shutdown: AtomicBool,
@@ -58,10 +58,10 @@ impl Reactor {
     pub fn new(n_workers: usize) -> Arc<Self> {
         Arc::new(Self {
             injector: Injector::new(),
-            stealers: RwLock::new(Vec::with_capacity(n_workers)),
+            stealers: RwLock::new(Vec::with_capacity(n_workers.max(1))),
             sleep: Mutex::new(()),
             sleep_cvar: Condvar::new(),
-            n_workers: n_workers.max(1),
+            n_workers: AtomicUsize::new(n_workers),
             started: OnceLock::new(),
             inflight: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
@@ -70,7 +70,7 @@ impl Reactor {
     }
 
     pub fn worker_count(&self) -> usize {
-        self.n_workers
+        self.n_workers.load(Ordering::Relaxed)
     }
 
     pub fn inflight(&self) -> usize {
@@ -80,11 +80,16 @@ impl Reactor {
     fn ensure_started(self: &Arc<Self>) {
         let reactor = Arc::clone(self);
         let _ = self.started.get_or_init(|| {
+            let mut n = reactor.n_workers.load(Ordering::Relaxed);
+            if n == 0 {
+                n = crate::thread::WorkerCap::new().max().max(1);
+                reactor.n_workers.store(n, Ordering::Relaxed);
+            }
             let mut handles = reactor
                 .worker_handles
                 .lock()
                 .unwrap_or_else(|e| e.into_inner());
-            for i in 0..reactor.n_workers {
+            for i in 0..n {
                 let r = Arc::clone(&reactor);
                 let name = format!("coil-reactor-{i}");
                 let handle = thread::Builder::new()
@@ -536,9 +541,9 @@ mod tests {
     }
 
     #[test]
-    fn worker_count_clamps_zero_to_one() {
+    fn worker_count_zero_stays_lazy() {
         let r = Reactor::new(0);
-        assert_eq!(r.worker_count(), 1);
+        assert_eq!(r.worker_count(), 0);
     }
 
     #[test]

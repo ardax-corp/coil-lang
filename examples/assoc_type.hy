@@ -14,7 +14,7 @@ trait Collect<C> {
     fn head(C xs) -> Elem;
 }
 
-impl Collect<Option<int>> {
+impl Collect for Option<int> {
     type Elem = int;
     pub fn head(Option<int> xs) -> int {
         return match xs {

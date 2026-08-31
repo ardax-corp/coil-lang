@@ -5,6 +5,6 @@ class Point {
 }
 
 fn main() {
-    let p = new readonly Point(1, 2);
+    let p = readonly new Point(1, 2);
     p.x = 10;
 }

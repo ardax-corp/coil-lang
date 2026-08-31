@@ -640,7 +640,6 @@ fn body_has_loop_control_walk<'a>(node: &Output<'a>) -> bool {
                 || arms.iter().any(|arm| body_has_loop_control_walk(&arm.body))
         }
         Expression::Loop { body, .. } => body_has_loop_control_walk(body),
-        Expression::For { body, .. } => body_has_loop_control_walk(body),
         _ => false,
     }
 }

@@ -526,9 +526,8 @@
         assert_eq!(vm.pop().as_int(), 6);
     }
 
-    /// Docs contract: `Index` never panics — too-large / negative / non-array
-    /// targets yield the integer `-1`. `IndexUnchecked` skips the range test
-    /// (compiler proof only; UB in release on violation).
+    /// Docs contract: checked `Index` panics on OOB / non-array.
+    /// `IndexUnchecked` skips the range test (compiler proof only).
     #[test]
     fn index_pin_reads_after_array_pin() {
         let mut vm = Machine::<8>::default();
@@ -577,10 +576,9 @@
         assert_eq!(vm.pop().as_int(), 6);
     }
 
-    /// Docs contract: checked `Index` never panics — too-large / negative / non-array
-    /// targets yield the integer `-1` (COI-85 keeps the check in-VM).
+    /// Docs contract: checked `Index` panics on OOB / non-array.
     #[test]
-    fn index_oob_and_non_array_yield_minus_one() {
+    fn index_oob_and_non_array_panic() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             const_int(10),
@@ -590,7 +588,7 @@
             Byte::new(Instruction::Index),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(vm.pop().as_int(), -1, "too-large array Index");
+        assert!(vm.panicked(), "too-large array Index");
 
         let mut vm = Machine::<8>::default();
         vm.run(&[
@@ -602,7 +600,7 @@
             Byte::new(Instruction::Index),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(vm.pop().as_int(), -1, "too-large tuple Index");
+        assert!(vm.panicked(), "too-large tuple Index");
 
         let neg1 = Value::from(-1_i64).raw() as u64;
         let mut vm = Machine::<8>::default();
@@ -619,7 +617,7 @@
             &[],
             0,
         );
-        assert_eq!(vm.pop().as_int(), -1, "negative array Index");
+        assert!(vm.panicked(), "negative array Index");
 
         let mut vm = Machine::<8>::default();
         vm.run(&[
@@ -628,13 +626,12 @@
             Byte::new(Instruction::Index),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(vm.pop().as_int(), -1, "non-array Index");
+        assert!(vm.panicked(), "non-array Index");
     }
 
-    /// Docs contract: `StoreIndex` with a bad index is a no-op and still
-    /// leaves `x` on the stack.
+    /// Docs contract: `StoreIndex` with a bad index panics.
     #[test]
-    fn store_index_oob_is_noop_and_pushes_value() {
+    fn store_index_oob_panics() {
         let mut vm = Machine::<8>::default();
         vm.run(&[
             const_int(10),
@@ -646,44 +643,8 @@
             Byte::new(Instruction::StoreIndex),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(vm.pop().as_int(), 7, "OOB StoreIndex still pushes value");
+        assert!(vm.panicked(), "OOB StoreIndex");
 
-        // Array still [10, 20] — re-index both slots.
-        let mut vm = Machine::<8>::default();
-        vm.run(&[
-            const_int(10),
-            const_int(20),
-            Byte::new(Instruction::MakeArray).with_operand_u32(2),
-            Byte::new(Instruction::DUPLICATE),
-            Byte::new(Instruction::DUPLICATE),
-            const_int(5),
-            const_int(99),
-            Byte::new(Instruction::StoreIndex),
-            Byte::new(Instruction::POP),
-            Byte::new(Instruction::DUPLICATE),
-            const_int(0),
-            Byte::new(Instruction::Index),
-            Byte::new(Instruction::HALT),
-        ]);
-        assert_eq!(vm.pop().as_int(), 10, "slot 0 unchanged after OOB store");
-
-        let mut vm = Machine::<8>::default();
-        vm.run(&[
-            const_int(10),
-            const_int(20),
-            Byte::new(Instruction::MakeArray).with_operand_u32(2),
-            Byte::new(Instruction::DUPLICATE),
-            const_int(5),
-            const_int(99),
-            Byte::new(Instruction::StoreIndex),
-            Byte::new(Instruction::POP),
-            const_int(1),
-            Byte::new(Instruction::Index),
-            Byte::new(Instruction::HALT),
-        ]);
-        assert_eq!(vm.pop().as_int(), 20, "slot 1 unchanged after OOB store");
-
-        // Non-array target: still a no-op that pushes the value.
         let mut vm = Machine::<8>::default();
         vm.run(&[
             const_int(42),
@@ -692,7 +653,7 @@
             Byte::new(Instruction::StoreIndex),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(vm.pop().as_int(), 9, "non-array StoreIndex pushes value");
+        assert!(vm.panicked(), "non-array StoreIndex");
     }
 
     /// Empty MakeTuple / MakeArray still allocate a rooted aggregate.
@@ -2656,223 +2617,45 @@
     }
 
     #[test]
-    fn option_niche_round_trip_preserves_heap_payload() {
+    fn retired_option_niche_ops_panic() {
         let mut vm = Machine::<32>::default();
         vm.run_with_pool(
             &[
                 Byte::new(Instruction::STRING).with_operand_u32(0),
                 Byte::new(Instruction::OptionNicheToHeap),
-                Byte::new(Instruction::HeapOptionToNiche),
                 Byte::new(Instruction::HALT),
             ],
             &[],
             &["ok".to_string()],
             0,
         );
-        let value = vm.pop();
-        match vm.heap().find_object_by_addr(value.raw() as u64) {
-            Some(Object::String(string)) => assert_eq!(string.as_ref().data, "ok"),
-            other => panic!(
-                "niche round-trip lost string payload (object present: {})",
-                other.is_some()
-            ),
-        }
+        assert!(vm.panicked());
     }
 
     #[test]
-    fn pair_box_round_trip_preserves_tag_and_payload() {
+    fn retired_pair_ops_panic() {
         let mut vm = Machine::<16>::default();
         vm.run(&[
             const_int(42),
             const_int(0),
             Byte::new(Instruction::PairToHeap),
-            Byte::new(Instruction::HeapToPair),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(vm.pop().as_int(), 0);
-        assert_eq!(vm.pop().as_int(), 42);
+        assert!(vm.panicked());
     }
 
     #[test]
-    fn float_chain_store_preserves_separate_operation_rounding() {
-        let a = 1.0 + 2f64.powi(-27);
-        let b = 1.0 - 2f64.powi(-27);
-        let c = -1.0;
-        let descriptor = (Instruction::MULF as u64)
-            | (0_u64 << 8)
-            | (1_u64 << 16)
-            | ((Instruction::ADDF as u64) << 24)
-            | (2_u64 << 32);
+    fn retired_float_chain_store_panics() {
         let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &[
-                Byte::new(Instruction::CONST)
-                    .with_operand_u32(common::Byte::POOL_FLAG),
-                store_pop(0),
-                Byte::new(Instruction::CONST)
-                    .with_operand_u32(common::Byte::POOL_FLAG | 1),
-                store_pop(1),
-                Byte::new(Instruction::CONST)
-                    .with_operand_u32(common::Byte::POOL_FLAG | 2),
-                store_pop(2),
-                Byte::new(Instruction::FloatChainStore).with_operand_u32((3 << 16) | 3),
-                load(3),
-                Byte::new(Instruction::HALT),
-            ],
-            &[
-                Value::from(a).raw() as u64,
-                Value::from(b).raw() as u64,
-                Value::from(c).raw() as u64,
-                descriptor,
-            ],
-            &[],
-            0,
-        );
-
-        // Separate MULF then ADDF rounds the product to 1.0 before adding -1.
-        assert_eq!(vm.pop().as_float(), 0.0);
-    }
-
-    #[test]
-    fn float_chain_store_preserves_special_float_values() {
-        let descriptor = (Instruction::ADDF as u64)
-            | (0_u64 << 8)
-            | (1_u64 << 16)
-            | ((Instruction::MULF as u64) << 24)
-            | (2_u64 << 32);
-        let code = [
-            Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG),
-            store_pop(0),
-            Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG | 1),
-            store_pop(1),
-            Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG | 2),
-            store_pop(2),
-            Byte::new(Instruction::FloatChainStore).with_operand_u32((3 << 16) | 3),
-            load(3),
+        vm.run(&[
+            Byte::new(Instruction::FloatChainStore).with_operand_u32(0),
             Byte::new(Instruction::HALT),
-        ];
-        let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &code,
-            &[
-                Value::from(-0.0_f64).raw() as u64,
-                Value::from(-0.0_f64).raw() as u64,
-                Value::from(1.0_f64).raw() as u64,
-                descriptor,
-            ],
-            &[],
-            0,
-        );
-        let signed_zero = vm.pop().as_float();
-        assert_eq!(signed_zero, 0.0);
-        assert!(signed_zero.is_sign_negative());
-
-        let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &code,
-            &[
-                Value::from(f64::NAN).raw() as u64,
-                Value::from(1.0_f64).raw() as u64,
-                Value::from(1.0_f64).raw() as u64,
-                descriptor,
-            ],
-            &[],
-            0,
-        );
-        assert!(vm.pop().as_float().is_nan());
+        ]);
+        assert!(vm.panicked());
     }
 
     #[test]
-    fn float_chain_store_three_stage_const_under_matches_separate_ops() {
-        // 2.0 * (zr * zi) + ci with intermediate rounding, const-under MULF.
-        let zr = 1.0 + 2f64.powi(-27);
-        let zi = 1.0 - 2f64.powi(-27);
-        let ci = -1.0;
-        let two = 2.0_f64;
-        let separate = {
-            let t = zr * zi;
-            let t = two * t;
-            t + ci
-        };
-        // EXT | has_stage2 | stage1_left | rhs1_const
-        let descriptor = (Instruction::MULF as u64)
-            | (0_u64 << 8)
-            | (1_u64 << 16)
-            | ((Instruction::MULF as u64) << 24)
-            | (3_u64 << 32) // pool idx of 2.0
-            | ((Instruction::ADDF as u64) << 40)
-            | (2_u64 << 48) // ci slot
-            | (1 << 57) // rhs1 const
-            | (1 << 60) // stage1 other on left
-            | (1 << 62) // has stage2
-            | (1u64 << 63);
-        let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &[
-                Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG),
-                store_pop(0),
-                Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG | 1),
-                store_pop(1),
-                Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG | 2),
-                store_pop(2),
-                Byte::new(Instruction::FloatChainStore).with_operand_u32((4 << 16) | 4),
-                load(4),
-                Byte::new(Instruction::HALT),
-            ],
-            &[
-                Value::from(zr).raw() as u64,
-                Value::from(zi).raw() as u64,
-                Value::from(ci).raw() as u64,
-                Value::from(two).raw() as u64,
-                descriptor,
-            ],
-            &[],
-            0,
-        );
-        assert_eq!(vm.pop().as_float(), separate);
-    }
-
-    #[test]
-    fn float_chain_store_three_stage_preserves_nan() {
-        let descriptor = (Instruction::MULF as u64)
-            | (0_u64 << 8)
-            | (1_u64 << 16)
-            | ((Instruction::MULF as u64) << 24)
-            | (3_u64 << 32)
-            | ((Instruction::ADDF as u64) << 40)
-            | (2_u64 << 48)
-            | (1 << 57)
-            | (1 << 60)
-            | (1 << 62)
-            | (1u64 << 63);
-        let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &[
-                Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG),
-                store_pop(0),
-                Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG | 1),
-                store_pop(1),
-                Byte::new(Instruction::CONST).with_operand_u32(common::Byte::POOL_FLAG | 2),
-                store_pop(2),
-                Byte::new(Instruction::FloatChainStore).with_operand_u32((4 << 16) | 4),
-                load(4),
-                Byte::new(Instruction::HALT),
-            ],
-            &[
-                Value::from(f64::NAN).raw() as u64,
-                Value::from(1.0_f64).raw() as u64,
-                Value::from(1.0_f64).raw() as u64,
-                Value::from(2.0_f64).raw() as u64,
-                descriptor,
-            ],
-            &[],
-            0,
-        );
-        assert!(vm.pop().as_float().is_nan());
-    }
-
-    #[test]
-    fn vec_niche_pop_does_not_allocate_an_option_enum() {
+    fn vec_pop_allocates_a_boxed_option() {
         let mut vm = Machine::<16>::default();
         let (object, _) = vm.heap.alloc(
             ObjArray {
@@ -2881,13 +2664,12 @@
             Object::Array,
         );
         let before = vm.heap.live_object_count();
-        let value = crate::vec_ops::host_vec_pop_niche(
+        let value = crate::vec_ops::host_vec_pop(
             &mut vm.heap,
             &[Value::from(object.addr())],
         );
-
-        assert_eq!(value.as_int(), 7);
-        assert_eq!(vm.heap.live_object_count(), before);
+        assert!(vm.heap.find_object_by_addr(value.raw() as u64).is_some());
+        assert_eq!(vm.heap.live_object_count(), before + 1);
     }
 
     #[test]
@@ -3364,7 +3146,7 @@
     }
 
     #[test]
-    fn get_field_missing_returns_minus_one() {
+    fn get_field_missing_panics() {
         let mut vm = Machine::<16>::default();
         let mut code = Vec::new();
         let mut strings = Vec::new();
@@ -3375,7 +3157,7 @@
         code.push(Byte::new(Instruction::GetField));
         code.push(Byte::new(Instruction::HALT));
         vm.run_with_pool(&code, &[], &strings, 0);
-        assert_eq!(vm.pop().as_int(), -1);
+        assert!(vm.panicked(), "missing GetField");
     }
 
     #[test]
@@ -4395,65 +4177,19 @@
         assert_eq!(vm.pop().as_int(), 1);
     }
 
-    /// BinSlotSlotConstJmpf: ADDF(slots) > pool float — fall through / jump.
+    /// Retired BinSlotSlotConstJmpf panics if executed.
     #[test]
-    fn bin_slot_slot_const_jmpf_addf_gtf() {
-        let four = 4.0f64.to_bits();
-        let three = 3.0f64.to_bits();
-        let one = 1.0f64.to_bits();
-        let two = 2.0f64.to_bits();
-        // Code layout: setup(0..3), fused(4), fall(5..6), jump(7..8).
-        // 3.0+1.0=4.0; 4.0 > 4.0 is false → jump to 7 → push 0
-        let desc_jump =
-            common::Byte::pack_bin_slot_slot_const_jmpf_desc(1, Instruction::GTF as u8, 2, 7);
+    fn retired_bin_slot_slot_const_jmpf_panics() {
         let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &[
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
-                Byte::new(Instruction::STORE).with_operand_u32(0),
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG | 1),
-                Byte::new(Instruction::STORE).with_operand_u32(1),
-                Byte::new(Instruction::BinSlotSlotConstJmpf).with_bin_slot_slot_const_jmpf(
-                    Instruction::ADDF as u8,
-                    0,
-                    3,
-                ),
-                const_int(1),
-                Byte::new(Instruction::HALT),
-                const_int(0),
-                Byte::new(Instruction::HALT),
-            ],
-            &[three, one, four, desc_jump],
-            &[],
-            0,
-        );
-        assert_eq!(vm.pop().as_int(), 0);
-
-        // 3.0+2.0=5.0; 5.0 > 4.0 → fall through → push 1
-        let desc_fall =
-            common::Byte::pack_bin_slot_slot_const_jmpf_desc(1, Instruction::GTF as u8, 2, 7);
-        let mut vm = Machine::<16>::default();
-        vm.run_with_pool(
-            &[
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG),
-                Byte::new(Instruction::STORE).with_operand_u32(0),
-                Byte::new(Instruction::CONST).with_operand_u32(Byte::POOL_FLAG | 1),
-                Byte::new(Instruction::STORE).with_operand_u32(1),
-                Byte::new(Instruction::BinSlotSlotConstJmpf).with_bin_slot_slot_const_jmpf(
-                    Instruction::ADDF as u8,
-                    0,
-                    3,
-                ),
-                const_int(1),
-                Byte::new(Instruction::HALT),
-                const_int(0),
-                Byte::new(Instruction::HALT),
-            ],
-            &[three, two, four, desc_fall],
-            &[],
-            0,
-        );
-        assert_eq!(vm.pop().as_int(), 1);
+        vm.run(&[
+            Byte::new(Instruction::BinSlotSlotConstJmpf).with_bin_slot_slot_const_jmpf(
+                Instruction::ADDF as u8,
+                0,
+                0,
+            ),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert!(vm.panicked());
     }
 
     /// BinSlotSlotConstJmpt: ADDF(slots) > pool float — jump when true (escape break).

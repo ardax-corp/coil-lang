@@ -404,12 +404,7 @@ fn cond_jump_fusable(slot: &Slot) -> Option<(bool, Label)> {
 
 fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)> {
     // Fuse-select order mirrors historical peephole try_fuse; JMPF targets stay symbolic.
-    if let Some((s, n)) = try_fuse_float_chain_store(window, pool) {
-        return Some((s, n));
-    }
-    if let Some((s, n)) = try_fuse_bin_slot_slot_const_jmpf(window) {
-        return Some((s, n));
-    }
+    // Mandelbrot-shaped `FloatChainStore` / `BinSlotSlotConstJmpf` are not emitted.
     if let Some(s) = try_fuse_load_const_cmp_jmpf_slot(window) {
         return Some((s, 4));
     }
@@ -520,12 +515,16 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
 
 /// Source-ordered float chain → `FloatChainStore`.
 ///
+/// Not selected in production fuse-select (mandelbrot-shaped). Kept so
+/// packing helpers stay compilable.
+///
 /// Matches:
 /// - `LOAD a; LOAD b; op1; LOAD c; op2; STORE d` (legacy 2-stage)
 /// - `BinSlotSlot op1; LOAD c; op2; [LOAD e; op3;] STORE d`
 /// - `CONST pool; BinSlotSlot/LOADs op1; op2; LOAD c; op3; STORE d` (const-under)
 ///
 /// Stages evaluate left-to-right with no reassociation/FMA. Returns `(fused, consumed)`.
+#[allow(dead_code)]
 fn try_fuse_float_chain_store(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)> {
     if let Some(r) = try_fuse_float_chain_const_under(window, pool) {
         return Some(r);
@@ -789,9 +788,12 @@ fn const_pool_index(byte: &Byte) -> Option<u32> {
 
 /// Float magnitude escape: fuse into `BinSlotSlotConstJmpf`.
 ///
+/// Not selected in production fuse-select (mandelbrot-shaped).
+///
 /// Matches either:
 /// - `BinSlotSlot <float-arith>; CONST pool; <float-cmp>; JMPF` (4)
 /// - `LOAD a; LOAD b; <float-arith>; CONST pool; <float-cmp>; JMPF` (6)
+#[allow(dead_code)]
 fn try_fuse_bin_slot_slot_const_jmpf(window: &[Slot]) -> Option<(Slot, usize)> {
     if let Some(s) = try_fuse_bin_slot_slot_const_jmpf_ready(window) {
         return Some((s, 4));
@@ -893,7 +895,7 @@ fn try_fuse_load_load_op_jmpf_slot(window: &[Slot]) -> Option<Slot> {
     let b2 = slot_as_byte(&window[2])?;
     let (if_true, tgt) = cond_jump_fusable(&window[3])?;
     let a = load_slot(&b0)?;
-    let b = load_slot(&b1)?;
+    let b = load_or_dup_slot(a, &b1)?;
     if !is_jmpf_cond_op(*b2.bytecode()) {
         return None;
     }
@@ -944,7 +946,7 @@ fn try_fuse_load_load_op_store(window: &[Slot]) -> Option<Slot> {
     let b2 = slot_as_byte(&window[2])?;
     let b3 = slot_as_byte(&window[3])?;
     let a = load_slot(&b0)?;
-    let b = load_slot(&b1)?;
+    let b = load_or_dup_slot(a, &b1)?;
     if !is_bin_op(*b2.bytecode()) {
         return None;
     }
@@ -1264,6 +1266,17 @@ fn load_slot(byte: &Byte) -> Option<u8> {
     Some(slot as u8)
 }
 
+/// `DUP` copies TOS; after `LOAD a` that is slot `a` again.
+fn load_or_dup_slot(first: u8, byte: &Byte) -> Option<u8> {
+    if let Some(s) = load_slot(byte) {
+        return Some(s);
+    }
+    if *byte.bytecode() == Instruction::DUPLICATE {
+        return Some(first);
+    }
+    None
+}
+
 fn store_slot_u8(byte: &Byte) -> Option<u8> {
     if !matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop) {
         return None;
@@ -1360,7 +1373,7 @@ fn try_fuse_bin_slot_imm_local(window: &[Byte; 3]) -> Option<Byte> {
 
 fn try_fuse_bin_slot_slot_local(window: &[Byte; 3]) -> Option<Byte> {
     let a = load_slot(&window[0])?;
-    let b = load_slot(&window[1])?;
+    let b = load_or_dup_slot(a, &window[1])?;
     let op = *window[2].bytecode();
     if !is_bin_op(op) {
         return None;
@@ -1761,18 +1774,11 @@ mod tests {
         let mut pool = vec![0u64; 7];
         pool[6] = 4.0f64.to_bits();
         let lowered = lower(il.ops(), &mut pool);
-        assert!(matches!(
+        assert_ne!(
             *lowered.bytecode[0].bytecode(),
-            Instruction::BinSlotSlotConstJmpf
-        ));
-        let (bin_op, a, desc_idx) = lowered.bytecode[0].bin_slot_slot_const_jmpf_parts();
-        assert_eq!(bin_op, Instruction::ADDF as u8);
-        assert_eq!(a, 10);
-        let (b, cmp, fidx, target) = Byte::unpack_bin_slot_slot_const_jmpf_desc(pool[desc_idx]);
-        assert_eq!(b, 11);
-        assert_eq!(cmp, Instruction::GTF as u8);
-        assert_eq!(fidx, 6);
-        assert_eq!(target, 2); // after fused op + fall-through CONST
+            Instruction::BinSlotSlotConstJmpf,
+            "mandelbrot-shaped BinSlotSlotConstJmpf is not fused"
+        );
     }
 
     #[test]
@@ -1793,17 +1799,13 @@ mod tests {
         let mut pool = vec![0u64; 7];
         pool[6] = 4.0f64.to_bits();
         let lowered = lower(il.ops(), &mut pool);
-        assert!(matches!(
-            *lowered.bytecode[0].bytecode(),
-            Instruction::BinSlotSlotConstJmpf
-        ));
-        let (bin_op, a, desc_idx) = lowered.bytecode[0].bin_slot_slot_const_jmpf_parts();
-        assert_eq!(bin_op, Instruction::ADDF as u8);
-        assert_eq!(a, 10);
-        let (b, cmp, fidx, _) = Byte::unpack_bin_slot_slot_const_jmpf_desc(pool[desc_idx]);
-        assert_eq!(b, 11);
-        assert_eq!(cmp, Instruction::GTF as u8);
-        assert_eq!(fidx, 6);
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::BinSlotSlotConstJmpf),
+            "LOAD;LOAD;ADDF;CONST;GTF;JMPF must not fuse to BinSlotSlotConstJmpf"
+        );
     }
 
     #[test]
@@ -1866,21 +1868,12 @@ mod tests {
 
         let mut pool = Vec::new();
         let lowered = lower(il.ops(), &mut pool);
-        assert!(matches!(
-            *lowered.bytecode[0].bytecode(),
-            Instruction::FloatChainStore
-        ));
-        assert_eq!(lowered.bytecode[0].operand_u32() >> 16, 4);
-        let descriptor = pool[lowered.bytecode[0].operand_u32() as usize & 0xFFFF];
-        assert_eq!(descriptor as u8, Instruction::SUBF as u8);
-        assert_eq!((descriptor >> 8) as u8, 1);
-        assert_eq!((descriptor >> 16) as u8, 2);
-        assert_eq!((descriptor >> 24) as u8, Instruction::ADDF as u8);
-        assert_eq!((descriptor >> 32) as u8, 3);
-        assert_eq!(
-            descriptor & (1u64 << 63),
-            0,
-            "legacy 2-stage keeps EXT clear"
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::FloatChainStore),
+            "FloatChainStore is not emitted"
         );
     }
 
@@ -1901,24 +1894,13 @@ mod tests {
         il.push_byte(Byte::new(Instruction::STORE).with_operand_u32(8));
 
         let lowered = lower(il.ops(), &mut pool);
-        assert_eq!(lowered.bytecode.len(), 1);
-        assert!(matches!(
-            *lowered.bytecode[0].bytecode(),
-            Instruction::FloatChainStore
-        ));
-        assert_eq!(lowered.bytecode[0].operand_u32() >> 16, 8);
-        let descriptor = pool[lowered.bytecode[0].operand_u32() as usize & 0xFFFF];
-        assert_ne!(descriptor & (1u64 << 63), 0);
-        assert_eq!(descriptor as u8, Instruction::MULF as u8);
-        assert_eq!((descriptor >> 8) as u8, 7);
-        assert_eq!((descriptor >> 16) as u8, 8);
-        assert_eq!((descriptor >> 24) as u8, Instruction::MULF as u8);
-        assert_eq!((descriptor >> 32) as u8, 0); // const pool idx 0
-        assert_ne!(descriptor & (1 << 57), 0); // rhs1 const
-        assert_ne!(descriptor & (1 << 60), 0); // stage1 other on left
-        assert_ne!(descriptor & (1 << 62), 0); // has stage2
-        assert_eq!((descriptor >> 40) as u8, Instruction::ADDF as u8);
-        assert_eq!((descriptor >> 48) as u8, 6);
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::FloatChainStore),
+            "FloatChainStore is not emitted"
+        );
     }
 
     #[test]
@@ -1935,17 +1917,13 @@ mod tests {
 
         let mut pool = Vec::new();
         let lowered = lower(il.ops(), &mut pool);
-        assert!(matches!(
-            *lowered.bytecode[0].bytecode(),
-            Instruction::FloatChainStore
-        ));
-        let descriptor = pool[lowered.bytecode[0].operand_u32() as usize & 0xFFFF];
-        assert_eq!(descriptor as u8, Instruction::SUBF as u8);
-        assert_eq!((descriptor >> 8) as u8, 1);
-        assert_eq!((descriptor >> 16) as u8, 2);
-        assert_eq!((descriptor >> 24) as u8, Instruction::ADDF as u8);
-        assert_eq!((descriptor >> 32) as u8, 3);
-        assert_eq!(descriptor & (1u64 << 63), 0);
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::FloatChainStore),
+            "FloatChainStore is not emitted"
+        );
     }
 
     /// Stage0 `LOAD; CONST; op` (post-cast_spill shape) fuses with continuations.
@@ -1966,23 +1944,13 @@ mod tests {
         il.push_byte(Byte::new(Instruction::STORE).with_operand_u32(5));
 
         let lowered = lower(il.ops(), &mut pool);
-        assert_eq!(lowered.bytecode.len(), 1);
-        assert!(matches!(
-            *lowered.bytecode[0].bytecode(),
-            Instruction::FloatChainStore
-        ));
-        let descriptor = pool[lowered.bytecode[0].operand_u32() as usize & 0xFFFF];
-        assert_ne!(descriptor & (1u64 << 63), 0);
-        assert_eq!(descriptor as u8, Instruction::MULF as u8);
-        assert_eq!((descriptor >> 8) as u8, 10);
-        assert_eq!((descriptor >> 16) as u8, 0); // pool idx 0
-        assert_ne!(descriptor & (1 << 56), 0); // rhs0 const
-        assert_eq!((descriptor >> 24) as u8, Instruction::DIVF as u8);
-        assert_eq!((descriptor >> 32) as u8, 11);
-        assert_ne!(descriptor & (1 << 62), 0); // has stage2
-        assert_eq!((descriptor >> 40) as u8, Instruction::SUBF as u8);
-        assert_eq!((descriptor >> 48) as u8, 1);
-        assert_ne!(descriptor & (1 << 58), 0); // rhs2 const
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::FloatChainStore),
+            "FloatChainStore is not emitted"
+        );
     }
 
     /// `CastIntToFloat` spill + const-under stage0 → `FloatChainStore` (mandelbrot `cr`).
@@ -2016,17 +1984,38 @@ mod tests {
         ];
         let lowered = lower(&ops, &mut pool);
         assert!(
-            lowered
+            !lowered
                 .bytecode
                 .iter()
                 .any(|b| matches!(*b.bytecode(), Instruction::FloatChainStore)),
-            "cast_spill + const-under should fuse; got {:?}",
+            "FloatChainStore is not emitted; got {:?}",
             lowered
                 .bytecode
                 .iter()
                 .map(|b| *b.bytecode())
                 .collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn lower_fuses_load_dup_mul_to_bin_slot_slot() {
+        let mut il = IlBuilder::new();
+        il.push_byte(Byte::new(Instruction::LOAD).with_operand_u32(7));
+        il.push_byte(Byte::new(Instruction::DUPLICATE));
+        il.push_byte(Byte::new(Instruction::MUL));
+        il.push_byte(Byte::new(Instruction::HALT));
+
+        let mut pool = Vec::new();
+        let lowered = lower(il.ops(), &mut pool);
+        assert!(
+            matches!(*lowered.bytecode[0].bytecode(), Instruction::BinSlotSlot),
+            "LOAD; DUP; MUL should fuse; got {:?}",
+            lowered.bytecode[0].bytecode()
+        );
+        let (op, a, b) = lowered.bytecode[0].bin_slot_slot_parts();
+        assert_eq!(op, Instruction::MUL as u8);
+        assert_eq!(a, 7);
+        assert_eq!(b, 7);
     }
 
     #[test]

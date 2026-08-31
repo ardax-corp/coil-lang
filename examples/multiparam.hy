@@ -8,7 +8,7 @@ trait Convert<A, B> {
     fn cast(A x) -> B;
 }
 
-impl Convert<int, int> {
+impl Convert<int> for int {
     pub fn cast(int x) -> int {
         return x;
     }

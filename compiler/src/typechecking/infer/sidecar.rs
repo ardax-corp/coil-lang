@@ -10,7 +10,7 @@ use crate::typechecking::def_id::DefId;
 use crate::typechecking::generics::InstanceDef;
 use crate::typechecking::id::NodeId;
 use crate::typechecking::subst::apply_ty_prune;
-use crate::typechecking::ty::{option_inner, result_ok_err, Ty};
+use crate::typechecking::ty::Ty;
 
 use super::{Checker, ForInInfo};
 
@@ -152,53 +152,6 @@ impl Checker {
     }
 }
 
-fn peel_fn_return(ty: &Ty) -> Ty {
-    let mut t = ty.clone();
-    while let Ty::Forall { body, .. } = t {
-        t = *body;
-    }
-    while let Ty::Fun(_, ret) = t {
-        t = *ret;
-    }
-    t
-}
-
-fn pair_value_supported(ty: &Ty) -> bool {
-    match ty {
-        Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::Readonly(inner) | Ty::Constructor { owner: inner, .. } => pair_value_supported(inner),
-        Ty::App(_, args) => args.iter().all(pair_value_supported),
-        Ty::List(inner) => pair_value_supported(inner),
-        _ => true,
-    }
-}
-
-fn niche_heap_only(ty: &Ty, is_class: impl Fn(&str) -> bool) -> bool {
-    match ty {
-        Ty::Readonly(inner) | Ty::Constructor { owner: inner, .. } => {
-            niche_heap_only(inner, is_class)
-        }
-        Ty::Con(name) => name == "string" || is_class(name),
-        Ty::App(head, _) => matches!(head.as_ref(), Ty::Con(name) if is_class(name)),
-        Ty::List(_) | Ty::Sum { .. } | Ty::Tuple(_) | Ty::Record { .. } => true,
-        _ => false,
-    }
-}
-
-fn pair_niche_for_scheme_ty(ty: &Ty, is_class: impl Fn(&str) -> bool) -> Option<PairNicheAbi> {
-    let ret = peel_fn_return(ty);
-    if let Some((ok, err)) = result_ok_err(&ret) {
-        if pair_value_supported(&ok) && pair_value_supported(&err) {
-            return Some(PairNicheAbi::PairResult);
-        }
-    }
-    if let Some(inner) = option_inner(&ret) {
-        if niche_heap_only(&inner, is_class) {
-            return Some(PairNicheAbi::NicheOption);
-        }
-        if pair_value_supported(&inner) {
-            return Some(PairNicheAbi::PairOption);
-        }
-    }
+fn pair_niche_for_scheme_ty(_ty: &Ty, _is_class: impl Fn(&str) -> bool) -> Option<PairNicheAbi> {
     None
 }

@@ -69,8 +69,8 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 | Errors | Built-in `Option`/`Result`; `raise`, `?`, `??`, `?.` |
 | Classes | `class C { … }`, `impl C { … }`, `new C(…)` — prefer methods for type-tied ops; inherent `fn drop()` is a GC-time finalizer |
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |
-| FFI | `extern { … }` blocks or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
-| Attributes | `#[derive(Show)]`, `#[test("desc")]`, user `attr` decorators |
+| FFI | `extern "c" { fn …; }` or `use ffi::{dload, declare, invoke}` + `ffi::types::{Int, …}` |
+| Attributes | `#[derive(Show)]`, user `attr` decorators; tests are `test("desc") { … }` only |
 | Type query | `typeof expr` → compile-time FQN string (not evaluated at runtime) |
 
 Named call-site args: positional prefix then `f(name: v)`. Rest: trailing `T... xs`. Spread: `f(...pack)`.
@@ -111,7 +111,7 @@ test("addition") {
 }
 ```
 
-Or `#[test("desc")] fn … { … }`. Body is Result mode. `panic` aborts VM; `coil test` treats as failure.
+Body is Result mode. `panic` aborts VM; `coil test` treats as failure. `#[test]` on `fn` is a type error.
 
 ## Multi-file projects
 
@@ -139,7 +139,7 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `coil.toml` paths, system.
 5. **Stale `out.hyc`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
-7. **Free generic Option return** — `fn f<T>(T) -> Option<T>` is a type error (`E0127`). Put it on an inherent `impl` method. See [limitations.md](docs/internals/limitations.md).
+7. **`Option`/`Result`** — always boxed enums (archive 4). Free `fn f<T>(T) -> Option<T>` is still `E0127`; put that return on an inherent method.
 
 ## Debugging programs
 

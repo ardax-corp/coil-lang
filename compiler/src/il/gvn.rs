@@ -663,26 +663,9 @@ pub fn cfg_gvn_with(ops: &mut Vec<IlOp>, ssa: bool) {
     if ssa {
         super::gvn_ssa::ssa_gvn(ops);
     }
-    expand_dup_after_load(ops);
 }
 
 pub use super::gvn_ssa::{build_ssa, eliminate_redundant, number_values, ssa_gvn};
-
-/// `Load s; Dup` → `Load s; Load s`, undoing Dup-CSE that would otherwise hide
-/// a binop's operands from fuse-select (`BinSlotSlot*`, packed `LOAD`).
-///
-/// Dispatch-neutral on its own — `Dup` and `Load` are one op each — and always
-/// sound: nothing between the pair can write `s`, so TOS still holds `stack[s]`.
-fn expand_dup_after_load(ops: &mut [IlOp]) {
-    for i in 0..ops.len().saturating_sub(1) {
-        let IlOp::Load { slot, .. } = ops[i] else {
-            continue;
-        };
-        if let IlOp::Dup { loc } = ops[i + 1] {
-            ops[i + 1] = IlOp::Load { slot, loc };
-        }
-    }
-}
 
 #[cfg(test)]
 #[path = "gvn.tests.rs"]
@@ -723,8 +706,7 @@ mod tests {
         assert!(matches!(ops[2], IlOp::Dup { .. }));
     }
 
-    /// Tests the CSE step directly: `cfg_gvn` re-expands `Load; Dup` at the end
-    /// so fuse-select still sees both operands (`expand_dup_after_load`).
+    /// Identical loads CSE to `Load; Dup`; fuse-select treats Dup as the second operand.
     #[test]
     fn within_block_dup_replaces_second_identical_load() {
         let mut ops = vec![
@@ -1312,8 +1294,8 @@ mod tests {
 
     #[test]
     fn expands_dup_after_load_so_binop_can_fuse() {
-        // `x * x`: GVN would leave `Load; Dup; MUL`, which fuse-select cannot
-        // turn into BinSlotSlot.
+        // `x * x`: GVN leaves `Load; Dup; MUL`; fuse-select treats Dup as the
+        // second operand of BinSlotSlot.
         let mut ops = vec![
             IlOp::Load { slot: 7, loc: loc() },
             IlOp::Load { slot: 7, loc: loc() },
@@ -1325,9 +1307,8 @@ mod tests {
         ];
         cfg_gvn(&mut ops);
         assert!(
-            matches!(ops[0], IlOp::Load { slot: 7, .. })
-                && matches!(ops[1], IlOp::Load { slot: 7, .. }),
-            "both operands must stay LOADs for BinSlotSlot fusion"
+            matches!(ops[0], IlOp::Load { slot: 7, .. }) && matches!(ops[1], IlOp::Dup { .. }),
+            "GVN may Dup-CSE the second LOAD; fuse-select accepts Dup"
         );
     }
 

@@ -27,6 +27,8 @@ pub struct BoundMethodCall {
     pub method_slot: usize,
     pub arity: usize,
     pub has_receiver: bool,
+    /// Trait that owns the method (may be a superclass of the bound dict).
+    pub class: String,
 }
 
 /// Code-generation recipe for an operator dispatched through a typeclass
