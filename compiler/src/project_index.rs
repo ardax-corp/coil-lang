@@ -313,4 +313,63 @@ mod tests {
 
         let _ = fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn two_modules_defining_foo_do_not_collapse() {
+        let dir = std::env::temp_dir().join(format!(
+            "coil-project-index-two-foo-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        write_project(
+            &dir,
+            &[
+                ("a.hy", "fn foo() -> int { return 1; }\n"),
+                ("b.hy", "fn foo() -> int { return 2; }\n"),
+                (
+                    "main.hy",
+                    "use a::foo;\nuse b::foo as bfoo;\nfn main() { let x = foo(); let y = bfoo(); return; }\n",
+                ),
+            ],
+            "main.hy",
+        );
+
+        let mut index = ProjectIndex::new(dir.clone());
+        index.index_from_manifest();
+
+        let a = dir.join("a.hy");
+        let b = dir.join("b.hy");
+        let main = dir.join("main.hy");
+        let a_defs = index.symbols_for(&a).unwrap().definitions("foo");
+        let b_defs = index.symbols_for(&b).unwrap().definitions("foo");
+        assert_eq!(a_defs.len(), 1);
+        assert_eq!(b_defs.len(), 1);
+        let a_id = a_defs[0].def_id;
+        let b_id = b_defs[0].def_id;
+        assert!(a_id.is_some() && b_id.is_some(), "expected bound DefIds");
+        assert_ne!(a_id, b_id, "same-name foo in two modules must not share a DefId");
+
+        let main_syms = index.symbols_for(&main).unwrap();
+        let foo_refs: Vec<_> = main_syms
+            .references("foo")
+            .iter()
+            .filter(|s| {
+                let src = index.source_for(&main).unwrap();
+                &src[s.range.clone()] == "foo"
+            })
+            .collect();
+        assert!(!foo_refs.is_empty());
+        let resolved_foo = index.resolve_definition(&main, foo_refs[0].range.clone(), "foo");
+        assert_eq!(resolved_foo.len(), 1);
+        assert_eq!(resolved_foo[0].0, a);
+
+        let bfoo_refs = main_syms.references("bfoo");
+        if !bfoo_refs.is_empty() {
+            let resolved_b = index.resolve_definition(&main, bfoo_refs[0].range.clone(), "bfoo");
+            assert_eq!(resolved_b.len(), 1);
+            assert_eq!(resolved_b[0].0, b);
+        }
+
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
