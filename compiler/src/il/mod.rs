@@ -1,5 +1,7 @@
 //! Compile-time stack IL with symbolic labels.
 //!
+//! Instruction lowering + label resolution + fuse — not a semantic IR.
+//! Names, types, and call meaning live in DefIds / the typed sidecar.
 //! Codegen emits [`IlOp`]s (including [`IlOp::Label`] bind points and
 //! label-targeted jumps). [`lower`] assigns PCs once, selecting fused
 //! encodings along the way — no post-shrink jump relocation.

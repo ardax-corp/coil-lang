@@ -32,6 +32,8 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 - **Lint gate**: `cargo check --workspace` (not clippy — `Gc::payload_mut` deny).
 - **Fuse-select (D4)**: one named pass on typed `IlOp` after concat (`fuse_select` → PC assign). Residual `Byte` is a cold refuse. No post-lower `adjust_target`, no production per-fn fuse.
 
+- **IL** is instruction lowering + label resolution + fuse — not a semantic IR. DefIds / typed sidecar hold names, types, and call meaning. See `docs/internals/pipeline.md` (IL intent).
+
 Codegen / match / `STORE`: `.cursor/skills/coil-contributor/reference.md`. Pipeline: `docs/internals/pipeline.md`.
 
 ## Cloud agents

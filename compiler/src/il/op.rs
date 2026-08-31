@@ -70,6 +70,7 @@ pub enum IlJumpKind {
     JumpIfTrue,
     JumpIfMatch {
         tag: u32,
+        /// Tell/DCE stack effect. Lower encodes tag + target only.
         arity: u32,
     },
 }
@@ -90,7 +91,8 @@ pub enum EntryKind {
 /// [`IlOp::Byte`] remains the escape hatch for the long tail.
 #[derive(Clone, PartialEq, Eq)]
 pub enum IlOp {
-    /// Residual cold set (`FORMAT`, FFI, packed multi-slot LOAD/STORE, …).
+    /// Residual cold set / escape hatch (`FORMAT`, FFI, packed multi-slot
+    /// LOAD/STORE, and anything [`IlOp::from_plain_byte`] still leaves unmatched).
     /// Fuse-select refuses any window that includes this. Jump/call ops that
     /// still embed absolute PCs are accepted for transitional emit paths;
     /// prefer [`IlOp::Jump`] / [`IlOp::Entry`].
@@ -106,7 +108,8 @@ pub enum IlOp {
         slot: u32,
         loc: DebugLoc,
     },
-    /// Inline `CONST` only (non-negative; pool / high-bit forms use [`IlOp::ConstPool`]).
+    /// Inline `CONST` (encoding-aware: non-negative; pool / high-bit forms
+    /// use [`IlOp::ConstPool`]). Optional later: value first, encode at lower.
     Const {
         imm: i32,
         loc: DebugLoc,
@@ -216,6 +219,7 @@ pub enum IlOp {
         loc: DebugLoc,
     },
     /// Plain int/float binop or comparison (stack operands).
+    /// `op` is the VM [`Instruction`] today; an IL-level kind is optional later.
     Bin {
         op: Instruction,
         loc: DebugLoc,
