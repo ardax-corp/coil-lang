@@ -33,7 +33,7 @@ impl FfiErrorKindTag {
             | FfiError::MissingReturnType
             | FfiError::VoidArgument { .. }
             | FfiError::EmptyName => Self::InvalidSignature,
-            FfiError::Unsupported(_) => Self::Unsupported,
+            FfiError::Unsupported(_) | FfiError::InteriorNul => Self::Unsupported,
             FfiError::InvalidHandle(_) => Self::InvalidHandle,
             FfiError::LibraryDenied { .. } | FfiError::SymbolDenied { .. } => Self::Other,
         }

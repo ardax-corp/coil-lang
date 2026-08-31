@@ -2,16 +2,16 @@
 
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, exit};
+use std::process::{exit, Command};
 use std::sync::Arc;
 
 use common::{
-    ARCHIVE_VERSION, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
     archive_version_compatible, default_natives_root, embedded_archive_slice,
     format_archive_version, read_embedded_native_lock, read_package_trailer,
+    ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug, ARCHIVE_VERSION,
 };
-use machine::{DloadGate, Machine, wire_standard_host_natives};
 use machine::thread::ThreadProgram;
+use machine::{wire_standard_host_natives, DloadGate, Machine};
 use rkyv::rancor::Error;
 
 /// Errors loading a `.hyc` / embedded archive blob.
@@ -22,10 +22,19 @@ pub enum LoadErr {
     Version(u32),
 }
 
+/// Owned archive payload restored by CLI and packaged execute.
+#[derive(Debug)]
+pub struct LoadedArchive {
+    pub bytecode: Vec<Byte>,
+    pub constants: Vec<u64>,
+    pub strings: Vec<String>,
+    pub static_slots: u32,
+    pub debug: ProgramDebug,
+    pub struct_layouts: Vec<common::CStructLayout>,
+}
+
 /// Deserialize an `ArchivedProgram` blob (from `.hyc` or an embedded slice).
-pub fn load_archive_bytes(
-    buffer: &[u8],
-) -> Result<(Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug), LoadErr> {
+pub fn load_archive_bytes(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
     let align = std::mem::align_of::<ArchivedArchivedProgram>();
     if (buffer.as_ptr() as usize) % align == 0 {
         decode_archive(buffer)
@@ -36,9 +45,7 @@ pub fn load_archive_bytes(
     }
 }
 
-fn decode_archive(
-    buffer: &[u8],
-) -> Result<(Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug), LoadErr> {
+fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
     let archived =
         rkyv::access::<ArchivedArchivedProgram, Error>(buffer).map_err(|_| LoadErr::Corrupt)?;
     let version = u32::from(archived.version);
@@ -56,23 +63,25 @@ fn decode_archive(
         .map_err(|_| LoadErr::Corrupt)?;
     let debug_locs = rkyv::deserialize::<Vec<common::DebugLoc>, Error>(&archived.debug_locs)
         .map_err(|_| LoadErr::Corrupt)?;
-    Ok((
+    let struct_layouts =
+        rkyv::deserialize::<Vec<common::CStructLayout>, Error>(&archived.struct_layouts)
+            .map_err(|_| LoadErr::Corrupt)?;
+    Ok(LoadedArchive {
         bytecode,
         constants,
         strings,
-        static_slot_count,
-        ProgramDebug {
+        static_slots: static_slot_count,
+        debug: ProgramDebug {
             source_files,
             debug_locs,
             fn_symbols: Vec::new(),
         },
-    ))
+        struct_layouts,
+    })
 }
 
 /// Load a `.hyc` file from disk.
-pub fn try_load_archive(
-    path: &str,
-) -> Result<(Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug), LoadErr> {
+pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
     let mut f = std::fs::File::open(path).map_err(|_| LoadErr::Missing)?;
     let mut buffer = Vec::with_capacity(1024);
     f.read_to_end(&mut buffer).map_err(|_| LoadErr::Corrupt)?;
@@ -83,14 +92,10 @@ pub fn try_load_archive(
 ///
 /// Returns `true` when a language-level `panic` aborted.
 ///
-/// FFI struct layouts from `extern struct` are not restored here (not stored in
-/// the archive yet). `ffi_search_paths` are searched before `entry`'s parent.
+/// Restores [`common::CStructLayout`] from the archive (CLI `.hyc` and packaged
+/// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
 pub fn execute_archived_program(
-    bytecode: &[Byte],
-    constants: &[u64],
-    strings: &[String],
-    static_slots: u32,
-    debug: ProgramDebug,
+    loaded: &LoadedArchive,
     entry: Option<&Path>,
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
@@ -103,17 +108,25 @@ pub fn execute_archived_program(
 
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
     machine.set_ffi_paths(base_dir, ffi_search_paths);
+    for layout in &loaded.struct_layouts {
+        machine.register_struct_layout(machine::CStructLayout::from_archive(layout));
+    }
 
     machine.set_thread_program(Arc::new(ThreadProgram {
-        code: Arc::from(bytecode.to_vec()),
-        constants: Arc::from(constants.to_vec()),
-        strings: Arc::from(strings.to_vec()),
-        static_slot_count: static_slots,
-        debug: debug.clone(),
+        code: Arc::from(loaded.bytecode.clone()),
+        constants: Arc::from(loaded.constants.clone()),
+        strings: Arc::from(loaded.strings.clone()),
+        static_slot_count: loaded.static_slots,
+        debug: loaded.debug.clone(),
         operand_stack_slots: machine::DEFAULT_OPERAND_STACK_SLOTS as u32,
     }));
-    machine.set_program_debug(debug);
-    machine.run_raw(bytecode, constants, strings, static_slots);
+    machine.set_program_debug(loaded.debug.clone());
+    machine.run_raw(
+        &loaded.bytecode,
+        &loaded.constants,
+        &loaded.strings,
+        loaded.static_slots,
+    );
     machine.panicked()
 }
 
@@ -135,7 +148,10 @@ fn ensure_native_cache(lock: &NativeLock, exe: &Path) -> Result<Vec<PathBuf>, St
                 }
             }
         }
-        missing.push(format!("{} {} ({})", entry.package, entry.version, entry.filename));
+        missing.push(format!(
+            "{} {} ({})",
+            entry.package, entry.version, entry.filename
+        ));
     }
     if !missing.is_empty() {
         return Err(format!(
@@ -165,7 +181,7 @@ pub fn try_run_embedded() -> Option<bool> {
         exit(1);
     }
 
-    let (bytecode, constants, strings, static_slots, debug) = match load_archive_bytes(archive) {
+    let loaded = match load_archive_bytes(archive) {
         Ok(ok) => ok,
         Err(LoadErr::Version(v)) => {
             eprintln!(
@@ -230,16 +246,8 @@ pub fn try_run_embedded() -> Option<bool> {
         ffi_search_paths.push(parent.join("lib"));
     }
 
-    let panicked = execute_archived_program(
-        &bytecode,
-        &constants,
-        &strings,
-        static_slots,
-        debug,
-        Some(exe.as_path()),
-        ffi_search_paths,
-        dload_gate,
-    );
+    let panicked =
+        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate);
     Some(panicked)
 }
 
