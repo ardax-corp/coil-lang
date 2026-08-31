@@ -64,6 +64,7 @@ impl Checker {
             def_interner,
             schemes_by_def: HashMap::new(),
             local_defs: HashMap::new(),
+            module_locals: HashMap::new(),
             def_ids_by_node: HashMap::new(),
             current_module_id,
             current_match_lhs: None,
@@ -1475,6 +1476,8 @@ impl Checker {
             &self.virtual_modules,
             &mut self.local_defs,
         );
+        self.module_locals
+            .insert(self.current_module_id, self.local_defs.clone());
 
         // Forward-declaration pre-pass: walk the AST once and
         // register every `enum` declaration's shape. This must run
@@ -1576,6 +1579,14 @@ impl Checker {
 
     pub fn def_interner(&self) -> &crate::typechecking::def_id::DefInterner {
         &self.def_interner
+    }
+
+    /// Resolve-time name → [`DefId`] for `module` (includes `use` aliases).
+    pub fn module_locals(
+        &self,
+        module: crate::typechecking::def_id::ModuleId,
+    ) -> Option<&HashMap<String, DefId>> {
+        self.module_locals.get(&module)
     }
 
     fn record_free_fn_scheme(&mut self, name: &str, scheme: Scheme) {
