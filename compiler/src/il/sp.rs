@@ -60,6 +60,7 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
         | IlOp::ConstPool { .. }
         | IlOp::String { .. }
         | IlOp::Dup { .. } => Some(1),
+        IlOp::LogNot { .. } => Some(0),
         IlOp::StorePop { .. } | IlOp::Pop { .. } | IlOp::ArrayPin { .. } => Some(-1),
         IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => Some(-1),
         IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. } => Some(0),

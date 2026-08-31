@@ -521,32 +521,35 @@ instrumenting). Inner `ssa_gvn` follows the `ssa_gvn` flag.
 - **Tests:** `il/gvn.rs` `within_block_dup_replaces_second_identical_const`
   (calls `cfg_gvn` directly). Dup-expand: `expands_dup_after_load_so_binop_can_fuse`.
 
-## fuse-select (lower, not in `opt/`)
+## fuse-select (D4, named pass in `lower.rs`, not in `opt/` driver)
 
-**Fn:** `il::lower::lower_optimized` → `fuse_slots_with_origins` /
-`try_fuse_slots`. Runs **once** after concat. Not gated by `OptimizeOptions`.
+**Fn:** `il::lower::fuse_select` called from `lower_optimized`. Runs **once**
+after concat. Not gated by `OptimizeOptions`. Not a second lowering: PC assign
+and encode stay in `lower_optimized`. No post-lower `adjust_target`.
 
-- **Input:** Post-opt IL. Typed ops + residual `Byte` encode to `Slot::Byte`.
-  Symbolic `Jump`/`Entry` stay slots until PC assign. Incoming labels and
-  absolute jump targets are bind points.
+- **Input:** Post-opt **typed** [`IlOp`](../op.rs). `Jump`/`Entry` stay symbolic.
+  Incoming [`Label`] / [`JoinLabel`] binds and `FuseHint` / `JoinClass` (D3) are
+  hard barriers — no dummy `NOOP` / `DUP;POP`. Residual [`IlOp::Byte`] is the
+  **cold set** (`FORMAT`, FFI, packed multi-slot LOAD/STORE, unmatched
+  `from_plain_byte`) and is **refused** in any multi-op window.
 - **Output:** Superinstructions (const fold, `BinSlotImm`/`BinSlotSlot`,
   `*Jmpf`/`*Jmpt`, `*Store`, packed LOAD/STORE n≤3, `*Return`,
   `FloatChainStore` up to 3 stages, `BinSlotSlotConstJmpf`, …) then one PC
   assignment. `Vec<Byte>` for the archive. Label ids map to PCs; they do not
   survive as IL.
 - **Refusals:** Window that would pull a **label** or **abs-jump target** onto a
-  non-first op; `*Return` fusion when window[0] is an **unconditional join**
-  (stacked arm value must be popped). **`FuseHint`** on the cond-jump
-  (`nofuse` / `ValueUnderJmp`) refuses `*Jmpf`/`*Jmpt` fusion (pair-`?` /
-  pair-match keep `EQ;JMPF`). A **`JoinLabel`** bind is a value join: same
-  window-break as a label, including `CONST;RETURN`. Residual abs JMP as
-  `Byte` panics. Per-function fuse-select is not production (measured no win).
-  Dummy `NOOP` / `DUP;POP` barriers are not used (D3). Fuse-select stays in
-  lower (not D4).
+  non-first op; window that contains residual **`Byte`**; `*Return` fusion when
+  window[0] is an **unconditional join** (stacked arm value must be popped).
+  **`FuseHint`** on the cond-jump (`nofuse` / `ValueUnderJmp`) refuses
+  `*Jmpf`/`*Jmpt` fusion (pair-`?` / pair-match keep `EQ;JMPF`). A
+  **`JoinLabel`** bind is a value join: same window-break as a label, including
+  `CONST;RETURN`. Residual abs JMP as `Byte` panics. Per-function fuse-select
+  is not production (measured no win).
 - **Tests:** `il/lower.rs` `lower_fuses_bin_slot_slot`, `lower_fuses_bin_slot_imm`,
   `lower_fuses_const_return_imm`, `lower_fuses_load_const_add_store_to_bin_slot_imm_store`,
   `lower_fuses_two_stage_float_chain_store`, `lower_refuses_cmp_jmpf_when_jump_is_nofuse`,
-  `lower_refuses_const_return_across_value_join`. Cast-spill → fuse:
+  `lower_refuses_const_return_across_value_join`,
+  `fuse_select_refuses_residual_byte_in_window`. Cast-spill → fuse:
   `cast_spill_feeds_float_chain_store`. Invert-guard: `opt/convoy.tests.rs`
   `invert_guard_refuses_value_under_jmp_hint`.
 
@@ -584,7 +587,7 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | seek_back_edge | `slot_promote.rs` | no |
 | slot_promote_tell | `slot_promote.rs` | no |
 | cfg_gvn | `gvn.rs` | no |
-| fuse-select | `lower.rs` | no |
+| fuse-select (D4) | `lower.rs` | no |
 
 Run (from repo root):
 

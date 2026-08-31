@@ -420,6 +420,7 @@ fn format_il_op(op: &IlOp) -> String {
         IlOp::String { idx, .. } => format!("STRING table[{idx}]"),
         IlOp::Dup { .. } => "DUPLICATE".to_string(),
         IlOp::Pop { .. } => "POP".to_string(),
+        IlOp::LogNot { .. } => "LogNot".to_string(),
         IlOp::Index { .. } => "Index".to_string(),
         IlOp::IndexUnchecked { .. } => "IndexUnchecked".to_string(),
         IlOp::ArrayPin { slot, .. } => format!("ArrayPin slot={slot}"),

@@ -90,9 +90,10 @@ pub enum EntryKind {
 /// [`IlOp::Byte`] remains the escape hatch for the long tail.
 #[derive(Clone, PartialEq, Eq)]
 pub enum IlOp {
-    /// Ordinary VM instruction whose operand is not a code pointer.
-    /// Jump/call ops that still embed absolute PCs are accepted for
-    /// transitional emit paths; prefer [`IlOp::Jump`] / [`IlOp::Entry`].
+    /// Residual cold set (`FORMAT`, FFI, packed multi-slot LOAD/STORE, …).
+    /// Fuse-select refuses any window that includes this. Jump/call ops that
+    /// still embed absolute PCs are accepted for transitional emit paths;
+    /// prefer [`IlOp::Jump`] / [`IlOp::Entry`].
     Byte {
         byte: Byte,
         loc: DebugLoc,
@@ -124,6 +125,10 @@ pub enum IlOp {
         loc: DebugLoc,
     },
     Pop {
+        loc: DebugLoc,
+    },
+    /// Unary `LogNot` (stack). Typed so fuse-select can emit `LogNotJmpf`.
+    LogNot {
         loc: DebugLoc,
     },
     /// `Index` — pop array + index, push element.
@@ -339,6 +344,7 @@ impl IlOp {
             },
             Instruction::DUPLICATE => Self::Dup { loc },
             Instruction::POP => Self::Pop { loc },
+            Instruction::LogNot => Self::LogNot { loc },
             Instruction::Index => Self::Index { loc },
             Instruction::IndexUnchecked => Self::IndexUnchecked { loc },
             Instruction::ArrayPin => Self::ArrayPin {
@@ -443,6 +449,7 @@ impl IlOp {
             IlOp::String { idx, .. } => Byte::new(Instruction::STRING).with_operand_u32(*idx),
             IlOp::Dup { .. } => Byte::new(Instruction::DUPLICATE),
             IlOp::Pop { .. } => Byte::new(Instruction::POP),
+            IlOp::LogNot { .. } => Byte::new(Instruction::LogNot),
             IlOp::Index { .. } => Byte::new(Instruction::Index),
             IlOp::IndexUnchecked { .. } => Byte::new(Instruction::IndexUnchecked),
             IlOp::ArrayPin { slot, .. } => Byte::new(Instruction::ArrayPin).with_operand_u32(*slot),
@@ -576,6 +583,7 @@ impl IlOp {
             | IlOp::String { loc, .. }
             | IlOp::Dup { loc }
             | IlOp::Pop { loc }
+            | IlOp::LogNot { loc }
             | IlOp::Index { loc }
             | IlOp::IndexUnchecked { loc }
             | IlOp::ArrayPin { loc, .. }
@@ -619,6 +627,7 @@ impl IlOp {
             | IlOp::String { loc: l, .. }
             | IlOp::Dup { loc: l }
             | IlOp::Pop { loc: l }
+            | IlOp::LogNot { loc: l }
             | IlOp::Index { loc: l }
             | IlOp::IndexUnchecked { loc: l }
             | IlOp::ArrayPin { loc: l, .. }
@@ -666,6 +675,7 @@ impl IlOp {
             IlOp::String { .. } => Some(Instruction::STRING),
             IlOp::Dup { .. } => Some(Instruction::DUPLICATE),
             IlOp::Pop { .. } => Some(Instruction::POP),
+            IlOp::LogNot { .. } => Some(Instruction::LogNot),
             IlOp::Index { .. } => Some(Instruction::Index),
             IlOp::IndexUnchecked { .. } => Some(Instruction::IndexUnchecked),
             IlOp::ArrayPin { .. } => Some(Instruction::ArrayPin),
