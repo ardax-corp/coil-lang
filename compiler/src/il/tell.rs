@@ -14,6 +14,11 @@
 //! post-opt IL tell against bytecode tell via lower's `pre_to_post` map. The
 //! symbolic-IL path still feeds cursor-safe pre-lower optimizations.
 //!
+//! Direct `CALL` / `Entry{Call}` is unary (`push 1`) unless the fall-through is
+//! `PairToHeap`: codegen emits that pair immediately after a `ReturnPair`
+//! callee, and the VM leaves payload+tag until the box. `sp` stays unary; this
+//! lookahead is cursor-only.
+//!
 //! **The cursor is not a per-PC constant.** A loop whose body stores to a higher
 //! slot each pass reaches its header with a different cursor on the back edge
 //! than on first entry, so [`Tell::Unknown`] at a join is often the correct
@@ -156,14 +161,33 @@ fn effect(byte: &Byte, pool: &[u64]) -> Effect {
 /// the VM reads it from the runtime enum — so the taken edge is unmodelled here.
 /// An IL-level model can do better: `IlJumpKind::JumpIfMatch` carries `arity`.
 fn edge_effects(byte: &Byte, pool: &[u64]) -> (Effect, Effect) {
+    edge_effects_with_next(byte, None, pool)
+}
+
+fn edge_effects_with_next(byte: &Byte, next: Option<&Byte>, pool: &[u64]) -> (Effect, Effect) {
     match *byte.bytecode() {
         Instruction::JumpIfMatch => (Effect::Delta(0), Effect::Unknown),
         Instruction::PairJumpIfTag => (Effect::Delta(0), Effect::Delta(-1)),
+        Instruction::CALL => {
+            let (arity, _) = byte.call_parts();
+            let e = Effect::Delta(call_result_delta(arity as u32, next_is_pair_to_heap(next)));
+            (e, e)
+        }
+        Instruction::CallIndirect if next_is_pair_to_heap(next) => {
+            let raw = byte.operand_u32();
+            let arity = (raw & 0xFFFF) + (raw >> 16);
+            let e = Effect::Delta(call_result_delta(arity, true));
+            (e, e)
+        }
         _ => {
             let e = effect(byte, pool);
             (e, e)
         }
     }
+}
+
+fn next_is_pair_to_heap(next: Option<&Byte>) -> bool {
+    next.is_some_and(|b| *b.bytecode() == Instruction::PairToHeap)
 }
 
 /// True when `byte`'s cursor effect is modelled on both edges. A pass can check
@@ -270,7 +294,13 @@ fn signed_arity_delta(arity: u32) -> i32 {
 /// `CALL` / `MakeCoro`: pop `arity` args, push one result. The callee frame base
 /// is `tell - arity` and the matching return seeks back to it before pushing.
 fn call_arity_delta(arity: u32) -> i32 {
-    1 - arity.min(i32::MAX as u32) as i32
+    call_result_delta(arity, false)
+}
+
+/// Unary return pushes one value; `ReturnPair` leaves payload+tag (two).
+fn call_result_delta(arity: u32, pair_return: bool) -> i32 {
+    let results = if pair_return { 2 } else { 1 };
+    results - arity.min(i32::MAX as u32) as i32
 }
 
 fn effect_il(op: &IlOp, pool: &[u64]) -> Effect {
@@ -291,7 +321,20 @@ fn effect_il(op: &IlOp, pool: &[u64]) -> Effect {
     }
 }
 
-fn edge_effects_il(op: &IlOp, pool: &[u64]) -> (Effect, Effect) {
+fn next_non_label(ops: &[IlOp], idx: usize) -> Option<&IlOp> {
+    ops.get(idx + 1..)?
+        .iter()
+        .find(|op| !matches!(op, IlOp::Label(_)))
+}
+
+fn il_is_pair_to_heap(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::PairToHeap
+    )
+}
+
+fn edge_effects_il_with_next(op: &IlOp, next: Option<&IlOp>, pool: &[u64]) -> (Effect, Effect) {
     if let IlOp::Jump { kind, .. } = op {
         return match kind {
             IlJumpKind::Unconditional => (Effect::Delta(0), Effect::Delta(0)),
@@ -302,6 +345,20 @@ fn edge_effects_il(op: &IlOp, pool: &[u64]) -> (Effect, Effect) {
                 (Effect::Delta(0), Effect::Delta(signed_arity_delta(*arity)))
             }
         };
+    }
+    if let IlOp::Entry {
+        kind: EntryKind::Call,
+        arity,
+        ..
+    } = op
+    {
+        let pair = next.is_some_and(il_is_pair_to_heap);
+        let e = Effect::Delta(call_result_delta(*arity, pair));
+        return (e, e);
+    }
+    if let IlOp::Byte { byte, .. } = op {
+        let next_byte = next.and_then(IlOp::as_plain_byte);
+        return edge_effects_with_next(byte, next_byte.as_ref(), pool);
     }
     let effect = effect_il(op, pool);
     (effect, effect)
@@ -412,7 +469,7 @@ pub fn analyze_at(code: &[Byte], pool: &[u64], entry: usize, entry_tell: u32) ->
         code.len(),
         entry,
         entry_tell,
-        |pc| edge_effects(&code[pc], pool),
+        |pc| edge_effects_with_next(&code[pc], code.get(pc + 1), pool),
         |pc| jump_target(&code[pc], pool),
         |pc| is_unconditional_transfer(&code[pc]),
     )
@@ -435,7 +492,7 @@ pub fn analyze_il_at(ops: &[IlOp], entry_tell: u32) -> TellInfo {
         ops.len(),
         0,
         entry_tell,
-        |idx| edge_effects_il(&ops[idx], &[]),
+        |idx| edge_effects_il_with_next(&ops[idx], next_non_label(ops, idx), &[]),
         |idx| il_jump_target(&ops[idx], &labels),
         |idx| il_is_unconditional_transfer(&ops[idx]),
     )
@@ -928,6 +985,57 @@ mod tests {
         let info = analyze_il_at(&ops, 2);
         assert_eq!(info.tell_before(0).known(), Some(2));
         assert_eq!(info.tell_before(1).known(), Some(3));
+    }
+
+    /// `ReturnPair` leaves payload+tag; codegen boxes with `PairToHeap` immediately
+    /// after the call. Cursor after CALL is `seed + 2 - arity`, then `-1` for the box.
+    #[test]
+    fn call_then_pair_to_heap_pushes_two_then_boxes() {
+        let loc = common::DebugLoc::unknown();
+        for arity in [0u32, 2] {
+            let seed = arity + 3;
+            let after_call = shift(seed, call_result_delta(arity, true));
+            let after_box = shift(after_call, -1);
+            let code = vec![
+                Byte::new(Instruction::CALL).with_call_packed(arity, 0),
+                Byte::new(Instruction::PairToHeap),
+                Byte::new(Instruction::RETURN),
+            ];
+            let bc = analyze_at(&code, &[], 0, seed);
+            assert_eq!(
+                bc.tell_before(1).known(),
+                Some(after_call),
+                "bytecode CALL arity {arity} before PairToHeap"
+            );
+            assert_eq!(
+                bc.tell_before(2).known(),
+                Some(after_box),
+                "bytecode PairToHeap arity {arity}"
+            );
+
+            let ops = vec![
+                IlOp::Entry {
+                    kind: crate::il::op::EntryKind::Call,
+                    arity,
+                    target: Label(0),
+                    loc,
+                },
+                IlOp::byte(Byte::new(Instruction::PairToHeap)),
+                IlOp::Return { loc },
+            ];
+            let il = analyze_il_at(&ops, seed);
+            assert_eq!(il.tell_before(1).known(), Some(after_call));
+            assert_eq!(il.tell_before(2).known(), Some(after_box));
+        }
+        // Unary CALL (no PairToHeap) is unchanged.
+        let unary = vec![
+            Byte::new(Instruction::CALL).with_call_packed(0, 0),
+            Byte::new(Instruction::RETURN),
+        ];
+        assert_eq!(
+            analyze_at(&unary, &[], 0, 2).tell_before(1).known(),
+            Some(3)
+        );
     }
 
     /// Differential form of the Call-delta bug: IL after-cursor must match

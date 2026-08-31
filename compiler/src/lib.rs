@@ -41,8 +41,8 @@ pub use reporting::{ErrorCode, Label, Message, MessageKind};
 pub use typechecking::env::{Env, Frame};
 pub use typechecking::pretty::format_ty_for_diag;
 pub use typechecking::{
-    BuiltinExport, CStructDef, CallbackSigDef, Checker, FfiBuiltin, ForInInfo, ForInKind, Ty,
-    VirtualModules,
+    BuiltinExport, CStructDef, CallbackSigDef, Checker, DefId, DefInterner, DefKind, FfiBuiltin,
+    ForInInfo, ForInKind, ModuleId, Ty, VirtualModules,
 };
 
 pub use codegen::{Compiler, PROLOGUE_BYTECODE_LEN, unescape_coil_string};
