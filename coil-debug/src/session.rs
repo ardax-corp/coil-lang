@@ -176,7 +176,7 @@ impl DebugSession {
         let mut machine = Machine::<256>::default();
         let pins = pipeline.dload_native_pins();
         let trusted = pipeline.dload_trusted_stems();
-        let structs = pipeline.c_struct_encodings();
+        let structs = pipeline.archived_struct_layouts();
         let m = pipeline.manifest();
         machine::wire_vm_host(
             &mut machine,

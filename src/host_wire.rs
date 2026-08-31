@@ -13,7 +13,7 @@ pub fn wire_pipeline_vm<const N: usize>(
 ) {
     let pins = pipeline.dload_native_pins();
     let trusted = pipeline.dload_trusted_stems();
-    let structs = pipeline.c_struct_encodings();
+    let structs = pipeline.archived_struct_layouts();
     let m = pipeline.manifest();
     wire_vm_host(
         machine,

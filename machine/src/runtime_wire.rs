@@ -4,11 +4,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use common::{Byte, ProgramDebug, tag};
+use common::{Byte, ProgramDebug};
 
 use crate::env;
 use crate::ffi::DloadGate;
-use crate::memory::{CStructLayout, FfiType};
+use crate::memory::CStructLayout;
 use crate::thread::ThreadProgram;
 use crate::{Machine, set_allow_attach};
 
@@ -26,7 +26,7 @@ pub struct VmHostSpec<'a> {
     pub allow_exit: bool,
     pub allow_ffi_exec: bool,
     pub allow_attach: bool,
-    pub c_structs: &'a [(String, Vec<(String, u32)>)],
+    pub c_structs: &'a [common::CStructLayout],
 }
 
 /// Standard natives, dload gate, env grants, FFI search, C layouts.
@@ -59,22 +59,8 @@ pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) 
     env::set_allow_ffi_exec(spec.allow_ffi_exec);
     set_allow_attach(spec.allow_attach);
 
-    for (name, fields) in spec.c_structs {
-        let fields = fields
-            .iter()
-            .map(|(fname, enc)| {
-                let (t, aux) = if *enc <= tag::STRUCT {
-                    (*enc, 0)
-                } else {
-                    (*enc & 0xFFFF, *enc >> 16)
-                };
-                (fname.clone(), FfiType::from_tag(t, aux))
-            })
-            .collect();
-        vm.register_struct_layout(CStructLayout {
-            name: name.clone(),
-            fields,
-        });
+    for layout in spec.c_structs {
+        vm.register_struct_layout(CStructLayout::from_archive(layout));
     }
 }
 
