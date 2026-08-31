@@ -46,6 +46,7 @@ impl Compiler {
     ) {
         self.checker.set_current_module(module);
         let _ = self.checker.check_program(ast);
+        self.typed_sidecar = self.checker.typed_sidecar();
         self.messages.extend(self.checker.take_messages());
     }
 
@@ -3589,6 +3590,14 @@ impl Compiler {
             self.emit_idx += 1;
         }
         id
+    }
+
+    /// Type from the B2 sidecar (NodeId), falling back to the checker cache.
+    fn sidecar_ty(&self, id: crate::typechecking::id::NodeId) -> Option<Ty> {
+        self.typed_sidecar
+            .ty(id)
+            .cloned()
+            .or_else(|| self.checker.lookup_at(id))
     }
 
     /// Identifier type for codegen: mono arm overrides, then span cache, then
@@ -12192,12 +12201,32 @@ impl Compiler {
                 bytecode.push_const_pool(idx);
             }
             Expression::String(str) => {
-                use crate::typechecking::subst::apply_ty_prune;
                 let escaped = unescape_coil_string(str);
-                let span_ty = self
-                    .checker
-                    .lookup_for_codegen_span(span.start, span.end)
-                    .map(|ty| apply_ty_prune(self.checker.subst(), &ty));
+                // Sidecar first (B2). Span fallback covers emit_idx drift when
+                // stack-array init compiles items without `do_compile` of the
+                // array node — otherwise later literals in the same file read
+                // the wrong NodeId (byte_string_lit.hy).
+                let escaped_len = escaped.as_bytes().len();
+                let span_ty = self_id
+                    .and_then(|id| self.sidecar_ty(id))
+                    .filter(|ty| match ty {
+                        Ty::Con(n) if n == "byte" => true,
+                        Ty::Array { element, length }
+                            if matches!(element.as_ref(), Ty::Con(n) if n == "byte") =>
+                        {
+                            match length {
+                                crate::typechecking::ty::ArrayLength::Static(n) => {
+                                    *n == escaped_len
+                                }
+                                crate::typechecking::ty::ArrayLength::Dynamic => true,
+                            }
+                        }
+                        _ => false,
+                    })
+                    .or_else(|| {
+                        self.checker
+                            .lookup_for_codegen_span(span.start, span.end)
+                    });
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
                     .as_ref()
@@ -15526,6 +15555,8 @@ impl Compiler {
             self.expand_and_check(module, ast);
         } else {
             self.checker.set_current_module(module);
+            // Check already ran via `parse_expand_check` / `typecheck_module`.
+            self.typed_sidecar = self.checker.typed_sidecar();
         }
         // Recursion depth / `#[max_depth]` — independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);

@@ -29,7 +29,11 @@ pub use aggregate_arith::{
 #[allow(unused_imports)] // public API for Matrix helpers
 pub use aggregate_arith::{is_matrix_ty, unwrap_matrix_ty, wrap_matrix_ty};
 pub use def_id::{DefId, DefInterner, DefKind, ModuleId};
-pub use infer::{CStructDef, CallbackSigDef, Checker, ForInInfo, ForInKind};
+#[allow(unused_imports)] // public API re-export
+pub use infer::{
+    CStructDef, CallbackSigDef, Checker, ForInInfo, ForInKind, PairNicheAbi, SelectedOverload,
+    TypedSidecar,
+};
 #[allow(unused_imports)] // public API for kind-aware callers / tests
 pub use kind::Kind;
 #[allow(unused_imports)] // public API re-export

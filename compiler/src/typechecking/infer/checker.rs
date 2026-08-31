@@ -78,6 +78,7 @@ impl Checker {
             infer_depth: 0,
             cache: std::collections::HashMap::new(),
             codegen_types_by_span: HashMap::new(),
+            node_ids_by_span: HashMap::new(),
             codegen_var_types: std::collections::HashMap::new(),
             polyfn_binding_spans: std::collections::HashSet::new(),
             codegen_var_types_scopes: Vec::new(),
@@ -91,6 +92,7 @@ impl Checker {
             spread_expanded_bases: std::collections::HashSet::new(),
             overload_sets: std::collections::HashMap::new(),
             selected_overloads_by_span: std::collections::HashMap::new(),
+            selected_overloads: std::collections::HashMap::new(),
             overload_decl_by_span: std::collections::HashMap::new(),
             call_site_dicts: HashMap::new(),
             call_site_dicts_by_span: HashMap::new(),
@@ -1341,6 +1343,7 @@ impl Checker {
         self.infer_depth = 0;
         self.cache.clear();
         self.codegen_types_by_span.clear();
+        self.node_ids_by_span.clear();
         self.codegen_var_types.clear();
         self.polyfn_binding_spans.clear();
         self.codegen_var_types_scopes.clear();
@@ -1359,6 +1362,7 @@ impl Checker {
         self.overload_sets.retain(|k, _| k.contains("::"));
         // Declaration/call span tables are per-module.
         self.selected_overloads_by_span.clear();
+        self.selected_overloads.clear();
         self.overload_decl_by_span.clear();
         self.partial_fills_by_span.clear();
         self.partial_filled_tys_by_span.clear();
@@ -1988,6 +1992,8 @@ impl Checker {
         let id = self.ids.ids()[self.next_id_idx];
         self.next_id_idx += 1;
         self.maybe_attach_def_id(id, expr);
+        self.node_ids_by_span
+            .insert((expr.0.start, expr.0.end), id);
 
         let ty = self.infer_inner(expr, Some(id));
         self.cache.insert(id, ty.clone());
@@ -2258,7 +2264,7 @@ impl Checker {
             Expression::Bool(_) => boolean(),
 
             // ---- Names ----
-            Expression::Identifier(name) => self.infer_identifier(name, range),
+            Expression::Identifier(name) => self.infer_identifier(name, id, range),
 
             // A bare type name (only valid as an annotation, but be
             // permissive).
@@ -4003,7 +4009,7 @@ impl Checker {
     }
 
     #[inline(never)]
-    fn infer_identifier(&mut self, name: &str, range: Range<usize>) -> Ty {
+    fn infer_identifier(&mut self, name: &str, id: Option<NodeId>, range: Range<usize>) -> Ty {
         // When `name` has multiple overload candidates and appears in
         // value position, try to narrow using `current_expected`.
         if self.is_overloaded(name) {
@@ -4033,8 +4039,9 @@ impl Checker {
             if matching.len() == 1 {
                 // Unique match — record and return its type.
                 let candidate = matching[0].clone();
-                self.selected_overloads_by_span.insert(
-                    (range.start, range.end),
+                self.record_selected_overload(
+                    id,
+                    &range,
                     (candidate.fixed_arity, candidate.is_rest, candidate.id),
                 );
                 return self.instantiate_ty(&candidate.scheme);
@@ -4879,8 +4886,9 @@ impl Checker {
                         match self.select_overload_for_args(&fqn, user_argc, &prelim_tys) {
                             OverloadSelect::Selected(c) => {
                                 let c = c.clone();
-                                self.selected_overloads_by_span.insert(
-                                    (range.start, range.end),
+                                self.record_selected_overload(
+                                    id,
+                                    &range,
                                     (c.fixed_arity, c.is_rest, c.id),
                                 );
                                 c.scheme
@@ -5086,8 +5094,9 @@ impl Checker {
                     match self.select_overload_for_args(&fqn, user_argc, &prelim_tys) {
                         OverloadSelect::Selected(c) => {
                             let c = c.clone();
-                            self.selected_overloads_by_span.insert(
-                                (range.start, range.end),
+                            self.record_selected_overload(
+                                id,
+                                &range,
                                 (c.fixed_arity, c.is_rest, c.id),
                             );
                             (c.scheme, true)
@@ -5517,8 +5526,9 @@ impl Checker {
                 OverloadSelect::Selected(candidate) => {
                     let candidate = candidate.clone();
                     // Record the selection for codegen.
-                    self.selected_overloads_by_span.insert(
-                        (range.start, range.end),
+                    self.record_selected_overload(
+                        id,
+                        &range,
                         (candidate.fixed_arity, candidate.is_rest, candidate.id),
                     );
                     let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = {
@@ -5838,6 +5848,19 @@ impl Checker {
     // ============================================================
     //  Type cache and lookup
     // ============================================================
+
+    fn record_selected_overload(
+        &mut self,
+        id: Option<NodeId>,
+        range: &std::ops::Range<usize>,
+        triple: (usize, bool, u32),
+    ) {
+        if let Some(id) = id {
+            self.selected_overloads.insert(id, triple);
+        }
+        self.selected_overloads_by_span
+            .insert((range.start, range.end), triple);
+    }
 
     /// Look up the inferred type of a node by [`NodeId`].
     pub fn lookup_at(&self, id: NodeId) -> Option<Ty> {
@@ -8695,8 +8718,9 @@ impl Checker {
         if crate::codegen::string_literal_as_single_byte(s).is_err() {
             return false;
         }
-        self.codegen_types_by_span.insert(
-            (node.0.start, node.0.end),
+        self.retarget_node_ty(
+            node.0.start,
+            node.0.end,
             crate::typechecking::ty::byte(),
         );
         true
@@ -8723,9 +8747,15 @@ impl Checker {
                 crate::typechecking::ty::array_fixed(crate::typechecking::ty::byte(), bytes.len())
             }
         };
-        self.codegen_types_by_span
-            .insert((node.0.start, node.0.end), ty);
+        self.retarget_node_ty(node.0.start, node.0.end, ty);
         true
+    }
+
+    fn retarget_node_ty(&mut self, start: usize, end: usize, ty: Ty) {
+        self.codegen_types_by_span.insert((start, end), ty.clone());
+        if let Some(&id) = self.node_ids_by_span.get(&(start, end)) {
+            self.cache.insert(id, ty);
+        }
     }
 
     fn string_literal_byte_mismatch(&mut self, raw: &str, range: &Range<usize>) -> Ty {
@@ -11995,8 +12025,11 @@ impl Checker {
             baseline.insert(arg_name.clone());
         }
         self.fn_codegen_baselines.push(baseline);
-        // Free-fn arg NodeId assign deferred (Hash / constraint-kind). Lambdas
-        // call `assign_fn_arg_node_ids` at their infer site.
+        // Consume Fragment + Argument NodeIds so body infer stays lockstep
+        // with codegen `do_compile(args)` (same skip of type-annotation children).
+        if method_owner.is_none() {
+            self.assign_fn_arg_node_ids(args, &arg_tys);
+        }
         let prev_function = if method_owner.is_none() {
             self.current_function.replace(name.to_string())
         } else {

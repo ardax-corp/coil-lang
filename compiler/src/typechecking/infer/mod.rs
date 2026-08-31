@@ -215,6 +215,8 @@ pub struct Checker {
 
     /// Source-span fallback for codegen when pre-walk IDs are misaligned.
     codegen_types_by_span: HashMap<(usize, usize), Ty>,
+    /// Span → NodeId so post-infer coercions can retarget `cache` (B2 sidecar).
+    node_ids_by_span: HashMap<(usize, usize), NodeId>,
 
     /// Variable types for codegen when infer cache is misaligned in function bodies.
     codegen_var_types: std::collections::HashMap<String, Ty>,
@@ -279,6 +281,9 @@ pub struct Checker {
     /// Value is `(fixed_arity, is_rest, candidate_id)`. Populated during
     /// inference; consumed by codegen for the mangled table key.
     pub selected_overloads_by_span: std::collections::HashMap<(usize, usize), (usize, bool, u32)>,
+
+    /// Same as [`Self::selected_overloads_by_span`], keyed by the call/ident [`NodeId`].
+    selected_overloads: std::collections::HashMap<NodeId, (usize, bool, u32)>,
 
     /// Declaration span → `(candidate_id, fixed_arity, is_rest)` for
     /// overloaded functions so codegen can mangle each body uniquely.
@@ -594,6 +599,8 @@ impl Default for Checker {
 
 
 mod checker;
+mod sidecar;
+pub use sidecar::{PairNicheAbi, SelectedOverload, TypedSidecar};
 
 
 /// Human-readable name of a payload shape, used in
