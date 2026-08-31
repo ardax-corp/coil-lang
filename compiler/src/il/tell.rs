@@ -1176,6 +1176,9 @@ mod tests {
                 loc,
             },
             IlOp::Return { loc },
+            // Bind the Call target so C3 lower succeeds; this test is about
+            // arity mismatch, not unbound labels.
+            IlOp::Label(Label(0)),
         ];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
