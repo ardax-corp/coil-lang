@@ -118,6 +118,10 @@ impl DefInterner {
     pub fn is_empty(&self) -> bool {
         self.infos.is_empty()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = &DefInfo> {
+        self.infos.iter()
+    }
 }
 
 #[cfg(test)]

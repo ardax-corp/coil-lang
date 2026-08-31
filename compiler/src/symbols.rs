@@ -6,6 +6,8 @@ use std::{
 
 use parser::ast::{EnumConstructPayload, EnumVariantPayload, Expression, Output};
 
+use crate::DefId;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     Function,
@@ -24,6 +26,8 @@ pub struct SymbolDef {
     pub file: PathBuf,
     pub range: Range<usize>,
     pub name_range: Range<usize>,
+    /// Interned def when this index was bound to checker tables (B5).
+    pub def_id: Option<DefId>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,6 +35,8 @@ pub struct RefSite {
     pub name: String,
     pub file: PathBuf,
     pub range: Range<usize>,
+    /// Bound [`DefId`] for this use, when resolve tables are present.
+    pub def_id: Option<DefId>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -86,25 +92,18 @@ impl SymbolIndex {
                 _ => continue,
             };
             let range = span.start..span.end;
-            // `use path as alias` spans the whole import; prefer the rightmost
-            // name match so aliases like `out` are not bound to `stdout`.
-            let name_start = if matches!(expression.as_ref(), Expression::Use { .. }) {
-                source[range.clone()]
-                    .rfind(name)
-                    .map(|offset| range.start + offset)
-                    .unwrap_or(range.start)
-            } else {
-                source[range.clone()]
-                    .find(name)
-                    .map(|offset| range.start + offset)
-                    .unwrap_or(range.start)
-            };
+            // Prefer the parser's source slice; fall back to a search *inside
+            // this item span* (not the whole file). `use` aliases take the
+            // rightmost hit so `out` is not the `out` in `stdout`.
+            let prefer_last = matches!(expression.as_ref(), Expression::Use { .. });
+            let name_range = name_range_in(source, name, &range, prefer_last);
             let definition = SymbolDef {
                 name: name.to_owned(),
                 kind,
                 file: file.clone(),
                 range,
-                name_range: name_start..name_start + name.len(),
+                name_range,
+                def_id: None,
             };
             self.definitions
                 .entry(name.to_owned())
@@ -140,6 +139,7 @@ impl SymbolIndex {
                             name: (*name).to_owned(),
                             file: file.clone(),
                             range: span,
+                            def_id: None,
                         });
                 }
                 Expression::Integer(_)
@@ -384,6 +384,68 @@ impl SymbolIndex {
         }
 
         visit(self, file, expression.1.as_ref(), expression.0.start..expression.0.end);
+    }
+
+    /// Attach checker [`DefId`]s for names resolved in this file (locals + `use`).
+    pub fn bind_def_ids(&mut self, locals: &HashMap<String, DefId>) {
+        for defs in self.definitions.values_mut() {
+            for def in defs {
+                if def.def_id.is_none() {
+                    def.def_id = locals.get(&def.name).copied();
+                }
+            }
+        }
+        for sites in self.references.values_mut() {
+            for site in sites {
+                if site.def_id.is_none() {
+                    site.def_id = locals.get(&site.name).copied();
+                }
+            }
+        }
+    }
+
+    pub fn def_id_for_name(&self, name: &str) -> Option<DefId> {
+        self.definitions(name)
+            .iter()
+            .find_map(|d| d.def_id)
+            .or_else(|| self.references(name).iter().find_map(|s| s.def_id))
+    }
+}
+
+/// Name span inside `item`, without a whole-file `source.find(name)`.
+fn name_range_in(source: &str, name: &str, item: &Range<usize>, prefer_last: bool) -> Range<usize> {
+    if let Some(r) = slice_offset_in_source(source, name) {
+        if r.start >= item.start && r.end <= item.end {
+            if !prefer_last {
+                return r;
+            }
+        }
+    }
+    let Some(slice) = source.get(item.clone()) else {
+        return item.start..item.start;
+    };
+    let found = if prefer_last {
+        slice.rfind(name)
+    } else {
+        slice.find(name)
+    };
+    match found {
+        Some(off) => {
+            let start = item.start + off;
+            start..start + name.len()
+        }
+        None => item.start..item.start.saturating_add(name.len()).min(item.end),
+    }
+}
+
+fn slice_offset_in_source(source: &str, name: &str) -> Option<Range<usize>> {
+    let src = source.as_ptr() as usize;
+    let n = name.as_ptr() as usize;
+    if n >= src && n + name.len() <= src + source.len() {
+        let start = n - src;
+        Some(start..start + name.len())
+    } else {
+        None
     }
 }
 

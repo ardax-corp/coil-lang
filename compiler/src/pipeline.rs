@@ -304,6 +304,27 @@ impl Pipeline {
         &self.manifest
     }
 
+    /// Files discovered on the last compile/typecheck (use-graph, not a root walk).
+    pub fn discovered_files(&self) -> &[PathBuf] {
+        &self.processed
+    }
+
+    /// Entry file of the last compile/typecheck.
+    pub fn entry_file(&self) -> Option<&Path> {
+        self.entry_file.as_deref()
+    }
+
+    /// Point this pipeline at `root`. Reloads `coil.toml` into this Pipeline's
+    /// Manifest (the one copy). No-op when the root is already bound.
+    pub fn bind_project_root(&mut self, root: PathBuf) {
+        if root == self.project_root {
+            return;
+        }
+        self.project_root = root.clone();
+        self.manifest = Manifest::load(&root).unwrap_or_default();
+        Self::apply_env_grants(&self.manifest);
+    }
+
     /// Grant `dload` of `stem` for the SHA-256 of `path` (host/tests).
     ///
     /// The CLI never calls this. Consumer stems are `[ffi] allow` plus lock

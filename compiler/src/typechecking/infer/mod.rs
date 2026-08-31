@@ -171,6 +171,8 @@ pub struct Checker {
     schemes_by_def: HashMap<DefId, Scheme>,
     /// Current-file local name → [`DefId`] (reset each `check_program`).
     local_defs: HashMap<String, DefId>,
+    /// Per-module snapshot of [`local_defs`] after resolve (persists across files).
+    module_locals: HashMap<ModuleId, HashMap<String, DefId>>,
     /// Sidecar: pre-walk [`NodeId`] → interned def (reset each `check_program`).
     def_ids_by_node: HashMap<NodeId, DefId>,
     /// [`ModuleId`] for [`Self::current_module`].
