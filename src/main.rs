@@ -936,10 +936,11 @@ mod tests {
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
         let loaded = try_load_archive(stale.to_str().unwrap());
-        assert!(
-            matches!(loaded, Err(LoadErr::Version(v)) if v == stale_version),
-            "{loaded:?}"
-        );
+        match &loaded {
+            Err(LoadErr::Version(v)) if *v == stale_version => {}
+            Err(e) => panic!("expected Version({stale_version}), got Err({e:?})"),
+            Ok(_) => panic!("expected Version({stale_version}), got Ok(..)"),
+        }
         let _ = std::fs::remove_file(&stale);
 
         let ok_path = unique_tmp("ok");
