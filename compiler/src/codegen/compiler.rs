@@ -3609,6 +3609,26 @@ impl Compiler {
             .or_else(|| self.checker.lookup_at(id))
     }
 
+    /// Extern setup is keyed by the declaration's short name (and, after
+    /// B3, sometimes the module FQN). Call meaning is FQN via DefId.
+    fn lookup_extern_runtime(&self, n: &str) -> Option<(u32, u32)> {
+        if let Some(&hit) = self.extern_runtime_functions.get(n) {
+            return Some(hit);
+        }
+        let stripped = strip_overload_key(n);
+        if stripped != n
+            && let Some(&hit) = self.extern_runtime_functions.get(stripped)
+        {
+            return Some(hit);
+        }
+        let simple = stripped.rsplit("::").next().unwrap_or(stripped);
+        if simple != n && simple != stripped {
+            self.extern_runtime_functions.get(simple).copied()
+        } else {
+            None
+        }
+    }
+
     /// Free-fn FQN from interned [`DefId`], not `Compiler.aliases`.
     fn resolve_free_fn(&self, name: &str) -> String {
         if let Some(def) = self.checker.def_id_of(name) {
@@ -15062,7 +15082,7 @@ impl Compiler {
             // the current module FQN before reporting unknown.
             let n = if self.functions.contains_key(&n)
                 || self.fn_entry_labels.contains_key(&n)
-                || self.extern_runtime_functions.contains_key(&n)
+                || self.lookup_extern_runtime(&n).is_some()
                 || self.native.contains_key(&n)
             {
                 n
@@ -15103,7 +15123,7 @@ impl Compiler {
                 n
             };
 
-            if let Some(&(lib_slot, fn_id_slot)) = self.extern_runtime_functions.get(&n) {
+            if let Some((lib_slot, fn_id_slot)) = self.lookup_extern_runtime(&n) {
                 // Same discipline as HostInvoke: emit lib/fn_id first,
                 // then compile args onto `self.bytecode`. Nested IO
                 // HostInvoke writes directly to `self.bytecode` and

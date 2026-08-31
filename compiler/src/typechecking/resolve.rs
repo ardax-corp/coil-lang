@@ -76,7 +76,8 @@ fn intern_items(
         }
         Expression::ExternBlock { declarations, .. } => {
             for decl in declarations {
-                let _ = interner.intern(module, DefKind::Ffi, decl.name);
+                let id = interner.intern(module, DefKind::Ffi, decl.name);
+                local_defs.entry(decl.name.to_string()).or_insert(id);
             }
         }
         Expression::Implementation { owner, methods, .. } => {
@@ -319,5 +320,22 @@ mod tests {
         );
         let imported = *entry_locals.get("read").expect("imported read");
         assert_eq!(imported, defined);
+    }
+
+    #[test]
+    fn resolve_interns_extern_fn_into_local_defs() {
+        let ast = parse(
+            "extern \"c\" {\n    fn strlen(string s) -> int;\n}\nfn run() {}\n",
+        );
+        let mut intern = DefInterner::new();
+        let m = intern.intern_module("ffi_mod::sys");
+        let mut local = HashMap::new();
+        resolve(&mut intern, m, &ast, &VirtualModules::new(), &mut local);
+        let strlen = *local.get("strlen").expect("extern strlen interned");
+        let run = *local.get("run").expect("run interned");
+        assert_ne!(strlen, run);
+        let info = intern.info(strlen).expect("strlen DefInfo");
+        assert_eq!(info.kind, DefKind::Ffi);
+        assert_eq!(info.name, "strlen");
     }
 }
