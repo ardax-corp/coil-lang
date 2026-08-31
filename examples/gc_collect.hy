@@ -5,8 +5,11 @@ use string::{to_bytes};
 
 fn ephemeral_weak() {
     let r = root([1, 2, 3]);
-    let w = weak(get(r));
-    // Drop the strong root without retaining the payload locally.
+    let inner = match get(r) {
+        Option::Some(v) => v,
+        Option::None => [1, 2, 3],
+    };
+    let w = weak(inner);
     unroot(r);
     return w;
 }

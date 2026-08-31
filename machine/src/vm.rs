@@ -971,13 +971,11 @@ impl<const S: usize> Machine<S> {
                 for (val, _) in &queue {
                     if let Some(obj) = Self::find_object_by_addr(&self.heap, val.raw() as u64) {
                         obj.mark(&mut gray);
-                        Self::mark_aggregate_elements(&self.heap, &obj, &mut gray);
-                        obj.mark_references(&mut gray);
+                        obj.mark_references(&self.heap, &mut gray);
                     }
                 }
                 while let Some(obj) = gray.pop() {
-                    Self::mark_aggregate_elements(&self.heap, &obj, &mut gray);
-                    obj.mark_references(&mut gray);
+                    obj.mark_references(&self.heap, &mut gray);
                 }
                 for (val, pc) in queue {
                     self.run_finalizer(val, pc);
@@ -1029,24 +1027,7 @@ impl<const S: usize> Machine<S> {
 
     fn mark_from_vm_roots(&mut self) {
         let roots = self.collect_vm_root_addrs();
-        self.heap.trace(&roots);
-        let (mut gray, mut root_objects) = self.heap.take_gc_worklists();
-        let mut current = self.heap.head_for_lookup();
-        while let Some(reference) = current {
-            if reference.is_marked() {
-                root_objects.push(reference);
-            }
-            current = reference.get_next();
-        }
-        for root in &root_objects {
-            Self::mark_aggregate_elements(&self.heap, root, &mut gray);
-            root.mark_references(&mut gray);
-        }
-        while let Some(obj) = gray.pop() {
-            Self::mark_aggregate_elements(&self.heap, &obj, &mut gray);
-            obj.mark_references(&mut gray);
-        }
-        self.heap.restore_gc_worklists(gray, root_objects);
+        self.heap.mark_from_roots(&roots);
         self.heap.restore_gc_roots(roots);
     }
 
@@ -1202,31 +1183,6 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// Trace heap pointers stored as raw `Value`s inside arrays/tuples.
-    /// `Object::mark_references` cannot do this alone — those aggregates
-    /// keep `Vec<Value>`, not `Member::Object`.
-    fn mark_aggregate_elements(heap: &Heap, obj: &Object, gray: &mut Vec<Object>) {
-        match obj {
-            Object::Array(gc) => {
-                for v in &gc.as_ref().elements {
-                    Self::mark_value_if_heap(heap, *v, gray);
-                }
-            }
-            Object::Tuple(gc) => {
-                for v in &gc.as_ref().elements {
-                    Self::mark_value_if_heap(heap, *v, gray);
-                }
-            }
-            Object::Fn(gc) => {
-                let f = gc.as_ref();
-                for v in f.captures.iter().chain(f.captured_args.iter()) {
-                    Self::mark_value_if_heap(heap, *v, gray);
-                }
-            }
-            _ => {}
-        }
-    }
-
     fn saved_stack_live_mask(heap: &Heap, values: &[Value]) -> u64 {
         let mut mask = 0u64;
         for (i, v) in values.iter().enumerate() {
@@ -1254,16 +1210,6 @@ impl<const S: usize> Machine<S> {
         }
         if let Some(delegate) = &coro.yield_from {
             roots.push(delegate.as_ptr() as u64);
-        }
-    }
-
-    fn mark_value_if_heap(heap: &Heap, v: Value, gray: &mut Vec<Object>) {
-        let addr = v.raw() as u64;
-        if addr == 0 {
-            return;
-        }
-        if let Some(child) = Self::find_object_by_addr(heap, addr) {
-            child.mark(gray);
         }
     }
 
@@ -3242,20 +3188,21 @@ impl<const S: usize> Machine<S> {
                     // pressure still fires when HostInvoke is the only
                     // allocator on a hot path.
                     let live_before = self.heap.live_object_count();
-                    let native_name = self.natives.get_by_id(fn_id).map(|n| n.name().to_string());
-                    if native_name.as_deref() == Some(crate::GC_COLLECT_NATIVE) {
-                        let before = self.heap.size();
-                        self.gc_collect();
-                        let freed = before.saturating_sub(self.heap.size());
-                        self.stack.push(Value::from(freed as i64));
-                    } else if native_name.as_deref() == Some(crate::GC_REGISTER_FINALIZER_NATIVE) {
-                        let type_id = args.first().map(|v| v.as_int() as u32).unwrap_or(0);
-                        let pc = args.get(1).map(|v| v.as_int() as u32).unwrap_or(0);
-                        self.register_finalizer(type_id, pc);
-                        self.stack.push(Value::from(0i64));
-                    } else {
-                        match self.natives.get_by_id(fn_id) {
-                            Some(native) => match native.invoke(&mut self.heap, args) {
+                    match self.natives.get_by_id(fn_id) {
+                        Some(native) => match native.host_op() {
+                            crate::HostOp::Collect => {
+                                let before = self.heap.size();
+                                self.gc_collect();
+                                let freed = before.saturating_sub(self.heap.size());
+                                self.stack.push(Value::from(freed as i64));
+                            }
+                            crate::HostOp::RegisterFinalizer => {
+                                let type_id = args.first().map(|v| v.as_int() as u32).unwrap_or(0);
+                                let pc = args.get(1).map(|v| v.as_int() as u32).unwrap_or(0);
+                                self.register_finalizer(type_id, pc);
+                                self.stack.push(Value::from(0i64));
+                            }
+                            crate::HostOp::Ordinary => match native.invoke(&mut self.heap, args) {
                                 Ok(Some(v)) => self.stack.push(v),
                                 Ok(None) => {
                                     if let Some(req) = crate::io::take_pending_io_park() {
@@ -3289,17 +3236,17 @@ impl<const S: usize> Machine<S> {
                                     );
                                 }
                             },
-                            None => {
-                                return self.runtime_panic(
-                                    &format!("HostInvoke: unknown native id {fn_id}"),
-                                    ip.saturating_sub(1),
-                                );
-                            }
+                        },
+                        None => {
+                            return self.runtime_panic(
+                                &format!("HostInvoke: unknown native id {fn_id}"),
+                                ip.saturating_sub(1),
+                            );
                         }
-                        let allocated = self.heap.live_object_count().saturating_sub(live_before);
-                        if allocated > 0 {
-                            self.maybe_gc_after_alloc();
-                        }
+                    }
+                    let allocated = self.heap.live_object_count().saturating_sub(live_before);
+                    if allocated > 0 {
+                        self.maybe_gc_after_alloc();
                     }
                 }
                 Instruction::HostInvokeNiche => {
