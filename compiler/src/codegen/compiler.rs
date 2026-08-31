@@ -46,6 +46,7 @@ impl Compiler {
     ) {
         self.checker.set_current_module(module);
         let _ = self.checker.check_program(ast);
+        self.typed_sidecar = self.checker.typed_sidecar();
         self.messages.extend(self.checker.take_messages());
     }
 
@@ -3544,6 +3545,14 @@ impl Compiler {
             self.emit_idx += 1;
         }
         id
+    }
+
+    /// Type from the B2 sidecar (NodeId), falling back to the checker cache.
+    fn sidecar_ty(&self, id: crate::typechecking::id::NodeId) -> Option<Ty> {
+        self.typed_sidecar
+            .ty(id)
+            .cloned()
+            .or_else(|| self.checker.lookup_at(id))
     }
 
     /// Identifier type for codegen: mono arm overrides, then span cache, then
@@ -12147,12 +12156,9 @@ impl Compiler {
                 bytecode.push_const_pool(idx);
             }
             Expression::String(str) => {
-                use crate::typechecking::subst::apply_ty_prune;
                 let escaped = unescape_coil_string(str);
-                let span_ty = self
-                    .checker
-                    .lookup_for_codegen_span(span.start, span.end)
-                    .map(|ty| apply_ty_prune(self.checker.subst(), &ty));
+                // B2 proof: this path reads the NodeId sidecar, not the span map.
+                let span_ty = self_id.and_then(|id| self.sidecar_ty(id));
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
                     .as_ref()
@@ -15494,6 +15500,7 @@ impl Compiler {
             self.decorated_class_ctors.insert(key, ctor_fn);
         }
         let _program_ty = self.checker.check_program(ast);
+        self.typed_sidecar = self.checker.typed_sidecar();
         // Recursion depth / `#[max_depth]` — independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
         self.messages.extend(stack_bound.messages);

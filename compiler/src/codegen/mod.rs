@@ -771,6 +771,8 @@ pub struct Compiler {
     /// `Checker::check_program`; its cache is consulted by `do_compile`
     /// to pick `ADD` vs `ADDF`, `==` vs `==` (floats), etc.
     checker: crate::typechecking::Checker,
+    /// NodeId/DefId facts from the last `check_program` (B2).
+    typed_sidecar: crate::typechecking::TypedSidecar,
     /// Index into [`crate::typechecking::Checker::ids`] used by
     /// `do_compile` to recover the `NodeId` of the node it's currently
     /// emitting. Reset at the start of each `compile`.
@@ -993,6 +995,7 @@ impl Default for Compiler {
             context: Context::default(),
             // ---
             checker: crate::typechecking::Checker::new(),
+            typed_sidecar: crate::typechecking::TypedSidecar::default(),
             emit_idx: 0,
             program_start_offset,
             setup_entry_offset: program_start_offset,

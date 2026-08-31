@@ -7,18 +7,18 @@ use std::{
 };
 
 use common::{
-    ARCHIVE_VERSION, ArchivedArchivedProgram, ArchivedProgram, Byte, Instruction, ProgramDebug,
-    archive_version_compatible,
+    archive_version_compatible, ArchivedArchivedProgram, ArchivedProgram, Byte, Instruction,
+    ProgramDebug, ARCHIVE_VERSION,
 };
 use machine::{FfiError, FfiSignature, FfiType, Heap, HostClosureFn, NativeFn};
-use parser::{Pratt, SimpleSpan, ast::Expression};
+use parser::{ast::Expression, Pratt, SimpleSpan};
 use reporting::{
-    Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap, create_sink,
+    create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
 };
 use rkyv::rancor::Error;
 
-use crate::Compiler;
 use crate::manifest::Manifest;
+use crate::Compiler;
 
 /// A queued file to compile, along with the path it was
 /// discovered under. The pipeline processes queued files
@@ -1120,18 +1120,24 @@ impl Pipeline {
             .expect("Unable to write compiled output to file");
     }
 
-    /// Compile a parsed AST and return the bytecode
-    /// (ignoring typecheck messages). Used by the
-    /// `fizbuz_runs_to_completion` golden test, which
-    /// exercises a .hy example that the typechecker
-    /// rejects (`return;` is parsed as a variable name)
-    /// but the codegen still produces valid bytecode for.
+    /// Compile a parsed AST and return the bytecode.
+    ///
+    /// Does **not** emit when the checker rejected the program (B2).
+    /// Ill-typed examples belong in diagnostics fixtures, not here.
     pub fn compile_test(
         &mut self,
         module: &str,
         ast: &mut (SimpleSpan, Box<Expression<'_>>),
     ) -> (Vec<Byte>, Vec<u64>) {
         let mut bytecode = self.compiler_lazy_mut().compile(module, ast);
+        let rejected = self
+            .compiler_lazy()
+            .get_messages()
+            .iter()
+            .any(|m| *m.kind() == reporting::MessageKind::ERROR);
+        if rejected {
+            return (Vec::new(), Vec::new());
+        }
 
         // Patch the JMP at offset 1 (the second prologue
         // instruction).
@@ -1848,11 +1854,9 @@ fn main() {
     #[test]
     fn compile_src_retaining_il_clears_flag_on_failure() {
         let mut pipeline = Pipeline::new();
-        assert!(
-            pipeline
-                .compile_src_retaining_il("fn main() { !!! }")
-                .is_err()
-        );
+        assert!(pipeline
+            .compile_src_retaining_il("fn main() { !!! }")
+            .is_err());
         assert!(
             !pipeline.retain_cursor_il,
             "retain flag must clear even when compile fails"

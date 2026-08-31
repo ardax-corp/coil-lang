@@ -1466,9 +1466,7 @@ use string::{format, to_bytes};
     // ---- Type cache ----
 
     #[test]
-    fn free_fn_arg_still_in_codegen_var_types() {
-        // Free-fn `assign_fn_arg_node_ids` is deferred (Hash / constraint-kind).
-        // Params remain available via the name side-table.
+    fn free_fn_arg_node_ids_cached() {
         let src = "fn f(int x) -> int { return x; }";
         let (c, _) = check(src);
         assert!(c.messages().is_empty(), "{:?}", c.messages());
@@ -1477,6 +1475,70 @@ use string::{format, to_bytes};
                 .map(|t| apply_ty_prune(c.subst(), t)),
             Some(int())
         );
+        let ast = Pratt::default().parse(src).expect("parse");
+        fn find_fn_arg_span(node: &parser::ast::Output<'_>) -> Option<(usize, usize)> {
+            use parser::ast::Expression;
+            match node.1.as_ref() {
+                Expression::Program(cs) | Expression::Block(cs) | Expression::Fragment(cs) => {
+                    cs.iter().find_map(find_fn_arg_span)
+                }
+                Expression::Function { args, body, .. } => {
+                    if let Expression::Fragment(children) = args.1.as_ref() {
+                        let found = children.iter().find_map(|child| {
+                            if matches!(child.1.as_ref(), Expression::Argument { .. }) {
+                                Some((child.0.start, child.0.end))
+                            } else {
+                                None
+                            }
+                        });
+                        if found.is_some() {
+                            return found;
+                        }
+                    }
+                    body.as_ref().and_then(find_fn_arg_span)
+                }
+                Expression::Expr(e)
+                | Expression::Statement(e)
+                | Expression::ExprStatement(e)
+                | Expression::Group(e) => find_fn_arg_span(e),
+                _ => None,
+            }
+        }
+        let (start, end) = find_fn_arg_span(&ast).expect("free-fn Argument span");
+        assert_eq!(
+            c.lookup_for_codegen_span(start, end),
+            Some(int()),
+            "free-fn Argument must be in the NodeId cache / span table"
+        );
+        let side = c.typed_sidecar();
+        assert!(
+            side.tys().values().any(|t| t == &int()),
+            "sidecar must record the parameter type by NodeId"
+        );
+    }
+
+    #[test]
+    fn typed_sidecar_is_nodeid_keyed() {
+        let src = "fn f(int x) -> int { return x; }";
+        let (c, _) = check(src);
+        assert!(c.messages().is_empty(), "{:?}", c.messages());
+        let side = c.typed_sidecar();
+        assert!(!side.tys().is_empty(), "sidecar tys after check_program");
+        let f_id = c.def_id_of("f").expect("f DefId");
+        assert!(
+            c.id_table()
+                .ids()
+                .iter()
+                .any(|id| c.def_id_at(*id) == Some(f_id)),
+            "Function node must carry DefId"
+        );
+        assert_eq!(side.def_id(
+            *c.id_table()
+                .ids()
+                .iter()
+                .find(|id| c.def_id_at(**id) == Some(f_id))
+                .unwrap()
+        ), Some(f_id));
     }
 
     #[test]

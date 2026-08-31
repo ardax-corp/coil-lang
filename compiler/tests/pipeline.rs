@@ -1184,6 +1184,24 @@ fn fizbuz_runs_to_completion() {
 }
 
 #[test]
+fn compile_test_emits_nothing_when_checker_rejects() {
+    let mut pipeline = compiler::Pipeline::new();
+    let src = r#"
+fn main() {
+    let x: int = "nope";
+}
+"#;
+    let parser = parser::Pratt::default();
+    let mut ast = parser.parse(src).expect("ill-typed program should parse");
+    let (bytecode, constants) = pipeline.compile_test("", &mut ast);
+    assert!(
+        bytecode.is_empty(),
+        "compile_test must not emit bytecode for a program the checker rejected"
+    );
+    assert!(constants.is_empty());
+}
+
+#[test]
 fn let_binding_emits_store_pop_in_bytecode() {
     use common::Instruction;
     let mut pipeline = Pipeline::new();

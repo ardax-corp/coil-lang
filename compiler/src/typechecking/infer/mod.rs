@@ -280,6 +280,9 @@ pub struct Checker {
     /// inference; consumed by codegen for the mangled table key.
     pub selected_overloads_by_span: std::collections::HashMap<(usize, usize), (usize, bool, u32)>,
 
+    /// Same as [`Self::selected_overloads_by_span`], keyed by the call/ident [`NodeId`].
+    selected_overloads: std::collections::HashMap<NodeId, (usize, bool, u32)>,
+
     /// Declaration span → `(candidate_id, fixed_arity, is_rest)` for
     /// overloaded functions so codegen can mangle each body uniquely.
     pub overload_decl_by_span: std::collections::HashMap<(usize, usize), (u32, usize, bool)>,
@@ -594,6 +597,8 @@ impl Default for Checker {
 
 
 mod checker;
+mod sidecar;
+pub use sidecar::{PairNicheAbi, SelectedOverload, TypedSidecar};
 
 
 /// Human-readable name of a payload shape, used in
