@@ -2779,3 +2779,66 @@ fn dump<T: Ord>(T a, T b) {
         "help should pin shared for/.to_vec numeric-step policy, got: {help:?}"
     );
 }
+
+#[test]
+fn free_generic_option_return_has_stable_code() {
+    let msgs = check_messages(
+        "fn some_of<T>(T x) -> Option<T> { return Option::Some(x); }\nfn main() { let _ = some_of(7); }",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
+        "expected UnsupportedGenericOptionReturn (E0127), got: {:?}",
+        msgs.iter().map(|m| m.code()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn free_generic_option_return_inferred_has_stable_code() {
+    let msgs = check_messages(
+        "fn some_of<T>(T x) { return Option::Some(x); }\nfn main() { let _ = some_of(7); }",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
+        "inferred Option<T> return must also be E0127, got: {:?}",
+        msgs.iter().map(|m| m.code()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn free_generic_option_of_ground_payload_is_ok() {
+    let msgs = check_messages(
+        "fn none_of<T>(T x) -> Option<int> { return Option::None; }\nfn main() { let _ = none_of(1); }",
+    );
+    assert!(
+        !msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
+        "Option<int> payload does not depend on T; got: {:?}",
+        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn method_generic_option_return_is_ok() {
+    let msgs = check_messages(
+        r#"
+class Cell<T> { item: T }
+impl Cell<T> {
+    fn get() -> Option<T> {
+        return Option::Some(self.item);
+    }
+}
+fn main() {
+    let c = new Cell(7);
+    let _ = c.get();
+}
+"#,
+    );
+    assert!(
+        !msgs.iter()
+            .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
+        "inherent method Option return must typecheck; got: {:?}",
+        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+    );
+}

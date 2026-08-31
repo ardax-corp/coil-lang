@@ -4,7 +4,7 @@ Tracked in Linear: [Known limitations](https://linear.app/ardax/project/known-li
 
 Actionable gaps in the compiler, VM, and language surface. For opcode/archive rules see [AGENTS.md](../../AGENTS.md); for typechecker error codes see [error-codes.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md).
 
-**Design rule:** prefer **method-based APIs** (`impl` methods on classes) over free functions for type-tied operations — stdlib, new language features, and codegen fixes should default to methods. Virtual-module host primitives (`io::read`) remain free functions.
+**Design rule:** prefer **method-based APIs** (`impl` methods on classes) over free functions for type-tied operations — stdlib, new language features, and codegen fixes should default to methods. Virtual-module host primitives (`io::read`) remain free functions. A free generic function that returns `Option` of a type parameter is a type error (`E0127`), not a style preference; inherent methods that return `Option` are valid.
 
 **Priority key:** blocking = correctness crash or major feature blocked; high = reliability or significant DX gap; medium = partial support; low = deferred polish.
 

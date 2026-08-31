@@ -139,7 +139,7 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `coil.toml` paths, system.
 5. **Stale `out.hyc`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
-7. **Free fn vs method** — use `impl` methods for collection/container ops; free generic fns returning `Option`/`Result` can mis-codegen — see [limitations.md](docs/internals/limitations.md).
+7. **Free generic Option return** — `fn f<T>(T) -> Option<T>` is a type error (`E0127`). Put it on an inherent `impl` method. See [limitations.md](docs/internals/limitations.md).
 
 ## Debugging programs
 

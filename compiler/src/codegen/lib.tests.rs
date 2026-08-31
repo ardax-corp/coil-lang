@@ -5230,20 +5230,26 @@ fn main() {
         );
     }
 
-    /// Generic functions returning ADTs must not emit a primitive UnboxValue
-    /// on the call result (that would turn a valid heap object into garbage).
+    /// Inherent methods returning Option<T> must not UnboxValue the call result
+    /// (that would turn a valid heap object / niche pointer into garbage).
+    /// Free `fn f<T>(T) -> Option<T>` is a type error (E0127); see diagnostics.
     #[test]
-    fn generic_fn_returning_option_does_not_unbox_enum() {
+    fn generic_method_returning_option_does_not_unbox_enum() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
-            "fn some_of<T>(T x) -> Option<T> { return Option::Some(x); } \
-fn main() { let _ = some_of(7); }",
+            r#"
+class Cell<T> { item: T }
+impl Cell<T> {
+    fn get() -> Option<T> { return Option::Some(self.item); }
+}
+fn main() { let _ = (new Cell(7)).get(); }
+"#,
         );
         let opcodes: Vec<_> = bc.iter().map(|b| b.bytecode()).collect();
         let last_call = opcodes
             .iter()
             .rposition(|op| matches!(op, Instruction::CALL | Instruction::TailCall))
-            .expect("expected a CALL to some_of");
+            .expect("expected a CALL to Cell::get");
         assert!(
             !matches!(opcodes.get(last_call + 1), Some(Instruction::UnboxValue)),
             "Option return must not be UnboxValue'd after CALL; near: {:?}",
