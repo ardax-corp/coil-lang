@@ -160,6 +160,25 @@ impl IoReactor {
             .remove(&token);
     }
 
+    /// Drop every async waiter on this handle (stream close).
+    pub fn cancel_waits_for(&self, handle: WaitHandle) {
+        self.inner
+            .waits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .retain(|_, w| w.handle != handle);
+        self.inner.cvar.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn has_wait(&self, token: WaitToken) -> bool {
+        self.inner
+            .waits
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains_key(&token)
+    }
+
     /// Block until `token` is marked ready (or cancelled → TimedOut-like Other).
     pub fn wait_token(
         &self,

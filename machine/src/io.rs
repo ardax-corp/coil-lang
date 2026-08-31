@@ -325,17 +325,22 @@ pub(crate) fn with_stream_mut<R>(
 }
 
 pub fn stream_close(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
-    with_stream_mut(heap, stream, |s| {
+    let wait = with_stream_mut(heap, stream, |s| {
         if s.closed {
             return Err(IoErrorTag::AlreadyClosed);
         }
+        let wait = s.handle.as_ref().map(|h| h.wait_handle());
         if let Some(slot) = s.attached.take() {
             slot.shutdown_then_free(s.handle.as_mut());
         }
         s.handle.take();
         s.closed = true;
-        Ok(())
-    })?
+        Ok(wait)
+    })??;
+    if let Some(handle) = wait {
+        crate::thread::host_cancel_waiters_for(handle);
+    }
+    Ok(())
 }
 
 /// Non-blocking read into an existing `Vec<byte>` buffer. Returns:
@@ -1921,6 +1926,22 @@ mod tests {
     fn io_drive_without_host_state_returns_zero() {
         let mut heap = Heap::default();
         assert_eq!(io_drive(&mut heap).as_int(), 0);
+    }
+
+    #[test]
+    fn stream_close_cancels_reactor_waiters() {
+        let mut vm = crate::Machine::<64>::default();
+        let io = std::sync::Arc::clone(vm.io_reactor());
+        let (r, w) = tcp_connected_pair();
+        let wait = WaitHandle::from_tcp(&r);
+        let mut heap = Heap::default();
+        let stream = alloc_stream(&mut heap, NativeHandle::Tcp(r), StreamKind::Tcp).unwrap();
+        let tok = io.register_wait(wait, Interest::Readable);
+        assert!(io.has_wait(tok));
+        let _guard = crate::thread::HostStateGuard::enter(&mut vm);
+        stream_close(&mut heap, stream).unwrap();
+        assert!(!io.has_wait(tok));
+        drop(w);
     }
 
     #[test]

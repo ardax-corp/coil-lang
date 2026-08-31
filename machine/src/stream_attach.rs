@@ -4,7 +4,6 @@
 //! kind does not require a VM change. Handshake is one native step per call;
 //! WouldBlock parks on [`crate::io::reactor_wait_fd_no_help`].
 
-use std::cell::Cell;
 use std::ffi::{CStr, c_char, c_void};
 use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,9 +35,11 @@ pub struct StreamVTable {
 pub struct AttachedIo {
     ptr: Option<NonNull<c_void>>,
     vtable: StreamVTable,
-    wants_write: Cell<bool>,
+    wants_write: AtomicBool,
 }
 
+// Session/vtable are package-owned C pointers. `wants_write` is `AtomicBool`
+// (Sync); do not put a `Cell` here.
 unsafe impl Send for AttachedIo {}
 unsafe impl Sync for AttachedIo {}
 
@@ -48,16 +49,16 @@ impl AttachedIo {
         Self {
             ptr: Some(ptr),
             vtable,
-            wants_write: Cell::new(false),
+            wants_write: AtomicBool::new(false),
         }
     }
 
     pub fn wants_write(&self) -> bool {
-        self.wants_write.get()
+        self.wants_write.load(Ordering::Relaxed)
     }
 
     pub fn set_wants_write(&self, wants: bool) {
-        self.wants_write.set(wants);
+        self.wants_write.store(wants, Ordering::Relaxed);
     }
 
     fn raw_ptr(&self) -> *mut c_void {
@@ -76,7 +77,7 @@ impl AttachedIo {
         let n = unsafe { (self.vtable.read)(ptr, buf.as_mut_ptr(), buf.len(), &mut err) };
         if let Some(tag) = tag_from_err_out(err) {
             if tag == IoErrorTag::WouldBlock {
-                self.wants_write.set(false);
+                self.wants_write.store(false, Ordering::Relaxed);
             }
             return Err(tag);
         }
@@ -104,7 +105,7 @@ impl AttachedIo {
         let n = unsafe { (self.vtable.write)(ptr, buf.as_ptr(), buf.len(), &mut err) };
         if let Some(tag) = tag_from_err_out(err) {
             if tag == IoErrorTag::WouldBlock {
-                self.wants_write.set(true);
+                self.wants_write.store(true, Ordering::Relaxed);
             }
             return Err(tag);
         }
@@ -180,43 +181,31 @@ fn tag_from_err_out(err: *const c_char) -> Option<IoErrorTag> {
     }
 }
 
-/// When false, [`stream_attach`] returns `PermissionDenied`. Set from
-/// `coil.toml` `[ffi] allow_attach` (default off). Unsigned C vtables are
-/// not a default coil capability.
-static ALLOW_ATTACH: AtomicBool = AtomicBool::new(false);
-
-/// Runtime gate for `Stream.attach` (from project manifest).
-pub fn set_allow_attach(allow: bool) {
-    ALLOW_ATTACH.store(allow, Ordering::Relaxed);
-}
-
-fn fn_from_i64<T>(addr: i64) -> Result<T, IoErrorTag> {
-    if addr == 0 {
+/// Typed code pointer from a hashed `dload` (HostInvoke path).
+pub(crate) fn typed_fn_from_hashed_dload<T>(addr: i64) -> Result<T, IoErrorTag> {
+    let p = crate::thread::host_code_ptr_from_hashed_dload(addr)?;
+    if std::mem::size_of::<T>() != std::mem::size_of::<*const ()>() {
         return Err(IoErrorTag::InvalidInput);
     }
-    Ok(unsafe { std::mem::transmute_copy(&addr) })
+    Ok(unsafe { std::mem::transmute_copy(&p) })
 }
 
 /// In-place attach on the same Stream object.
+///
+/// `allow` is the per-Machine `[ffi] allow_attach` flag. `vtable` holds typed
+/// C function pointers (tests construct them; HostInvoke takes them from a
+/// hashed dload, never a raw `i64` transmute).
 pub fn stream_attach(
     heap: &mut Heap,
+    allow: bool,
     stream: Value,
     ptr: i64,
-    read: i64,
-    write: i64,
-    shutdown: i64,
-    free: i64,
+    vtable: StreamVTable,
 ) -> Result<Value, IoErrorTag> {
-    if !ALLOW_ATTACH.load(Ordering::Relaxed) {
+    if !allow {
         return Err(IoErrorTag::PermissionDenied);
     }
     let ptr_nn = NonNull::new(ptr as *mut c_void).ok_or(IoErrorTag::InvalidInput)?;
-    let vtable = StreamVTable {
-        read: fn_from_i64(read)?,
-        write: fn_from_i64(write)?,
-        shutdown: fn_from_i64(shutdown)?,
-        free: fn_from_i64(free)?,
-    };
     with_stream_mut(heap, stream, |s: &mut ObjStream| {
         if s.closed || s.handle.is_none() {
             return Err(IoErrorTag::AlreadyClosed);
@@ -269,36 +258,6 @@ mod tests {
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
     use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
-    use std::sync::{Mutex, MutexGuard};
-
-    static ATTACH_TEST_GUARD: Mutex<()> = Mutex::new(());
-
-    struct AttachAllowGuard {
-        prev: bool,
-        _lock: MutexGuard<'static, ()>,
-    }
-
-    impl AttachAllowGuard {
-        fn allow() -> Self {
-            let lock = ATTACH_TEST_GUARD.lock().expect("attach test mutex");
-            let prev = ALLOW_ATTACH.load(Ordering::Relaxed);
-            ALLOW_ATTACH.store(true, Ordering::Relaxed);
-            Self { prev, _lock: lock }
-        }
-
-        fn deny() -> Self {
-            let lock = ATTACH_TEST_GUARD.lock().expect("attach test mutex");
-            let prev = ALLOW_ATTACH.load(Ordering::Relaxed);
-            ALLOW_ATTACH.store(false, Ordering::Relaxed);
-            Self { prev, _lock: lock }
-        }
-    }
-
-    impl Drop for AttachAllowGuard {
-        fn drop(&mut self) {
-            ALLOW_ATTACH.store(self.prev, Ordering::Relaxed);
-        }
-    }
     use std::time::Duration;
 
     struct XorSession {
@@ -382,8 +341,13 @@ mod tests {
         let _ = s.shutdowns.load(Ordering::SeqCst);
     }
 
-    fn fn_addr(p: *const ()) -> i64 {
-        p as usize as i64
+    fn xor_vtable() -> StreamVTable {
+        StreamVTable {
+            read: xor_read,
+            write: xor_write,
+            shutdown: xor_shutdown,
+            free: xor_free,
+        }
     }
 
     fn tcp_pair() -> (TcpStream, TcpStream) {
@@ -406,22 +370,12 @@ mod tests {
         let stream = alloc_stream(heap, NativeHandle::Tcp(sock), StreamKind::Tcp).expect("alloc");
         let session = XorSession::new(xor);
         let raw = Box::into_raw(session);
-        stream_attach(
-            heap,
-            stream,
-            raw as i64,
-            fn_addr(xor_read as *const ()),
-            fn_addr(xor_write as *const ()),
-            fn_addr(xor_shutdown as *const ()),
-            fn_addr(xor_free as *const ()),
-        )
-        .expect("attach");
+        stream_attach(heap, true, stream, raw as i64, xor_vtable()).expect("attach");
         (stream, raw)
     }
 
     #[test]
     fn attach_xor_vtable_is_not_tls_and_hooks_read_write() {
-        let _gate = AttachAllowGuard::allow();
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let (stream, ptr) = attach_xor(&mut heap, client, 0x5A);
@@ -462,7 +416,6 @@ mod tests {
 
     #[test]
     fn attach_would_block_parks_via_reactor_wait_fd_no_help() {
-        let _gate = AttachAllowGuard::allow();
         let (client, mut server) = tcp_pair();
         let wait = crate::io_handle::WaitHandle::from_tcp(&client);
         let mut heap = Heap::default();
@@ -496,7 +449,6 @@ mod tests {
 
     #[test]
     fn attach_write_would_block_sets_park_writable() {
-        let _gate = AttachAllowGuard::allow();
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let (stream, ptr) = attach_xor(&mut heap, client, 0);
@@ -556,7 +508,6 @@ mod tests {
 
     #[test]
     fn drop_calls_shutdown_then_free_in_order() {
-        let _gate = AttachAllowGuard::allow();
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream =
@@ -569,12 +520,15 @@ mod tests {
         let raw = Box::into_raw(session);
         stream_attach(
             &mut heap,
+            true,
             stream,
             raw as i64,
-            fn_addr(order_read as *const ()),
-            fn_addr(order_write as *const ()),
-            fn_addr(order_shutdown as *const ()),
-            fn_addr(order_free as *const ()),
+            StreamVTable {
+                read: order_read,
+                write: order_write,
+                shutdown: order_shutdown,
+                free: order_free,
+            },
         )
         .expect("attach");
         stream_close(&mut heap, stream).expect("close");
@@ -590,45 +544,48 @@ mod tests {
 
     #[test]
     fn attach_denied_without_allow_attach() {
-        let _gate = AttachAllowGuard::deny();
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
-        let err = stream_attach(&mut heap, stream, 1, 2, 3, 4, 5).unwrap_err();
+        let err = stream_attach(&mut heap, false, stream, 1, xor_vtable()).unwrap_err();
         assert_eq!(err, IoErrorTag::PermissionDenied);
         drop(server);
     }
 
     #[test]
     fn attach_null_session_is_invalid_when_allowed() {
-        let _gate = AttachAllowGuard::allow();
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
-        let err = stream_attach(&mut heap, stream, 0, 2, 3, 4, 5).unwrap_err();
+        let err = stream_attach(&mut heap, true, stream, 0, xor_vtable()).unwrap_err();
         assert_eq!(err, IoErrorTag::InvalidInput);
         drop(server);
     }
 
     #[test]
     fn attach_rejects_second_attach() {
-        let _gate = AttachAllowGuard::allow();
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let (stream, _ptr) = attach_xor(&mut heap, client, 0);
-        let err = stream_attach(
-            &mut heap,
-            stream,
-            1,
-            fn_addr(xor_read as *const ()),
-            fn_addr(xor_write as *const ()),
-            fn_addr(xor_shutdown as *const ()),
-            fn_addr(xor_free as *const ()),
-        )
-        .unwrap_err();
+        let err = stream_attach(&mut heap, true, stream, 1, xor_vtable()).unwrap_err();
         assert_eq!(err, IoErrorTag::InvalidInput);
+        stream_close(&mut heap, stream).ok();
+        drop(server);
+    }
+
+    #[test]
+    fn allow_is_per_call_not_a_process_switch() {
+        let (client, server) = tcp_pair();
+        let mut heap = Heap::default();
+        let stream =
+            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
+        let denied = stream_attach(&mut heap, false, stream, 1, xor_vtable()).unwrap_err();
+        assert_eq!(denied, IoErrorTag::PermissionDenied);
+        let session = XorSession::new(0);
+        let raw = Box::into_raw(session);
+        stream_attach(&mut heap, true, stream, raw as i64, xor_vtable()).expect("allow on this call");
         stream_close(&mut heap, stream).ok();
         drop(server);
     }

@@ -24,12 +24,24 @@ pub struct DloadGate {
     host_unhashed: HashSet<String>,
     /// Allow-listed stems whose dep row is `trusted = true`.
     trusted_unhashed: HashSet<String>,
+    /// Per-Machine `Stream.attach` grant (`[ffi] allow_attach`). Default off.
+    allow_attach: bool,
 }
 
 impl DloadGate {
     /// Deny every stem, including first-party `crypto` / `tls` / `regex` / `time`.
     pub fn deny_all() -> Self {
         Self::default()
+    }
+
+    /// `[ffi] allow_attach` for this gate (default false). Not process-global.
+    pub fn set_allow_attach(&mut self, allow: bool) {
+        self.allow_attach = allow;
+    }
+
+    /// Whether `Stream.attach` is allowed on VMs using this gate.
+    pub fn allow_attach(&self) -> bool {
+        self.allow_attach
     }
 
     /// Stems from consumer `[ffi] allow` and lock native `(stem, sha256 hex)` pins.
@@ -213,6 +225,17 @@ mod tests {
     use super::*;
     use crate::ffi::resolve::DLOAD_PRODUCTION_STEMS;
     use std::io::Write;
+
+    #[test]
+    fn allow_attach_defaults_off_and_is_per_gate() {
+        let mut a = DloadGate::deny_all();
+        let b = DloadGate::deny_all();
+        assert!(!a.allow_attach());
+        assert!(!b.allow_attach());
+        a.set_allow_attach(true);
+        assert!(a.allow_attach());
+        assert!(!b.allow_attach());
+    }
 
     #[test]
     fn deny_all_rejects_c_and_unknown() {

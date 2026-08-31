@@ -343,7 +343,6 @@ impl Pipeline {
         machine::env::set_allow_exec(m.allow_exec);
         machine::env::set_allow_exit(m.allow_exit);
         machine::env::set_allow_ffi_exec(m.allow_ffi_exec);
-        machine::set_allow_attach(m.allow_attach);
     }
 
     /// Fail-closed gate: consumer allow+hash, allow+trusted, and host grants.
@@ -361,6 +360,7 @@ impl Pipeline {
         for (stem, path) in &self.extra_dload_grants {
             let _ = gate.grant_file(stem, path);
         }
+        gate.set_allow_attach(self.manifest.allow_attach);
         gate
     }
 

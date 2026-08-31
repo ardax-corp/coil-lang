@@ -80,9 +80,11 @@ so a mid-handshake park cannot nest-steal the peer `thread::spawn` job onto
 the same stack (that deadlocked both sides under `COIL_MAX_WORKER_THREADS=1`
 — COI-116). The pool worker still runs the peer while the waiter polls.
 
-`Stream.attach` is gated by `[ffi] allow_attach` (default false). Without
-that flag the native returns `IoError::PermissionDenied`. `[ffi] allow` for
-`dload` does not grant attach.
+`Stream.attach` is gated per `Machine` by `[ffi] allow_attach` on `DloadGate`
+(default false). It is not a process-wide switch. Without that flag the native
+returns `IoError::PermissionDenied`. `[ffi] allow` for `dload` does not grant
+attach. Function pointers must be symbols from a hashed (or trusted/host)
+`dload`, not raw `i64` transmutes.
 
 After `Stream.attach`, IO (`stream_read` / `stream_write` / close) dispatches
 to the registered C vtable. The VM does not have a TLS-named stream kind and

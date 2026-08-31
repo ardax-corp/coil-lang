@@ -356,6 +356,7 @@ pub(crate) struct MachineHostState {
     spawn_context: Option<ThreadSpawnContext>,
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
+    dload_gate: crate::ffi::DloadGate,
 }
 
 thread_local! {
@@ -372,6 +373,7 @@ impl HostStateGuard {
         let spawn_context = vm.thread_spawn_context();
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
         let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
+        let dload_gate = vm.dload_gate().clone();
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
                 raw: (vm as *mut Machine<N>).cast(),
@@ -379,6 +381,7 @@ impl HostStateGuard {
                 spawn_context,
                 io_reactor,
                 cpu_reactor,
+                dload_gate,
             });
         });
         Self { prev }
@@ -458,6 +461,120 @@ pub(crate) fn host_io_wait_no_help(
         Some(io) => io.wait_fd(handle, interest, timeout),
         None => IoReactor::new().wait_fd(handle, interest, timeout),
     }
+}
+
+/// Per-Machine `[ffi] allow_attach`. False when no VM is bound.
+pub(crate) fn host_allow_attach() -> bool {
+    HOST_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .is_some_and(|s| s.dload_gate.allow_attach())
+    })
+}
+
+/// Code pointer must be a symbol in a file the bound gate would hashed-dload.
+pub(crate) fn host_code_ptr_from_hashed_dload(
+    addr: i64,
+) -> Result<*const (), crate::io::IoErrorTag> {
+    use crate::io::IoErrorTag;
+    if addr == 0 {
+        return Err(IoErrorTag::InvalidInput);
+    }
+    HOST_STATE.with(|c| {
+        let state = c.borrow();
+        let Some(state) = state.as_ref() else {
+            return Err(IoErrorTag::PermissionDenied);
+        };
+        hashed_dload_code_ptr(&state.dload_gate, addr as *const std::ffi::c_void)
+    })
+}
+
+fn hashed_dload_code_ptr(
+    gate: &crate::ffi::DloadGate,
+    ptr: *const std::ffi::c_void,
+) -> Result<*const (), crate::io::IoErrorTag> {
+    use crate::io::IoErrorTag;
+    let path = mapped_module_path(ptr).ok_or(IoErrorTag::InvalidInput)?;
+    let stem = crate::ffi::dload_request_stem(&path);
+    if gate.check_request(&stem).is_err() {
+        return Err(IoErrorTag::InvalidInput);
+    }
+    if !gate.file_hash_allowed(&stem, std::path::Path::new(&path)) {
+        return Err(IoErrorTag::InvalidInput);
+    }
+    Ok(ptr as *const ())
+}
+
+#[cfg(unix)]
+fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
+    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
+    let rc = unsafe { libc::dladdr(ptr, info.as_mut_ptr()) };
+    if rc == 0 {
+        return None;
+    }
+    let info = unsafe { info.assume_init() };
+    if info.dli_fname.is_null() {
+        return None;
+    }
+    // Interior pointers (not a symbol start) are not typed code pointers.
+    if info.dli_saddr.is_null() || info.dli_saddr as *const std::ffi::c_void != ptr {
+        return None;
+    }
+    Some(
+        unsafe { std::ffi::CStr::from_ptr(info.dli_fname) }
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+#[cfg(windows)]
+fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
+    use std::os::windows::ffi::OsStringExt;
+    const FROM_ADDRESS: u32 = 0x00000004;
+    const UNCHANGED_REFCOUNT: u32 = 0x00000002;
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn GetModuleHandleExW(
+            flags: u32,
+            lp: *const u16,
+            module: *mut *mut std::ffi::c_void,
+        ) -> i32;
+        fn GetModuleFileNameW(
+            module: *mut std::ffi::c_void,
+            buf: *mut u16,
+            len: u32,
+        ) -> u32;
+    }
+    let mut module: *mut std::ffi::c_void = std::ptr::null_mut();
+    let ok = unsafe {
+        GetModuleHandleExW(FROM_ADDRESS | UNCHANGED_REFCOUNT, ptr as *const u16, &mut module)
+    };
+    if ok == 0 || module.is_null() {
+        return None;
+    }
+    let mut buf = [0u16; 512];
+    let n = unsafe { GetModuleFileNameW(module, buf.as_mut_ptr(), buf.len() as u32) };
+    if n == 0 {
+        return None;
+    }
+    Some(
+        std::ffi::OsString::from_wide(&buf[..n as usize])
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// Drop async waiters registered on `handle` (stream close).
+pub(crate) fn host_cancel_waiters_for(handle: crate::io_handle::WaitHandle) {
+    HOST_STATE.with(|c| {
+        if let Some(io) = c
+            .borrow()
+            .as_ref()
+            .and_then(|s| s.io_reactor.as_ref())
+        {
+            io.cancel_waits_for(handle);
+        }
+    });
 }
 
 /// Poll async waiters once on the bound IO reactor.

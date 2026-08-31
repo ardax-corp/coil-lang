@@ -406,6 +406,20 @@ impl<const S: usize> Machine<S> {
         self.dload_gate = gate;
     }
 
+    pub fn dload_gate(&self) -> &crate::ffi::DloadGate {
+        &self.dload_gate
+    }
+
+    /// Per-Machine `Stream.attach` grant. Lives on [`DloadGate`], not a process flag.
+    pub fn set_allow_attach(&mut self, allow: bool) {
+        self.dload_gate.set_allow_attach(allow);
+    }
+
+    /// Whether this VM allows `Stream.attach`.
+    pub fn allow_attach(&self) -> bool {
+        self.dload_gate.allow_attach()
+    }
+
     /// Host/test stems with no lock hash. Does not restore a first-party exemption.
     pub fn set_dload_allowlist<I, St>(&mut self, extra_stems: I)
     where
