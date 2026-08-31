@@ -1,6 +1,6 @@
 # Internals
 
-How coil is structured for contributors and embedders. End-user language docs live in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`; site routes `/docs/<path>` until a public domain is set).
+How coil is structured for contributors. End-user language docs live in [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`; site routes `/docs/<path>` until a public domain is set).
 
 | Document | Contents |
 |----------|----------|
@@ -32,7 +32,10 @@ How coil is structured for contributors and embedders. End-user language docs li
 | `machine` | VM, heap/GC, FFI (libffi), host natives |
 | `common` | Opcodes, values, archive format |
 | `coil-simd` | Stable SIMD helpers (`std::arch`) for numeric / byte kernels |
-| `coil-cli` | Shared CLI argument parsing |
+| `coil-cli` | Shared CLI argument parsing (`try_run_embedded` for packaged apps) |
 | `reporting` | Diagnostics rendering (ariadne) |
+| `coil-embed` | Packaged-app runner: a small bin that calls `coil_cli::try_run_embedded`. **Not** an embed-the-VM library. |
+
+`coil package` concatenates a `.hyc` onto a runner (`coil-embed` when present, otherwise the full `coil` binary). There is no supported embed-the-VM library API yet (that needs host-catalog + archive C-layout work, later).
 
 Contributor invariants: [AGENTS.md](../../AGENTS.md).

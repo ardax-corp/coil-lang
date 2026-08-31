@@ -36,7 +36,7 @@ Namespace suite (`compiler/tests/namespace.rs`) passed repeatedly under `--test-
 |---------|------|------------|
 | FFI tests `eprintln!("skipping…"); return;` when `cc` / `.so` / `libc` missing | CI can go green without exercising FFI | Soft-skip **panics when `CI` is set**; GitHub Actions installs `libffi-dev` + `build-essential` |
 | No `.github/workflows` before this work | Regressions like #15 Ord derive landed unnoticed | Added `.github/workflows/ci.yml` |
-| CLI `out.hyc` cache | Stale bytecode on manual runs (not pipeline goldens) | Documented; CI does not rely on the cache for goldens |
+| CLI `out.hyc` cache | Stale bytecode on manual runs (not pipeline goldens) | **Doc was wrong:** default `coil file.hy` does not read/write `out.hyc`; `coil run out.hyc` warns, does not rebuild. See [pipeline.md](pipeline.md). |
 
 ## Coverage (post edge-case expansion)
 
