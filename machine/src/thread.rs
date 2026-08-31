@@ -533,7 +533,7 @@ fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
     const FROM_ADDRESS: u32 = 0x00000004;
     const UNCHANGED_REFCOUNT: u32 = 0x00000002;
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetModuleHandleExW(
             flags: u32,
             lp: *const u16,
