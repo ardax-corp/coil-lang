@@ -1,7 +1,9 @@
 //! Runtime counters for `--pgo-instrument` HostInvoke hits.
 
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
+
+use crate::thread;
 
 /// Matches compiler `profile::SITE_STRIDE` packing.
 pub const SITE_STRIDE: u32 = 1_000_000;
@@ -18,11 +20,11 @@ struct Counts {
     branches: BTreeMap<u32, (u64, u64)>,
 }
 
-static COUNTS: Mutex<Counts> = Mutex::new(Counts {
-    functions: BTreeMap::new(),
-    blocks: BTreeMap::new(),
-    branches: BTreeMap::new(),
-});
+/// Per-Machine PGO counters (shared with nested workers via Arc).
+#[derive(Clone, Default)]
+pub struct PgoCounters {
+    inner: Arc<Mutex<Counts>>,
+}
 
 /// Snapshot of packed-key counters (function keys use `fn_index * SITE_STRIDE`).
 #[derive(Clone, Debug, Default)]
@@ -32,31 +34,49 @@ pub struct PgoSnapshot {
     pub branch_counts: BTreeMap<u32, (u64, u64)>,
 }
 
-pub fn reset() {
-    *COUNTS.lock().unwrap_or_else(|e| e.into_inner()) = Counts::default();
+impl PgoCounters {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn reset(&self) {
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner()) = Counts::default();
+    }
+
+    pub fn hit(&self, packed: i64) {
+        let kind = packed & 3;
+        let key = (packed >> 2) as u32;
+        let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match kind {
+            KIND_FN => *g.functions.entry(key).or_insert(0) += 1,
+            KIND_BLOCK => *g.blocks.entry(key).or_insert(0) += 1,
+            KIND_BR_TAKEN => g.branches.entry(key).or_insert((0, 0)).0 += 1,
+            KIND_BR_NOT => g.branches.entry(key).or_insert((0, 0)).1 += 1,
+            _ => {}
+        }
+    }
+
+    pub fn snapshot(&self) -> PgoSnapshot {
+        let g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        PgoSnapshot {
+            function_keys: g.functions.clone(),
+            block_counts: g.blocks.clone(),
+            branch_counts: g.branches.clone(),
+        }
+    }
 }
 
-/// Apply one `pgo_hit` packed operand: `kind | (site_key << 2)`.
+/// Apply one `pgo_hit` packed operand on the bound Machine.
 pub fn hit(packed: i64) {
-    let kind = packed & 3;
-    let key = (packed >> 2) as u32;
-    let mut g = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
-    match kind {
-        KIND_FN => *g.functions.entry(key).or_insert(0) += 1,
-        KIND_BLOCK => *g.blocks.entry(key).or_insert(0) += 1,
-        KIND_BR_TAKEN => g.branches.entry(key).or_insert((0, 0)).0 += 1,
-        KIND_BR_NOT => g.branches.entry(key).or_insert((0, 0)).1 += 1,
-        _ => {}
-    }
+    thread::host_pgo_hit(packed);
 }
 
 pub fn snapshot() -> PgoSnapshot {
-    let g = COUNTS.lock().unwrap_or_else(|e| e.into_inner());
-    PgoSnapshot {
-        function_keys: g.functions.clone(),
-        block_counts: g.blocks.clone(),
-        branch_counts: g.branches.clone(),
-    }
+    thread::host_pgo_snapshot()
+}
+
+pub fn reset() {
+    thread::host_pgo_reset();
 }
 
 #[cfg(test)]
@@ -65,16 +85,24 @@ mod tests {
 
     #[test]
     fn hit_accumulates_kinds() {
-        reset();
-        hit(KIND_FN | ((7u32 as i64) << 2));
-        hit(KIND_BLOCK | ((7u32 as i64) << 2));
-        hit(KIND_BR_TAKEN | ((3u32 as i64) << 2));
-        hit(KIND_BR_NOT | ((3u32 as i64) << 2));
-        hit(KIND_BR_TAKEN | ((3u32 as i64) << 2));
-        let s = snapshot();
+        let c = PgoCounters::new();
+        c.hit(KIND_FN | ((7u32 as i64) << 2));
+        c.hit(KIND_BLOCK | ((7u32 as i64) << 2));
+        c.hit(KIND_BR_TAKEN | ((3u32 as i64) << 2));
+        c.hit(KIND_BR_NOT | ((3u32 as i64) << 2));
+        c.hit(KIND_BR_TAKEN | ((3u32 as i64) << 2));
+        let s = c.snapshot();
         assert_eq!(s.function_keys.get(&7), Some(&1));
         assert_eq!(s.block_counts.get(&7), Some(&1));
         assert_eq!(s.branch_counts.get(&3), Some(&(2, 1)));
-        reset();
+    }
+
+    #[test]
+    fn two_machines_do_not_share_pgo_counts() {
+        let a = PgoCounters::new();
+        let b = PgoCounters::new();
+        a.hit(KIND_FN | ((1u32 as i64) << 2));
+        assert_eq!(a.snapshot().function_keys.get(&1), Some(&1));
+        assert!(b.snapshot().function_keys.is_empty());
     }
 }

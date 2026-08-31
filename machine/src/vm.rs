@@ -280,6 +280,7 @@ pub struct Machine<const S: usize> {
     allow_exit: bool,
     /// Per-Machine `[env] allow_ffi_exec` (default deny).
     allow_ffi_exec: bool,
+    pgo: crate::pgo::PgoCounters,
     /// Registered C struct layouts for pass-by-value FFI.
     struct_layouts: Vec<CStructLayout>,
     /// Keeps libffi callback trampolines alive (ties lifetime to VM run).
@@ -369,6 +370,7 @@ impl<const S: usize> Machine<S> {
             allow_exec: false,
             allow_exit: false,
             allow_ffi_exec: false,
+            pgo: crate::pgo::PgoCounters::new(),
             struct_layouts: Vec::new(),
             ffi_closures: Vec::new(),
             program_code: Vec::new(),
@@ -435,6 +437,22 @@ impl<const S: usize> Machine<S> {
 
     pub fn allow_ffi_exec(&self) -> bool {
         self.allow_ffi_exec
+    }
+
+    pub fn pgo_counters(&self) -> &crate::pgo::PgoCounters {
+        &self.pgo
+    }
+
+    pub fn pgo_snapshot(&self) -> crate::pgo::PgoSnapshot {
+        self.pgo.snapshot()
+    }
+
+    pub fn pgo_reset(&self) {
+        self.pgo.reset();
+    }
+
+    pub fn set_pgo_counters(&mut self, pgo: crate::pgo::PgoCounters) {
+        self.pgo = pgo;
     }
 
     /// Per-Machine `Stream.attach` grant. Lives on [`DloadGate`], not a process flag.
@@ -1412,6 +1430,7 @@ impl<const S: usize> Machine<S> {
             allow_exec: self.allow_exec,
             allow_exit: self.allow_exit,
             allow_ffi_exec: self.allow_ffi_exec,
+            pgo: self.pgo.clone(),
         })
     }
 

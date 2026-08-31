@@ -38,6 +38,7 @@ pub struct Job {
     pub allow_exec: bool,
     pub allow_exit: bool,
     pub allow_ffi_exec: bool,
+    pub pgo: crate::pgo::PgoCounters,
 }
 
 /// Per-root-VM work-stealing reactor.
@@ -400,6 +401,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         allow_exec,
         allow_exit,
         allow_ffi_exec,
+        pgo,
     } = job;
 
     // A joining root help-steals jobs onto its *own* thread, so the print
@@ -423,6 +425,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         vm.set_ffi_paths(ffi_base_dir, ffi_search_paths);
         vm.set_dload_gate(dload_gate);
         vm.set_env_grants(allow_exec, allow_exit, allow_ffi_exec);
+        vm.set_pgo_counters(pgo);
         if let Some(buf) = &shared_print {
             vm.set_shared_print(Arc::clone(buf));
             vm.with_output(SharedPrintWriter(Arc::clone(buf)));
@@ -484,6 +487,7 @@ pub fn job_from_spawn_context(
         allow_exec: ctx.allow_exec,
         allow_exit: ctx.allow_exit,
         allow_ffi_exec: ctx.allow_ffi_exec,
+        pgo: ctx.pgo,
     }
 }
 
@@ -525,6 +529,7 @@ mod tests {
             allow_exec: false,
             allow_exit: false,
             allow_ffi_exec: false,
+            pgo: crate::pgo::PgoCounters::new(),
         };
         reactor.submit(job);
         state
@@ -625,6 +630,7 @@ mod tests {
             allow_exec: false,
             allow_exit: false,
             allow_ffi_exec: false,
+            pgo: crate::pgo::PgoCounters::new(),
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(
