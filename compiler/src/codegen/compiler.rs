@@ -4201,7 +4201,7 @@ impl Compiler {
             return false;
         }
 
-        let Some(native_id) = self.native_id(machine::PACKED_VEC_ARITH) else {
+        let Some(native_id) = self.native_id(common::PACKED_VEC_ARITH) else {
             return false;
         };
 
@@ -6958,13 +6958,13 @@ impl Compiler {
         emit_host(
             self,
             format!("{owner}::attach"),
-            machine::STREAM_ATTACH_NATIVE,
+            common::STREAM_ATTACH_NATIVE,
             &[0, 1, 2, 3, 4, 5],
         );
         emit_host(
             self,
             format!("{owner}::park"),
-            machine::STREAM_PARK_NATIVE,
+            common::STREAM_PARK_NATIVE,
             &[0],
         );
     }
@@ -9960,7 +9960,7 @@ impl Compiler {
                 if *elem_is_float {
                     ops |= 1 << 16;
                 }
-                (machine::PACKED_DOT, ops, args)
+                (common::PACKED_DOT, ops, args)
             }
             LinearAlgebraKind::MatMul {
                 m,
@@ -9990,7 +9990,7 @@ impl Compiler {
                 if *row_is_tuple {
                     ops |= 1 << 26;
                 }
-                (machine::PACKED_MATMUL, ops, args)
+                (common::PACKED_MATMUL, ops, args)
             }
             LinearAlgebraKind::MatrixZip {
                 m,
@@ -10023,7 +10023,7 @@ impl Compiler {
                 if *row_is_tuple {
                     ops |= 1 << 26;
                 }
-                (machine::PACKED_MATRIX_ZIP, ops, args)
+                (common::PACKED_MATRIX_ZIP, ops, args)
             }
             LinearAlgebraKind::MatrixNeg {
                 m,
@@ -10050,7 +10050,7 @@ impl Compiler {
                 if *row_is_tuple {
                     ops |= 1 << 18;
                 }
-                (machine::PACKED_MATRIX_NEG, ops, args)
+                (common::PACKED_MATRIX_NEG, ops, args)
             }
             LinearAlgebraKind::Cross { .. } => return false,
         };

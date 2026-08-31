@@ -58,3 +58,98 @@ pub fn load_library_resolved(
 ) -> Result<Arc<Library>, FfiError> {
     resolve_library(name, base_dir, search_paths, gate)
 }
+
+/// Build `examples/sum.c` into the platform `libsum` filename if missing or stale.
+/// Used by machine FFI tests so they do not depend on compiler integration tests
+/// compiling the fixture as a side effect.
+#[cfg(test)]
+pub(crate) fn ensure_examples_libsum() -> PathBuf {
+    let lib_name = platform_shared_lib_filename("sum");
+    let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("machine crate must have a parent (workspace root)");
+    let sum_c = workspace_root.join("examples/sum.c");
+    let libsum = workspace_root.join("examples").join(&lib_name);
+
+    let needs_build = match (sum_c.metadata(), libsum.metadata()) {
+        (Ok(src_meta), Ok(so_meta)) => src_meta.modified().ok() > so_meta.modified().ok(),
+        (Ok(_), Err(_)) => true,
+        _ => false,
+    };
+    if !needs_build && libsum.exists() {
+        return libsum;
+    }
+    if !sum_c.exists() {
+        return libsum;
+    }
+
+    let tmp = libsum.with_file_name(format!(
+        ".{}.{}.tmp",
+        lib_name,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+
+    let mut cmd = std::process::Command::new("cc");
+    #[cfg(target_os = "macos")]
+    {
+        cmd.arg("-dynamiclib");
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        cmd.arg("-shared").arg("-fPIC");
+    }
+    #[cfg(target_os = "windows")]
+    {
+        cmd.arg("-shared");
+    }
+    let status = cmd.arg("-O2").arg("-o").arg(&tmp).arg(&sum_c).status();
+    match status {
+        Ok(s) if s.success() => {
+            if std::fs::rename(&tmp, &libsum).is_err() {
+                if !libsum.exists() {
+                    let _ = std::fs::copy(&tmp, &libsum);
+                }
+                let _ = std::fs::remove_file(&tmp);
+            }
+        }
+        Ok(s) => {
+            let _ = std::fs::remove_file(&tmp);
+            if std::env::var_os("CI").is_some() {
+                panic!(
+                    "FFI soft-skip forbidden in CI: cc returned non-zero status {} building {lib_name}",
+                    s.code().unwrap_or(-1)
+                );
+            }
+            eprintln!(
+                "skipping: cc returned non-zero status {} building {lib_name}",
+                s.code().unwrap_or(-1)
+            );
+        }
+        Err(e) => {
+            if std::env::var_os("CI").is_some() {
+                panic!("FFI soft-skip forbidden in CI: failed to invoke cc: {e}");
+            }
+            eprintln!("skipping: failed to invoke cc: {e}");
+        }
+    }
+    libsum
+}
+
+/// Compile `examples/libsum` if needed; `None` means skip (never in CI).
+#[cfg(test)]
+pub(crate) fn require_examples_libsum() -> Option<(String, PathBuf)> {
+    let lib_name = platform_shared_lib_filename("sum");
+    let lib_path = ensure_examples_libsum();
+    if lib_path.exists() {
+        Some((lib_name, lib_path))
+    } else {
+        if std::env::var_os("CI").is_some() {
+            panic!("FFI soft-skip forbidden in CI: {lib_name} not built");
+        }
+        eprintln!("skipping: {lib_name} not built");
+        None
+    }
+}

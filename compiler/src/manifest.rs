@@ -333,7 +333,7 @@ impl Manifest {
                                 ),
                             });
                         }
-                        if machine::is_libc_alias(&stem) {
+                        if common::is_libc_alias(&stem) {
                             return Err(ManifestError::Parse {
                                 line: line_num,
                                 message: format!(

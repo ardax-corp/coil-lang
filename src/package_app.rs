@@ -246,7 +246,17 @@ pub fn cmd_package(
         .filter(|p| !p.as_os_str().is_empty());
     if check_native && uses_ffi {
         let libs = ffi_library_names_from_bytecode(&bytecode, &strings);
-        let gate = pipeline.build_dload_gate();
+        let mut gate = machine::DloadGate::from_consumer_trusted(
+            &pipeline.manifest().ffi_allow,
+            &pipeline.dload_native_pins(),
+            pipeline.dload_trusted_stems(),
+        );
+        for stem in pipeline.extra_dload_stems() {
+            gate.grant_stem(stem);
+        }
+        for (stem, path) in pipeline.extra_dload_grants() {
+            let _ = gate.grant_file(stem, path);
+        }
         let search: Vec<PathBuf> = pipeline
             .manifest()
             .ffi_search_paths
@@ -350,8 +360,8 @@ pub fn run_packaged_output(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coil_cli::{load_archive_bytes, LoadErr};
-    use common::{pack_archive_version, ArchivedProgram, Instruction};
+    use coil_cli::{LoadErr, load_archive_bytes};
+    use common::{ArchivedProgram, Instruction, pack_archive_version};
 
     #[test]
     fn load_archive_bytes_rejects_version() {
