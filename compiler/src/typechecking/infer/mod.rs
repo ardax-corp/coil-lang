@@ -1,4 +1,7 @@
-//! Hindley–Milner inference (Algorithm W) over the coil AST.
+//! Constraint-based type inference over the coil AST.
+//!
+//! Generics are explicit (`fn f<T>`, `class Cell<T>`). `let` bindings are
+//! monomorphic; this is not Algorithm W.
 //!
 //! [`Checker`] owns the substitution, accumulates diagnostics with error
 //! recovery, and caches inferred types keyed by pre-walk [`NodeId`]s.

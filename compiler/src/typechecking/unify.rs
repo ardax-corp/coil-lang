@@ -2,7 +2,9 @@
 
 use super::env::substitute_vars;
 use super::subst::{apply_ty, compose, Subst};
-use super::ty::{ftv_ty, option_inner, peel_constructor_refinement, result_ok_err, Ty, TyVarId};
+use super::ty::{
+    ftv_ty, option_inner, peel_constructor_refinement, result_ok_err, Constraint, Ty, TyVarId,
+};
 
 /// Failure modes for unification.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -27,6 +29,39 @@ impl std::fmt::Display for UnifyError {
 }
 
 impl std::error::Error for UnifyError {}
+
+
+/// Structural equality of `forall` constraints after renaming `c2`'s bound
+/// vars. Display is not injective (`Existential("Show")` and `Con("Show")`
+/// both print as `Show`), so pretty-printed args must not decide unify.
+fn forall_constraints_eq(
+    c1: &[Constraint],
+    c2: &[Constraint],
+    mapping: &std::collections::HashMap<TyVarId, TyVarId>,
+) -> bool {
+    if c1.len() != c2.len() {
+        return false;
+    }
+    let mut used = vec![false; c2.len()];
+    'left: for a in c1 {
+        for (i, b) in c2.iter().enumerate() {
+            if used[i] || a.class != b.class || a.args.len() != b.args.len() {
+                continue;
+            }
+            let renamed: Vec<Ty> = b
+                .args
+                .iter()
+                .map(|ty| substitute_vars(ty, mapping))
+                .collect();
+            if a.args == renamed {
+                used[i] = true;
+                continue 'left;
+            }
+        }
+        return false;
+    }
+    true
+}
 
 /// Unify two types, starting from the empty substitution.
 ///
@@ -125,40 +160,7 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
 
             let mapping = b2.iter().copied().zip(b1.iter().copied()).collect();
             let renamed_body2 = substitute_vars(&body2, &mapping);
-            let mut normalized_c1 = c1
-                .iter()
-                .map(|c| {
-                    (
-                        c.class.clone(),
-                        c.args
-                            .iter()
-                            .map(|a| format!("{}", a))
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    )
-                })
-                .collect::<Vec<_>>();
-            let mut normalized_c2 = c2
-                .iter()
-                .map(|c| {
-                    let renamed_args: Vec<_> = c
-                        .args
-                        .iter()
-                        .map(|a| substitute_vars(a, &mapping))
-                        .collect();
-                    (
-                        c.class.clone(),
-                        renamed_args
-                            .iter()
-                            .map(|a| format!("{}", a))
-                            .collect::<Vec<_>>()
-                            .join(","),
-                    )
-                })
-                .collect::<Vec<_>>();
-            normalized_c1.sort();
-            normalized_c2.sort();
-            if normalized_c1 != normalized_c2 {
+            if !forall_constraints_eq(&c1, &c2, &mapping) {
                 return Err(UnifyError::Mismatch {
                     left: Ty::Forall {
                         bounds: b1,
@@ -1165,5 +1167,47 @@ mod tests {
         // Dynamic is the unsized join: Static(n) ↔ Dynamic still unifies.
         assert!(unify(&array_fixed(int(), 2), &array(int())).is_ok());
         assert!(unify(&array(int()), &array_fixed(int(), 2)).is_ok());
+    }
+
+    #[test]
+    fn forall_constraints_compare_structurally_not_via_display() {
+        // Display(`Existential { class: "Show" }`) == Display(`Con("Show")`).
+        let left = Ty::Forall {
+            bounds: vec![TyVarId(0)],
+            constraints: vec![Constraint {
+                class: "Num".into(),
+                args: vec![Ty::Existential {
+                    class: "Show".into(),
+                }],
+            }],
+            body: Box::new(v(0)),
+        };
+        let right = Ty::Forall {
+            bounds: vec![TyVarId(1)],
+            constraints: vec![Constraint {
+                class: "Num".into(),
+                args: vec![Ty::Con("Show".into())],
+            }],
+            body: Box::new(v(1)),
+        };
+        assert!(
+            matches!(unify(&left, &right), Err(UnifyError::Mismatch { .. })),
+            "Display-colliding constraint args must not unify"
+        );
+    }
+
+    #[test]
+    fn forall_constraints_match_after_bound_rename() {
+        let left = Ty::Forall {
+            bounds: vec![TyVarId(0)],
+            constraints: vec![Constraint::unary("Num", TyVarId(0))],
+            body: Box::new(v(0)),
+        };
+        let right = Ty::Forall {
+            bounds: vec![TyVarId(7)],
+            constraints: vec![Constraint::unary("Num", TyVarId(7))],
+            body: Box::new(v(7)),
+        };
+        assert!(unify(&left, &right).is_ok());
     }
 }

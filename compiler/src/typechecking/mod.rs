@@ -1,4 +1,4 @@
-//! Hindley–Milner type inference for coil.
+//! Type inference for coil (explicit generics, monomorphic `let`).
 //!
 //! Runs after parsing and before bytecode emission. Exposes [`Checker`]
 //! for inference, native registration, and span-indexed type lookup.

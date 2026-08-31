@@ -16,6 +16,7 @@ Actionable gaps in the compiler, VM, and language surface. For opcode/archive ru
 | `import` keyword | **Non-goal:** not a synonym of `use` and not a distinct construct. Module binding is `use` only. | [COI-73](https://linear.app/ardax/issue/COI-73) |
 | `case` as `match` alias | **Non-goal:** not a synonym of `match`. Pattern matching is `match` only. | [COI-74](https://linear.app/ardax/issue/COI-74) |
 | Range `collect` | **Implemented:** numeric `Range` / `RangeInclusive` (`int` / `byte` / `float`) expose inherent `.to_vec() -> Vec<T>`. Decreasing ranges collect empty (same as `for`). Non-numeric `Ord` may construct a range; `for` and `.to_vec()` are type errors (no `succ` protocol). Step syntax still deferred. | [COI-75](https://linear.app/ardax/issue/COI-75) |
+| Let-polymorphism / Algorithm W | **Decided (explicit generics only):** `Env::generalize` is test-only; production `let` is `Scheme::mono`. Polymorphic values are `fn f<T>` / `class C<T>` (and trait bounds), not inferred at `let`. Headers no longer claim Algorithm W. | — |
 | Duplicate record fields | **Implemented:** parser rejects duplicate names in record literals, constructors, patterns, and enum variant field decls (`E0208`). Typechecker keeps the same check if parse is bypassed. | [COI-76](https://linear.app/ardax/issue/COI-76) |
 
 ## Userland footguns

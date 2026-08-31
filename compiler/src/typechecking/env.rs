@@ -1,4 +1,8 @@
-//! Scoped environments and let-polymorphism ([`generalize`], [`instantiate_with_kinds`]).
+//! Scoped environments and scheme instantiation ([`instantiate_with_kinds`]).
+//!
+//! Production does not let-generalize (not Algorithm W). Bindings are
+//! monomorphic unless syntax declares type parameters. `generalize` is
+//! test-only.
 
 use std::collections::{HashMap, HashSet};
 
@@ -189,8 +193,11 @@ impl Env {
     }
 }
 
-/// Generalize: quantify type variables free in `ty` but not in `env`.
-#[allow(dead_code)]
+/// Quantify type variables free in `ty` but not in `env`.
+///
+/// Not called on the typecheck path. Explicit `fn f<T>` / `class C<T>`
+/// build schemes from syntax; `let` bindings are [`Scheme::mono`].
+#[cfg(test)]
 pub fn generalize(env: &Env, ty: &Ty) -> Scheme {
     let env_ftv = env.ftv();
     let ty_ftv = ftv_ty(ty);
@@ -611,8 +618,8 @@ mod tests {
 
     #[test]
     fn instantiate_twice_produces_different_vars() {
-        // Each instantiation must mint fresh vars — this is what gives
-        // let-polymorphism its power.
+        // Each instantiation must mint fresh vars so a scheme can be
+        // used at independent types (explicit generics, not let-gen).
         let s = Scheme {
             bounds: vec![TyVarId(0)],
             kinds: vec![],
@@ -653,19 +660,12 @@ mod tests {
         assert_eq!(ty, expected);
     }
 
-    // ---- Let-polymorphism: the headline scenario ----
+    // ---- generalize (test-only; production never calls this) ----
 
     #[test]
-    fn let_polymorphism_id_used_at_two_types() {
-        // Simulate `let id = fn(x) x in (id 1, id true)`:
-        //
-        //   1. The lambda infers α -> α for a fresh α.
-        //   2. generalize at the let with an empty env quantifies α,
-        //      yielding `∀α. α -> α`.
-        //   3. The env gets id : ∀α. α -> α.
-        //   4. Two instantiations of id give different fresh vars, so
-        //      the two uses can be unified with int and bool
-        //      independently.
+    fn generalize_id_used_at_two_types() {
+        // The helper can quantify `α -> α`, but Coil does not run this
+        // at `let`. Explicit `fn id<T>(T x) -> T` is the production path.
 
         let mut env = Env::new();
         let mut counter = TyVarCounter::new();
