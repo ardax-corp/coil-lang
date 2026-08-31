@@ -1,5 +1,5 @@
 use super::*;
-use crate::typechecking::{CStructDef, ForInKind};
+use crate::typechecking::{CStructDef, ForInInfo, ForInKind, PairNicheAbi};
 use reporting::{ErrorCode, Message};
 
 #[cfg(any(test, feature = "dissect"))]
@@ -600,14 +600,12 @@ impl Compiler {
         let Expression::Identifier(fname) = name.1.as_ref() else {
             return false;
         };
-        let mut call_key = self
-            .aliases
-            .get(*fname)
-            .cloned()
-            .unwrap_or_else(|| fname.to_string());
-        if let Some((fa, is_rest, id)) = self
-            .checker
-            .selected_overload_at(call_expr.0.start, call_expr.0.end)
+        let mut call_key = self.resolve_free_fn(fname);
+        if let Some((fa, is_rest, id)) = self.sidecar_overload(
+            None,
+            call_expr.0.start,
+            call_expr.0.end,
+        )
         {
             let keyed = overload_fn_key(&call_key, fa, is_rest, id);
             if self.functions.contains_key(&keyed) {
@@ -703,14 +701,12 @@ impl Compiler {
         let Expression::Identifier(fname) = name.1.as_ref() else {
             return false;
         };
-        let mut call_key = self
-            .aliases
-            .get(*fname)
-            .cloned()
-            .unwrap_or_else(|| fname.to_string());
-        if let Some((fa, is_rest, id)) = self
-            .checker
-            .selected_overload_at(call_expr.0.start, call_expr.0.end)
+        let mut call_key = self.resolve_free_fn(fname);
+        if let Some((fa, is_rest, id)) = self.sidecar_overload(
+            None,
+            call_expr.0.start,
+            call_expr.0.end,
+        )
         {
             let keyed = overload_fn_key(&call_key, fa, is_rest, id);
             if self.functions.contains_key(&keyed) {
@@ -3371,11 +3367,7 @@ impl Compiler {
     fn direct_call_fqn(&self, name: &Output<'_>) -> Option<String> {
         match name.1.as_ref() {
             Expression::Identifier(n) => {
-                let resolved = self
-                    .aliases
-                    .get(*n)
-                    .cloned()
-                    .unwrap_or_else(|| (*n).to_string());
+                let resolved = self.resolve_free_fn(n);
                 Some(resolved)
             }
             Expression::QualifiedAccess { owner, member } => Some(format!("{owner}::{member}")),
@@ -3615,6 +3607,116 @@ impl Compiler {
             .ty(id)
             .cloned()
             .or_else(|| self.checker.lookup_at(id))
+    }
+
+    /// Free-fn FQN from interned [`DefId`], not `Compiler.aliases`.
+    fn resolve_free_fn(&self, name: &str) -> String {
+        if let Some(def) = self.checker.def_id_of(name) {
+            return self.fqn_of_def(def);
+        }
+        if name.contains("::") {
+            return name.to_string();
+        }
+        if !self.namespace.is_empty() {
+            if let Some(def) = self.checker.interned_def(&self.namespace, name) {
+                return self.fqn_of_def(def);
+            }
+            let qualified = format!("{}::{}", self.namespace, name);
+            if self.functions.contains_key(&qualified)
+                || self.fn_entry_labels.contains_key(&qualified)
+            {
+                return qualified;
+            }
+        }
+        name.to_string()
+    }
+
+    fn fqn_of_def(&self, def: crate::typechecking::DefId) -> String {
+        let Some(info) = self.checker.def_interner().info(def) else {
+            return String::new();
+        };
+        match self.checker.def_interner().module_path(info.module) {
+            Some(path) if !path.is_empty() => format!("{path}::{}", info.name),
+            _ => info.name.clone(),
+        }
+    }
+
+    fn sidecar_overload(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<(usize, bool, u32)> {
+        if let Some(id) = node
+            && let Some(o) = self.typed_sidecar.overload(id)
+        {
+            return Some((o.fixed_arity, o.is_rest, o.candidate_id));
+        }
+        self.checker.selected_overload_at(start, end)
+    }
+
+    fn sidecar_for_in(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<ForInInfo> {
+        node.and_then(|id| self.typed_sidecar.for_in(id).cloned())
+            .or_else(|| node.and_then(|id| self.checker.for_in_info_at(id).cloned()))
+            .or_else(|| self.checker.for_in_info_for_span(start, end).cloned())
+    }
+
+    fn sidecar_dicts(
+        &self,
+        node: Option<crate::typechecking::id::NodeId>,
+        start: usize,
+        end: usize,
+    ) -> Option<&[crate::typechecking::generics::InstanceDef]> {
+        if let Some(id) = node {
+            if let Some(dicts) = self.typed_sidecar.dicts(id) {
+                return Some(dicts);
+            }
+            if let Some(dicts) = self.checker.call_dicts_at(id) {
+                return Some(dicts);
+            }
+        }
+        self.checker.call_dicts_for_span(start, end)
+    }
+
+    fn sidecar_pair_niche(&self, name: &str) -> Option<PairNicheAbi> {
+        self.typed_sidecar.pair_niche(self.def_id_for_name(name)?)
+    }
+
+    fn sidecar_ffi_tags(&self, name: &str) -> Option<&[u32]> {
+        self.typed_sidecar.ffi_tags(self.def_id_for_name(name)?)
+    }
+
+    fn def_id_for_name(&self, name: &str) -> Option<crate::typechecking::DefId> {
+        if let Some((module, simple)) = name.rsplit_once("::") {
+            self.checker
+                .interned_def(module, simple)
+                .or_else(|| self.checker.def_id_of(simple))
+        } else {
+            self.checker
+                .def_id_of(name)
+                .or_else(|| self.checker.interned_def(&self.namespace, name))
+                .or_else(|| self.checker.interned_def("", name))
+        }
+    }
+
+    fn resolve_call_ffi_tags(
+        &mut self,
+        callee: Option<&str>,
+        span: (usize, usize),
+        args: &[&Output],
+    ) -> Option<Vec<(u32, u32)>> {
+        if let Some(name) = callee
+            && let Some(tags) = self.sidecar_ffi_tags(name)
+            && tags.len() == args.len()
+        {
+            return Some(tags.iter().copied().map(|tag| (tag, 0u32)).collect());
+        }
+        resolve_variadic_ffi_tags(&self.checker, span, args, &mut self.messages)
     }
 
     /// Identifier type for codegen: mono arm overrides, then span cache, then
@@ -4799,11 +4901,10 @@ impl Compiler {
         let mut operand = arity & 0xFFFF;
         if variadic {
             let args: Vec<_> = tuple_elements.iter().collect();
-            if let Some(tags) = resolve_variadic_ffi_tags(
-                &self.checker,
+            if let Some(tags) = self.resolve_call_ffi_tags(
+                None,
                 (span.start, span.end),
                 &args,
-                &mut self.messages,
             ) {
                 for &(tag, aux) in &tags {
                     emit_ffi_type_const(&mut self.bytecode, tag, aux);
@@ -7044,6 +7145,17 @@ impl Compiler {
         if let Some(cached) = self.pair_return_kinds.borrow().get(name) {
             return *cached;
         }
+        if let Some(abi) = self.sidecar_pair_niche(name) {
+            let kind = match abi {
+                PairNicheAbi::PairResult => Some(false),
+                PairNicheAbi::PairOption => Some(true),
+                PairNicheAbi::NicheOption => None,
+            };
+            self.pair_return_kinds
+                .borrow_mut()
+                .insert(name.to_string(), kind);
+            return kind;
+        }
         let kind = self.compute_pair_return_kind(name);
         self.pair_return_kinds
             .borrow_mut()
@@ -7110,11 +7222,7 @@ impl Compiler {
     /// `Some(is_option)` when calling `callee` leaves a pair on the stack.
     fn pair_call_kind(&self, callee: &Output) -> Option<bool> {
         let name = match callee.1.as_ref() {
-            Expression::Identifier(name) => self
-                .aliases
-                .get(*name)
-                .cloned()
-                .unwrap_or_else(|| (*name).to_string()),
+            Expression::Identifier(name) => self.resolve_free_fn(name),
             Expression::QualifiedAccess { owner, member } => {
                 format!("{}::{}", owner, member)
             }
@@ -10183,34 +10291,9 @@ impl Compiler {
                     // Disk-module wildcards are rejected in typecheck
                     // (`ErrorCode::WildcardImport`); leave aliases unchanged.
                 } else {
-                    // Prefer the FQN that actually exists in the function
-                    // table so both conventions work:
-                    //   foo/sadge.hy  → foo::sadge::sadge  (one-item-per-file)
-                    //   foo.hy        → foo::sadge         (item-in-module-file)
-                    let module_ns = p.join("::");
-                    let file_per_item = if module_ns.is_empty() {
-                        format!("{name}::{name}")
-                    } else {
-                        format!("{module_ns}::{name}::{name}")
-                    };
-                    let item_in_module = if module_ns.is_empty() {
-                        name.clone()
-                    } else {
-                        format!("{module_ns}::{name}")
-                    };
-                    let qualified = if self.functions.contains_key(&item_in_module) {
-                        item_in_module
-                    } else if self.functions.contains_key(&file_per_item) {
-                        file_per_item
-                    } else {
-                        // Dependency not linked yet: prefer item-in-module
-                        // (`io::sync::write_all`) over one-item-per-file
-                        // (`io::sync::write_all::write_all`), which poisons
-                        // intra-module calls after a premature `use`.
-                        item_in_module
-                    };
-                    let local = alias.clone().unwrap_or_else(|| name.clone());
-                    self.aliases.insert(local, qualified);
+                    // B3: free-fn names resolve through DefId / sidecar, not
+                    // `Compiler.aliases`. Typecheck already bound `use`.
+                    let _ = (p, name, alias);
                 }
             }
             Expression::Noop(_) => (),
@@ -10292,11 +10375,7 @@ impl Compiler {
                         // If so, track this variable as holding an ObjPolyFn.
                         let polyfn_source = match unwrapped_identifier(&children[1]) {
                             Some(rhs_name) => {
-                                let resolved = self
-                                    .aliases
-                                    .get(rhs_name)
-                                    .cloned()
-                                    .unwrap_or_else(|| rhs_name.to_string());
+                                let resolved = self.resolve_free_fn(rhs_name);
                                 (self.checker.is_generic_fn(&resolved)
                                     || self.functions.get(&resolved).is_some()
                                         && self.checker.is_generic_fn(rhs_name))
@@ -11109,10 +11188,7 @@ impl Compiler {
                         Expression::Identifier(n) => (*n).to_string(),
                         _ => "__for_in_x".to_string(),
                     };
-                    let info = self_id
-                        .and_then(|id| self.checker.for_in_info_at(id))
-                        .or_else(|| self.checker.for_in_info_for_span(span.start, span.end))
-                        .cloned();
+                    let info = self.sidecar_for_in(self_id, span.start, span.end);
                     let item_ty = info.as_ref().map(|i| i.item_ty.clone());
                     let kind = info.map(|i| i.kind).unwrap_or(ForInKind::Coroutine);
                     match kind {
@@ -11450,11 +11526,7 @@ impl Compiler {
                 bytecode.append(&mut self.do_compile(ty));
             }
             Expression::Identifier(n) => {
-                let resolved = self
-                    .aliases
-                    .get(*n)
-                    .cloned()
-                    .unwrap_or_else(|| n.to_string());
+                let resolved = self.resolve_free_fn(n);
                 if let Some(v) = self
                     .const_env()
                     .get(&resolved)
@@ -11497,11 +11569,7 @@ impl Compiler {
                     // escaping into a non-call position (e.g. `let f = id;`).
                     // In that case, emit MakePolyFn instead of a direct CALL offset,
                     // so the variable holds an ObjPolyFn that CallIndirect can use.
-                    let resolved_n = self
-                        .aliases
-                        .get(*n)
-                        .cloned()
-                        .unwrap_or_else(|| n.to_string());
+                    let resolved_n = self.resolve_free_fn(n);
                     if self.checker.is_generic_fn(&resolved_n) {
                         if let Some(&entry_offset) = self.functions.get(&resolved_n) {
                             // Phase 4: constrained generics always escape via
@@ -11547,7 +11615,7 @@ impl Compiler {
                     } else {
                         // Monomorphic function in value position → MakeFn.
                         let (fa, is_rest, entry_key) = if let Some((fa, is_rest, id)) =
-                            self.checker.selected_overload_at(span.start, span.end)
+                            self.sidecar_overload(self_id, span.start, span.end)
                         {
                             let keyed = overload_fn_key(&resolved_n, fa, is_rest, id);
                             (fa, is_rest, keyed)
@@ -12396,11 +12464,7 @@ impl Compiler {
                     }
                 }
                 Expression::Identifier(name) => {
-                    let resolved = self
-                        .aliases
-                        .get(*name)
-                        .cloned()
-                        .unwrap_or_else(|| name.to_string());
+                    let resolved = self.resolve_free_fn(name);
                     if let Some(static_slot) = self
                         .checker
                         .static_slot_index(&resolved)
@@ -14545,9 +14609,8 @@ impl Compiler {
             // discharged a concrete instance into `call_dicts_at`.
             // Emit receiver + args + dictionary, then direct CALL to
             // the instance method (dict ABI, trailing dict arg).
-            let ground_trait = self_id
-                .and_then(|id| self.checker.call_dicts_at(id))
-                .or_else(|| self.checker.call_dicts_for_span(span.start, span.end))
+            let ground_trait = self
+                .sidecar_dicts(self_id, span.start, span.end)
                 .and_then(|dicts| dicts.first())
                 .and_then(|instance| {
                     let fqn = instance.method_fqns.get(*method)?.clone();
@@ -14615,7 +14678,7 @@ impl Compiler {
             if let Some(fqn_base) = fqn {
                 let nargs = args.as_ref().map(|items| items.len()).unwrap_or(0);
                 let fqn = if let Some((fa, is_rest, id)) =
-                    self.checker.selected_overload_at(span.start, span.end)
+                    self.sidecar_overload(self_id, span.start, span.end)
                 {
                     let keyed = overload_fn_key(&fqn_base, fa, is_rest, id);
                     if self.functions.contains_key(&keyed) {
@@ -14992,11 +15055,7 @@ impl Compiler {
             }
 
             let identifier = self.resolve_variable_checked(name);
-            let n = self
-                .aliases
-                .get(&identifier)
-                .cloned()
-                .unwrap_or_else(|| identifier.clone());
+            let n = self.resolve_free_fn(&identifier);
             // Non-entry modules register `ns::name`, but sibling
             // calls use the bare name. Typecheck inserts bare
             // names so TC can pass while codegen misses — retry
@@ -15012,8 +15071,7 @@ impl Compiler {
                 if self.functions.contains_key(&qualified)
                     || self.fn_entry_labels.contains_key(&qualified)
                     || self
-                        .checker
-                        .selected_overload_at(span.start, span.end)
+                        .sidecar_overload(self_id, span.start, span.end)
                         .is_some()
                 {
                     qualified
@@ -15026,7 +15084,7 @@ impl Compiler {
 
             // Arity-overload table key (when the typechecker selected one).
             let n = if let Some((fa, is_rest, id)) =
-                self.checker.selected_overload_at(span.start, span.end)
+                self.sidecar_overload(self_id, span.start, span.end)
             {
                 let keyed = overload_fn_key(&n, fa, is_rest, id);
                 if self.functions.contains_key(&keyed) {
@@ -15079,11 +15137,10 @@ impl Compiler {
                         .as_ref()
                         .map(|items| items.iter().collect())
                         .unwrap_or_default();
-                    if let Some(tags) = resolve_variadic_ffi_tags(
-                        &self.checker,
+                    if let Some(tags) = self.resolve_call_ffi_tags(
+                        Some(&n),
                         call_span,
                         &arg_refs,
-                        &mut self.messages,
                     ) {
                         for &(tag, aux) in &tags {
                             emit_ffi_type_const(&mut self.bytecode, tag, aux);
@@ -15194,8 +15251,7 @@ impl Compiler {
 
                 // Partial application → MakeFn (not CALL).
                 let (fa, is_rest, _id) = self
-                    .checker
-                    .selected_overload_at(span.start, span.end)
+                    .sidecar_overload(self_id, span.start, span.end)
                     .or_else(|| {
                         let names = self.checker.fn_param_names(&lookup_name)?;
                         let rest = self.checker.fn_has_rest(&lookup_name);

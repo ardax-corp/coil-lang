@@ -1,7 +1,7 @@
 //! Typed facts after `check_program`, keyed only by [`NodeId`] / [`DefId`].
 //!
-//! Codegen still walks the AST (B3 is the walk-only-sidecar cut). This sidecar
-//! is the NodeId-keyed table those lookups should prefer over span/`String`
+//! Codegen still walks `Expression` for shape. Meaning (overload, dicts,
+//! ForInKind, FFI tags, pair/niche ABI) prefers this table over span/`String`
 //! maps. Span fallbacks remain on [`Checker`] until their tests move.
 
 use std::collections::HashMap;
