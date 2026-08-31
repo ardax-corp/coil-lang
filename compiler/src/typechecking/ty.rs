@@ -29,7 +29,7 @@ impl TyVarId {
 }
 
 /// Monomorphic types.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Ty {
     Var(TyVarId),
     Con(String),
@@ -69,7 +69,7 @@ pub enum Ty {
 }
 
 /// Array length: compile-time constant or runtime-known.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ArrayLength {
     Static(usize),
     Dynamic,
@@ -82,7 +82,7 @@ impl ArrayLength {
 }
 
 /// Variant payload shape: unit, tuple, or record fields.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum EnumVariantPayloadTy {
     Unit,
     Tuple(Vec<Ty>),
@@ -134,7 +134,7 @@ impl Ty {
 /// `T: Num` → `Constraint { class: "Num", args: [Var(α)] }`.
 /// Multi-param classes use N args:
 /// `Convert<A, B>` → `Constraint { class: "Convert", args: [Var(α), Var(β)] }`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Constraint {
     pub class: String,
     pub args: Vec<Ty>,

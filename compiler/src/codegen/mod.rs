@@ -12,7 +12,7 @@ use reporting::Label as DiagLabel;
 use crate::block_builder::{BlockBuilder, JumpKind as BbJumpKind, Label as BbLabel};
 use crate::const_fold::ConstValue;
 use crate::il::{CodeBuf, EmitBuf, EntryKind, FuseHint, IlJumpKind, IlOp, Label as IlLabel};
-use crate::monomorphize::{MonoKey, MonoPlan, parse_mono_ty_name};
+use crate::monomorphize::{MonoKey, MonoPlan};
 use crate::typechecking::{Checker, Ty};
 use parser::{
     SimpleSpan,
