@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use common::{Byte, DebugLoc, Instruction};
 
 use super::func::IlFunc;
-use super::op::{EntryKind, IlJumpKind, IlOp, Label};
+use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 use super::opt;
 
 /// Result of lowering an IL module.
@@ -31,7 +31,7 @@ pub struct Lowered {
 #[derive(Clone)]
 enum Slot {
     Byte(Byte, DebugLoc),
-    Jump(IlJumpKind, Label, DebugLoc),
+    Jump(IlJumpKind, Label, DebugLoc, FuseHint),
     Entry(EntryKind, u32, Label, DebugLoc),
     PrologueJmp(DebugLoc),
     CmpJmpf(u8, Label, DebugLoc, bool),
@@ -69,7 +69,7 @@ impl Slot {
     fn loc(&self) -> DebugLoc {
         match self {
             Slot::Byte(_, l)
-            | Slot::Jump(_, _, l)
+            | Slot::Jump(_, _, l, _)
             | Slot::Entry(_, _, _, l)
             | Slot::PrologueJmp(l)
             | Slot::CmpJmpf(_, _, l, _)
@@ -163,13 +163,18 @@ pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
 
     for op in ops {
         match op {
-            IlOp::Label(Label(id)) => pending.push(*id),
-            IlOp::Jump { kind, target, loc } => {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => pending.push(*id),
+            IlOp::Jump {
+                kind,
+                target,
+                loc,
+                hint,
+            } => {
                 let idx = pre_slots.len();
                 if !pending.is_empty() {
                     binds_at.insert(idx, std::mem::take(&mut pending));
                 }
-                pre_slots.push(Slot::Jump(*kind, *target, *loc));
+                pre_slots.push(Slot::Jump(*kind, *target, *loc, *hint));
             }
             IlOp::Entry {
                 kind,
@@ -269,8 +274,8 @@ fn fuse_slots_with_origins(
         if let Some((f, window)) = try_fuse_slots(&slots[i..], pool) {
             let crosses_label = (1..window).any(|k| binds_at.contains_key(&(i + k)));
             let crosses_abs = (1..window).any(|k| abs_jump_targets.contains(&(i + k)));
-            let return_at_uncond_join = slot_is_return_fusion(&f)
-                && join_has_unconditional_pred(&slots, i, binds_at);
+            let return_at_uncond_join =
+                slot_is_return_fusion(&f) && join_has_unconditional_pred(&slots, i, binds_at);
             if !crosses_label && !crosses_abs && !return_at_uncond_join {
                 fused = Some((f, window));
             }
@@ -311,11 +316,20 @@ fn absolute_jump_targets(slots: &[Slot]) -> std::collections::HashSet<usize> {
     set
 }
 
-fn cond_jump(slot: &Slot) -> Option<(bool, Label)> {
+fn cond_jump(slot: &Slot) -> Option<(bool, Label, FuseHint)> {
     match slot {
-        Slot::Jump(IlJumpKind::JumpIfFalse, t, _) => Some((false, *t)),
-        Slot::Jump(IlJumpKind::JumpIfTrue, t, _) => Some((true, *t)),
+        Slot::Jump(IlJumpKind::JumpIfFalse, t, _, h) => Some((false, *t, *h)),
+        Slot::Jump(IlJumpKind::JumpIfTrue, t, _, h) => Some((true, *t, *h)),
         _ => None,
+    }
+}
+
+fn cond_jump_fusable(slot: &Slot) -> Option<(bool, Label)> {
+    let (if_true, tgt, hint) = cond_jump(slot)?;
+    if hint.blocks_cmp_jmp_fuse() {
+        None
+    } else {
+        Some((if_true, tgt))
     }
 }
 
@@ -358,49 +372,51 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
         }
     }
     if window.len() >= 2
-        && let (Some(b0), Some((if_true, tgt))) =
+        && let (Some(b0), Some((if_true, tgt, jmp_hint))) =
             (slot_as_byte(&window[0]), cond_jump(&window[1]))
     {
-        if *b0.bytecode() == Instruction::BinSlotImm {
-            let (op, slot, imm) = b0.bin_slot_imm_parts();
-            if is_jmpf_cond_op(Instruction::from(op)) {
+        if !jmp_hint.blocks_cmp_jmp_fuse() {
+            if *b0.bytecode() == Instruction::BinSlotImm {
+                let (op, slot, imm) = b0.bin_slot_imm_parts();
+                if is_jmpf_cond_op(Instruction::from(op)) {
+                    return Some((
+                        Slot::BinSlotImmJmpf {
+                            op,
+                            slot: slot as u8,
+                            imm: imm as i16,
+                            target: tgt,
+                            loc: window[0].loc(),
+                            if_true,
+                        },
+                        2,
+                    ));
+                }
+            }
+            if *b0.bytecode() == Instruction::BinSlotSlot {
+                let (op, a, b) = b0.bin_slot_slot_parts();
+                if is_jmpf_cond_op(Instruction::from(op)) {
+                    return Some((
+                        Slot::BinSlotSlotJmpf {
+                            op,
+                            a: a as u8,
+                            b: b as u8,
+                            target: tgt,
+                            loc: window[0].loc(),
+                            if_true,
+                        },
+                        2,
+                    ));
+                }
+            }
+            if *b0.bytecode() == Instruction::LogNot {
+                return Some((Slot::LogNotJmpf(tgt, window[0].loc(), if_true), 2));
+            }
+            if is_jmpf_cond_op(*b0.bytecode()) {
                 return Some((
-                    Slot::BinSlotImmJmpf {
-                        op,
-                        slot: slot as u8,
-                        imm: imm as i16,
-                        target: tgt,
-                        loc: window[0].loc(),
-                        if_true,
-                    },
+                    Slot::CmpJmpf(*b0.bytecode() as u8, tgt, window[0].loc(), if_true),
                     2,
                 ));
             }
-        }
-        if *b0.bytecode() == Instruction::BinSlotSlot {
-            let (op, a, b) = b0.bin_slot_slot_parts();
-            if is_jmpf_cond_op(Instruction::from(op)) {
-                return Some((
-                    Slot::BinSlotSlotJmpf {
-                        op,
-                        a: a as u8,
-                        b: b as u8,
-                        target: tgt,
-                        loc: window[0].loc(),
-                        if_true,
-                    },
-                    2,
-                ));
-            }
-        }
-        if *b0.bytecode() == Instruction::LogNot {
-            return Some((Slot::LogNotJmpf(tgt, window[0].loc(), if_true), 2));
-        }
-        if is_jmpf_cond_op(*b0.bytecode()) {
-            return Some((
-                Slot::CmpJmpf(*b0.bytecode() as u8, tgt, window[0].loc(), if_true),
-                2,
-            ));
         }
     }
     if window.len() >= 2
@@ -450,10 +466,7 @@ fn try_fuse_float_chain_store(window: &[Slot], pool: &mut Vec<u64>) -> Option<(S
 
 /// `CONST k; <stage0>; op1; [LOAD/CONST other; op2;] STORE dest`
 /// where `op1` uses const-under stack order: `op1(k, acc0)`.
-fn try_fuse_float_chain_const_under(
-    window: &[Slot],
-    pool: &mut Vec<u64>,
-) -> Option<(Slot, usize)> {
+fn try_fuse_float_chain_const_under(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)> {
     if window.len() < 5 {
         return None;
     }
@@ -504,10 +517,7 @@ fn try_fuse_float_chain_const_under(
 }
 
 /// `<stage0>; (LOAD|CONST other; op)+ ; STORE` with accumulator on the left.
-fn try_fuse_float_chain_standard(
-    window: &[Slot],
-    pool: &mut Vec<u64>,
-) -> Option<(Slot, usize)> {
+fn try_fuse_float_chain_standard(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)> {
     let (stage0_len, op0, lhs0, lhs0_const, rhs0, rhs0_const) = parse_float_stage0(window)?;
     let mut i = stage0_len;
     let (i1, op1, rhs1, rhs1_const, stage1_left) = parse_float_continuation(&window[i..])?;
@@ -727,7 +737,7 @@ fn try_fuse_bin_slot_slot_const_jmpf_ready(window: &[Slot]) -> Option<Slot> {
     let b0 = slot_as_byte(&window[0])?;
     let b1 = slot_as_byte(&window[1])?;
     let b2 = slot_as_byte(&window[2])?;
-    let (if_true, tgt) = cond_jump(&window[3])?;
+    let (if_true, tgt) = cond_jump_fusable(&window[3])?;
     if *b0.bytecode() != Instruction::BinSlotSlot {
         return None;
     }
@@ -760,7 +770,7 @@ fn try_fuse_load_load_arith_const_jmpf(window: &[Slot]) -> Option<Slot> {
     let b2 = slot_as_byte(&window[2])?;
     let b3 = slot_as_byte(&window[3])?;
     let b4 = slot_as_byte(&window[4])?;
-    let (if_true, tgt) = cond_jump(&window[5])?;
+    let (if_true, tgt) = cond_jump_fusable(&window[5])?;
     let a = load_slot(&b0)?;
     let b = load_slot(&b1)?;
     if !is_float_arith_op(*b2.bytecode()) {
@@ -789,7 +799,7 @@ fn try_fuse_load_const_cmp_jmpf_slot(window: &[Slot]) -> Option<Slot> {
     let b0 = slot_as_byte(&window[0])?;
     let b1 = slot_as_byte(&window[1])?;
     let b2 = slot_as_byte(&window[2])?;
-    let (if_true, tgt) = cond_jump(&window[3])?;
+    let (if_true, tgt) = cond_jump_fusable(&window[3])?;
     let slot = load_slot(&b0)?;
     let imm = i16::try_from(const_inline_value(&b1)?).ok()?;
     if !is_jmpf_cond_op(*b2.bytecode()) {
@@ -812,7 +822,7 @@ fn try_fuse_load_load_op_jmpf_slot(window: &[Slot]) -> Option<Slot> {
     let b0 = slot_as_byte(&window[0])?;
     let b1 = slot_as_byte(&window[1])?;
     let b2 = slot_as_byte(&window[2])?;
-    let (if_true, tgt) = cond_jump(&window[3])?;
+    let (if_true, tgt) = cond_jump_fusable(&window[3])?;
     let a = load_slot(&b0)?;
     let b = load_slot(&b1)?;
     if !is_jmpf_cond_op(*b2.bytecode()) {
@@ -907,7 +917,7 @@ fn join_has_unconditional_pred(
     let labels = binds_at.get(&i).map(Vec::as_slice).unwrap_or(&[]);
     for slot in slots {
         match slot {
-            Slot::Jump(IlJumpKind::Unconditional, t, _) if labels.contains(&t.0) => return true,
+            Slot::Jump(IlJumpKind::Unconditional, t, _, _) if labels.contains(&t.0) => return true,
             Slot::Byte(b, _)
                 if *b.bytecode() == Instruction::JMP && b.operand_u32() as usize == i =>
             {
@@ -923,7 +933,7 @@ fn encode_slot(slot: &Slot, labels: &HashMap<u32, usize>, pool: &mut Vec<u64>) -
     match slot {
         Slot::Byte(b, _) => *b,
         Slot::PrologueJmp(_) => Byte::new(Instruction::JMP).with_operand_u32(u32::MAX),
-        Slot::Jump(kind, target, _) => {
+        Slot::Jump(kind, target, _, _) => {
             let pc = resolve(labels, *target);
             match kind {
                 IlJumpKind::Unconditional => Byte::new(Instruction::JMP).with_operand_u32(pc),
@@ -1488,6 +1498,55 @@ mod tests {
     }
 
     #[test]
+    fn lower_refuses_cmp_jmpf_when_jump_is_nofuse() {
+        let mut il = IlBuilder::new();
+        let exit = il.fresh_label();
+        il.push_byte(Byte::new(Instruction::EQ));
+        il.emit_jump_hinted(
+            IlJumpKind::JumpIfFalse,
+            exit,
+            common::DebugLoc::unknown(),
+            FuseHint::nofuse_value_under_jmp(),
+        );
+        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(1));
+        il.bind_label(exit);
+        il.push_byte(Byte::new(Instruction::HALT));
+
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(il.ops(), &mut pool);
+        let ops: Vec<_> = lowered.bytecode.iter().map(|b| *b.bytecode()).collect();
+        assert!(
+            !ops.iter().any(|o| matches!(o, Instruction::CmpJmpf)),
+            "nofuse JMPF must stay unfused; got {ops:?}"
+        );
+        assert!(matches!(ops[0], Instruction::EQ));
+        assert!(matches!(ops[1], Instruction::JMPF));
+    }
+
+    #[test]
+    fn lower_refuses_const_return_across_value_join() {
+        let mut il = IlBuilder::new();
+        let join = il.fresh_label();
+        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(2));
+        il.emit_jump(IlJumpKind::Unconditional, join);
+        il.push_byte(Byte::new(Instruction::CONST).with_const_inline(1));
+        il.bind_join_label(join);
+        il.push_byte(Byte::new(Instruction::RETURN));
+
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(il.ops(), &mut pool);
+        let ops: Vec<_> = lowered.bytecode.iter().map(|b| *b.bytecode()).collect();
+        assert!(
+            !ops.iter().any(|o| matches!(o, Instruction::ConstReturnImm)),
+            "value join must block CONST;RETURN fuse; got {ops:?}"
+        );
+        assert!(
+            ops.iter().any(|o| matches!(o, Instruction::JMP)),
+            "other arm must keep JMP to join; got {ops:?}"
+        );
+    }
+
+    #[test]
     fn lower_fuses_log_not_jmpf() {
         let mut il = IlBuilder::new();
         let exit = il.fresh_label();
@@ -1721,7 +1780,11 @@ mod tests {
         assert_eq!((descriptor >> 16) as u8, 2);
         assert_eq!((descriptor >> 24) as u8, Instruction::ADDF as u8);
         assert_eq!((descriptor >> 32) as u8, 3);
-        assert_eq!(descriptor & (1u64 << 63), 0, "legacy 2-stage keeps EXT clear");
+        assert_eq!(
+            descriptor & (1u64 << 63),
+            0,
+            "legacy 2-stage keeps EXT clear"
+        );
     }
 
     #[test]
@@ -2250,12 +2313,14 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Load { slot: 3, loc },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load { slot: 3, loc },
@@ -2355,10 +2420,7 @@ mod tests {
     #[test]
     fn lower_module_inner_captures_pre_fuse_ops_only_when_requested() {
         let loc = DebugLoc::unknown();
-        let ops = vec![
-            IlOp::Const { imm: 1, loc },
-            IlOp::Return { loc },
-        ];
+        let ops = vec![IlOp::Const { imm: 1, loc }, IlOp::Return { loc }];
         let mut pool = Vec::new();
         let mut module = crate::il::IlModule::from_flat(&ops, &[]);
         let plain = lower_module_inner(

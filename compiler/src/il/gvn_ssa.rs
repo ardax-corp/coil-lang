@@ -205,7 +205,7 @@ fn step(
     intern: &mut Intern,
 ) -> Option<u32> {
     match &ops[i] {
-        IlOp::Label(_) | IlOp::Jump { .. } => None,
+        IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Jump { .. } => None,
         IlOp::Const { imm, .. } => {
             let v = intern.intern(VExpr::Const(*imm));
             stack.push(v);

@@ -257,7 +257,7 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>) {
         // consumer inside the loop (skip orphan Const that changes SP freely).
         // Simpler gate: hoist at most a single invariant op per loop when it
         // appears as the first emitting op after the header label.
-        let first_emit = (lp.body_start()..lp.latch).find(|&i| !matches!(ops[i], IlOp::Label(_)));
+        let first_emit = (lp.body_start()..lp.latch).find(|&i| !matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)));
         let Some(fi) = first_emit else {
             continue;
         };
@@ -719,7 +719,7 @@ fn il_function_start(ops: &[IlOp], idx: usize) -> usize {
 fn resolve_label_before(ops: &[IlOp], before: usize, target: Label) -> Option<usize> {
     let start = il_function_start(ops, before);
     for i in (start..before).rev() {
-        if matches!(&ops[i], IlOp::Label(l) if *l == target) {
+        if matches!(&ops[i], IlOp::Label(l) | IlOp::JoinLabel(l) if *l == target) {
             return Some(i);
         }
     }
@@ -919,7 +919,7 @@ pub(super) fn insert_preheader_ops(ops: &mut Vec<IlOp>, lp: &NaturalLoop, materi
     let duplicate_labels: std::collections::HashSet<u32> = {
         let mut counts = std::collections::HashMap::<u32, usize>::new();
         for op in ops.iter() {
-            if let IlOp::Label(Label(id)) = op {
+            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
                 *counts.entry(*id).or_default() += 1;
             }
         }
@@ -953,6 +953,7 @@ pub(super) fn insert_preheader_ops(ops: &mut Vec<IlOp>, lp: &NaturalLoop, materi
         kind: IlJumpKind::Unconditional,
         target: lp.header_label,
         loc,
+        hint: Default::default(),
     };
     ops.insert(insert_at, IlOp::Label(pre));
     let mut at = insert_at + 1;
@@ -980,6 +981,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Const {
@@ -991,6 +993,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1031,6 +1034,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         let before = ops.clone();
@@ -1046,6 +1050,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load {
@@ -1068,11 +1073,13 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Halt { loc: loc() },
@@ -1107,6 +1114,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load {
@@ -1118,6 +1126,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1143,6 +1152,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Const { imm: 7, loc: loc() },
@@ -1151,6 +1161,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1198,6 +1209,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         let before = ops.clone();
@@ -1214,11 +1226,13 @@ mod tests {
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Halt { loc: loc() },
@@ -1239,6 +1253,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         let before = ops.clone();
@@ -1253,6 +1268,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::BinSlotImm {
@@ -1266,6 +1282,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1312,6 +1329,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ];
         let before = ops.clone();
@@ -1330,6 +1348,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::BinSlotSlot {
@@ -1343,6 +1362,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1366,6 +1386,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load {
@@ -1390,6 +1411,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1429,6 +1451,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::ConstPool {
@@ -1455,6 +1478,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1519,6 +1543,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load {
@@ -1540,6 +1565,7 @@ mod tests {
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Halt { loc: loc() });
 
@@ -1568,6 +1594,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::String {
@@ -1579,6 +1606,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1616,6 +1644,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load {
@@ -1637,6 +1666,7 @@ mod tests {
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Halt { loc: loc() });
 
@@ -1671,6 +1701,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load {
@@ -1686,6 +1717,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1724,6 +1756,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load { slot: 0, loc: loc() },
@@ -1742,6 +1775,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1774,6 +1808,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load { slot: 0, loc: loc() },
@@ -1788,6 +1823,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ];
@@ -1826,6 +1862,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
         ]
@@ -1837,6 +1874,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Halt { loc: loc() },
         ]

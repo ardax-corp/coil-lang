@@ -81,7 +81,7 @@ fn eliminate_in_loop(ops: &mut Vec<IlOp>, lp: &LoopInfo) {
         return;
     };
     let exit_label = match &ops[exit_label_idx] {
-        IlOp::Label(l) => *l,
+        IlOp::Label(l) | IlOp::JoinLabel(l) => *l,
         _ => return,
     };
 
@@ -124,7 +124,7 @@ fn eliminate_in_loop(ops: &mut Vec<IlOp>, lp: &LoopInfo) {
     sink.sort_by_key(|(slot, _, _)| *slot);
     let exit_label_idx = ops
         .iter()
-        .position(|op| matches!(op, IlOp::Label(l) if *l == exit_label))
+        .position(|op| matches!(op, IlOp::Label(l) | IlOp::JoinLabel(l) if *l == exit_label))
         .expect("exit label survives store removal");
     let mut at = exit_label_idx + 1;
     for (_, prod, store) in sink {
@@ -173,7 +173,7 @@ fn unique_forward_exit_label(ops: &[IlOp], lp: &LoopInfo) -> Option<usize> {
     }
     let t = target?;
     ops.iter()
-        .position(|op| matches!(op, IlOp::Label(l) if *l == t))
+        .position(|op| matches!(op, IlOp::Label(l) | IlOp::JoinLabel(l) if *l == t))
         .filter(|&i| i > lp.latch)
 }
 
@@ -231,7 +231,7 @@ fn slot_is_loaded(op: &IlOp, slot: u32) -> bool {
 fn natural_loops(ops: &[IlOp]) -> Vec<LoopInfo> {
     let mut label_at: HashMap<u32, usize> = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             label_at.insert(*id, i);
         }
     }

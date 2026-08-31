@@ -54,12 +54,12 @@ impl SpInfo {
 /// Net stack delta for `op`, or `None` if the effect is unknown / fail-closed.
 pub fn stack_delta(op: &IlOp) -> Option<i32> {
     match op {
-        IlOp::Label(_) => Some(0),
+        IlOp::Label(_) | IlOp::JoinLabel(_) => Some(0),
         IlOp::Load { .. }
-            | IlOp::Const { .. }
-            | IlOp::ConstPool { .. }
-            | IlOp::String { .. }
-            | IlOp::Dup { .. } => Some(1),
+        | IlOp::Const { .. }
+        | IlOp::ConstPool { .. }
+        | IlOp::String { .. }
+        | IlOp::Dup { .. } => Some(1),
         IlOp::StorePop { .. } | IlOp::Pop { .. } | IlOp::ArrayPin { .. } => Some(-1),
         IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => Some(-1),
         IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. } => Some(0),
@@ -179,9 +179,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::BinSlotSlotStore => Some(0),
         Instruction::CmpJmpf | Instruction::CmpJmpt => Some(-2),
         Instruction::LogNotJmpf | Instruction::LogNotJmpt => Some(-1),
-        Instruction::RETURN
-        | Instruction::LoadReturnSlot
-        | Instruction::ConstReturnImm => Some(-1),
+        Instruction::RETURN | Instruction::LoadReturnSlot | Instruction::ConstReturnImm => Some(-1),
         Instruction::ReturnPair => Some(-2),
         Instruction::BinReturn => Some(-2),
         Instruction::HALT | Instruction::NOOP => Some(0),
@@ -192,8 +190,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::IndexPin | Instruction::IndexPinUnchecked => Some(0),
         Instruction::StoreIndexPin | Instruction::StoreIndexPinUnchecked => Some(-1),
         Instruction::BoxValue | Instruction::UnboxValue | Instruction::LoadField => Some(0),
-        Instruction::OptionNicheToHeap
-        | Instruction::HeapOptionToNiche => Some(0),
+        Instruction::OptionNicheToHeap | Instruction::HeapOptionToNiche => Some(0),
         Instruction::PairToHeap => Some(-1),
         Instruction::HeapToPair => Some(1),
         Instruction::CastIntToFloat
@@ -299,7 +296,7 @@ pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
 
     let mut label_at: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             label_at.insert(*id, i);
         }
     }
@@ -359,7 +356,7 @@ pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
                 };
             } else if is_terminator(op) {
                 fall_sp = None;
-            } else if matches!(op, IlOp::Label(_)) {
+            } else if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 fall_sp = Some(before);
             } else {
                 fall_sp = Some(after);
@@ -414,12 +411,14 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 2, loc: loc() },
@@ -441,6 +440,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Const { imm: 3, loc: loc() },
@@ -448,6 +448,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 2, loc: loc() },
@@ -623,6 +624,7 @@ mod tests {
             kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 2 },
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         };
         assert_eq!(stack_delta(&jmp), Some(-1));
     }
@@ -686,10 +688,7 @@ mod tests {
             stack_delta(&IlOp::ConstPool { idx: 2, loc: loc() }),
             Some(1)
         );
-        assert_eq!(
-            stack_delta(&IlOp::String { idx: 4, loc: loc() }),
-            Some(1)
-        );
+        assert_eq!(stack_delta(&IlOp::String { idx: 4, loc: loc() }), Some(1));
     }
 
     #[test]

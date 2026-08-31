@@ -92,6 +92,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Return { loc },
@@ -139,6 +140,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Byte {
                 byte: Byte::new(Instruction::CONST).with_const_inline(1),
@@ -149,6 +151,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Byte {
@@ -207,6 +210,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(1)),
             IlOp::Label(Label(0)),
@@ -253,6 +257,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Label(Label(0)),
@@ -287,6 +292,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::LOAD).with_operand_u32(0)),
             IlOp::Label(Label(0)),
@@ -309,6 +315,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(1)),
             IlOp::Label(Label(0)),
@@ -327,6 +334,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Label(Label(0)),
@@ -349,12 +357,14 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::Unpack).with_operand_u32(1)),
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const {
@@ -401,6 +411,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Label(Label(0)),
@@ -422,6 +433,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Pop {
                 loc: common::DebugLoc::unknown(),
@@ -432,6 +444,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -467,6 +480,7 @@
                 kind: IlJumpKind::JumpIfTrue,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Pop {
                 loc: common::DebugLoc::unknown(),
@@ -477,6 +491,7 @@
                 kind: IlJumpKind::JumpIfTrue,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -512,12 +527,14 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -535,12 +552,14 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -574,12 +593,14 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -599,12 +620,14 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -623,12 +646,14 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(54),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(1)),
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(54),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Label(Label(54)),
@@ -648,6 +673,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(54),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::CONST).with_const_inline(0)),
             IlOp::Label(Label(54)),
@@ -675,6 +701,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::LOAD).with_operand_u32(2)),
             IlOp::Label(Label(1)),
@@ -698,6 +725,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::ADD)),
             IlOp::Label(Label(0)),
@@ -736,6 +764,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(slot),
             IlOp::Label(Label(0)),
@@ -760,6 +789,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(imm),
             IlOp::Label(Label(0)),
@@ -787,12 +817,14 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(54),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::GT)),
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(54),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::EQ)),
             IlOp::Label(Label(54)),
@@ -812,6 +844,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::ADD)),
             IlOp::Label(Label(0)),
@@ -833,6 +866,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Pop {
                 loc: common::DebugLoc::unknown(),
@@ -845,6 +879,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -871,12 +906,14 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(imm),
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -897,12 +934,14 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::ADD)),
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::byte(Byte::new(Instruction::RETURN)),
@@ -920,6 +959,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::byte(Byte::new(Instruction::SUB)),
             IlOp::Label(Label(1)),
@@ -954,6 +994,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Const {
                 imm: 0,
@@ -983,6 +1024,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 3,
@@ -1012,6 +1054,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Bin {
                 op: Instruction::MUL,
@@ -1048,6 +1091,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             imm,
             IlOp::Label(Label(0)),
@@ -1160,6 +1204,7 @@
                 kind: crate::il::op::IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
                 target,
                 loc,
+                hint: Default::default(),
             },
             IlOp::Return { loc },
         ];
@@ -1258,6 +1303,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Load { slot: 1, loc },
@@ -1580,6 +1626,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Return {
@@ -1609,6 +1656,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const {
@@ -1798,6 +1846,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
         ];
         ops.extend(suf.clone());
@@ -1805,6 +1854,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -1865,6 +1915,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(54),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 0,
@@ -1882,6 +1933,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(54),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 0,
@@ -1917,6 +1969,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
@@ -1943,6 +1996,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         // Pop value left under cond so second arm matches join SP (return_convoy shape).
         ops.push(IlOp::Pop {
@@ -1954,6 +2008,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
@@ -2013,6 +2068,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc },
             IlOp::Return { loc },
@@ -2039,6 +2095,7 @@
             kind: IlJumpKind::JumpIfTrue,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -2049,6 +2106,7 @@
             kind: IlJumpKind::JumpIfTrue,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::StorePop {
@@ -2101,6 +2159,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 0,
@@ -2118,6 +2177,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
@@ -2139,12 +2199,14 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.extend(suf);
         ops.push(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
@@ -2188,6 +2250,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -2198,6 +2261,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
@@ -2259,6 +2323,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -2269,6 +2334,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         // Net-zero pre-join junk — must survive (Load+StorePop, not part of S).
         ops.push(IlOp::Load {
@@ -2333,6 +2399,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(54),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -2343,6 +2410,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(54),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(54)));
         ops.push(IlOp::Label(Label(48)));
@@ -2395,6 +2463,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -2405,6 +2474,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
@@ -2466,6 +2536,7 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 1 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 0,
@@ -2483,6 +2554,7 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
@@ -2509,6 +2581,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -2519,6 +2592,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
@@ -2571,6 +2645,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             target: Label(54),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -2581,6 +2656,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
             target: Label(54),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(54)));
         ops.push(IlOp::Label(Label(48)));
@@ -2628,12 +2704,14 @@
             kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.extend(suf);
         ops.push(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
@@ -2658,6 +2736,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Const {
                 imm: 99,
@@ -2669,6 +2748,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -2715,6 +2795,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
         ];
         ops.extend(suf.clone());
@@ -2722,6 +2803,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -2778,6 +2860,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
         ];
         ops.extend(suf.clone());
@@ -2785,6 +2868,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -2816,6 +2900,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
         ];
         ops.extend(suf.clone());
@@ -2823,6 +2908,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -2895,6 +2981,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 0,
@@ -2929,6 +3016,7 @@
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
@@ -2951,6 +3039,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
@@ -2958,6 +3047,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(9),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(9)));
         ops.push(IlOp::Halt {
@@ -2978,6 +3068,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
@@ -2999,6 +3090,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
@@ -3025,6 +3117,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop {
             loc: common::DebugLoc::unknown(),
@@ -3035,6 +3128,7 @@
             kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::StorePop {
@@ -3081,6 +3175,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Const {
                 imm: 99,
@@ -3092,6 +3187,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -3134,6 +3230,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
         ];
         ops.extend(suf.clone());
@@ -3141,6 +3238,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(54),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -3198,6 +3296,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
         ];
         ops.extend(suf.clone());
@@ -3205,6 +3304,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: common::DebugLoc::unknown(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -3261,6 +3361,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
         ];
@@ -3269,6 +3370,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc,
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(2)));
         ops.extend(fmt.clone());
@@ -3276,6 +3378,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc,
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return { loc });
@@ -3301,6 +3404,7 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc,
+                hint: Default::default(),
             },
         ];
         ops.extend(suf.clone());
@@ -3308,6 +3412,7 @@
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc,
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
@@ -3395,6 +3500,7 @@
                 kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
                 target: Label(1),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 1,
@@ -3424,6 +3530,7 @@
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: common::DebugLoc::unknown(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const {
@@ -3554,11 +3661,13 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 5, loc },
@@ -3581,6 +3690,49 @@
     }
 
     #[test]
+    fn invert_guard_refuses_value_under_jmp_hint() {
+        let loc = common::DebugLoc::unknown();
+        let mut ops = vec![
+            IlOp::Bin {
+                op: Instruction::EQ,
+                loc,
+            },
+            IlOp::jump_hinted(
+                IlJumpKind::JumpIfFalse,
+                Label(1),
+                loc,
+                crate::il::FuseHint::nofuse_value_under_jmp(),
+            ),
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(2),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Const { imm: 5, loc },
+            IlOp::Label(Label(2)),
+            IlOp::Return { loc },
+        ];
+        invert_branch_over_jump(&mut ops);
+        let jumps: Vec<_> = ops
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Jump { kind, target, .. } => Some((*kind, target.0)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            jumps,
+            vec![
+                (IlJumpKind::JumpIfFalse, 1),
+                (IlJumpKind::Unconditional, 2)
+            ],
+            "ValueUnderJmp JMPF must not invert; got {jumps:?}"
+        );
+    }
+
+    #[test]
     fn inverts_guard_when_condition_fuses_with_jmpf() {
         // `BinSlotSlot LE; JMPF; JMP` inverts to JMPT so fuse can emit BinSlotSlotJmpt.
         let loc = common::DebugLoc::unknown();
@@ -3595,11 +3747,13 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Label(Label(2)),
@@ -3627,11 +3781,13 @@
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(3),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc,
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc },
             IlOp::Label(Label(3)),

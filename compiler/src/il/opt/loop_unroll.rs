@@ -90,7 +90,7 @@ pub fn unroll_loop(ops: &mut Vec<IlOp>, loop_info: &LoopInfo) {
 fn natural_loops(ops: &[IlOp]) -> Vec<(usize, usize, Label)> {
     let mut label_at: HashMap<u32, usize> = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             label_at.insert(*id, i);
         }
     }
@@ -276,9 +276,9 @@ fn jump_is_forward(ops: &[IlOp], jmp_idx: usize, latch: usize) -> bool {
     let IlOp::Jump { target, .. } = &ops[jmp_idx] else {
         return false;
     };
-    ops.iter()
-        .enumerate()
-        .any(|(i, op)| i > latch && matches!(op, IlOp::Label(l) if l.0 == target.0))
+    ops.iter().enumerate().any(|(i, op)| {
+        i > latch && matches!(op, IlOp::Label(l) | IlOp::JoinLabel(l) if l.0 == target.0)
+    })
 }
 
 fn header_has_foreign_jumps(
@@ -422,7 +422,7 @@ fn is_add_one_to_slot(ops: &[IlOp], store_idx: usize, index_slot: u32) -> bool {
 fn max_label_id(ops: &[IlOp]) -> u32 {
     ops.iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
             IlOp::Jump { target, .. } => Some(target.0),
             IlOp::Entry { target, .. } => Some(target.0),
             _ => None,
@@ -435,7 +435,7 @@ fn remap_defined_labels(ops: &[IlOp], start_id: u32) -> (Vec<IlOp>, u32) {
     let mut map = HashMap::new();
     let mut next = start_id;
     for op in ops {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             map.entry(*id).or_insert_with(|| {
                 let n = next;
                 next = next.saturating_add(1);
@@ -450,10 +450,17 @@ fn remap_defined_labels(ops: &[IlOp], start_id: u32) -> (Vec<IlOp>, u32) {
         .iter()
         .map(|op| match op {
             IlOp::Label(Label(id)) => IlOp::Label(Label(map[id])),
-            IlOp::Jump { kind, target, loc } => IlOp::Jump {
+            IlOp::JoinLabel(Label(id)) => IlOp::JoinLabel(Label(map[id])),
+            IlOp::Jump {
+                kind,
+                target,
+                loc,
+                hint,
+            } => IlOp::Jump {
                 kind: *kind,
                 target: Label(map.get(&target.0).copied().unwrap_or(target.0)),
                 loc: *loc,
+                hint: *hint,
             },
             other => other.clone(),
         })

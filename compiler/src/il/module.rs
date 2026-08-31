@@ -273,7 +273,7 @@ fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
 
 fn first_label_id(ops: &[IlOp]) -> Option<u32> {
     ops.iter().find_map(|op| match op {
-        IlOp::Label(Label(id)) => Some(*id),
+        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
         _ => None,
     })
 }
@@ -313,7 +313,7 @@ fn remap_cross_function_entry_call_targets(
     let local: HashSet<u32> = ops
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -341,7 +341,7 @@ fn remap_cross_function_jump_targets(
     let local: HashSet<u32> = ops
         .iter()
         .filter_map(|op| match op {
-            IlOp::Label(Label(id)) => Some(*id),
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
             _ => None,
         })
         .collect();
@@ -438,6 +438,7 @@ mod tests {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc,
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Return { loc },
@@ -450,6 +451,7 @@ mod tests {
                     kind: IlJumpKind::Unconditional,
                     target: Label(0),
                     loc,
+                    hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
                 IlOp::Return { loc },
@@ -458,13 +460,16 @@ mod tests {
         let (flat, _, _) = m.to_flat();
         let mut label_ids = Vec::new();
         for op in &flat {
-            if let IlOp::Label(Label(id)) = op {
+            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
                 label_ids.push(*id);
             }
         }
         assert_eq!(
             label_ids.len(),
-            label_ids.iter().collect::<std::collections::HashSet<_>>().len(),
+            label_ids
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             "flat IL must not reuse label ids across functions: {label_ids:?}"
         );
     }
@@ -494,7 +499,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .find_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .expect("callee entry label");
@@ -548,7 +553,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(3)
@@ -591,7 +596,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .find_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .expect("callee body label");
@@ -643,7 +648,7 @@ mod tests {
         let callee_label = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(2)
@@ -692,7 +697,7 @@ mod tests {
         let method_label = flat
             .iter()
             .filter_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .nth(1)
@@ -726,6 +731,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(99),
                 loc,
+                hint: Default::default(),
             },
         ];
         m.funcs.push(IlFuncBody {
@@ -736,7 +742,7 @@ mod tests {
         let drop_label = flat
             .iter()
             .find_map(|op| match op {
-                IlOp::Label(Label(id)) => Some(*id),
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
                 _ => None,
             })
             .expect("drop entry label");
@@ -842,6 +848,7 @@ mod tests {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop { loc: loc() });
         ops.extend(suf);
@@ -850,6 +857,7 @@ mod tests {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return { loc: loc() });
@@ -890,6 +898,7 @@ mod tests {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Pop { loc: loc() });
         ops.extend(suf);
@@ -898,6 +907,7 @@ mod tests {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return { loc: loc() });
@@ -957,16 +967,24 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(0)),
             IlOp::Const { imm: 1, loc: loc() },
-            IlOp::StorePop { slot: 2, loc: loc() },
-            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::StorePop {
+                slot: 2,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 2,
+                loc: loc(),
+            },
             IlOp::Pop { loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(0),
                 loc: loc(),
+                hint: Default::default(),
             },
         ]
     }
@@ -997,12 +1015,12 @@ mod tests {
             invariant_store_elim: false,
             ssa_gvn: false,
             escape_analysis: false,
-                branch_optimization: false,
-                block_reordering: false,
-                iterative_optimization: false,
-                max_optimization_iterations: 10,
-                collect_stats: false,
-                pure_call_ctx: None,
+            branch_optimization: false,
+            block_reordering: false,
+            iterative_optimization: false,
+            max_optimization_iterations: 10,
+            collect_stats: false,
+            pure_call_ctx: None,
         }
     }
 
@@ -1055,7 +1073,11 @@ mod tests {
             }
             _ => None,
         });
-        assert_eq!(seek_to, Some(2), "Seek must re-anchor to the forward-edge tell");
+        assert_eq!(
+            seek_to,
+            Some(2),
+            "Seek must re-anchor to the forward-edge tell"
+        );
         let stores = flat
             .iter()
             .filter(|op| matches!(op, IlOp::StorePop { .. }))

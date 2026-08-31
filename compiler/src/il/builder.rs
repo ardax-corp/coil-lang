@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use common::{Byte, DebugLoc};
 
-use super::op::{EntryKind, IlJumpKind, IlOp, Label};
+use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 
 /// Error from [`IlBuilder::finalize`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -90,6 +90,12 @@ impl IlBuilder {
         self.ops.push(IlOp::Label(label));
     }
 
+    /// Bind `label` as a value-producing join (match / `?` end).
+    pub fn bind_join_label(&mut self, label: Label) {
+        self.bound.insert(label.0);
+        self.ops.push(IlOp::JoinLabel(label));
+    }
+
     /// Insert a bound label marker at raw op index `raw_idx` (does not append).
     pub fn insert_bound_label_at(&mut self, raw_idx: usize, label: Label) {
         self.bound.insert(label.0);
@@ -101,8 +107,18 @@ impl IlBuilder {
     }
 
     pub fn emit_jump_at(&mut self, kind: IlJumpKind, target: Label, loc: DebugLoc) {
+        self.emit_jump_hinted(kind, target, loc, FuseHint::default());
+    }
+
+    pub fn emit_jump_hinted(
+        &mut self,
+        kind: IlJumpKind,
+        target: Label,
+        loc: DebugLoc,
+        hint: FuseHint,
+    ) {
         self.targeted.insert(target.0);
-        self.ops.push(IlOp::Jump { kind, target, loc });
+        self.ops.push(IlOp::jump_hinted(kind, target, loc, hint));
     }
 
     pub fn emit_entry(&mut self, kind: EntryKind, arity: u32, target: Label) {
@@ -293,13 +309,24 @@ impl IlBuilder {
                     self.bound.insert(nid);
                     self.ops.push(IlOp::Label(Label(nid)));
                 }
-                IlOp::Jump { kind, target, loc } => {
+                IlOp::JoinLabel(Label(id)) => {
+                    let nid = map_label(id, self);
+                    self.bound.insert(nid);
+                    self.ops.push(IlOp::JoinLabel(Label(nid)));
+                }
+                IlOp::Jump {
+                    kind,
+                    target,
+                    loc,
+                    hint,
+                } => {
                     let nid = map_label(target.0, self);
                     self.targeted.insert(nid);
                     self.ops.push(IlOp::Jump {
                         kind,
                         target: Label(nid),
                         loc,
+                        hint,
                     });
                 }
                 IlOp::Entry {
@@ -374,6 +401,7 @@ impl IlBuilder {
         for op in &mut chunk {
             match op {
                 IlOp::Label(Label(id))
+                | IlOp::JoinLabel(Label(id))
                 | IlOp::Jump {
                     target: Label(id), ..
                 }
@@ -391,7 +419,7 @@ impl IlBuilder {
             }
         }
         for op in &chunk {
-            if let IlOp::Label(Label(id)) = op {
+            if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
                 self.bound.insert(*id);
             }
             if let IlOp::Jump {

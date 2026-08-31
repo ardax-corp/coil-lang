@@ -32,6 +32,7 @@ fn loop_with_invariant_store(read_after: bool, read_in_loop: bool, variant: bool
             kind: IlJumpKind::JumpIfFalse,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         },
     ];
     if variant {
@@ -84,6 +85,7 @@ fn loop_with_invariant_store(read_after: bool, read_in_loop: bool, variant: bool
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(1)),
     ]);
@@ -184,6 +186,7 @@ fn eliminates_two_unused_invariant_stores() {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Const { imm: 1, loc: loc() },
         IlOp::StorePop {
@@ -212,6 +215,7 @@ fn eliminates_two_unused_invariant_stores() {
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(1)),
         IlOp::Halt { loc: loc() },

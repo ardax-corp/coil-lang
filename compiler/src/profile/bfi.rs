@@ -144,6 +144,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 0, loc: loc() },
             IlOp::Return { loc: loc() },

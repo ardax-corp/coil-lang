@@ -385,7 +385,7 @@ pub fn format_bytecode(artifacts: &DissectArtifacts, pat: Option<&str>) -> Resul
 
 fn format_il_op(op: &IlOp) -> String {
     match op {
-        IlOp::Label(l) => format!("Label L{}", l.0),
+        IlOp::Label(l) | IlOp::JoinLabel(l) => format!("Label L{}", l.0),
         IlOp::Jump { kind, target, .. } => {
             let k = match kind {
                 IlJumpKind::Unconditional => "JMP",

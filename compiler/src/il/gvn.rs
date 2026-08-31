@@ -114,7 +114,7 @@ fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
     leaders.insert(0);
     let mut label_at: HashMap<u32, usize> = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             label_at.insert(*id, i);
             leaders.insert(i);
         }
@@ -237,7 +237,7 @@ fn gvn_within_blocks(ops: &mut Vec<IlOp>, blocks: &[Block]) {
         let mut last_key: Option<u64> = None;
         let mut last_idx: Option<usize> = None;
         for i in b.start..b.end {
-            if matches!(ops[i], IlOp::Label(_)) || is_mem_barrier(&ops[i]) {
+            if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) || is_mem_barrier(&ops[i]) {
                 last_key = None;
                 last_idx = None;
                 continue;
@@ -283,7 +283,7 @@ fn get_field_cse(ops: &mut Vec<IlOp>, blocks: &[Block]) {
         let mut last: Option<(u32, u32, usize)> = None; // obj, key, getfield_idx
         let mut i = b.start;
         while i < b.end {
-            if matches!(ops[i], IlOp::Label(_)) {
+            if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 i += 1;
                 continue;
             }
@@ -309,7 +309,7 @@ fn get_field_cse(ops: &mut Vec<IlOp>, blocks: &[Block]) {
                 {
                     let mut only_labels = true;
                     for j in fi + 1..i {
-                        if !matches!(ops[j], IlOp::Label(_)) {
+                        if !matches!(ops[j], IlOp::Label(_) | IlOp::JoinLabel(_)) {
                             only_labels = false;
                             break;
                         }
@@ -399,7 +399,7 @@ fn load_field_cse(ops: &mut Vec<IlOp>, blocks: &[Block]) {
         let mut last: Option<(u32, u32, usize)> = None; // slot, index, field_idx
         let mut i = b.start;
         while i < b.end {
-            if matches!(ops[i], IlOp::Label(_)) {
+            if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 i += 1;
                 continue;
             }
@@ -421,7 +421,7 @@ fn load_field_cse(ops: &mut Vec<IlOp>, blocks: &[Block]) {
                 {
                     let mut only_labels = true;
                     for j in fi + 1..i {
-                        if !matches!(ops[j], IlOp::Label(_)) {
+                        if !matches!(ops[j], IlOp::Label(_) | IlOp::JoinLabel(_)) {
                             only_labels = false;
                             break;
                         }
@@ -498,7 +498,7 @@ fn gvn_at_joins(ops: &mut Vec<IlOp>, blocks: &[Block]) {
 
         let mut join_prod = None;
         for i in b.start..b.end {
-            if matches!(ops[i], IlOp::Label(_)) {
+            if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 continue;
             }
             if is_pure_producer(&ops[i])
@@ -564,7 +564,7 @@ fn last_emitting_non_jump(ops: &[IlOp], b: &Block) -> Option<usize> {
         return None;
     }
     for i in (b.start..b.end).rev() {
-        if matches!(ops[i], IlOp::Label(_)) {
+        if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) {
             continue;
         }
         if matches!(ops[i], IlOp::Jump { .. }) {
@@ -582,7 +582,7 @@ fn last_emitting_non_jump(ops: &[IlOp], b: &Block) -> Option<usize> {
 fn join_pure_tail(ops: &[IlOp], start: usize, end: usize, len: usize) -> Option<Vec<usize>> {
     let mut idxs = Vec::with_capacity(len);
     for i in start..end {
-        if matches!(ops[i], IlOp::Label(_)) {
+        if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) {
             continue;
         }
         if !is_pure_producer(&ops[i]) {
@@ -615,7 +615,7 @@ fn join_pure_tail(ops: &[IlOp], start: usize, end: usize, len: usize) -> Option<
 fn pred_tail_keys(ops: &[IlOp], b: &Block, len: usize) -> Option<Vec<u64>> {
     let mut emitting = Vec::new();
     for i in b.start..b.end {
-        if matches!(ops[i], IlOp::Label(_) | IlOp::Jump { .. }) || is_return_like(&ops[i]) {
+        if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Jump { .. }) || is_return_like(&ops[i]) {
             continue;
         }
         emitting.push(i);
@@ -870,12 +870,14 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::String { idx: 7, loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::String { idx: 7, loc: loc() },
@@ -909,12 +911,14 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::String { idx: 1, loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::String { idx: 2, loc: loc() },
@@ -960,12 +964,14 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 1, loc: loc() },
@@ -991,6 +997,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 3,
@@ -1000,6 +1007,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load {
@@ -1035,12 +1043,14 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 2, loc: loc() },
@@ -1075,6 +1085,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 3,
@@ -1084,6 +1095,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load {
@@ -1262,6 +1274,7 @@ mod tests {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Load {
                 slot: 0,
@@ -1272,6 +1285,7 @@ mod tests {
                 kind: IlJumpKind::Unconditional,
                 target: Label(2),
                 loc: loc(),
+                hint: Default::default(),
             },
             IlOp::Label(Label(1)),
             IlOp::Load {

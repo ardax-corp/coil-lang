@@ -348,6 +348,10 @@ impl CodeBuf {
         self.il.bind_label(label);
     }
 
+    pub fn bind_join_label(&mut self, label: Label) {
+        self.il.bind_join_label(label);
+    }
+
     /// Bind a fresh label at the current emit position (fn / lambda / thunk entry).
     /// Labels do not advance [`Self::len`], so absolute PC tables stay aligned.
     /// Records the binding so later packed CALL/CodePtr Bytes rewrite to Entry.
@@ -380,7 +384,7 @@ impl CodeBuf {
         let mut existing: Option<Label> = None;
         for (i, op) in self.il.ops().iter().enumerate() {
             if emitting == code_pos {
-                if let IlOp::Label(l) = op {
+                if let IlOp::Label(l) | IlOp::JoinLabel(l) = op {
                     existing = Some(*l);
                 } else {
                     raw_idx = i;
@@ -468,6 +472,7 @@ impl CodeBuf {
                 kind: IlJumpKind::Unconditional,
                 target,
                 loc: DebugLoc::unknown(),
+                hint: Default::default(),
             },
         );
     }
@@ -601,7 +606,7 @@ impl CodeBuf {
         let mut out = Vec::new();
         let mut i = 0usize;
         for op in self.il.ops() {
-            if matches!(op, super::IlOp::Label(_)) {
+            if matches!(op, super::IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 if i >= start && i < end {
                     out.push(op.clone());
                 }

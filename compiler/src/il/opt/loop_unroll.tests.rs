@@ -37,6 +37,7 @@ fn counted_while(trips_imm: i32, with_call: bool, with_break: bool) -> Vec<IlOp>
             kind: IlJumpKind::JumpIfFalse,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Load {
             slot: 0,
@@ -69,6 +70,7 @@ fn counted_while(trips_imm: i32, with_call: bool, with_break: bool) -> Vec<IlOp>
             kind: IlJumpKind::Unconditional,
             target: Label(1),
             loc: loc(),
+            hint: Default::default(),
         });
     }
     ops.extend([
@@ -89,6 +91,7 @@ fn counted_while(trips_imm: i32, with_call: bool, with_break: bool) -> Vec<IlOp>
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc: loc(),
+            hint: Default::default(),
         },
         IlOp::Label(Label(1)),
         IlOp::Load {
@@ -196,6 +199,7 @@ fn nested_loops_are_not_unrolled() {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(3),
             loc,
+            hint: Default::default(),
         },
         IlOp::Const { imm: 0, loc },
         IlOp::StorePop { slot: 1, loc },
@@ -210,6 +214,7 @@ fn nested_loops_are_not_unrolled() {
             kind: IlJumpKind::JumpIfFalse,
             target: Label(2),
             loc,
+            hint: Default::default(),
         },
         IlOp::Load { slot: 1, loc },
         IlOp::Const { imm: 1, loc },
@@ -222,6 +227,7 @@ fn nested_loops_are_not_unrolled() {
             kind: IlJumpKind::Unconditional,
             target: Label(1),
             loc,
+            hint: Default::default(),
         },
         IlOp::Label(Label(2)),
         IlOp::Load { slot: 0, loc },
@@ -235,6 +241,7 @@ fn nested_loops_are_not_unrolled() {
             kind: IlJumpKind::Unconditional,
             target: Label(0),
             loc,
+            hint: Default::default(),
         },
         IlOp::Label(Label(3)),
         IlOp::Halt { loc },

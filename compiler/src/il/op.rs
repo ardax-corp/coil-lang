@@ -12,6 +12,54 @@ impl Label {
     }
 }
 
+/// Lowering annotation on a jump or label bind. Not a dummy opcode.
+///
+/// Fuse-select and invert-guard honor this; production `NOOP` / `DUP;POP`
+/// barriers are gone (D3).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct FuseHint {
+    /// Do not fuse this op with neighbors (pair-`?` / pair-match `EQ;JMPF`).
+    pub nofuse: bool,
+    pub join: JoinClass,
+}
+
+impl FuseHint {
+    pub const fn nofuse_value_under_jmp() -> Self {
+        Self {
+            nofuse: true,
+            join: JoinClass::ValueUnderJmp,
+        }
+    }
+
+    pub const fn value_join() -> Self {
+        Self {
+            nofuse: false,
+            join: JoinClass::Value,
+        }
+    }
+
+    pub fn blocks_cmp_jmp_fuse(self) -> bool {
+        self.nofuse || matches!(self.join, JoinClass::ValueUnderJmp)
+    }
+
+    pub fn is_value_join(self) -> bool {
+        matches!(self.join, JoinClass::Value)
+    }
+}
+
+/// Join class on a lowering annotation.
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub enum JoinClass {
+    #[default]
+    None,
+    /// Match / `?` join that carries a stacked value. Fuse must not pull a
+    /// producer from one predecessor across this bind.
+    Value,
+    /// Guard jump whose compare sits under a still-live stacked value
+    /// (pair tag still on stack after `EQ;JMPF`).
+    ValueUnderJmp,
+}
+
 /// Control-flow jump kind (IL-level; packing happens in the lowerer).
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum IlJumpKind {
@@ -193,11 +241,14 @@ pub enum IlOp {
     },
     /// Bind `label` to the next emitting instruction's PC (last bind wins).
     Label(Label),
+    /// Value-producing join bind (match / `?` end). Same PC rule as [`IlOp::Label`].
+    JoinLabel(Label),
     /// Control-flow jump with a symbolic target.
     Jump {
         kind: IlJumpKind,
         target: Label,
         loc: DebugLoc,
+        hint: FuseHint,
     },
     /// CALL / TailCall / MakeCoro / CodePtr / MakePolyFn with a label target.
     Entry {
@@ -394,12 +445,8 @@ impl IlOp {
             IlOp::Pop { .. } => Byte::new(Instruction::POP),
             IlOp::Index { .. } => Byte::new(Instruction::Index),
             IlOp::IndexUnchecked { .. } => Byte::new(Instruction::IndexUnchecked),
-            IlOp::ArrayPin { slot, .. } => {
-                Byte::new(Instruction::ArrayPin).with_operand_u32(*slot)
-            }
-            IlOp::IndexPin { slot, .. } => {
-                Byte::new(Instruction::IndexPin).with_operand_u32(*slot)
-            }
+            IlOp::ArrayPin { slot, .. } => Byte::new(Instruction::ArrayPin).with_operand_u32(*slot),
+            IlOp::IndexPin { slot, .. } => Byte::new(Instruction::IndexPin).with_operand_u32(*slot),
             IlOp::IndexPinUnchecked { slot, .. } => {
                 Byte::new(Instruction::IndexPinUnchecked).with_operand_u32(*slot)
             }
@@ -449,7 +496,11 @@ impl IlOp {
             IlOp::BinReturn { op, .. } => {
                 Byte::new(Instruction::BinReturn).with_bin_return(*op as u8)
             }
-            IlOp::Label(_) | IlOp::Jump { .. } | IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => {
+            IlOp::Label(_)
+            | IlOp::JoinLabel(_)
+            | IlOp::Jump { .. }
+            | IlOp::Entry { .. }
+            | IlOp::PrologueJmp { .. } => {
                 return None;
             }
         })
@@ -457,7 +508,42 @@ impl IlOp {
 
     /// True if this op becomes one (or more) final bytecode slots.
     pub fn emits_code(&self) -> bool {
-        !matches!(self, IlOp::Label(_))
+        !matches!(self, IlOp::Label(_) | IlOp::JoinLabel(_))
+    }
+
+    /// Bind site label id, if this is a label marker.
+    pub fn bind_label(&self) -> Option<Label> {
+        match self {
+            IlOp::Label(id) | IlOp::JoinLabel(id) => Some(*id),
+            _ => None,
+        }
+    }
+
+    /// Lowering hint on this op (empty for everything except jumps and join labels).
+    pub fn fuse_hint(&self) -> FuseHint {
+        match self {
+            IlOp::Jump { hint, .. } => *hint,
+            IlOp::JoinLabel(_) => FuseHint::value_join(),
+            _ => FuseHint::default(),
+        }
+    }
+
+    pub fn jump(kind: IlJumpKind, target: Label, loc: DebugLoc) -> Self {
+        IlOp::Jump {
+            kind,
+            target,
+            loc,
+            hint: FuseHint::default(),
+        }
+    }
+
+    pub fn jump_hinted(kind: IlJumpKind, target: Label, loc: DebugLoc, hint: FuseHint) -> Self {
+        IlOp::Jump {
+            kind,
+            target,
+            loc,
+            hint,
+        }
     }
 
     /// Jump / Entry / PrologueJmp — not safe to copy as a tiny-inline body.
@@ -518,7 +604,7 @@ impl IlOp {
             | IlOp::Jump { loc, .. }
             | IlOp::Entry { loc, .. }
             | IlOp::PrologueJmp { loc } => *loc,
-            IlOp::Label(_) => DebugLoc::unknown(),
+            IlOp::Label(_) | IlOp::JoinLabel(_) => DebugLoc::unknown(),
         }
     }
 
@@ -561,7 +647,7 @@ impl IlOp {
             | IlOp::Jump { loc: l, .. }
             | IlOp::Entry { loc: l, .. }
             | IlOp::PrologueJmp { loc: l } => *l = loc,
-            IlOp::Label(_) => {}
+            IlOp::Label(_) | IlOp::JoinLabel(_) => {}
         }
     }
 
@@ -619,7 +705,7 @@ impl IlOp {
                 EntryKind::MakePolyFn => Instruction::MakePolyFn,
             }),
             IlOp::PrologueJmp { .. } => Some(Instruction::JMP),
-            IlOp::Label(_) => None,
+            IlOp::Label(_) | IlOp::JoinLabel(_) => None,
         }
     }
 }
@@ -829,11 +915,7 @@ mod tests {
 
     #[test]
     fn long_tail_control_stays_unencoded() {
-        let jmp = IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target: Label(0),
-            loc: DebugLoc::unknown(),
-        };
+        let jmp = IlOp::jump(IlJumpKind::Unconditional, Label(0), DebugLoc::unknown());
         assert!(jmp.as_encode_byte().is_none());
         assert!(jmp.is_control());
         let entry = IlOp::Entry {

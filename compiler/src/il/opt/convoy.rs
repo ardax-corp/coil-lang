@@ -1,8 +1,8 @@
 //! IL optimization — convoy passes.
 
+use super::cfg::is_return_terminator;
 use crate::il::op::{IlJumpKind, IlOp, Label};
 use common::Instruction;
-use super::cfg::is_return_terminator;
 /// True if `byte` is a sinkable return producer (`LOAD s` or inline `CONST k`).
 fn is_return_producer(byte: &common::Byte) -> bool {
     match *byte.bytecode() {
@@ -109,12 +109,13 @@ fn return_label_cluster(ops: &[IlOp], r: usize) -> Option<(usize, usize)> {
     if !ops[r].is_plain_return() {
         return None;
     }
-    if r == 0 || !matches!(ops[r - 1], IlOp::Label(_)) {
+    if r == 0 || !matches!(ops[r - 1], IlOp::Label(_) | IlOp::JoinLabel(_)) {
         return None;
     }
     let cluster_end = r - 1;
     let mut cluster_start = cluster_end;
-    while cluster_start > 0 && matches!(ops[cluster_start - 1], IlOp::Label(_)) {
+    while cluster_start > 0 && matches!(ops[cluster_start - 1], IlOp::Label(_) | IlOp::JoinLabel(_))
+    {
         cluster_start -= 1;
     }
     Some((cluster_start, cluster_end))
@@ -125,16 +126,18 @@ fn return_label_cluster(ops: &[IlOp], r: usize) -> Option<(usize, usize)> {
 /// Return clusters keep today's rewrite. Non-return requires a non-label
 /// consumer that is not an unconditional jump-only terminator (no local work).
 fn join_label_cluster(ops: &[IlOp], i: usize) -> Option<(usize, usize, JoinKind)> {
-    if !matches!(ops.get(i), Some(IlOp::Label(_))) {
+    if !matches!(ops.get(i), Some(IlOp::Label(_) | IlOp::JoinLabel(_))) {
         return None;
     }
     // Only the start of a consecutive label run.
-    if i > 0 && matches!(ops[i - 1], IlOp::Label(_)) {
+    if i > 0 && matches!(ops[i - 1], IlOp::Label(_) | IlOp::JoinLabel(_)) {
         return None;
     }
     let cluster_start = i;
     let mut cluster_end = i;
-    while cluster_end + 1 < ops.len() && matches!(ops[cluster_end + 1], IlOp::Label(_)) {
+    while cluster_end + 1 < ops.len()
+        && matches!(ops[cluster_end + 1], IlOp::Label(_) | IlOp::JoinLabel(_))
+    {
         cluster_end += 1;
     }
     let after = cluster_end + 1;
@@ -160,7 +163,7 @@ fn join_label_cluster(ops: &[IlOp], i: usize) -> Option<(usize, usize, JoinKind)
         return None;
     }
     // Non-label emitting (or control) consumer — shared continuation.
-    if matches!(consumer, IlOp::Label(_)) {
+    if matches!(consumer, IlOp::Label(_) | IlOp::JoinLabel(_)) {
         return None;
     }
     Some((cluster_start, cluster_end, JoinKind::NonReturn))
@@ -744,7 +747,7 @@ pub(crate) fn multi_op_join_convoy(ops: &mut Vec<IlOp>) {
 fn label_cluster_ids(ops: &[IlOp], start: usize, end: usize) -> Vec<Label> {
     (start..=end)
         .filter_map(|i| match &ops[i] {
-            IlOp::Label(l) => Some(*l),
+            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
             _ => None,
         })
         .collect()
@@ -881,7 +884,7 @@ pub(super) fn return_convoy(ops: &mut Vec<IlOp>) {
             r += 1;
             continue;
         };
-        let IlOp::Label(join) = ops[cluster_start] else {
+        let (IlOp::Label(join) | IlOp::JoinLabel(join)) = ops[cluster_start] else {
             r += 1;
             continue;
         };
@@ -1076,7 +1079,6 @@ pub(super) fn return_convoy(ops: &mut Vec<IlOp>) {
     }
     *ops = out;
 }
-
 
 #[cfg(test)]
 #[path = "convoy.tests.rs"]

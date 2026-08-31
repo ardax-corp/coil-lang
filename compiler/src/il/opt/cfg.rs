@@ -6,8 +6,8 @@ use common::Instruction;
 pub(super) fn label_targets(ops: &[IlOp]) -> std::collections::HashMap<u32, usize> {
     let mut map = std::collections::HashMap::new();
     for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
-            map.insert(*id, i);
+        if let Some(id) = op.bind_label() {
+            map.insert(id.0, i);
         }
     }
     map
@@ -20,6 +20,7 @@ pub(super) fn jump_thread(ops: &mut Vec<IlOp>) {
             kind: IlJumpKind::Unconditional,
             target,
             loc,
+            hint,
         } = ops[i]
         else {
             continue;
@@ -30,7 +31,7 @@ pub(super) fn jump_thread(ops: &mut Vec<IlOp>) {
         let mut j = idx;
         while j < ops.len() {
             match &ops[j] {
-                IlOp::Label(_) => j += 1,
+                IlOp::Label(_) | IlOp::JoinLabel(_) => j += 1,
                 IlOp::Jump {
                     kind: IlJumpKind::Unconditional,
                     target: t2,
@@ -40,6 +41,7 @@ pub(super) fn jump_thread(ops: &mut Vec<IlOp>) {
                         kind: IlJumpKind::Unconditional,
                         target: *t2,
                         loc,
+                        hint,
                     };
                     break;
                 }
@@ -62,6 +64,7 @@ pub(crate) fn invert_branch_over_jump(ops: &mut Vec<IlOp>) {
                 kind: IlJumpKind::JumpIfFalse,
                 target: skip,
                 loc,
+                hint,
             },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
@@ -73,7 +76,11 @@ pub(crate) fn invert_branch_over_jump(ops: &mut Vec<IlOp>) {
             i += 1;
             continue;
         };
-        let (skip, far, loc) = (*skip, *far, *loc);
+        if hint.blocks_cmp_jmp_fuse() {
+            i += 1;
+            continue;
+        }
+        let (skip, far, loc, hint) = (*skip, *far, *loc, *hint);
         if !labels_bind_at(ops, i + 2, skip) {
             i += 1;
             continue;
@@ -82,6 +89,7 @@ pub(crate) fn invert_branch_over_jump(ops: &mut Vec<IlOp>) {
             kind: IlJumpKind::JumpIfTrue,
             target: far,
             loc,
+            hint,
         };
         remove.insert(i + 1);
         i += 2;
@@ -103,8 +111,8 @@ pub(crate) fn invert_branch_over_jump(ops: &mut Vec<IlOp>) {
 fn labels_bind_at(ops: &[IlOp], from: usize, target: Label) -> bool {
     for op in &ops[from..] {
         match op {
-            IlOp::Label(l) if *l == target => return true,
-            IlOp::Label(_) => continue,
+            IlOp::Label(l) | IlOp::JoinLabel(l) if *l == target => return true,
+            IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
             _ => return false,
         }
     }
@@ -147,7 +155,7 @@ pub(super) fn eliminate_dead_blocks(ops: &mut Vec<IlOp>) {
     let mut out = Vec::with_capacity(ops.len());
     let mut reachable = true;
     for op in ops.drain(..) {
-        if matches!(op, IlOp::Label(_)) {
+        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
             reachable = true;
             out.push(op);
             continue;
@@ -166,4 +174,3 @@ pub(super) fn eliminate_dead_blocks(ops: &mut Vec<IlOp>) {
     }
     *ops = out;
 }
-
