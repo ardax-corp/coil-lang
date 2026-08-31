@@ -286,11 +286,13 @@ impl Checker {
                 && inst.defined_module == self.current_module
                 && inst.range == range
         });
-        if let Some(existing) = overlapping.as_ref() {
-            let same_decl = existing_idx.is_some_and(|idx| {
+        let same_decl = overlapping.as_ref().is_some_and(|existing| {
+            existing_idx.is_some_and(|idx| {
                 self.generics.instances[idx].defined_module == existing.defined_module
                     && self.generics.instances[idx].range == existing.range
-            });
+            })
+        });
+        if let Some(existing) = overlapping.as_ref() {
             if !same_decl {
             let mut msg = Message::error(
                 ErrorCode::GenericTypeError,
@@ -558,7 +560,8 @@ impl Checker {
                 }
             }
         }
-        let mut invalid_instance = class_def.is_none() || orphaned || overlapping.is_some();
+        let mut invalid_instance =
+            class_def.is_none() || orphaned || (overlapping.is_some() && !same_decl);
         if let Some(class_def) = class_def.as_ref() {
             // Superclass instances must already exist for the same args.
             // `impl Ordered<int>` requires `Equal<int>`, transitively.

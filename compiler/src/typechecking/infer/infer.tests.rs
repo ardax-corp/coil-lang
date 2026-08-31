@@ -4254,6 +4254,52 @@ fn main() {
         assert_eq!(apply_ty_prune(c.subst(), y_ty), int());
     }
 
+    #[test]
+    fn for_in_before_into_iterator_impl_is_accepted() {
+        let src = r#"
+class Counter {
+    pub cur: int,
+    pub end: int,
+}
+
+fn consume(Counter c) -> int {
+    let s = 0;
+    for x in c {
+        s = s + x;
+    }
+    return s;
+}
+
+impl IntoIterator for Counter {
+    type Item = int;
+    type IntoIter = Counter;
+    pub fn into_iter(Counter c) -> Counter {
+        return c;
+    }
+}
+
+impl Iterator for Counter {
+    type Item = int;
+    pub fn next(Counter c) -> Option<int> {
+        if c.cur < c.end {
+            let v = c.cur;
+            c.cur = c.cur + 1;
+            return Option::Some(v);
+        }
+        return Option::None;
+    }
+}
+
+fn main() {
+    let n = consume(new Counter(0, 3));
+}
+"#;
+        let (c, _) = check(src);
+        assert!(c.messages().is_empty(), "unexpected: {:?}", c.messages());
+        let n_ty = c.codegen_var_type("n").expect("n");
+        assert_eq!(apply_ty_prune(c.subst(), n_ty), int());
+    }
+
     /// COI-115: `impl Trait<T>` bodies must see inherent `impl T` methods.
     #[test]
     fn trait_impl_can_call_inherent_method() {

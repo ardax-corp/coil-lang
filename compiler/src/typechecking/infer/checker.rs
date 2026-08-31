@@ -1507,6 +1507,10 @@ impl Checker {
         // Forward-declare module-level function signatures so `impl`
         // methods that appear earlier in the file can call them.
         self.pre_register_free_functions(ast);
+        // Trait instances before the main walk so `for x in` (and other
+        // uses) see `IntoIterator` / `Iterator` when `impl` is later in
+        // the file. Method bodies still typecheck in source order.
+        self.pre_register_typeclass_impls(ast);
 
         let ty = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.infer(ast))) {
             Ok(ty) => ty,
