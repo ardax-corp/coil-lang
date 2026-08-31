@@ -3292,7 +3292,6 @@
     }
 
     #[test]
-    #[test]
     #[cfg(debug_assertions)]
     #[should_panic]
     fn jump_if_match_on_empty_stack_debug_asserts() {
@@ -3379,7 +3378,6 @@
         assert_eq!(vm.pop().as_int(), -1);
     }
 
-    #[test]
     #[test]
     #[cfg(debug_assertions)]
     #[should_panic]
