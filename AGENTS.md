@@ -33,6 +33,7 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 - **Fuse-select (D4)**: one named pass on typed `IlOp` after concat (`fuse_select` → PC assign). Residual `Byte` is a cold refuse. No post-lower `adjust_target`, no production per-fn fuse.
 
 - **IL** is instruction lowering + label resolution + fuse — not a semantic IR. DefIds / typed sidecar hold names, types, and call meaning. See `docs/internals/pipeline.md` (IL intent).
+- **Single emit sink**: production codegen pushes through `CodeBuf` / `IlBuilder` only. Encode in `il::lower`.
 
 Codegen / match / `STORE`: `.cursor/skills/coil-contributor/reference.md`. Pipeline: `docs/internals/pipeline.md`.
 

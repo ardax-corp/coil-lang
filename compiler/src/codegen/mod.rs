@@ -841,8 +841,8 @@ pub struct Compiler {
     /// Name of the function currently being codegen'd (for ctor/Instantiate routing).
     active_fn_name: Option<String>,
 
-    /// Bytecode for global static initializers (spliced at `program_start_offset`).
-    static_init_bytecode: Vec<Byte>,
+    /// Global static initializers (spliced at `program_start_offset`). Same sink as `ffi_init`.
+    static_init: CodeBuf,
 
     /// `extern` dlopen/declare setup accumulated across modules, spliced into
     /// the prologue setup region at finalize (so imported-module `extern`
@@ -1029,7 +1029,7 @@ impl Default for Compiler {
             mono_plan: MonoPlan::default(),
             mono_offsets: HashMap::new(),
             mono_codegen_var_types: Vec::new(),
-            static_init_bytecode: Vec::new(),
+            static_init: CodeBuf::new(),
             ffi_init: CodeBuf::new(),
             current_source_file: None,
             source_file_indices: std::collections::BTreeMap::new(),

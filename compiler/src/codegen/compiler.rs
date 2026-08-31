@@ -210,15 +210,20 @@ impl Compiler {
         self.debug_locs.push(loc);
     }
 
-    fn emit_bytes(&mut self, span: SimpleSpan, bytes: &[Byte]) {
+    fn emit_bytes(&mut self, span: SimpleSpan, bytes: &mut CodeBuf) {
         if bytes.is_empty() {
             return;
         }
-        self.pad_debug_locs();
         let loc = self.loc_for_span(span);
-        for &b in bytes {
-            self.bytecode.push(b);
-            self.debug_locs.push(loc);
+        for op in bytes.il_mut().ops_mut() {
+            op.set_loc(loc);
+        }
+        let n = bytes.len();
+        self.bytecode.append(bytes);
+        self.pad_debug_locs();
+        let start = self.debug_locs.len().saturating_sub(n);
+        for slot in &mut self.debug_locs[start..] {
+            *slot = loc;
         }
     }
 
@@ -322,7 +327,7 @@ impl Compiler {
         self.const_env_stack.pop();
     }
 
-    fn emit_const_value(&mut self, v: &ConstValue, bytecode: &mut Vec<Byte>) {
+    fn emit_const_value(&mut self, v: &ConstValue, bytecode: &mut CodeBuf) {
         match v {
             ConstValue::Int(n) => {
                 if (0..=i32::MAX as i64).contains(n) {
@@ -358,7 +363,7 @@ impl Compiler {
     fn try_emit_folded_expr(
         &mut self,
         ast: &(SimpleSpan, Box<Expression<'_>>),
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         allow_mul_shl: bool,
     ) -> bool {
         if let Some(v) = crate::const_fold::eval_expr(ast, self.const_env()) {
@@ -674,7 +679,7 @@ impl Compiler {
     }
 
     /// `return self(...)` tail-call when eligible.
-    fn try_emit_tail_call_expr(&mut self, expr: &Output<'_>, bytecode: &mut Vec<Byte>) -> bool {
+    fn try_emit_tail_call_expr(&mut self, expr: &Output<'_>, bytecode: &mut CodeBuf) -> bool {
         if !self.fn_defers.is_empty() {
             return false;
         }
@@ -1132,7 +1137,7 @@ impl Compiler {
     }
 
     /// Expand sole `BinReturn` at a call site: reload caller temps then the plain op.
-    fn expand_bin_return_for_inline(byte: &Byte, temps: &[u32], out: &mut Vec<Byte>) -> bool {
+    fn expand_bin_return_for_inline(byte: &Byte, temps: &[u32], out: &mut CodeBuf) -> bool {
         if *byte.bytecode() != Instruction::BinReturn {
             return false;
         }
@@ -1187,7 +1192,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
     ) -> bool {
         let prefix = Self::emit_attempt_prefix(bytecode);
         if self.try_inline_direct_call_into(fqn, args, bytecode) {
@@ -1199,15 +1204,15 @@ impl Compiler {
 
     /// Snapshot a speculative emit target so [`Self::restore_emit_attempt`] can
     /// undo a refused attempt. `None` means it was empty (the common case).
-    fn emit_attempt_prefix(bytecode: &[Byte]) -> Option<Vec<Byte>> {
+    fn emit_attempt_prefix(bytecode: &CodeBuf) -> Option<CodeBuf> {
         if bytecode.is_empty() {
             None
         } else {
-            Some(bytecode.to_vec())
+            Some(bytecode.clone())
         }
     }
 
-    fn restore_emit_attempt(bytecode: &mut Vec<Byte>, prefix: Option<Vec<Byte>>) {
+    fn restore_emit_attempt(bytecode: &mut CodeBuf, prefix: Option<CodeBuf>) {
         match prefix {
             Some(p) => *bytecode = p,
             None => bytecode.clear(),
@@ -1273,7 +1278,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
     ) -> bool {
         // Incomplete self-bodies are not safe to tiny-inline (missing else/rest).
         let Some((start, end, provisional)) = self.resolve_inline_span(fqn) else {
@@ -1413,7 +1418,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
     ) -> bool {
         let prefix = Self::emit_attempt_prefix(bytecode);
         if self.try_self_unroll_call_into(fqn, args, bytecode) {
@@ -1429,7 +1434,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
     ) -> bool {
         // Need a finished body: mid-compile self-unroll would copy a partial CFG.
         let Some((start, end, provisional)) = self.resolve_fn_span(fqn) else {
@@ -1493,7 +1498,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         target_offset: u32,
         is_indirect: bool,
     ) -> bool {
@@ -1523,7 +1528,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         target_offset: u32,
         is_indirect: bool,
     ) -> bool {
@@ -1672,7 +1677,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         target_offset: u32,
     ) -> bool {
         let prefix = Self::emit_attempt_prefix(bytecode);
@@ -1691,7 +1696,7 @@ impl Compiler {
         &mut self,
         fqn: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         target_offset: u32,
     ) -> bool {
         let Some((start, end)) = self.fn_bytecode_spans.get(fqn).copied() else {
@@ -1751,7 +1756,8 @@ impl Compiler {
             let before = self.bytecode.len();
             let mut bytes = self.do_compile(value);
             let split = self.bytecode.len() != before;
-            if split || !Self::peel_remat_bytes_ok(&bytes) {
+            let plain = Self::codebuf_plain_bytes(&bytes);
+            if split || plain.as_ref().is_none_or(|p| !Self::peel_remat_bytes_ok(p)) {
                 self.bytecode.append(&mut bytes);
                 let tmp = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(tmp);
@@ -1759,7 +1765,7 @@ impl Compiler {
                     Byte::new(Instruction::LOAD).with_load_store_slot(tmp),
                 ]);
             } else {
-                argv.push(bytes);
+                argv.push(plain.unwrap());
             }
         }
 
@@ -1927,6 +1933,17 @@ impl Compiler {
     /// Compiled argument that re-materializes for free: exactly one byte pushing
     /// one value out of the caller's frame, independent of the operand stack. That
     /// last part rules out `DUPLICATE`, whose two copies would read two tops.
+    fn codebuf_plain_bytes(buf: &CodeBuf) -> Option<Vec<Byte>> {
+        let mut out = Vec::new();
+        for op in buf.ops() {
+            if !op.emits_code() {
+                continue;
+            }
+            out.push(op.as_plain_byte()?);
+        }
+        Some(out)
+    }
+
     fn peel_remat_bytes_ok(bytes: &[Byte]) -> bool {
         let [byte] = bytes else {
             return false;
@@ -2662,7 +2679,7 @@ impl Compiler {
     }
 
     /// Direct `CALL`, or `Entry{Call}` when the callee body is still ahead.
-    fn emit_direct_fn_call(&mut self, dest: &mut Vec<Byte>, name: &str, arity: u32) -> bool {
+    fn emit_direct_fn_call(&mut self, dest: &mut CodeBuf, name: &str, arity: u32) -> bool {
         if let Some(&offset) = self.functions.get(name) {
             dest.push(Byte::new(Instruction::CALL).with_call_packed(arity, offset as u32));
             true
@@ -2856,7 +2873,7 @@ impl Compiler {
     }
 
     /// Push elements of a multi-slot local then `MakeArray` (escape to heap).
-    fn emit_box_stack_array(&mut self, bytecode: &mut Vec<Byte>, base: u32, n: usize) {
+    fn emit_box_stack_array(&mut self, bytecode: &mut CodeBuf, base: u32, n: usize) {
         for i in 0..n {
             bytecode.push_load(base + i as u32);
         }
@@ -2869,7 +2886,7 @@ impl Compiler {
     /// writeback, stack-array slots stay stale (e.g. `arr[i % n] += 1` loops).
     fn emit_unbox_stack_array(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         arr_slot: u32,
         base: u32,
         n: usize,
@@ -2891,7 +2908,7 @@ impl Compiler {
     /// Returns `true` for array literals and copies from another multi-slot local.
     fn try_emit_stack_array_init(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         rhs: &Output,
         base: u32,
         n: usize,
@@ -3096,7 +3113,7 @@ impl Compiler {
         &mut self,
         fn_name: &str,
         args: &[Output<'_>],
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         box_generic: bool,
     ) -> u32 {
         self.consume_spread_emit_ids(args);
@@ -3461,7 +3478,7 @@ impl Compiler {
     fn emit_call_args_pure_first(
         &mut self,
         args: &[Output<'_>],
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         box_generic: bool,
     ) -> u32 {
         let mut temps = vec![0u32; args.len()];
@@ -3510,7 +3527,7 @@ impl Compiler {
     fn emit_call_args_stage_all(
         &mut self,
         args: &[Output<'_>],
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         box_generic: bool,
     ) -> u32 {
         let mut temps = vec![0u32; args.len()];
@@ -3540,7 +3557,7 @@ impl Compiler {
     fn emit_call_args_stage_self_bc(
         &mut self,
         args: &[Output<'_>],
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         box_generic: bool,
     ) -> u32 {
         let mut temps: Vec<Option<u32>> = vec![None; args.len()];
@@ -3569,14 +3586,14 @@ impl Compiler {
 
     /// Compile `arg` onto [`Self::bytecode`] and `StorePop` into a fresh temp.
     fn stage_call_arg_to_temp(&mut self, arg: &Output<'_>, box_generic: bool, tmp_out: &mut u32) {
-        let mut staged = Vec::new();
+        let mut staged = CodeBuf::new();
         self.append_with_existential_pack(&mut staged, arg);
         self.bytecode.append(&mut staged);
         if box_generic {
             if let Some(arg_ty) = self.codegen_expr_ty(arg) {
-                let mut box_bc = Vec::new();
+                let mut box_bc = CodeBuf::new();
                 self.emit_generic_arg_box(&mut box_bc, &arg_ty);
-                self.bytecode.extend(box_bc);
+                self.bytecode.append(&mut box_bc);
             }
         }
         let tmp = self.alloc_temp_slot();
@@ -3624,16 +3641,16 @@ impl Compiler {
             .map(|t| apply_ty_prune(self.checker.subst(), t))
     }
 
-    fn discard_statement_value(bytecode: &mut Vec<Byte>) {
+    fn discard_statement_value(bytecode: &mut CodeBuf) {
         if matches!(
-            bytecode.last().map(|b| b.bytecode()),
+            bytecode.last_byte().map(|b| *b.bytecode()),
             Some(Instruction::DUPLICATE)
         ) {
             // If it was supposed to add `POP` but prev is `DUP`
             // then remove the DUP as well
-            bytecode.pop();
+            bytecode.pop_last_emitting();
         } else if matches!(
-            bytecode.last().map(|b| b.bytecode()),
+            bytecode.last_byte().map(|b| *b.bytecode()),
             Some(
                 Instruction::STORE
                     | Instruction::StorePop
@@ -3645,7 +3662,7 @@ impl Compiler {
             // SetField / StoreIndex push the value back — still need POP when
             // they are last (handled by the final branch).
         } else if !matches!(
-            bytecode.last().map(|b| b.bytecode()),
+            bytecode.last_byte().map(|b| *b.bytecode()),
             Some(Instruction::YieldCoro | Instruction::YieldFromCoro)
         ) {
             bytecode.push_pop();
@@ -3693,7 +3710,7 @@ impl Compiler {
     /// then its method entry loaded from the dictionary tuple.
     fn emit_bound_operator_call(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         lhs: &Output,
         rhs: &Output,
         dict_index: usize,
@@ -3718,7 +3735,7 @@ impl Compiler {
     /// shape from mono/codegen var types).
     fn try_emit_aggregate_arith(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         self_id: Option<crate::typechecking::id::NodeId>,
         span_start: usize,
         span_end: usize,
@@ -3992,7 +4009,7 @@ impl Compiler {
     /// smaller shapes keep the existing scalar unroll.
     fn try_emit_packed_aggregate_arith(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         info: &crate::typechecking::AggregateArithInfo,
         lhs: &Output,
         rhs: Option<&Output>,
@@ -4102,7 +4119,7 @@ impl Compiler {
     }
 
     /// Negate TOS: int via `NEG`; float via `NEGF`.
-    fn emit_neg_tos(&mut self, bytecode: &mut Vec<Byte>, is_float: bool) {
+    fn emit_neg_tos(&mut self, bytecode: &mut CodeBuf, is_float: bool) {
         if is_float {
             bytecode.push(Byte::new(Instruction::NEGF));
         } else {
@@ -4113,12 +4130,12 @@ impl Compiler {
     /// Always unrolls static arities at compile time in v1 (including N > 4).
     fn emit_zip_loop<F>(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         n: usize,
         mut emit_elem: F,
         as_tuple: bool,
     ) where
-        F: FnMut(&mut Self, &mut Vec<Byte>, usize),
+        F: FnMut(&mut Self, &mut CodeBuf, usize),
     {
         for i in 0..n {
             emit_elem(self, bytecode, i);
@@ -4157,9 +4174,9 @@ impl Compiler {
         self.bytecode.push_load(idx);
         self.bytecode.push_index();
         {
-            let mut neg_bc = Vec::new();
+            let mut neg_bc = CodeBuf::new();
             self.emit_neg_tos(&mut neg_bc, elem_is_float);
-            self.bytecode.extend(neg_bc);
+            self.bytecode.append(&mut neg_bc);
         }
         self.bytecode.push(Byte::new(Instruction::ArrayPush));
         self.bytecode.push_store_pop(out);
@@ -4418,7 +4435,7 @@ impl Compiler {
     /// path (caller falls through when this returns `false`).
     fn emit_concrete_operator_call(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         lhs: &Output,
         rhs: &Output,
         class: &str,
@@ -4566,8 +4583,8 @@ impl Compiler {
                 if *spec == 'v' {
                     self.emit_show_for_format_arg(param);
                 } else {
-                    let bc = self.do_compile(param);
-                    self.bytecode.extend(bc);
+                    let mut bc = self.do_compile(param);
+                    self.bytecode.append(&mut bc);
                 }
                 let slot = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(slot);
@@ -4575,8 +4592,8 @@ impl Compiler {
                 emitted += 1;
             }
             for param in params.iter().skip(emitted) {
-                let bc = self.do_compile(param);
-                self.bytecode.extend(bc);
+                let mut bc = self.do_compile(param);
+                self.bytecode.append(&mut bc);
                 let slot = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(slot);
                 arg_slots.push(slot);
@@ -4588,14 +4605,14 @@ impl Compiler {
             self.bytecode
                 .push(Byte::new(Instruction::FORMAT).with_operand_u32(params.len() as u32));
         } else {
-            let format_bc = self.do_compile(format);
-            self.bytecode.extend(format_bc);
+            let mut format_bc = self.do_compile(format);
+            self.bytecode.append(&mut format_bc);
             let mut params_len = 0u32;
             if let Some(params) = params {
                 params_len = params.len() as u32;
                 for param in params {
-                    let bc = self.do_compile(param);
-                    self.bytecode.extend(bc);
+                    let mut bc = self.do_compile(param);
+                    self.bytecode.append(&mut bc);
                 }
             }
             self.bytecode
@@ -4686,17 +4703,17 @@ impl Compiler {
             }
         };
 
-        let lib_bc = self.do_compile(lib);
-        self.bytecode.extend(lib_bc);
-        let name_bc = self.do_compile(name);
-        self.bytecode.extend(name_bc);
+        let mut lib_bc = self.do_compile(lib);
+        self.bytecode.append(&mut lib_bc);
+        let mut name_bc = self.do_compile(name);
+        self.bytecode.append(&mut name_bc);
 
         for elem in &tuple_elements {
             if let Some((tag, aux)) = ffi_type_tag_from_output(&self.checker, elem) {
                 emit_ffi_type_const(&mut self.bytecode, tag, aux);
             } else {
-                let bc = self.do_compile(elem);
-                self.bytecode.extend(bc);
+                let mut bc = self.do_compile(elem);
+                self.bytecode.append(&mut bc);
             }
         }
         let arity = tuple_elements.len() as u32;
@@ -4705,8 +4722,8 @@ impl Compiler {
         if let Some((tag, aux)) = ffi_type_tag_from_output(&self.checker, ret_type) {
             emit_ffi_type_const(&mut self.bytecode, tag, aux);
         } else {
-            let ret_bc = self.do_compile(ret_type);
-            self.bytecode.extend(ret_bc);
+            let mut ret_bc = self.do_compile(ret_type);
+            self.bytecode.append(&mut ret_bc);
         }
 
         let mut operand = arity & 0xFFFF;
@@ -4760,10 +4777,10 @@ impl Compiler {
             }
         };
 
-        let lib_bc = self.do_compile(lib);
-        self.bytecode.extend(lib_bc);
-        let fn_bc = self.do_compile(fn_id);
-        self.bytecode.extend(fn_bc);
+        let mut lib_bc = self.do_compile(lib);
+        self.bytecode.append(&mut lib_bc);
+        let mut fn_bc = self.do_compile(fn_id);
+        self.bytecode.append(&mut fn_bc);
 
         for elem in &tuple_elements {
             if let Expression::Identifier(name) = elem.1.as_ref()
@@ -4773,8 +4790,8 @@ impl Compiler {
                     .push(Byte::new(Instruction::CodePtr).with_operand_u32(offset as u32));
                 continue;
             }
-            let bc = self.do_compile(elem);
-            self.bytecode.extend(bc);
+            let mut bc = self.do_compile(elem);
+            self.bytecode.append(&mut bc);
         }
         let arity = tuple_elements.len() as u32;
         self.bytecode.push_make_tuple(arity);
@@ -5472,7 +5489,7 @@ impl Compiler {
     /// methods in declaration order (flattened). Superclass slots are filled
     /// from the matching superclass instance for the same type arguments.
     fn emit_instance_dict(
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         class: &str,
         lookup: &[crate::typechecking::Ty],
         checker: &Checker,
@@ -5505,7 +5522,7 @@ impl Compiler {
     }
 
     fn emit_existential_pack_recipe(
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         pack: &crate::typechecking::infer::ExistentialPack,
         checker: &Checker,
         functions: &HashMap<String, usize>,
@@ -5522,7 +5539,7 @@ impl Compiler {
         }
     }
 
-    fn append_with_existential_pack(&mut self, bytecode: &mut Vec<Byte>, expr: &Output) {
+    fn append_with_existential_pack(&mut self, bytecode: &mut CodeBuf, expr: &Output) {
         let pack = self
             .checker
             .existential_pack_for_span(expr.0.start, expr.0.end)
@@ -5544,7 +5561,7 @@ impl Compiler {
         let mut expr_bc = self.do_compile(expr);
         self.bytecode.append(&mut expr_bc);
         if let Some(pack) = pack {
-            let mut pack_bc = Vec::new();
+            let mut pack_bc = CodeBuf::new();
             Self::emit_existential_pack_recipe(&mut pack_bc, &pack, &self.checker, &self.functions);
             self.bytecode.append(&mut pack_bc);
         }
@@ -5553,14 +5570,14 @@ impl Compiler {
 
     /// Like [`Self::append_with_existential_pack`], but match expressions skip
     /// the join `DUPLICATE; POP` barrier because the value is stored immediately.
-    fn append_binding_rhs(&mut self, bytecode: &mut Vec<Byte>, expr: &Output) {
+    fn append_binding_rhs(&mut self, bytecode: &mut CodeBuf, expr: &Output) {
         let prev = self.suppress_match_fusion_barrier;
         self.suppress_match_fusion_barrier = true;
         self.append_with_existential_pack(bytecode, expr);
         self.suppress_match_fusion_barrier = prev;
     }
 
-    fn load_tuple_field(bytecode: &mut Vec<Byte>, tuple_slot: u32, index: i32) {
+    fn load_tuple_field(bytecode: &mut CodeBuf, tuple_slot: u32, index: i32) {
         bytecode.push_load(tuple_slot);
         bytecode.push_const(index);
         bytecode.push_index();
@@ -5568,7 +5585,7 @@ impl Compiler {
 
     fn emit_existential_method_call(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         name: &Output,
         args: Option<&Vec<Output>>,
         hint: &crate::typechecking::infer::ExistentialMethodCall,
@@ -5666,7 +5683,7 @@ impl Compiler {
     ///
     /// Returns the number of dict tuples pushed (used to bump CALL arity).
     fn emit_call_site_dicts(
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         fn_name: &str,
         arg_tys: &[crate::typechecking::Ty],
         ret_ty: Option<&crate::typechecking::Ty>,
@@ -5727,7 +5744,7 @@ impl Compiler {
     /// emits `MakePolyFnCapture` when this is non-zero.
     fn emit_polyfn_escape_dicts(
         &self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         fn_name: &str,
         escape_ty: Option<&crate::typechecking::Ty>,
     ) -> usize {
@@ -5806,7 +5823,7 @@ impl Compiler {
         &mut self,
         fname: &str,
         args: Option<&[Output<'_>]>,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
     ) -> bool {
         let Some(args) = args else {
             return false;
@@ -6330,8 +6347,8 @@ impl Compiler {
         self.bytecode.push_load(BOUND_SLOT);
         self.bytecode.push(Byte::new(Instruction::LE));
         bb.emit_jump_to(exit, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
-        let body_bc = self.do_compile(body);
-        self.bytecode.extend(body_bc);
+        let mut body_bc = self.do_compile(body);
+        self.bytecode.append(&mut body_bc);
         bb.emit_jump_to(top, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit, self.bytecode.il_mut());
         bb.finalize()
@@ -7075,7 +7092,7 @@ impl Compiler {
     }
 
     /// Box a unary `Option`/`Result` call return before storing or re-matching.
-    fn emit_pair_to_heap_after_call(&self, bytecode: &mut Vec<Byte>, lookup_name: &str) {
+    fn emit_pair_to_heap_after_call(&self, bytecode: &mut CodeBuf, lookup_name: &str) {
         if let Some(is_option) = self.pair_return_kind(lookup_name)
             && !self.pair_value_context
         {
@@ -7289,7 +7306,7 @@ impl Compiler {
     /// call return boundary (generic→concrete).  Does nothing when the
     /// type is open (`Ty::Var`) — the caller can't know the tag at compile
     /// time in that case (the boxed value stays boxed).
-    fn emit_unbox_if_needed(bytecode: &mut Vec<Byte>, ty: &crate::typechecking::Ty) {
+    fn emit_unbox_if_needed(bytecode: &mut CodeBuf, ty: &crate::typechecking::Ty) {
         if let Some(tag) = Self::ty_to_value_tag(ty) {
             // UnboxValue operand: [15:0] = ValueTag as u16.
             bytecode.push_unbox_value(tag as u32);
@@ -7883,7 +7900,7 @@ impl Compiler {
     /// instruction.
     fn compile_binary_operands(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         lhs: &Output,
         rhs: &Output,
     ) -> bool {
@@ -8019,7 +8036,7 @@ impl Compiler {
         &mut self,
         pattern: &parser::ast::LetPattern<'_>,
         src_slot: u32,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
     ) {
         use parser::ast::LetPattern;
         match pattern {
@@ -8091,8 +8108,8 @@ impl Compiler {
         let arr_slot = self.alloc_temp_slot();
         let idx_slot = self.alloc_temp_slot();
         if !array_already_on_stack {
-            let iter_bc = self.do_compile(iterable.expect("iterable required when not on stack"));
-            self.bytecode.extend(iter_bc);
+            let mut iter_bc = self.do_compile(iterable.expect("iterable required when not on stack"));
+            self.bytecode.append(&mut iter_bc);
         }
         self.bytecode.push_store_pop(arr_slot);
         self.bytecode.push_const(0);
@@ -8128,8 +8145,8 @@ impl Compiler {
 
         self.loop_stack.push((continue_label, exit_label));
         self.loop_bbs.push(bb);
-        let body_bc = self.do_compile(body);
-        self.bytecode.extend(body_bc);
+        let mut body_bc = self.do_compile(body);
+        self.bytecode.append(&mut body_bc);
         let mut bb = self
             .loop_bbs
             .pop()
@@ -8159,8 +8176,8 @@ impl Compiler {
         arity: usize,
     ) {
         let tup_slot = self.alloc_temp_slot();
-        let iter_bc = self.do_compile(iterable);
-        self.bytecode.extend(iter_bc);
+        let mut iter_bc = self.do_compile(iterable);
+        self.bytecode.append(&mut iter_bc);
         self.bytecode.push_store_pop(tup_slot);
         for i in 0..arity {
             self.bytecode.push_load(tup_slot);
@@ -8173,8 +8190,8 @@ impl Compiler {
 
     /// Dict → `DictEntries` → array of `(string, V)` pairs → array for-in.
     fn emit_for_in_dict(&mut self, iterable: &Output<'_>, body: &Output<'_>, binding_name: &str) {
-        let iter_bc = self.do_compile(iterable);
-        self.bytecode.extend(iter_bc);
+        let mut iter_bc = self.do_compile(iterable);
+        self.bytecode.append(&mut iter_bc);
         self.bytecode.push(Byte::new(Instruction::DictEntries));
         self.emit_for_in_array_loop(body, binding_name, true, None);
     }
@@ -8208,7 +8225,7 @@ impl Compiler {
                     {
                         for k in 0..trips {
                             let val = s + k as i64;
-                            let mut trip_bc = Vec::new();
+                            let mut trip_bc = CodeBuf::new();
                             self.emit_const_value(&ConstValue::Int(val), &mut trip_bc);
                             trip_bc.push_store_pop(binding_slot);
                             let mut body_bc = self.do_compile(body);
@@ -8228,17 +8245,17 @@ impl Compiler {
             Expression::Range { start, end, .. } => {
                 // Consume the Range node's ID (pre-walk: Range → start → end).
                 let _ = self.next_emit_id();
-                let start_bc = self.do_compile(start);
-                self.bytecode.extend(start_bc);
+                let mut start_bc = self.do_compile(start);
+                self.bytecode.append(&mut start_bc);
                 self.bytecode.push_store_pop(cur_slot);
-                let end_bc = self.do_compile(end);
-                self.bytecode.extend(end_bc);
+                let mut end_bc = self.do_compile(end);
+                self.bytecode.append(&mut end_bc);
                 self.bytecode.push_store_pop(end_slot);
             }
             _ => {
                 let range_slot = self.alloc_temp_slot();
-                let iter_bc = self.do_compile(iterable);
-                self.bytecode.extend(iter_bc);
+                let mut iter_bc = self.do_compile(iterable);
+                self.bytecode.append(&mut iter_bc);
                 self.bytecode.push_store_pop(range_slot);
 
                 self.bytecode.push_load(range_slot);
@@ -8287,8 +8304,8 @@ impl Compiler {
 
         self.loop_stack.push((continue_label, exit_label));
         self.loop_bbs.push(bb);
-        let body_bc = self.do_compile(body);
-        self.bytecode.extend(body_bc);
+        let mut body_bc = self.do_compile(body);
+        self.bytecode.append(&mut body_bc);
         let mut bb = self
             .loop_bbs
             .pop()
@@ -8320,8 +8337,8 @@ impl Compiler {
     /// value excluded). Same layout as the Phase CORO for-in path.
     fn emit_for_in_coro(&mut self, iterable: &Output<'_>, body: &Output<'_>, binding_name: &str) {
         let handle_slot = self.alloc_temp_slot();
-        let iter_bc = self.do_compile(iterable);
-        self.bytecode.extend(iter_bc);
+        let mut iter_bc = self.do_compile(iterable);
+        self.bytecode.append(&mut iter_bc);
         self.bytecode.push_store_pop(handle_slot);
 
         let _ = self.next_emit_id();
@@ -8344,8 +8361,8 @@ impl Compiler {
 
         self.loop_stack.push((top_label, exit_label));
         self.loop_bbs.push(bb);
-        let body_bc = self.do_compile(body);
-        self.bytecode.extend(body_bc);
+        let mut body_bc = self.do_compile(body);
+        self.bytecode.append(&mut body_bc);
         let mut bb = self
             .loop_bbs
             .pop()
@@ -8384,8 +8401,8 @@ impl Compiler {
         let niche_next = item_ty.is_some_and(|ty| Self::niche_heap_only_ty(ty, &self.checker));
 
         let it_slot = self.alloc_temp_slot();
-        let iter_bc = self.do_compile(iterable);
-        self.bytecode.extend(iter_bc);
+        let mut iter_bc = self.do_compile(iterable);
+        self.bytecode.append(&mut iter_bc);
         self.bytecode.push_box_value(carrier_tag);
         Self::emit_known_target_call(&mut self.bytecode, into_off, 1);
         self.bytecode.push_store_pop(it_slot);
@@ -8428,8 +8445,8 @@ impl Compiler {
 
         self.loop_stack.push((top_label, exit_label));
         self.loop_bbs.push(bb);
-        let body_bc = self.do_compile(body);
-        self.bytecode.extend(body_bc);
+        let mut body_bc = self.do_compile(body);
+        self.bytecode.append(&mut body_bc);
         let mut bb = self
             .loop_bbs
             .pop()
@@ -8454,7 +8471,7 @@ impl Compiler {
     /// staged into slots so non-selected arguments retain their side effects.
     fn try_emit_direct_class_field_access(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         receiver: &Output<'_>,
         field: &str,
     ) -> bool {
@@ -8505,7 +8522,7 @@ impl Compiler {
 
         let mut arg_slots = Vec::with_capacity(args.len());
         for arg in args {
-            let mut arg_bc = Vec::new();
+            let mut arg_bc = CodeBuf::new();
             self.append_with_existential_pack(&mut arg_bc, arg);
             bytecode.append(&mut arg_bc);
             let slot = self.alloc_temp_slot();
@@ -8926,7 +8943,7 @@ impl Compiler {
         }
     }
 
-    fn emit_read_lvalue(&mut self, bytecode: &mut Vec<Byte>, target: &Output) -> bool {
+    fn emit_read_lvalue(&mut self, bytecode: &mut CodeBuf, target: &Output) -> bool {
         match target.1.as_ref() {
             Expression::Identifier(name) => {
                 if let Some(slot) = self.variable_slot(name) {
@@ -8974,7 +8991,7 @@ impl Compiler {
 
     fn emit_write_lvalue(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         target: &Output,
         leave_value_on_stack: bool,
     ) {
@@ -9087,7 +9104,7 @@ impl Compiler {
 
     fn emit_compound_assign(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         self_id: Option<crate::typechecking::id::NodeId>,
         span_start: usize,
         span_end: usize,
@@ -9117,7 +9134,7 @@ impl Compiler {
             _ => None,
         };
         if let Some(agg_op) = agg_op {
-            let mut tmp = Vec::new();
+            let mut tmp = CodeBuf::new();
             if self.try_emit_matrix_op(&mut tmp, self_id, span_start, span_end, target, Some(rhs)) {
                 bytecode.append(&mut tmp);
                 self.emit_write_lvalue(bytecode, target, false);
@@ -9192,7 +9209,7 @@ impl Compiler {
 
     fn emit_adjust(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         target: &Output,
         op: parser::ast::AdjustOp,
         prefix: bool,
@@ -9326,8 +9343,8 @@ impl Compiler {
             }
         }
         let mut init_bc = self.do_compile(init);
-        self.static_init_bytecode.append(&mut init_bc);
-        self.static_init_bytecode
+        self.static_init.append(&mut init_bc);
+        self.static_init
             .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
     }
 
@@ -9513,7 +9530,7 @@ impl Compiler {
     /// recorded [`LinearAlgebraInfo`] on this node.
     fn try_emit_matrix_op(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         self_id: Option<crate::typechecking::id::NodeId>,
         span_start: usize,
         span_end: usize,
@@ -9553,7 +9570,7 @@ impl Compiler {
     /// unroll. `cross` stays unrolled (fixed N=3).
     fn emit_linear_algebra(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         self_id: Option<crate::typechecking::id::NodeId>,
         span_start: usize,
         span_end: usize,
@@ -9818,7 +9835,7 @@ impl Compiler {
     /// Returns false to fall back to scalar unroll.
     fn try_emit_packed_linear_algebra(
         &mut self,
-        bytecode: &mut Vec<Byte>,
+        bytecode: &mut CodeBuf,
         kind: &crate::typechecking::LinearAlgebraKind,
         args: &[Output],
     ) -> bool {
@@ -9967,8 +9984,8 @@ impl Compiler {
         let fail = bb.fresh_label(self.bytecode.il_mut());
         let end = bb.fresh_label(self.bytecode.il_mut());
 
-        let cond_bc = self.do_compile(&args[0]);
-        self.bytecode.extend(cond_bc);
+        let mut cond_bc = self.do_compile(&args[0]);
+        self.bytecode.append(&mut cond_bc);
         bb.emit_jump_to(fail, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
 
         // Success: Ok(())
@@ -9980,8 +9997,8 @@ impl Compiler {
         bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(fail, self.bytecode.il_mut());
         if let Some(msg) = args.get(1) {
-            let msg_bc = self.do_compile(msg);
-            self.bytecode.extend(msg_bc);
+            let mut msg_bc = self.do_compile(msg);
+            self.bytecode.append(&mut msg_bc);
         } else {
             self.emit_string_literal("assertion failed");
         }
@@ -10002,8 +10019,8 @@ impl Compiler {
         };
         let handle_slot = self.alloc_temp_slot();
         let value_slot = self.alloc_temp_slot();
-        let coro_bc = self.do_compile(coro_expr);
-        self.bytecode.extend(coro_bc);
+        let mut coro_bc = self.do_compile(coro_expr);
+        self.bytecode.append(&mut coro_bc);
         self.bytecode.push_store_pop(handle_slot);
 
         let mut bb = BlockBuilder::new();
@@ -10124,7 +10141,7 @@ impl Compiler {
     fn do_compile<'compiler>(
         &mut self,
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
+    ) -> CodeBuf {
         self.codegen_depth += 1;
         if self.codegen_depth > super::CODEGEN_RECURSION_LIMIT {
             self.messages.push(Message::error(
@@ -10145,8 +10162,8 @@ impl Compiler {
     fn do_compile_inner<'compiler>(
         &mut self,
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
-    ) -> Vec<Byte> {
-        let mut bytecode = vec![];
+    ) -> CodeBuf {
+        let mut bytecode = CodeBuf::new();
         let self_id = self.next_emit_id();
         let (span, child) = ast;
 
@@ -10247,7 +10264,7 @@ impl Compiler {
                 let tmp = self.alloc_temp_slot();
                 if rhs_is_match {
                     self.bytecode.push_store_pop(tmp);
-                    let mut binds = Vec::new();
+                    let mut binds = CodeBuf::new();
                     self.emit_let_pattern_binds(pattern, tmp, &mut binds);
                     self.bytecode.append(&mut binds);
                 } else {
@@ -10440,7 +10457,7 @@ impl Compiler {
                 body,
             } => {
                 let Some(body) = body else {
-                    return vec![];
+                    return CodeBuf::new();
                 };
                 let qualified = if self.namespace.is_empty() {
                     name.to_string()
@@ -10709,13 +10726,13 @@ impl Compiler {
             }
             // ---- Userland FFI builtins ----
             Expression::Dload(path) => {
-                let bc = self.do_compile(path);
-                self.bytecode.extend(bc);
+                let mut bc = self.do_compile(path);
+                self.bytecode.append(&mut bc);
                 self.bytecode.push(Byte::new(Instruction::FfiLoad));
             }
             Expression::Done(handle) => {
-                let bc = self.do_compile(handle);
-                self.bytecode.extend(bc);
+                let mut bc = self.do_compile(handle);
+                self.bytecode.append(&mut bc);
                 self.bytecode.push(Byte::new(Instruction::DoneCoro));
             }
             // --- Aggregates ---
@@ -10807,8 +10824,8 @@ impl Compiler {
             }
             Expression::Index(_, None) => {}
             Expression::Readonly(inner) => {
-                let inner_bc = self.do_compile(inner);
-                bytecode.extend(inner_bc);
+                let mut inner_bc = self.do_compile(inner);
+                bytecode.append(&mut inner_bc);
             }
             Expression::QualifiedAccess { owner, member } => {
                 let fqn = self.class_member_fqn(owner, member);
@@ -11144,15 +11161,15 @@ impl Compiler {
                     let exit_label = bb.fresh_label(self.bytecode.il_mut());
                     bb.bind_label(top_label, self.bytecode.il_mut());
 
-                    let iter_bc = self.do_compile(iterable);
-                    self.bytecode.extend(iter_bc);
+                    let mut iter_bc = self.do_compile(iterable);
+                    self.bytecode.append(&mut iter_bc);
 
                     bb.emit_jump_to(exit_label, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
 
                     self.loop_stack.push((top_label, exit_label));
                     self.loop_bbs.push(bb);
-                    let body_bc = self.do_compile(body);
-                    self.bytecode.extend(body_bc);
+                    let mut body_bc = self.do_compile(body);
+                    self.bytecode.append(&mut body_bc);
                     let mut bb = self
                         .loop_bbs
                         .pop()
@@ -11187,7 +11204,7 @@ impl Compiler {
                     if let Some(init) = init {
                         let mut init_bc = self.do_compile(init);
                         Self::discard_statement_value(&mut init_bc);
-                        self.bytecode.extend(init_bc);
+                        self.bytecode.append(&mut init_bc);
                     }
                     self.discard_compile(cond);
                     let body_start_idx = self.emit_idx;
@@ -11198,7 +11215,7 @@ impl Compiler {
                         if let Some(step) = step {
                             let mut step_bc = self.do_compile(step);
                             Self::discard_statement_value(&mut step_bc);
-                            self.bytecode.extend(step_bc);
+                            self.bytecode.append(&mut step_bc);
                         }
                     }
                     return bytecode;
@@ -11208,7 +11225,7 @@ impl Compiler {
                     if let Some(init) = init {
                         let mut init_bc = self.do_compile(init);
                         Self::discard_statement_value(&mut init_bc);
-                        self.bytecode.extend(init_bc);
+                        self.bytecode.append(&mut init_bc);
                     }
                     self.discard_compile(cond);
                     if let Some(step) = step {
@@ -11220,7 +11237,7 @@ impl Compiler {
                 if let Some(init) = init {
                     let mut init_bc = self.do_compile(init);
                     Self::discard_statement_value(&mut init_bc);
-                    self.bytecode.extend(init_bc);
+                    self.bytecode.append(&mut init_bc);
                 }
 
                 let mut bb = BlockBuilder::new();
@@ -11229,15 +11246,15 @@ impl Compiler {
                 let exit_label = bb.fresh_label(self.bytecode.il_mut());
                 bb.bind_label(top_label, self.bytecode.il_mut());
 
-                let cond_bc = self.do_compile(cond);
-                self.bytecode.extend(cond_bc);
+                let mut cond_bc = self.do_compile(cond);
+                self.bytecode.append(&mut cond_bc);
 
                 bb.emit_jump_to(exit_label, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
 
                 self.loop_stack.push((continue_label, exit_label));
                 self.loop_bbs.push(bb);
-                let body_bc = self.do_compile(body);
-                self.bytecode.extend(body_bc);
+                let mut body_bc = self.do_compile(body);
+                self.bytecode.append(&mut body_bc);
                 let mut bb = self
                     .loop_bbs
                     .pop()
@@ -11250,7 +11267,7 @@ impl Compiler {
                 if let Some(step) = step {
                     let mut step_bc = self.do_compile(step);
                     Self::discard_statement_value(&mut step_bc);
-                    self.bytecode.extend(step_bc);
+                    self.bytecode.append(&mut step_bc);
                 }
 
                 bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
@@ -11648,8 +11665,8 @@ impl Compiler {
 
                     // Emit cond then JMPF (including single-branch if).
                     if let Some(cond) = cond_opt {
-                        let cond_bc = self.do_compile(cond);
-                        self.bytecode.extend(cond_bc);
+                        let mut cond_bc = self.do_compile(cond);
+                        self.bytecode.append(&mut cond_bc);
                         let jmpf_target = branch_start_labels[i].unwrap_or(end_label);
                         bb.emit_jump_to(
                             jmpf_target,
@@ -11659,8 +11676,8 @@ impl Compiler {
                     }
 
                     // Body after cond+JMPF so Print/nested control-flow offsets stay correct.
-                    let body_bc = self.do_compile(body);
-                    self.bytecode.extend(body_bc);
+                    let mut body_bc = self.do_compile(body);
+                    self.bytecode.append(&mut body_bc);
 
                     // Emit a `JMP → end` placeholder for every
                     // branch except the last. The last branch falls
@@ -12975,8 +12992,8 @@ impl Compiler {
             // --- Error-handling operators (desugar to MakeEnum / JumpIfMatch) ---
             Expression::Raise(expr) => {
                 // `raise e` → push e, wrap Err(e), RETURN.
-                let expr_bc = self.do_compile(expr);
-                self.emit_bytes(*span, &expr_bc);
+                let mut expr_bc = self.do_compile(expr);
+                self.emit_bytes(*span, &mut expr_bc);
                 if self.compiling_pair_mode {
                     self.bytecode.push_const(1);
                 } else {
@@ -12992,8 +13009,8 @@ impl Compiler {
                 self.debug_locs.push(loc);
             }
             Expression::Panic(expr) => {
-                let expr_bc = self.do_compile(expr);
-                self.emit_bytes(*span, &expr_bc);
+                let mut expr_bc = self.do_compile(expr);
+                self.emit_bytes(*span, &mut expr_bc);
                 self.emit_byte(*span, Byte::new(Instruction::Panic));
             }
             Expression::TypeOf(inner) => {
@@ -13038,9 +13055,9 @@ impl Compiler {
                     self.compiling_pair_mode && self.expr_is_pair_producer(inner);
                 let previous_pair_context = self.pair_value_context;
                 self.pair_value_context = pair_inner || pair_producer;
-                let inner_bc = self.do_compile(inner);
+                let mut inner_bc = self.do_compile(inner);
                 self.pair_value_context = previous_pair_context;
-                self.bytecode.extend(inner_bc);
+                self.bytecode.append(&mut inner_bc);
 
                 let mut bb = BlockBuilder::new();
                 let success = bb.fresh_label(self.bytecode.il_mut());
@@ -13176,10 +13193,10 @@ impl Compiler {
                 self.pair_value_context = pair_lhs;
                 let previous_niche_context = self.force_niche_option;
                 self.force_niche_option = niche_lhs;
-                let lhs_bc = self.do_compile(lhs);
+                let mut lhs_bc = self.do_compile(lhs);
                 self.force_niche_option = previous_niche_context;
                 self.pair_value_context = previous_pair_context;
-                self.bytecode.extend(lhs_bc);
+                self.bytecode.append(&mut lhs_bc);
 
                 let mut bb = BlockBuilder::new();
                 let success = bb.fresh_label(self.bytecode.il_mut());
@@ -13200,8 +13217,8 @@ impl Compiler {
                     bb.bind_label(failure, self.bytecode.il_mut());
                     self.bytecode.push_pop();
                     self.bytecode.push_pop();
-                    let rhs_bc = self.do_compile(rhs);
-                    self.bytecode.extend(rhs_bc);
+                    let mut rhs_bc = self.do_compile(rhs);
+                    self.bytecode.append(&mut rhs_bc);
                     bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
                     bb.bind_label(success, self.bytecode.il_mut());
                 } else if niche_lhs {
@@ -13214,8 +13231,8 @@ impl Compiler {
                         self.bytecode.il_mut(),
                     );
                     self.bytecode.push_pop();
-                    let rhs_bc = self.do_compile(rhs);
-                    self.bytecode.extend(rhs_bc);
+                    let mut rhs_bc = self.do_compile(rhs);
+                    self.bytecode.append(&mut rhs_bc);
                     bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
                     bb.bind_label(success, self.bytecode.il_mut());
                 } else {
@@ -13229,8 +13246,8 @@ impl Compiler {
                     );
                     // Miss: discard failure, evaluate rhs, jump to end.
                     self.bytecode.push_pop();
-                    let rhs_bc = self.do_compile(rhs);
-                    self.bytecode.extend(rhs_bc);
+                    let mut rhs_bc = self.do_compile(rhs);
+                    self.bytecode.append(&mut rhs_bc);
                     bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
                     bb.bind_label(success, self.bytecode.il_mut());
                 }
@@ -13246,8 +13263,8 @@ impl Compiler {
                         .codegen_expr_ty(ast)
                         .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
                 {
-                    let recv_bc = self.do_compile(receiver);
-                    self.bytecode.extend(recv_bc);
+                    let mut recv_bc = self.do_compile(receiver);
+                    self.bytecode.append(&mut recv_bc);
 
                     let mut bb = BlockBuilder::new();
                     let end = bb.fresh_label(self.bytecode.il_mut());
@@ -13285,9 +13302,9 @@ impl Compiler {
                     if let Some(field_index) = enum_field_index {
                         self.bytecode.push_load_field(field_index as u32);
                     } else if is_record || is_class {
-                        let mut field_bc = Vec::new();
+                        let mut field_bc = CodeBuf::new();
                         self.emit_field_name(&mut field_bc, field);
-                        self.bytecode.extend(field_bc);
+                        self.bytecode.append(&mut field_bc);
                         self.bytecode.push_get_field();
                     } else {
                         self.bytecode.push_load_field(0);
@@ -13303,9 +13320,9 @@ impl Compiler {
                 if receiver_is_niche {
                     self.force_heap_option = true;
                 }
-                let recv_bc = self.do_compile(receiver);
+                let mut recv_bc = self.do_compile(receiver);
                 self.force_heap_option = previous_force;
-                self.bytecode.extend(recv_bc);
+                self.bytecode.append(&mut recv_bc);
                 if receiver_is_niche && !Self::is_option_construct(receiver) {
                     self.bytecode
                         .push(Byte::new(Instruction::OptionNicheToHeap));
@@ -13405,18 +13422,18 @@ impl Compiler {
         &mut self,
         scrutinee: &Output<'compiler>,
         arms: &[MatchArm<'compiler>],
-    ) -> Vec<Byte> {
+    ) -> CodeBuf {
         if (self.compiling_pair_mode
             || matches!(scrutinee.1.as_ref(), Expression::Call { .. }))
             && self.expr_is_pair_producer(scrutinee)
             && self.expr_pair_enum_kind(scrutinee).is_some()
             && self.try_compile_pair_match(scrutinee, arms)
         {
-            return Vec::new();
+            return CodeBuf::new();
         }
         if self.expr_is_niche_option(scrutinee) {
             if self.try_compile_niche_option_match(scrutinee, arms) {
-                return Vec::new();
+                return CodeBuf::new();
             }
 
             // Existing pattern lowering requires an ObjEnum. Force direct
@@ -13452,9 +13469,9 @@ impl Compiler {
             .push_seek(self.context.variables.len() as u32);
         let previous_pair_context = self.pair_value_context;
         self.pair_value_context = true;
-        let scrutinee_bc = self.do_compile(scrutinee);
+        let mut scrutinee_bc = self.do_compile(scrutinee);
         self.pair_value_context = previous_pair_context;
-        self.bytecode.extend(scrutinee_bc);
+        self.bytecode.append(&mut scrutinee_bc);
 
         let mut bb = BlockBuilder::new();
         let fallback = bb.fresh_label(self.bytecode.il_mut());
@@ -13544,8 +13561,8 @@ impl Compiler {
             inner.insert(name.to_string(), slot);
         }
         let saved_bindings = self.push_match_bindings(inner);
-        let body_bc = self.do_compile(&arm.body);
-        self.bytecode.extend(body_bc);
+        let mut body_bc = self.do_compile(&arm.body);
+        self.bytecode.append(&mut body_bc);
         self.context.match_bindings = saved_bindings;
     }
 
@@ -13608,9 +13625,9 @@ impl Compiler {
             .push_seek(self.context.variables.len() as u32);
         let previous_niche_context = self.force_niche_option;
         self.force_niche_option = true;
-        let scrutinee_bc = self.do_compile(scrutinee);
+        let mut scrutinee_bc = self.do_compile(scrutinee);
         self.force_niche_option = previous_niche_context;
-        self.bytecode.extend(scrutinee_bc);
+        self.bytecode.append(&mut scrutinee_bc);
 
         let mut bb = BlockBuilder::new();
         let fallback_label = bb.fresh_label(self.bytecode.il_mut());
@@ -13677,8 +13694,8 @@ impl Compiler {
         if let Some(slot) = slot {
             self.record_debug_local(binding.unwrap_or(""), slot);
         }
-        let body_bc = self.do_compile(&arm.body);
-        self.bytecode.extend(body_bc);
+        let mut body_bc = self.do_compile(&arm.body);
+        self.bytecode.append(&mut body_bc);
         self.context.match_bindings = saved_bindings;
     }
 
@@ -13687,8 +13704,8 @@ impl Compiler {
         &mut self,
         scrutinee: &Output<'compiler>,
         arms: &[MatchArm<'compiler>],
-    ) -> Vec<Byte> {
-        let mut bytecode = vec![];
+    ) -> CodeBuf {
+        let mut bytecode = CodeBuf::new();
         if arms.is_empty() {
             bytecode.append(&mut self.do_compile(scrutinee));
             bytecode.push_pop();
@@ -13727,8 +13744,8 @@ impl Compiler {
             // `variables`, and bindings must start *after* those
             // temps or Unpack/JumpIfMatch collide with them
             // (e.g. `match try_recv(rx)` after print→write_all).
-            let scrutinee_bc = self.do_compile(scrutinee);
-            self.bytecode.extend(scrutinee_bc);
+            let mut scrutinee_bc = self.do_compile(scrutinee);
+            self.bytecode.append(&mut scrutinee_bc);
             if self.force_heap_option
                 && self.expr_is_niche_option(scrutinee)
                 && !Self::is_option_construct(scrutinee)
@@ -14234,14 +14251,14 @@ impl Compiler {
                 // on the stack at the binding slot.
                 if !Self::match_arm_body_is_identity_binding(&arm.pattern.1, &arm.body) {
                     if self.match_tail_call {
-                        let mut arm_bc = Vec::new();
+                        let mut arm_bc = CodeBuf::new();
                         if !self.try_emit_tail_call_expr(&arm.body, &mut arm_bc) {
                             arm_bc = self.do_compile(&arm.body);
                         }
-                        self.bytecode.extend(arm_bc);
+                        self.bytecode.append(&mut arm_bc);
                     } else {
-                        let body_bc = self.do_compile(&arm.body);
-                        self.bytecode.extend(body_bc);
+                        let mut body_bc = self.do_compile(&arm.body);
+                        self.bytecode.append(&mut body_bc);
                     }
                 }
 
@@ -14287,8 +14304,8 @@ impl Compiler {
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
         self_id: Option<crate::typechecking::id::NodeId>,
         span: &SimpleSpan,
-    ) -> Vec<Byte> {
-        let mut bytecode = vec![];
+    ) -> CodeBuf {
+        let mut bytecode = CodeBuf::new();
         // Fold `len(literal)` before trait dispatch so string/tuple
         // lengths become CONST instead of Length thunk + ArrayLen.
         if let Expression::Identifier(raw) = name.1.as_ref()
@@ -14405,8 +14422,8 @@ impl Compiler {
             match kind {
                 crate::typechecking::FfiBuiltin::Dload => {
                     if let Some(path) = arg_slice.first() {
-                        let bc = self.do_compile(path);
-                        self.bytecode.extend(bc);
+                        let mut bc = self.do_compile(path);
+                        self.bytecode.append(&mut bc);
                         self.bytecode.push(Byte::new(Instruction::FfiLoad));
                     }
                 }
@@ -14692,8 +14709,8 @@ impl Compiler {
                             _ => arg,
                         };
                         if self.arg_emits_on_self_bytecode(value) {
-                            let recv_bc = self.do_compile(recv);
-                            self.bytecode.extend(recv_bc);
+                            let mut recv_bc = self.do_compile(recv);
+                            self.bytecode.append(&mut recv_bc);
                             let recv_tmp = self.alloc_temp_slot();
                             self.bytecode.push_store_pop(recv_tmp);
                             let _ = self.do_compile(value);
@@ -15696,11 +15713,11 @@ impl Compiler {
         let setup_pos = self.program_start_offset as usize;
         let mut init_len = 0usize;
 
-        if !self.static_init_bytecode.is_empty() {
+        if !self.static_init.is_empty() {
             self.setup_entry_offset = setup_pos as u32;
-            let inits = std::mem::take(&mut self.static_init_bytecode);
+            let inits = std::mem::take(&mut self.static_init);
             let n = inits.len();
-            self.bytecode.splice_bytes_at(setup_pos + init_len, inits);
+            self.bytecode.splice_buf_at(setup_pos + init_len, inits);
             self.bytecode
                 .bump_absolute_entry_targets(setup_pos + init_len, n);
             self.bytecode.bump_func_spans(setup_pos + init_len, n);
