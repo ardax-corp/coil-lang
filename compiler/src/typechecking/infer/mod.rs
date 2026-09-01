@@ -183,6 +183,13 @@ pub struct Checker {
     /// [`ModuleId`] for [`Self::current_module`].
     current_module_id: ModuleId,
 
+    /// Host grants applied at typecheck (deny-all until `set_host_grants`).
+    host_grants: crate::HostGrants,
+    /// Extra compile-time `dload` stems from Pipeline host/test grants.
+    dload_host_stems: Vec<String>,
+    /// Coil names whose FFI symbol is process-exec (`system`, `execve`, …).
+    ffi_exec_names: HashSet<String>,
+
     /// Type of the surrounding `match`'s LHS, if any. Used by
     /// [`Expression::Default`] arms.
     current_match_lhs: Option<Ty>,

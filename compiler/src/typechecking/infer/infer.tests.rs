@@ -222,8 +222,17 @@
     /// The top-level parser expects declarations / statements. Bare
     /// expressions are wrapped in a probe function so we infer the
     /// expression type instead of `unit` from `expr;`.
+    fn fixture_dload_grants() -> crate::HostGrants {
+        let mut g = crate::HostGrants::deny_all();
+        for stem in ["sum", "noop", "x.so", "x", "missing", "plugin"] {
+            g.grant_dload_allow(stem);
+        }
+        g
+    }
+
     fn check(src: &str) -> (Checker, Ty) {
         let mut c = Checker::new();
+        c.set_host_grants(fixture_dload_grants(), Vec::new());
         let trimmed = normalize_adjacent_decls(src.trim());
         let owned = format_check_src(trimmed.as_str());
         match Pratt::default().parse(owned.as_str()) {
@@ -248,6 +257,7 @@
         }
         let owned = format_check_src(trimmed.as_str());
         let mut c = Checker::new();
+        c.set_host_grants(fixture_dload_grants(), Vec::new());
         let ast = Pratt::default()
             .parse(owned.as_str())
             .unwrap_or_else(|msg| panic!("parse failed for `{}`: {:?}", src, msg));

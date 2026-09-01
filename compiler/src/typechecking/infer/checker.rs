@@ -37,6 +37,8 @@ mod infer_class;
 mod infer_fn;
 #[path = "infer_match.rs"]
 mod infer_match;
+#[path = "host_caps.rs"]
+mod host_caps;
 
 /// Max native recursion depth for [`Checker::infer`]. Chosen well under what
 /// a debug-build stack of a few MiB can hold even with `infer_inner`'s
@@ -74,6 +76,9 @@ impl Checker {
             module_locals: HashMap::new(),
             def_ids_by_node: HashMap::new(),
             current_module_id,
+            host_grants: crate::HostGrants::deny_all(),
+            dload_host_stems: Vec::new(),
+            ffi_exec_names: HashSet::new(),
             current_match_lhs: None,
             classes: std::collections::HashMap::new(),
             class_type_ids: std::collections::HashMap::new(),
@@ -1423,6 +1428,7 @@ impl Checker {
         self.current_function = None;
         self.extern_variadic.clear();
         self.extern_variadic_nfixed.clear();
+        self.ffi_exec_names.clear();
         self.variadic_call_arg_tags.clear();
         self.pending_exhaustive.clear();
         self.async_functions.clear();
@@ -2337,9 +2343,9 @@ impl Checker {
             // empty (FFI symbols are resolved at VM startup,
             // not at compile time).
             Expression::ExternBlock {
-                library: _,
+                library,
                 declarations,
-            } => self.infer_extern_block(declarations),
+            } => self.infer_extern_block(library, declarations, range),
 
             Expression::Expr(e) | Expression::Group(e) | Expression::Statement(e) => self.infer(e),
             // Semicolon form discards the value (same as a Rust statement).
@@ -3271,8 +3277,16 @@ impl Checker {
     }
 
     #[inline(never)]
-    fn infer_extern_block(&mut self, declarations: &[ExternFunction]) -> Ty {
+    fn infer_extern_block(
+        &mut self,
+        library: &str,
+        declarations: &[ExternFunction],
+        range: Range<usize>,
+    ) -> Ty {
+        self.gate_dload_stem(library, range.clone());
         for decl in declarations {
+            let sym = decl.symbol.unwrap_or(decl.name);
+            self.gate_ffi_exec_symbol(sym, decl.name, decl.args.0.into_range());
             let arg_tys: Vec<Ty> = if let Expression::Fragment(items) = decl.args.1.as_ref()
             {
                 items
@@ -4062,6 +4076,12 @@ impl Checker {
 
             let recv_ty = self.infer(recv);
             let resolved = apply_ty_prune(&self.subst, &recv_ty);
+            if *method == "attach"
+                && self.class_owner_from_ty(&resolved).as_deref()
+                    == Some(crate::typechecking::ty::STREAM)
+            {
+                self.gate_stream_attach(range.clone());
+            }
 
             // Named args on methods: only inherent class methods.
             if method_has_named {
@@ -4525,6 +4545,16 @@ impl Checker {
                 );
             }
         };
+
+        if let Some("env_exec") = self.host_fn_in_scope(&ident) {
+            self.gate_env_exec(range.clone());
+        } else if let Some("env_exit") = self.host_fn_in_scope(&ident) {
+            self.gate_env_exit(range.clone());
+        }
+        if self.io_fn_in_scope(&ident) == Some(IoBuiltin::StreamAttach) {
+            self.gate_stream_attach(range.clone());
+        }
+        self.gate_ffi_exec_call(&ident, range.clone());
 
         let raw_args = args.as_deref().unwrap_or(&[]);
         let has_named = raw_args
@@ -9879,6 +9909,7 @@ impl Checker {
         }
         if let Some(path) = args.first() {
             let _ = self.infer(path);
+            self.gate_dload_arg(path, path.0.into_range());
         } else {
             let _ = self.error_with_help(
                 ErrorCode::DeclareArity,
@@ -9903,6 +9934,9 @@ impl Checker {
         if args.len() == 4 || args.len() == 5 {
             self.infer(&args[0]);
             self.infer(&args[1]);
+            if let Some(sym) = host_caps::const_string_expr(&args[1]) {
+                self.gate_ffi_exec_symbol(&sym, &sym, args[1].0.into_range());
+            }
             match args[2].1.as_ref() {
                 Expression::Tuple(_) => {
                     self.infer_ffi_type_expr(&args[2]);

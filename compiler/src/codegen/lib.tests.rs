@@ -19,6 +19,10 @@
             .parse(owned.as_str())
             .expect("parse failed");
         let mut compiler = Compiler::default();
+        let mut grants = crate::HostGrants::deny_all();
+        grants.grant_dload_allow("noop");
+        grants.grant_dload_allow("sum");
+        compiler.set_host_grants(grants, Vec::new());
         // Stable placeholder ids so Approach A packed HostInvoke lowering
         // fires in unit tests (Pipeline assigns real ids at runtime).
         compiler.register_native_id(machine::PACKED_DOT, 9001);
@@ -5781,6 +5785,9 @@ fn main() -> Result<(), Error> { \
 }";
         let mut ast = Pratt::default().parse(src).expect("parse failed");
         let mut compiler = Compiler::default();
+        let mut grants = crate::HostGrants::deny_all();
+        grants.grant_dload_allow("noop");
+        compiler.set_host_grants(grants, Vec::new());
         let bc = compiler.compile("", &mut ast);
         assert!(
             compiler.get_messages().is_empty(),
@@ -5824,6 +5831,9 @@ fn main() -> Result<(), Error> { \
 }";
         let mut ast = Pratt::default().parse(src).expect("parse failed");
         let mut compiler = Compiler::default();
+        let mut grants = crate::HostGrants::deny_all();
+        grants.grant_dload_allow("noop");
+        compiler.set_host_grants(grants, Vec::new());
         let bc = compiler.compile("", &mut ast);
         assert!(
             compiler.get_messages().is_empty(),
@@ -5866,6 +5876,9 @@ fn main() { \
 }";
         let mut ast = Pratt::default().parse(src).expect("parse failed");
         let mut compiler = Compiler::default();
+        let mut grants = crate::HostGrants::deny_all();
+        grants.grant_dload_allow("sum");
+        compiler.set_host_grants(grants, Vec::new());
         let bc = compiler.compile("", &mut ast);
         let doubler = *compiler
             .functions
