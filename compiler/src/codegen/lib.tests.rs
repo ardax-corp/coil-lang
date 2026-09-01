@@ -1282,7 +1282,7 @@ fn main() {
         let ops = bc.ops();
         assert_eq!(ops.len(), 2);
         let IlOp::Byte { byte: code_ptr, .. } = ops[0] else {
-            panic!("expected CodePtr byte, got {:?}", ops[0]);
+            panic!("expected CodePtr byte");
         };
         assert!(matches!(code_ptr.bytecode(), Instruction::CodePtr));
         assert_eq!(code_ptr.operand_u32(), 42);
@@ -1291,7 +1291,7 @@ fn main() {
             ..
         } = ops[1]
         else {
-            panic!("expected CallIndirect byte, got {:?}", ops[1]);
+            panic!("expected CallIndirect byte");
         };
         assert!(matches!(call_indirect.bytecode(), Instruction::CallIndirect));
         assert_eq!(call_indirect.operand_u32(), 2);
@@ -5696,7 +5696,7 @@ fn main() { let _ = (new Cell(7)).get(); }
         Compiler::emit_call_indirect(&mut bc, 100_000, 1);
         let ops = bc.ops();
         let IlOp::Byte { byte: code_ptr, .. } = ops[0] else {
-            panic!("expected CodePtr byte, got {:?}", ops[0]);
+            panic!("expected CodePtr byte");
         };
         assert!(matches!(code_ptr.bytecode(), Instruction::CodePtr));
         assert_eq!(
@@ -5709,7 +5709,7 @@ fn main() { let _ = (new Cell(7)).get(); }
             ..
         } = ops[1]
         else {
-            panic!("expected CallIndirect byte, got {:?}", ops[1]);
+            panic!("expected CallIndirect byte");
         };
         assert!(matches!(call_indirect.bytecode(), Instruction::CallIndirect));
     }
