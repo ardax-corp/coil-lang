@@ -1606,6 +1606,7 @@ impl Checker {
     }
 
     /// [`DefId`] for one overload candidate (`0` is the set representative).
+    #[cfg(test)]
     pub fn interned_overload_def(&self, name: &str, candidate: u32) -> Option<DefId> {
         let (module, intern_name) = self.split_overload_intern_key(name);
         self.def_interner
