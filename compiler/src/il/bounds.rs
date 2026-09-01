@@ -73,6 +73,7 @@ fn note_array_len_hoist() {
 }
 
 /// Hoist invariant ArrayLen materializations and record index proofs.
+#[cfg(test)]
 pub fn loop_bounds(ops: &mut Vec<IlOp>) {
     loop_bounds_with(ops, None);
 }
@@ -1126,6 +1127,7 @@ mod hoist {
     }
 
     /// Per-loop array facts, innermost loop first.
+    #[cfg(test)]
     pub(super) fn loop_array_facts(ops: &[IlOp]) -> Vec<LoopArrayFacts> {
         loop_array_facts_with(ops, None)
     }
@@ -1192,6 +1194,7 @@ mod hoist {
     /// Move every invariant `len(a)` and constant addressing operand out of the
     /// alias-safe loops that materialize them. Returns whether anything was
     /// rewritten.
+    #[cfg(test)]
     pub(crate) fn hoist_loop_invariants(ops: &mut Vec<IlOp>) -> bool {
         hoist_loop_invariants_with(ops, None)
     }
