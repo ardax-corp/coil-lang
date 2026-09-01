@@ -361,6 +361,7 @@ mod tests {
         assert_eq!(enum_tag(&heap, r), Some(0));
     }
 
+    #[test]
     fn ffi_exec_symbols_are_classified() {
         assert!(is_ffi_exec_symbol("system"));
         assert!(is_ffi_exec_symbol("execve"));
