@@ -12,6 +12,23 @@ fn fib_entry() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
 }
 
+fn coil_on_entry(bin: &str, cwd: &Path, entry: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.current_dir(cwd);
+    apply_workspace_roots(&mut cmd);
+    cmd.arg(entry);
+    cmd
+}
+
+fn coil_compile_entry(bin: &str, cwd: &Path, entry: &Path) -> Command {
+    let mut cmd = Command::new(bin);
+    cmd.current_dir(cwd);
+    cmd.arg("compile");
+    apply_workspace_roots(&mut cmd);
+    cmd.arg(entry);
+    cmd
+}
+
 fn temp_cwd(label: &str) -> PathBuf {
     static N: AtomicU64 = AtomicU64::new(0);
     let n = N.fetch_add(1, Ordering::Relaxed);
@@ -34,9 +51,7 @@ fn default_run_fib_prints_55_and_no_out_hyc() {
     let entry = fib_entry();
     let cwd = temp_cwd("fib");
 
-    let out = Command::new(&bin)
-        .current_dir(&cwd)
-        .arg(entry.to_str().unwrap())
+    let out = coil_on_entry(&bin, &cwd, &entry)
         .output()
         .expect("spawn coil");
 
@@ -66,9 +81,7 @@ fn default_run_preserves_existing_out_hyc() {
     let marker = b"not-a-real-archive-sentinel\n";
     std::fs::write(&archive, marker).expect("seed out.hyc");
 
-    let out = Command::new(&bin)
-        .current_dir(&cwd)
-        .arg(entry.to_str().unwrap())
+    let out = coil_on_entry(&bin, &cwd, &entry)
         .output()
         .expect("spawn coil");
 
@@ -92,9 +105,7 @@ fn compile_writes_out_hyc_and_run_prints_55() {
     let cwd = temp_cwd("compile_run");
     let archive = cwd.join("out.hyc");
 
-    let compile = Command::new(&bin)
-        .current_dir(&cwd)
-        .args(["compile", entry.to_str().unwrap()])
+    let compile = coil_compile_entry(&bin, &cwd, &entry)
         .output()
         .expect("spawn coil compile");
     assert!(

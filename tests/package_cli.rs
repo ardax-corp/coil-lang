@@ -119,15 +119,19 @@ fn package_fib_embedded_run_prints_55() {
     ));
     let _ = std::fs::remove_file(&out);
 
-    let status = Command::new(&bin)
-        .args([
-            "package",
+    let mut package = Command::new(&bin);
+    package.args(["package"]);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        package.arg("--root").arg(root);
+    }
+    package.args([
             entry.to_str().unwrap(),
             "-o",
             out.to_str().unwrap(),
             "--runner",
             embed.to_str().unwrap(),
-        ])
+        ]);
+    let status = package
         .status()
         .expect("spawn coil package");
     assert!(status.success(), "package failed");
@@ -168,16 +172,20 @@ fn package_ffi_without_native_inventory_fails() {
     ));
     let _ = std::fs::remove_file(&out);
 
-    let status = Command::new(&bin)
-        .args([
-            "package",
+    let mut cmd = Command::new(&bin);
+    cmd.args(["package"]);
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+    cmd.args([
             entry.to_str().unwrap(),
             "-o",
             out.to_str().unwrap(),
             "--runner",
             embed.to_str().unwrap(),
         ])
-        .current_dir(&manifest)
+        .current_dir(&manifest);
+    let status = cmd
         .status()
         .expect("spawn coil package");
     assert!(

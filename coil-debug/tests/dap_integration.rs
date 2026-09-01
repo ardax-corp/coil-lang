@@ -48,8 +48,12 @@ struct DapClient {
 impl DapClient {
     fn spawn(cwd: &std::path::Path) -> Self {
         let bin = coil_debug_bin();
-        let mut child = Command::new(&bin)
-            .arg("--dap")
+        let mut cmd = Command::new(&bin);
+        cmd.arg("--dap");
+        for root in compiler::Pipeline::workspace_language_extra_roots() {
+            cmd.arg("--root").arg(root);
+        }
+        let mut child = cmd
             .current_dir(cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
