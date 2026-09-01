@@ -361,8 +361,11 @@ impl Pipeline {
         self.bind_project_root(project_dir, roots);
     }
 
-    /// Workspace `src`, `examples/src`, and coil-stdlib checkouts (test helper).
-    pub fn bind_workspace_language_roots(&mut self) {
+    /// Extra `use`/`mod` roots for this repo's examples and stdlib checkouts.
+    ///
+    /// CLI/tests pass these as `--root` (the language path does not read
+    /// `[module].roots` from `coil.toml`).
+    pub fn workspace_language_extra_roots() -> Vec<PathBuf> {
         let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
             .parent()
             .expect("compiler crate parent is the workspace");
@@ -373,7 +376,15 @@ impl Pipeline {
         if let Ok(p) = std::env::var("COIL_STDLIB") {
             extra.push(PathBuf::from(p));
         }
-        self.bind_project_roots_with_default(ws.to_path_buf(), extra);
+        extra
+    }
+
+    /// Workspace `src`, `examples/src`, and coil-stdlib checkouts (test helper).
+    pub fn bind_workspace_language_roots(&mut self) {
+        let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate parent is the workspace");
+        self.bind_project_roots_with_default(ws.to_path_buf(), Self::workspace_language_extra_roots());
     }
 
     /// Grant `dload` of `stem` for the SHA-256 of `path` (host/tests).
