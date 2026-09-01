@@ -33,7 +33,12 @@ fn print_help() {
     );
 }
 
-fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, String> {
+enum Parsed {
+    Dap { extra_roots: Vec<PathBuf> },
+    Repl(ReportConfig, DebugArgs),
+}
+
+fn parse_args(args: &[String]) -> Result<Parsed, String> {
     let mut log_json = false;
     let mut log_lsp = false;
     let mut batch = false;
@@ -129,7 +134,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
         {
             return Err("--dap cannot be combined with REPL flags or a positional file".into());
         }
-        return Ok(None);
+        return Ok(Parsed::Dap { extra_roots });
     }
 
     let filename = match (filename, entry_flag) {
@@ -141,7 +146,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
         (None, None) => return Err("debug requires an entry .hy file".into()),
     };
     let config = ReportConfig::from_cli_flags(log_json, log_lsp).map_err(|e| e.to_string())?;
-    Ok(Some((
+    Ok(Parsed::Repl(
         config,
         DebugArgs {
             filename,
@@ -150,14 +155,14 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
             grants,
             extra_roots,
         },
-    )))
+    ))
 }
 
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
     match parse_args(&raw) {
-        Ok(None) => cmd_dap(),
-        Ok(Some((config, args))) => cmd_debug(config, args),
+        Ok(Parsed::Dap { extra_roots }) => cmd_dap(extra_roots),
+        Ok(Parsed::Repl(config, args)) => cmd_debug(config, args),
         Err(msg) => {
             eprintln!("coil-debug: {msg}");
             print_help();

@@ -774,7 +774,7 @@ mod tests {
             &fib_path(),
             Box::new(std::io::sink()),
             HostGrants::deny_all(),
-            Vec::new(),
+            Pipeline::workspace_language_extra_roots(),
         )
         .expect("compile fib")
     }
