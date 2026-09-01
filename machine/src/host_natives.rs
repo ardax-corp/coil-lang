@@ -114,27 +114,16 @@ fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
     let id = out.len();
     register_id(STREAM_ATTACH_NATIVE, id);
     out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
-        use crate::io::IoErrorTag;
         use crate::stream_attach::{typed_fn_from_hashed_dload, StreamVTable};
-        let r = if !crate::thread::host_allow_attach() {
-            Err(IoErrorTag::PermissionDenied)
-        } else {
-            (|| {
-                let vtable = StreamVTable {
-                    read: typed_fn_from_hashed_dload(args[2].as_int())?,
-                    write: typed_fn_from_hashed_dload(args[3].as_int())?,
-                    shutdown: typed_fn_from_hashed_dload(args[4].as_int())?,
-                    free: typed_fn_from_hashed_dload(args[5].as_int())?,
-                };
-                crate::stream_attach::stream_attach(
-                    heap,
-                    true,
-                    args[0],
-                    args[1].as_int(),
-                    vtable,
-                )
-            })()
-        };
+        let r = (|| {
+            let vtable = StreamVTable {
+                read: typed_fn_from_hashed_dload(args[2].as_int())?,
+                write: typed_fn_from_hashed_dload(args[3].as_int())?,
+                shutdown: typed_fn_from_hashed_dload(args[4].as_int())?,
+                free: typed_fn_from_hashed_dload(args[5].as_int())?,
+            };
+            crate::stream_attach::stream_attach(heap, args[0], args[1].as_int(), vtable)
+        })();
         Ok(Some(as_result_value(heap, r)))
     })));
 }

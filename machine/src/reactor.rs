@@ -35,9 +35,6 @@ pub struct Job {
     pub ffi_base_dir: Option<PathBuf>,
     pub ffi_search_paths: Vec<PathBuf>,
     pub dload_gate: DloadGate,
-    pub allow_exec: bool,
-    pub allow_exit: bool,
-    pub allow_ffi_exec: bool,
     pub pgo: crate::pgo::PgoCounters,
 }
 
@@ -403,9 +400,6 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         ffi_base_dir,
         ffi_search_paths,
         dload_gate,
-        allow_exec,
-        allow_exit,
-        allow_ffi_exec,
         pgo,
     } = job;
 
@@ -429,7 +423,6 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         vm.set_worker_cap(crate::thread::WorkerCap::from_count(reactor.worker_count()));
         vm.set_ffi_paths(ffi_base_dir, ffi_search_paths);
         vm.set_dload_gate(dload_gate);
-        vm.set_env_grants(allow_exec, allow_exit, allow_ffi_exec);
         vm.set_pgo_counters(pgo);
         if let Some(buf) = &shared_print {
             vm.set_shared_print(Arc::clone(buf));
@@ -489,9 +482,6 @@ pub fn job_from_spawn_context(
         ffi_base_dir: ctx.ffi_base_dir,
         ffi_search_paths: ctx.ffi_search_paths,
         dload_gate: ctx.dload_gate,
-        allow_exec: ctx.allow_exec,
-        allow_exit: ctx.allow_exit,
-        allow_ffi_exec: ctx.allow_ffi_exec,
         pgo: ctx.pgo,
     }
 }
@@ -531,9 +521,6 @@ mod tests {
             ffi_base_dir: None,
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
-            allow_exec: false,
-            allow_exit: false,
-            allow_ffi_exec: false,
             pgo: crate::pgo::PgoCounters::new(),
         };
         reactor.submit(job);
@@ -632,9 +619,6 @@ mod tests {
             ffi_base_dir: None,
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
-            allow_exec: false,
-            allow_exit: false,
-            allow_ffi_exec: false,
             pgo: crate::pgo::PgoCounters::new(),
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.

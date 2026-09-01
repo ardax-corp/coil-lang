@@ -354,25 +354,25 @@ impl Pipeline {
         self.try_sync_host_caps();
     }
 
-    /// Allow `Stream.attach` on Machines wired from this pipeline.
+    /// Allow `Stream.attach` at typecheck (`--allow-attach`).
     pub fn grant_attach(&mut self) {
         self.host_grants.allow_attach = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow `env::exec` on Machines wired from this pipeline.
+    /// Allow `env::exec` at typecheck (`--allow-exec`).
     pub fn grant_exec(&mut self) {
         self.host_grants.allow_exec = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow `env::exit` on Machines wired from this pipeline.
+    /// Allow `env::exit` at typecheck (`--allow-exit`).
     pub fn grant_exit(&mut self) {
         self.host_grants.allow_exit = true;
         self.try_sync_host_caps();
     }
 
-    /// Allow FFI process-exec symbols on Machines wired from this pipeline.
+    /// Allow FFI process-exec symbols at typecheck (`--allow-ffi-exec`).
     pub fn grant_ffi_exec(&mut self) {
         self.host_grants.allow_ffi_exec = true;
         self.try_sync_host_caps();
@@ -406,7 +406,8 @@ impl Pipeline {
         }
     }
 
-    /// Host grants applied at VM wire time (deny-all until set).
+    /// Host grants applied at typecheck (deny-all until set). The VM does not
+    /// re-apply these; the compiled artifact is the grant.
     pub fn host_grants(&self) -> &HostGrants {
         &self.host_grants
     }
@@ -438,23 +439,18 @@ impl Pipeline {
             .collect()
     }
 
-    /// Fail-closed gate: consumer allow+hash, allow+trusted, and host grants.
+    /// Fail-closed integrity: lock hash, trusted, and host grants.
     #[cfg(any(test, feature = "vm-wire"))]
     pub fn build_dload_gate(&self) -> machine::DloadGate {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
         let trusted = lock.trusted_extra_stems(&self.manifest.dependencies);
-        let mut gate = machine::DloadGate::from_consumer_trusted(
-            &self.host_grants.allow_dload,
-            lock.native_pins(),
-            &trusted,
-        );
+        let mut gate = machine::DloadGate::from_consumer_trusted(lock.native_pins(), &trusted);
         for stem in &self.extra_dload_stems {
             gate.grant_stem(stem);
         }
         for (stem, path) in &self.extra_dload_grants {
             let _ = gate.grant_file(stem, path);
         }
-        gate.set_allow_attach(self.host_grants.allow_attach);
         gate
     }
 
@@ -481,11 +477,6 @@ impl Pipeline {
         let search = self.ffi_search_path_bufs();
         vm.set_ffi_paths(base_dir, search);
         vm.set_dload_gate(self.build_dload_gate());
-        vm.set_env_grants(
-            self.host_grants.allow_exec,
-            self.host_grants.allow_exit,
-            self.host_grants.allow_ffi_exec,
-        );
         for layout in self.archived_struct_layouts() {
             vm.register_struct_layout(CStructLayout::from_archive(&layout));
         }

@@ -179,7 +179,6 @@ impl DebugSession {
         let pins = pipeline.dload_native_pins();
         let trusted = pipeline.dload_trusted_stems();
         let structs = pipeline.archived_struct_layouts();
-        let grants = pipeline.host_grants();
         let search = pipeline.ffi_search_path_bufs();
         machine::wire_vm_host(
             &mut machine,
@@ -187,15 +186,10 @@ impl DebugSession {
                 entry_path: Some(&entry_path),
                 project_root: pipeline.project_root(),
                 ffi_search_paths: &search,
-                ffi_allow: &grants.allow_dload,
                 native_pins: &pins,
                 trusted_stems: &trusted,
                 extra_dload_stems: pipeline.extra_dload_stems(),
                 extra_dload_grants: pipeline.extra_dload_grants(),
-                allow_exec: grants.allow_exec,
-                allow_exit: grants.allow_exit,
-                allow_ffi_exec: grants.allow_ffi_exec,
-                allow_attach: grants.allow_attach,
                 c_structs: &structs,
             },
         );

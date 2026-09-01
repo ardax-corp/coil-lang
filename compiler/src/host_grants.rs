@@ -1,7 +1,8 @@
-//! Host capability grants for compile/run. Independent of `coil.toml`.
+//! Host capability grants for compile/typecheck. Independent of `coil.toml`.
 //!
 //! Spool may still parse Manifest `[env]` / `[ffi] allow` keys. The language
-//! path (Pipeline, VM wire, CLI) uses this struct and CLI flags only.
+//! path (Pipeline, CLI) uses this struct and CLI flags at typecheck. The VM
+//! does not re-apply these flags; the compiled artifact is the grant.
 
 use std::path::PathBuf;
 
@@ -11,7 +12,7 @@ use std::path::PathBuf;
 /// libc aliases stay denied even when listed in [`Self::allow_dload`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HostGrants {
-    /// `Stream.attach` (per-Machine, on the dload gate).
+    /// `Stream.attach` at typecheck (`--allow-attach`).
     pub allow_attach: bool,
     /// `env::exec`.
     pub allow_exec: bool,

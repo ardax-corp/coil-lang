@@ -272,14 +272,8 @@ pub struct Machine<const S: usize> {
     base_dir: Option<PathBuf>,
     /// Extra search paths from `coil.toml` `[ffi]`.
     ffi_search_paths: Vec<PathBuf>,
-    /// Fail-closed `dload` policy (allow + lock hash or trusted).
+    /// Fail-closed `dload` integrity (lock hash or trusted).
     dload_gate: crate::ffi::DloadGate,
-    /// Per-Machine `[env] allow_exec` (default deny).
-    allow_exec: bool,
-    /// Per-Machine `[env] allow_exit` (default deny).
-    allow_exit: bool,
-    /// Per-Machine `[env] allow_ffi_exec` (default deny).
-    allow_ffi_exec: bool,
     pgo: crate::pgo::PgoCounters,
     /// Registered C struct layouts for pass-by-value FFI.
     struct_layouts: Vec<CStructLayout>,
@@ -367,9 +361,6 @@ impl<const S: usize> Machine<S> {
             base_dir: None,
             ffi_search_paths: Vec::new(),
             dload_gate: crate::ffi::DloadGate::deny_all(),
-            allow_exec: false,
-            allow_exit: false,
-            allow_ffi_exec: false,
             pgo: crate::pgo::PgoCounters::new(),
             struct_layouts: Vec::new(),
             ffi_closures: Vec::new(),
@@ -421,24 +412,6 @@ impl<const S: usize> Machine<S> {
         &self.dload_gate
     }
 
-    pub fn set_env_grants(&mut self, allow_exec: bool, allow_exit: bool, allow_ffi_exec: bool) {
-        self.allow_exec = allow_exec;
-        self.allow_exit = allow_exit;
-        self.allow_ffi_exec = allow_ffi_exec;
-    }
-
-    pub fn allow_exec(&self) -> bool {
-        self.allow_exec
-    }
-
-    pub fn allow_exit(&self) -> bool {
-        self.allow_exit
-    }
-
-    pub fn allow_ffi_exec(&self) -> bool {
-        self.allow_ffi_exec
-    }
-
     pub fn pgo_counters(&self) -> &crate::pgo::PgoCounters {
         &self.pgo
     }
@@ -453,16 +426,6 @@ impl<const S: usize> Machine<S> {
 
     pub fn set_pgo_counters(&mut self, pgo: crate::pgo::PgoCounters) {
         self.pgo = pgo;
-    }
-
-    /// Per-Machine `Stream.attach` grant. Lives on [`DloadGate`], not a process flag.
-    pub fn set_allow_attach(&mut self, allow: bool) {
-        self.dload_gate.set_allow_attach(allow);
-    }
-
-    /// Whether this VM allows `Stream.attach`.
-    pub fn allow_attach(&self) -> bool {
-        self.dload_gate.allow_attach()
     }
 
     /// Host/test stems with no lock hash. Does not restore a first-party exemption.
@@ -1426,9 +1389,6 @@ impl<const S: usize> Machine<S> {
             ffi_base_dir: self.base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
-            allow_exec: self.allow_exec,
-            allow_exit: self.allow_exit,
-            allow_ffi_exec: self.allow_ffi_exec,
             pgo: self.pgo.clone(),
         })
     }

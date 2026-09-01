@@ -135,11 +135,6 @@ pub fn prepare_cif_for_symbol(
 }
 
 pub fn resolve_symbol(library: &libloading::Library, symbol: &str) -> Result<CodePtr, FfiError> {
-    if crate::env::is_ffi_exec_symbol(symbol) && !crate::thread::host_allow_ffi_exec() {
-        return Err(FfiError::SymbolDenied {
-            name: symbol.to_string(),
-        });
-    }
     type FnPtr = unsafe extern "C" fn();
     let sym_bytes: &[u8] = symbol.as_bytes();
     let sym: libloading::Symbol<FnPtr> = unsafe {
@@ -807,9 +802,9 @@ mod tests {
     }
 
     #[test]
-    fn resolve_symbol_denies_system_without_allow_ffi_exec() {
-        let err = match open_libc_ungated() {
-            Some(lib) => resolve_symbol(&lib, "system"),
+    fn resolve_symbol_system_succeeds_when_libc_opens() {
+        let lib = match open_libc_ungated() {
+            Some(lib) => lib,
             None => {
                 if std::env::var_os("CI").is_some() {
                     panic!("FFI soft-skip forbidden in CI: libc not reachable via dlopen");
@@ -818,16 +813,13 @@ mod tests {
                 return;
             }
         };
-        match err {
-            Err(FfiError::SymbolDenied { name }) => assert_eq!(name, "system"),
-            other => panic!("expected SymbolDenied for system, got {other:?}"),
-        }
+        resolve_symbol(&lib, "system").expect("hand-written bytecode may resolve system");
     }
 
     #[test]
-    fn resolve_symbol_denies_execve_without_allow_ffi_exec() {
-        let err = match open_libc_ungated() {
-            Some(lib) => resolve_symbol(&lib, "execve"),
+    fn resolve_symbol_execve_succeeds_when_libc_opens() {
+        let lib = match open_libc_ungated() {
+            Some(lib) => lib,
             None => {
                 if std::env::var_os("CI").is_some() {
                     panic!("FFI soft-skip forbidden in CI: libc not reachable via dlopen");
@@ -836,10 +828,10 @@ mod tests {
                 return;
             }
         };
-        match err {
-            Err(FfiError::SymbolDenied { name }) => assert_eq!(name, "execve"),
-            other => panic!("expected SymbolDenied for execve, got {other:?}"),
-        }
+        // POSIX `execve` is not exported by Windows CRT; `_wsystem` is the
+        // classified FFI-exec symbol that opens with the same libc handle.
+        let name = if cfg!(windows) { "_wsystem" } else { "execve" };
+        resolve_symbol(&lib, name).expect("hand-written bytecode may resolve FFI exec symbols");
     }
 
     #[cfg(not(target_os = "windows"))]

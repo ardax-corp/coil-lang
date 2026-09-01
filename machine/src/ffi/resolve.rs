@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn extra_stems_need_allow_and_hash() {
+    fn extra_stems_need_hash_or_trusted() {
         let gate = DloadGate::deny_all();
         gate.check_request("sum").unwrap_err();
         let abs = if cfg!(windows) {
@@ -553,10 +553,10 @@ mod tests {
 
     #[test]
     fn trusted_extra_missing_file_is_not_found_not_denied() {
-        let gate = DloadGate::from_consumer_trusted(["plugin"], &[], ["plugin"]);
+        let gate = DloadGate::from_consumer_trusted(&[], ["plugin"]);
         let path = missing_abs_lib("plugin");
         gate.check_request(&path)
-            .expect("allow + trusted extra stem must pass the gate");
+            .expect("trusted extra stem must pass the gate");
         match resolve_library(&path, None, &[], &gate) {
             Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
             other => panic!("expected LibraryNotFound for trusted extra, got {other:?}"),
@@ -565,7 +565,7 @@ mod tests {
 
     #[test]
     fn allowlisted_trusted_c_is_library_denied() {
-        let gate = DloadGate::from_consumer_trusted(["c"], &[], ["c"]);
+        let gate = DloadGate::from_consumer_trusted(&[], ["c"]);
         match resolve_library("c", None, &[], &gate) {
             Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "c"),
             other => panic!("expected LibraryDenied for trusted allow-listed c, got {other:?}"),
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn untrusted_extra_without_pin_is_library_denied() {
-        let gate = DloadGate::from_consumer(["plugin"], &[]);
+        let gate = DloadGate::from_consumer(&[]);
         let path = missing_abs_lib("plugin");
         match resolve_library(&path, None, &[], &gate) {
             Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "plugin"),
@@ -603,7 +603,7 @@ mod tests {
 
     #[test]
     fn dload_time_allow_plus_trusted_missing_file_is_library_not_found() {
-        let gate = DloadGate::from_consumer_trusted(["time"], &[], ["time"]);
+        let gate = DloadGate::from_consumer_trusted(&[], ["time"]);
         let path = missing_abs_lib("time");
         match resolve_library(&path, None, &[], &gate) {
             Err(FfiError::LibraryNotFound { name, .. }) => assert_eq!(name, path),
@@ -611,7 +611,7 @@ mod tests {
         }
         match resolve_library("c", None, &[], &gate) {
             Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "c"),
-            other => panic!("time allow must never grant dload(c), got {other:?}"),
+            other => panic!("time trusted must never grant dload(c), got {other:?}"),
         }
     }
 
@@ -622,7 +622,7 @@ mod tests {
             let path = missing_abs_lib(stem);
             match resolve_library(&path, None, &[], &gate) {
                 Err(FfiError::LibraryDenied { stem: got, .. }) => assert_eq!(got, *stem),
-                other => panic!("expected LibraryDenied for {stem} without allow, got {other:?}"),
+                other => panic!("expected LibraryDenied for {stem} without hash|trusted, got {other:?}"),
             }
         }
     }
@@ -630,7 +630,6 @@ mod tests {
     #[test]
     fn first_party_allow_plus_trusted_missing_file_is_not_found() {
         let gate = DloadGate::from_consumer_trusted(
-            ["crypto", "tls", "regex", "time"],
             &[],
             ["crypto", "tls", "regex", "time"],
         );
@@ -649,19 +648,19 @@ mod tests {
 
     #[test]
     fn first_party_allow_without_hash_or_trusted_is_library_denied() {
-        let gate = DloadGate::from_consumer(["crypto", "tls", "regex", "time"], &[]);
+        let gate = DloadGate::from_consumer(&[]);
         for stem in DLOAD_PRODUCTION_STEMS {
             let path = missing_abs_lib(stem);
             match resolve_library(&path, None, &[], &gate) {
                 Err(FfiError::LibraryDenied { stem: got, .. }) => assert_eq!(got, *stem),
-                other => panic!("expected LibraryDenied for allow-only {stem}, got {other:?}"),
+                other => panic!("expected LibraryDenied for unhashed {stem}, got {other:?}"),
             }
         }
     }
 
     #[test]
     fn allowlisted_trusted_libc_is_library_denied() {
-        let gate = DloadGate::from_consumer_trusted(["libc"], &[], ["libc"]);
+        let gate = DloadGate::from_consumer_trusted(&[], ["libc"]);
         match resolve_library("libc", None, &[], &gate) {
             Err(FfiError::LibraryDenied { stem, .. }) => assert_eq!(stem, "c"),
             other => panic!("expected LibraryDenied for trusted allow-listed libc, got {other:?}"),
