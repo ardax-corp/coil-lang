@@ -274,7 +274,10 @@ fn granted_exec_emits_host_invoke() {
         &mut pipeline,
         r#"
 use env::{exec};
-fn main() { let _ = exec("true", []); }
+fn main() {
+    let args: Vec<string> = [];
+    let _ = exec("true", args);
+}
 "#,
     );
     assert!(

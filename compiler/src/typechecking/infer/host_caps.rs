@@ -156,7 +156,10 @@ mod tests {
     fn exec_without_grant_is_error() {
         let src = r#"
 use env::{exec};
-fn main() { let _ = exec("true", []); }
+fn main() {
+    let args: Vec<string> = [];
+    let _ = exec("true", args);
+}
 "#;
         let codes = check_codes(src, crate::HostGrants::deny_all(), &[]);
         assert!(codes.contains(&ErrorCode::HostExecDenied), "{codes:?}");
@@ -166,12 +169,15 @@ fn main() { let _ = exec("true", []); }
     fn exec_with_grant_typechecks() {
         let src = r#"
 use env::{exec};
-fn main() { let _ = exec("true", []); }
+fn main() {
+    let args: Vec<string> = [];
+    let _ = exec("true", args);
+}
 "#;
         let mut g = crate::HostGrants::deny_all();
         g.allow_exec = true;
         let codes = check_codes(src, g, &[]);
-        assert!(!codes.contains(&ErrorCode::HostExecDenied), "{codes:?}");
+        assert!(codes.is_empty(), "{codes:?}");
     }
 
     #[test]
