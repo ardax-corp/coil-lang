@@ -15,8 +15,6 @@ pub const MAX_UNROLL_TRIPS: u32 = 8;
 pub struct LoopInfo {
     pub header: usize,
     pub latch: usize,
-    #[allow(dead_code)]
-    pub header_label: Label,
     /// First op after the header `JMPF` (body, including induction step).
     pub body_start: usize,
     pub trips: u32,
@@ -143,7 +141,6 @@ fn classify_counted_loop(
     Some(LoopInfo {
         header,
         latch,
-        header_label,
         body_start: jmpf + 1,
         trips: trips as u32,
     })

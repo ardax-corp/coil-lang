@@ -14,8 +14,6 @@ use super::super::op::IlOp;
 /// One `MakeArray` that was stored to a local.
 #[derive(Clone, Debug)]
 pub struct AllocSite {
-    #[allow(dead_code)]
-    pub id: u32,
     pub make_idx: usize,
     pub arity: u32,
     pub store_slot: u32,
@@ -40,7 +38,6 @@ const MAX_STACK_ARITY: u32 = 32;
 /// Track which `MakeArray` locals escape this function.
 pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
     let mut allocs = Vec::new();
-    let mut id = 0u32;
     let mut i = 0;
     while i + 1 < ops.len() {
         if let IlOp::MakeArray { arity, .. } = &ops[i]
@@ -49,13 +46,11 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
             && let IlOp::StorePop { slot, .. } = &ops[i + 1]
         {
             allocs.push(AllocSite {
-                id,
                 make_idx: i,
                 arity: *arity,
                 store_slot: *slot,
                 escaped: !makearray_elems_are_immediate(ops, i, *arity),
             });
-            id = id.saturating_add(1);
             i += 2;
             continue;
         }

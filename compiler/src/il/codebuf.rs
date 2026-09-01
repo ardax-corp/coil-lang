@@ -466,13 +466,6 @@ impl CodeBuf {
         self.il.push_prologue_jmp();
     }
 
-    #[allow(dead_code)]
-    pub fn splice_bytes_at(&mut self, code_pos: usize, bytes: Vec<Byte>) {
-        let mut inserted = IlBuilder::new();
-        inserted.extend_bytes(bytes);
-        self.il.splice_code_at(code_pos, inserted);
-    }
-
     /// Splice another buffer's IL before logical code index `code_pos`,
     /// remapping labels into this buffer's namespace.
     pub fn splice_buf_at(&mut self, code_pos: usize, other: CodeBuf) {

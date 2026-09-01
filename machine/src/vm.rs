@@ -864,11 +864,6 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    #[allow(dead_code)]
-    fn value_to_string(&self, v: &Value) -> String {
-        Self::object_string_value(&self.heap, v)
-    }
-
     fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {
         let (tag, aux) = Self::decode_ffi_type_tag(v, heap);
         crate::memory::FfiType::from_tag(tag, aux)
