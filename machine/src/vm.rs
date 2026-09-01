@@ -261,8 +261,9 @@ pub struct Machine<const S: usize> {
     heap: Heap,
     stack: Stack<Value>,
     frames: ArrayVec<Frame, S>,
-    /// Per-frame pinned arrays for `ArrayPin` / `IndexPin*` (GC roots).
-    frame_pins: ArrayVec<HashMap<u32, Object>, S>,
+    /// Pin maps for frames that actually ran `ArrayPin`. Each entry's `0` is
+    /// `frames.len()` at first pin (TailCall keeps the same depth).
+    frame_pins: Vec<(usize, HashMap<u32, Object>)>,
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
@@ -343,14 +344,12 @@ impl<const S: usize> Machine<S> {
     pub fn with_operand_capacity(operand_slots: usize) -> Self {
         let mut frames = ArrayVec::default();
         frames.consume();
-        let mut frame_pins = ArrayVec::default();
-        frame_pins.consume();
         let worker_cap = crate::thread::WorkerCap::new();
         let reactor = crate::reactor::Reactor::new(0);
         let cap = operand_slots.clamp(1, crate::MAX_OPERAND_STACK_SLOTS);
         Self {
             frames,
-            frame_pins,
+            frame_pins: Vec::new(),
             heap: Heap::default(),
             stack: Stack::with_capacity(cap),
             output: None,
@@ -570,8 +569,7 @@ impl<const S: usize> Machine<S> {
         self.stack = Stack::with_capacity(self.stack.capacity());
         self.frames = ArrayVec::default();
         self.frames.consume();
-        self.frame_pins = ArrayVec::default();
-        self.frame_pins.consume();
+        self.frame_pins.clear();
         self.panicked = false;
         self.pending_ffi = None;
         self.pending_io = None;
@@ -778,19 +776,41 @@ impl<const S: usize> Machine<S> {
     }
 
     fn pop_call_frame(&mut self) -> usize {
-        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
-        self.frame_pins.pop();
+        self.pop_pin_map_for_current_frame();
         self.frames.pop().get()
     }
 
-    fn push_pin_frame(&mut self) {
-        self.frame_pins
-            .setup_current_and_advance(|pins| pins.clear());
-        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
+    /// Drop the pin map for the active frame if ArrayPin created one.
+    #[inline]
+    fn pop_pin_map_for_current_frame(&mut self) {
+        let depth = self.frames.len();
+        if self.frame_pins.last().is_some_and(|(d, _)| *d == depth) {
+            self.frame_pins.pop();
+        }
     }
 
-    fn current_pins_mut(&mut self) -> &mut HashMap<u32, Object> {
-        self.frame_pins.get_mut()
+    #[inline]
+    fn current_pins(&self) -> Option<&HashMap<u32, Object>> {
+        let depth = self.frames.len();
+        match self.frame_pins.last() {
+            Some((d, map)) if *d == depth => Some(map),
+            _ => None,
+        }
+    }
+
+    /// Allocate a pin map only when this frame first pins an array.
+    #[inline]
+    fn pin_current_array(&mut self, slot: u32, obj: Object) {
+        let depth = self.frames.len();
+        if let Some((d, map)) = self.frame_pins.last_mut() {
+            if *d == depth {
+                map.insert(slot, obj);
+                return;
+            }
+        }
+        let mut map = HashMap::new();
+        map.insert(slot, obj);
+        self.frame_pins.push((depth, map));
     }
 
     fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Option<Value> {
@@ -1035,7 +1055,7 @@ impl<const S: usize> Machine<S> {
                 Self::root_coroutine_saved_stack(&self.heap, gc.as_ref(), &mut roots);
             }
         }
-        for pins in self.frame_pins.iter() {
+        for (_, pins) in &self.frame_pins {
             for obj in pins.values() {
                 roots.push(obj.addr());
             }
@@ -1463,6 +1483,11 @@ impl<const S: usize> Machine<S> {
         self.register_finalizer(type_id, pc);
     }
 
+    #[cfg(test)]
+    pub fn live_pin_map_count(&self) -> usize {
+        self.frame_pins.len()
+    }
+
     fn with_coroutine_mut(&self, addr: u64, f: impl FnOnce(&mut ObjCoroutine)) {
         let mut current = self.heap.head_for_lookup();
         while let Some(reference) = current {
@@ -1645,9 +1670,7 @@ impl<const S: usize> Machine<S> {
                 f.seek(frame_ip);
                 f.set(base_sp + sp_off);
             });
-            // Yield pops pins with frames; restore a matching empty pin map
-            // so later CALL / ArrayPin / finalizers still have a live slot.
-            self.push_pin_frame();
+            // Pins are not saved across yield; ArrayPin after resume allocates.
         }
 
         *ip = coro.resume_ip;
@@ -1685,21 +1708,22 @@ impl<const S: usize> Machine<S> {
             .position(|c| c.coro.as_ptr() == parent.as_ptr())
             .unwrap_or(self.resume_stack.len().saturating_sub(1));
         let parent_ctx = &self.resume_stack[parent_entry_idx];
+        let parent_base_sp = parent_ctx.base_sp;
+        let parent_frame_depth = parent_ctx.frame_depth;
 
         self.save_coroutine_state(
             parent,
             parent.as_ref().yield_from_resume_ip,
             self.stack.tell(),
-            parent_ctx.base_sp,
-            parent_ctx.frame_depth,
+            parent_base_sp,
+            parent_frame_depth,
         );
 
-        self.stack.seek(parent_ctx.base_sp);
-        while self.frames.len() > parent_ctx.frame_depth {
-            self.frame_pins.pop();
+        self.stack.seek(parent_base_sp);
+        while self.frames.len() > parent_frame_depth {
+            self.pop_pin_map_for_current_frame();
             self.frames.pop();
         }
-        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
         if self.resume_stack.len() > parent_entry_idx + 1 {
             self.resume_stack.truncate(parent_entry_idx + 1);
         }
@@ -1762,10 +1786,9 @@ impl<const S: usize> Machine<S> {
 
         self.stack.seek(base_sp);
         while self.frames.len() > frame_depth {
-            self.frame_pins.pop();
+            self.pop_pin_map_for_current_frame();
             self.frames.pop();
         }
-        debug_assert_eq!(self.frames.len(), self.frame_pins.len());
 
         self.stack.push(yield_val);
         let caller = self.frames.get_mut();
@@ -2023,7 +2046,6 @@ impl<const S: usize> Machine<S> {
             f.seek(0);
             f.set(callee_sp);
         });
-        self.push_pin_frame();
         // Capture only when RETURN reaches this frame depth (the
         // call_function entry), not when inner CALLs return.
         self.nested_frame_depths.push(self.frames.len());
@@ -2462,7 +2484,9 @@ impl<const S: usize> Machine<S> {
                 Instruction::CALL => {
                     let (arity, target) = opcode.call_parts();
                     promise!(self.stack.tell() >= arity);
+                    // Empty set is the hot path (fib); skip HashSet::contains.
                     if arity == 1
+                        && unlikely(!self.finalizer_pcs.is_empty())
                         && self.finalizer_pcs.contains(&(target as u32))
                     {
                         promise!(self.stack.tell() >= 1);
@@ -2483,14 +2507,12 @@ impl<const S: usize> Machine<S> {
                         );
                         sp = callee_sp;
                         set_jump_target(&mut ip, target, code_len);
-                        self.push_pin_frame();
                     } else {
                         self.frames.rewrite_top_and_push(
                             |caller| caller.seek(ip + 1),
                             |frame| frame.set(callee_sp),
                         );
                         sp = callee_sp;
-                        self.push_pin_frame();
                     }
                 }
                 Instruction::TailCall => {
@@ -3312,7 +3334,7 @@ impl<const S: usize> Machine<S> {
                     let arr_val = self.stack.pop();
                     let addr = arr_val.raw() as u64;
                     if let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) {
-                        self.current_pins_mut().insert(slot, Object::Array(gc));
+                        self.pin_current_array(slot, Object::Array(gc));
                     }
                 }
                 Instruction::Index | Instruction::IndexUnchecked => {
@@ -3340,7 +3362,7 @@ impl<const S: usize> Machine<S> {
                     let slot = opcode.operand_u32();
                     let index = self.stack.pop().as_int();
                     let unchecked = matches!(*bc, Instruction::IndexPinUnchecked);
-                    let result = match self.current_pins_mut().get(&slot) {
+                    let result = match self.current_pins().and_then(|pins| pins.get(&slot)) {
                         Some(Object::Array(gc)) => {
                             Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
@@ -3469,7 +3491,8 @@ impl<const S: usize> Machine<S> {
                     let value = self.stack.pop();
                     let index = self.stack.pop().as_int();
                     let unchecked = matches!(*bc, Instruction::StoreIndexPinUnchecked);
-                    if let Some(Object::Array(mut gc)) = self.current_pins_mut().get(&slot).copied()
+                    if let Some(Object::Array(mut gc)) =
+                        self.current_pins().and_then(|pins| pins.get(&slot)).copied()
                     {
                         let arr = gc.as_mut();
                         if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
@@ -3930,7 +3953,6 @@ impl<const S: usize> Machine<S> {
                             .setup_current_and_advance(|frame| frame.set(callee_sp));
                         sp = callee_sp;
                         set_jump_target(&mut ip, entry as usize, code_len);
-                        self.push_pin_frame();
                         continue;
                     }
 
@@ -4001,7 +4023,6 @@ impl<const S: usize> Machine<S> {
                         .setup_current_and_advance(|frame| frame.set(callee_sp));
                     sp = callee_sp;
                     set_jump_target(&mut ip, target, code_len);
-                    self.push_pin_frame();
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):
