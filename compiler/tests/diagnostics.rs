@@ -2326,7 +2326,7 @@ fn primitive_cast_rejects_negative_literal_int_as_byte() {
 }
 
 #[test]
-fn env_exec_call_emits_trusted_inputs_warning() {
+fn env_exec_call_is_compile_error_without_grant() {
     let msgs = compile_messages(
         r#"
 use env::{exec};
@@ -2337,14 +2337,14 @@ fn main() {
     );
     assert!(
         msgs.iter()
-            .any(|m| m.contains("env::exec") && m.contains("trusted inputs")),
-        "expected env::exec trusted-inputs warning, got: {:?}",
+            .any(|m| m.contains("env::exec") && m.contains("--allow-exec")),
+        "expected env::exec capability error, got: {:?}",
         msgs
     );
 }
 
 #[test]
-fn env_exit_call_emits_process_termination_warning() {
+fn env_exit_call_is_compile_error_without_grant() {
     let msgs = compile_messages(
         r#"
 use env::{exit};
@@ -2355,8 +2355,8 @@ fn main() {
     );
     assert!(
         msgs.iter()
-            .any(|m| m.contains("env::exit") && m.contains("terminates the process")),
-        "expected env::exit process-termination warning, got: {:?}",
+            .any(|m| m.contains("env::exit") && m.contains("--allow-exit")),
+        "expected env::exit capability error, got: {:?}",
         msgs
     );
 }
