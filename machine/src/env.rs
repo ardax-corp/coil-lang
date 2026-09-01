@@ -17,33 +17,7 @@ pub fn set_allow_exit(_allow: bool) {}
 /// Runtime gate for FFI process-exec symbols. Prefer [`crate::Machine::set_env_grants`].
 pub fn set_allow_ffi_exec(_allow: bool) {}
 
-/// True when `name` is a libc/CRT process-exec symbol (not `env::exec`).
-pub fn is_ffi_exec_symbol(name: &str) -> bool {
-    let n = name.trim().trim_matches('_').to_ascii_lowercase();
-    matches!(
-        n.as_str(),
-        "system"
-            | "wsystem"
-            | "libc_system"
-            | "exec"
-            | "execl"
-            | "execle"
-            | "execlp"
-            | "execv"
-            | "execvp"
-            | "execvpe"
-            | "execve"
-            | "fexecve"
-            | "execveat"
-            | "posix_spawn"
-            | "posix_spawnp"
-            | "popen"
-            | "createprocessa"
-            | "createprocessw"
-            | "winexec"
-    )
-}
-
+pub use common::is_ffi_exec_symbol;
 
 /// Tag indices for [`EnvError`](common::BUILTIN_ENV_ERROR_ENUM).
 #[repr(u32)]
@@ -267,7 +241,7 @@ fn try_host_exec(heap: &mut Heap, args: &[Value]) -> Result<i64, EnvErrorTag> {
     }
     let argv = value_as_string_array(heap, args[1])?;
     // Inherits VM cwd + env; runtime gate is the bound Machine's
-    // `[env] allow_exec` (compile still warns on `exec` / `exit`).
+    // CLI / Pipeline `allow_exec` (typecheck already requires `--allow-exec`).
     let status = Command::new(&program)
         .args(&argv)
         .status()

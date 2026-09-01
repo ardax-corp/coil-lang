@@ -667,6 +667,42 @@ pub fn host_native_ids() -> impl Iterator<Item = (&'static str, usize)> {
     HOST_NATIVES.iter().map(|e| (e.name, e.id as usize))
 }
 
+/// True when `name` is a libc/CRT process-exec symbol (not `env::exec`).
+pub fn is_ffi_exec_symbol(name: &str) -> bool {
+    let n = name.trim().trim_matches('_').to_ascii_lowercase();
+    matches!(
+        n.as_str(),
+        "system"
+            | "wsystem"
+            | "libc_system"
+            | "exec"
+            | "execl"
+            | "execle"
+            | "execlp"
+            | "execv"
+            | "execvp"
+            | "execvpe"
+            | "execve"
+            | "fexecve"
+            | "execveat"
+            | "posix_spawn"
+            | "posix_spawnp"
+            | "popen"
+            | "createprocessa"
+            | "createprocessw"
+            | "winexec"
+    )
+}
+
+/// Filename stem for the `dload` gate (`/abs/libfoo.so` → `foo`).
+pub fn dload_request_stem(name: &str) -> String {
+    let file = std::path::Path::new(name)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or(name);
+    library_stem(file)
+}
+
 /// Whether `name` (or its stem) refers to the C standard library.
 pub fn is_libc_alias(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
@@ -674,7 +710,7 @@ pub fn is_libc_alias(name: &str) -> bool {
         lower.as_str(),
         "c" | "libc" | "libc.so.6" | "libsystem" | "libsystem.b.dylib" | "ucrtbase" | "msvcrt"
     ) || {
-        let stem = libc_library_stem(&lower);
+        let stem = library_stem(&lower);
         matches!(
             stem.as_str(),
             "c" | "system" | "system.b" | "ucrtbase" | "msvcrt"
@@ -682,7 +718,8 @@ pub fn is_libc_alias(name: &str) -> bool {
     }
 }
 
-fn libc_library_stem(name: &str) -> String {
+/// Strip a known shared-library suffix and optional `lib` prefix.
+pub fn library_stem(name: &str) -> String {
     let mut stem = name.to_string();
     if let Some(idx) = stem.find(".so.") {
         stem.truncate(idx);
@@ -714,5 +751,20 @@ mod tests {
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
         }
+    }
+
+    #[test]
+    fn dload_request_stem_strips_lib_and_suffix() {
+        assert_eq!(dload_request_stem("libsum.so"), "sum");
+        assert_eq!(dload_request_stem("/abs/libtime.so"), "time");
+        assert_eq!(dload_request_stem("c"), "c");
+    }
+
+    #[test]
+    fn ffi_exec_symbol_aliases() {
+        assert!(is_ffi_exec_symbol("system"));
+        assert!(is_ffi_exec_symbol("execve"));
+        assert!(is_ffi_exec_symbol("_wsystem"));
+        assert!(!is_ffi_exec_symbol("strlen"));
     }
 }

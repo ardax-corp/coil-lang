@@ -264,6 +264,7 @@ impl Pipeline {
             self.manifest = Manifest::load(&root).unwrap_or_default();
         }
         self.reset_session();
+        self.sync_host_caps();
         self.entry_file = Some(file.to_path_buf());
         self.enqueue_file(file.to_path_buf());
         self.discover_all();
@@ -336,11 +337,13 @@ impl Pipeline {
     /// Host grants do not restore a first-party exemption.
     pub fn grant_dload_file(&mut self, stem: impl Into<String>, path: PathBuf) {
         self.extra_dload_grants.push((stem.into(), path));
+        self.try_sync_host_caps();
     }
 
     /// Host/test extra stem with no lock hash (libc fixtures). Not a consumer grant.
     pub fn grant_dload_stem(&mut self, stem: impl Into<String>) {
         self.extra_dload_stems.push(stem.into());
+        self.try_sync_host_caps();
     }
 
     /// Consumer `dload` stem (`--allow-dload`). Still needs lock hash or `trusted`.
@@ -348,31 +351,59 @@ impl Pipeline {
     /// Libc aliases stay denied at the gate even if listed here.
     pub fn grant_dload_allow(&mut self, stem: impl Into<String>) {
         self.host_grants.grant_dload_allow(stem);
+        self.try_sync_host_caps();
     }
 
     /// Allow `Stream.attach` on Machines wired from this pipeline.
     pub fn grant_attach(&mut self) {
         self.host_grants.allow_attach = true;
+        self.try_sync_host_caps();
     }
 
     /// Allow `env::exec` on Machines wired from this pipeline.
     pub fn grant_exec(&mut self) {
         self.host_grants.allow_exec = true;
+        self.try_sync_host_caps();
     }
 
     /// Allow `env::exit` on Machines wired from this pipeline.
     pub fn grant_exit(&mut self) {
         self.host_grants.allow_exit = true;
+        self.try_sync_host_caps();
     }
 
     /// Allow FFI process-exec symbols on Machines wired from this pipeline.
     pub fn grant_ffi_exec(&mut self) {
         self.host_grants.allow_ffi_exec = true;
+        self.try_sync_host_caps();
     }
 
     /// Replace host grants (CLI / embedders). Does not read Manifest.
     pub fn set_host_grants(&mut self, grants: HostGrants) {
         self.host_grants = grants;
+        self.try_sync_host_caps();
+    }
+
+    fn extra_dload_stems_for_check(&self) -> Vec<String> {
+        let mut extra = self.extra_dload_stems.clone();
+        for (stem, _) in &self.extra_dload_grants {
+            if !extra.iter().any(|s| s == stem) {
+                extra.push(stem.clone());
+            }
+        }
+        extra
+    }
+
+    fn sync_host_caps(&mut self) {
+        let grants = self.host_grants.clone();
+        let extra = self.extra_dload_stems_for_check();
+        self.compiler_lazy_mut().set_host_grants(grants, extra);
+    }
+
+    fn try_sync_host_caps(&mut self) {
+        if self.compiler.get().is_some() {
+            self.sync_host_caps();
+        }
     }
 
     /// Host grants applied at VM wire time (deny-all until set).
@@ -993,6 +1024,7 @@ impl Pipeline {
         module: &str,
         strip_tests: bool,
     ) -> bool {
+        self.sync_host_caps();
         if !self.fill_ast_cache(file) {
             self.emit_spanless_error(
                 ErrorCode::IoError,
@@ -1314,6 +1346,7 @@ impl Pipeline {
         };
 
         self.reset_session();
+        self.sync_host_caps();
         self.entry_file = None;
         self.begin_compile_opt_stats();
 
@@ -2467,17 +2500,43 @@ fn main() {}
     #[test]
     fn typecheck_project_sees_ffi() {
         let src = r#"
-extern "c" {
+extern "plugin" {
     fn c_abs(int x) -> int;
 }
 
 fn main() {}
 "#;
         let (_dir, file) = temp_hy("ffi", src);
-        let errors = typecheck_errors(&file);
+        let mut pipeline = Pipeline::new();
+        pipeline.grant_dload_allow("plugin");
+        let results = pipeline.typecheck_project(&file);
+        let errors: Vec<String> = results
+            .into_iter()
+            .flat_map(|(_, msgs)| {
+                msgs.into_iter()
+                    .filter(|m| *m.kind() == MessageKind::ERROR)
+                    .map(|m| m.message().to_string())
+            })
+            .collect();
         assert!(
             errors.is_empty(),
             "extern signature should be visible to typecheck_project, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn typecheck_project_denies_ungranted_exec() {
+        let src = r#"
+use env::{exec};
+fn main() {
+    let _ = exec("true", []);
+}
+"#;
+        let (_dir, file) = temp_hy("exec", src);
+        let errors = typecheck_errors(&file);
+        assert!(
+            errors.iter().any(|m| m.contains("--allow-exec")),
+            "typecheck_project must error on ungranted env::exec, got {errors:?}"
         );
     }
 

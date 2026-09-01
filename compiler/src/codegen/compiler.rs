@@ -268,6 +268,11 @@ impl Compiler {
         self.include_tests = include;
     }
 
+    /// Host capability grants for typecheck (deny-all until set).
+    pub fn set_host_grants(&mut self, grants: crate::HostGrants, extra_dload_stems: Vec<String>) {
+        self.checker.set_host_grants(grants, extra_dload_stems);
+    }
+
     pub fn include_tests(&self) -> bool {
         self.include_tests
     }

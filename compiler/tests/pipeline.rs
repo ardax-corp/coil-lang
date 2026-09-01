@@ -231,6 +231,145 @@ fn run_example_src(src: &str) -> String {
     run_example_src_with_entry(src, None)
 }
 
+fn assert_compile_fails(src: &str, code: compiler::ErrorCode) {
+    let mut pipeline = Pipeline::new();
+    assert_compile_fails_pipeline(&mut pipeline, src, code);
+}
+
+fn assert_compile_fails_pipeline(pipeline: &mut Pipeline, src: &str, code: compiler::ErrorCode) {
+    let result = pipeline.compile_src(src);
+    let msgs: Vec<_> = pipeline
+        .messages()
+        .iter()
+        .map(|m| (m.code(), m.message().to_string()))
+        .collect();
+    assert!(result.is_err(), "expected compile failure, got Ok; {msgs:?}");
+    assert!(
+        pipeline.messages().iter().any(|m| m.code() == Some(code)),
+        "expected {code:?}, got {msgs:?}"
+    );
+}
+
+fn compile_ok(pipeline: &mut Pipeline, src: &str) -> Vec<common::Byte> {
+    pipeline
+        .compile_src(src)
+        .unwrap_or_else(|_| {
+            panic!(
+                "expected compile Ok, messages={:?}",
+                pipeline
+                    .messages()
+                    .iter()
+                    .map(|m| (m.code(), m.message().to_string()))
+                    .collect::<Vec<_>>()
+            )
+        })
+        .0
+}
+
+#[test]
+fn granted_exec_emits_host_invoke() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_exec();
+    let bc = compile_ok(
+        &mut pipeline,
+        r#"
+use env::{exec};
+fn main() {
+    let args: Vec<string> = [];
+    let _ = exec("true", args);
+}
+"#,
+    );
+    assert!(
+        bc.iter()
+            .any(|b| matches!(b.bytecode(), common::Instruction::HostInvoke)),
+        "granted env::exec must emit HostInvoke, opcodes={:?}",
+        bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn granted_exit_emits_host_invoke() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_exit();
+    let bc = compile_ok(
+        &mut pipeline,
+        r#"
+use env::{exit};
+fn main() { exit(0); }
+"#,
+    );
+    assert!(
+        bc.iter()
+            .any(|b| matches!(b.bytecode(), common::Instruction::HostInvoke)),
+        "granted env::exit must emit HostInvoke"
+    );
+}
+
+#[test]
+fn granted_dload_emits_ffi_load() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_dload_allow("plugin");
+    let bc = compile_ok(
+        &mut pipeline,
+        r#"
+use ffi::{dload};
+fn main() { let _ = dload("plugin"); }
+"#,
+    );
+    assert!(
+        bc.iter()
+            .any(|b| matches!(b.bytecode(), common::Instruction::FfiLoad)),
+        "granted dload must emit FfiLoad"
+    );
+}
+
+#[test]
+fn granted_ffi_exec_extern_compiles() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_dload_allow("plugin");
+    pipeline.grant_ffi_exec();
+    let _ = compile_ok(
+        &mut pipeline,
+        r#"
+extern "plugin" {
+    fn system() -> int;
+}
+fn main() { let _ = system(); }
+"#,
+    );
+}
+
+#[test]
+fn host_dload_stem_grant_compiles_without_allow_dload() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_dload_stem("plugin");
+    let _ = compile_ok(
+        &mut pipeline,
+        r#"
+use ffi::{dload};
+fn main() { let _ = dload("plugin"); }
+"#,
+    );
+}
+
+#[test]
+fn dload_nonconst_is_compile_error() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_dload_allow("plugin");
+    assert_compile_fails_pipeline(
+        &mut pipeline,
+        r#"
+use ffi::{dload};
+fn main() {
+    let name = "plugin";
+    let _ = dload(name);
+}
+"#,
+        compiler::ErrorCode::HostDloadNonConst,
+    );
+}
+
 fn compile_src_with_tests(src: &str) -> (Pipeline, Vec<common::Byte>, Vec<u64>) {
     let mut pipeline = Pipeline::new();
     pipeline.set_include_tests(true);
@@ -315,47 +454,6 @@ fn run_src_with_grants(
         .compile_src(src)
         .expect("example failed to compile (parse error or type errors)");
     run_bytecode(bytecode, constants, &pipeline, entry)
-}
-
-fn run_src_with_extra_stems(src: &str, entry: Option<&std::path::Path>, stems: &[&str]) -> String {
-    let mut pipeline = Pipeline::new();
-    for stem in stems {
-        pipeline.grant_dload_stem((*stem).to_string());
-    }
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("example failed to compile (parse error or type errors)");
-    run_bytecode(bytecode, constants, &pipeline, entry)
-}
-
-fn run_file_with_extra_stems(path: &str, stems: &[&str]) -> String {
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-    let full = workspace_root.join(path);
-    let mut pipeline = Pipeline::new();
-    for stem in stems {
-        pipeline.grant_dload_stem((*stem).to_string());
-    }
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(full.to_str().unwrap())
-        .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
-    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
-}
-
-fn run_file_with_grants(path: &str, grants: &[(&str, std::path::PathBuf)]) -> String {
-    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("compiler crate must have a parent (workspace root)");
-    let full = workspace_root.join(path);
-    let mut pipeline = Pipeline::new();
-    for (stem, p) in grants {
-        pipeline.grant_dload_file((*stem).to_string(), p.clone());
-    }
-    let (bytecode, constants) = pipeline
-        .compile_src_from_file(full.to_str().unwrap())
-        .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
-    run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()))
 }
 
 #[test]
@@ -1742,39 +1840,30 @@ fn example_ffi_sum_via_dlopen_prints_42() {
 }
 
 #[test]
-fn example_strlen_prints_5() {
-    let result = std::panic::catch_unwind(|| {
-        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .expect("compiler crate must have a parent (workspace root)");
-        let full = workspace_root.join("examples/strlen.hy");
-        let src = std::fs::read_to_string(&full).expect("read strlen.hy");
-        run_src_with_extra_stems(&src, Some(full.as_path()), &["c"])
-    });
-    let output = match result {
-        Ok(s) => s,
-        Err(_) => {
-            ffi_soft_skip("strlen test panicked (dlopen failure?)");
-            return;
-        }
-    };
-    assert_eq!(output, "5", "strlen(\"hello\") should print 5");
+fn example_strlen_is_compile_error_for_libc() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join("examples/strlen.hy");
+    let src = std::fs::read_to_string(&full).expect("read strlen.hy");
+    assert_compile_fails(&src, compiler::ErrorCode::HostDloadDenied);
 }
 
 #[test]
-fn example_strlen_prints_5_compile_src_from_file() {
-    let result =
-        std::panic::catch_unwind(|| run_file_with_extra_stems("examples/strlen.hy", &["c"]));
-    let output = match result {
-        Ok(s) => s,
-        Err(_) => {
-            ffi_soft_skip("strlen test panicked (dlopen failure?)");
-            return;
-        }
-    };
-    assert_eq!(
-        output, "5",
-        "strlen(\"hello\") via compile_src_from_file should print 5"
+fn example_strlen_from_file_is_compile_error_for_libc() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_dload_stem("c");
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join("examples/strlen.hy");
+    let result = pipeline.compile_src_from_file(full.to_str().unwrap());
+    assert!(result.is_err());
+    assert!(
+        pipeline
+            .messages()
+            .iter()
+            .any(|m| m.code() == Some(compiler::ErrorCode::HostDloadDenied))
     );
 }
 
@@ -1867,79 +1956,27 @@ fn clean_captured_os_stdout(output: &str) -> String {
 
 #[cfg(unix)]
 #[test]
-fn example_ffi_printf_prints_hello_42() {
-    #[cfg(not(unix))]
-    {
-        ffi_soft_skip("ffi_printf OS-stdout capture is unix-only");
-        return;
-    }
-
-    #[cfg(unix)]
-    {
-        let result = std::panic::catch_unwind(|| {
-            let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-                .parent()
-                .expect("compiler crate must have a parent (workspace root)");
-            let full = workspace_root.join("examples/ffi_printf.hy");
-            let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
-            let ((), os_out) = with_captured_os_stdout(|| {
-                let _vm_out = run_src_with_extra_stems(&src, Some(full.as_path()), &["c"]);
-            });
-            os_out
-        });
-        let output = match result {
-            Ok(s) => s,
-            Err(_) => {
-                ffi_soft_skip("ffi_printf test panicked (dlopen failure?)");
-                return;
-            }
-        };
-        let cleaned = clean_captured_os_stdout(&output);
-        assert_eq!(
-            cleaned.trim(),
-            "hello 42",
-            "printf(\"hello %lld\", 42) should write to OS stdout (raw={output:?})"
-        );
-    }
+fn example_ffi_printf_is_compile_error_for_libc() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join("examples/ffi_printf.hy");
+    let src = std::fs::read_to_string(&full).expect("read ffi_printf.hy");
+    assert_compile_fails(&src, compiler::ErrorCode::HostDloadDenied);
 }
 
 #[test]
-fn extern_missing_library_panics_with_message() {
-    let src = r#"
-use io::{stdout, write};
-use string::{format, to_bytes};
+fn extern_missing_library_is_compile_error() {
+    assert_compile_fails(
+        r#"
 extern "this_library_definitely_does_not_exist_xyzzy" {
     fn noop() -> int;
 }
 fn main() {
-    write(stdout(), to_bytes(format("%i", noop())));
+    let _ = noop();
 }
-"#;
-    let mut pipeline = Pipeline::new();
-    let (bytecode, constants) = pipeline
-        .compile_src(src)
-        .expect("should compile (load failure is runtime)");
-    let shared = SharedBuf::new();
-    let mut machine = Machine::<128>::default();
-    machine.with_output(shared.clone());
-    pipeline.wire_vm_ffi(&mut machine, None);
-    pipeline.wire_host_natives(&mut machine);
-    machine.set_program_debug(pipeline.program_debug());
-    machine.run_raw(
-        &bytecode,
-        &constants,
-        pipeline.strings(),
-        pipeline.static_slot_count(),
-    );
-    assert!(
-        machine.panicked(),
-        "missing library should panic, not segfault"
-    );
-    let _ = machine.restore_output();
-    let output = shared.into_utf8();
-    assert!(
-        output.contains("panic:") && output.contains("denied"),
-        "expected panic about dload deny, got: {output:?}"
+"#,
+        compiler::ErrorCode::HostDloadDenied,
     );
 }
 
@@ -1963,48 +2000,28 @@ time = { git = "https://example.com/coil-time.git", trusted = true }
 
 #[test]
 fn userland_dload_unknown_stem_is_denied_not_missing() {
-    let src = r#"
-use ffi::{dload, ErrorKind};
-use io::{stdout, write};
-use string::{format, to_bytes};
+    assert_compile_fails(
+        r#"
+use ffi::{dload};
 fn main() {
-    let r = dload("notalist");
-    let msg = match r {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            _ => "other",
-        },
-    };
-    write(stdout(), to_bytes(format("%s", msg)));
+    let _ = dload("notalist");
 }
-"#;
-    let output = run_example_src(src);
-    assert_eq!(output, "denied");
+"#,
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
 fn userland_dload_c_is_denied() {
-    let src = r#"
-use ffi::{dload, ErrorKind};
-use io::{stdout, write};
-use string::{format, to_bytes};
+    assert_compile_fails(
+        r#"
+use ffi::{dload};
 fn main() {
-    let r = dload("c");
-    let msg = match r {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            _ => "other",
-        },
-    };
-    write(stdout(), to_bytes(format("%s", msg)));
+    let _ = dload("c");
 }
-"#;
-    let output = run_example_src(src);
-    assert_eq!(output, "denied");
+"#,
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
@@ -2016,69 +2033,25 @@ fn userland_dload_absolute_non_allowlisted_is_denied() {
     };
     let src = format!(
         r#"
-use ffi::{{dload, ErrorKind}};
-use io::{{stdout, write}};
-use string::{{format, to_bytes}};
+use ffi::{{dload}};
 fn main() {{
-    let r = dload("{path}");
-    let msg = match r {{
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {{
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            _ => "other",
-        }},
-    }};
-    write(stdout(), to_bytes(format("%s", msg)));
+    let _ = dload("{path}");
 }}
 "#
     );
-    let output = run_example_src(&src);
-    assert_eq!(output, "denied");
+    assert_compile_fails(&src, compiler::ErrorCode::HostDloadDenied);
 }
 
 #[test]
 fn userland_dload_first_party_stems_without_allow_are_denied() {
-    // Bare `dload("crypto")` opens system libcrypto on macOS and aborts.
     let src = format!(
         r#"
-use ffi::{{dload, ErrorKind}};
-use io::{{stdout, write}};
-use string::{{format, to_bytes}};
+use ffi::{{dload}};
 fn main() {{
-    let m0 = match dload("{}") {{
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {{
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            _ => "other",
-        }},
-    }};
-    let m1 = match dload("{}") {{
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {{
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            _ => "other",
-        }},
-    }};
-    let m2 = match dload("{}") {{
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {{
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            _ => "other",
-        }},
-    }};
-    let m3 = match dload("{}") {{
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e.kind {{
-            ErrorKind::LibraryNotFound => "missing",
-            ErrorKind::Other => "denied",
-            _ => "other",
-        }},
-    }};
-    write(stdout(), to_bytes(format("%s %s %s %s", m0, m1, m2, m3)));
+    let _ = dload("{}");
+    let _ = dload("{}");
+    let _ = dload("{}");
+    let _ = dload("{}");
 }}
 "#,
         missing_abs_dload("time"),
@@ -2086,11 +2059,7 @@ fn main() {{
         missing_abs_dload("tls"),
         missing_abs_dload("regex"),
     );
-    let output = run_example_src(&src);
-    assert_eq!(
-        output, "denied denied denied denied",
-        "first-party stems must be denied without allow; got {output:?}"
-    );
+    assert_compile_fails(&src, compiler::ErrorCode::HostDloadDenied);
 }
 
 #[test]
@@ -2291,6 +2260,53 @@ fn run_userland_dload_project_grants(
     output
 }
 
+fn assert_dload_project_compile_fails(
+    test_name: &str,
+    toml_extra: &str,
+    lock: Option<&str>,
+    src: &str,
+    dload_allow: &[&str],
+    code: compiler::ErrorCode,
+) {
+    let pid = std::process::id();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let dir = std::env::temp_dir().join(format!("coil_dload_fail_{test_name}_{pid}_{nanos}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("mkdir dload fail project");
+    let stdlib = workspace_stdlib();
+    let manifest = format!(
+        "[module]\nroots = [\"{}\"]\n\n{toml_extra}\n",
+        stdlib.display()
+    );
+    std::fs::write(dir.join("coil.toml"), manifest).expect("write coil.toml");
+    if let Some(lock) = lock {
+        std::fs::write(dir.join("coil.lock"), lock).expect("write coil.lock");
+    }
+    let entry = dir.join("main.hy");
+    std::fs::write(&entry, src).expect("write main.hy");
+    let mut pipeline = Pipeline::new();
+    let mut grants = compiler::HostGrants::deny_all();
+    for stem in dload_allow {
+        grants.grant_dload_allow(*stem);
+    }
+    pipeline.set_host_grants(grants);
+    let result = pipeline.compile_src_from_file(entry.to_str().unwrap());
+    let msgs: Vec<_> = pipeline
+        .messages()
+        .iter()
+        .map(|m| (m.code(), m.message().to_string()))
+        .collect();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(result.is_err(), "expected compile failure, got Ok; {msgs:?}");
+    assert!(
+        pipeline.messages().iter().any(|m| m.code() == Some(code)),
+        "expected {code:?}, got {msgs:?}"
+    );
+}
+
 #[test]
 fn userland_dload_trusted_extra_without_pin_is_missing_not_denied() {
     let extra = r#"
@@ -2347,13 +2363,14 @@ fn userland_dload_trusted_without_allow_is_denied() {
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
-    let output = run_userland_dload_project(
+    assert_dload_project_compile_fails(
         "trusted_no_allow",
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-        &[]);
-    assert_eq!(output, "denied");
+        &[],
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
@@ -2365,16 +2382,13 @@ allow = ["plugin"]
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
-    let output = run_userland_dload_project(
+    assert_dload_project_compile_fails(
         "toml_allow_ignored",
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
         &[],
-    );
-    assert_eq!(
-        output, "denied",
-        "Manifest [ffi] allow must not grant dload, got {output:?}"
+        compiler::ErrorCode::HostDloadDenied,
     );
 }
 
@@ -2384,9 +2398,14 @@ fn userland_dload_trusted_c_is_denied() {
 [dependencies]
 c = { git = "https://example.com/libc.git", trusted = true }
 "#;
-    let src = dload_kind_program("c");
-    let output = run_userland_dload_project("trusted_c", extra, None, &src, &[]);
-    assert_eq!(output, "denied");
+    assert_dload_project_compile_fails(
+        "trusted_c",
+        extra,
+        None,
+        &dload_kind_program("c"),
+        &[],
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
@@ -2395,13 +2414,14 @@ fn userland_dload_crypto_without_allow_is_denied() {
 [dependencies]
 crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
 "#;
-    let output = run_userland_dload_project(
+    assert_dload_project_compile_fails(
         "crypto_trusted_no_allow",
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-        &[]);
-    assert_eq!(output, "denied");
+        &[],
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
@@ -2440,9 +2460,14 @@ fn userland_dload_trusted_libc_is_denied() {
 [dependencies]
 libc = { git = "https://example.com/libc.git", trusted = true }
 "#;
-    let output =
-        run_userland_dload_project("trusted_libc", extra, None, &dload_kind_program("libc"), &["libc"]);
-    assert_eq!(output, "denied");
+    assert_dload_project_compile_fails(
+        "trusted_libc",
+        extra,
+        None,
+        &dload_kind_program("libc"),
+        &["libc"],
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
@@ -2451,19 +2476,14 @@ fn userland_dload_allowlisted_trusted_c_is_denied() {
 [dependencies]
 c = { git = "https://example.com/libc.git", trusted = true }
 "#;
-    let panicked = catch_unwind(AssertUnwindSafe(|| {
-        run_userland_dload_project("trusted_allow_c", extra, None, &dload_kind_program("c"), &["c"])
-    }));
-    match panicked {
-        Ok(output) => assert_eq!(output, "denied"),
-        Err(payload) => {
-            let msg = panic_message(&payload);
-            assert!(
-                msg.contains("libc alias") && msg.contains("`c`"),
-                "allow-listed c must not grant dload; got panic {msg:?}"
-            );
-        }
-    }
+    assert_dload_project_compile_fails(
+        "trusted_allow_c",
+        extra,
+        None,
+        &dload_kind_program("c"),
+        &["c"],
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
@@ -2638,13 +2658,14 @@ crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
 fn userland_dload_first_party_trusted_without_allow_is_denied() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
         let extra = format!("[dependencies]\n{}", first_party_dep_line(stem, Some(true)));
-        let output = run_userland_dload_project(
+        assert_dload_project_compile_fails(
             &format!("{stem}_trusted_no_allow"),
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-            &[]);
-        assert_eq!(output, "denied", "{stem} without [ffi] allow must be denied");
+            &[],
+            compiler::ErrorCode::HostDloadDenied,
+        );
     }
 }
 
@@ -2729,24 +2750,14 @@ fn userland_dload_allowlisted_trusted_libc_is_denied() {
 [dependencies]
 libc = { git = "https://example.com/libc.git", trusted = true }
 "#;
-    let panicked = catch_unwind(AssertUnwindSafe(|| {
-        run_userland_dload_project(
-            "trusted_allow_libc",
-            extra,
-            None,
-            &dload_kind_program("libc"),
-            &["libc"])
-    }));
-    match panicked {
-        Ok(output) => assert_eq!(output, "denied"),
-        Err(payload) => {
-            let msg = panic_message(&payload);
-            assert!(
-                msg.contains("libc alias") && msg.contains("`libc`"),
-                "allow-listed libc must not grant dload; got panic {msg:?}"
-            );
-        }
-    }
+    assert_dload_project_compile_fails(
+        "trusted_allow_libc",
+        extra,
+        None,
+        &dload_kind_program("libc"),
+        &["libc"],
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
 #[test]
@@ -3605,9 +3616,21 @@ fn main() {
 }
 
 #[test]
-fn example_attr_ffi_strlen_prints_5() {
-    let output = run_file_with_extra_stems("examples/attr_ffi.hy", &["c"]);
-    assert_eq!(output, "5");
+fn example_attr_ffi_strlen_is_compile_error_for_libc() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_dload_stem("c");
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("compiler crate must have a parent (workspace root)");
+    let full = workspace_root.join("examples/attr_ffi.hy");
+    let result = pipeline.compile_src_from_file(full.to_str().unwrap());
+    assert!(result.is_err());
+    assert!(
+        pipeline
+            .messages()
+            .iter()
+            .any(|m| m.code() == Some(compiler::ErrorCode::HostDloadDenied))
+    );
 }
 
 #[test]
@@ -7966,8 +7989,26 @@ fn stream_attach_and_park_typecheck() {
             pipeline.messages()
         );
     }
+    fn check_ok_attach(src: &str) {
+        let mut pipeline = Pipeline::new();
+        pipeline.grant_attach();
+        assert!(
+            pipeline.compile_src(src).is_ok(),
+            "expected typecheck Ok for {src:?}, messages={:?}",
+            pipeline.messages()
+        );
+    }
     check_ok("use io::{attach, park};\nfn main() {}\n");
     check_ok(
+        r#"
+use io::{stdout, park};
+fn main() {
+    let s = stdout();
+    let _ = s.park();
+}
+"#,
+    );
+    check_ok_attach(
         r#"
 use io::{stdout, attach, park};
 fn main() {
@@ -7977,7 +8018,7 @@ fn main() {
 }
 "#,
     );
-    check_ok(
+    check_ok_attach(
         r#"
 use io::{stdout};
 fn main() {
@@ -7991,25 +8032,16 @@ fn main() {
 
 #[test]
 fn stream_attach_denied_without_allow_attach() {
-    let src = r#"
-use io::{stdout, write, attach, IoError};
-use string::{format, to_bytes};
+    assert_compile_fails(
+        r#"
+use io::{stdout, attach};
 fn main() {
     let s = stdout();
-    let r = attach(s, 0, 0, 0, 0, 0);
-    let msg = match r {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e {
-            IoError::PermissionDenied => "denied",
-            IoError::InvalidInput => "invalid",
-            _ => "other",
-        },
-    };
-    write(stdout(), to_bytes(format("%s", msg)));
+    let _ = attach(s, 0, 0, 0, 0, 0);
 }
-"#;
-    let output = run_example_src(src);
-    assert_eq!(output, "denied", "attach must be off by default, got {output:?}");
+"#,
+        compiler::ErrorCode::HostAttachDenied,
+    );
 }
 
 #[test]
@@ -8045,26 +8077,19 @@ fn main() {
 fn stream_attach_denied_when_only_toml_allows() {
     let extra = "[ffi]\nallow_attach = true\n";
     let src = r#"
-use io::{stdout, write, attach, IoError};
-use string::{format, to_bytes};
+use io::{stdout, attach};
 fn main() {
     let s = stdout();
-    let r = attach(s, 0, 0, 0, 0, 0);
-    let msg = match r {
-        Result::Ok(_) => "ok",
-        Result::Err(e) => match e {
-            IoError::PermissionDenied => "denied",
-            IoError::InvalidInput => "invalid",
-            _ => "other",
-        },
-    };
-    write(stdout(), to_bytes(format("%s", msg)));
+    let _ = attach(s, 0, 0, 0, 0, 0);
 }
 "#;
-    let output = run_userland_dload_project("toml_attach_ignored", extra, None, src, &[]);
-    assert_eq!(
-        output, "denied",
-        "Manifest [ffi] allow_attach must not grant Stream.attach, got {output:?}"
+    assert_dload_project_compile_fails(
+        "toml_attach_ignored",
+        extra,
+        None,
+        src,
+        &[],
+        compiler::ErrorCode::HostAttachDenied,
     );
 }
 
@@ -9508,15 +9533,13 @@ fn compile_src_from_file_succeeds_with_only_warnings() {
     std::fs::write(
         &src_path,
         r#"
-use env::{exit};
 fn main() {
-    exit(0);
+    return;
+    let _ = 1;
 }
 "#,
     )
     .expect("write warn_only.hy");
-    // Point module roots at the workspace stdlib so `use env` resolves when
-    // the temp dir is the project root.
     std::fs::write(
         dir.join("coil.toml"),
         format!(
@@ -9532,7 +9555,7 @@ fn main() {
     let _ = std::fs::remove_dir_all(&dir);
     assert!(
         result.is_ok(),
-        "warnings (env::exit) must not fail in-memory compile: {msgs:?}"
+        "warnings (unreachable code) must not fail in-memory compile: {msgs:?}"
     );
     assert!(
         !pipeline.had_errors(),
@@ -9543,8 +9566,8 @@ fn main() {
             .messages()
             .iter()
             .any(|m| *m.kind() == reporting::MessageKind::WARNING
-                && m.message().contains("env::exit")),
-        "expected env::exit warning to remain inspectable: {msgs:?}"
+                && m.message().contains("unreachable")),
+        "expected unreachable-code warning to remain inspectable: {msgs:?}"
     );
 }
 
@@ -9598,55 +9621,41 @@ fn main() {
     assert_eq!(output, "across-gc");
 }
 
-/// COI-19: extern handles in static slots survive locals / repeat calls.
+/// COI-19: extern of libc is a compile error even with host extra stems.
 #[test]
-fn extern_strlen_twice_after_vec_ok() {
-    let result = std::panic::catch_unwind(|| {
-        run_src_with_extra_stems(
-            r#"
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-
+fn extern_strlen_libc_is_compile_error() {
+    assert_compile_fails(
+        r#"
 extern "c" {
     fn strlen(string s) -> int;
 }
-
 fn main() {
-    let v = Vec::new();
-    v.push("x");
-    let a = strlen("hello");
-    let b = strlen("hello");
-    let _ = write_all(stdout(), to_bytes(format("%v %v\n", a, b)));
+    let _ = strlen("hello");
 }
 "#,
-            None,
-            &["c"],
-        )
-    });
-    let output = match result {
-        Ok(s) => s,
-        Err(_) => {
-            ffi_soft_skip("extern strlen test panicked (dlopen failure?)");
-            return;
-        }
-    };
-    assert_eq!(output, "5 5\n");
+        compiler::ErrorCode::HostDloadDenied,
+    );
 }
 
-/// COI-19: `extern` in an imported module still initializes before main.
+/// COI-19: `extern "c"` in an imported module is still a compile error.
 #[test]
-fn extern_in_imported_module_runs() {
-    let result =
-        std::panic::catch_unwind(|| run_file_with_extra_stems("examples/ffi_mod_entry.hy", &["c"]));
-    let output = match result {
-        Ok(s) => s,
-        Err(_) => {
-            ffi_soft_skip("module extern test panicked (dlopen failure?)");
-            return;
-        }
-    };
-    assert_eq!(output, "4\n");
+fn extern_in_imported_module_libc_is_compile_error() {
+    let mut pipeline = Pipeline::new();
+    pipeline.grant_dload_stem("c");
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let full = workspace_root.join("examples/ffi_mod_entry.hy");
+    let result = pipeline.compile_src_from_file(full.to_str().unwrap());
+    assert!(result.is_err(), "extern c must not compile: {:?}", pipeline.messages());
+    assert!(
+        pipeline
+            .messages()
+            .iter()
+            .any(|m| m.code() == Some(compiler::ErrorCode::HostDloadDenied)),
+        "expected HostDloadDenied, got {:?}",
+        pipeline.messages()
+    );
 }
 
 /// COI-106: binding a unary Result/Option call before match must preserve heap payloads.

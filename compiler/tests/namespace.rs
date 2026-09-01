@@ -1242,9 +1242,9 @@ fn main() {
     };
     let output = with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
-        // Host grant: fail-closed `dload` still needs a hashed stem. The pin
-        // is search_paths inheritance, not the consumer allow/lock policy.
         pipeline.grant_dload_file("sum", libsum);
+        pipeline.grant_dload_allow("sum");
+        pipeline.grant_dload_allow("tls");
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
             Err(()) => {

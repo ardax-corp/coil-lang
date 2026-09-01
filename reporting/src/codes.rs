@@ -90,6 +90,18 @@ pub enum ErrorCode {
     InvalidFfiType,
     DeclareArity,
     InvokeArity,
+    /// `env::exec` without `--allow-exec`.
+    HostExecDenied,
+    /// `env::exit` without `--allow-exit`.
+    HostExitDenied,
+    /// `Stream.attach` without `--allow-attach`.
+    HostAttachDenied,
+    /// FFI process-exec symbol without `--allow-ffi-exec`.
+    HostFfiExecDenied,
+    /// `dload` of a const stem that is not granted (or a libc alias).
+    HostDloadDenied,
+    /// `dload` path is not a compile-time string (would leak the runtime allowlist).
+    HostDloadNonConst,
 
     // --- Codegen (E08xx) ---
     UnknownExpression,
@@ -162,6 +174,12 @@ impl ErrorCode {
             Self::InvalidFfiType => "E0403",
             Self::DeclareArity => "E0404",
             Self::InvokeArity => "E0405",
+            Self::HostExecDenied => "E0406",
+            Self::HostExitDenied => "E0407",
+            Self::HostAttachDenied => "E0408",
+            Self::HostFfiExecDenied => "E0409",
+            Self::HostDloadDenied => "E0410",
+            Self::HostDloadNonConst => "E0411",
             Self::UnknownExpression => "E0800",
             Self::CodegenError => "E0801",
             Self::UnboundedRecursion => "E0802",
@@ -233,6 +251,12 @@ impl ErrorCode {
             Self::InvalidFfiType => "invalid FFI type",
             Self::DeclareArity => "declare argument mismatch",
             Self::InvokeArity => "invoke argument mismatch",
+            Self::HostExecDenied => "env::exec is not granted",
+            Self::HostExitDenied => "env::exit is not granted",
+            Self::HostAttachDenied => "Stream.attach is not granted",
+            Self::HostFfiExecDenied => "FFI process-exec is not granted",
+            Self::HostDloadDenied => "dload stem is not granted",
+            Self::HostDloadNonConst => "dload path must be a string literal",
             Self::UnknownExpression => "unknown expression in codegen",
             Self::CodegenError => "codegen error",
             Self::UnboundedRecursion => "unbounded recursion depth",
@@ -312,6 +336,12 @@ mod tests {
             | InvalidFfiType
             | DeclareArity
             | InvokeArity
+            | HostExecDenied
+            | HostExitDenied
+            | HostAttachDenied
+            | HostFfiExecDenied
+            | HostDloadDenied
+            | HostDloadNonConst
             | UnknownExpression
             | CodegenError
             | UnboundedRecursion
@@ -373,6 +403,12 @@ mod tests {
             InvalidFfiType,
             DeclareArity,
             InvokeArity,
+            HostExecDenied,
+            HostExitDenied,
+            HostAttachDenied,
+            HostFfiExecDenied,
+            HostDloadDenied,
+            HostDloadNonConst,
             UnknownExpression,
             CodegenError,
             UnboundedRecursion,

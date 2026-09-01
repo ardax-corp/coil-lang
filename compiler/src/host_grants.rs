@@ -40,6 +40,17 @@ impl HostGrants {
         }
     }
 
+    /// Compile-time `dload` check: libc aliases are never granted.
+    pub fn allows_dload_stem(&self, stem: &str) -> bool {
+        if common::is_libc_alias(stem) {
+            return false;
+        }
+        let key = common::dload_request_stem(stem);
+        self.allow_dload
+            .iter()
+            .any(|s| common::dload_request_stem(s) == key)
+    }
+
     /// Append an FFI lookup directory (not a dload grant).
     pub fn add_ffi_search_path(&mut self, path: impl Into<PathBuf>) {
         let path = path.into();

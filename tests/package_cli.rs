@@ -275,6 +275,8 @@ url = "https://example.com/libsum.so"
             out.to_str().unwrap(),
             "--runner",
             embed.to_str().unwrap(),
+            "--allow-dload",
+            "sum",
         ])
         .current_dir(&tmp)
         .output()

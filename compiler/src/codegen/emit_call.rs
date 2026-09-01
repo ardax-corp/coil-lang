@@ -167,20 +167,6 @@ impl Compiler {
         if let Expression::Identifier(fname) = name.1.as_ref()
             && let Some(registry) = self.checker.host_fn_in_scope(fname)
         {
-            if registry == "env_exec" {
-                self.messages.push(Message::warn(
-                    ErrorCode::GenericTypeError,
-                    "env::exec runs an external program with the given arguments; only use with trusted inputs"
-                        .to_string(),
-                    span.into_range(),
-                ));
-            } else if registry == "env_exit" {
-                self.messages.push(Message::warn(
-                    ErrorCode::GenericTypeError,
-                    "env::exit terminates the process with the given exit code".to_string(),
-                    span.into_range(),
-                ));
-            }
             self.emit_host_native_invoke(registry, args.as_deref().unwrap_or(&[]));
             self.emit_host_option_boundary(ast);
             return bytecode;
