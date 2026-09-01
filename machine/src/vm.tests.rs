@@ -1951,13 +1951,10 @@
         });
         vm.run(&[
             Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
-            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
             Byte::new(Instruction::HostInvoke).with_operand_u32(0),
             Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
-            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
             Byte::new(Instruction::HostInvoke).with_operand_u32(0),
             Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
-            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
             Byte::new(Instruction::HostInvoke).with_operand_u32(0),
             Byte::new(Instruction::HALT),
         ]);
@@ -1976,7 +1973,6 @@
         vm.with_output(TestOutputBuf(Arc::clone(&buf)));
         vm.run(&[
             Byte::new(Instruction::CONST).with_value_u32(99),
-            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
             Byte::new(Instruction::HostInvoke).with_operand_u32(0),
             Byte::new(Instruction::HALT),
         ]);
@@ -2007,7 +2003,6 @@
         });
         vm.run(&[
             Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
-            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
             Byte::new(Instruction::HostInvoke).with_operand_u32(0),
             Byte::new(Instruction::HALT),
         ]);
@@ -2035,7 +2030,6 @@
         let fn_id = vm.register_fn(sig, |_heap, _args| Ok(None));
         vm.run(&[
             Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
-            Byte::new(Instruction::MakeTuple).with_operand_u32(0),
             Byte::new(Instruction::HostInvoke).with_operand_u32(0),
             const_int(42),
             Byte::new(Instruction::HALT),
@@ -2085,8 +2079,7 @@
         vm.push(Value::from(fn_id as i64));
         vm.push(stream);
         let code = [
-            Byte::new(Instruction::MakeTuple).with_operand_u32(1),
-            Byte::new(Instruction::HostInvoke).with_operand_u32(0),
+            Byte::new(Instruction::HostInvoke).with_operand_u32(1),
             Byte::new(Instruction::HALT),
         ];
         let paused = vm.execute(&code, &[], 0);
@@ -4299,7 +4292,7 @@
         assert_eq!(vm.pop().as_int(), 8);
     }
 
-    /// HostInvoke borrows tuple elements as `&[Value]` (no clone); native must
+    /// HostInvoke reads args from the stack window (no MakeTuple); native must
     /// still observe args and may allocate without dangling the slice.
     #[test]
     fn host_invoke_slice_args_readable_during_allocating_native() {
@@ -4316,17 +4309,16 @@
         let fn_id = vm.register_fn(sig, |heap, args| {
             assert_eq!(args.len(), 2);
             let sum = args[0].as_int() + args[1].as_int();
-            // Allocate while the args slice is live — must not free the tuple.
+            // Allocate while the args slice is live — must not free the window.
             let (_obj, _) = heap.alloc(ObjString::from("scratch"), Object::String);
             Ok(Some(Value::from(sum)))
         });
-        // Stack order: fn_id under tuple (HostInvoke pops tuple, then fn_id).
+        // Stack order: fn_id, arg0, arg1 (HostInvoke arity=2).
         vm.run(&[
             Byte::new(Instruction::CONST).with_value_u32(fn_id as u32),
             const_int(20),
             const_int(22),
-            Byte::new(Instruction::MakeTuple).with_operand_u32(2),
-            Byte::new(Instruction::HostInvoke).with_operand_u32(0),
+            Byte::new(Instruction::HostInvoke).with_operand_u32(2),
             Byte::new(Instruction::HALT),
         ]);
         assert_eq!(vm.pop().as_int(), 42);

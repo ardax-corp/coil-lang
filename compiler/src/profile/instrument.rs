@@ -71,7 +71,7 @@ fn site_key(local: u32) -> u32 {
     super::current_fn_index().saturating_mul(SITE_STRIDE) + local
 }
 
-/// Insert stack-neutral `CONST native; CONST packed; MakeTuple 1; HostInvoke; Pop`.
+/// Insert stack-neutral `CONST native; CONST packed; HostInvoke 1; Pop`.
 pub fn insert_pgo_counters(ops: &mut Vec<IlOp>, native_id: i32, map: &InstrumentMap) {
     if ops.is_empty() {
         return;
@@ -103,14 +103,13 @@ pub fn insert_pgo_counters(ops: &mut Vec<IlOp>, native_id: i32, map: &Instrument
     }
 }
 
-fn hit_ops(native_id: i32, packed: i32, loc: DebugLoc) -> [IlOp; 5] {
+fn hit_ops(native_id: i32, packed: i32, loc: DebugLoc) -> [IlOp; 4] {
     [
         IlOp::Const {
             imm: native_id,
             loc,
         },
         IlOp::Const { imm: packed, loc },
-        IlOp::MakeTuple { arity: 1, loc },
         IlOp::HostInvoke { arity: 1, loc },
         IlOp::Pop { loc },
     ]

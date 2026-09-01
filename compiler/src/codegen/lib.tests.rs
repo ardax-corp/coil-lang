@@ -5722,7 +5722,7 @@ fn main() { let _ = (new Cell(7)).get(); }
 
     /// Nested IO HostInvoke (`read(stdin(), buf)`) stages args before pushing
     /// the outer native id, so temp slots from nested calls cannot sit between
-    /// the id and the tuple that HostInvoke consumes.
+    /// the id and the args that HostInvoke consumes.
     #[test]
     fn nested_io_host_invoke_emits_outer_const_before_inner_host_invoke() {
         use common::Instruction;
@@ -6471,16 +6471,12 @@ fn main() {
             .iter()
             .position(|b| matches!(b.bytecode(), Instruction::HostInvoke))
             .expect("expected HostInvoke");
-        // Layout: … CONST meta, MakeTuple, HostInvoke
+        // Layout: … CONST meta, HostInvoke
         assert!(
-            hi >= 2 && matches!(bc[hi - 1].bytecode(), Instruction::MakeTuple),
-            "HostInvoke must follow MakeTuple"
+            hi >= 1 && matches!(bc[hi - 1].bytecode(), Instruction::CONST),
+            "HostInvoke must follow meta CONST"
         );
-        assert!(
-            matches!(bc[hi - 2].bytecode(), Instruction::CONST),
-            "meta CONST must precede MakeTuple"
-        );
-        bc[hi - 2].operand_u32()
+        bc[hi - 1].operand_u32()
     }
 
     /// Approach A: `Matrix` `+` lowers to packed_matrix_zip with zip_kind=Add.
@@ -6651,12 +6647,12 @@ fn main() {
         assert_eq!(ops & (1 << 24), 0, "int elements");
         assert_eq!(ops & (1 << 25), 0, "array result");
         assert_eq!(ops & (1 << 26), 0, "zip (not broadcast)");
-        // native id CONST then MakeTuple(3) then HostInvoke
+        // native id CONST then args then HostInvoke(3)
         let hi = bc
             .iter()
             .position(|b| matches!(b.bytecode(), Instruction::HostInvoke))
             .unwrap();
-        assert_eq!(bc[hi - 1].operand_u32(), 3, "binary arity MakeTuple(3)");
+        assert_eq!(bc[hi].operand_u32(), 3, "binary arity HostInvoke(3)");
     }
 
     /// N < 8 stays on scalar unroll — packed path must not fire.
@@ -6740,7 +6736,7 @@ fn main() {
             .iter()
             .position(|b| matches!(b.bytecode(), Instruction::HostInvoke))
             .unwrap();
-        assert_eq!(bc_neg[hi - 1].operand_u32(), 2, "unary MakeTuple(2)");
+        assert_eq!(bc_neg[hi].operand_u32(), 2, "unary HostInvoke(2)");
     }
 
     #[test]

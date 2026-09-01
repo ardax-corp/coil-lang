@@ -22,28 +22,92 @@ fn find_object(heap: &Heap, addr: u64) -> Option<Object> {
     heap.find_object_by_addr(addr)
 }
 
-fn aggregate_elements(heap: &Heap, v: Value) -> Option<Vec<Value>> {
-    match find_object(heap, v.raw() as u64) {
-        Some(Object::Array(gc)) => Some(gc.as_ref().elements.clone()),
-        Some(Object::Tuple(gc)) => Some(gc.as_ref().elements.clone()),
+fn elements_of(obj: &Object) -> Option<&[Value]> {
+    match obj {
+        Object::Array(gc) => Some(gc.as_ref().elements.as_slice()),
+        Object::Tuple(gc) => Some(gc.as_ref().elements.as_slice()),
         _ => None,
     }
 }
 
-fn extract_matrix_row_major(heap: &Heap, v: Value, m: usize, n: usize) -> Option<Vec<Value>> {
-    let rows = aggregate_elements(heap, v)?;
+fn pack_f64_1d(heap: &Heap, v: Value, n: usize, out: &mut Vec<f64>) -> bool {
+    let Some(obj) = find_object(heap, v.raw() as u64) else {
+        return false;
+    };
+    let Some(elems) = elements_of(&obj) else {
+        return false;
+    };
+    let n = n.min(elems.len());
+    out.clear();
+    out.extend(elems[..n].iter().map(Value::as_float));
+    true
+}
+
+fn pack_i64_1d(heap: &Heap, v: Value, n: usize, out: &mut Vec<i64>) -> bool {
+    let Some(obj) = find_object(heap, v.raw() as u64) else {
+        return false;
+    };
+    let Some(elems) = elements_of(&obj) else {
+        return false;
+    };
+    let n = n.min(elems.len());
+    out.clear();
+    out.extend(elems[..n].iter().map(Value::as_int));
+    true
+}
+
+fn pack_f64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<f64>) -> bool {
+    let Some(outer) = find_object(heap, v.raw() as u64) else {
+        return false;
+    };
+    let Some(rows) = elements_of(&outer) else {
+        return false;
+    };
     if rows.len() < m {
-        return None;
+        return false;
     }
-    let mut out = Vec::with_capacity(m.saturating_mul(n));
+    out.clear();
+    out.reserve(m.saturating_mul(n));
     for i in 0..m {
-        let row = aggregate_elements(heap, rows[i])?;
-        if row.len() < n {
-            return None;
+        let Some(row_obj) = find_object(heap, rows[i].raw() as u64) else {
+            return false;
+        };
+        let Some(cells) = elements_of(&row_obj) else {
+            return false;
+        };
+        if cells.len() < n {
+            return false;
         }
-        out.extend_from_slice(&row[..n]);
+        out.extend(cells[..n].iter().map(Value::as_float));
     }
-    Some(out)
+    true
+}
+
+fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>) -> bool {
+    let Some(outer) = find_object(heap, v.raw() as u64) else {
+        return false;
+    };
+    let Some(rows) = elements_of(&outer) else {
+        return false;
+    };
+    if rows.len() < m {
+        return false;
+    }
+    out.clear();
+    out.reserve(m.saturating_mul(n));
+    for i in 0..m {
+        let Some(row_obj) = find_object(heap, rows[i].raw() as u64) else {
+            return false;
+        };
+        let Some(cells) = elements_of(&row_obj) else {
+            return false;
+        };
+        if cells.len() < n {
+            return false;
+        }
+        out.extend(cells[..n].iter().map(Value::as_int));
+    }
+    true
 }
 
 fn alloc_aggregate(heap: &mut Heap, values: Vec<Value>, is_tuple: bool) -> Value {
@@ -74,14 +138,6 @@ fn alloc_nested_matrix(
     alloc_aggregate(heap, rows, outer_is_tuple)
 }
 
-fn values_to_f64(cells: &[Value]) -> Vec<f64> {
-    cells.iter().map(|v| v.as_float()).collect()
-}
-
-fn values_to_i64(cells: &[Value]) -> Vec<i64> {
-    cells.iter().map(|v| v.as_int()).collect()
-}
-
 fn f64_to_values(cells: &[f64]) -> Vec<Value> {
     cells.iter().copied().map(Value::from).collect()
 }
@@ -100,17 +156,32 @@ pub fn packed_dot(heap: &mut Heap, args: &[Value]) -> Value {
     let ops = args[2].as_int() as u32;
     let len = (ops & 0xFFFF) as usize;
     let is_float = (ops & (1 << 16)) != 0;
-    let av = aggregate_elements(heap, a).unwrap_or_default();
-    let bv = aggregate_elements(heap, b).unwrap_or_default();
-    let n = len.min(av.len()).min(bv.len());
     if is_float {
-        let a = values_to_f64(&av[..n]);
-        let b = values_to_f64(&bv[..n]);
-        Value::from(coil_simd::dot_f64(&a, &b))
+        let mut av = Vec::new();
+        let mut bv = Vec::new();
+        if !pack_f64_1d(heap, a, len, &mut av) {
+            av.clear();
+            av.resize(len, 0.0);
+        }
+        if !pack_f64_1d(heap, b, len, &mut bv) {
+            bv.clear();
+            bv.resize(len, 0.0);
+        }
+        let n = len.min(av.len()).min(bv.len());
+        Value::from(coil_simd::dot_f64(&av[..n], &bv[..n]))
     } else {
-        let a = values_to_i64(&av[..n]);
-        let b = values_to_i64(&bv[..n]);
-        Value::from(coil_simd::dot_i64(&a, &b))
+        let mut av = Vec::new();
+        let mut bv = Vec::new();
+        if !pack_i64_1d(heap, a, len, &mut av) {
+            av.clear();
+            av.resize(len, 0);
+        }
+        if !pack_i64_1d(heap, b, len, &mut bv) {
+            bv.clear();
+            bv.resize(len, 0);
+        }
+        let n = len.min(av.len()).min(bv.len());
+        Value::from(coil_simd::dot_i64(&av[..n], &bv[..n]))
     }
 }
 
@@ -128,21 +199,33 @@ pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Value {
     let is_float = (ops & (1 << 24)) != 0;
     let outer_is_tuple = (ops & (1 << 25)) != 0;
     let row_is_tuple = (ops & (1 << 26)) != 0;
-    let a_cells = extract_matrix_row_major(heap, a, m, k)
-        .unwrap_or_else(|| vec![Value::default(); m.saturating_mul(k)]);
-    let b_cells = extract_matrix_row_major(heap, b, k, n)
-        .unwrap_or_else(|| vec![Value::default(); k.saturating_mul(n)]);
     let c = if is_float {
-        let a = values_to_f64(&a_cells);
-        let b = values_to_f64(&b_cells);
+        let mut a_cells = Vec::new();
+        let mut b_cells = Vec::new();
+        if !pack_f64_matrix(heap, a, m, k, &mut a_cells) {
+            a_cells.clear();
+            a_cells.resize(m.saturating_mul(k), 0.0);
+        }
+        if !pack_f64_matrix(heap, b, k, n, &mut b_cells) {
+            b_cells.clear();
+            b_cells.resize(k.saturating_mul(n), 0.0);
+        }
         let mut c = vec![0.0; m.saturating_mul(n)];
-        coil_simd::matmul_f64(&a, &b, &mut c, m, k, n);
+        coil_simd::matmul_f64(&a_cells, &b_cells, &mut c, m, k, n);
         f64_to_values(&c)
     } else {
-        let a = values_to_i64(&a_cells);
-        let b = values_to_i64(&b_cells);
+        let mut a_cells = Vec::new();
+        let mut b_cells = Vec::new();
+        if !pack_i64_matrix(heap, a, m, k, &mut a_cells) {
+            a_cells.clear();
+            a_cells.resize(m.saturating_mul(k), 0);
+        }
+        if !pack_i64_matrix(heap, b, k, n, &mut b_cells) {
+            b_cells.clear();
+            b_cells.resize(k.saturating_mul(n), 0);
+        }
         let mut c = vec![0_i64; m.saturating_mul(n)];
-        coil_simd::matmul_i64(&a, &b, &mut c, m, k, n);
+        coil_simd::matmul_i64(&a_cells, &b_cells, &mut c, m, k, n);
         i64_to_values(&c)
     };
     alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
@@ -162,33 +245,46 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
     let is_float = (ops & (1 << 24)) != 0;
     let outer_is_tuple = (ops & (1 << 25)) != 0;
     let row_is_tuple = (ops & (1 << 26)) != 0;
-    let a_cells = extract_matrix_row_major(heap, a, m, n)
-        .unwrap_or_else(|| vec![Value::default(); m.saturating_mul(n)]);
-    let b_cells = extract_matrix_row_major(heap, b, m, n)
-        .unwrap_or_else(|| vec![Value::default(); m.saturating_mul(n)]);
     let len = m.saturating_mul(n);
     let c = if is_float {
-        let a = values_to_f64(&a_cells[..len.min(a_cells.len())]);
-        let b = values_to_f64(&b_cells[..len.min(b_cells.len())]);
-        let mut out = vec![0.0; a.len().min(b.len())];
-        if zip_kind == 1 {
-            coil_simd::zip_sub_f64(&a, &b, &mut out);
-        } else {
-            coil_simd::zip_add_f64(&a, &b, &mut out);
+        let mut a_cells = Vec::new();
+        let mut b_cells = Vec::new();
+        if !pack_f64_matrix(heap, a, m, n, &mut a_cells) {
+            a_cells.clear();
+            a_cells.resize(len, 0.0);
         }
-        // Pad if extract was short (defensive zero fill already in a_cells path).
+        if !pack_f64_matrix(heap, b, m, n, &mut b_cells) {
+            b_cells.clear();
+            b_cells.resize(len, 0.0);
+        }
+        let nlen = a_cells.len().min(b_cells.len());
+        let mut out = vec![0.0; nlen];
+        if zip_kind == 1 {
+            coil_simd::zip_sub_f64(&a_cells[..nlen], &b_cells[..nlen], &mut out);
+        } else {
+            coil_simd::zip_add_f64(&a_cells[..nlen], &b_cells[..nlen], &mut out);
+        }
         while out.len() < len {
             out.push(0.0);
         }
         f64_to_values(&out[..len])
     } else {
-        let a = values_to_i64(&a_cells[..len.min(a_cells.len())]);
-        let b = values_to_i64(&b_cells[..len.min(b_cells.len())]);
-        let mut out = vec![0_i64; a.len().min(b.len())];
+        let mut a_cells = Vec::new();
+        let mut b_cells = Vec::new();
+        if !pack_i64_matrix(heap, a, m, n, &mut a_cells) {
+            a_cells.clear();
+            a_cells.resize(len, 0);
+        }
+        if !pack_i64_matrix(heap, b, m, n, &mut b_cells) {
+            b_cells.clear();
+            b_cells.resize(len, 0);
+        }
+        let nlen = a_cells.len().min(b_cells.len());
+        let mut out = vec![0_i64; nlen];
         if zip_kind == 1 {
-            coil_simd::zip_sub_i64(&a, &b, &mut out);
+            coil_simd::zip_sub_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out);
         } else {
-            coil_simd::zip_add_i64(&a, &b, &mut out);
+            coil_simd::zip_add_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out);
         }
         while out.len() < len {
             out.push(0);
@@ -210,17 +306,24 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Value {
     let is_float = (ops & (1 << 16)) != 0;
     let outer_is_tuple = (ops & (1 << 17)) != 0;
     let row_is_tuple = (ops & (1 << 18)) != 0;
-    let a_cells = extract_matrix_row_major(heap, a, m, n)
-        .unwrap_or_else(|| vec![Value::default(); m.saturating_mul(n)]);
+    let len = m.saturating_mul(n);
     let c = if is_float {
-        let a = values_to_f64(&a_cells);
-        let mut out = vec![0.0; a.len()];
-        coil_simd::zip_neg_f64(&a, &mut out);
+        let mut a_cells = Vec::new();
+        if !pack_f64_matrix(heap, a, m, n, &mut a_cells) {
+            a_cells.clear();
+            a_cells.resize(len, 0.0);
+        }
+        let mut out = vec![0.0; a_cells.len()];
+        coil_simd::zip_neg_f64(&a_cells, &mut out);
         f64_to_values(&out)
     } else {
-        let a = values_to_i64(&a_cells);
-        let mut out = vec![0_i64; a.len()];
-        coil_simd::zip_neg_i64(&a, &mut out);
+        let mut a_cells = Vec::new();
+        if !pack_i64_matrix(heap, a, m, n, &mut a_cells) {
+            a_cells.clear();
+            a_cells.resize(len, 0);
+        }
+        let mut out = vec![0_i64; a_cells.len()];
+        coil_simd::zip_neg_i64(&a_cells, &mut out);
         i64_to_values(&out)
     };
     alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
@@ -249,21 +352,28 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
 
     if op == 4 {
         // Unary neg: args = [vec, meta]
-        let cells = aggregate_elements(heap, args[0])
-            .unwrap_or_else(|| vec![Value::default(); len]);
-        let n = len.min(cells.len());
         let out = if is_float {
-            let a = values_to_f64(&cells[..n]);
-            let mut o = vec![0.0; a.len()];
-            coil_simd::zip_neg_f64(&a, &mut o);
+            let mut a = Vec::new();
+            if !pack_f64_1d(heap, args[0], len, &mut a) {
+                a.clear();
+                a.resize(len, 0.0);
+            }
+            let n = len.min(a.len());
+            let mut o = vec![0.0; n];
+            coil_simd::zip_neg_f64(&a[..n], &mut o);
             while o.len() < len {
                 o.push(0.0);
             }
             f64_to_values(&o[..len])
         } else {
-            let a = values_to_i64(&cells[..n]);
-            let mut o = vec![0_i64; a.len()];
-            coil_simd::zip_neg_i64(&a, &mut o);
+            let mut a = Vec::new();
+            if !pack_i64_1d(heap, args[0], len, &mut a) {
+                a.clear();
+                a.resize(len, 0);
+            }
+            let n = len.min(a.len());
+            let mut o = vec![0_i64; n];
+            coil_simd::zip_neg_i64(&a[..n], &mut o);
             while o.len() < len {
                 o.push(0);
             }
@@ -284,26 +394,29 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
         } else {
             (lhs, rhs)
         };
-        let cells = aggregate_elements(heap, vec_v)
-            .unwrap_or_else(|| vec![Value::default(); len]);
-        let n = len.min(cells.len());
         let out = if is_float {
-            let a = values_to_f64(&cells[..n]);
+            let mut a = Vec::new();
+            if !pack_f64_1d(heap, vec_v, len, &mut a) {
+                a.clear();
+                a.resize(len, 0.0);
+            }
+            let n = len.min(a.len());
+            let a = &a[..n];
             let s = sc_v.as_float();
             let mut o = vec![0.0; a.len()];
             match op {
-                2 if !scalar_left => coil_simd::scale_f64(&a, s, &mut o),
-                2 => coil_simd::scale_f64(&a, s, &mut o), // mul commutative
+                2 if !scalar_left => coil_simd::scale_f64(a, s, &mut o),
+                2 => coil_simd::scale_f64(a, s, &mut o), // mul commutative
                 _ => {
                     let b = vec![s; a.len()];
                     match op {
-                        0 if !scalar_left => coil_simd::zip_add_f64(&a, &b, &mut o),
-                        0 => coil_simd::zip_add_f64(&b, &a, &mut o),
-                        1 if !scalar_left => coil_simd::zip_sub_f64(&a, &b, &mut o),
-                        1 => coil_simd::zip_sub_f64(&b, &a, &mut o),
-                        3 if !scalar_left => coil_simd::zip_div_f64(&a, &b, &mut o),
-                        3 => coil_simd::zip_div_f64(&b, &a, &mut o),
-                        _ => coil_simd::zip_add_f64(&a, &b, &mut o),
+                        0 if !scalar_left => coil_simd::zip_add_f64(a, &b, &mut o),
+                        0 => coil_simd::zip_add_f64(&b, a, &mut o),
+                        1 if !scalar_left => coil_simd::zip_sub_f64(a, &b, &mut o),
+                        1 => coil_simd::zip_sub_f64(&b, a, &mut o),
+                        3 if !scalar_left => coil_simd::zip_div_f64(a, &b, &mut o),
+                        3 => coil_simd::zip_div_f64(&b, a, &mut o),
+                        _ => coil_simd::zip_add_f64(a, &b, &mut o),
                     }
                 }
             }
@@ -312,17 +425,23 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
             }
             f64_to_values(&o[..len])
         } else {
-            let a = values_to_i64(&cells[..n]);
+            let mut a = Vec::new();
+            if !pack_i64_1d(heap, vec_v, len, &mut a) {
+                a.clear();
+                a.resize(len, 0);
+            }
+            let n = len.min(a.len());
+            let a = &a[..n];
             let s = sc_v.as_int();
             let mut o = vec![0_i64; a.len()];
             match op {
-                2 => coil_simd::scale_i64(&a, s, &mut o),
+                2 => coil_simd::scale_i64(a, s, &mut o),
                 _ => {
                     let b = vec![s; a.len()];
                     match op {
-                        0 => coil_simd::zip_add_i64(&a, &b, &mut o),
-                        1 if !scalar_left => coil_simd::zip_sub_i64(&a, &b, &mut o),
-                        1 => coil_simd::zip_sub_i64(&b, &a, &mut o),
+                        0 => coil_simd::zip_add_i64(a, &b, &mut o),
+                        1 if !scalar_left => coil_simd::zip_sub_i64(a, &b, &mut o),
+                        1 => coil_simd::zip_sub_i64(&b, a, &mut o),
                         3 if !scalar_left => {
                             for i in 0..a.len() {
                                 o[i] = a[i] / b[i];
@@ -333,7 +452,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
                                 o[i] = b[i] / a[i];
                             }
                         }
-                        _ => coil_simd::zip_add_i64(&a, &b, &mut o),
+                        _ => coil_simd::zip_add_i64(a, &b, &mut o),
                     }
                 }
             }
@@ -345,36 +464,51 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
         return alloc_aggregate(heap, out, is_tuple);
     }
 
-    let av = aggregate_elements(heap, lhs).unwrap_or_else(|| vec![Value::default(); len]);
-    let bv = aggregate_elements(heap, rhs).unwrap_or_else(|| vec![Value::default(); len]);
-    let n = len.min(av.len()).min(bv.len());
     let out = if is_float {
-        let a = values_to_f64(&av[..n]);
-        let b = values_to_f64(&bv[..n]);
-        let mut o = vec![0.0; a.len().min(b.len())];
+        let mut av = Vec::new();
+        let mut bv = Vec::new();
+        if !pack_f64_1d(heap, lhs, len, &mut av) {
+            av.clear();
+            av.resize(len, 0.0);
+        }
+        if !pack_f64_1d(heap, rhs, len, &mut bv) {
+            bv.clear();
+            bv.resize(len, 0.0);
+        }
+        let n = len.min(av.len()).min(bv.len());
+        let mut o = vec![0.0; n];
         match op {
-            1 => coil_simd::zip_sub_f64(&a, &b, &mut o),
-            2 => coil_simd::zip_mul_f64(&a, &b, &mut o),
-            3 => coil_simd::zip_div_f64(&a, &b, &mut o),
-            _ => coil_simd::zip_add_f64(&a, &b, &mut o),
+            1 => coil_simd::zip_sub_f64(&av[..n], &bv[..n], &mut o),
+            2 => coil_simd::zip_mul_f64(&av[..n], &bv[..n], &mut o),
+            3 => coil_simd::zip_div_f64(&av[..n], &bv[..n], &mut o),
+            _ => coil_simd::zip_add_f64(&av[..n], &bv[..n], &mut o),
         }
         while o.len() < len {
             o.push(0.0);
         }
         f64_to_values(&o[..len])
     } else {
-        let a = values_to_i64(&av[..n]);
-        let b = values_to_i64(&bv[..n]);
-        let mut o = vec![0_i64; a.len().min(b.len())];
+        let mut av = Vec::new();
+        let mut bv = Vec::new();
+        if !pack_i64_1d(heap, lhs, len, &mut av) {
+            av.clear();
+            av.resize(len, 0);
+        }
+        if !pack_i64_1d(heap, rhs, len, &mut bv) {
+            bv.clear();
+            bv.resize(len, 0);
+        }
+        let n = len.min(av.len()).min(bv.len());
+        let mut o = vec![0_i64; n];
         match op {
-            1 => coil_simd::zip_sub_i64(&a, &b, &mut o),
-            2 => coil_simd::zip_mul_i64(&a, &b, &mut o),
+            1 => coil_simd::zip_sub_i64(&av[..n], &bv[..n], &mut o),
+            2 => coil_simd::zip_mul_i64(&av[..n], &bv[..n], &mut o),
             3 => {
                 for i in 0..o.len() {
-                    o[i] = a[i] / b[i];
+                    o[i] = av[i] / bv[i];
                 }
             }
-            _ => coil_simd::zip_add_i64(&a, &b, &mut o),
+            _ => coil_simd::zip_add_i64(&av[..n], &bv[..n], &mut o),
         }
         while o.len() < len {
             o.push(0);
@@ -416,6 +550,11 @@ mod tests {
         let r0 = alloc_array_f(heap, vec![rows[0][0], rows[0][1]]);
         let r1 = alloc_array_f(heap, vec![rows[1][0], rows[1][1]]);
         alloc_aggregate(heap, vec![r0, r1], false)
+    }
+
+    fn aggregate_elements(heap: &Heap, v: Value) -> Option<Vec<Value>> {
+        let obj = find_object(heap, v.raw() as u64)?;
+        elements_of(&obj).map(|e| e.to_vec())
     }
 
     #[test]

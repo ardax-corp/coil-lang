@@ -133,8 +133,8 @@ impl Natives {
         self.by_name.get(name).cloned()
     }
 
-    pub fn get_by_id(&self, id: usize) -> Option<Arc<dyn NativeFn>> {
-        self.by_id.get(id).cloned()
+    pub fn get_by_id(&self, id: usize) -> Option<&dyn NativeFn> {
+        self.by_id.get(id).map(|n| n.as_ref())
     }
 
     pub fn len(&self) -> usize {

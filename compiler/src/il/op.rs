@@ -202,7 +202,7 @@ pub enum IlOp {
     SetField {
         loc: DebugLoc,
     },
-    /// Host native call — pop fn id + args tuple; push result (delta −1).
+    /// Host native call — pop fn id + `arity` args; push result (delta −arity).
     HostInvoke {
         arity: u32,
         loc: DebugLoc,

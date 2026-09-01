@@ -71,8 +71,8 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
         // GetField: pop target+name, push value (−1). SetField: pop value+target+name, push value (−2).
         IlOp::GetField { .. } => Some(-1),
         IlOp::SetField { .. } => Some(-2),
-        // HostInvoke: pop fn_id + args tuple, push result.
-        IlOp::HostInvoke { .. } => Some(-1),
+        // HostInvoke: pop fn_id + arity args, push result (delta −arity).
+        IlOp::HostInvoke { arity, .. } => Some(-(*arity as i32)),
         IlOp::Print { .. } => Some(-1),
         IlOp::Bin { .. } => Some(-1),
         // Slot forms push a computed value without consuming eval-stack args.
@@ -211,7 +211,8 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
             Some(1 - arity as i32)
         }
         Instruction::TailCall => None,
-        Instruction::HostInvoke | Instruction::HostInvokeNiche => Some(-1),
+        Instruction::HostInvoke => Some(-((byte.operand_u32() & 0xFFFF) as i32)),
+        Instruction::HostInvokeNiche => Some(-1),
         Instruction::FloatChainStore => Some(0),
         Instruction::PRINT | Instruction::GetField => Some(-1),
         Instruction::SetField => Some(-2),
@@ -682,7 +683,7 @@ mod tests {
                 arity: 3,
                 loc: loc(),
             }),
-            Some(-1)
+            Some(-3)
         );
         assert_eq!(stack_delta(&IlOp::Print { loc: loc() }), Some(-1));
         assert_eq!(

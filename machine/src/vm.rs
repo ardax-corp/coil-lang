@@ -3082,43 +3082,54 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::HostInvoke => {
-                    let raw = opcode.operand_u32();
-                    let _arity = (raw & 0xFFFF) as usize;
-                    let tuple_val = self.stack.pop();
-                    let tuple_addr = tuple_val.raw() as u64;
-                    let fn_id_val = self.stack.pop();
-                    let fn_id = fn_id_val.as_int() as usize;
-                    let args: &[Value] = match Self::find_object_by_addr(&self.heap, tuple_addr) {
-                        Some(crate::memory::Object::Tuple(gc)) => {
-                            let elems = &gc.as_ref().elements;
-                            // SAFETY: `tuple_val` keeps the tuple alive until invoke
-                            // returns; VM GC runs only after the native finishes.
-                            unsafe { std::slice::from_raw_parts(elems.as_ptr(), elems.len()) }
-                        }
-                        _ => &[],
-                    };
+                    let arity = (opcode.operand_u32() & 0xFFFF) as usize;
+                    let tell = self.stack.tell();
+                    let consume = arity + 1;
+                    promise!(tell >= consume);
+                    let fn_id = self.stack.top_window(consume)[0].as_int() as usize;
                     // Packed LA (and other host natives) allocate via
                     // `heap.alloc` inside the closure; count those so GC
                     // pressure still fires when HostInvoke is the only
                     // allocator on a hot path.
                     let live_before = self.heap.live_object_count();
-                    match self.natives.get_by_id(fn_id) {
-                        Some(native) => match native.host_op() {
-                            crate::HostOp::Collect => {
-                                let before = self.heap.size();
-                                self.gc_collect();
-                                let freed = before.saturating_sub(self.heap.size());
-                                self.stack.push(Value::from(freed as i64));
-                            }
-                            crate::HostOp::RegisterFinalizer => {
-                                let type_id = args.first().map(|v| v.as_int() as u32).unwrap_or(0);
-                                let pc = args.get(1).map(|v| v.as_int() as u32).unwrap_or(0);
-                                self.register_finalizer(type_id, pc);
-                                self.stack.push(Value::from(0i64));
-                            }
-                            crate::HostOp::Ordinary => match native.invoke(&mut self.heap, args) {
-                                Ok(Some(v)) => self.stack.push(v),
+                    let host_op = match self.natives.get_by_id(fn_id) {
+                        Some(native) => native.host_op(),
+                        None => {
+                            return self.runtime_panic(
+                                &format!("HostInvoke: unknown native id {fn_id}"),
+                                ip.saturating_sub(1),
+                            );
+                        }
+                    };
+                    match host_op {
+                        crate::HostOp::Collect => {
+                            self.stack.seek(tell - consume);
+                            let before = self.heap.size();
+                            self.gc_collect();
+                            let freed = before.saturating_sub(self.heap.size());
+                            self.stack.push(Value::from(freed as i64));
+                        }
+                        crate::HostOp::RegisterFinalizer => {
+                            let args = self.stack.top_window(consume);
+                            let type_id = args.get(1).map(|v| v.as_int() as u32).unwrap_or(0);
+                            let pc = args.get(2).map(|v| v.as_int() as u32).unwrap_or(0);
+                            self.register_finalizer(type_id, pc);
+                            self.stack.seek(tell - consume);
+                            self.stack.push(Value::from(0i64));
+                        }
+                        crate::HostOp::Ordinary => {
+                            let native = self
+                                .natives
+                                .get_by_id(fn_id)
+                                .expect("id checked above");
+                            let args = &self.stack.top_window(consume)[1..];
+                            match native.invoke(&mut self.heap, args) {
+                                Ok(Some(v)) => {
+                                    self.stack.seek(tell - consume);
+                                    self.stack.push(v);
+                                }
                                 Ok(None) => {
+                                    self.stack.seek(tell - consume);
                                     if let Some(req) = crate::io::take_pending_io_park() {
                                         if !self.resume_stack.is_empty() {
                                             // Inside a coroutine: register for batch
@@ -3141,21 +3152,13 @@ impl<const S: usize> Machine<S> {
                                     }
                                 }
                                 Err(e) => {
+                                    let name = native.name();
                                     return self.runtime_panic(
-                                        &format!(
-                                            "HostInvoke failed for `{}`: {e}",
-                                            native.name()
-                                        ),
+                                        &format!("HostInvoke failed for `{name}`: {e}"),
                                         ip.saturating_sub(1),
                                     );
                                 }
-                            },
-                        },
-                        None => {
-                            return self.runtime_panic(
-                                &format!("HostInvoke: unknown native id {fn_id}"),
-                                ip.saturating_sub(1),
-                            );
+                            }
                         }
                     }
                     let allocated = self.heap.live_object_count().saturating_sub(live_before);
