@@ -8,6 +8,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Array pins](array-pin.md) | Shipped `ArrayPin` / `IndexPin*` handle (COI-198) |
+| [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [SIMD](simd.md) | `coil-simd` — stable `std::arch` kernels for packed LA |
 | [Auto-par](auto-par.md) | Purity analysis + capped fork-join for recursive binops |
 | [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **120**/`stream_attach`, **121**/`stream_park` |
