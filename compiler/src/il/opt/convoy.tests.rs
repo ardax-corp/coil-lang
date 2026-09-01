@@ -1782,6 +1782,7 @@
                 mem_fwd: true,
                 copy_prop: true,
                 slot_promote: false,
+                tos_carry: false,
                 canon: false,
                 cast_spill: false,
                 algebraic: false,

@@ -28,6 +28,7 @@ fn isolated() -> OptimizeOptions {
         mem_fwd: false,
         copy_prop: false,
         slot_promote: false,
+        tos_carry: false,
         canon: false,
         cast_spill: false,
         algebraic: false,

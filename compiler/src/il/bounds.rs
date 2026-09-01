@@ -12,6 +12,7 @@ use std::collections::{HashMap, HashSet};
 
 use common::{Byte, Instruction};
 
+use super::analysis::{NaturalLoop, find_natural_loops, il_function_start};
 use super::op::{IlJumpKind, IlOp, Label};
 use super::pure_call::PureCallCtx;
 use super::sp;
@@ -108,66 +109,6 @@ pub fn loop_bounds_with(ops: &mut Vec<IlOp>, purity: Option<&PureCallCtx>) {
             .index_pin_rewrites
             .saturating_add(stats.index_pin_rewrites);
     });
-}
-
-#[derive(Clone, Debug)]
-struct NaturalLoop {
-    header: usize,
-    latch: usize,
-    header_label: Label,
-}
-
-impl NaturalLoop {
-    fn body_start(&self) -> usize {
-        self.header + 1
-    }
-}
-
-/// IL is module-flat; labels reuse per function. Scope lookups to the function
-/// containing `idx` (ops since the previous `Return`).
-fn il_function_start(ops: &[IlOp], idx: usize) -> usize {
-    for i in (0..idx).rev() {
-        if matches!(ops[i], IlOp::Return { .. }) {
-            return i + 1;
-        }
-    }
-    0
-}
-
-fn resolve_label_before(ops: &[IlOp], before: usize, target: Label) -> Option<usize> {
-    let start = il_function_start(ops, before);
-    for i in (start..before).rev() {
-        if matches!(&ops[i], IlOp::Label(l) if *l == target) {
-            return Some(i);
-        }
-    }
-    None
-}
-
-fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
-    let mut out = Vec::new();
-    for (i, op) in ops.iter().enumerate() {
-        let IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target,
-            ..
-        } = op
-        else {
-            continue;
-        };
-        let Some(h) = resolve_label_before(ops, i, *target) else {
-            continue;
-        };
-        if h >= i {
-            continue;
-        }
-        out.push(NaturalLoop {
-            header: h,
-            latch: i,
-            header_label: *target,
-        });
-    }
-    out
 }
 
 fn is_array_len(op: &IlOp) -> bool {

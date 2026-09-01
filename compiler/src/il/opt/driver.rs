@@ -230,6 +230,11 @@ fn apply_slot_promote(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCt
     0
 }
 
+fn apply_tos_carry(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
+    super::tos_carry::tos_carry(ops, ctx.entry_sp);
+    0
+}
+
 fn apply_clone_shared_return(
     ops: &mut Vec<IlOp>,
     _: &OptimizeOptions,
@@ -469,6 +474,17 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: apply_slot_promote,
     },
     PassSpec {
+        name: "tos_carry",
+        phase: Phase::Decision,
+        kind: PassKind::Generic,
+        floor: OptFloor::Standard,
+        omit_from_size: false,
+        seed_entry_tell_after: false,
+        gate: |o| o.tos_carry,
+        set_flag: |o| o.tos_carry = true,
+        apply: apply_tos_carry,
+    },
+    PassSpec {
         name: "clone_shared_return",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -597,6 +613,7 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "invariant_store_elim",
     "escape_analysis",
     "slot_promote",
+    "tos_carry",
     "clone_shared_return",
     "return_convoy",
     "bin_join_convoy",
@@ -647,6 +664,7 @@ mod tests {
                 "invariant_store_elim",
                 "escape_analysis",
                 "slot_promote",
+                "tos_carry",
                 "clone_shared_return",
                 "return_convoy",
                 "bin_join_convoy",

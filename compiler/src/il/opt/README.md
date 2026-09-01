@@ -67,11 +67,11 @@ decision opts + `cfg_gvn`.
 **Decision** (`decision_once_at`), in order:
 
 10. `licm` → 11. `loop_bounds` → 12. `loop_unroll` → 13. `invariant_store_elim`
-→ 14. `ssa_gvn` → 15. `escape_analysis` → 16. `slot_promote` (+ `dead_store`)
+→ 14. `escape_analysis` → 15. `slot_promote` (+ `dead_store`) → 16. `tos_carry`
 → 17. `clone_shared_return` → 18. `return_convoy` → 19. `bin_join_convoy` →
 20. `multi_op_join_convoy` → 21. `invert_guard_branch` →
 22. `branch_optimization` → 23. `block_reordering` → 24. `seek_back_edge` →
-25. `slot_promote_tell`
+25. `slot_promote_tell` → 26. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
 opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
@@ -355,7 +355,28 @@ Uses **`tell`**. Cleanup `dead_store_at` runs immediately after.
   `Byte` between copy-shuffle ops; overlapping live ranges (mandelbrot
   `tr`/`zr`); multi-pred φ merges; address-taken / aggregate promotion.
 - **Tests:** `opt/slot_promote.rs` `forwards_alias_load_through_store_load`,
-  `rewrites_bin_slot_through_alias`, `same_def_join_forwards_alias_across_diamond`.
+  `rewrites_bin_slot_through_alias`,   `same_def_join_forwards_alias_across_diamond`.
+
+## `tos_carry`
+
+**Flag:** `tos_carry` (default on at Standard). **Fn:** `tos_carry::tos_carry`.
+Uses **`sp`**. Runs after `slot_promote` coalescing.
+
+- **Input:** Known-SP `producer; STORE t` then a straight-line region, then
+  `LOAD t; STORE s` (`t != s`). The region may bury TOS under `Const` /
+  `ConstPool` / `Load` / `BinSlot*` pushes and recover it with stack `Bin` and
+  `STORE dest` (`extra` depth must be 0 at the copy). Residual `Byte`
+  `BinSlotSlotStore` is TOS-neutral when `extra == 0`.
+- **Output:** Drops `STORE t` and `LOAD t` so the producer value stays on TOS
+  under the region and the final `STORE s` pops it. Height-neutral
+  (remove −1 store and +1 load). No new opcode.
+- **Refusals:** Empty region; labels / jumps / `CALL` / host / `Dup` / `Pop` /
+  `Index*` / unknown `Byte`; `LOAD t` or `STORE t` in the region; `BinSlot*`
+  that reads `t`; `STORE s` in the region; unknown SP at the early store;
+  `t` still live after `STORE s`.
+- **Tests:** `opt/tos_carry.tests.rs` `delays_store_across_bin_slot_then_drops_reload`,
+  `delays_store_across_const_and_stack_bin`,
+  `refuses_load_of_carried_slot_in_region`, `refuses_control_flow_in_region`.
 
 ## `clone_shared_return`
 
