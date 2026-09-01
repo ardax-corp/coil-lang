@@ -86,6 +86,7 @@ impl Pass for PassSpec {
 }
 
 /// Names of table rows whose flag is on, in table order.
+#[cfg(test)]
 pub fn enabled_pass_names(opts: &OptimizeOptions) -> Vec<&'static str> {
     PRODUCTION_PASSES
         .iter()
@@ -597,6 +598,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
 ];
 
 /// D1 README production order (cleanup then decision).
+#[cfg(test)]
 pub const D1_PASS_ORDER: &[&str] = &[
     "jump_thread",
     "dead_block",

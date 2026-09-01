@@ -1771,10 +1771,10 @@ fn expand_decls<'a>(
         if let Expression::Function {
             docs: _,
             attrs,
-            name,
+            name: _,
             is_coro,
             args,
-            returns,
+            returns: _,
             body,
             ..
         } = decls[i].1.as_mut()

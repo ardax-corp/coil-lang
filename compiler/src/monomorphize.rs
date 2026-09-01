@@ -173,6 +173,7 @@ pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> M
 }
 
 /// Alias kept for in-crate tests.
+#[cfg(test)]
 pub fn plan_monomorphization(module: &str, ast: &Output, checker: &Checker) -> MonoPlan {
     run_monomorphize_pass(module, ast, checker)
 }

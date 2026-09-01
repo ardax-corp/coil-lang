@@ -165,6 +165,7 @@ const FIB_UNITS_MAX: i64 = 91;
 /// Node counts back into threshold units: the smallest `n` whose `fib(n)` tree
 /// is at least this big. Exact inverse of [`fib_tree_nodes`], so a fib-shaped
 /// site at `n` scores exactly `n`.
+#[cfg(test)]
 fn fib_tree_units(nodes: i64) -> i64 {
     let mut n = 0;
     while n < FIB_UNITS_MAX && fib_tree_nodes(n) < nodes {
@@ -204,6 +205,7 @@ impl<'a> WorkEstimate<'a> {
 
     /// Work below `fn_name(args)` in threshold units, saturating one unit past
     /// the cutoff (scores at or below it are exact).
+    #[cfg(test)]
     fn units(&mut self, fn_name: &str, args: &[i64]) -> i64 {
         let nodes = self.nodes(fn_name, args, 0);
         fib_tree_units(nodes)
@@ -254,7 +256,7 @@ impl<'a> WorkEstimate<'a> {
 
 /// Structural work below `fn_name(args)`'s fork site, in [`par_cost_threshold`]
 /// units (a fib-shaped site at `n` scores `n`). Saturates at `threshold + 1`.
-#[allow(dead_code)] // score accessor for unit tests / tooling
+#[cfg(test)]
 pub fn par_work_units(sites: &HashMap<String, ParForkSite>, fn_name: &str, args: &[i64]) -> i64 {
     WorkEstimate::new(sites).units(fn_name, args)
 }

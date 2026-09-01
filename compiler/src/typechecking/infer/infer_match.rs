@@ -6,7 +6,7 @@ use parser::ast::{Expression, MatchArm, Output, Pattern};
 use reporting::ErrorCode;
 
 use crate::typechecking::subst::apply_ty_prune;
-use crate::typechecking::ty::{Ty, never};
+use crate::typechecking::ty::Ty;
 
 use super::*;
 

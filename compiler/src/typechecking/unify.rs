@@ -65,9 +65,8 @@ fn forall_constraints_eq(
 
 /// Unify two types, starting from the empty substitution.
 ///
-/// Convenience wrapper over [`unify_with`] for tests and one-shot
-/// unifications.
-#[allow(dead_code)] // exposed for tests and one-shot use
+/// Convenience wrapper over [`unify_with`] for tests.
+#[cfg(test)]
 pub fn unify(t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> {
     unify_with(&Subst::empty(), t1, t2)
 }

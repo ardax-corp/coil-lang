@@ -7,10 +7,10 @@ mod heat;
 mod instrument;
 mod opt;
 
-pub use bfi::{compute_block_frequency, heat_is_hot, BlockFrequency};
+pub use bfi::{compute_block_frequency, BlockFrequency};
 pub use checksum::fn_shape_checksum;
 pub use data::{LoadError, ProfileData, PROFILE_VERSION};
-pub use heat::{block_heat, block_heat_current, block_heat_from_map};
+pub use heat::block_heat_current;
 pub use instrument::{
     instrument_for_pgo, instrument_for_pgo_mut, instrument_for_pgo_named_mut, InstrumentMap,
     SITE_STRIDE,

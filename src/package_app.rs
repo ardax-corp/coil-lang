@@ -339,24 +339,6 @@ pub fn cmd_package(
     );
 }
 
-/// Run a freshly packaged binary (integration tests).
-#[cfg(test)]
-#[allow(dead_code)]
-pub fn run_packaged_output(path: &Path) -> Result<String, String> {
-    use std::process::Command as StdCommand;
-    let out = StdCommand::new(path)
-        .output()
-        .map_err(|e| format!("spawn {}: {e}", path.display()))?;
-    if !out.status.success() {
-        return Err(format!(
-            "exit {:?}: {}",
-            out.status.code(),
-            String::from_utf8_lossy(&out.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

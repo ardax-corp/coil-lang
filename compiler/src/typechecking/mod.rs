@@ -42,8 +42,10 @@ pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sit
 pub use par_profit::{
     ArgForm, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites, args_worth_parallel,
     arm_callee, collect_par_specialization_args, eval_arm_args, par_cost_threshold,
-    par_specialization_name, par_work_units,
+    par_specialization_name,
 };
+#[cfg(test)]
+pub use par_profit::par_work_units;
 #[allow(unused_imports)] // public API re-export
 pub use purity::{
     RecursivePureSet, analyze_pure_fns, analyze_recursive_fns, analyze_recursive_pure,

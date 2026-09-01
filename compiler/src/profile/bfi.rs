@@ -122,11 +122,6 @@ pub fn compute_block_frequency(
     BlockFrequency { local: next }
 }
 
-/// True when `heat` is hot relative to `max` in the function.
-pub fn heat_is_hot(heat: u64, max: u64) -> bool {
-    heat > 0 && max > 0 && heat * 2 >= max && heat >= 8
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

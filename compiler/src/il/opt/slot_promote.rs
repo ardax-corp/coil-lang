@@ -49,7 +49,7 @@ use common::Instruction;
 use crate::il::analysis::{
     Block, SlotLiveness, analyze_slot_liveness, build_blocks, op_slot_use_def, preds_of,
 };
-use crate::il::op::{IlOp, Label};
+use crate::il::op::IlOp;
 
 /// Binding of a local slot to a virtual value within the promotion region.
 #[derive(Clone)]

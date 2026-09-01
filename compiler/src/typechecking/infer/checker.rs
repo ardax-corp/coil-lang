@@ -2,14 +2,14 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 use parser::ast::{
-    Expression, ExternFunction, FieldModifier, MatchArm, Output, Pattern, TypeParam, Visibility,
+    Expression, ExternFunction, FieldModifier, Output, Pattern, Visibility,
 };
 use reporting::{ErrorCode, Label, Message};
 
 use crate::typechecking::def_id::DefId;
 use crate::typechecking::env::{Env, TyVarCounter, instantiate_with_kinds};
 use crate::typechecking::generics::{
-    AssocTypeDecl, AssocTypeValue, Generics, InstanceDef, TypeClassDef, TypeClassMethodDef,
+    AssocTypeDecl, AssocTypeValue, Generics, InstanceDef, TypeClassDef,
 };
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
@@ -1655,12 +1655,6 @@ impl Checker {
     /// Borrow the running substitution (useful for diagnostics).
     pub fn subst(&self) -> &Subst {
         &self.subst
-    }
-
-    #[cfg(test)]
-    #[allow(dead_code)]
-    pub(crate) fn cache(&self) -> impl Iterator<Item = (NodeId, &Ty)> {
-        self.cache.iter().map(|(k, v)| (*k, v))
     }
 
     fn push_scope(&mut self) {

@@ -8169,27 +8169,7 @@ impl Compiler {
         )
     }
 
-    /// Return `true` when the *next* node to be emitted has an open type variable
-    /// type (i.e. it is a generic type parameter, not a concrete `int`/`float`/…).
-    /// Used to choose `DynAdd`/`DynSub`/… over `ADD`/`ADDF`/… for generic bodies.
-    #[allow(dead_code)] // kept for potential future use alongside operand_is_open_ty
-    fn is_generic_ty_at_current_idx(&self) -> bool {
-        let Some(id) = self.checker.id_table().ids().get(self.emit_idx).copied() else {
-            return false;
-        };
-        matches!(
-            self.checker.lookup_at(id),
-            Some(crate::typechecking::ty::Ty::Var(_))
-        )
-    }
-
-    /// Return `true` when `operand` resolves to an open type variable — i.e.
-    /// the operand is a generic type parameter that is not yet concrete.
-    ///
-    /// Handles `Expression::Identifier` via span-preferring [`Self::codegen_ident_ty`].
-    /// All other expression shapes return `false` conservatively; they are either
-    /// concrete literals or sub-expressions whose containing `Identifier` was
-    /// already flagged on the inner call.
+    /// True when `operand` resolves to an open type variable (generic param).
     fn operand_is_open_ty(&self, operand: &Output) -> bool {
         match operand.1.as_ref() {
             Expression::Identifier(_) => match self.codegen_ident_ty(operand) {
@@ -10572,7 +10552,7 @@ impl Compiler {
             }
             Expression::Function {
                 docs: _,
-                attrs,
+                attrs: _,
                 name,
                 is_coro,
                 is_static: _,
@@ -10611,8 +10591,7 @@ impl Compiler {
                 } else {
                     qualified.clone()
                 };
-                let (fn_offset, _) = self.bind_function_entry(table_key.clone());
-                let fn_offset = fn_offset as u32;
+                let _ = self.bind_function_entry(table_key.clone());
                 self.fn_arities
                     .insert(table_key.clone(), (fixed_arity as u32, has_rest));
                 // Overloads share the unmangled FQN; do not mirror arity
@@ -13100,7 +13079,6 @@ impl Compiler {
                 // Payload left on stack for the caller (e.g. StorePop).
             }
             Expression::Cast(expr, ty_ann) => {
-                use crate::typechecking::subst::apply_ty_prune;
                 use crate::typechecking::ty::{ArrayLength, Ty};
 
                 let dst_ty = self_id.and_then(|id| self.sidecar_ty(id));

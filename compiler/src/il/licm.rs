@@ -66,7 +66,7 @@ pub fn licm_with(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCall
 /// further out — reusing `t` is what avoids leaving a `LOAD new; STORE t` copy.
 fn licm_cast_hoist_triple(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = ordered_loops(ops);
+    let loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
@@ -136,7 +136,7 @@ pub(super) fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> 
 /// whether anything was rewritten.
 fn licm_cast_int_to_float(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = ordered_loops(ops);
+    let loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
@@ -292,7 +292,7 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::P
 /// into a temp slot, so the loop gets a fresh stack value on every iteration.
 fn licm_float_expression_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = ordered_loops(ops);
+    let loops = ordered_loops(ops);
 
     for lp in loops {
         if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp, purity) {
@@ -337,7 +337,7 @@ fn licm_float_expression_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_
 /// not a LICM barrier, and hoisting `len(a)` makes `while len(a) < n` hang.
 fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = ordered_loops(ops);
+    let loops = ordered_loops(ops);
     for lp in loops {
         if !info.sp_before(lp.header).is_known() || loop_has_barrier(ops, &lp, purity) {
             continue;
@@ -556,7 +556,7 @@ fn is_float_arith(instruction: Instruction) -> bool {
 /// into preheader temps. Returns true when a transform was applied.
 fn licm_string_keys(ops: &mut Vec<IlOp>) -> bool {
     let info = sp::analyze(ops);
-    let mut loops = ordered_loops(ops);
+    let loops = ordered_loops(ops);
     for lp in &loops {
         if !info.sp_before(lp.header).is_known() {
             continue;
