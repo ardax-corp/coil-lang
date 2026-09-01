@@ -3,7 +3,8 @@
     };
 
     use super::{
-        alloc_count, dispatch_count, make_fast_count, reset_alloc_profile, reset_dispatch_count,
+        alloc_count, dispatch_count, intern_str_count, make_fast_count, reset_alloc_profile,
+        reset_dispatch_count,
     };
     use crate::{Heap, Machine, ObjArray, ObjEnum, Object};
     use std::sync::{Arc, Mutex};
@@ -377,6 +378,112 @@
             1
         );
         assert!(vm.heap().find_object_by_addr(value.raw() as u64).is_some());
+    }
+
+    #[test]
+    fn repeated_program_string_skips_intern_str_hash() {
+        reset_alloc_profile();
+        let strings = vec!["literal".to_owned()];
+        let code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        vm.run_with_pool(&code, &[], &strings, 0);
+
+        assert_eq!(
+            intern_str_count(),
+            1,
+            "second STRING of the same program index must use the index cache, not intern_str"
+        );
+        let second = vm.pop();
+        let first = vm.pop();
+        assert_eq!(first.raw(), second.raw());
+        assert!(vm.heap().find_object_by_addr(first.raw() as u64).is_some());
+        assert_eq!(
+            vm.heap()
+                .into_iter()
+                .filter(|obj| matches!(obj, Object::String(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn program_string_cache_is_not_a_gc_root() {
+        reset_alloc_profile();
+        let strings = vec!["keep".to_owned()];
+        let drop_code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        vm.run_with_pool(&drop_code, &[], &strings, 0);
+        assert_eq!(intern_str_count(), 1);
+        assert_eq!(
+            vm.heap()
+                .into_iter()
+                .filter(|obj| matches!(obj, Object::String(_)))
+                .count(),
+            1,
+            "interned literal stays in the heap until GC"
+        );
+
+        vm.collect_garbage();
+        assert_eq!(
+            vm.heap()
+                .into_iter()
+                .filter(|obj| matches!(obj, Object::String(_)))
+                .count(),
+            0,
+            "program-string cache must not keep interned literals alive"
+        );
+
+        let keep_code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        vm.run_with_pool(&keep_code, &[], &strings, 0);
+        assert_eq!(intern_str_count(), 2);
+        let keep = vm.pop();
+        assert!(vm.heap().find_object_by_addr(keep.raw() as u64).is_some());
+        let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
+            Some(Object::String(gc)) => gc.as_ref().data.clone(),
+            _ => panic!("expected interned keep string on the stack after GC"),
+        };
+        assert_eq!(text, "keep");
+    }
+
+    #[test]
+    fn format_concat_reuses_cached_program_strings() {
+        reset_alloc_profile();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let strings = vec!["%s%s".to_owned(), "a".to_owned(), "b".to_owned()];
+        let code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::STRING).with_operand_u32(2),
+            Byte::new(Instruction::FORMAT).with_operand_u32(2),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::STRING).with_operand_u32(2),
+            Byte::new(Instruction::FORMAT).with_operand_u32(2),
+            Byte::new(Instruction::PRINT),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        vm.run_with_pool(&code, &[], &strings, 0);
+        assert_eq!(
+            intern_str_count(),
+            3,
+            "second FORMAT's STRING ops must hit the program-index cache"
+        );
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
+        assert_eq!(s, "ab");
     }
 
     #[test]

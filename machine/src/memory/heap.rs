@@ -130,6 +130,7 @@ impl Heap {
 
     /// Intern a borrowed string without allocating when it is already cached.
     pub fn intern_str(&mut self, data: &str) -> RefString {
+        crate::vm::note_intern_str();
         let hash = ObjString::hash(data);
         if let Some(s) = self.strings.find(data, hash) {
             return s;
