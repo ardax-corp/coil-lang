@@ -5,7 +5,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{ProgramDebug, byte_to_position};
-use compiler::{DissectArtifacts, FnSym, Pipeline, matches_fn_pat};
+use compiler::{DissectArtifacts, FnSym, HostGrants, Pipeline, matches_fn_pat};
 use machine::{DebugController, Machine, StopReason};
 use reporting::ReportConfig;
 
@@ -156,8 +156,10 @@ impl DebugSession {
         config: ReportConfig,
         filename: &str,
         reporter: Box<dyn std::io::Write + Send>,
+        grants: HostGrants,
     ) -> Result<Self, ()> {
         let mut pipeline = Pipeline::with_reporter(config, reporter);
+        pipeline.set_host_grants(grants);
         let artifacts = match pipeline.compile_dissect(filename, false) {
             Ok(a) => a,
             Err(()) => {
@@ -177,22 +179,23 @@ impl DebugSession {
         let pins = pipeline.dload_native_pins();
         let trusted = pipeline.dload_trusted_stems();
         let structs = pipeline.archived_struct_layouts();
-        let m = pipeline.manifest();
+        let grants = pipeline.host_grants();
+        let search = pipeline.ffi_search_path_bufs();
         machine::wire_vm_host(
             &mut machine,
             &machine::VmHostSpec {
                 entry_path: Some(&entry_path),
                 project_root: pipeline.project_root(),
-                ffi_search_paths: &m.ffi_search_paths,
-                ffi_allow: &m.ffi_allow,
+                ffi_search_paths: &search,
+                ffi_allow: &grants.allow_dload,
                 native_pins: &pins,
                 trusted_stems: &trusted,
                 extra_dload_stems: pipeline.extra_dload_stems(),
                 extra_dload_grants: pipeline.extra_dload_grants(),
-                allow_exec: m.allow_exec,
-                allow_exit: m.allow_exit,
-                allow_ffi_exec: m.allow_ffi_exec,
-                allow_attach: m.allow_attach,
+                allow_exec: grants.allow_exec,
+                allow_exit: grants.allow_exit,
+                allow_ffi_exec: grants.allow_ffi_exec,
+                allow_attach: grants.allow_attach,
                 c_structs: &structs,
             },
         );
@@ -769,7 +772,13 @@ mod tests {
 
     fn compile_fib() -> DebugSession {
         let config = ReportConfig::from_cli_flags(false, false).expect("report config");
-        DebugSession::compile(config, &fib_path(), Box::new(std::io::sink())).expect("compile fib")
+        DebugSession::compile(
+            config,
+            &fib_path(),
+            Box::new(std::io::sink()),
+            HostGrants::deny_all(),
+        )
+        .expect("compile fib")
     }
 
     #[test]

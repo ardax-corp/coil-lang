@@ -5,7 +5,7 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::process::exit;
 
-use compiler::{format_bytecode_section, matches_fn_pat};
+use compiler::{format_bytecode_section, matches_fn_pat, HostGrants};
 use machine::StopReason;
 use reporting::{ReportConfig, ReportFormat};
 
@@ -15,6 +15,7 @@ pub struct DebugArgs {
     pub filename: String,
     pub script: Option<String>,
     pub batch: bool,
+    pub grants: HostGrants,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -32,7 +33,12 @@ fn writer_for(format: ReportFormat) -> Box<dyn Write + Send> {
 
 pub fn cmd_debug(config: ReportConfig, args: DebugArgs) {
     let format = config.format;
-    let mut session = match DebugSession::compile(config, &args.filename, writer_for(format)) {
+    let mut session = match DebugSession::compile(
+        config,
+        &args.filename,
+        writer_for(format),
+        args.grants,
+    ) {
         Ok(s) => s,
         Err(()) => exit(1),
     };

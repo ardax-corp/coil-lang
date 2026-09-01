@@ -6,6 +6,7 @@ use std::io::{self, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use compiler::HostGrants;
 use machine::StopReason;
 use reporting::ReportConfig;
 use serde_json::{Value, json};
@@ -133,7 +134,12 @@ impl DapServer {
                 let config = ReportConfig::from_cli_flags(false, false).map_err(|e| {
                     io::Error::new(io::ErrorKind::Other, e.to_string())
                 })?;
-                match DebugSession::compile(config, &path_str, Box::new(io::stderr())) {
+                match DebugSession::compile(
+                    config,
+                    &path_str,
+                    Box::new(io::stderr()),
+                    HostGrants::deny_all(),
+                ) {
                     Ok(mut session) => {
                         session.set_print_capture(Arc::clone(&self.print_buf));
                         self.session = Some(session);

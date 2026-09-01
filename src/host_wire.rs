@@ -10,15 +10,15 @@ use machine::{DloadGate, Machine, VmHostSpec, wire_thread_program, wire_vm_host}
 pub fn pipeline_dload_gate(pipeline: &Pipeline) -> DloadGate {
     let pins = pipeline.dload_native_pins();
     let trusted = pipeline.dload_trusted_stems();
-    let manifest = pipeline.manifest();
-    let mut gate = DloadGate::from_consumer_trusted(&manifest.ffi_allow, &pins, &trusted);
+    let grants = pipeline.host_grants();
+    let mut gate = DloadGate::from_consumer_trusted(&grants.allow_dload, &pins, &trusted);
     for stem in pipeline.extra_dload_stems() {
         gate.grant_stem(stem);
     }
     for (stem, path) in pipeline.extra_dload_grants() {
         let _ = gate.grant_file(stem, path);
     }
-    gate.set_allow_attach(manifest.allow_attach);
+    gate.set_allow_attach(grants.allow_attach);
     gate
 }
 
@@ -30,22 +30,23 @@ pub fn wire_pipeline_vm<const N: usize>(
     let pins = pipeline.dload_native_pins();
     let trusted = pipeline.dload_trusted_stems();
     let structs = pipeline.archived_struct_layouts();
-    let m = pipeline.manifest();
+    let grants = pipeline.host_grants();
+    let search = pipeline.ffi_search_path_bufs();
     wire_vm_host(
         machine,
         &VmHostSpec {
             entry_path: entry,
             project_root: pipeline.project_root(),
-            ffi_search_paths: &m.ffi_search_paths,
-            ffi_allow: &m.ffi_allow,
+            ffi_search_paths: &search,
+            ffi_allow: &grants.allow_dload,
             native_pins: &pins,
             trusted_stems: &trusted,
             extra_dload_stems: pipeline.extra_dload_stems(),
             extra_dload_grants: pipeline.extra_dload_grants(),
-            allow_exec: m.allow_exec,
-            allow_exit: m.allow_exit,
-            allow_ffi_exec: m.allow_ffi_exec,
-            allow_attach: m.allow_attach,
+            allow_exec: grants.allow_exec,
+            allow_exit: grants.allow_exit,
+            allow_ffi_exec: grants.allow_ffi_exec,
+            allow_attach: grants.allow_attach,
             c_structs: &structs,
         },
     );
