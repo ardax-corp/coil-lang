@@ -11,7 +11,7 @@ use common::{
     is_packaged_executable, is_system_ffi_stem, ArchivedArchivedProgram, ArchivedProgram, Byte,
     NativeLock, NativeLockEntry, ARCHIVE_VERSION, PACKAGE_FLAG_USES_FFI,
 };
-use compiler::Pipeline;
+use compiler::{Manifest, Pipeline};
 use machine::platform_shared_lib_filename;
 use reporting::ErrorCode;
 use rkyv::rancor::Error;
@@ -93,16 +93,23 @@ fn sha256_hex_file(path: &Path) -> Result<(String, u64), String> {
     ))
 }
 
+fn spool_project() -> (PathBuf, Manifest) {
+    let start = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let dir = Manifest::locate_dir(&start).unwrap_or(start);
+    let manifest = Manifest::load(&dir).unwrap_or_default();
+    (dir, manifest)
+}
+
 /// Build a [`NativeLock`] from bytecode `dload` stems and `[[ffi.native]]` rows.
 pub fn build_native_lock(
-    pipeline: &Pipeline,
+    _pipeline: &Pipeline,
     bytecode: &[Byte],
     strings: &[String],
 ) -> Result<NativeLock, String> {
     let stems = ffi_library_names_from_bytecode(bytecode, strings);
     let mut entries = Vec::new();
-    let natives = &pipeline.manifest().ffi_natives;
-    let root = pipeline.project_root();
+    let (root, manifest) = spool_project();
+    let natives = &manifest.ffi_natives;
 
     for stem in &stems {
         if is_system_ffi_stem(stem) {
@@ -153,11 +160,10 @@ pub fn build_native_lock(
 }
 
 /// Build a native lock from the current project's `[[ffi.native]]` (project-mode download).
-pub fn native_lock_from_project_manifest(pipeline: &Pipeline) -> Result<NativeLock, String> {
-    let natives = &pipeline.manifest().ffi_natives;
-    let root = pipeline.project_root();
+pub fn native_lock_from_project_manifest(_pipeline: &Pipeline) -> Result<NativeLock, String> {
+    let (root, manifest) = spool_project();
     let mut entries = Vec::new();
-    for decl in natives {
+    for decl in &manifest.ffi_natives {
         if is_system_ffi_stem(&decl.name) {
             continue;
         }

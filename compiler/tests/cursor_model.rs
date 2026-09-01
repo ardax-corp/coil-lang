@@ -34,6 +34,7 @@ fn compile(path: &str) -> Compiled {
     let src =
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let (bytecode, pool) = pipeline
         .compile_src(&src)
         .unwrap_or_else(|_| panic!("compile failed: {path}"));
@@ -55,6 +56,7 @@ fn compile_retaining_il(path: &str) -> Compiled {
     let src =
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let (bytecode, pool) = pipeline
         .compile_src_retaining_il(&src)
         .unwrap_or_else(|_| panic!("compile failed: {path}"));

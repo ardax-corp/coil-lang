@@ -76,6 +76,8 @@ pub(crate) struct CliArgs {
     pub pgo_use_profile: Option<String>,
     pub pgo_generate_profile: Option<String>,
     pub host_grants: HostGrants,
+    /// Extra `--root` directories (default `src` is always included).
+    pub module_roots: Vec<PathBuf>,
 }
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
@@ -167,14 +169,43 @@ impl HostGrantFlags {
     }
 }
 
+/// Extra `use`/`mod` search directories (`--root`, repeatable).
+#[derive(Args, Clone, Debug, Default)]
+struct RootFlags {
+    /// Extra module search directory (repeatable). Default is `src` under cwd.
+    #[arg(long = "root", value_name = "DIR", action = clap::ArgAction::Append)]
+    root: Vec<PathBuf>,
+}
+
+impl RootFlags {
+    fn is_set(&self) -> bool {
+        !self.root.is_empty()
+    }
+}
+
+/// `--entry` as an alternative to a positional `.hy` file.
+#[derive(Args, Clone, Debug, Default)]
+struct EntryFlag {
+    /// Entry `.hy` (instead of the positional file)
+    #[arg(long = "entry", value_name = "FILE")]
+    entry: Option<String>,
+}
+
+impl EntryFlag {
+    fn is_set(&self) -> bool {
+        self.entry.is_some()
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "coil",
     version,
     about = "Coil compiler and runtime",
     disable_help_subcommand = true,
-    after_help = "When no file is given, `coil` / `coil compile` use `[entry].file` from coil.toml.\n\
+    after_help = "Pass the entry as a positional `.hy` or `--entry FILE`.\n\
 Default diagnostics: pretty reports on stderr.\n\
+`--root DIR` is repeatable extra `use`/`mod` search (default is `src` under cwd).\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
 `--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck — coil.toml\n\
 does not grant them. `coil run out.hyc` and coil-embed do not re-apply allow flags;\n\
@@ -190,10 +221,14 @@ struct RawCli {
     profile: CompileProfileFlags,
     #[command(flatten)]
     grants: HostGrantFlags,
+    #[command(flatten)]
+    roots: RootFlags,
+    #[command(flatten)]
+    entry_flag: EntryFlag,
     /// Compile harness tests into the archive (default: omit)
     #[arg(long)]
     include_tests: bool,
-    /// Compile this `.hy` file in memory and run it (or `[entry].file` from coil.toml)
+    /// Compile this `.hy` file in memory and run it (or `--entry`)
     #[arg(value_name = "FILE")]
     file: Option<String>,
     #[command(subcommand)]
@@ -212,13 +247,17 @@ enum RawCommand {
         profile: CompileProfileFlags,
         #[command(flatten)]
         grants: HostGrantFlags,
+        #[command(flatten)]
+        roots: RootFlags,
+        #[command(flatten)]
+        entry_flag: EntryFlag,
         /// Compile harness tests into the archive (default: omit)
         #[arg(long)]
         include_tests: bool,
         /// Output archive path
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
-        /// Entry `.hy` (or `[entry].file` from coil.toml)
+        /// Entry `.hy` (or `--entry`)
         file: Option<String>,
     },
     /// Execute a previously compiled .hyc archive
@@ -238,6 +277,8 @@ enum RawCommand {
         opt: OptLevelFlags,
         #[command(flatten)]
         grants: HostGrantFlags,
+        #[command(flatten)]
+        roots: RootFlags,
         /// Stop after the first failed case
         #[arg(long)]
         fail_fast: bool,
@@ -254,6 +295,10 @@ enum RawCommand {
         profile: CompileProfileFlags,
         #[command(flatten)]
         grants: HostGrantFlags,
+        #[command(flatten)]
+        roots: RootFlags,
+        #[command(flatten)]
+        entry_flag: EntryFlag,
         /// Packaged binary path (default: entry file stem)
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
@@ -267,7 +312,7 @@ enum RawCommand {
         #[arg(long)]
         strip_debug: bool,
         /// Entry `.hy` file
-        file: String,
+        file: Option<String>,
     },
     /// Native lock helpers for `spool download`
     Natives {
@@ -282,6 +327,10 @@ enum RawCommand {
         opt: OptLevelFlags,
         #[command(flatten)]
         profile: CompileProfileFlags,
+        #[command(flatten)]
+        roots: RootFlags,
+        #[command(flatten)]
+        entry_flag: EntryFlag,
         /// Filter functions by FQN substring / trailing name
         #[arg(long = "fn", value_name = "PAT")]
         fn_pat: Option<String>,
@@ -292,7 +341,7 @@ enum RawCommand {
         #[arg(long)]
         ast: bool,
         /// Entry `.hy` file
-        file: String,
+        file: Option<String>,
     },
     /// GDB-style debugger (REPL; --dap for IDE)
     Debug {
@@ -300,6 +349,10 @@ enum RawCommand {
         log: LogFlags,
         #[command(flatten)]
         grants: HostGrantFlags,
+        #[command(flatten)]
+        roots: RootFlags,
+        #[command(flatten)]
+        entry_flag: EntryFlag,
         /// Run commands from a script file
         #[arg(short = 'x', value_name = "SCRIPT")]
         script: Option<String>,
@@ -380,6 +433,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             pgo_use_profile: None,
             pgo_generate_profile: None,
             host_grants: HostGrants::deny_all(),
+            module_roots: Vec::new(),
         });
     }
 
@@ -446,6 +500,7 @@ fn cli_from(
     opt: OptLevelFlags,
     profile: CompileProfileFlags,
     grants: HostGrantFlags,
+    roots: Vec<PathBuf>,
 ) -> CliArgs {
     CliArgs {
         command,
@@ -459,6 +514,28 @@ fn cli_from(
         pgo_use_profile: profile.pgo_use_profile,
         pgo_generate_profile: profile.pgo_generate_profile,
         host_grants: grants.into_grants(),
+        module_roots: roots,
+    }
+}
+
+fn merge_entry(positional: Option<String>, flag: Option<String>) -> Result<String, String> {
+    let pos = positional.filter(|s| !s.is_empty());
+    let flag = flag.filter(|s| !s.is_empty());
+    match (pos, flag) {
+        (Some(a), Some(b)) if a != b => Err(
+            "pass the entry as a positional file or `--entry`, not both".into(),
+        ),
+        (Some(a), _) => Ok(a),
+        (_, Some(b)) => Ok(b),
+        (None, None) => Ok(String::new()),
+    }
+}
+
+fn require_hy_entry(filename: &str) -> Result<(), String> {
+    if filename.is_empty() {
+        Err("missing input file (pass a .hy file or `--entry`)".into())
+    } else {
+        Ok(())
     }
 }
 
@@ -470,6 +547,8 @@ impl RawCli {
             || self.include_tests
             || self.file.is_some()
             || self.grants.is_set()
+            || self.roots.is_set()
+            || self.entry_flag.is_set()
     }
 
     fn into_cli_args(self) -> Result<CliArgs, String> {
@@ -479,16 +558,22 @@ impl RawCli {
             );
         }
         Ok(match self.command {
-            None => cli_from(
-                Command::BuildAndRun {
-                    filename: self.file.unwrap_or_default(),
-                },
-                self.log,
-                self.include_tests,
-                self.opt,
-                self.profile,
-                self.grants,
-            ),
+            None => {
+                let filename = merge_entry(self.file, self.entry_flag.entry)?;
+                require_hy_entry(&filename)?;
+                if is_reserved(&filename) {
+                    return Err("missing input file (pass a .hy file or `--entry`)".into());
+                }
+                cli_from(
+                    Command::BuildAndRun { filename },
+                    self.log,
+                    self.include_tests,
+                    self.opt,
+                    self.profile,
+                    self.grants,
+                    self.roots.root,
+                )
+            }
             Some(RawCommand::Lsp { stdio: _ }) => cli_from(
                 Command::Lsp,
                 LogFlags::default(),
@@ -496,6 +581,7 @@ impl RawCli {
                 OptLevelFlags::default(),
                 CompileProfileFlags::default(),
                 HostGrantFlags::default(),
+                Vec::new(),
             ),
             Some(RawCommand::Fmt { paths, check: _ }) => {
                 if paths.is_empty() {
@@ -508,12 +594,14 @@ impl RawCli {
                     OptLevelFlags::default(),
                     CompileProfileFlags::default(),
                     HostGrantFlags::default(),
+                    Vec::new(),
                 )
             }
             Some(RawCommand::Test {
                 log,
                 opt,
                 grants,
+                roots,
                 fail_fast,
                 path,
             }) => {
@@ -529,6 +617,7 @@ impl RawCli {
                     opt,
                     CompileProfileFlags::default(),
                     grants,
+                    roots.root,
                 )
             }
             Some(RawCommand::Compile {
@@ -536,12 +625,15 @@ impl RawCli {
                 opt,
                 profile,
                 grants,
+                roots,
+                entry_flag,
                 include_tests,
                 output,
                 file,
             }) => {
-                let filename = file.unwrap_or_default();
-                if !filename.is_empty() && is_reserved(&filename) {
+                let filename = merge_entry(file, entry_flag.entry)?;
+                require_hy_entry(&filename)?;
+                if is_reserved(&filename) {
                     return Err("compile requires an entry file".into());
                 }
                 cli_from(
@@ -554,6 +646,7 @@ impl RawCli {
                     opt,
                     profile,
                     grants,
+                    roots.root,
                 )
             }
             Some(RawCommand::Run {
@@ -567,23 +660,28 @@ impl RawCli {
                 OptLevelFlags::default(),
                 CompileProfileFlags::default(),
                 grants,
+                Vec::new(),
             ),
             Some(RawCommand::Package {
                 log,
                 opt,
                 profile,
                 grants,
+                roots,
+                entry_flag,
                 output,
                 runner,
                 check_native,
                 strip_debug,
                 file,
             }) => {
-                if is_reserved(&file) {
+                let filename = merge_entry(file, entry_flag.entry)?;
+                require_hy_entry(&filename)?;
+                if is_reserved(&filename) {
                     return Err("package requires an entry file".into());
                 }
                 let out = output.unwrap_or_else(|| {
-                    Path::new(&file)
+                    Path::new(&filename)
                         .file_stem()
                         .and_then(|s| s.to_str())
                         .unwrap_or("a.out")
@@ -591,7 +689,7 @@ impl RawCli {
                 });
                 cli_from(
                     Command::Package {
-                        filename: file,
+                        filename,
                         output: out,
                         runner,
                         check_native,
@@ -602,6 +700,7 @@ impl RawCli {
                     opt,
                     profile,
                     grants,
+                    roots.root,
                 )
             }
             Some(RawCommand::Natives {
@@ -613,22 +712,27 @@ impl RawCli {
                 OptLevelFlags::default(),
                 CompileProfileFlags::default(),
                 HostGrantFlags::default(),
+                Vec::new(),
             ),
             Some(RawCommand::Dissect {
                 log,
                 opt,
                 profile,
+                roots,
+                entry_flag,
                 fn_pat,
                 il,
                 ast,
                 file,
             }) => {
-                if is_reserved(&file) {
+                let filename = merge_entry(file, entry_flag.entry)?;
+                require_hy_entry(&filename)?;
+                if is_reserved(&filename) {
                     return Err("dissect requires an entry .hy file".into());
                 }
                 cli_from(
                     Command::Dissect {
-                        filename: file,
+                        filename,
                         fn_pat,
                         show_il: il,
                         show_ast: ast,
@@ -638,17 +742,20 @@ impl RawCli {
                     opt,
                     profile,
                     HostGrantFlags::default(),
+                    roots.root,
                 )
             }
             Some(RawCommand::Debug {
                 log,
                 grants,
+                roots,
+                entry_flag,
                 script,
                 batch,
                 dap,
                 file,
             }) => {
-                let command = if dap && file.is_none() {
+                let command = if dap && file.is_none() && entry_flag.entry.is_none() {
                     Command::Debug {
                         filename: None,
                         script: None,
@@ -656,9 +763,10 @@ impl RawCli {
                         dap: true,
                     }
                 } else {
-                    let Some(filename) = file else {
+                    let filename = merge_entry(file, entry_flag.entry)?;
+                    if filename.is_empty() {
                         return Err("debug requires an entry .hy file (or use --dap)".into());
-                    };
+                    }
                     if is_reserved(&filename) {
                         return Err("debug requires an entry .hy file".into());
                     }
@@ -679,6 +787,7 @@ impl RawCli {
                     OptLevelFlags::default(),
                     CompileProfileFlags::default(),
                     grants,
+                    roots.root,
                 )
             }
         })
@@ -941,26 +1050,41 @@ mod tests {
     }
 
     #[test]
-    fn parse_empty_args_defers_to_manifest_entry() {
-        let cli = parse_args(&args(&[])).unwrap();
-        assert_eq!(
-            cli.command,
-            Command::BuildAndRun {
-                filename: String::new()
-            }
-        );
+    fn parse_empty_args_requires_entry() {
+        assert!(parse_args(&args(&[])).is_err());
+        assert!(parse_args(&args(&["compile"])).is_err());
     }
 
     #[test]
-    fn parse_compile_without_file_defers_to_manifest_entry() {
-        let cli = parse_args(&args(&["compile"])).unwrap();
+    fn parse_entry_flag_and_roots() {
+        let cli = parse_args(&args(&["--entry", "src/main.hy"])).unwrap();
+        assert_eq!(
+            cli.command,
+            Command::BuildAndRun {
+                filename: "src/main.hy".into()
+            }
+        );
+        let cli = parse_args(&args(&["compile", "--entry", "a.hy"])).unwrap();
         assert_eq!(
             cli.command,
             Command::Compile {
-                filename: String::new(),
+                filename: "a.hy".into(),
                 output: DEFAULT_OUT.into(),
             }
         );
+        let cli = parse_args(&args(&[
+            "--root",
+            "examples/src",
+            "--root",
+            "vendor",
+            "a.hy",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cli.module_roots,
+            vec![PathBuf::from("examples/src"), PathBuf::from("vendor")]
+        );
+        assert!(parse_args(&args(&["--entry", "a.hy", "b.hy"])).is_err());
     }
 
     #[test]

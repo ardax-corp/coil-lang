@@ -19,7 +19,10 @@ use reporting::{
 use rkyv::rancor::Error;
 
 use crate::host_grants::HostGrants;
-use crate::manifest::Manifest;
+use crate::manifest::{
+    default_module_roots, namespace_of_in_roots, resolve_mod_in_roots, resolve_use_in_roots,
+    Manifest,
+};
 use crate::Compiler;
 
 /// A queued file to compile, along with the path it was
@@ -30,7 +33,7 @@ struct WorkItem {
     /// Absolute path to the file on disk.
     file: PathBuf,
     /// Module namespace, derived from the file's path
-    /// relative to one of the manifest's search roots.
+    /// relative to one of the pipeline search roots.
     /// `None` means the file is outside any search root
     /// (we still compile it, but its namespace is the
     /// bare file stem).
@@ -40,6 +43,9 @@ struct WorkItem {
 pub struct Pipeline {
     failed: bool,
     project_root: PathBuf,
+    /// `use`/`mod` search roots, relative to [`Self::project_root`] or absolute.
+    roots: Vec<PathBuf>,
+    /// Spool/package fields only. Never loaded to bind language roots/entry.
     manifest: Manifest,
     bytecode: Vec<Byte>,
     /// Set of files already visited (used to short-circuit
@@ -257,12 +263,9 @@ impl Pipeline {
     /// Typecheck an entry and its discovered modules without generating
     /// bytecode. Each result is associated with the source file that was
     /// checked, which makes this suitable for editor diagnostics.
+    ///
+    /// Does not load `coil.toml`. Bind roots with [`Self::bind_project_root`].
     pub fn typecheck_project(&mut self, file: &Path) -> Vec<(PathBuf, Vec<Message>)> {
-        let root = Self::find_project_root(file);
-        if root != self.project_root {
-            self.project_root = root.clone();
-            self.manifest = Manifest::load(&root).unwrap_or_default();
-        }
         self.reset_session();
         self.sync_host_caps();
         self.entry_file = Some(file.to_path_buf());
@@ -275,7 +278,9 @@ impl Pipeline {
                 String::new()
             } else {
                 item.namespace
-                    .or_else(|| self.manifest.namespace_of(&self.project_root, &item.file))
+                    .or_else(|| {
+                        namespace_of_in_roots(&self.roots, &self.project_root, &item.file)
+                    })
                     .unwrap_or_default()
             };
             let before = self.compiler_lazy_mut().get_messages().len();
@@ -299,12 +304,17 @@ impl Pipeline {
             .unwrap_or_default()
     }
 
-    /// Project root (directory containing `coil.toml`, or cwd).
+    /// Project directory (cwd unless [`Self::bind_project_root`] set another).
     pub fn project_root(&self) -> &Path {
         &self.project_root
     }
 
-    /// Loaded project manifest (`[entry]`, `[module].roots`, …).
+    /// `use`/`mod` search roots (default `["src"]` relative to the project dir).
+    pub fn module_roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
+    /// Spool/package manifest copy (not used for language roots/entry).
     pub fn manifest(&self) -> &Manifest {
         &self.manifest
     }
@@ -319,14 +329,62 @@ impl Pipeline {
         self.entry_file.as_deref()
     }
 
-    /// Point this pipeline at `root`. Reloads `coil.toml` into this Pipeline's
-    /// Manifest (the one copy). No-op when the root is already bound.
-    pub fn bind_project_root(&mut self, root: PathBuf) {
-        if root == self.project_root {
+    /// Bind the project directory and `use`/`mod` search roots.
+    ///
+    /// Empty `roots` means [`default_module_roots`] (`["src"]`). Does not
+    /// read `coil.toml`. CLI and tests pass extra `--root` directories here.
+    pub fn bind_project_root(&mut self, project_dir: PathBuf, roots: Vec<PathBuf>) {
+        let roots = if roots.is_empty() {
+            default_module_roots()
+        } else {
+            roots
+        };
+        if project_dir == self.project_root && roots == self.roots {
             return;
         }
-        self.project_root = root.clone();
-        self.manifest = Manifest::load(&root).unwrap_or_default();
+        self.project_root = project_dir;
+        self.roots = roots;
+    }
+
+    /// Bind `project_dir` with default `src` plus `extra` roots (test helper).
+    pub fn bind_project_roots_with_default(
+        &mut self,
+        project_dir: PathBuf,
+        extra: impl IntoIterator<Item = PathBuf>,
+    ) {
+        let mut roots = default_module_roots();
+        for r in extra {
+            if !roots.contains(&r) {
+                roots.push(r);
+            }
+        }
+        self.bind_project_root(project_dir, roots);
+    }
+
+    /// Extra `use`/`mod` roots for this repo's examples and stdlib checkouts.
+    ///
+    /// CLI/tests pass these as `--root` (the language path does not read
+    /// `[module].roots` from `coil.toml`).
+    pub fn workspace_language_extra_roots() -> Vec<PathBuf> {
+        let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate parent is the workspace");
+        let mut extra = vec![ws.join("examples/src"), ws.join(".deps/coil-stdlib/src")];
+        if let Some(parent) = ws.parent() {
+            extra.push(parent.join("coil-stdlib/src"));
+        }
+        if let Ok(p) = std::env::var("COIL_STDLIB") {
+            extra.push(PathBuf::from(p));
+        }
+        extra
+    }
+
+    /// Workspace `src`, `examples/src`, and coil-stdlib checkouts (test helper).
+    pub fn bind_workspace_language_roots(&mut self) {
+        let ws = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("compiler crate parent is the workspace");
+        self.bind_project_roots_with_default(ws.to_path_buf(), Self::workspace_language_extra_roots());
     }
 
     /// Grant `dload` of `stem` for the SHA-256 of `path` (host/tests).
@@ -428,7 +486,10 @@ impl Pipeline {
 
     pub fn dload_trusted_stems(&self) -> Vec<String> {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
-        lock.trusted_extra_stems(&self.manifest.dependencies)
+        let deps = Manifest::load(&self.project_root)
+            .map(|m| m.dependencies)
+            .unwrap_or_default();
+        lock.trusted_extra_stems(&deps)
     }
 
     pub fn c_struct_encodings(&self) -> Vec<(String, Vec<(String, u32)>)> {
@@ -443,7 +504,10 @@ impl Pipeline {
     #[cfg(any(test, feature = "vm-wire"))]
     pub fn build_dload_gate(&self) -> machine::DloadGate {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
-        let trusted = lock.trusted_extra_stems(&self.manifest.dependencies);
+        let deps = Manifest::load(&self.project_root)
+            .map(|m| m.dependencies)
+            .unwrap_or_default();
+        let trusted = lock.trusted_extra_stems(&deps);
         let mut gate = machine::DloadGate::from_consumer_trusted(lock.native_pins(), &trusted);
         for stem in &self.extra_dload_stems {
             gate.grant_stem(stem);
@@ -452,15 +516,6 @@ impl Pipeline {
             let _ = gate.grant_file(stem, path);
         }
         gate
-    }
-
-    /// Resolve `[entry].file` from the manifest to an absolute path.
-    /// Returns `None` when the manifest has no entry point.
-    pub fn manifest_entry_path(&self) -> Option<PathBuf> {
-        self.manifest
-            .entry
-            .as_ref()
-            .map(|rel| self.project_root.join(rel))
     }
 
     /// Wire FFI library resolution paths and C struct layouts into the VM.
@@ -491,12 +546,7 @@ impl Pipeline {
     }
 
     pub fn ffi_search_path_bufs(&self) -> Vec<std::path::PathBuf> {
-        let mut search: Vec<std::path::PathBuf> = self
-            .manifest
-            .ffi_search_paths
-            .iter()
-            .map(|p| self.project_root.join(p))
-            .collect();
+        let mut search: Vec<std::path::PathBuf> = Vec::new();
         for p in &self.host_grants.ffi_search_paths {
             let resolved = if p.is_absolute() {
                 p.clone()
@@ -512,28 +562,6 @@ impl Pipeline {
         search
     }
 
-    /// Walk up from `start` looking for a directory that contains
-    /// `coil.toml`. Falls back to the process cwd when none is found.
-    pub fn find_project_root(start: &Path) -> PathBuf {
-        let mut dir = if start.is_file() {
-            start
-                .parent()
-                .map(Path::to_path_buf)
-                .unwrap_or_else(|| PathBuf::from("."))
-        } else {
-            start.to_path_buf()
-        };
-        loop {
-            if dir.join("coil.toml").is_file() {
-                return dir;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-    }
-
     pub fn new() -> Self {
         Self::with_reporter(ReportConfig::default(), Box::new(std::io::stderr()))
     }
@@ -544,9 +572,6 @@ impl Pipeline {
     /// capture rendered diagnostics into a buffer.
     pub fn with_reporter(config: ReportConfig, writer: Box<dyn Write + Send>) -> Self {
         let cwd = std::env::current_dir().expect("Unable to determine current working directory");
-        // Prefer a `coil.toml` found by walking up from cwd; otherwise
-        // use cwd with the default manifest (`src/` only).
-        let project_root = Self::find_project_root(&cwd);
         let sink = create_sink(&config, SourceMap::new(), writer);
 
         // The prologue is `[CALL, JMP, HALT]`. The pipeline
@@ -561,7 +586,8 @@ impl Pipeline {
 
         let mut pipeline = Self {
             failed: false,
-            project_root: project_root.clone(),
+            project_root: cwd,
+            roots: default_module_roots(),
             manifest: Manifest::default(),
             bytecode,
             processed: Vec::new(),
@@ -589,12 +615,6 @@ impl Pipeline {
             retain_cursor_il: false,
             cursor_il: None,
         };
-        match Manifest::load(&project_root) {
-            Ok(m) => {
-                pipeline.manifest = m;
-            }
-            Err(e) => pipeline.emit_manifest_load_error(&project_root, e),
-        }
         pipeline.register_standard_host_natives();
         pipeline
     }
@@ -639,56 +659,6 @@ impl Pipeline {
     pub fn emit_spanless_warning(&mut self, code: ErrorCode, message: impl Into<String>) {
         self.sink
             .emit(Diagnostic::warning(message.into()).with_code(code));
-    }
-
-    fn emit_manifest_load_error(
-        &mut self,
-        project_root: &Path,
-        err: crate::manifest::ManifestError,
-    ) {
-        let path = project_root.join("coil.toml");
-        match err {
-            crate::manifest::ManifestError::Parse { line, message } => {
-                if let Ok(contents) = std::fs::read_to_string(&path) {
-                    let range = Manifest::byte_range_for_line(&contents, line);
-                    let msg = Message::error(
-                        ErrorCode::IoError,
-                        format!("`coil.toml` parse error at line {line}: {message}"),
-                        range,
-                    );
-                    self.emit_message(&path, &contents, &msg);
-                } else {
-                    self.emit_spanless_error(
-                        ErrorCode::IoError,
-                        format!(
-                            "`{}`: parse error at line {line}: {message}",
-                            path.display()
-                        ),
-                    );
-                }
-            }
-            crate::manifest::ManifestError::Io(msg) => {
-                self.emit_spanless_error(ErrorCode::IoError, msg);
-            }
-            crate::manifest::ManifestError::MissingSection(section) => {
-                self.emit_spanless_error(
-                    ErrorCode::IoError,
-                    format!(
-                        "`{}`: missing manifest section `[{section}]`",
-                        path.display()
-                    ),
-                );
-            }
-            crate::manifest::ManifestError::MissingKey { section, key } => {
-                self.emit_spanless_error(
-                    ErrorCode::IoError,
-                    format!(
-                        "`{}`: missing manifest key `[{section}].{key}`",
-                        path.display()
-                    ),
-                );
-            }
-        }
     }
 
     fn emit_module_not_found(
@@ -761,8 +731,7 @@ impl Pipeline {
                         let mut segments = segments;
                         segments.pop();
                         if let Some(file) =
-                            self.manifest
-                                .resolve_use(&self.project_root, &segments, &last)
+                            resolve_use_in_roots(&self.roots, &self.project_root, &segments, &last)
                         {
                             self.record_module_dep(parent_file, &file);
                             self.enqueue_file(file);
@@ -774,13 +743,16 @@ impl Pipeline {
                                 format!("`use {}::*`", Self::format_use_path(path, "*")),
                             );
                         }
-                    } else if let Some(file) = self.manifest.resolve_mod(&self.project_root, "*") {
+                    } else if let Some(file) =
+                        resolve_mod_in_roots(&self.roots, &self.project_root, "*")
+                    {
                         self.record_module_dep(parent_file, &file);
                         self.enqueue_file(file);
                     } else {
                         self.emit_module_not_found(parent_file, parent_src, use_range, "`use *`");
                     }
-                } else if let Some(file) = self.manifest.resolve_use(&self.project_root, path, name)
+                } else if let Some(file) =
+                    resolve_use_in_roots(&self.roots, &self.project_root, path, name)
                 {
                     self.record_module_dep(parent_file, &file);
                     self.enqueue_file(file);
@@ -794,7 +766,7 @@ impl Pipeline {
                 }
             }
             Expression::Module(name, _body) => {
-                if let Some(file) = self.manifest.resolve_mod(&self.project_root, name) {
+                if let Some(file) = resolve_mod_in_roots(&self.roots, &self.project_root, name) {
                     self.record_module_dep(parent_file, &file);
                     self.enqueue_file(file);
                 } else {
@@ -936,7 +908,7 @@ impl Pipeline {
         if self.processed.contains(&file) {
             return;
         }
-        let ns = self.manifest.namespace_of(&self.project_root, &file);
+        let ns = namespace_of_in_roots(&self.roots, &self.project_root, &file);
         self.processed.push(file.clone());
         self.worklist.push_back(WorkItem {
             file: file.clone(),
@@ -1431,14 +1403,6 @@ impl Pipeline {
     /// Multi-file entry point: discovers and compiles the module graph from disk.
     pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), ()> {
         let entry = PathBuf::from(file);
-        // Re-root the manifest from the entry file so
-        // `cargo run -- examples/modules.hy` finds the workspace
-        // `coil.toml` even when cwd differs.
-        let root = Self::find_project_root(&entry);
-        if root != self.project_root {
-            self.project_root = root.clone();
-            self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-        }
         self.reset_session();
         self.entry_file = Some(entry.clone());
         self.begin_compile_opt_stats();
@@ -1483,11 +1447,6 @@ impl Pipeline {
         capture_il: bool,
     ) -> Result<crate::DissectArtifacts, ()> {
         let entry = PathBuf::from(file);
-        let root = Self::find_project_root(&entry);
-        if root != self.project_root {
-            self.project_root = root.clone();
-            self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-        }
         self.reset_session();
         self.entry_file = Some(entry.clone());
         self.begin_compile_opt_stats();
@@ -2127,6 +2086,7 @@ fn main() { add(1, 2); }
         let src =
             std::fs::read_to_string(root.join("examples/perf/vec_scan.hy")).expect("read vec_scan");
         let mut pipeline = Pipeline::new();
+        pipeline.bind_workspace_language_roots();
         let (bytecode, _) = pipeline.compile_src(&src).expect("compile vec_scan");
         let syms = pipeline.program_debug().fn_symbols;
         let end = bytecode.len();
@@ -2167,6 +2127,7 @@ fn main() { add(1, 2); }
         let src =
             std::fs::read_to_string(root.join("examples/perf/nsieve.hy")).expect("read nsieve");
         let mut pipeline = Pipeline::new();
+        pipeline.bind_workspace_language_roots();
         let (bytecode, _) = pipeline
             .compile_src_retaining_il(&src)
             .expect("compile nsieve");

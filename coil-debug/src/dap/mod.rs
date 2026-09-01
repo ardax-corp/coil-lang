@@ -28,10 +28,11 @@ struct DapServer {
     paused_at_entry: bool,
     /// Captures inferior stdout so it does not corrupt the DAP stdio stream.
     print_buf: Arc<Mutex<Vec<u8>>>,
+    extra_roots: Vec<PathBuf>,
 }
 
 impl DapServer {
-    fn new() -> Self {
+    fn new(extra_roots: Vec<PathBuf>) -> Self {
         let print_buf = Arc::new(Mutex::new(Vec::new()));
         machine::io::set_shared_print_redirect(Some(Arc::clone(&print_buf)));
         Self {
@@ -43,6 +44,7 @@ impl DapServer {
             exited: false,
             paused_at_entry: false,
             print_buf,
+            extra_roots,
         }
     }
 
@@ -139,6 +141,7 @@ impl DapServer {
                     &path_str,
                     Box::new(io::stderr()),
                     HostGrants::deny_all(),
+                    self.extra_roots.clone(),
                 ) {
                     Ok(mut session) => {
                         session.set_print_capture(Arc::clone(&self.print_buf));
@@ -531,11 +534,11 @@ fn resolve_program_path(program: &str, cwd: Option<&Path>) -> PathBuf {
 }
 
 /// Run the DAP adapter on stdio until disconnect/terminate.
-pub fn run_dap_server() -> io::Result<()> {
+pub fn run_dap_server(extra_roots: Vec<PathBuf>) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
-    let mut server = DapServer::new();
+    let mut server = DapServer::new(extra_roots);
 
     loop {
         let Some(msg) = read_message(&mut reader)? else {

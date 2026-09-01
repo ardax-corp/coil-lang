@@ -13,8 +13,6 @@ fn build_project(test_name: &str, files: &[(&str, &str)], entry: &str) -> (PathB
     let tmp = std::env::temp_dir().join(format!("coil_defid_{test_name}_{pid}_{nanos}"));
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create temp project dir");
-    std::fs::write(tmp.join("coil.toml"), "[module]\nroots = [\"./src\"]\n")
-        .expect("write coil.toml");
     for (rel, content) in files {
         let full = tmp.join(rel);
         if let Some(parent) = full.parent() {
@@ -38,8 +36,9 @@ fn imported_fn_def_id_matches_defining_module() {
             "use math::add;\nfn main() {\n    add(1, 2);\n}\n",
         ),
     ];
-    let (_root, entry) = build_project("use_same_id", &files, "src/main.hy");
+    let (root, entry) = build_project("use_same_id", &files, "src/main.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
     if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
         for msg in pipeline.messages() {
             eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -76,8 +75,9 @@ fn imported_one_item_per_file_def_id_matches_defining_module() {
             "use foo::sadge;\nfn main() {\n    sadge();\n}\n",
         ),
     ];
-    let (_root, entry) = build_project("use_file_per_item", &files, "src/main.hy");
+    let (root, entry) = build_project("use_file_per_item", &files, "src/main.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
     if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
         for msg in pipeline.messages() {
             eprintln!("PIPELINE ERROR: {}", msg.message());
@@ -106,8 +106,9 @@ fn imported_alias_one_item_per_file_def_id_matches_defining_module() {
             "use foo::sadge as f;\nfn main() {\n    f();\n}\n",
         ),
     ];
-    let (_root, entry) = build_project("use_file_per_item_alias", &files, "src/main.hy");
+    let (root, entry) = build_project("use_file_per_item_alias", &files, "src/main.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
     if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
         for msg in pipeline.messages() {
             eprintln!("PIPELINE ERROR: {}", msg.message());

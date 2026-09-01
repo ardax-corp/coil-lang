@@ -553,6 +553,7 @@ fn perf_mandelbrot_hoists_invariant_ci_out_of_x_loop() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let path = root.join("examples/perf/mandelbrot.hy");
     let mut pipeline = compiler::Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let (bc, _) = pipeline
         .compile_src_from_file(path.to_str().unwrap())
         .expect("compile mandelbrot from file");

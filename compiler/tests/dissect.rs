@@ -9,6 +9,7 @@ fn compile_dissect_fib_symbols_locals_and_il() {
         .expect("workspace root");
     let path = workspace_root.join("examples/fib.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let arts = pipeline
         .compile_dissect(path.to_str().unwrap(), true)
         .expect("fib.hy should compile via compile_dissect");
@@ -46,6 +47,7 @@ fn compile_dissect_without_il_leaves_snapshot_none() {
         .expect("workspace root");
     let path = workspace_root.join("examples/fib.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let arts = pipeline
         .compile_dissect(path.to_str().unwrap(), false)
         .expect("fib.hy should compile");

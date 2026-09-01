@@ -232,7 +232,7 @@ fn run_example_src(src: &str) -> String {
 }
 
 fn assert_compile_fails(src: &str, code: compiler::ErrorCode) {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     assert_compile_fails_pipeline(&mut pipeline, src, code);
 }
 
@@ -268,7 +268,7 @@ fn compile_ok(pipeline: &mut Pipeline, src: &str) -> Vec<common::Byte> {
 
 #[test]
 fn granted_exec_emits_host_invoke() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_exec();
     let bc = compile_ok(
         &mut pipeline,
@@ -290,7 +290,7 @@ fn main() {
 
 #[test]
 fn granted_exit_emits_host_invoke() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_exit();
     let bc = compile_ok(
         &mut pipeline,
@@ -308,7 +308,7 @@ fn main() { exit(0); }
 
 #[test]
 fn granted_dload_emits_ffi_load() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_dload_allow("plugin");
     let bc = compile_ok(
         &mut pipeline,
@@ -326,7 +326,7 @@ fn main() { let _ = dload("plugin"); }
 
 #[test]
 fn granted_ffi_exec_extern_compiles() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_dload_allow("plugin");
     pipeline.grant_ffi_exec();
     let _ = compile_ok(
@@ -342,7 +342,7 @@ fn main() { let _ = system(); }
 
 #[test]
 fn host_dload_stem_grant_compiles_without_allow_dload() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_dload_stem("plugin");
     let _ = compile_ok(
         &mut pipeline,
@@ -355,7 +355,7 @@ fn main() { let _ = dload("plugin"); }
 
 #[test]
 fn dload_nonconst_is_compile_error() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_dload_allow("plugin");
     assert_compile_fails_pipeline(
         &mut pipeline,
@@ -370,8 +370,14 @@ fn main() {
     );
 }
 
+fn test_pipeline() -> Pipeline {
+    let mut p = Pipeline::new();
+    p.bind_workspace_language_roots();
+    p
+}
+
 fn compile_src_with_tests(src: &str) -> (Pipeline, Vec<common::Byte>, Vec<u64>) {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
     let (bytecode, constants) = pipeline
         .compile_src(src)
@@ -385,7 +391,7 @@ fn run_harness_src(src: &str) -> String {
 }
 
 fn run_example_src_with_entry(src: &str, entry: Option<&std::path::Path>) -> String {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("example failed to compile (parse error or type errors)");
@@ -394,13 +400,13 @@ fn run_example_src_with_entry(src: &str, entry: Option<&std::path::Path>) -> Str
 
 /// Multi-file examples (`use` / `mod`) must go through
 /// `compile_src_from_file` so the pipeline discovers dependencies
-/// via `coil.toml` roots. In-memory `compile_src` cannot load them.
+/// via bound `--root` / default `src`. In-memory `compile_src` cannot load them.
 fn run_example_multifile(path: &str) -> String {
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("compiler crate must have a parent (workspace root)");
     let full = workspace_root.join(path);
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src_from_file(full.to_str().unwrap())
         .unwrap_or_else(|_| panic!("multi-file example failed to compile: {}", full.display()));
@@ -446,7 +452,7 @@ fn run_src_with_grants(
     entry: Option<&std::path::Path>,
     grants: &[(&str, std::path::PathBuf)],
 ) -> String {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     for (stem, path) in grants {
         pipeline.grant_dload_file((*stem).to_string(), path.clone());
     }
@@ -462,7 +468,7 @@ fn example_panic_loc_archive_has_source_files() {
         .parent()
         .expect("workspace root");
     let path = workspace_root.join("examples/panic_loc.hy");
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _constants) = pipeline
         .compile_src_from_file(path.to_str().unwrap())
         .expect("panic_loc should compile");
@@ -517,7 +523,7 @@ fn example_assert_prints_ok_assertion_failed_custom() {
 
 #[test]
 fn panic_aborts_and_writes_message() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(
             r#"
@@ -1075,7 +1081,7 @@ use string::{format, to_bytes};
             write(stdout(), to_bytes(format("%i", f(41))));
         }
     "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _constants) = pipeline.compile_src(src).expect("compile");
     let capture = bytecode
         .iter()
@@ -1164,7 +1170,7 @@ use string::{format, to_bytes};
             write(stdout(), to_bytes(format("%i", f(42))));
         }
     "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _constants) = pipeline.compile_src(src).expect("compile");
     let capture = bytecode
         .iter()
@@ -1191,7 +1197,7 @@ use string::{format, to_bytes};
             write(stdout(), to_bytes(format("%i", f(fib(6)))));
         }
     "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
     assert!(
         bytecode
@@ -1284,6 +1290,7 @@ fn fizbuz_runs_to_completion() {
 #[test]
 fn compile_test_emits_nothing_when_checker_rejects() {
     let mut pipeline = compiler::Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let src = r#"
 fn main() {
     let x: int = "nope";
@@ -1302,7 +1309,7 @@ fn main() {
 #[test]
 fn let_binding_emits_store_pop_in_bytecode() {
     use common::Instruction;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -1547,6 +1554,7 @@ use string::{format, to_bytes};
     "#;
 
     let mut pipeline = compiler::Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let parser = parser::Pratt::default();
     let mut ast = parser
         .parse(src)
@@ -1574,6 +1582,7 @@ use string::{format, to_bytes};
 #[test]
 fn nested_if_in_loop_runs_correctly() {
     let mut pipeline = compiler::Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let src = r#"
         fn main() {
             let i = 0;
@@ -1851,7 +1860,7 @@ fn example_strlen_is_compile_error_for_libc() {
 
 #[test]
 fn example_strlen_from_file_is_compile_error_for_libc() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_dload_stem("c");
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -2154,17 +2163,14 @@ fn dload_gate_for_project(
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir dload gate project");
     let stdlib = workspace_stdlib();
-    let manifest = format!(
-        "[module]\nroots = [\"{}\"]\n\n{toml_extra}\n",
-        stdlib.display()
-    );
-    std::fs::write(dir.join("coil.toml"), manifest).expect("write coil.toml");
+    std::fs::write(dir.join("coil.toml"), toml_extra).expect("write coil.toml");
     if let Some(lock) = lock {
         std::fs::write(dir.join("coil.lock"), lock).expect("write coil.lock");
     }
     let entry = dir.join("main.hy");
     std::fs::write(&entry, "fn main() {}\n").expect("write main.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_project_roots_with_default(dir.clone(), [stdlib]);
     for stem in dload_allow {
         pipeline.grant_dload_allow(*stem);
     }
@@ -2232,17 +2238,14 @@ fn run_userland_dload_project_grants(
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir dload project");
     let stdlib = workspace_stdlib();
-    let manifest = format!(
-        "[module]\nroots = [\"{}\"]\n\n{toml_extra}\n",
-        stdlib.display()
-    );
-    std::fs::write(dir.join("coil.toml"), manifest).expect("write coil.toml");
+    std::fs::write(dir.join("coil.toml"), toml_extra).expect("write coil.toml");
     if let Some(lock) = lock {
         std::fs::write(dir.join("coil.lock"), lock).expect("write coil.lock");
     }
     let entry = dir.join("main.hy");
     std::fs::write(&entry, src).expect("write main.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_project_roots_with_default(dir.clone(), [stdlib]);
     for stem in dload_allow {
         grants.grant_dload_allow(*stem);
     }
@@ -2277,17 +2280,14 @@ fn assert_dload_project_compile_fails(
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("mkdir dload fail project");
     let stdlib = workspace_stdlib();
-    let manifest = format!(
-        "[module]\nroots = [\"{}\"]\n\n{toml_extra}\n",
-        stdlib.display()
-    );
-    std::fs::write(dir.join("coil.toml"), manifest).expect("write coil.toml");
+    std::fs::write(dir.join("coil.toml"), toml_extra).expect("write coil.toml");
     if let Some(lock) = lock {
         std::fs::write(dir.join("coil.lock"), lock).expect("write coil.lock");
     }
     let entry = dir.join("main.hy");
     std::fs::write(&entry, src).expect("write main.hy");
     let mut pipeline = Pipeline::new();
+    pipeline.bind_project_roots_with_default(dir.clone(), [stdlib]);
     let mut grants = compiler::HostGrants::deny_all();
     for stem in dload_allow {
         grants.grant_dload_allow(*stem);
@@ -3040,7 +3040,7 @@ fn main() {
     let _d = (1.0..=2.0).to_vec();
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("range to_vec compile");
     let syms = pipeline.program_debug().fn_symbols;
     let body = |name: &str| {
@@ -3551,7 +3551,7 @@ enum E {
 
 fn main() {}
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline
         .compile_src(src)
         .expect("derive Serialize should compile without type errors");
@@ -3618,7 +3618,7 @@ fn main() {
 
 #[test]
 fn example_attr_ffi_strlen_is_compile_error_for_libc() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_dload_stem("c");
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -3684,7 +3684,7 @@ fn main() {
 
 #[test]
 fn attr_test_fn_discovered_by_harness() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
     let src = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -3996,7 +3996,7 @@ fn main() {
 /// Err arm in a binding match must still panic with the literal message.
 #[test]
 fn let_result_ok_panic_match_err_path_panics() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(
             r#"
@@ -4068,7 +4068,7 @@ test("ok") {
 /// Soft-fail path prints `> Test "…" failed` and aborts via Panic.
 #[test]
 fn harness_virtual_main_prints_failure_and_panics() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
     let (bytecode, constants) = pipeline
         .compile_src(
@@ -4106,7 +4106,7 @@ test("broken") {
 /// soft failure does not prevent later cases from running.
 #[test]
 fn harness_isolated_call_function_continues_after_soft_fail() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
     let (bytecode, constants) = pipeline
         .compile_src(
@@ -4140,7 +4140,7 @@ test("c") { assert(1 + 1 == 2)?; }
 /// matching `run_test_case` in the CLI so a VM abort does not fail-fast.
 #[test]
 fn harness_isolated_call_function_continues_after_hard_panic() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
     let (bytecode, constants) = pipeline
         .compile_src(
@@ -4526,7 +4526,7 @@ fn main() {
 /// Disk-import rebind must not suppress explicit-capture checks for locals.
 #[test]
 fn disk_import_lambda_still_requires_local_capture() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 use io::{stdout};
@@ -4641,7 +4641,7 @@ fn main() {
 
 #[test]
 fn production_compile_strips_harness_declarations() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(
             r#"
@@ -4760,7 +4760,7 @@ fn main() {
     let flag = Arc::clone(&is_err);
     run_on_example_stack("attr-async-diag".into(), move || {
         *flag.lock().unwrap_or_else(|e| e.into_inner()) =
-            Pipeline::new().compile_src(&src).is_err();
+            test_pipeline().compile_src(&src).is_err();
         String::new()
     });
     assert!(
@@ -5213,7 +5213,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", n)));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     assert!(
         bytecode
@@ -5241,7 +5241,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", n)));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     assert!(
         bytecode
@@ -5428,7 +5428,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", fib(22))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par fib should compile");
@@ -5477,7 +5477,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", leaves(build(21)))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par enum-ctor should compile");
@@ -5513,7 +5513,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", rec(22))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let _ = pipeline
         .compile_src(src)
         .expect("impure ctor-payload rec should still compile");
@@ -5539,7 +5539,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", diff(22))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par sub binop should compile");
@@ -5572,7 +5572,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", tak(21, 12, 6))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par self-call should compile");
@@ -5608,7 +5608,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", tak(18, 12, 6))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("fair tak should compile");
     assert!(
         pipeline.function_offset("__coil_par_tak_18_12_6").is_none(),
@@ -5636,7 +5636,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", rec(22))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let _ = pipeline
         .compile_src(src)
         .expect("impure rec should still compile");
@@ -5665,7 +5665,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", pair_fib(22))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("helper-arm IPA should compile");
@@ -5695,7 +5695,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", pair_sq(22))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("trivial helper arms should compile");
@@ -5725,7 +5725,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", fibm(22))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("match-arm IPA should compile");
@@ -5757,7 +5757,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i,%i", acc, i)));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("auto-par loop should compile");
@@ -5878,7 +5878,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i,%i", a, b)));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("two auto-par loops should compile");
@@ -5960,7 +5960,7 @@ fn main() {
     }
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let _ = pipeline
         .compile_src(src)
         .expect("impure loop should still compile");
@@ -5989,7 +5989,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", acc)));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
         .expect("short loop should compile");
@@ -6301,7 +6301,7 @@ fn main() {
     let output = run_example_src(src);
     assert_eq!(output, "5");
 
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("class field source");
     let symbols = pipeline.program_debug().fn_symbols;
     let main = symbols
@@ -6345,7 +6345,7 @@ fn main() {
     let output = run_example_src(src);
     assert_eq!(output, "6");
 
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("second field temp");
     let symbols = pipeline.program_debug().fn_symbols;
     let main = symbols
@@ -6393,7 +6393,7 @@ fn main() {
     let output = run_example_src(src);
     assert_eq!(output, "5");
 
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("grouped field temp");
     let symbols = pipeline.program_debug().fn_symbols;
     let main = symbols
@@ -6444,7 +6444,7 @@ fn main() {
     let output = run_example_src(src);
     assert_eq!(output, "5");
 
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("named local class");
     let symbols = pipeline.program_debug().fn_symbols;
     let main = symbols
@@ -6496,7 +6496,7 @@ fn main() {
     let output = run_example_src(src);
     assert_eq!(output, "7");
 
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("drop temp field");
     let symbols = pipeline.program_debug().fn_symbols;
     let main = symbols
@@ -7648,7 +7648,7 @@ fn main() {
     write(stdout(), to_bytes(format("%f,%f", d[0], d[1])));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
     assert!(
         bytecode
@@ -7819,7 +7819,7 @@ fn example_ansi_color_prints_red() {
 /// Virtual `time` is gone (COI-259); coil-time is a package.
 #[test]
 fn virtual_time_module_does_not_resolve() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src("use time::{epoch};\nfn main() {}\n");
     assert!(err.is_err(), "expected module-not-found for virtual time");
     assert!(
@@ -7835,7 +7835,7 @@ fn virtual_time_module_does_not_resolve() {
 /// Virtual `crypto` is gone (COI-216); coil-crypto is a package.
 #[test]
 fn virtual_crypto_module_does_not_resolve() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src("use crypto::{sha256};\nfn main() {}\n");
     assert!(err.is_err(), "expected module-not-found for virtual crypto");
     assert!(
@@ -7957,7 +7957,7 @@ fn main() {
 #[test]
 fn virtual_tls_modules_do_not_resolve() {
     fn check_missing(src: &str) {
-        let mut pipeline = Pipeline::new();
+        let mut pipeline = test_pipeline();
         let err = pipeline.compile_src(src);
         assert!(
             err.is_err(),
@@ -7983,7 +7983,7 @@ fn virtual_tls_modules_do_not_resolve() {
 #[test]
 fn stream_attach_and_park_typecheck() {
     fn check_ok(src: &str) {
-        let mut pipeline = Pipeline::new();
+        let mut pipeline = test_pipeline();
         assert!(
             pipeline.compile_src(src).is_ok(),
             "expected typecheck Ok for {src:?}, messages={:?}",
@@ -7991,7 +7991,7 @@ fn stream_attach_and_park_typecheck() {
         );
     }
     fn check_ok_attach(src: &str) {
-        let mut pipeline = Pipeline::new();
+        let mut pipeline = test_pipeline();
         pipeline.grant_attach();
         assert!(
             pipeline.compile_src(src).is_ok(),
@@ -8106,7 +8106,7 @@ fn example_io_tls_does_not_import_virtual_tls() {
 #[test]
 fn optional_virtual_modules_match_cargo_features() {
     fn check(src: &str, enabled: bool) {
-        let mut pipeline = Pipeline::new();
+        let mut pipeline = test_pipeline();
         let ok = pipeline.compile_src(src).is_ok();
         assert_eq!(
             ok,
@@ -8234,7 +8234,7 @@ fn main() {
 
 #[test]
 fn fallthrough_string_return_requires_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 use io::{stdout, write};
@@ -8282,7 +8282,7 @@ fn main() {
 
 #[test]
 fn fallthrough_int_requires_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 use io::{stdout, write};
@@ -8307,7 +8307,7 @@ fn main() {
 
 #[test]
 fn fallthrough_bool_byte_float_require_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 fn flag() -> bool {}
@@ -8327,7 +8327,7 @@ fn main() {}
 
 #[test]
 fn fallthrough_option_requires_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 fn opt() -> Option<int> {}
@@ -8345,7 +8345,7 @@ fn main() { let _ = opt(); }
 
 #[test]
 fn fallthrough_async_yield_only_does_not_e0111() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 async fn gen_three() {
@@ -8398,7 +8398,7 @@ fn main() {
 
 #[test]
 fn fallthrough_result_int_requires_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 fn ok_int() -> Result<int, string> {}
@@ -8416,7 +8416,7 @@ fn main() { let _ = ok_int(); }
 
 #[test]
 fn fallthrough_result_string_and_adt_require_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 enum Color { Red, Blue }
@@ -8470,7 +8470,7 @@ fn main() {
 
 #[test]
 fn while_true_satisfies_non_unit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 fn forever() -> int {
@@ -8496,7 +8496,7 @@ fn main() {
 
 #[test]
 fn unreachable_after_return_is_warning() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 use io::{stdout, write};
@@ -8523,7 +8523,7 @@ fn main() {
 
 #[test]
 fn unreachable_after_while_true_is_warning() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 use io::{stdout, write};
@@ -8551,7 +8551,7 @@ fn main() {
 
 #[test]
 fn defer_dominated_by_while_true_warns_e0123() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 use io::{stdout, write};
@@ -8594,7 +8594,7 @@ fn main() {
 
 #[test]
 fn defer_inside_while_true_warns_e0123() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 use io::{stdout, write};
@@ -8637,7 +8637,7 @@ fn main() {
 /// Hard errors must still fail `compile_src` after the warning-only change.
 #[test]
 fn compile_src_still_fails_on_hard_errors() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 fn main() {
@@ -8659,7 +8659,7 @@ fn main() {
 
 #[test]
 fn while_true_with_break_requires_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 fn f() -> int {
@@ -8684,7 +8684,7 @@ fn main() {
 
 #[test]
 fn const_true_while_satisfies_non_unit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 fn forever() -> int {
@@ -8711,7 +8711,7 @@ fn main() {
 
 #[test]
 fn for_true_satisfies_non_unit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 fn forever() -> int {
@@ -8737,7 +8737,7 @@ fn main() {
 
 #[test]
 fn raise_path_satisfies_result_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 fn boom() -> Result<int, string> {
@@ -8762,7 +8762,7 @@ fn main() {
 
 #[test]
 fn panic_path_satisfies_non_unit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 fn boom() -> int {
@@ -8787,7 +8787,7 @@ fn main() {
 
 #[test]
 fn if_without_else_requires_explicit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let err = pipeline.compile_src(
         r#"
 fn f(bool b) -> int {
@@ -8812,7 +8812,7 @@ fn main() {
 
 #[test]
 fn if_else_returns_satisfy_non_unit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 use io::{stdout, write};
@@ -8865,7 +8865,7 @@ fn main() {
 
 #[test]
 fn match_all_arms_exit_satisfies_non_unit_return() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let result = pipeline.compile_src(
         r#"
 fn f(Option<int> o) -> int {
@@ -8983,7 +8983,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", pick(true))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     assert!(
         !bytecode.iter().any(|b| matches!(
@@ -9017,7 +9017,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", a[0] + a[1])));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     let mut set_field_followed_by_pop = 0usize;
     for w in bytecode.windows(2) {
@@ -9052,7 +9052,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", twice(new Point(3, 4)))));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     // Prologue: STRING table["x"]; STORE temp (ctor also emits STRING "x" for SetField).
     let x_idx = pipeline
@@ -9097,7 +9097,7 @@ fn main() {
     }
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     let syms = pipeline.program_debug().fn_symbols;
     let main_idx = syms.iter().position(|s| s.name == "main").expect("main");
@@ -9165,7 +9165,7 @@ fn main() {
     write(stdout(), to_bytes(format("%s-%i", "archive", 35)));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
     assert!(
         !pipeline.strings().is_empty(),
@@ -9395,7 +9395,7 @@ fn main() {
     write(stdout(), to_bytes(a + b + c));
 }
 "#;
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     let pct_idx = pipeline
         .strings()
@@ -9541,16 +9541,9 @@ fn main() {
 "#,
     )
     .expect("write warn_only.hy");
-    std::fs::write(
-        dir.join("coil.toml"),
-        format!(
-            "[module]\nroots = [\"{}\"]\n",
-            workspace_stdlib().display()
-        ),
-    )
-    .expect("write coil.toml");
 
     let mut pipeline = Pipeline::new();
+    pipeline.bind_project_roots_with_default(dir.clone(), Vec::<std::path::PathBuf>::new());
     let result = pipeline.compile_src_from_file(src_path.to_str().unwrap());
     let msgs: Vec<_> = pipeline.messages().iter().map(|m| m.message()).collect();
     let _ = std::fs::remove_dir_all(&dir);
@@ -9641,7 +9634,7 @@ fn main() {
 /// COI-19: `extern "c"` in an imported module is still a compile error.
 #[test]
 fn extern_in_imported_module_libc_is_compile_error() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.grant_dload_stem("c");
     let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -9752,7 +9745,7 @@ test("bind method option Some/None") {
 /// `!panicked && result_is_ok`.
 #[test]
 fn nested_method_try_preserves_inner_result_payload() {
-    let mut pipeline = Pipeline::new();
+    let mut pipeline = test_pipeline();
     pipeline.set_include_tests(true);
     let (bytecode, constants) = pipeline
         .compile_src(

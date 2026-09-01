@@ -103,13 +103,13 @@ jobs:
       - name: Language harness (`coil test`)
         if: matrix.features.id == 'default'
         run: |
-          ./target/debug/coil test
+          ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Leak smoke (`coil test` under ulimit -v)
         if: matrix.features.id == 'default' && runner.os == 'Linux'
         run: |
           ulimit -v 65536
-          ./target/debug/coil test
+          ./target/debug/coil test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Showcase project tests
         if: matrix.features.id == 'default'
@@ -192,7 +192,7 @@ jobs:
         run: |
           cargo_bin="$(cygpath -u "${CARGO_HOME:-$USERPROFILE/.cargo}")/bin"
           export PATH="$MINGW_PREFIX/bin:$cargo_bin:/usr/bin:$PATH"
-          ./target/debug/coil.exe test
+          ./target/debug/coil.exe test --root examples/src --root .deps/coil-stdlib/src --root ../coil-stdlib/src
 
       - name: Showcase project tests
         shell: msys2 {0}

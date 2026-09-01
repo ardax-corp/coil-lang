@@ -29,6 +29,12 @@ fn fib_entry() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
 }
 
+fn apply_workspace_roots(cmd: &mut Command) {
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+}
+
 fn run_debug_script(script_body: &str, cwd_suffix: &str) -> (std::process::Output, PathBuf) {
     ensure_helper("coil-debug");
     let bin = coil_bin();
@@ -39,17 +45,17 @@ fn run_debug_script(script_body: &str, cwd_suffix: &str) -> (std::process::Outpu
     let script = cwd.join("cmds.txt");
     std::fs::write(&script, script_body).expect("write script");
 
-    let out = Command::new(&bin)
-        .current_dir(&cwd)
-        .args([
-            "debug",
-            entry.to_str().unwrap(),
-            "-x",
-            script.to_str().unwrap(),
-            "--batch",
-        ])
-        .output()
-        .expect("spawn coil debug");
+    let mut cmd = Command::new(&bin);
+    cmd.current_dir(&cwd);
+    cmd.arg("debug");
+    apply_workspace_roots(&mut cmd);
+    cmd.args([
+        entry.to_str().unwrap(),
+        "-x",
+        script.to_str().unwrap(),
+        "--batch",
+    ]);
+    let out = cmd.output().expect("spawn coil debug");
     (out, cwd)
 }
 

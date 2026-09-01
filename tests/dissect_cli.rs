@@ -28,6 +28,23 @@ fn fib_entry() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
 }
 
+fn apply_workspace_roots(cmd: &mut Command) {
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+}
+
+fn coil_dissect(bin: &str, cwd: Option<&std::path::Path>, entry: &std::path::Path) -> Command {
+    let mut cmd = Command::new(bin);
+    if let Some(cwd) = cwd {
+        cmd.current_dir(cwd);
+    }
+    cmd.arg("dissect");
+    apply_workspace_roots(&mut cmd);
+    cmd.arg(entry);
+    cmd
+}
+
 #[test]
 fn dissect_fib_fn_prints_bytecode_without_out_hyc() {
     ensure_coil_dissect();
@@ -37,9 +54,8 @@ fn dissect_fib_fn_prints_bytecode_without_out_hyc() {
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
 
-    let out = Command::new(&bin)
-        .current_dir(&cwd)
-        .args(["dissect", entry.to_str().unwrap(), "--fn", "fib"])
+    let out = coil_dissect(&bin, Some(&cwd), &entry)
+        .args(["--fn", "fib"])
         .output()
         .expect("spawn coil dissect");
     assert!(
@@ -69,8 +85,8 @@ fn dissect_fn_miss_exits_nonzero() {
     let bin = coil_bin();
     let entry = fib_entry();
 
-    let out = Command::new(&bin)
-        .args(["dissect", entry.to_str().unwrap(), "--fn", "nope"])
+    let out = coil_dissect(&bin, None, &entry)
+        .args(["--fn", "nope"])
         .output()
         .expect("spawn coil dissect");
     assert!(
@@ -93,16 +109,8 @@ fn dissect_fib_il_and_ast_sections() {
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
 
-    let out = Command::new(&bin)
-        .current_dir(&cwd)
-        .args([
-            "dissect",
-            entry.to_str().unwrap(),
-            "--fn",
-            "fib",
-            "--il",
-            "--ast",
-        ])
+    let out = coil_dissect(&bin, Some(&cwd), &entry)
+        .args(["--fn", "fib", "--il", "--ast"])
         .output()
         .expect("spawn coil dissect --il --ast");
     assert!(

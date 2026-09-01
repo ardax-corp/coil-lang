@@ -23,11 +23,20 @@ fi
 # GNU `timeout` is absent on stock macOS; prefer gtimeout (coreutils) then bare run.
 run_coil_test() {
   if command -v timeout >/dev/null 2>&1; then
-    timeout "${TIMEOUT_SECS}s" "$BIN" test
+    timeout "${TIMEOUT_SECS}s" "$BIN" test \
+      --root src \
+      --root ../../../.deps/coil-stdlib/src \
+      --root ../../../../coil-stdlib/src
   elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "${TIMEOUT_SECS}s" "$BIN" test
+    gtimeout "${TIMEOUT_SECS}s" "$BIN" test \
+      --root src \
+      --root ../../../.deps/coil-stdlib/src \
+      --root ../../../../coil-stdlib/src
   else
-    "$BIN" test
+    "$BIN" test \
+      --root src \
+      --root ../../../.deps/coil-stdlib/src \
+      --root ../../../../coil-stdlib/src
   fi
 }
 

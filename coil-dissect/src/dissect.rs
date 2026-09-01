@@ -15,11 +15,14 @@ pub struct DissectArgs {
     pub fn_pat: Option<String>,
     pub show_il: bool,
     pub show_ast: bool,
+    pub extra_roots: Vec<std::path::PathBuf>,
 }
 
 pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     let format = config.format;
     let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
+    let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    pipeline.bind_project_roots_with_default(dir, args.extra_roots);
 
     let artifacts = match pipeline.compile_dissect(&args.filename, args.show_il) {
         Ok(a) => a,

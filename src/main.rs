@@ -36,30 +36,17 @@ pub(crate) fn fail_and_exit(
     exit(1);
 }
 
-fn resolve_entry_filename(pipeline: &mut Pipeline, filename: &str) -> String {
-    if !filename.is_empty() {
-        return filename.to_string();
+fn resolve_entry_filename(filename: &str) -> Result<String, String> {
+    if filename.is_empty() {
+        Err("missing input file (pass a .hy file or `--entry`)".into())
+    } else {
+        Ok(filename.to_string())
     }
-    match pipeline.manifest_entry_path() {
-        Some(path) => {
-            let display = path.display().to_string();
-            if !path.exists() {
-                fail_and_exit(
-                    pipeline,
-                    ErrorCode::MissingInputFile,
-                    format!(
-                        "manifest `[entry].file` does not exist: `{display}` (set a valid path in coil.toml or pass a .hy file)"
-                    ),
-                );
-            }
-            display
-        }
-        None => fail_and_exit(
-            pipeline,
-            ErrorCode::MissingInputFile,
-            "missing input file or command (pass a .hy file, or set `[entry].file` in coil.toml)",
-        ),
-    }
+}
+
+fn bind_cli_roots(pipeline: &mut Pipeline, extra: Vec<PathBuf>) {
+    let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    pipeline.bind_project_roots_with_default(dir, extra);
 }
 
 fn print_opt_stats(text: bool, json: bool) {
@@ -129,7 +116,7 @@ fn write_pgo_profile(path: Option<&str>, snap: Option<machine::pgo::PgoSnapshot>
 }
 
 fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
-    // Multi-file entry: discovers `use` / `mod` via coil.toml.
+    // Multi-file entry: discovers `use` / `mod` via bound `--root` / default `src`.
     let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
         Err(()) => {
@@ -189,24 +176,11 @@ mod archive_staleness {
         if p.is_absolute() {
             return None;
         }
-        let Ok(mut dir) = std::env::current_dir() else {
+        let Ok(dir) = std::env::current_dir() else {
             return None;
         };
-        loop {
-            let candidate = dir.join(p);
-            if let Some(s) = candidate.to_str()
-                && let Some(m) = archive_mtime(s)
-            {
-                return Some(m);
-            }
-            if dir.join("coil.toml").is_file() {
-                break;
-            }
-            if !dir.pop() {
-                break;
-            }
-        }
-        None
+        let candidate = dir.join(p);
+        candidate.to_str().and_then(archive_mtime)
     }
 
     /// True when `path` refers to the same file as `other` (best-effort).
@@ -547,6 +521,7 @@ fn run_test_suite(
     fail_fast: bool,
     opt_level: OptLevel,
     grants: HostGrants,
+    extra_roots: &[PathBuf],
 ) -> Result<(usize, usize), String> {
     let files = collect_test_files(root)?;
 
@@ -571,6 +546,7 @@ fn run_test_suite(
         pipeline.set_include_tests(true);
         pipeline.set_opt_level(opt_level);
         pipeline.set_host_grants(grants.clone());
+        bind_cli_roots(&mut pipeline, extra_roots.to_vec());
 
         // catch_unwind isolates a compiler ICE from aborting the whole
         // harness under panic=unwind. Release builds use panic=abort, so
@@ -700,11 +676,19 @@ fn cmd_test(
     fail_fast: bool,
     opt_level: OptLevel,
     grants: HostGrants,
+    extra_roots: Vec<PathBuf>,
 ) {
     let root = path.unwrap_or_else(|| TESTS_DIR.to_string());
     let tests_dir = Path::new(&root);
     let (passed, failed) =
-        match run_test_suite(config.clone(), tests_dir, fail_fast, opt_level, grants) {
+        match run_test_suite(
+            config.clone(),
+            tests_dir,
+            fail_fast,
+            opt_level,
+            grants,
+            &extra_roots,
+        ) {
         Ok(counts) => counts,
         Err(msg) => {
             let format = config.format;
@@ -808,9 +792,14 @@ fn main() {
     };
 
     match cli.command {
-        Command::Test { path, fail_fast } => {
-            cmd_test(config, path, fail_fast, cli.opt_level, cli.host_grants)
-        }
+        Command::Test { path, fail_fast } => cmd_test(
+            config,
+            path,
+            fail_fast,
+            cli.opt_level,
+            cli.host_grants,
+            cli.module_roots,
+        ),
         Command::Dissect { .. } => dispatch_helper("dissect"),
         Command::Debug { .. } => dispatch_helper("debug"),
         Command::Fmt => dispatch_helper("fmt"),
@@ -819,6 +808,7 @@ fn main() {
             let format = config.format;
             let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
             pipeline.set_host_grants(cli.host_grants.clone());
+            bind_cli_roots(&mut pipeline, cli.module_roots.clone());
             if cli.include_tests {
                 pipeline.set_include_tests(true);
             }
@@ -833,7 +823,10 @@ fn main() {
             }
             match command {
                 Command::BuildAndRun { filename } => {
-                    let filename = resolve_entry_filename(&mut pipeline, &filename);
+                    let filename = match resolve_entry_filename(&filename) {
+                        Ok(f) => f,
+                        Err(msg) => fail_and_exit(&mut pipeline, ErrorCode::MissingInputFile, msg),
+                    };
                     let snap = cmd_build_and_run(
                         &mut pipeline,
                         &filename,
@@ -843,7 +836,10 @@ fn main() {
                     write_pgo_profile(cli.pgo_generate_profile.as_deref(), Some(snap));
                 }
                 Command::Compile { filename, output } => {
-                    let filename = resolve_entry_filename(&mut pipeline, &filename);
+                    let filename = match resolve_entry_filename(&filename) {
+                        Ok(f) => f,
+                        Err(msg) => fail_and_exit(&mut pipeline, ErrorCode::MissingInputFile, msg),
+                    };
                     cmd_compile(
                         &mut pipeline,
                         &filename,
@@ -1146,8 +1142,7 @@ mod tests {
         // Well-typed under compile_fail/ ⇒ harness failure (inverted).
         std::fs::write(
             cf.join("unexpected_ok.hy"),
-            "use io::{stdout};
-use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  write_all(stdout(), to_bytes(format(\"%i\", 1)));\n}\n",
+            "fn main() {\n  let _x = 1;\n}\n",
         )
         .unwrap();
         // Normal positive case still runs.
@@ -1159,6 +1154,7 @@ use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  writ
             false,
             OptLevel::Standard,
             HostGrants::deny_all(),
+            &[],
         )
         .expect("suite runs");
         assert_eq!(passed, 2, "bad compile_fail + positive ok");
@@ -1176,8 +1172,7 @@ use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  writ
         // Lexicographic order: a_ok before z_bad — fail-fast must stop after a_ok.
         std::fs::write(
             cf.join("a_ok.hy"),
-            "use io::{stdout};
-use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  write_all(stdout(), to_bytes(format(\"%i\", 1)));\n}\n",
+            "fn main() {\n  let _x = 1;\n}\n",
         )
         .unwrap();
         std::fs::write(
@@ -1192,6 +1187,7 @@ use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  writ
             true,
             OptLevel::Standard,
             HostGrants::deny_all(),
+            &[],
         )
         .expect("suite runs");
         assert_eq!(failed, 1, "a_ok should fail (unexpected compile success)");
@@ -1214,23 +1210,20 @@ use io::sync::{write_all};\nuse string::{format, to_bytes};\nfn main() {\n  writ
     }
 
     #[test]
-    fn archive_source_mtime_resolves_via_coil_toml_root() {
-        let root = unique_tmp("mtime_root");
-        let nested = root.join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(root.join("coil.toml"), b"[module]\nroots = [\"./src\"]\n").unwrap();
+    fn archive_source_mtime_resolves_cwd_relative() {
+        let root = unique_tmp("mtime_cwd");
         let src = root.join("src");
         std::fs::create_dir_all(&src).unwrap();
         let file = src.join("worker.hy");
         std::fs::write(&file, b"fn f() {}").unwrap();
 
         let prev = std::env::current_dir().unwrap();
-        std::env::set_current_dir(&nested).unwrap();
+        std::env::set_current_dir(&root).unwrap();
         let m = archive_source_mtime("src/worker.hy");
         std::env::set_current_dir(&prev).unwrap();
         assert!(
             m.is_some(),
-            "should resolve src/worker.hy via parent coil.toml root"
+            "should resolve src/worker.hy relative to cwd"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
