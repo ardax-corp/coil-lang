@@ -4,7 +4,7 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use compiler::{ErrorCode, Pipeline};
+use compiler::{ErrorCode, HostGrants, Pipeline};
 use machine::Machine;
 
 // Tests change cwd; serialize with CWD_LOCK when running in parallel.
@@ -1185,13 +1185,9 @@ fn build_libsum_into(dir: &Path) -> Option<PathBuf> {
     }
 }
 
-/// COI-233 worker fixture: `[ffi] search_paths = ["./allowed"]` with libsum
+/// COI-233 worker fixture: FFI search dir `./allowed` with libsum
 /// there, and a non-loadable marker at cwd `native/libtls.so` (not a hijack).
 fn run_coi233_worker_ffi_project() -> Option<String> {
-    let manifest = format!(
-        "{}\n[ffi]\nsearch_paths = [\"./allowed\"]\n",
-        manifest_src_and_stdlib()
-    );
     let files = [
         (
             "src/main.hy",
@@ -1230,7 +1226,7 @@ fn main() {
             "coil-security-pin: not a shared library\n",
         ),
     ];
-    let (root, entry) = build_project("coi233_worker_ffi", &manifest, &files, "src/main.hy");
+    let (root, entry) = build_project("coi233_worker_ffi", "", &files, "src/main.hy");
     let Some(libsum) = build_libsum_into(&root.join("allowed")) else {
         let _ = std::fs::remove_dir_all(&root);
         return None;
@@ -1238,9 +1234,12 @@ fn main() {
     let output = with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
         bind_ns_pipeline(&mut pipeline, &[]);
+        let mut grants = HostGrants::deny_all();
+        grants.add_ffi_search_path(root.join("allowed"));
+        grants.grant_dload_allow("sum");
+        grants.grant_dload_allow("tls");
+        pipeline.set_host_grants(grants);
         pipeline.grant_dload_file("sum", libsum);
-        pipeline.grant_dload_allow("sum");
-        pipeline.grant_dload_allow("tls");
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
             Err(()) => {
@@ -1273,12 +1272,12 @@ fn worker_dload_does_not_search_cwd_native_tls() {
     );
     assert!(
         output.ends_with("|10") || output.ends_with("|11"),
-        "parent must dload sum via [ffi] search_paths, got {output:?}"
+        "parent must dload sum via FFI search paths, got {output:?}"
     );
 }
 
 /// COI-233: a `thread::spawn` worker must resolve `dload("sum")` from the same
-/// `[ffi] search_paths` as the root graph.
+/// FFI search paths as the root graph.
 #[test]
 fn worker_dload_sees_parent_ffi_search_paths() {
     let Some(output) = run_coi233_worker_ffi_project() else {
@@ -1286,7 +1285,7 @@ fn worker_dload_sees_parent_ffi_search_paths() {
     };
     assert!(
         output.ends_with("|11"),
-        "parent and worker must both dload sum via [ffi] search_paths, got {output:?}"
+        "parent and worker must both dload sum via FFI search paths, got {output:?}"
     );
 }
 
