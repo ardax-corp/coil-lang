@@ -139,6 +139,7 @@ impl DapServer {
                     &path_str,
                     Box::new(io::stderr()),
                     HostGrants::deny_all(),
+                    Vec::new(),
                 ) {
                     Ok(mut session) => {
                         session.set_print_capture(Arc::clone(&self.print_buf));

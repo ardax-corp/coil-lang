@@ -133,8 +133,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     if let Some(root_uri) = workspace_root {
         state.workspace_root = Some(root_uri.clone());
-        let mut index = ProjectIndex::new(root_uri);
-        index.index_from_manifest();
+        let index = ProjectIndex::new(root_uri);
         state.project_index = Some(index);
     }
     for message in &connection.receiver {
@@ -634,6 +633,9 @@ fn project_diagnostics(state: &ServerState, uri: &Uri, document: &Document) -> V
             .collect();
     };
     let mut pipeline = Pipeline::new();
+    if let Some(root) = &state.workspace_root {
+        pipeline.bind_project_root(root.clone(), compiler::default_module_roots());
+    }
     for (open_uri, open_document) in &state.documents {
         if let Some(open_path) = uri_path(open_uri) {
             pipeline.set_file_text(open_path, open_document.text.clone());

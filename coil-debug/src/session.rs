@@ -157,9 +157,12 @@ impl DebugSession {
         filename: &str,
         reporter: Box<dyn std::io::Write + Send>,
         grants: HostGrants,
+        extra_roots: Vec<PathBuf>,
     ) -> Result<Self, ()> {
         let mut pipeline = Pipeline::with_reporter(config, reporter);
         pipeline.set_host_grants(grants);
+        let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        pipeline.bind_project_roots_with_default(dir, extra_roots);
         let artifacts = match pipeline.compile_dissect(filename, false) {
             Ok(a) => a,
             Err(()) => {
@@ -771,6 +774,7 @@ mod tests {
             &fib_path(),
             Box::new(std::io::sink()),
             HostGrants::deny_all(),
+            Vec::new(),
         )
         .expect("compile fib")
     }

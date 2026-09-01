@@ -12,7 +12,8 @@ fn print_help() {
         "Usage:\n\
          \x20 coil-debug [--log-json | --log-lsp] [--dap] [<file.hy>] [-x <script>] [--batch]\n\
          \x20            [--allow-attach] [--allow-exit] [--allow-exec] [--allow-ffi-exec]\n\
-         \x20            [--allow-dload STEM]... [--ffi-search-path DIR]...\n\
+         \x20            [--allow-dload STEM]... [--ffi-search-path DIR]... [--root DIR]...\n\
+         \x20            [--entry FILE]\n\
          \n\
          Options:\n\
          \x20 --dap              Debug Adapter Protocol over stdio (program from DAP launch)\n\
@@ -20,6 +21,8 @@ fn print_help() {
          \x20 --batch            Non-interactive; exit after script / stdin\n\
          \x20 --log-json         Emit SARIF 2.1 diagnostics on stdout\n\
          \x20 --log-lsp          Emit LSP Diagnostic NDJSON on stdout\n\
+         \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
+         \x20 --entry FILE       Entry `.hy` (instead of the positional file)\n\
          \x20 --allow-attach     Allow Stream.attach (default deny)\n\
          \x20 --allow-exit       Allow env::exit (default deny)\n\
          \x20 --allow-exec       Allow env::exec (default deny)\n\
@@ -38,6 +41,8 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
     let mut script: Option<String> = None;
     let mut filename: Option<String> = None;
     let mut grants = HostGrants::deny_all();
+    let mut extra_roots: Vec<PathBuf> = Vec::new();
+    let mut entry_flag: Option<String> = None;
     let mut i = 1usize;
     while i < args.len() {
         let a = &args[i];
@@ -74,6 +79,26 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
             s if s.starts_with("--ffi-search-path=") => {
                 grants.add_ffi_search_path(PathBuf::from(s.trim_start_matches("--ffi-search-path=")));
             }
+            "--root" => {
+                i += 1;
+                let dir = args
+                    .get(i)
+                    .ok_or_else(|| "missing DIR after --root".to_string())?;
+                extra_roots.push(PathBuf::from(dir));
+            }
+            s if s.starts_with("--root=") => {
+                extra_roots.push(PathBuf::from(s.trim_start_matches("--root=")));
+            }
+            "--entry" => {
+                i += 1;
+                let path = args
+                    .get(i)
+                    .ok_or_else(|| "missing FILE after --entry".to_string())?;
+                entry_flag = Some(path.clone());
+            }
+            s if s.starts_with("--entry=") => {
+                entry_flag = Some(s.trim_start_matches("--entry=").to_string());
+            }
             "-x" => {
                 i += 1;
                 let path = args
@@ -107,7 +132,14 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
         return Ok(None);
     }
 
-    let filename = filename.ok_or_else(|| "debug requires an entry .hy file".to_string())?;
+    let filename = match (filename, entry_flag) {
+        (Some(a), Some(b)) if a != b => {
+            return Err("pass the entry as a positional file or `--entry`, not both".into());
+        }
+        (Some(a), _) => a,
+        (_, Some(b)) => b,
+        (None, None) => return Err("debug requires an entry .hy file".into()),
+    };
     let config = ReportConfig::from_cli_flags(log_json, log_lsp).map_err(|e| e.to_string())?;
     Ok(Some((
         config,
@@ -116,6 +148,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
             script,
             batch,
             grants,
+            extra_roots,
         },
     )))
 }

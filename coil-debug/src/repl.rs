@@ -16,6 +16,7 @@ pub struct DebugArgs {
     pub script: Option<String>,
     pub batch: bool,
     pub grants: HostGrants,
+    pub extra_roots: Vec<std::path::PathBuf>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -38,6 +39,7 @@ pub fn cmd_debug(config: ReportConfig, args: DebugArgs) {
         &args.filename,
         writer_for(format),
         args.grants,
+        args.extra_roots,
     ) {
         Ok(s) => s,
         Err(()) => exit(1),
