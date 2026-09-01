@@ -7233,8 +7233,7 @@ fn main() {
     }
 
     /// COI-108 forward refs: callee declared after the caller must still use
-    /// the pair Try path (reserved entry + `pair_call_kind`), not Unknown method
-    /// or PairToHeap-before-tag-check.
+    /// the reserved entry Try path, not Unknown method or PairToHeap-before-tag-check.
     #[test]
     fn forward_mismatched_result_method_try_keeps_pair_path() {
         let (bc, _) = compile_src(

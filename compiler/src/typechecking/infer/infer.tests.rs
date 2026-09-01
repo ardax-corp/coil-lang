@@ -7019,7 +7019,7 @@ fn main() {
     }
 
     #[test]
-    fn overload_option_returns_keep_distinct_sidecar_abis() {
+    fn overload_option_returns_keep_distinct_def_ids() {
         let (c, _) = check(
             r#"
 class HeapItem { pub n: int, }
@@ -7031,9 +7031,6 @@ fn main() { }
         let d0 = c.interned_overload_def("f", 0).expect("candidate 0 DefId");
         let d1 = c.interned_overload_def("f", 1).expect("candidate 1 DefId");
         assert_ne!(d0, d1, "overloads must not share a DefId");
-        let sc = c.typed_sidecar();
-        assert_eq!(sc.pair_niche(d0), None);
-        assert_eq!(sc.pair_niche(d1), None);
     }
 
     #[test]
