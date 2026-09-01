@@ -683,6 +683,14 @@ impl Manifest {
     }
 }
 
+fn abs_search_root(project_root: &Path, root: &Path) -> PathBuf {
+    if root.as_os_str().is_empty() || root == Path::new(".") {
+        project_root.to_path_buf()
+    } else {
+        project_root.join(root)
+    }
+}
+
 /// Convention A then B `use` resolution against `roots` (relative to `project_root`).
 pub fn resolve_use_in_roots(
     roots: &[PathBuf],
@@ -691,7 +699,7 @@ pub fn resolve_use_in_roots(
     name: &str,
 ) -> Option<PathBuf> {
     for root in roots {
-        let mut candidate = project_root.join(root);
+        let mut candidate = abs_search_root(project_root, root);
         for segment in path {
             candidate.push(segment);
         }
@@ -703,7 +711,7 @@ pub fn resolve_use_in_roots(
     if let Some(module_stem) = path.last() {
         let dir_segments = &path[..path.len() - 1];
         for root in roots {
-            let mut candidate = project_root.join(root);
+            let mut candidate = abs_search_root(project_root, root);
             for segment in dir_segments {
                 candidate.push(segment);
             }
@@ -719,7 +727,7 @@ pub fn resolve_use_in_roots(
 /// `mod name;` → `<root>/name.hy` in each search root.
 pub fn resolve_mod_in_roots(roots: &[PathBuf], project_root: &Path, name: &str) -> Option<PathBuf> {
     for root in roots {
-        let candidate = project_root.join(root).join(format!("{}.hy", name));
+        let candidate = abs_search_root(project_root, root).join(format!("{}.hy", name));
         if candidate.exists() {
             return Some(candidate);
         }
@@ -734,7 +742,7 @@ pub fn namespace_of_in_roots(
     file: &Path,
 ) -> Option<String> {
     for root in roots {
-        let abs_root = project_root.join(root);
+        let abs_root = abs_search_root(project_root, root);
         if let Ok(rel) = file.strip_prefix(&abs_root) {
             return Some(path_to_namespace(rel));
         }
@@ -1198,6 +1206,23 @@ mod tests {
         };
         let ns = m.namespace_of(&tmp, &file);
         assert_eq!(ns, Some("core::ffi::dload".to_string()));
+
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn namespace_of_dot_root_strips_project_dir() {
+        let tmp = std::env::temp_dir().join(format!(
+            "coil_manifest_dot_root_{}",
+            std::process::id()
+        ));
+        let nested = tmp.join("a");
+        std::fs::create_dir_all(&nested).unwrap();
+        let file = nested.join("foo.hy");
+        std::fs::write(&file, "// empty\n").unwrap();
+
+        let ns = namespace_of_in_roots(&[PathBuf::from(".")], &tmp, &file);
+        assert_eq!(ns.as_deref(), Some("a::foo"));
 
         let _ = std::fs::remove_dir_all(&tmp);
     }

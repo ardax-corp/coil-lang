@@ -13,7 +13,8 @@ use std::{
 use reporting::Message;
 
 use crate::{
-    default_module_roots, Checker, DefId, Pipeline, SymbolIndex, SymbolKind,
+    default_module_roots, manifest::namespace_of_in_roots, Checker, DefId, Pipeline, SymbolIndex,
+    SymbolKind,
 };
 
 #[derive(Clone)]
@@ -154,10 +155,12 @@ impl ProjectIndex {
         let ns = if self.pipeline.entry_file() == Some(path) {
             String::new()
         } else {
-            self.pipeline
-                .manifest()
-                .namespace_of(self.pipeline.project_root(), path)
-                .unwrap_or_default()
+            namespace_of_in_roots(
+                self.pipeline.module_roots(),
+                self.pipeline.project_root(),
+                path,
+            )
+            .unwrap_or_default()
         };
         let mid = self.checker().def_interner().module_id(&ns)?;
         self.checker().module_locals(mid).cloned()
