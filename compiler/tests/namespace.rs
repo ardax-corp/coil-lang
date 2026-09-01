@@ -67,7 +67,7 @@ impl Write for SharedBuf {
 /// Create a temp project and return `(project_root, entry_path)`.
 fn build_project(
     test_name: &str,
-    manifest: &str,
+    _manifest: &str,
     files: &[(&str, &str)],
     entry: &str,
 ) -> (PathBuf, PathBuf) {
@@ -80,11 +80,6 @@ fn build_project(
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).expect("create temp project dir");
 
-    // Write the manifest.
-    let manifest_path = tmp.join("coil.toml");
-    std::fs::write(&manifest_path, manifest).expect("write coil.toml");
-
-    // Write the source files.
     for (rel, content) in files {
         let full = tmp.join(rel);
         if let Some(parent) = full.parent() {
@@ -93,14 +88,25 @@ fn build_project(
         std::fs::write(&full, content).expect("write source file");
     }
 
-    // Return the project root and the entry file's full path.
     let entry_full = tmp.join(entry);
     (tmp, entry_full)
 }
 
+fn bind_ns_pipeline(pipeline: &mut Pipeline, extra: &[PathBuf]) {
+    let cwd = std::env::current_dir().expect("cwd");
+    let mut roots = vec![workspace_stdlib()];
+    roots.extend(extra.iter().cloned());
+    pipeline.bind_project_roots_with_default(cwd, roots);
+}
+
 fn run_project(project_root: &PathBuf, entry: &PathBuf) -> String {
+    run_project_with_extra(project_root, entry, &[])
+}
+
+fn run_project_with_extra(project_root: &PathBuf, entry: &PathBuf, extra: &[PathBuf]) -> String {
     with_project_cwd(project_root, || {
         let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, extra);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
             Err(()) => {
@@ -159,6 +165,7 @@ fn compile_entry_and_assert_jump_if_match_pool_valid(
     entry: &PathBuf,
 ) -> (Vec<common::Byte>, Vec<u64>, Pipeline) {
     let mut pipeline = Pipeline::new();
+    bind_ns_pipeline(&mut pipeline, &[]);
     let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
         Ok(pair) => pair,
         Err(()) => {
@@ -190,6 +197,7 @@ fn compile_entry_and_assert_jump_if_match_pool_valid(
 fn compile_project_errors(project_root: &PathBuf, entry: &PathBuf) -> Vec<String> {
     with_project_cwd(project_root, || {
         let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
         let result = pipeline.compile_src_from_file(entry.to_str().unwrap());
         assert!(result.is_err(), "expected compile to fail");
         pipeline
@@ -378,7 +386,7 @@ fn multiple_roots_search_in_order() {
         ),
     ];
     let (root, entry) = build_project("multiple_roots", &manifest, files, "src/main.hy");
-    let output = run_project(&root, &entry);
+    let output = run_project_with_extra(&root, &entry, &[root.join("vendor")]);
     assert_eq!(output, "from-src");
 }
 
@@ -529,6 +537,7 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
     let _guard = CwdGuard(original_cwd);
 
     let mut pipeline = Pipeline::new();
+    bind_ns_pipeline(&mut pipeline, &[]);
     let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
         Ok(pair) => pair,
         Err(()) => {
@@ -706,6 +715,7 @@ fn parse_fail_dependency_emits_single_diagnostic() {
 
     let capture = Capture::default();
     let mut pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(capture.clone()));
+    bind_ns_pipeline(&mut pipeline, &[]);
     let result = pipeline.compile_src_from_file(entry.to_str().unwrap());
     assert!(
         result.is_err(),
@@ -730,21 +740,12 @@ fn parse_fail_dependency_emits_single_diagnostic() {
 }
 
 #[test]
-fn manifest_entry_path_joins_project_root() {
-    let manifest = format!(
-        r#"[module]
-roots = ["./src", "{}"]
-
-[entry]
-file = "./src/main.hy"
-"#,
-        workspace_stdlib().display()
-    );
+fn bind_project_root_sets_explicit_roots_without_toml() {
     let files = &[(
         "src/main.hy",
         "use io::{stdout, write};\nuse string::{format, to_bytes};\nfn main() { write(stdout(), to_bytes(format(\"%i\", 42))); }\n",
     )];
-    let (root, _entry) = build_project("manifest_entry", &manifest, files, "src/main.hy");
+    let (root, entry) = build_project("bind_roots", "", files, "src/main.hy");
 
     let _cwd_lock = CwdLockGuard(CWD_LOCK.lock().unwrap_or_else(|e| e.into_inner()));
     let original_cwd = std::env::current_dir().expect("get cwd");
@@ -758,17 +759,11 @@ file = "./src/main.hy"
     let _guard = CwdGuard(original_cwd);
 
     let mut pipeline = Pipeline::new();
-    let entry = pipeline
-        .manifest_entry_path()
-        .expect("manifest should declare [entry].file");
-    assert!(
-        entry.ends_with("src/main.hy"),
-        "expected project-root-joined entry, got {}",
-        entry.display()
-    );
+    bind_ns_pipeline(&mut pipeline, &[]);
+    assert_eq!(pipeline.project_root(), root.as_path());
     let (bytecode, constants) = pipeline
         .compile_src_from_file(entry.to_str().unwrap())
-        .expect("manifest entry should compile");
+        .expect("bound roots should compile");
     let output = run_bytecode(bytecode, constants, &pipeline);
     assert_eq!(output, "42");
 }
@@ -1242,6 +1237,7 @@ fn main() {
     };
     let output = with_project_cwd(&root, || {
         let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
         pipeline.grant_dload_file("sum", libsum);
         pipeline.grant_dload_allow("sum");
         pipeline.grant_dload_allow("tls");

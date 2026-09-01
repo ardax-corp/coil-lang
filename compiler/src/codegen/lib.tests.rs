@@ -121,6 +121,7 @@
             .unwrap()
             .join("examples/static_singleton.hy");
         let mut pipeline = crate::Pipeline::new();
+        pipeline.bind_workspace_language_roots();
         let (bytecode, constants) = pipeline
             .compile_src_from_file(path.to_str().unwrap())
             .expect("compile");
@@ -156,6 +157,7 @@
             .unwrap()
             .join("examples/static_minimal.hy");
         let mut pipeline = crate::Pipeline::new();
+        pipeline.bind_workspace_language_roots();
         let (bytecode, constants) = pipeline
             .compile_src_from_file(path.to_str().unwrap())
             .expect("compile");
