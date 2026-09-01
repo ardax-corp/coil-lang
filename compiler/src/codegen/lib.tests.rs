@@ -1277,13 +1277,24 @@ fn main() {
     #[test]
     fn emit_call_indirect_pushes_target_then_opcode() {
         use common::Instruction;
-        let mut bc = Vec::new();
+        let mut bc = CodeBuf::new();
         Compiler::emit_call_indirect(&mut bc, 42, 2);
-        assert_eq!(bc.len(), 2);
-        assert!(matches!(bc[0].bytecode(), Instruction::CodePtr));
-        assert_eq!(bc[0].operand_u32(), 42);
-        assert!(matches!(bc[1].bytecode(), Instruction::CallIndirect));
-        assert_eq!(bc[1].operand_u32(), 2);
+        let ops = bc.ops();
+        assert_eq!(ops.len(), 2);
+        let IlOp::Byte { byte: code_ptr, .. } = ops[0] else {
+            panic!("expected CodePtr byte, got {:?}", ops[0]);
+        };
+        assert!(matches!(code_ptr.bytecode(), Instruction::CodePtr));
+        assert_eq!(code_ptr.operand_u32(), 42);
+        let IlOp::Byte {
+            byte: call_indirect,
+            ..
+        } = ops[1]
+        else {
+            panic!("expected CallIndirect byte, got {:?}", ops[1]);
+        };
+        assert!(matches!(call_indirect.bytecode(), Instruction::CallIndirect));
+        assert_eq!(call_indirect.operand_u32(), 2);
     }
 
     // ============================================================
@@ -5681,15 +5692,26 @@ fn main() { let _ = (new Cell(7)).get(); }
     #[test]
     fn call_indirect_sites_use_code_ptr_targets() {
         use common::Instruction;
-        let mut bc = Vec::new();
+        let mut bc = CodeBuf::new();
         Compiler::emit_call_indirect(&mut bc, 100_000, 1);
-        assert!(matches!(bc[0].bytecode(), Instruction::CodePtr));
+        let ops = bc.ops();
+        let IlOp::Byte { byte: code_ptr, .. } = ops[0] else {
+            panic!("expected CodePtr byte, got {:?}", ops[0]);
+        };
+        assert!(matches!(code_ptr.bytecode(), Instruction::CodePtr));
         assert_eq!(
-            bc[0].operand_u32(),
+            code_ptr.operand_u32(),
             100_000,
             "CodePtr must carry full 32-bit targets (> u16::MAX)"
         );
-        assert!(matches!(bc[1].bytecode(), Instruction::CallIndirect));
+        let IlOp::Byte {
+            byte: call_indirect,
+            ..
+        } = ops[1]
+        else {
+            panic!("expected CallIndirect byte, got {:?}", ops[1]);
+        };
+        assert!(matches!(call_indirect.bytecode(), Instruction::CallIndirect));
     }
 
     /// Nested IO HostInvoke (`read(stdin(), buf)`) stages args before pushing
