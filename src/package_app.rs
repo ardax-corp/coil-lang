@@ -246,11 +246,10 @@ pub fn cmd_package(
         .filter(|p| !p.as_os_str().is_empty());
     if check_native && uses_ffi {
         let libs = ffi_library_names_from_bytecode(&bytecode, &strings);
-        let mut gate = machine::DloadGate::from_consumer_trusted(
-            &pipeline.host_grants().allow_dload,
-            &pipeline.dload_native_pins(),
-            pipeline.dload_trusted_stems(),
-        );
+    let mut gate = machine::DloadGate::from_consumer_trusted(
+        &pipeline.dload_native_pins(),
+        pipeline.dload_trusted_stems(),
+    );
         for stem in pipeline.extra_dload_stems() {
             gate.grant_stem(stem);
         }

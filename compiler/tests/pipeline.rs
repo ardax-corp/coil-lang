@@ -2564,7 +2564,7 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
     let gate = dload_gate_for_project("honor_skip_hash", extra, None, &["plugin"]);
     gate.check_request("plugin")
-        .expect("allow + trusted extra stem must pass");
+        .expect("trusted extra stem must pass");
     assert!(!gate.hash_required("plugin"));
 }
 
@@ -2580,13 +2580,14 @@ plugin = { git = "https://example.com/plugin.git" }
 }
 
 #[test]
-fn pipeline_gate_trusted_without_allow_is_denied() {
+fn pipeline_gate_trusted_without_allow_still_loads() {
     let extra = r#"
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
     let gate = dload_gate_for_project("trusted_no_allow_gate", extra, None, &[]);
-    assert_library_denied(&gate, "plugin", "plugin");
+    gate.check_request("plugin")
+        .expect("trusted is integrity, not a compile-time allow re-check");
 }
 
 #[test]
@@ -8069,7 +8070,7 @@ fn main() {
     let output = run_userland_dload_project_grants("allow_attach_null", extra, None, src, &[], grants);
     assert_eq!(
         output, "invalid",
-        "allow_attach must reach pointer checks, got {output:?}"
+        "attach must reach pointer checks, got {output:?}"
     );
 }
 

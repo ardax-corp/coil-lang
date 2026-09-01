@@ -443,16 +443,13 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
     }
 
     // Weak base_dir: archive parent, for relative FFI dload paths.
-    // dload/attach/env grants come from CLI flags on this invocation, not coil.toml.
+    // Allow flags are compile-time only; the artifact is the grant.
     let entry = Path::new(archive);
     if execute_archived_program(
         &loaded,
         Some(entry),
         pipeline.ffi_search_path_bufs(),
         Some(crate::host_wire::pipeline_dload_gate(pipeline)),
-        pipeline.host_grants().allow_exec,
-        pipeline.host_grants().allow_exit,
-        pipeline.host_grants().allow_ffi_exec,
     ) {
         exit(1);
     }

@@ -119,8 +119,9 @@ struct CompileProfileFlags {
 
 /// Host capabilities. Default deny (same as a missing coil.toml).
 ///
-/// Not read from Manifest. `coil run out.hyc` uses these flags for this
-/// invocation only. `--ffi-search-path` is lookup, not a dload grant.
+/// Not read from Manifest. Used for **compile/typecheck** (`E0406`–`E0411`).
+/// `coil run out.hyc` and coil-embed do not re-apply these flags; the artifact
+/// is the grant. `--ffi-search-path` is lookup, not a dload grant.
 /// `dload("c")` stays denied even with `--allow-dload c`.
 #[derive(Args, Clone, Debug, Default)]
 struct HostGrantFlags {
@@ -175,9 +176,10 @@ impl HostGrantFlags {
     after_help = "When no file is given, `coil` / `coil compile` use `[entry].file` from coil.toml.\n\
 Default diagnostics: pretty reports on stderr.\n\
 Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
-`--allow-dload STEM`) are CLI / Pipeline API only — coil.toml does not grant them.\n\
-`coil run out.hyc` uses this invocation's flags, not live coil.toml.\n\
-`--ffi-search-path` is lookup only. `dload(\"c\")` stays denied even if flagged."
+`--allow-dload STEM`) are CLI / Pipeline API for compile and typecheck — coil.toml\n\
+does not grant them. `coil run out.hyc` and coil-embed do not re-apply allow flags;\n\
+if the bytecode has the op, it runs. `--ffi-search-path` is lookup only.\n\
+`dload(\"c\")` stays denied even if flagged."
 )]
 struct RawCli {
     #[command(flatten)]
