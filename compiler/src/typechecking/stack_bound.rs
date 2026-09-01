@@ -34,8 +34,10 @@ pub fn operand_slots_for_frames(max_frames: u32) -> u32 {
 }
 
 /// Proven or attributed max live frames for one recursive function.
+///
+/// Recorded on [`StackBoundReport`]; frame sizing uses `operand_slots_needed` only.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // per-fn rows are test/diagnostic; not wired into frames
 pub struct FnStackBound {
     pub fn_name: String,
     /// Maximum simultaneous frames of this function (and its SCC peers).

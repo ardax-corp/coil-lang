@@ -65,8 +65,7 @@ pub enum JoinClass {
 pub enum IlJumpKind {
     Unconditional,
     JumpIfFalse,
-    /// Complete jump set (JMPT); constructed in opts/tests, matched in lower/sp.
-    #[allow(dead_code)]
+    /// Complete jump set (JMPT); `branch_opt` inverts JMPF; lower encodes `JMPT`.
     JumpIfTrue,
     JumpIfMatch {
         tag: u32,

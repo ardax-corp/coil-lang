@@ -10,6 +10,29 @@
     };
     use parser::Pratt;
 
+    #[test]
+    fn error_with_labels_records_secondary_spans() {
+        let mut c = Checker::new();
+        let _ = c.error_with_labels(
+            ErrorCode::TypeMismatch,
+            "mismatch".into(),
+            0..1,
+            vec![("expected here".into(), 2..4), ("found here".into(), 5..7)],
+            Some("see both sites".into()),
+        );
+        let msgs = c.messages();
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].message(), "mismatch");
+        assert_eq!(msgs[0].code(), Some(ErrorCode::TypeMismatch));
+        assert_eq!(msgs[0].help().as_deref(), Some("see both sites"));
+        let labels = msgs[0].labels();
+        assert_eq!(labels.len(), 2);
+        assert_eq!(labels[0].message(), "expected here");
+        assert_eq!(labels[0].range(), &(2..4));
+        assert_eq!(labels[1].message(), "found here");
+        assert_eq!(labels[1].range(), &(5..7));
+    }
+
     fn is_bare_expr_source(trimmed: &str) -> bool {
         if trimmed.contains('\n') || trimmed.contains(';') || trimmed.starts_with('{') {
             return false;

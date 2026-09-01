@@ -90,6 +90,8 @@ impl MonoPlan {
         self.specializations.is_empty()
     }
 
+    /// Intern lookup used by monomorphize tests; codegen uses `intern.get`.
+    #[cfg(test)]
     pub fn ty(&self, id: TyId) -> Option<&Ty> {
         self.intern.get(id)
     }
