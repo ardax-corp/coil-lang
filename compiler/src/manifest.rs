@@ -1,7 +1,15 @@
-//! Project manifest (`coil.toml`) parsing and module path resolution.
-//! Format and discovery rules: coil-website `src/content/docs/references/project-config.md` (`/docs/references/project-config`).
+//! Project manifest (`coil.toml`) parsing for spool / package.
+//!
+//! Language `use`/`mod` search roots are CLI / [`crate::Pipeline`] state, not
+//! `[module]` / `[entry]` from this file. Spool still parses those keys so old
+//! manifests stay valid. Format: coil-website `/docs/references/project-config`.
 
 use std::path::{Path, PathBuf};
+
+/// Default `use`/`mod` search roots (`src` relative to the project directory).
+pub fn default_module_roots() -> Vec<PathBuf> {
+    vec![PathBuf::from("src")]
+}
 
 /// Errors that can occur while loading a `coil.toml` manifest.
 #[derive(Debug, Clone, PartialEq)]
@@ -116,12 +124,11 @@ pub struct FfiNativeDecl {
 /// Resolved project manifest.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
-    /// Search roots for module discovery. Each path is
-    /// resolved relative to the project root (the directory
-    /// containing `coil.toml`).
+    /// Parsed `[module].roots`. Spool/docs may read this; the language
+    /// path does not copy it into [`crate::Pipeline`].
     pub roots: Vec<PathBuf>,
-    /// Optional explicit entry point. When `None`, the
-    /// compiler falls back to the file passed on the CLI.
+    /// Parsed `[entry].file`. Spool/docs may read this; compile/typecheck
+    /// use the CLI positional / `--entry` only.
     pub entry: Option<PathBuf>,
     /// Extra directories searched when resolving FFI library paths.
     pub ffi_search_paths: Vec<PathBuf>,
@@ -169,15 +176,35 @@ impl Default for Manifest {
 }
 
 impl Manifest {
+    /// Walk up from `start` for a directory that contains `coil.toml`.
+    /// Packaging / spool use this; the language pipeline does not.
+    pub fn locate_dir(start: &Path) -> Option<PathBuf> {
+        let mut dir = if start.is_file() {
+            start
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| PathBuf::from("."))
+        } else {
+            start.to_path_buf()
+        };
+        loop {
+            if dir.join("coil.toml").is_file() {
+                return Some(dir);
+            }
+            if !dir.pop() {
+                return None;
+            }
+        }
+    }
+
     /// Load a manifest from a project root. If `coil.toml`
     /// exists, parse it. If not, return the default manifest
     /// (just `src/`).
     ///
     /// `project_root` is the directory containing the
     /// `coil.toml` file. Search roots in the manifest are
-    /// stored as relative paths; callers should re-root them
-    /// when actually searching (see
-    /// [`Manifest::resolve_module`]).
+    /// stored as relative paths; the language path does not
+    /// use them for discovery.
     pub fn load(project_root: &Path) -> Result<Self, ManifestError> {
         let manifest_path = project_root.join("coil.toml");
         match std::fs::read_to_string(&manifest_path) {
@@ -627,52 +654,14 @@ impl Manifest {
     /// The fully qualified name of the imported item depends
     /// on which file was loaded — see codegen's alias map.
     pub fn resolve_use(&self, project_root: &Path, path: &[String], name: &str) -> Option<PathBuf> {
-        // Convention A — one item per file (preferred when both A and B exist):
-        //   `use foo::sadge;` → `<root>/foo/sadge.hy`
-        //   `use lib::io::read;` → `<root>/lib/io/read.hy`
-        for root in &self.roots {
-            let mut candidate = project_root.join(root);
-            for segment in path {
-                candidate.push(segment);
-            }
-            candidate.push(format!("{}.hy", name));
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        // Convention B — item inside a module file (same file as
-        // `use path::*;`). Without this fallback, modules that live
-        // under a search root as `foo.hy` are only reachable via glob,
-        // never via `use foo::item;` / `use foo::{item, …};`.
-        //   `use foo::sadge;` → `<root>/foo.hy` (when foo/sadge.hy is absent)
-        //   `use lib::io::read;` → `<root>/lib/io.hy`
-        if let Some(module_stem) = path.last() {
-            let dir_segments = &path[..path.len() - 1];
-            for root in &self.roots {
-                let mut candidate = project_root.join(root);
-                for segment in dir_segments {
-                    candidate.push(segment);
-                }
-                candidate.push(format!("{}.hy", module_stem));
-                if candidate.exists() {
-                    return Some(candidate);
-                }
-            }
-        }
-        None
+        resolve_use_in_roots(&self.roots, project_root, path, name)
     }
 
     /// Resolve a `mod foo;` forward declaration to an
     /// absolute file path. Looks for `<root>/foo.hy` in
     /// each search root.
     pub fn resolve_mod(&self, project_root: &Path, name: &str) -> Option<PathBuf> {
-        for root in &self.roots {
-            let candidate = project_root.join(root).join(format!("{}.hy", name));
-            if candidate.exists() {
-                return Some(candidate);
-            }
-        }
-        None
+        resolve_mod_in_roots(&self.roots, project_root, name)
     }
 
     /// Compute the namespace of a file given its absolute
@@ -690,14 +679,67 @@ impl Manifest {
     /// compilable (we use their bare stem as the namespace),
     /// but the caller is expected to handle that fallback.
     pub fn namespace_of(&self, project_root: &Path, file: &Path) -> Option<String> {
-        for root in &self.roots {
-            let abs_root = project_root.join(root);
-            if let Ok(rel) = file.strip_prefix(&abs_root) {
-                return Some(path_to_namespace(rel));
+        namespace_of_in_roots(&self.roots, project_root, file)
+    }
+}
+
+/// Convention A then B `use` resolution against `roots` (relative to `project_root`).
+pub fn resolve_use_in_roots(
+    roots: &[PathBuf],
+    project_root: &Path,
+    path: &[String],
+    name: &str,
+) -> Option<PathBuf> {
+    for root in roots {
+        let mut candidate = project_root.join(root);
+        for segment in path {
+            candidate.push(segment);
+        }
+        candidate.push(format!("{}.hy", name));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    if let Some(module_stem) = path.last() {
+        let dir_segments = &path[..path.len() - 1];
+        for root in roots {
+            let mut candidate = project_root.join(root);
+            for segment in dir_segments {
+                candidate.push(segment);
+            }
+            candidate.push(format!("{}.hy", module_stem));
+            if candidate.exists() {
+                return Some(candidate);
             }
         }
-        None
     }
+    None
+}
+
+/// `mod name;` → `<root>/name.hy` in each search root.
+pub fn resolve_mod_in_roots(roots: &[PathBuf], project_root: &Path, name: &str) -> Option<PathBuf> {
+    for root in roots {
+        let candidate = project_root.join(root).join(format!("{}.hy", name));
+        if candidate.exists() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Namespace from the first search root that contains `file`.
+pub fn namespace_of_in_roots(
+    roots: &[PathBuf],
+    project_root: &Path,
+    file: &Path,
+) -> Option<String> {
+    for root in roots {
+        let abs_root = project_root.join(root);
+        if let Ok(rel) = file.strip_prefix(&abs_root) {
+            return Some(path_to_namespace(rel));
+        }
+    }
+    None
 }
 
 /// Strip an inline comment (everything after `#`, but not

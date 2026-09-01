@@ -1,8 +1,8 @@
 //! Project-wide symbol index as a [`DefId`] view over discovered modules.
 //!
 //! B5: index the use-graph (not every `.hy` under roots). `resolve_definition`
-//! uses checker DefId tables, not "every def with this string". Manifest is
-//! [`Pipeline`]'s copy — this module does not `Manifest::load`.
+//! uses checker DefId tables, not "every def with this string". Roots are
+//! bound on [`Pipeline`] — this module does not `Manifest::load`.
 
 use std::{
     collections::HashMap,
@@ -13,7 +13,7 @@ use std::{
 use reporting::Message;
 
 use crate::{
-    Checker, DefId, Pipeline, SymbolIndex, SymbolKind,
+    default_module_roots, Checker, DefId, Pipeline, SymbolIndex, SymbolKind,
 };
 
 #[derive(Clone)]
@@ -31,8 +31,13 @@ pub struct ProjectIndex {
 
 impl ProjectIndex {
     pub fn new(project_root: PathBuf) -> Self {
+        Self::with_roots(project_root, default_module_roots())
+    }
+
+    /// Index with explicit search roots (CLI `--root` / LSP workspace).
+    pub fn with_roots(project_root: PathBuf, roots: Vec<PathBuf>) -> Self {
         let mut pipeline = Pipeline::new();
-        pipeline.bind_project_root(project_root.clone());
+        pipeline.bind_project_root(project_root.clone(), roots);
         Self {
             pipeline,
             project_root,
@@ -56,19 +61,12 @@ impl ProjectIndex {
         self.pipeline.compiler().checker()
     }
 
-    /// Index modules reachable from the Pipeline Manifest's `[entry]`.
-    ///
-    /// Does not walk every `.hy` under roots. Discovery is the use-graph
-    /// (`typecheck_project`). Reuses [`Pipeline`]'s Manifest.
-    pub fn index_from_manifest(&mut self) {
-        let Some(rel) = self.pipeline.manifest().entry.clone() else {
-            return;
-        };
-        let entry = self.pipeline.project_root().join(rel);
+    /// Index modules reachable from `entry` (use-graph, not every `.hy`).
+    pub fn index_entry(&mut self, entry: &Path) {
         if !entry.exists() {
             return;
         }
-        let _ = self.typecheck_entry(&entry);
+        let _ = self.typecheck_entry(entry);
     }
 
     /// Typecheck the module graph from `entry` and refresh indexed sources
@@ -188,15 +186,8 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn write_project(dir: &Path, files: &[(&str, &str)], entry: &str) {
+    fn write_project(dir: &Path, files: &[(&str, &str)]) {
         fs::create_dir_all(dir).unwrap();
-        fs::write(
-            dir.join("coil.toml"),
-            format!(
-                "[module]\nroots = [\".\"]\n[entry]\nfile = \"{entry}\"\n"
-            ),
-        )
-        .unwrap();
         for (name, src) in files {
             fs::write(dir.join(name), src).unwrap();
         }
@@ -254,7 +245,7 @@ mod tests {
     }
 
     #[test]
-    fn index_from_manifest_uses_use_graph_not_every_hy() {
+    fn index_entry_uses_use_graph_not_every_hy() {
         let dir = std::env::temp_dir().join(format!(
             "coil-project-index-graph-{}",
             std::process::id()
@@ -276,11 +267,10 @@ mod tests {
                     "fn helper() -> int { return 99; }\nfn never_called() { return; }\n",
                 ),
             ],
-            "main.hy",
         );
 
-        let mut index = ProjectIndex::new(dir.clone());
-        index.index_from_manifest();
+        let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
+        index.index_entry(&dir.join("main.hy"));
 
         let unused = dir.join("unused.hy");
         assert!(
@@ -331,11 +321,10 @@ mod tests {
                     "use a::foo;\nuse b::foo as bfoo;\nfn main() { let x = foo(); let y = bfoo(); return; }\n",
                 ),
             ],
-            "main.hy",
         );
 
-        let mut index = ProjectIndex::new(dir.clone());
-        index.index_from_manifest();
+        let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
+        index.index_entry(&dir.join("main.hy"));
 
         let a = dir.join("a.hy");
         let b = dir.join("b.hy");

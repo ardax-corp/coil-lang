@@ -36,7 +36,8 @@ pub use dissect::{
 };
 pub use host_grants::HostGrants;
 pub use manifest::{
-    DependencySpec, FfiNativeDecl, Manifest, ManifestError, PackageInfo, Scripts,
+    default_module_roots, DependencySpec, FfiNativeDecl, Manifest, ManifestError, PackageInfo,
+    Scripts,
 };
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
