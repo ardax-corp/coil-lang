@@ -5,7 +5,7 @@
     use crate::typechecking::ty::EnumVariantPayloadTy;
     use parser::SimpleSpan;
     use parser::ast::{
-        EnumConstructPayload, EnumVariantPayload, LetFieldPattern, LetPattern, PatternField,
+        EnumConstructPayload, EnumVariantPayload, LetFieldPattern, LetPattern, MatchArm, PatternField,
         PatternPayload, RecordFieldDecl, RecordFieldValue,
     };
     use parser::Pratt;

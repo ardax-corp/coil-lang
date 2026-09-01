@@ -1070,6 +1070,8 @@ mod hoist {
         store_count_in_loop,
     };
     use crate::il::op::IlOp;
+    #[cfg(test)]
+    use crate::il::op::Label;
     use crate::il::sp;
 
     /// Why a loop refused the length hoist, in the order the checks run.
