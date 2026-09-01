@@ -277,8 +277,12 @@ frame representation cheaper than `CALL` — not move the guard.
 
 Priority: medium to low until measured.
 
-`Machine::execute` already uses outlined dispatch, unchecked stack access, and
-typed/fused opcodes. Larger universal superinstructions or short trace fusion
+`Machine::execute` stays outlined (`#[inline(never)]`). Dispatch prefetches the
+next `Byte` (and jump targets) with arch `_mm_prefetch` / `_prefetch`; fused
+inner ops use a 256-entry handler table instead of a second `Instruction::from`
+match. Token-threading the main loop needs guaranteed TCO (`become`), which is
+still nightly on rustc 1.98. Larger universal superinstructions or short trace
+fusion should be considered only if they improve multiple benchmarks. Keep symbolic IL
 should be considered only if they improve multiple benchmarks. Keep symbolic IL
 and the single `il::lower` pass as the source of truth; do not add an opcode
 for one benchmark shape. Residual fuse near-misses after Phases 1–4 are scored
