@@ -207,7 +207,12 @@ fn scan_uses(
             }
         }
         Expression::Call { name, args } => {
-            poison_idents(name, cands, escaped);
+            let callee = peel(name);
+            if let Expression::Access(recv, _) = callee.1.as_ref() {
+                poison_idents(recv, cands, escaped);
+            } else {
+                poison_idents(name, cands, escaped);
+            }
             if let Some(args) = args {
                 for a in args {
                     poison_idents(a, cands, escaped);
@@ -766,7 +771,6 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use crate::typechecking::infer::Checker;
     use parser::Pratt;
 
@@ -799,6 +803,21 @@ fn main() {
             frame_local_count(src) >= 2,
             "expected binder + construct + match ident"
         );
+    }
+
+    #[test]
+    fn method_receiver_escapes() {
+        let src = r#"
+class Foo { pub v: int }
+impl Foo {
+    pub fn bump() -> int { return self.v + 1; }
+}
+fn main() {
+    let f = new Foo(41);
+    let y = f.bump();
+}
+"#;
+        assert_eq!(frame_local_count(src), 0, "method receiver must stay heap");
     }
 
     #[test]

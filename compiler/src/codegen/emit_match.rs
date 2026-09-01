@@ -285,7 +285,10 @@ impl Compiler {
                 self.bytecode.push_pop();
             }
             self.compile_pair_match_body(&arms[*arm_idx], *binding, slot);
-            bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            let more = i + 1 < n_dispatch || wildcard.is_some();
+            if more {
+                bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            }
             if let Some(m) = miss {
                 bb.bind_label(m, self.bytecode.il_mut());
             }

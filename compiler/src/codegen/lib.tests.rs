@@ -2850,8 +2850,9 @@ fn main() {
         // not UNPACK.
         let (bc, _pool) = compile_src(
             "enum E { Empty, Foo(int) } \
+ fn make() -> E { return E::Empty; } \
  fn main() { \
- let e = E::Empty; \
+ let e = make(); \
  match e { \
  E::Empty => 0, \
  E::Foo(_) => 1, \
@@ -3028,8 +3029,9 @@ fn main() {
         // that sub-pattern, which is a Binding → no runtime test).
         let (bc, _pool) = compile_src(
             "enum E { A(int), B(int) } \
+ fn make() -> E { return E::A(5); } \
  fn main() { \
- let x = E::A(5); \
+ let x = make(); \
  let _ = match x { \
  E::A(v) => v, \
  E::B(v) => v, \
@@ -3072,8 +3074,9 @@ fn main() {
         // its arm body).
         let (bc, _pool) = compile_src(
             "enum E { A, B } \
+ fn make() -> E { return E::A; } \
  fn main() { \
- let x = E::A; \
+ let x = make(); \
  let _ = match x { \
  E::A => 1, \
  E::B => 2, \
@@ -6858,9 +6861,12 @@ fn main() {
         let (bc, _) = compile_src(
             r#"
 class Box { pub n: int }
+fn take(Box b) -> int {
+    return b.n;
+}
 fn main() {
     let b = new Box(1);
-    return b.n;
+    return take(b);
 }
 "#,
         );
