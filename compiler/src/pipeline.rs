@@ -2086,6 +2086,7 @@ fn main() { add(1, 2); }
         let src =
             std::fs::read_to_string(root.join("examples/perf/vec_scan.hy")).expect("read vec_scan");
         let mut pipeline = Pipeline::new();
+        pipeline.bind_workspace_language_roots();
         let (bytecode, _) = pipeline.compile_src(&src).expect("compile vec_scan");
         let syms = pipeline.program_debug().fn_symbols;
         let end = bytecode.len();
@@ -2126,6 +2127,7 @@ fn main() { add(1, 2); }
         let src =
             std::fs::read_to_string(root.join("examples/perf/nsieve.hy")).expect("read nsieve");
         let mut pipeline = Pipeline::new();
+        pipeline.bind_workspace_language_roots();
         let (bytecode, _) = pipeline
             .compile_src_retaining_il(&src)
             .expect("compile nsieve");
