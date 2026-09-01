@@ -413,24 +413,40 @@
     #[test]
     fn program_string_cache_is_not_a_gc_root() {
         reset_alloc_profile();
-        let strings = vec!["keep".to_owned(), "burn".to_owned()];
-        let code = vec![
+        let strings = vec!["keep".to_owned()];
+        let drop_code = vec![
             Byte::new(Instruction::STRING).with_operand_u32(0),
             Byte::new(Instruction::POP),
-            Byte::new(Instruction::STRING).with_operand_u32(1),
-            Byte::new(Instruction::POP),
-            Byte::new(Instruction::STRING).with_operand_u32(0),
             Byte::new(Instruction::HALT),
         ];
         let mut vm = Machine::<8>::default();
-        vm.heap_mut().set_gc_threshold_for_test(0);
-        vm.run_with_pool(&code, &[], &strings, 0);
-
-        assert!(
-            intern_str_count() >= 3,
-            "GC must drop the cached handle so a later STRING re-interns, got {}",
-            intern_str_count()
+        vm.run_with_pool(&drop_code, &[], &strings, 0);
+        assert_eq!(intern_str_count(), 1);
+        assert_eq!(
+            vm.heap()
+                .into_iter()
+                .filter(|obj| matches!(obj, Object::String(_)))
+                .count(),
+            1,
+            "interned literal stays in the heap until GC"
         );
+
+        vm.collect_garbage();
+        assert_eq!(
+            vm.heap()
+                .into_iter()
+                .filter(|obj| matches!(obj, Object::String(_)))
+                .count(),
+            0,
+            "program-string cache must not keep interned literals alive"
+        );
+
+        let keep_code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        vm.run_with_pool(&keep_code, &[], &strings, 0);
+        assert_eq!(intern_str_count(), 2);
         let keep = vm.pop();
         assert!(vm.heap().find_object_by_addr(keep.raw() as u64).is_some());
         let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
