@@ -4,6 +4,7 @@ pub mod char_ord;
 #[cfg(any(test, feature = "debugger"))]
 pub mod debug;
 pub mod env;
+mod fused;
 mod ffi;
 pub mod fs;
 pub mod gc_handles;
