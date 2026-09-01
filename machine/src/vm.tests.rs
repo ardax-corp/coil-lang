@@ -733,6 +733,33 @@
     }
 
     #[test]
+    fn index_pin_two_slots_are_independent() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(1),
+            const_int(2),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            const_int(10),
+            const_int(20),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(3),
+            load(0),
+            Byte::new(Instruction::ArrayPin).with_operand_u32(0),
+            load(3),
+            Byte::new(Instruction::ArrayPin).with_operand_u32(3),
+            const_int(1),
+            Byte::new(Instruction::IndexPin).with_operand_u32(0),
+            const_int(0),
+            Byte::new(Instruction::IndexPin).with_operand_u32(3),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 10);
+        assert_eq!(vm.pop().as_int(), 2);
+        assert_eq!(vm.live_pin_map_count(), 1);
+    }
+
+    #[test]
     fn index_unchecked_reads_in_bounds_element() {
         let mut vm = Machine::<8>::default();
         vm.run(&[

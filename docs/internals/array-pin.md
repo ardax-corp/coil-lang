@@ -33,12 +33,12 @@ Do not append another pin / ArrayPtr opcode. The product is these five.
 
 Not a `Value` fat pointer, not a generation stamp, not a nursery card.
 
-`Machine` keeps `frame_pins: Vec<(usize, HashMap<u32, Object>)>`
-(`machine/src/vm.rs`). The `usize` is `frames.len()` at first `ArrayPin` on
-that frame. CALL does not allocate a map; `ArrayPin` inserts one. Keys are
-the array's **local slot** (the `ArrayPin` operand). Values are `Object`
-(`Copy` `Gc<ObjArray>` — a `NonNull<GcData<ObjArray>>` in
-`machine/src/memory/heap.rs`).
+`Machine` keeps `frame_pins: Vec<FramePins>` (`machine/src/vm.rs`). Each
+`FramePins` stores `frames.len()` at first `ArrayPin` on that frame and a
+`Vec<Option<Object>>` indexed by the array's **local slot** (the `ArrayPin`
+operand). CALL does not allocate a table; `ArrayPin` inserts one. Lookup is a
+vec index, not a `HashMap`. Values are `Object` (`Copy` `Gc<ObjArray>` — a
+`NonNull<GcData<ObjArray>>` in `machine/src/memory/heap.rs`).
 
 `ArrayPin` does the one `find_object_by_addr` for that slot: pop the stack-top
 address, and if it is `Object::Array`, insert that `Gc` under the operand
@@ -91,13 +91,13 @@ natives in `machine/src/vec_ops.rs`.
 There is no generation or pin-token opcode. A pin dies when:
 
 - the frame pops (`RETURN`, `pop_call_frame`, yield unwind) and that frame
-  had a map;
+  had a table;
 - `ArrayPin` overwrites the same slot;
-- coroutine yield drops maps for unwound frames. Pins are not saved across
+- coroutine yield drops tables for unwound frames. Pins are not saved across
   yield; `ArrayPin` after resume allocates again.
 
-`CALL` / `CallIndirect` / `call_function` do not push a pin map. The caller's
-map (if any) stays keyed by its frame depth and is still a GC root.
+`CALL` / `CallIndirect` / `call_function` do not push a pin table. The caller's
+table (if any) stays keyed by its frame depth and is still a GC root.
 `TailCall` reuses the current frame depth, so leftover pins remain until that
 frame returns. `TailCall` is already a length-proof barrier, so a proven
 loop body does not tail-call.
@@ -111,7 +111,7 @@ onto an intrusive list. A `kind` byte in the `GcHeader` reconstructs `Object`;
 Addresses stored in `Value` and `Gc` pointers stay valid for the object's
 lifetime (`machine/src/memory/heap.rs`).
 
-`collect_vm_root_addrs` walks every `frame_pins` map and pushes `obj.addr()`
+`collect_vm_root_addrs` walks every `frame_pins` table and pushes `obj.addr()`
 next to the operand stack, statics, and coroutine saved stacks. Automatic GC
 and `gc::collect` share `gc_collect` → `mark_from_vm_roots`. A live pin keeps
 the array marked, so sweep will not free it, and `fn drop()` on an element
@@ -130,7 +130,7 @@ roots.
 
 - `gc::Root` marks its payload while the `Root` object is reachable.
 - `gc::Weak` does not keep the referent alive; upgrade fails after sweep.
-- A frame pin keeps the array alive until the map entry is gone, even if the
+- A frame pin keeps the array alive until the table entry is gone, even if the
   local slot is later overwritten. That is extra liveness, not a use-after-free.
 - Resurrection from `fn drop()` ([COI-79](https://linear.app/ardax/issue/COI-79))
   is unchanged: drop still runs at most once; a pin that kept the object marked

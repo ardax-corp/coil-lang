@@ -1890,11 +1890,23 @@ mod tests {
         (stream, writer)
     }
 
+    /// macOS loopback can lag a tick after `write_all` before poll sees POLLIN.
+    fn wait_loopback_readable(heap: &mut Heap, stream: Value) {
+        let handle = stream_wait_handle(heap, stream).expect("wait handle");
+        reactor_wait_fd(
+            handle,
+            Interest::Readable,
+            Some(Duration::from_millis(250)),
+        )
+        .expect("loopback write should become readable");
+    }
+
     #[test]
     fn await_readable_returns_ok_when_already_ready() {
         let mut heap = Heap::default();
         let (stream, mut write) = tcp_stream_pair(&mut heap);
         write.write_all(b"a").expect("write");
+        wait_loopback_readable(&mut heap, stream);
         let _ = take_pending_io_park();
         let v = stream_await_readable(&mut heap, stream)
             .expect("await")

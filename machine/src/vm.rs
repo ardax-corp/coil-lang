@@ -1,7 +1,6 @@
 //! Bytecode interpreter: dispatch loop, automatic GC, and FFI.
 
 use std::{
-    collections::HashMap,
     ffi::c_void,
     fmt::Write as FmtWrite,
     io::{self, Write as IoWrite},
@@ -285,13 +284,21 @@ struct PendingIoWait {
     resume_sp: usize,
 }
 
+/// One frame's pinned arrays, keyed by `ArrayPin` operand (local slot).
+///
+/// Allocated lazily on first `ArrayPin`. Lookup is a vec index, not a hash.
+struct FramePins {
+    /// `frames.len()` at first pin (TailCall keeps the same depth).
+    depth: usize,
+    by_slot: Vec<Option<Object>>,
+}
+
 pub struct Machine<const S: usize> {
     heap: Heap,
     stack: Stack<Value>,
     frames: ArrayVec<Frame, S>,
-    /// Pin maps for frames that actually ran `ArrayPin`. Each entry's `0` is
-    /// `frames.len()` at first pin (TailCall keeps the same depth).
-    frame_pins: Vec<(usize, HashMap<u32, Object>)>,
+    /// Pin tables for frames that actually ran `ArrayPin`.
+    frame_pins: Vec<FramePins>,
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
@@ -813,37 +820,42 @@ impl<const S: usize> Machine<S> {
         self.frames.pop().get()
     }
 
-    /// Drop the pin map for the active frame if ArrayPin created one.
+    /// Drop the pin table for the active frame if ArrayPin created one.
     #[inline]
     fn pop_pin_map_for_current_frame(&mut self) {
         let depth = self.frames.len();
-        if self.frame_pins.last().is_some_and(|(d, _)| *d == depth) {
+        if self.frame_pins.last().is_some_and(|p| p.depth == depth) {
             self.frame_pins.pop();
         }
     }
 
     #[inline]
-    fn current_pins(&self) -> Option<&HashMap<u32, Object>> {
+    fn pinned_object(&self, slot: u32) -> Option<Object> {
         let depth = self.frames.len();
-        match self.frame_pins.last() {
-            Some((d, map)) if *d == depth => Some(map),
-            _ => None,
+        let pins = self.frame_pins.last()?;
+        if pins.depth != depth {
+            return None;
         }
+        pins.by_slot.get(slot as usize).copied().flatten()
     }
 
-    /// Allocate a pin map only when this frame first pins an array.
+    /// Allocate a pin table only when this frame first pins an array.
     #[inline]
     fn pin_current_array(&mut self, slot: u32, obj: Object) {
         let depth = self.frames.len();
-        if let Some((d, map)) = self.frame_pins.last_mut() {
-            if *d == depth {
-                map.insert(slot, obj);
+        let idx = slot as usize;
+        if let Some(pins) = self.frame_pins.last_mut() {
+            if pins.depth == depth {
+                if pins.by_slot.len() <= idx {
+                    pins.by_slot.resize(idx + 1, None);
+                }
+                pins.by_slot[idx] = Some(obj);
                 return;
             }
         }
-        let mut map = HashMap::new();
-        map.insert(slot, obj);
-        self.frame_pins.push((depth, map));
+        let mut by_slot = vec![None; idx + 1];
+        by_slot[idx] = Some(obj);
+        self.frame_pins.push(FramePins { depth, by_slot });
     }
 
     fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Option<Value> {
@@ -1090,8 +1102,8 @@ impl<const S: usize> Machine<S> {
                 Self::root_coroutine_saved_stack(&self.heap, gc.as_ref(), &mut roots);
             }
         }
-        for (_, pins) in &self.frame_pins {
-            for obj in pins.values() {
+        for pins in &self.frame_pins {
+            for obj in pins.by_slot.iter().flatten() {
                 roots.push(obj.addr());
             }
         }
@@ -3413,7 +3425,7 @@ impl<const S: usize> Machine<S> {
                     let slot = opcode.operand_u32();
                     let index = self.stack.pop().as_int();
                     let unchecked = matches!(*bc, Instruction::IndexPinUnchecked);
-                    let result = match self.current_pins().and_then(|pins| pins.get(&slot)) {
+                    let result = match self.pinned_object(slot) {
                         Some(Object::Array(gc)) => {
                             Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
@@ -3542,9 +3554,7 @@ impl<const S: usize> Machine<S> {
                     let value = self.stack.pop();
                     let index = self.stack.pop().as_int();
                     let unchecked = matches!(*bc, Instruction::StoreIndexPinUnchecked);
-                    if let Some(Object::Array(mut gc)) =
-                        self.current_pins().and_then(|pins| pins.get(&slot)).copied()
-                    {
+                    if let Some(Object::Array(mut gc)) = self.pinned_object(slot) {
                         let arr = gc.as_mut();
                         if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
                             return self

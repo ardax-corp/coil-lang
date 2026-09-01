@@ -522,6 +522,7 @@ mod tests {
     use super::*;
     use std::io::Write;
     use std::net::{TcpListener, TcpStream};
+    use std::time::{Duration, Instant};
 
     fn tcp_pair() -> (TcpStream, TcpStream) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -614,7 +615,15 @@ mod tests {
         let tok = io.register_wait(wait_of(&r), Interest::Readable);
         assert_eq!(io.poll_once(Some(Duration::ZERO)), 0);
         w.write_all(b"z").expect("write");
-        assert_eq!(io.poll_once(Some(Duration::ZERO)), 1);
+        let deadline = Instant::now() + Duration::from_millis(250);
+        let mut n = 0;
+        while Instant::now() < deadline {
+            n = io.poll_once(Some(Duration::from_millis(10)));
+            if n == 1 {
+                break;
+            }
+        }
+        assert_eq!(n, 1);
         // Second poll should not re-count the already-done waiter.
         assert_eq!(io.poll_once(Some(Duration::ZERO)), 0);
         io.wait_token(tok, Some(Duration::from_millis(10)))

@@ -11,6 +11,7 @@ fn compile(path: &str) -> (Vec<Byte>, Vec<u64>, Vec<String>, u32, Pipeline) {
     let src =
         std::fs::read_to_string(root.join(path)).unwrap_or_else(|e| panic!("read {path}: {e}"));
     let mut pipeline = Pipeline::new();
+    pipeline.bind_workspace_language_roots();
     let (bytecode, constants) = pipeline
         .compile_src(&src)
         .unwrap_or_else(|_| panic!("compile failed: {path}"));
