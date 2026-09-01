@@ -163,7 +163,8 @@ What neither slice does yet (see
   on). Tests use a synthetic raising loop because mandelbrot does not hit the
   profitable shape.
 - **Scheduling.** `mandelbrot`'s `tr → zr` copy cannot coalesce because `zr` is
-  read between the def and the copy; sinking the def past that read is the fix.
+  read between the def and the copy; **`tos_carry`** delays `STORE tr` across
+  slot-addressed ops and stack `Bin` so the latch pops TOS (no `MoveSlot` opcode).
 - **`Bin(slot, TOS)` operand shapes.** `mandelbrot`'s remaining `LOAD 5` / `LOAD
   6` feed an `ADDF` whose other operand is on the stack, which no existing fused
   form accepts. That is an opcode question, not a promotion one.
@@ -235,19 +236,16 @@ exact-size collect. Same opcodes, layouts, element order and GC rooting. This
 measured **performance-neutral** on `binary_trees` — within `poop` noise — which
 is the useful result: aggregate construction is not copy-bound.
 
-The remaining cost per object is in `Heap::alloc` itself, and it is structural:
+The remaining cost per object was in `Heap::alloc` itself, and it was structural:
 
 - one `Box::new(GcData::new(..))` per object, on top of the payload vector;
-- one `live` insert per allocation and one removal per sweep, because
-  `find_object_by_addr` probes a liveness set then reads the header kind;
+- one `live` HashSet insert per allocation and one removal per sweep, because
+  `find_object_by_addr` probed a liveness set then read the header kind;
 - `alloc_bytes` versus `gc_next_threshold` as the only collection trigger.
 
-So the next slice is the allocator and the address index — arena/region backing
-for `GcData`, or a cheaper object-identity scheme than a per-address hash — not
-the aggregate opcodes. Keep GC rooting correct before and after allocation, and
-consider batch allocation only once object lifetime boundaries are explicit.
-This remains the most direct path for `binary_trees` and is independent of a
-JIT.
+**COI-200:** mapped slab + header poison ([heap-identity.md](heap-identity.md)).
+`Value` is still a raw address. Payload `Vec`s stay ordinary Rust allocs.
+Do not append ArrayPtr.
 
 ### 4. Direct-call and closure specialization
 
@@ -304,7 +302,7 @@ existing opcode; fits append-only opcode ABI.
 | Function tree-shake | eager `Hash__*`/`Show__*`/… thunks in archives | binary size / dissect noise | **done** | Reachability prune before lower (`il::treeshake`); roots = `main` (+ tests when included). |
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |
-| `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle=1` (`tr`→`zr`); IL opts refused overlapping live ranges | ~2.56M dispatches/run (LOAD+STORE latch) | **needs more proof** (or defer pending benches) | Largest residual dispatch count, but mandelbrot-heavy; tak/numeric/nsieve have 0 latch shuffles. Needs universality proof (more loop-carried programs) before an append-only `MoveSlot` / rename op. Overlapping ranges may still need SSA rename rather than a 1-op shuffle. |
+| `MoveSlot` / φ shuffle | mandelbrot `loop_carried_phi_shuffle` (was `tr`→`zr` LOAD+STORE latch) | ~2.56M dispatches/run before TOS-carry | **IL rewrite landed** (`tos_carry`); opcode still unproven | Straight-line TOS-carry delays `STORE t` across `BinSlot*` and stack `Bin` so the latch pops TOS. Keep the pass even if only mandelbrot matches. Do **not** append `MoveSlot` until a universal residual remains. |
 | Unchecked `Index` / `StoreIndex` | nsieve static Index=1 + StoreIndex=1 in hot loops | nsieve-dominant | **done** | `il::bounds` proofs + `IndexPin*` (minor 13) on proven loops |
 | Unary slot / float `BinSlotImm` / packing holes | 0 on mandelbrot/tak/numeric/nsieve | — | **defer** | Zero evidence on the hot matrix. |
 | Slot move (non-latch) | numeric `slot_move` ≤3 (format/host temp) | low | **defer** | Not loop-carried; format-path noise, not a fuse candidate. |

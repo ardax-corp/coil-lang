@@ -556,6 +556,7 @@ mod tests {
                 licm: false,
                 loop_bounds: false,
                 slot_promote: false,
+                tos_carry: false,
                 mem_fwd: false,
                 copy_prop: false,
                 ..OptimizeOptions::default()

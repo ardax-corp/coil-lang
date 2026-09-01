@@ -46,7 +46,10 @@ use std::collections::{HashMap, HashSet};
 
 use common::Instruction;
 
-use crate::il::op::{IlJumpKind, IlOp, Label};
+use crate::il::analysis::{
+    Block, SlotLiveness, analyze_slot_liveness, build_blocks, op_slot_use_def, preds_of,
+};
+use crate::il::op::{IlOp, Label};
 
 /// Binding of a local slot to a virtual value within the promotion region.
 #[derive(Clone)]
@@ -211,120 +214,6 @@ fn meet_bindings(preds: &[&HashMap<u32, Binding>]) -> HashMap<u32, Binding> {
     // Fail closed: a pred that never bound `slot` means an unknown reaching def.
     out.retain(|slot, _| preds.iter().all(|p| p.contains_key(slot)));
     out
-}
-
-#[derive(Clone, Debug)]
-struct Block {
-    start: usize,
-    end: usize,
-    succs: Vec<usize>,
-}
-
-fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
-    if ops.is_empty() {
-        return Vec::new();
-    }
-    let mut leaders: HashSet<usize> = HashSet::new();
-    leaders.insert(0);
-    let mut label_at: HashMap<u32, usize> = HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) = op {
-            label_at.insert(*id, i);
-            leaders.insert(i);
-        }
-    }
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Jump { target, .. } = op {
-            if let Some(&t) = label_at.get(&target.0) {
-                leaders.insert(t);
-            }
-            if i + 1 < ops.len() {
-                leaders.insert(i + 1);
-            }
-        } else if matches!(
-            op,
-            IlOp::Return { .. }
-                | IlOp::Halt { .. }
-                | IlOp::LoadReturnSlot { .. }
-                | IlOp::ConstReturnImm { .. }
-                | IlOp::BinReturn { .. }
-        ) && i + 1 < ops.len()
-        {
-            leaders.insert(i + 1);
-        }
-    }
-    let mut starts: Vec<usize> = leaders.into_iter().collect();
-    starts.sort_unstable();
-    let mut blocks: Vec<Block> = Vec::new();
-    for (bi, &start) in starts.iter().enumerate() {
-        let end = starts.get(bi + 1).copied().unwrap_or(ops.len());
-        blocks.push(Block {
-            start,
-            end,
-            succs: Vec::new(),
-        });
-    }
-    let block_at: HashMap<usize, usize> = blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.start, i))
-        .collect();
-
-    for bi in 0..blocks.len() {
-        let end = blocks[bi].end;
-        if end == blocks[bi].start {
-            continue;
-        }
-        let last = end - 1;
-        match &ops[last] {
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target,
-                ..
-            } => {
-                if let Some(&t) = label_at.get(&target.0)
-                    && let Some(&sb) = block_at.get(&t)
-                {
-                    blocks[bi].succs.push(sb);
-                }
-            }
-            IlOp::Jump { target, .. } => {
-                if let Some(&t) = label_at.get(&target.0)
-                    && let Some(&sb) = block_at.get(&t)
-                {
-                    blocks[bi].succs.push(sb);
-                }
-                if end < ops.len()
-                    && let Some(&fb) = block_at.get(&end)
-                {
-                    blocks[bi].succs.push(fb);
-                }
-            }
-            IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. } => {}
-            _ => {
-                if end < ops.len()
-                    && let Some(&fb) = block_at.get(&end)
-                {
-                    blocks[bi].succs.push(fb);
-                }
-            }
-        }
-    }
-    blocks
-}
-
-fn preds_of(blocks: &[Block]) -> Vec<Vec<usize>> {
-    let mut preds = vec![Vec::new(); blocks.len()];
-    for (i, b) in blocks.iter().enumerate() {
-        for &s in &b.succs {
-            preds[s].push(i);
-        }
-    }
-    preds
 }
 
 /// Natural-loop block set for `header`: header plus nodes that reach it via
@@ -713,171 +602,6 @@ pub(super) fn slot_promote(ops: &mut Vec<IlOp>, entry_tell: u32) {
     // tell / dominating stores prove the floor (never bare tell-drop across CALL).
     raise_producer_into_dead_peel_floor(ops, entry_tell);
     elide_unused_alias_stores(ops, entry_tell);
-}
-
-/// Per-op slot use/def for liveness. `opaque` means residual forms whose slot
-/// footprint is incomplete — coalescing that touches those ops is refused.
-fn op_slot_use_def(op: &IlOp) -> (HashSet<u32>, HashSet<u32>, bool) {
-    let mut uses = HashSet::new();
-    let mut defs = HashSet::new();
-    let mut opaque = false;
-    match op {
-        IlOp::Load { slot, .. } | IlOp::LoadReturnSlot { slot, .. } => {
-            uses.insert(*slot);
-        }
-        IlOp::StorePop { slot, .. } => {
-            defs.insert(*slot);
-        }
-        IlOp::BinSlotImm { slot, .. } => {
-            uses.insert(*slot as u32);
-        }
-        IlOp::BinSlotSlot { a, b, .. } => {
-            uses.insert(*a as u32);
-            uses.insert(*b as u32);
-        }
-        IlOp::Byte { byte, .. } => {
-            let insn = *byte.bytecode();
-            match insn {
-                Instruction::LOAD | Instruction::LoadReturnSlot => {
-                    for k in 0..byte.load_store_count() {
-                        uses.insert(byte.load_store_slot_at(k));
-                    }
-                }
-                Instruction::STORE | Instruction::StorePop => {
-                    for k in 0..byte.load_store_count() {
-                        defs.insert(byte.load_store_slot_at(k));
-                    }
-                }
-                Instruction::BinSlotImm | Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
-                    let (_, slot, _) = byte.bin_slot_imm_parts();
-                    uses.insert(slot as u32);
-                }
-                Instruction::BinSlotImmStore => {
-                    let (_, src, _) = byte.bin_slot_imm_store_parts();
-                    uses.insert(src as u32);
-                    // Dest lives in the const pool; treat as opaque def.
-                    opaque = true;
-                }
-                Instruction::BinSlotSlot | Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
-                    let (_, a, b) = byte.bin_slot_slot_parts();
-                    uses.insert(a as u32);
-                    uses.insert(b as u32);
-                }
-                Instruction::BinSlotSlotStore => {
-                    let (_, a, b, dest) = byte.bin_slot_slot_store_parts();
-                    uses.insert(a as u32);
-                    uses.insert(b as u32);
-                    defs.insert(dest as u32);
-                }
-                Instruction::BinSlotSlotConstJmpf | Instruction::BinSlotSlotConstJmpt => {
-                    let o = byte.operand_u32();
-                    uses.insert(((o >> 16) & 0xff) as u32);
-                    // Second slot is pool-backed — fail closed.
-                    opaque = true;
-                }
-                Instruction::FloatChainStore => {
-                    let dest = byte.operand_u32() >> 16;
-                    defs.insert(dest);
-                    // Stage sources live in the descriptor pool.
-                    opaque = true;
-                }
-                _ => opaque = true,
-            }
-        }
-        IlOp::Label(_)
-        | IlOp::Jump { .. }
-        | IlOp::Const { .. }
-        | IlOp::ConstPool { .. }
-        | IlOp::String { .. }
-        | IlOp::Dup { .. }
-        | IlOp::Pop { .. }
-        | IlOp::Bin { .. }
-        | IlOp::Return { .. }
-        | IlOp::Halt { .. }
-        | IlOp::ConstReturnImm { .. } => {}
-        _ => opaque = true,
-    }
-    (uses, defs, opaque)
-}
-
-struct SlotLiveness {
-    /// Slots live immediately before each op.
-    live_before: Vec<HashSet<u32>>,
-    /// Slots live on exit from each block.
-    live_out: Vec<HashSet<u32>>,
-    /// Ops whose slot footprint is incompletely known.
-    opaque: Vec<bool>,
-}
-
-fn analyze_slot_liveness(ops: &[IlOp], blocks: &[Block]) -> SlotLiveness {
-    let n = ops.len();
-    let mut use_b: Vec<HashSet<u32>> = vec![HashSet::new(); blocks.len()];
-    let mut def_b: Vec<HashSet<u32>> = vec![HashSet::new(); blocks.len()];
-    let mut opaque = vec![false; n];
-
-    for (bi, block) in blocks.iter().enumerate() {
-        let mut defined = HashSet::new();
-        for i in block.start..block.end {
-            let (uses, defs, is_opaque) = op_slot_use_def(&ops[i]);
-            opaque[i] = is_opaque;
-            for u in &uses {
-                if !defined.contains(u) {
-                    use_b[bi].insert(*u);
-                }
-            }
-            for d in &defs {
-                defined.insert(*d);
-                def_b[bi].insert(*d);
-            }
-        }
-    }
-
-    let mut live_in: Vec<HashSet<u32>> = vec![HashSet::new(); blocks.len()];
-    let mut live_out: Vec<HashSet<u32>> = vec![HashSet::new(); blocks.len()];
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for bi in (0..blocks.len()).rev() {
-            let mut out = HashSet::new();
-            for &s in &blocks[bi].succs {
-                out.extend(live_in[s].iter().copied());
-            }
-            if out != live_out[bi] {
-                live_out[bi] = out;
-                changed = true;
-            }
-            let mut inn = use_b[bi].clone();
-            for s in &live_out[bi] {
-                if !def_b[bi].contains(s) {
-                    inn.insert(*s);
-                }
-            }
-            if inn != live_in[bi] {
-                live_in[bi] = inn;
-                changed = true;
-            }
-        }
-    }
-
-    let mut live_before = vec![HashSet::new(); n];
-    for (bi, block) in blocks.iter().enumerate() {
-        let mut live = live_out[bi].clone();
-        for i in (block.start..block.end).rev() {
-            let (uses, defs, _) = op_slot_use_def(&ops[i]);
-            // `live` is live-after op i; compute live-before.
-            for d in &defs {
-                live.remove(d);
-            }
-            live.extend(uses.iter().copied());
-            live_before[i] = live.clone();
-        }
-    }
-
-    SlotLiveness {
-        live_before,
-        live_out,
-        opaque,
-    }
 }
 
 fn coalesce_tell_ok(ops: &[IlOp], copy_idx: usize, t: u32, s: u32) -> bool {
@@ -1590,7 +1314,7 @@ mod tell {
 
     use common::{Byte, Instruction};
 
-    use crate::il::licm::find_natural_loops;
+    use crate::il::analysis::find_natural_loops;
     use crate::il::op::{EntryKind, IlJumpKind, IlOp, Label};
     use crate::il::tell::TellInfo;
 
@@ -1791,7 +1515,7 @@ mod tell {
         has_self.then_some(fwd)
     }
 
-    fn is_innermost(lp: &crate::il::licm::NaturalLoop, loops: &[crate::il::licm::NaturalLoop]) -> bool {
+    fn is_innermost(lp: &crate::il::analysis::NaturalLoop, loops: &[crate::il::analysis::NaturalLoop]) -> bool {
         !loops.iter().any(|inner| {
             inner.header != lp.header && inner.header > lp.header && inner.latch < lp.latch
         })
@@ -2163,6 +1887,7 @@ mod tell {
                 mem_fwd: false,
                 copy_prop: false,
                 slot_promote: false,
+                tos_carry: false,
                 canon: false,
                 cast_spill: false,
                 algebraic: false,

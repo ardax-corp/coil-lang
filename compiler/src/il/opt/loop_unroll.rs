@@ -89,31 +89,10 @@ pub fn unroll_loop(ops: &mut Vec<IlOp>, loop_info: &LoopInfo) {
 }
 
 fn natural_loops(ops: &[IlOp]) -> Vec<(usize, usize, Label)> {
-    let mut label_at: HashMap<u32, usize> = HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-            label_at.insert(*id, i);
-        }
-    }
-    let mut out = Vec::new();
-    for (i, op) in ops.iter().enumerate() {
-        let IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target,
-            ..
-        } = op
-        else {
-            continue;
-        };
-        let Some(&h) = label_at.get(&target.0) else {
-            continue;
-        };
-        if h >= i {
-            continue;
-        }
-        out.push((h, i, *target));
-    }
-    out
+    crate::il::analysis::find_natural_loops(ops)
+        .into_iter()
+        .map(|lp| (lp.header, lp.latch, lp.header_label))
+        .collect()
 }
 
 fn nested_loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {

@@ -229,34 +229,13 @@ fn slot_is_loaded(op: &IlOp, slot: u32) -> bool {
 }
 
 fn natural_loops(ops: &[IlOp]) -> Vec<LoopInfo> {
-    let mut label_at: HashMap<u32, usize> = HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-            label_at.insert(*id, i);
-        }
-    }
-    let mut out = Vec::new();
-    for (i, op) in ops.iter().enumerate() {
-        let IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target,
-            ..
-        } = op
-        else {
-            continue;
-        };
-        let Some(&h) = label_at.get(&target.0) else {
-            continue;
-        };
-        if h >= i {
-            continue;
-        }
-        out.push(LoopInfo {
-            header: h,
-            latch: i,
-        });
-    }
-    out
+    crate::il::analysis::find_natural_loops(ops)
+        .into_iter()
+        .map(|lp| LoopInfo {
+            header: lp.header,
+            latch: lp.latch,
+        })
+        .collect()
 }
 
 #[cfg(test)]

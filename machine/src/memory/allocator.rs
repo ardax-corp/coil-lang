@@ -1,4 +1,5 @@
 //! Unused arena allocator sketch (not wired into the live VM).
+//! Live headers use the mapped slab in `slab.rs` (docs/internals/heap-identity.md).
 
 // use std::{
 //     alloc::Layout, borrow::{Borrow, BorrowMut}, cell::RefCell, marker::PhantomData, ops::{Deref, DerefMut}

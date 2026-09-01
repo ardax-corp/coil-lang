@@ -698,38 +698,7 @@ fn max_slot_used(ops: &[IlOp]) -> u32 {
     max
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct NaturalLoop {
-    pub(super) header: usize,
-    /// Index of back-edge `Jump` (unconditional) to header.
-    pub(super) latch: usize,
-    pub(super) header_label: Label,
-}
-
-impl NaturalLoop {
-    pub(super) fn body_start(&self) -> usize {
-        self.header + 1
-    }
-}
-
-fn il_function_start(ops: &[IlOp], idx: usize) -> usize {
-    for i in (0..idx).rev() {
-        if matches!(ops[i], IlOp::Return { .. }) {
-            return i + 1;
-        }
-    }
-    0
-}
-
-fn resolve_label_before(ops: &[IlOp], before: usize, target: Label) -> Option<usize> {
-    let start = il_function_start(ops, before);
-    for i in (start..before).rev() {
-        if matches!(&ops[i], IlOp::Label(l) | IlOp::JoinLabel(l) if *l == target) {
-            return Some(i);
-        }
-    }
-    None
-}
+pub(super) use super::analysis::{NaturalLoop, find_natural_loops, il_function_start};
 
 fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
     let mut loops = find_natural_loops(ops);
@@ -743,33 +712,6 @@ fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
     }
     loops.sort_by_key(|l| std::cmp::Reverse(l.header));
     loops
-}
-
-pub(super) fn find_natural_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
-    let mut out = Vec::new();
-    for (i, op) in ops.iter().enumerate() {
-        let IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            target,
-            ..
-        } = op
-        else {
-            continue;
-        };
-        let Some(h) = resolve_label_before(ops, i, *target) else {
-            continue;
-        };
-        // Back-edge: jump target is before the jump.
-        if h >= i {
-            continue;
-        }
-        out.push(NaturalLoop {
-            header: h,
-            latch: i,
-            header_label: *target,
-        });
-    }
-    out
 }
 
 /// True when the loop can change some array's length or identity. `ArrayPush`

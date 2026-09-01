@@ -478,7 +478,7 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
         stream_stderr, stream_stdin, stream_stdout, stream_write, tcp_accept, tcp_connect,
         tcp_connect_timeout, tcp_listen, tcp_local_addr, tcp_peer_addr, tcp_set_nodelay,
         tcp_shutdown, to_bytes, udp_bind, udp_connect, udp_local_port, udp_recv_from, udp_send_to,
-        value_as_string,
+        value_as_open_mode, value_as_string,
     };
 
     for &kind in IoKind::all() {
@@ -502,7 +502,7 @@ fn push_io_natives(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMu
                             return Ok(Some(as_result_value(heap, Err(tag))));
                         }
                     };
-                    let mode = match value_as_string(heap, args[1]) {
+                    let mode = match value_as_open_mode(heap, args[1]) {
                         Ok(s) => s,
                         Err(tag) => {
                             return Ok(Some(as_result_value(heap, Err(tag))));

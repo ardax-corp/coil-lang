@@ -1,7 +1,10 @@
 //! Mark-and-sweep heap: intrusive object list, string interning, and GC.
 
+use std::alloc::Layout;
 use std::collections::{HashMap, HashSet};
+use std::ptr::{self, NonNull};
 
+use super::slab::Slab;
 use super::AddrHashBuilder;
 
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
@@ -15,8 +18,9 @@ pub struct Heap {
     gc_growth_factor: usize,
     strings: Table<()>,
     head: Option<Object>,
-    /// Live addresses only. Kind is in the object header (non-moving GC).
-    live: HashSet<u64, AddrHashBuilder>,
+    slab: Slab,
+    /// Live object count (alloc +1, sweep/dealloc −1). Not a membership set.
+    live_count: usize,
     /// Immortal arity-0 enum singletons keyed by tag (never swept).
     immortal_enums: HashMap<u32, Object, AddrHashBuilder>,
     /// Reused mark-set across collections (avoids alloc per GC).
@@ -38,7 +42,8 @@ impl Default for Heap {
             gc_growth_factor: GC_GROWTH_FACTOR,
             strings: Table::default(),
             head: None,
-            live: HashSet::default(),
+            slab: Slab::new(),
+            live_count: 0,
             immortal_enums: HashMap::default(),
             gc_mark_set: HashSet::default(),
             gc_gray: Vec::new(),
@@ -91,15 +96,24 @@ impl Heap {
     where
         F: Fn(Gc<T>) -> Object,
     {
-        let boxed = Box::new(GcData::new(self.head, data));
-        let content = Gc::new(boxed);
+        let layout = Layout::new::<GcData<T>>();
+        let slot = self.slab.alloc(layout).cast::<GcData<T>>();
+        unsafe {
+            slot.as_ptr().write(GcData::new(self.head, data));
+        }
+        let content = Gc::from_slot(slot);
         let object = map(content);
         content.set_kind(object.kind());
         let size = object.size();
         self.head = Some(object);
         self.alloc_bytes += size;
-        self.live.insert(object.addr());
+        self.live_count += 1;
         crate::vm::note_heap_alloc();
+        debug_assert!(
+            self.find_object_by_addr(object.addr()).is_some(),
+            "slab alloc must be findable at {:#x}",
+            object.addr()
+        );
 
         (object, content)
     }
@@ -194,7 +208,6 @@ impl Heap {
                 prev_obj = curr_obj;
                 curr_obj = next;
             } else {
-                self.live.remove(&curr_ref.addr());
                 unsafe { self.dealloc(curr_ref) };
                 curr_obj = next;
                 if let Some(prev_ref) = prev_obj {
@@ -217,7 +230,7 @@ impl Heap {
     /// Number of live heap objects (for GC pressure after `HostInvoke`).
     #[inline]
     pub fn live_object_count(&self) -> usize {
-        self.live.len()
+        self.live_count
     }
 
     /// True when live heap bytes exceed the collection threshold. [`Self::sweep`]
@@ -256,64 +269,11 @@ impl Heap {
     unsafe fn dealloc(&mut self, object: Object) {
         let size = object.size();
         self.alloc_bytes -= size;
-
-        match object {
-            Object::String(s) => {
-                s.release();
-            }
-            Object::Instance(i) => {
-                i.release();
-            }
-            Object::Enum(e) => {
-                e.release();
-            }
-            Object::Library(l) => {
-                l.release();
-            }
-            Object::Tuple(t) => {
-                t.release();
-            }
-            Object::Array(a) => {
-                a.release();
-            }
-            Object::Coroutine(c) => {
-                c.release();
-            }
-            Object::Boxed(b) => {
-                b.release();
-            }
-            Object::Root(r) => {
-                r.release();
-            }
-            Object::Weak(w) => {
-                w.release();
-            }
-            Object::PolyFn(p) => {
-                p.release();
-            }
-            Object::Fn(f) => {
-                f.release();
-            }
-            Object::Stream(s) => {
-                // Closing the fd happens in ObjStream::drop via release.
-                s.release();
-            }
-            Object::Thread(t) => {
-                t.release();
-            }
-            Object::Sender(s) => {
-                s.release();
-            }
-            Object::Receiver(r) => {
-                r.release();
-            }
-            Object::Mutex(m) => {
-                m.release();
-            }
-            Object::RwLock(l) => {
-                l.release();
-            }
-        }
+        debug_assert!(self.live_count > 0);
+        self.live_count -= 1;
+        let ptr = unsafe { NonNull::new_unchecked(object.addr() as *mut u8) };
+        unsafe { object.recycle_payload() };
+        self.slab.free(ptr);
     }
 
     pub fn trace(&mut self, values: &[u64]) {
@@ -448,9 +408,9 @@ impl Heap {
         self.head
     }
 
-    /// Find a heap object by its address (liveness set + header kind).
+    /// Find a heap object by its address (mapped slot + header kind).
     pub fn find_object_by_addr(&self, addr: u64) -> Option<Object> {
-        if addr == 0 || !self.live.contains(&addr) {
+        if addr == 0 || !self.slab.contains_slot(addr) {
             return None;
         }
         unsafe { Object::from_header(addr) }
@@ -470,7 +430,12 @@ impl Heap {
 
     /// True if `addr` is a live heap object.
     pub fn contains_addr(&self, addr: *mut u8) -> bool {
-        self.live.contains(&(addr as u64))
+        self.find_object_by_addr(addr as u64).is_some()
+    }
+
+    #[cfg(test)]
+    fn slot_mapped_for_test(&self, addr: u64) -> bool {
+        self.slab.contains_slot(addr)
     }
 }
 
@@ -520,7 +485,6 @@ use std::{
     cell::Cell,
     error, fmt, mem,
     ops::{self, BitXor, Deref},
-    ptr::NonNull,
 };
 
 pub type RefString = Gc<ObjString>;
@@ -856,6 +820,30 @@ impl Object {
             Self::Receiver(_) => 16,
             Self::Mutex(_) => 17,
             Self::RwLock(_) => 18,
+        }
+    }
+
+    /// Drop the payload and poison `kind = 0`. Slot memory stays mapped.
+    unsafe fn recycle_payload(self) {
+        match self {
+            Self::String(s) => unsafe { s.recycle() },
+            Self::Instance(i) => unsafe { i.recycle() },
+            Self::Enum(e) => unsafe { e.recycle() },
+            Self::Library(l) => unsafe { l.recycle() },
+            Self::Tuple(t) => unsafe { t.recycle() },
+            Self::Array(a) => unsafe { a.recycle() },
+            Self::Coroutine(c) => unsafe { c.recycle() },
+            Self::Boxed(b) => unsafe { b.recycle() },
+            Self::Root(r) => unsafe { r.recycle() },
+            Self::Weak(w) => unsafe { w.recycle() },
+            Self::PolyFn(p) => unsafe { p.recycle() },
+            Self::Fn(f) => unsafe { f.recycle() },
+            Self::Stream(s) => unsafe { s.recycle() },
+            Self::Thread(t) => unsafe { t.recycle() },
+            Self::Sender(s) => unsafe { s.recycle() },
+            Self::Receiver(r) => unsafe { r.recycle() },
+            Self::Mutex(m) => unsafe { m.recycle() },
+            Self::RwLock(l) => unsafe { l.recycle() },
         }
     }
 
@@ -1524,7 +1512,7 @@ pub trait GcSized {
 }
 
 /// Prefix of every managed allocation. Kind reconstructs [`Object`] without
-/// storing a typed handle in the live-set.
+/// a live-address HashSet (`kind == 0` is a free slot).
 #[repr(C)]
 struct GcHeader {
     kind: Cell<u8>,
@@ -1608,15 +1596,18 @@ pub struct Gc<T> {
 }
 
 impl<T> Gc<T> {
-    #[must_use]
-    pub fn new(boxed: Box<GcData<T>>) -> Self {
-        Self {
-            ptr: NonNull::from(Box::leak(boxed)),
-        }
+    fn from_slot(ptr: NonNull<GcData<T>>) -> Self {
+        Self { ptr }
     }
 
-    pub fn release(self) {
-        _ = unsafe { Box::from_raw(self.ptr.as_ptr()) };
+    /// Drop `T` and poison the header. The slot stays mapped for reuse.
+    unsafe fn recycle(self) {
+        let p = self.ptr.as_ptr();
+        unsafe {
+            ptr::drop_in_place(&mut (*p).data);
+            (*p).header.kind.set(0);
+            (*p).header.marked.set(false);
+        }
     }
 
     #[must_use]
@@ -2221,11 +2212,15 @@ mod tests {
         let (obj, _) = heap.alloc(ObjString::from("gone"), Object::String);
         let addr = obj.addr();
         assert!(heap.find_object_by_addr(addr).is_some());
-        // No roots → sweep removes the object and its live-set entry.
+        // No roots → sweep poisons the header; the slot stays mapped.
         unsafe { heap.sweep() };
         assert!(
+            heap.slot_mapped_for_test(addr),
+            "swept slot must stay mapped"
+        );
+        assert!(
             heap.find_object_by_addr(addr).is_none(),
-            "swept object must leave the O(1) addr index"
+            "swept object must be poisoned (kind 0), not a HashSet miss"
         );
     }
 

@@ -28,6 +28,8 @@ pub struct OptimizeOptions {
     pub copy_prop: bool,
     /// Promote slots to virtual values (straight-line + same-def joins).
     pub slot_promote: bool,
+    /// Delay `STORE t` across slot-addressed ops so `LOAD t; STORE s` pops TOS.
+    pub tos_carry: bool,
     /// Operand-order canon (`Const;Load` → `Load;Const`, load/load slot order).
     pub canon: bool,
     /// Spill `CastIntToFloat` that blocks FloatChainStore fuse windows.
@@ -317,6 +319,7 @@ mod escape_analysis;
 mod invariant_store_elim;
 mod loop_unroll;
 mod slot_promote;
+mod tos_carry;
 
 pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
 pub(crate) use convoy::multi_op_join_convoy;

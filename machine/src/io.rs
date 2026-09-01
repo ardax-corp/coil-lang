@@ -1173,6 +1173,21 @@ pub fn value_as_string(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
     }
 }
 
+/// `open` mode may be a heap string or an untagged 1-byte immediate (`"r"`).
+pub fn value_as_open_mode(heap: &Heap, v: Value) -> Result<String, IoErrorTag> {
+    match value_as_string(heap, v) {
+        Ok(s) => Ok(s),
+        Err(_) => {
+            let n = peel_one_boxed(heap, v).as_int();
+            if (0..=255).contains(&n) && (n as u8).is_ascii_lowercase() {
+                Ok(String::from_utf8_lossy(&[n as u8]).into_owned())
+            } else {
+                Err(IoErrorTag::InvalidInput)
+            }
+        }
+    }
+}
+
 /// Marshal a Stream (or one Boxed Stream) to its fd. `None` if `v` is not a stream.
 pub fn stream_fd_i64(heap: &Heap, v: Value) -> Option<i64> {
     let v = peel_one_boxed(heap, v);
@@ -1335,6 +1350,16 @@ mod tests {
         let path = std::env::temp_dir().join("coil_io_bad_mode.bin");
         let err = stream_open(&mut heap, path.to_str().unwrap(), "xx").unwrap_err();
         assert_eq!(err, IoErrorTag::InvalidInput);
+    }
+
+    #[test]
+    fn open_mode_accepts_untagged_ascii_byte() {
+        let heap = Heap::default();
+        assert_eq!(
+            value_as_open_mode(&heap, Value::from(b'r' as i64)).expect("byte r"),
+            "r"
+        );
+        assert!(value_as_open_mode(&heap, Value::from(0i64)).is_err());
     }
 
     #[test]

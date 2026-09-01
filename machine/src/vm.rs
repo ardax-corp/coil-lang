@@ -809,7 +809,7 @@ impl<const S: usize> Machine<S> {
     // }
 
     /// Free function so `execute` can borrow `frames` and `heap` separately.
-    /// Delegates to [`Heap::find_object_by_addr`] (live-set + header kind).
+    /// Delegates to [`Heap::find_object_by_addr`] (mapped slot + header kind).
     fn find_object_by_addr(heap: &Heap, addr: u64) -> Option<Object> {
         heap.find_object_by_addr(addr)
     }
@@ -4176,7 +4176,7 @@ impl<const S: usize> Machine<S> {
                 | Instruction::DynDiv
                 | Instruction::DynMod => {
                     /// Classify a value into (ValueTag, payload-Value).
-                    /// Uses `Heap::find_object_by_addr` (live-set + header kind).
+                    /// Uses `Heap::find_object_by_addr` (mapped slot + header kind).
                     fn classify_dyn(v: Value, heap: &Heap) -> (ValueTag, Value) {
                         let addr = v.raw() as u64;
                         if v.raw().is_null() {
