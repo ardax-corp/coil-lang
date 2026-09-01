@@ -3,7 +3,8 @@
     };
 
     use super::{
-        alloc_count, dispatch_count, make_fast_count, reset_alloc_profile, reset_dispatch_count,
+        alloc_count, dispatch_count, intern_str_count, make_fast_count, reset_alloc_profile,
+        reset_dispatch_count,
     };
     use crate::{Heap, Machine, ObjArray, ObjEnum, Object};
     use std::sync::{Arc, Mutex};
@@ -377,6 +378,66 @@
             1
         );
         assert!(vm.heap().find_object_by_addr(value.raw() as u64).is_some());
+    }
+
+    #[test]
+    fn repeated_program_string_skips_intern_str_hash() {
+        reset_alloc_profile();
+        let strings = vec!["literal".to_owned()];
+        let code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        vm.run_with_pool(&code, &[], &strings, 0);
+
+        assert_eq!(
+            intern_str_count(),
+            1,
+            "second STRING of the same program index must use the index cache, not intern_str"
+        );
+        let second = vm.pop();
+        let first = vm.pop();
+        assert_eq!(first.raw(), second.raw());
+        assert!(vm.heap().find_object_by_addr(first.raw() as u64).is_some());
+        assert_eq!(
+            vm.heap()
+                .into_iter()
+                .filter(|obj| matches!(obj, Object::String(_)))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn program_string_cache_is_not_a_gc_root() {
+        reset_alloc_profile();
+        let strings = vec!["keep".to_owned(), "burn".to_owned()];
+        let code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        vm.heap_mut().set_gc_threshold_for_test(0);
+        vm.run_with_pool(&code, &[], &strings, 0);
+
+        assert!(
+            intern_str_count() >= 3,
+            "GC must drop the cached handle so a later STRING re-interns, got {}",
+            intern_str_count()
+        );
+        let keep = vm.pop();
+        assert!(vm.heap().find_object_by_addr(keep.raw() as u64).is_some());
+        let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
+            Some(Object::String(gc)) => gc.as_ref().data.clone(),
+            other => panic!("expected interned keep string, got {other:?}"),
+        };
+        assert_eq!(text, "keep");
     }
 
     #[test]
