@@ -243,7 +243,8 @@ fn optimize_once_at(
 /// is empty (unit tests / buffers without `record_func`).
 ///
 /// Thin flat-buffer wrapper over [`super::IlModule::optimize_and_flatten`].
-/// Production lower uses [`super::lower_module`] on an owning module; this
+/// Production lower uses [`super::CodeBuf::lower_in_place`] /
+/// [`super::lower::lower_module_inner`] on an owning module; this
 /// stays for unit tests that mutate a bare `Vec<IlOp>`.
 ///
 /// Whole-buffer [`multi_op_join_convoy`] is required: scoped multi_op can treat

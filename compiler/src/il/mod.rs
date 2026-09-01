@@ -38,8 +38,9 @@ pub use builder::IlError;
 pub use codebuf::CodeBuf;
 pub use emit_buf::EmitBuf;
 pub use func::IlFunc;
-#[allow(unused_imports)]
-pub use lower::{Lowered, lower, lower_module, lower_with_funcs, try_lower};
+pub use lower::Lowered;
+#[cfg(test)]
+pub use lower::{lower, try_lower};
 pub use module::IlModule;
 pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 pub use treeshake::{TreeshakeInput, prune_unused_functions};
