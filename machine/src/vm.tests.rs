@@ -457,6 +457,36 @@
     }
 
     #[test]
+    fn format_concat_reuses_cached_program_strings() {
+        reset_alloc_profile();
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let strings = vec!["%s%s".to_owned(), "a".to_owned(), "b".to_owned()];
+        let code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::STRING).with_operand_u32(2),
+            Byte::new(Instruction::FORMAT).with_operand_u32(2),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::STRING).with_operand_u32(2),
+            Byte::new(Instruction::FORMAT).with_operand_u32(2),
+            Byte::new(Instruction::PRINT),
+            Byte::new(Instruction::HALT),
+        ];
+        let mut vm = Machine::<8>::default();
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        vm.run_with_pool(&code, &[], &strings, 0);
+        assert_eq!(
+            intern_str_count(),
+            3,
+            "second FORMAT's STRING ops must hit the program-index cache"
+        );
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
+        assert_eq!(s, "ab");
+    }
+
+    #[test]
     fn intern_key_reuses_heap_string_handle() {
         let mut vm = Machine::<8>::default();
         let key = vm.heap_mut().intern("field".to_owned());
