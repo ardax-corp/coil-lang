@@ -36,9 +36,8 @@ pub struct IlBuilder {
     bound: BTreeSet<u32>,
 }
 
-// Public IL API retained for opts/tests and future emit paths.
-#[allow(dead_code)]
 impl IlBuilder {
+    #[cfg(test)]
     pub fn new() -> Self {
         Self::default()
     }
@@ -49,10 +48,6 @@ impl IlBuilder {
 
     pub fn ops_mut(&mut self) -> &mut Vec<IlOp> {
         &mut self.ops
-    }
-
-    pub fn into_ops(self) -> Vec<IlOp> {
-        self.ops
     }
 
     pub fn clear(&mut self) {
@@ -138,10 +133,6 @@ impl IlBuilder {
         self.ops.push(IlOp::byte(byte));
     }
 
-    pub fn push_byte_at(&mut self, byte: Byte, loc: DebugLoc) {
-        self.ops.push(IlOp::byte_at(byte, loc));
-    }
-
     /// Append a typed IL op (prefer over [`Self::push_byte`] for hot-set ops).
     pub fn push_op(&mut self, op: IlOp) {
         self.ops.push(op);
@@ -152,10 +143,6 @@ impl IlBuilder {
             imm,
             loc: DebugLoc::unknown(),
         });
-    }
-
-    pub fn push_const_at(&mut self, imm: i32, loc: DebugLoc) {
-        self.push_op(IlOp::Const { imm, loc });
     }
 
     pub fn push_return(&mut self) {
@@ -276,18 +263,6 @@ impl IlBuilder {
         });
     }
 
-    pub fn extend_bytes<I: IntoIterator<Item = Byte>>(&mut self, bytes: I) {
-        for b in bytes {
-            self.push_byte(b);
-        }
-    }
-
-    pub fn extend_bytes_at(&mut self, bytes: &[Byte], loc: DebugLoc) {
-        for &b in bytes {
-            self.push_byte_at(b, loc);
-        }
-    }
-
     pub fn append(&mut self, other: &mut IlBuilder) -> BTreeMap<u32, u32> {
         // Merge label id spaces: remap other's labels to fresh ids.
         if other.ops.is_empty() {
@@ -350,18 +325,6 @@ impl IlBuilder {
         remap
     }
 
-    /// Append another builder that shares this builder's label namespace
-    /// (no remapping). Used when fragments were emitted against the same
-    /// parent label allocator.
-    pub fn append_shared(&mut self, other: &mut IlBuilder) {
-        self.targeted.extend(other.targeted.iter().copied());
-        self.bound.extend(other.bound.iter().copied());
-        self.next_label_id = self.next_label_id.max(other.next_label_id);
-        self.ops.append(&mut other.ops);
-        other.targeted.clear();
-        other.bound.clear();
-    }
-
     pub fn push_prologue_jmp(&mut self) {
         self.ops.push(IlOp::PrologueJmp {
             loc: DebugLoc::unknown(),
@@ -369,6 +332,7 @@ impl IlBuilder {
     }
 
     /// Ensure every targeted label was bound.
+    #[cfg(test)]
     pub fn finalize_labels(&self) -> Result<(), IlError> {
         for id in &self.targeted {
             if !self.bound.contains(id) {

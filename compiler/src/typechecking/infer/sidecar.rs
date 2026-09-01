@@ -1,8 +1,8 @@
 //! Typed facts after `check_program`, keyed only by [`NodeId`] / [`DefId`].
 //!
 //! Codegen still walks `Expression` for shape. Meaning (overload, dicts,
-//! ForInKind, FFI tags, pair/niche ABI) prefers this table over span/`String`
-//! maps. Span fallbacks remain on [`Checker`] until their tests move.
+//! ForInKind, FFI tags) prefers this table over span/`String` maps. Span
+//! fallbacks remain on [`Checker`] until their tests move.
 
 use std::collections::HashMap;
 
@@ -22,17 +22,6 @@ pub struct SelectedOverload {
     pub candidate_id: u32,
 }
 
-/// Pair vs pointer-niche ABI for a function's unary `Option`/`Result` return.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PairNicheAbi {
-    /// Two-slot pair ABI for `Result`.
-    PairResult,
-    /// Two-slot pair ABI for `Option`.
-    PairOption,
-    /// Pointer-niche `Option` (heap-only inner).
-    NicheOption,
-}
-
 /// Checker snapshot keyed only by [`NodeId`] / [`DefId`]. No span maps.
 #[derive(Clone, Debug, Default)]
 pub struct TypedSidecar {
@@ -43,7 +32,6 @@ pub struct TypedSidecar {
     dicts: HashMap<NodeId, Vec<InstanceDef>>,
     for_in: HashMap<NodeId, ForInInfo>,
     ffi_tags: HashMap<DefId, Vec<u32>>,
-    pair_niche: HashMap<DefId, PairNicheAbi>,
 }
 
 impl TypedSidecar {
@@ -75,10 +63,6 @@ impl TypedSidecar {
         self.ffi_tags.get(&id).map(Vec::as_slice)
     }
 
-    pub fn pair_niche(&self, id: DefId) -> Option<PairNicheAbi> {
-        self.pair_niche.get(&id).copied()
-    }
-
     pub fn tys(&self) -> &HashMap<NodeId, Ty> {
         &self.tys
     }
@@ -106,31 +90,9 @@ impl Checker {
         }
 
         let mut ffi_tags = HashMap::new();
-        let mut pair_niche = HashMap::new();
         for (name, def) in &self.local_defs {
             if let Some(tags) = self.ffi_fn_arg_tags.get(name) {
                 ffi_tags.insert(*def, tags.clone());
-            }
-            let scheme = self
-                .schemes_by_def
-                .get(def)
-                .or_else(|| self.env.lookup(name));
-            if let Some(scheme) = scheme {
-                let ty = apply_ty_prune(subst, &scheme.ty);
-                if let Some(abi) = pair_niche_for_scheme_ty(&ty, |n| self.is_class(n)) {
-                    pair_niche.insert(*def, abi);
-                }
-            }
-        }
-        for (key, cands) in &self.overload_sets {
-            for c in cands {
-                let Some(def) = self.interned_overload_def(key, c.id) else {
-                    continue;
-                };
-                let ty = apply_ty_prune(subst, &c.scheme.ty);
-                if let Some(abi) = pair_niche_for_scheme_ty(&ty, |n| self.is_class(n)) {
-                    pair_niche.insert(def, abi);
-                }
             }
         }
 
@@ -147,11 +109,6 @@ impl Checker {
             dicts: self.call_site_dicts.clone(),
             for_in: self.for_in_infos.clone(),
             ffi_tags,
-            pair_niche,
         }
     }
-}
-
-fn pair_niche_for_scheme_ty(_ty: &Ty, _is_class: impl Fn(&str) -> bool) -> Option<PairNicheAbi> {
-    None
 }
