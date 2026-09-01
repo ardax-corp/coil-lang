@@ -4452,7 +4452,6 @@ impl Compiler {
         };
         bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(meta));
         self.expr_depth += 1;
-        bytecode.push_make_tuple(arity as u32);
         bytecode.push_host_invoke(arity as u32);
         self.expr_depth = depth_on_entry;
         true
@@ -6089,7 +6088,7 @@ impl Compiler {
     /// `self.bytecode` via this helper. Emit the native-id `CONST` **before**
     /// compiling arguments so the runtime stack is `[id, arg0, …]` — the order
     /// `HostInvoke` expects. Compiling args into a side buffer first left nested
-    /// invokes *above* the id and `MakeTuple` packed the wrong values (piped
+    /// invokes *above* the id so the arg window packed the wrong values (piped
     /// stdin then looked empty).
     ///
     /// Always targets [`Self::bytecode`] so nested `format` / `match` (same
@@ -6256,7 +6255,6 @@ impl Compiler {
                 spawn_arity += 1;
             }
         }
-        self.bytecode.push_make_tuple(spawn_arity);
         self.bytecode.push_host_invoke(spawn_arity);
 
         bb.emit_jump_to(
@@ -6284,7 +6282,6 @@ impl Compiler {
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
         self.bytecode.push_load(handle_tmp);
-        self.bytecode.push_make_tuple(1);
         self.bytecode.push_host_invoke(1);
         // A failed join (worker result was not sendable, handle already taken)
         // redoes the whole site sequentially rather than propagating an error.
@@ -6539,7 +6536,6 @@ impl Compiler {
         self.bytecode.push_const(mid);
         self.bytecode.push_const(end);
         self.bytecode.push_const(identity);
-        self.bytecode.push_make_tuple(4);
         self.bytecode.push_host_invoke(4);
         bb.emit_jump_to(
             have_handle,
@@ -6565,7 +6561,6 @@ impl Compiler {
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
         self.bytecode.push_load(handle_tmp);
-        self.bytecode.push_make_tuple(1);
         self.bytecode.push_host_invoke(1);
         bb.emit_jump_to(
             joined,
@@ -6715,7 +6710,6 @@ impl Compiler {
             self.expr_depth += 1;
         }
         let arity = args.len();
-        self.bytecode.push_make_tuple(arity as u32);
         self.bytecode.push_host_invoke(arity as u32);
         // Result stays on the stack for the caller (ExprStatement POPs it).
         self.expr_depth = depth_on_entry;
@@ -6872,7 +6866,6 @@ impl Compiler {
                     .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
                 self.bytecode.push_load(0);
                 self.bytecode.push_unbox_value(ValueTag::String as u32);
-                self.bytecode.push_make_tuple(1);
                 self.bytecode.push_host_invoke(1);
                 self.bytecode.push_return();
             }
@@ -6900,7 +6893,6 @@ impl Compiler {
             self.bytecode.push_unbox_value(ValueTag::Instance as u32);
             self.bytecode.push_load(1);
             self.bytecode.push_unbox_value(ValueTag::Array as u32);
-            self.bytecode.push_make_tuple(arity);
             self.bytecode.push_host_invoke(arity);
             self.bytecode.push_return();
         }
@@ -7003,9 +6995,6 @@ impl Compiler {
             }
             compiler
                 .bytecode
-                .push_make_tuple(slots.len() as u32);
-            compiler
-                .bytecode
                 .push_host_invoke(slots.len() as u32);
             compiler.bytecode.push_return();
         };
@@ -7098,7 +7087,6 @@ impl Compiler {
             for &slot in slots {
                 compiler.bytecode.push_load(slot);
             }
-            compiler.bytecode.push_make_tuple(slots.len() as u32);
             compiler.bytecode.push_host_invoke(slots.len() as u32);
             compiler.bytecode.push_return();
         };
@@ -9968,7 +9956,7 @@ impl Compiler {
             return false;
         };
 
-        // HostInvoke stack: [id, args_tuple]; tuple = [arg0, …, meta].
+        // HostInvoke stack: [id, arg0, …, meta].
         // Meta is a full u32 bitfield — must use `with_operand_u32` (not
         // `with_value_u32`, which only keeps the low 16 bits).
         let depth_on_entry = self.expr_depth;
@@ -9981,7 +9969,6 @@ impl Compiler {
         bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(meta));
         self.expr_depth += 1;
         let arity = value_args.len() + 1; // + meta
-        bytecode.push_make_tuple(arity as u32);
         bytecode.push_host_invoke(arity as u32);
         self.expr_depth = depth_on_entry;
         true
@@ -11038,7 +11025,7 @@ impl Compiler {
                     // `LOAD tmp`: that would push a second copy and leave
                     // the stash sitting between any live values below
                     // (e.g. a HostInvoke native-id CONST) and the result,
-                    // so `MakeTuple`/`HostInvoke` would pick up the instance
+                    // so `HostInvoke` would pick up the instance
                     // as the native id.
                     let tmp_inst = self.alloc_temp_slot();
                     bytecode.push_store_pop(tmp_inst);
@@ -13383,7 +13370,6 @@ impl Compiler {
                 .push(Byte::new(Instruction::CONST).with_value_u32(type_id));
             self.bytecode
                 .emit_entry(crate::il::EntryKind::CodePtr, 0, label);
-            self.bytecode.push_make_tuple(2);
             self.bytecode.push_host_invoke(2);
             self.bytecode.push_pop();
         }

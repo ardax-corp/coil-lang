@@ -9,7 +9,7 @@ User code does not name these directly; the compiler emits them:
 | `FfiLoad` | `dload` |
 | `DeclareFFI` | `declare` |
 | `FfiInvoke` | `invoke` |
-| `HostInvoke` | Host-registered closure. Standard table in `machine/src/host_natives.rs`. **120** = `stream_attach`, **121** = `stream_park` (live package IO, not leftover TLS/crypto stubs). See [io-reactor.md](io-reactor.md). |
+| `HostInvoke` | Host-registered closure. Operand `[15:0]` is arg count; stack is `fn_id, arg0, …, argN-1` (no args tuple). Standard table in `machine/src/host_natives.rs`. **120** = `stream_attach`, **121** = `stream_park`. See [io-reactor.md](io-reactor.md). |
 | `HostInvokeNiche` | Tombstone (archive major 4); panics if executed |
 | `OptionNicheToHeap` / `HeapOptionToNiche` | Tombstone (archive major 4); panics if executed |
 | `PairToHeap` / `HeapToPair` | Tombstone (archive major 4); panics if executed |

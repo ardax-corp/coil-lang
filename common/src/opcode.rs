@@ -112,7 +112,7 @@ pub enum Instruction {
     GetField,
     SetField,
 
-    // HostInvoke: [15:0] tuple arity; stack: fn_id, args_tuple
+    // HostInvoke: [15:0] arg count; stack: fn_id, arg0, …, argN-1 (no tuple)
     HostInvoke,
 
     // Fused superinstructions — underlying op in [31:24] where applicable.

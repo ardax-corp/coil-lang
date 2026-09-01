@@ -784,7 +784,6 @@ impl Compiler {
                         self.expr_depth += 1;
                     }
                 }
-                self.bytecode.push_make_tuple(arity as u32);
                 self.bytecode.push_host_invoke(arity as u32);
                 self.expr_depth = depth_on_entry;
             } else if self.functions.contains_key(&n) || self.fn_entry_labels.contains_key(&n) {
