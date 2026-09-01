@@ -372,7 +372,7 @@ mod tests {
         let raw = Box::into_raw(session);
         stream_attach(heap, true, stream, raw as i64, xor_vtable()).expect("attach");
         assert!(
-            with_stream_mut(heap, stream, stream_is_attached).unwrap(),
+            with_stream_mut(heap, stream, |s| stream_is_attached(s)).unwrap(),
             "attach must set Attached + vtable"
         );
         (stream, raw)
@@ -554,7 +554,7 @@ mod tests {
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
         let err = stream_attach(&mut heap, false, stream, 1, xor_vtable()).unwrap_err();
         assert_eq!(err, IoErrorTag::PermissionDenied);
-        assert!(!with_stream_mut(&mut heap, stream, stream_is_attached).unwrap());
+        assert!(!with_stream_mut(&mut heap, stream, |s| stream_is_attached(s)).unwrap());
         drop(server);
     }
 
