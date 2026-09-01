@@ -8,8 +8,9 @@ use std::collections::HashMap;
 
 use common::{Byte, DebugLoc, Instruction};
 
-use super::func::IlFunc;
 use super::builder::IlError;
+#[cfg(test)]
+use super::func::IlFunc;
 use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 use super::opt;
 
@@ -121,23 +122,25 @@ pub fn assert_no_residual_abs_jumps(ops: &[IlOp]) {
 /// Optimize and lower `ops` into VM bytecode.
 ///
 /// When `funcs` is empty, opts run on the whole buffer (unit tests). Production
-/// [`super::CodeBuf::lower_in_place`] rebuilds an owning [`super::IlModule`] and
-/// lowers through [`lower_module`].
-#[allow(dead_code)] // used by unit tests / re-exports
+/// uses [`super::CodeBuf::lower_in_place`] → [`lower_module_inner`].
+#[cfg(test)]
 pub fn lower(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
     try_lower(ops, pool).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Lower `ops`, returning [`IlError::UnboundLabel`] instead of emitting JMP to PC 0.
+#[cfg(test)]
 pub fn try_lower(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlError> {
     try_lower_with_funcs(ops, &[], pool)
 }
 
 /// Rebuild [`super::IlModule`] from flat ops + spans, then [`lower_module`].
+#[cfg(test)]
 pub fn lower_with_funcs(ops: &[IlOp], funcs: &[IlFunc], pool: &mut Vec<u64>) -> Lowered {
     try_lower_with_funcs(ops, funcs, pool).unwrap_or_else(|e| panic!("{e}"))
 }
 
+#[cfg(test)]
 fn try_lower_with_funcs(
     ops: &[IlOp],
     funcs: &[IlFunc],
@@ -150,10 +153,12 @@ fn try_lower_with_funcs(
 /// Optimize an owning [`super::IlModule`] and lower once (fuse-select + PC assign).
 ///
 /// Pipeline: per-body opts/GVN → concat → whole-buffer multi_op → single lower.
+#[cfg(test)]
 pub fn lower_module(module: &mut super::IlModule, pool: &mut Vec<u64>) -> Lowered {
     try_lower_module(module, pool).unwrap_or_else(|e| panic!("{e}"))
 }
 
+#[cfg(test)]
 fn try_lower_module(
     module: &mut super::IlModule,
     pool: &mut Vec<u64>,
@@ -181,6 +186,7 @@ pub(crate) fn lower_module_inner(
 }
 
 /// Fuse-select + PC assign for an already-optimized op stream (no IL opts).
+#[cfg(test)]
 pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
     try_lower_optimized(ops, pool).unwrap_or_else(|e| panic!("{e}"))
 }
@@ -511,268 +517,6 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
         return Some((fused, n));
     }
     None
-}
-
-/// Source-ordered float chain → `FloatChainStore`.
-///
-/// Not selected in production fuse-select (mandelbrot-shaped). Kept so
-/// packing helpers stay compilable.
-///
-/// Matches:
-/// - `LOAD a; LOAD b; op1; LOAD c; op2; STORE d` (legacy 2-stage)
-/// - `BinSlotSlot op1; LOAD c; op2; [LOAD e; op3;] STORE d`
-/// - `CONST pool; BinSlotSlot/LOADs op1; op2; LOAD c; op3; STORE d` (const-under)
-///
-/// Stages evaluate left-to-right with no reassociation/FMA. Returns `(fused, consumed)`.
-#[allow(dead_code)]
-fn try_fuse_float_chain_store(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)> {
-    if let Some(r) = try_fuse_float_chain_const_under(window, pool) {
-        return Some(r);
-    }
-    try_fuse_float_chain_standard(window, pool)
-}
-
-/// `CONST k; <stage0>; op1; [LOAD/CONST other; op2;] STORE dest`
-/// where `op1` uses const-under stack order: `op1(k, acc0)`.
-fn try_fuse_float_chain_const_under(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)> {
-    if window.len() < 5 {
-        return None;
-    }
-    let const_idx = u8::try_from(const_pool_index(&slot_as_byte(&window[0])?)?).ok()?;
-    let (stage0_len, op0, lhs0, lhs0_const, rhs0, rhs0_const) = parse_float_stage0(&window[1..])?;
-    let mut i = 1 + stage0_len;
-    let op1 = float_arith_byte(&slot_as_byte(window.get(i)?)?)?;
-    i += 1;
-
-    let mut op2 = 0u8;
-    let mut rhs2 = 0u8;
-    let mut rhs2_const = false;
-    let mut stage2_left = false;
-    let mut has_stage2 = false;
-    if let Some((ni, op, other, is_const, on_left)) = parse_float_continuation(&window[i..]) {
-        // Need STORE after this continuation.
-        let after = i + ni;
-        if store_slot_u8(&slot_as_byte(window.get(after)?)?).is_some() {
-            op2 = op;
-            rhs2 = other;
-            rhs2_const = is_const;
-            stage2_left = on_left;
-            has_stage2 = true;
-            i = after;
-        }
-    }
-    let dest = store_slot_u8(&slot_as_byte(window.get(i)?)?)?;
-    i += 1;
-    // Const-under without a third stage is only useful if stage1 is the const op;
-    // require at least the closing store after op1 (2 binary stages total).
-    let descriptor = pack_float_chain_ext(
-        op0,
-        lhs0,
-        lhs0_const,
-        rhs0,
-        rhs0_const,
-        op1,
-        const_idx,
-        true,
-        true, // stage1: op1(const, acc)
-        has_stage2,
-        op2,
-        rhs2,
-        rhs2_const,
-        stage2_left,
-    );
-    Some((emit_float_chain_store(window, pool, dest, descriptor)?, i))
-}
-
-/// `<stage0>; (LOAD|CONST other; op)+ ; STORE` with accumulator on the left.
-fn try_fuse_float_chain_standard(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)> {
-    let (stage0_len, op0, lhs0, lhs0_const, rhs0, rhs0_const) = parse_float_stage0(window)?;
-    let mut i = stage0_len;
-    let (i1, op1, rhs1, rhs1_const, stage1_left) = parse_float_continuation(&window[i..])?;
-    i += i1;
-
-    let mut op2 = 0u8;
-    let mut rhs2 = 0u8;
-    let mut rhs2_const = false;
-    let mut stage2_left = false;
-    let mut has_stage2 = false;
-    if let Some((ni, op, other, is_const, on_left)) = parse_float_continuation(&window[i..]) {
-        let after = i + ni;
-        if store_slot_u8(&slot_as_byte(window.get(after)?)?).is_some() {
-            op2 = op;
-            rhs2 = other;
-            rhs2_const = is_const;
-            stage2_left = on_left;
-            has_stage2 = true;
-            i = after;
-        }
-    }
-    let dest = store_slot_u8(&slot_as_byte(window.get(i)?)?)?;
-    i += 1;
-
-    let use_ext = has_stage2
-        || lhs0_const
-        || rhs0_const
-        || rhs1_const
-        || rhs2_const
-        || stage1_left
-        || stage2_left;
-    let descriptor = if use_ext {
-        pack_float_chain_ext(
-            op0,
-            lhs0,
-            lhs0_const,
-            rhs0,
-            rhs0_const,
-            op1,
-            rhs1,
-            rhs1_const,
-            stage1_left,
-            has_stage2,
-            op2,
-            rhs2,
-            rhs2_const,
-            stage2_left,
-        )
-    } else {
-        (op0 as u64)
-            | ((lhs0 as u64) << 8)
-            | ((rhs0 as u64) << 16)
-            | ((op1 as u64) << 24)
-            | ((rhs1 as u64) << 32)
-    };
-    Some((emit_float_chain_store(window, pool, dest, descriptor)?, i))
-}
-
-fn emit_float_chain_store(
-    window: &[Slot],
-    pool: &mut Vec<u64>,
-    dest: u8,
-    descriptor: u64,
-) -> Option<Slot> {
-    let descriptor_idx = u16::try_from(pool.len()).ok()?;
-    pool.push(descriptor);
-    let operand = ((dest as u32) << 16) | descriptor_idx as u32;
-    Some(Slot::Byte(
-        Byte::new(Instruction::FloatChainStore).with_operand_u32(operand),
-        window[0].loc(),
-    ))
-}
-
-/// Pack extended `FloatChainStore` descriptor (bit 63 set). See `Instruction::FloatChainStore`.
-fn pack_float_chain_ext(
-    op0: u8,
-    lhs0: u8,
-    lhs0_const: bool,
-    rhs0: u8,
-    rhs0_const: bool,
-    op1: u8,
-    rhs1: u8,
-    rhs1_const: bool,
-    stage1_left: bool,
-    has_stage2: bool,
-    op2: u8,
-    rhs2: u8,
-    rhs2_const: bool,
-    stage2_left: bool,
-) -> u64 {
-    let mut d = (op0 as u64)
-        | ((lhs0 as u64) << 8)
-        | ((rhs0 as u64) << 16)
-        | ((op1 as u64) << 24)
-        | ((rhs1 as u64) << 32)
-        | ((op2 as u64) << 40)
-        | ((rhs2 as u64) << 48)
-        | (1u64 << 63);
-    if rhs0_const {
-        d |= 1 << 56;
-    }
-    if rhs1_const {
-        d |= 1 << 57;
-    }
-    if rhs2_const {
-        d |= 1 << 58;
-    }
-    if lhs0_const {
-        d |= 1 << 59;
-    }
-    if stage1_left {
-        d |= 1 << 60;
-    }
-    if stage2_left {
-        d |= 1 << 61;
-    }
-    if has_stage2 {
-        d |= 1 << 62;
-    }
-    d
-}
-
-/// Stage0: `LOAD a; LOAD b; float-op`, float `BinSlotSlot`, or mixed
-/// `LOAD`/`CONST` pool float + float-op (sets `lhs0_const` / `rhs0_const`).
-///
-/// `LOAD; CONST; op` is the post-`cast_spill` shape for mandelbrot `cr`/`ci`.
-fn parse_float_stage0(window: &[Slot]) -> Option<(usize, u8, u8, bool, u8, bool)> {
-    if window.is_empty() {
-        return None;
-    }
-    let b0 = slot_as_byte(&window[0])?;
-    if *b0.bytecode() == Instruction::BinSlotSlot {
-        let (op, a, b) = b0.bin_slot_slot_parts();
-        if !is_float_arith_op(Instruction::from(op)) {
-            return None;
-        }
-        return Some((1, op, a as u8, false, b as u8, false));
-    }
-    if window.len() < 3 {
-        return None;
-    }
-    let b1 = slot_as_byte(&window[1])?;
-    let b2 = slot_as_byte(&window[2])?;
-    let op = float_arith_byte(&b2)?;
-    if let (Some(lhs), Some(rhs)) = (load_slot(&b0), load_slot(&b1)) {
-        return Some((3, op, lhs, false, rhs, false));
-    }
-    if let (Some(lhs), Some(idx)) = (load_slot(&b0), const_pool_u8(&b1)) {
-        return Some((3, op, lhs, false, idx, true));
-    }
-    if let (Some(idx), Some(rhs)) = (const_pool_u8(&b0), load_slot(&b1)) {
-        return Some((3, op, idx, true, rhs, false));
-    }
-    if let (Some(l), Some(r)) = (const_pool_u8(&b0), const_pool_u8(&b1)) {
-        return Some((3, op, l, true, r, true));
-    }
-    None
-}
-
-fn const_pool_u8(byte: &Byte) -> Option<u8> {
-    u8::try_from(const_pool_index(byte)?).ok()
-}
-
-/// Continuation: `LOAD slot; float-op` or `CONST pool; float-op`.
-/// Returns `(consumed, op, other_idx, is_const, other_on_left)`.
-/// Stack order after pushing other is always `[acc, other]`, so `other_on_left` is false.
-fn parse_float_continuation(window: &[Slot]) -> Option<(usize, u8, u8, bool, bool)> {
-    if window.len() < 2 {
-        return None;
-    }
-    let b0 = slot_as_byte(&window[0])?;
-    let b1 = slot_as_byte(&window[1])?;
-    let op = float_arith_byte(&b1)?;
-    if let Some(slot) = load_slot(&b0) {
-        return Some((2, op, slot, false, false));
-    }
-    let idx = u8::try_from(const_pool_index(&b0)?).ok()?;
-    Some((2, op, idx, true, false))
-}
-
-fn float_arith_byte(byte: &Byte) -> Option<u8> {
-    let op = *byte.bytecode();
-    if is_float_arith_op(op) {
-        Some(op as u8)
-    } else {
-        None
-    }
 }
 
 fn const_pool_index(byte: &Byte) -> Option<u32> {

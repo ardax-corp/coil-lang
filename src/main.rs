@@ -270,14 +270,6 @@ mod archive_staleness {
             None => true,
         }
     }
-
-    /// Entry-only mtime compare.
-    pub(super) fn source_newer_than_archive(filename: &str, archive: &str) -> bool {
-        match (archive_mtime(archive), archive_mtime(filename)) {
-            (Some(arch), Some(src)) => src > arch,
-            _ => false,
-        }
-    }
 }
 
 /// Canonical entry path for FFI `base_dir` resolution (best-effort absolute).
@@ -888,7 +880,6 @@ fn main() {
 mod tests {
     use super::archive_staleness::{
         archive_is_stale, archive_mtime, archive_source_mtime, same_source_path,
-        source_newer_than_archive,
     };
     use super::*;
 
@@ -963,28 +954,6 @@ mod tests {
         assert_eq!(loaded.bytecode.len(), 1);
         assert!(loaded.struct_layouts.is_empty());
         let _ = std::fs::remove_file(&ok_path);
-    }
-
-    #[test]
-    fn source_newer_than_archive_compares_mtimes() {
-        let dir = unique_tmp("mtime");
-        std::fs::create_dir_all(&dir).unwrap();
-        let src = dir.join("a.hy");
-        let arch = dir.join("a.hyc");
-        // Archive first, then source after a short sleep so src mtime is newer.
-        std::fs::write(&arch, b"old").unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(30));
-        std::fs::write(&src, b"fn main() {}").unwrap();
-        assert!(source_newer_than_archive(
-            src.to_str().unwrap(),
-            arch.to_str().unwrap()
-        ));
-        // Missing paths => false
-        assert!(!source_newer_than_archive(
-            dir.join("nope.hy").to_str().unwrap(),
-            arch.to_str().unwrap()
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

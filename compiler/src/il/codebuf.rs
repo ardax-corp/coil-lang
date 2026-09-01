@@ -22,8 +22,6 @@ pub struct CodeBuf {
     opt_options: super::opt::OptimizeOptions,
 }
 
-// Public IL API retained for opts/tests, peephole, and recovery paths.
-#[allow(dead_code)]
 impl CodeBuf {
     pub fn new() -> Self {
         Self::default()
@@ -69,11 +67,6 @@ impl CodeBuf {
     pub fn push_const(&mut self, imm: i32) {
         self.invalidate_lowered();
         self.il.push_const(imm);
-    }
-
-    pub fn push_const_at(&mut self, imm: i32, loc: DebugLoc) {
-        self.invalidate_lowered();
-        self.il.push_const_at(imm, loc);
     }
 
     pub fn push_return(&mut self) {
@@ -164,12 +157,6 @@ impl CodeBuf {
     pub fn push_string(&mut self, idx: u32) {
         self.invalidate_lowered();
         self.il.push_string(idx);
-    }
-
-    pub fn extend<I: IntoIterator<Item = Byte>>(&mut self, iter: I) {
-        for b in iter {
-            self.push(b);
-        }
     }
 
     /// If `b` is a call-like op targeting a known entry PC, return Entry parts.
@@ -278,6 +265,7 @@ impl CodeBuf {
     }
 
     /// Record a function's emitting span, optional entry label, and entry SP.
+    #[cfg(test)]
     pub fn record_func(
         &mut self,
         name: impl Into<String>,
@@ -303,11 +291,6 @@ impl CodeBuf {
 
     pub fn funcs(&self) -> &[IlFunc] {
         &self.funcs
-    }
-
-    /// Clear recorded function spans (treeshake rebuilds them).
-    pub fn clear_funcs(&mut self) {
-        self.funcs.clear();
     }
 
     /// Keep only function records matching `pred` (treeshake after deletes).
@@ -454,23 +437,12 @@ impl CodeBuf {
         label
     }
 
-    pub fn emit_jump(&mut self, kind: IlJumpKind, target: Label) {
-        self.il.emit_jump(kind, target);
-    }
-
     pub fn emit_entry(&mut self, kind: EntryKind, arity: u32, target: Label) {
         self.il.emit_entry(kind, arity, target);
     }
 
     pub fn push_prologue_jmp(&mut self) {
         self.il.push_prologue_jmp();
-    }
-
-    #[allow(dead_code)]
-    pub fn splice_bytes_at(&mut self, code_pos: usize, bytes: Vec<Byte>) {
-        let mut inserted = IlBuilder::new();
-        inserted.extend_bytes(bytes);
-        self.il.splice_code_at(code_pos, inserted);
     }
 
     /// Splice another buffer's IL before logical code index `code_pos`,
@@ -552,30 +524,12 @@ impl CodeBuf {
         self.lowered.as_deref().unwrap_or(&[])
     }
 
-    pub fn as_mut_vec(&mut self) -> &mut Vec<Byte> {
-        self.lowered.get_or_insert_with(Vec::new)
-    }
-
     pub fn clone_bytes(&self) -> Vec<Byte> {
         self.lowered.clone().unwrap_or_default()
     }
 
-    pub fn take_bytes(&mut self) -> Vec<Byte> {
-        self.lowered.take().unwrap_or_default()
-    }
-
     pub fn ops(&self) -> &[IlOp] {
         self.il.ops()
-    }
-
-    pub fn lowered_locs(&self) -> &[DebugLoc] {
-        self.lowered_locs.as_deref().unwrap_or(&[])
-    }
-
-    pub fn set_loc_on_last(&mut self, loc: DebugLoc) {
-        if let Some(op) = self.il.ops_mut().last_mut() {
-            op.set_loc(loc);
-        }
     }
 
     /// Truncate to `code_len` emitting ops. Labels bound at PC `code_len`
@@ -609,8 +563,7 @@ impl CodeBuf {
 
     /// Plain bytes in the emitting-op range `[start, end)` (labels skipped).
     /// Jump/Entry ops are omitted from the returned vec — callers that need
-    /// a faithful body copy must reject spans with [`Self::span_has_control_ops`]
-    /// or judge candidacy via [`Self::code_slice_ops`].
+    /// a faithful body copy must judge candidacy via [`Self::code_slice_ops`].
     pub fn code_slice_bytes(&self, start: usize, end: usize) -> Vec<Byte> {
         let mut out = Vec::new();
         let mut i = 0usize;
@@ -676,29 +629,6 @@ impl CodeBuf {
             i += 1;
         }
         out
-    }
-
-    /// True if `[start, end)` contains a Jump/Entry (not safe to tiny-inline
-    /// via [`Self::code_slice_bytes`], which drops those ops).
-    pub fn span_has_control_ops(&self, start: usize, end: usize) -> bool {
-        self.code_slice_ops(start, end)
-            .iter()
-            .any(|op| op.is_control())
-    }
-
-    pub fn insert_byte_at_code(&mut self, code_idx: usize, byte: Byte) {
-        let mut emitting = 0usize;
-        let mut raw_idx = self.il.raw_len();
-        for (i, op) in self.il.ops().iter().enumerate() {
-            if emitting == code_idx {
-                raw_idx = i;
-                break;
-            }
-            if op.emits_code() {
-                emitting += 1;
-            }
-        }
-        self.il.ops_mut().insert(raw_idx, IlOp::byte(byte));
     }
 
     /// Shift [`Self::entry_at_offset`] keys after a splice that inserts `delta`

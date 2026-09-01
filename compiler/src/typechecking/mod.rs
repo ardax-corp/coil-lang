@@ -31,7 +31,7 @@ pub use aggregate_arith::{is_matrix_ty, unwrap_matrix_ty, wrap_matrix_ty};
 pub use def_id::{DefId, DefInterner, DefKind, ModuleId};
 #[allow(unused_imports)] // public API re-export
 pub use infer::{
-    CStructDef, CallbackSigDef, Checker, ForInInfo, ForInKind, PairNicheAbi, SelectedOverload,
+    CStructDef, CallbackSigDef, Checker, ForInInfo, ForInKind, SelectedOverload,
     TypedSidecar,
 };
 #[allow(unused_imports)] // public API for kind-aware callers / tests
@@ -42,8 +42,10 @@ pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sit
 pub use par_profit::{
     ArgForm, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites, args_worth_parallel,
     arm_callee, collect_par_specialization_args, eval_arm_args, par_cost_threshold,
-    par_specialization_name, par_work_units,
+    par_specialization_name,
 };
+#[cfg(test)]
+pub use par_profit::par_work_units;
 #[allow(unused_imports)] // public API re-export
 pub use purity::{
     RecursivePureSet, analyze_pure_fns, analyze_recursive_fns, analyze_recursive_pure,

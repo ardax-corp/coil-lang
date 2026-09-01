@@ -1,4 +1,5 @@
 use super::*;
+use super::super::gvn_ssa::{build_ssa, eliminate_redundant, number_values, ssa_gvn};
 use crate::il::op::{IlJumpKind, IlOp, Label};
 use common::{DebugLoc, Instruction};
 

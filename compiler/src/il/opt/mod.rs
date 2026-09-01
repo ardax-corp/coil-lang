@@ -112,6 +112,7 @@ pub struct OptimizationStats {
 }
 
 /// Run the current pipeline once. Ignores [`OptimizeOptions::iterative_optimization`].
+#[cfg(test)]
 pub fn run_optimization_pass(
     ops: &mut Vec<IlOp>,
     opts: &OptimizeOptions,
@@ -139,6 +140,7 @@ fn run_optimization_pass_at(
 
 /// Repeat [`run_optimization_pass`] until a round is a no-op or `max_iterations`
 /// (clamped to `1..=10`) is reached.
+#[cfg(test)]
 pub fn optimize_iteratively(
     ops: &mut Vec<IlOp>,
     opts: &OptimizeOptions,
@@ -241,12 +243,13 @@ fn optimize_once_at(
 /// is empty (unit tests / buffers without `record_func`).
 ///
 /// Thin flat-buffer wrapper over [`super::IlModule::optimize_and_flatten`].
-/// Production lower uses [`super::lower_module`] on an owning module; this
+/// Production lower uses [`super::CodeBuf::lower_in_place`] /
+/// [`super::lower::lower_module_inner`] on an owning module; this
 /// stays for unit tests that mutate a bare `Vec<IlOp>`.
 ///
 /// Whole-buffer [`multi_op_join_convoy`] is required: scoped multi_op can treat
 /// JMPF/fall-through diamonds as SP-known and mis-sink (e.g. `examples/fib.hy`).
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn optimize_per_func(
     ops: &mut Vec<IlOp>,
     funcs: &[super::IlFunc],

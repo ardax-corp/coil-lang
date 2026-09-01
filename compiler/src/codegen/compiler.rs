@@ -1,5 +1,5 @@
 use super::*;
-use crate::typechecking::{CStructDef, ForInInfo, ForInKind, PairNicheAbi};
+use crate::typechecking::{CStructDef, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
 #[path = "emit_call.rs"]
@@ -3875,18 +3875,6 @@ impl Compiler {
             })
     }
 
-    fn sidecar_pair_niche(&self, name: &str) -> Option<PairNicheAbi> {
-        if let Some((base, cand)) = super::overload_key_parts(name) {
-            if let Some(def) = self.checker.interned_overload_def(base, cand) {
-                if let Some(abi) = self.typed_sidecar.pair_niche(def) {
-                    return Some(abi);
-                }
-            }
-        }
-        let bare = super::strip_overload_key(name);
-        self.typed_sidecar.pair_niche(self.def_id_for_name(bare)?)
-    }
-
     fn sidecar_ffi_tags(&self, name: &str) -> Option<&[u32]> {
         self.typed_sidecar.ffi_tags(self.def_id_for_name(name)?)
     }
@@ -7268,53 +7256,12 @@ impl Compiler {
         Some(Self::peel_fn_return_ty(&applied))
     }
 
-    fn pair_value_ty_supported(ty: &Ty) -> bool {
-        match ty {
-            Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-            Ty::Array {
-                length: crate::typechecking::ty::ArrayLength::Static(_),
-                ..
-            } => false,
-            Ty::Readonly(inner) | Ty::Constructor { owner: inner, .. } => {
-                Self::pair_value_ty_supported(inner)
-            }
-            Ty::App(_, args) => args.iter().all(Self::pair_value_ty_supported),
-            Ty::List(inner) => Self::pair_value_ty_supported(inner),
-            Ty::Sum { variants, .. } => variants.iter().all(|(_, payload)| {
-                payload
-                    .field_types()
-                    .into_iter()
-                    .all(Self::pair_value_ty_supported)
-            }),
-            Ty::Tuple(items) => items.iter().all(Self::pair_value_ty_supported),
-            Ty::Record { fields } => fields
-                .iter()
-                .all(|(_, field)| Self::pair_value_ty_supported(field)),
-            Ty::Array {
-                length: crate::typechecking::ty::ArrayLength::Dynamic,
-                ..
-            }
-            | Ty::Con(_)
-            | Ty::Never => true,
-        }
-    }
-
     /// Return `Some(is_option)` for a compiled function whose unary return
-    /// can use the pair ABI. Pointer-niche options stay on the niche path.
+    /// can use the pair ABI. Always `None` while Option/Result stay boxed
+    /// (`ObjEnum`; pair/niche opcodes are tombstones).
     fn pair_return_kind(&self, name: &str) -> Option<bool> {
         if let Some(cached) = self.pair_return_kinds.borrow().get(name) {
             return *cached;
-        }
-        if let Some(abi) = self.sidecar_pair_niche(name) {
-            let kind = match abi {
-                PairNicheAbi::PairResult => Some(false),
-                PairNicheAbi::PairOption => Some(true),
-                PairNicheAbi::NicheOption => None,
-            };
-            self.pair_return_kinds
-                .borrow_mut()
-                .insert(name.to_string(), kind);
-            return kind;
         }
         let kind = self.compute_pair_return_kind(name);
         self.pair_return_kinds
@@ -7355,38 +7302,6 @@ impl Compiler {
                     .with_operand_u32(u32::from(is_option)),
             );
         }
-    }
-
-    fn pair_call_candidate(&self, callee: &Output) -> bool {
-        self.pair_call_kind(callee).is_some()
-    }
-
-    /// `Some(is_option)` when calling `callee` leaves a pair on the stack.
-    fn pair_call_kind(&self, callee: &Output) -> Option<bool> {
-        let name = match callee.1.as_ref() {
-            Expression::Identifier(name) => self.resolve_free_fn(name),
-            Expression::QualifiedAccess { owner, member } => {
-                format!("{}::{}", owner, member)
-            }
-            Expression::Access(receiver, method) => {
-                let ty = self.receiver_type(receiver).or_else(|| self.codegen_expr_ty(receiver));
-                let owner = ty
-                    .as_ref()
-                    .and_then(Checker::class_name_of_ty)
-                    .map(str::to_string)?;
-                self.context
-                    .methods
-                    .get(&owner)
-                    .and_then(|m| m.get(*method))
-                    .cloned()
-                    .unwrap_or_else(|| format!("{}::{}", owner, method))
-            }
-            _ => return None,
-        };
-        if !self.functions.contains_key(&name) && !self.fn_entry_labels.contains_key(&name) {
-            return None;
-        }
-        self.pair_return_kind(&name)
     }
 
     fn expr_is_pair_producer(&self, expr: &Output) -> bool {
@@ -8169,27 +8084,7 @@ impl Compiler {
         )
     }
 
-    /// Return `true` when the *next* node to be emitted has an open type variable
-    /// type (i.e. it is a generic type parameter, not a concrete `int`/`float`/…).
-    /// Used to choose `DynAdd`/`DynSub`/… over `ADD`/`ADDF`/… for generic bodies.
-    #[allow(dead_code)] // kept for potential future use alongside operand_is_open_ty
-    fn is_generic_ty_at_current_idx(&self) -> bool {
-        let Some(id) = self.checker.id_table().ids().get(self.emit_idx).copied() else {
-            return false;
-        };
-        matches!(
-            self.checker.lookup_at(id),
-            Some(crate::typechecking::ty::Ty::Var(_))
-        )
-    }
-
-    /// Return `true` when `operand` resolves to an open type variable — i.e.
-    /// the operand is a generic type parameter that is not yet concrete.
-    ///
-    /// Handles `Expression::Identifier` via span-preferring [`Self::codegen_ident_ty`].
-    /// All other expression shapes return `false` conservatively; they are either
-    /// concrete literals or sub-expressions whose containing `Identifier` was
-    /// already flagged on the inner call.
+    /// True when `operand` resolves to an open type variable (generic param).
     fn operand_is_open_ty(&self, operand: &Output) -> bool {
         match operand.1.as_ref() {
             Expression::Identifier(_) => match self.codegen_ident_ty(operand) {
@@ -9630,53 +9525,6 @@ impl Compiler {
         }
     }
 
-    fn niche_heap_only_ty(ty: &Ty, checker: &Checker) -> bool {
-        match ty {
-            Ty::Readonly(inner) | Ty::Constructor { owner: inner, .. } => {
-                Self::niche_heap_only_ty(inner, checker)
-            }
-            Ty::Con(name) => name == "string" || checker.is_class(name),
-            Ty::App(head, args) => {
-                let Ty::Con(name) = head.as_ref() else {
-                    return false;
-                };
-                checker.is_class(name)
-                    && args.iter().all(|arg| Self::niche_ground_ty(arg, checker))
-            }
-            Ty::List(_) | Ty::Sum { .. } | Ty::Tuple(_) | Ty::Record { .. } => {
-                Self::niche_ground_ty(ty, checker)
-            }
-            _ => false,
-        }
-    }
-
-    fn niche_ground_ty(ty: &Ty, checker: &Checker) -> bool {
-        match ty {
-            Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-            Ty::Con(name) => name == "string" || checker.is_class(name),
-            Ty::App(head, args) => {
-                let Ty::Con(name) = head.as_ref() else {
-                    return false;
-                };
-                checker.is_class(name)
-                    && args.iter().all(|arg| Self::niche_ground_ty(arg, checker))
-            }
-            Ty::List(inner) | Ty::Readonly(inner) => Self::niche_ground_ty(inner, checker),
-            Ty::Sum { variants, .. } => variants.iter().all(|(_, payload)| {
-                payload
-                    .field_types()
-                    .into_iter()
-                    .all(|field| Self::niche_ground_ty(field, checker))
-            }),
-            Ty::Constructor { owner, .. } => Self::niche_ground_ty(owner, checker),
-            Ty::Tuple(items) => items.iter().all(|item| Self::niche_ground_ty(item, checker)),
-            Ty::Record { fields } => fields
-                .iter()
-                .all(|(_, field)| Self::niche_ground_ty(field, checker)),
-            Ty::Array { .. } | Ty::Never => false,
-        }
-    }
-
     /// Wrap the top-of-stack value as `Ok(v)` (Result) or `Some(v)` (Option).
     fn emit_ok_or_some_wrap(bytecode: &mut impl EmitBuf, is_option: bool) {
         let tag = if is_option { 1u16 } else { 0u16 }; // Some=1, Ok=0
@@ -10572,7 +10420,7 @@ impl Compiler {
             }
             Expression::Function {
                 docs: _,
-                attrs,
+                attrs: _,
                 name,
                 is_coro,
                 is_static: _,
@@ -10611,8 +10459,7 @@ impl Compiler {
                 } else {
                     qualified.clone()
                 };
-                let (fn_offset, _) = self.bind_function_entry(table_key.clone());
-                let fn_offset = fn_offset as u32;
+                let _ = self.bind_function_entry(table_key.clone());
                 self.fn_arities
                     .insert(table_key.clone(), (fixed_arity as u32, has_rest));
                 // Overloads share the unmangled FQN; do not mirror arity
@@ -13100,7 +12947,6 @@ impl Compiler {
                 // Payload left on stack for the caller (e.g. StorePop).
             }
             Expression::Cast(expr, ty_ann) => {
-                use crate::typechecking::subst::apply_ty_prune;
                 use crate::typechecking::ty::{ArrayLength, Ty};
 
                 let dst_ty = self_id.and_then(|id| self.sidecar_ty(id));

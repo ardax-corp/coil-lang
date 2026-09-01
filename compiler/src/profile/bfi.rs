@@ -16,22 +16,18 @@ impl BlockFrequency {
         self.local.get(local as usize).copied().unwrap_or(0)
     }
 
+    /// Layout uses [`crate::profile::block_heat_current`]; these predicates are test API.
+    #[cfg(test)]
     pub fn max_heat(&self) -> u64 {
         self.local.iter().copied().max().unwrap_or(0)
     }
 
     /// Hot when at least half the hottest block and ≥ 8 hits (same spirit as fn hot).
+    #[cfg(test)]
     pub fn is_hot_local(&self, local: u32) -> bool {
         let h = self.heat_local(local);
         let max = self.max_heat();
         h > 0 && h * 2 >= max && h >= 8
-    }
-
-    pub fn is_cold_local(&self, local: u32) -> bool {
-        if self.local.is_empty() || self.max_heat() == 0 {
-            return false;
-        }
-        self.heat_local(local) == 0
     }
 }
 
@@ -120,11 +116,6 @@ pub fn compute_block_frequency(
     }
 
     BlockFrequency { local: next }
-}
-
-/// True when `heat` is hot relative to `max` in the function.
-pub fn heat_is_hot(heat: u64, max: u64) -> bool {
-    heat > 0 && max > 0 && heat * 2 >= max && heat >= 8
 }
 
 #[cfg(test)]

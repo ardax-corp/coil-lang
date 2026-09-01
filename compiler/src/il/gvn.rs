@@ -646,7 +646,7 @@ fn is_return_like(op: &IlOp) -> bool {
 }
 
 /// Run CFG-local GVN on a single function body in place.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn cfg_gvn(ops: &mut Vec<IlOp>) {
     cfg_gvn_with(ops, true);
 }
@@ -665,7 +665,7 @@ pub fn cfg_gvn_with(ops: &mut Vec<IlOp>, ssa: bool) {
     }
 }
 
-pub use super::gvn_ssa::{build_ssa, eliminate_redundant, number_values, ssa_gvn};
+pub use super::gvn_ssa::ssa_gvn;
 
 #[cfg(test)]
 #[path = "gvn.tests.rs"]

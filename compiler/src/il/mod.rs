@@ -27,17 +27,20 @@ mod sp;
 pub mod tell;
 mod treeshake;
 
-pub use bounds::{BoundsStats, LoopHeaderProof, last_bounds_stats};
+pub use bounds::{BoundsStats, last_bounds_stats};
 pub use canon::{CanonStats, last_canon_stats};
 pub use opt::OptLevel;
 pub use pure_call::PureCallCtx;
 
-pub use builder::{IlBuilder, IlError};
+pub use builder::IlBuilder;
+#[cfg(test)]
+pub use builder::IlError;
 pub use codebuf::CodeBuf;
 pub use emit_buf::EmitBuf;
 pub use func::IlFunc;
-#[allow(unused_imports)]
-pub use lower::{Lowered, lower, lower_module, lower_with_funcs, try_lower};
+pub use lower::Lowered;
+#[cfg(test)]
+pub use lower::{lower, try_lower};
 pub use module::IlModule;
-pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, JoinClass, Label};
+pub use op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 pub use treeshake::{TreeshakeInput, prune_unused_functions};

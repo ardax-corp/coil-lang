@@ -6,7 +6,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use super::ty::{Scheme, Ty, TyVarId, ftv_scheme, ftv_ty};
+use super::ty::{Scheme, Ty, TyVarId, ftv_scheme};
+#[cfg(test)]
+use super::ty::ftv_ty;
 
 /// A counter that mints fresh `TyVarId`s. Each call to [`TyVarCounter::fresh`]
 /// returns a distinct id.

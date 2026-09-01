@@ -73,6 +73,7 @@ fn note_array_len_hoist() {
 }
 
 /// Hoist invariant ArrayLen materializations and record index proofs.
+#[cfg(test)]
 pub fn loop_bounds(ops: &mut Vec<IlOp>) {
     loop_bounds_with(ops, None);
 }
@@ -369,9 +370,7 @@ fn insert_preheader_ops(ops: &mut Vec<IlOp>, lp: &NaturalLoop, materialize: Vec<
 struct CountedLoop {
     lp: NaturalLoop,
     index_slot: u32,
-    #[allow(dead_code)]
-    bound_slot: u32,
-    /// Array slots whose length equals `bound_slot` for this loop.
+    /// Array slots whose length equals the header bound for this loop.
     len_arrays: HashSet<u32>,
 }
 
@@ -426,7 +425,6 @@ fn detect_counted_loops(ops: &[IlOp], len_of: &HashMap<u32, u32>, purity: Option
         out.push(CountedLoop {
             lp,
             index_slot,
-            bound_slot,
             len_arrays,
         });
     }
@@ -1072,7 +1070,9 @@ mod hoist {
         NaturalLoop, find_natural_loops, insert_preheader_ops, loop_has_barrier, slots_stored_in_loop,
         store_count_in_loop,
     };
-    use crate::il::op::{IlOp, Label};
+    use crate::il::op::IlOp;
+    #[cfg(test)]
+    use crate::il::op::Label;
     use crate::il::sp;
 
     /// Why a loop refused the length hoist, in the order the checks run.
@@ -1117,7 +1117,6 @@ mod hoist {
     #[derive(Clone, Debug)]
     pub(super) struct LoopArrayFacts {
         pub header: usize,
-        pub header_label: Label,
         /// `Index` sites addressing an invariant array slot.
         pub index_sites: usize,
         /// `StoreIndex` sites addressing an invariant array slot.
@@ -1128,6 +1127,7 @@ mod hoist {
     }
 
     /// Per-loop array facts, innermost loop first.
+    #[cfg(test)]
     pub(super) fn loop_array_facts(ops: &[IlOp]) -> Vec<LoopArrayFacts> {
         loop_array_facts_with(ops, None)
     }
@@ -1141,7 +1141,6 @@ mod hoist {
             .map(|lp| {
                 let mut facts = LoopArrayFacts {
                     header: lp.header,
-                    header_label: lp.header_label,
                     index_sites: 0,
                     store_index_sites: 0,
                     len_hoist: None,
@@ -1195,6 +1194,7 @@ mod hoist {
     /// Move every invariant `len(a)` and constant addressing operand out of the
     /// alias-safe loops that materialize them. Returns whether anything was
     /// rewritten.
+    #[cfg(test)]
     pub(crate) fn hoist_loop_invariants(ops: &mut Vec<IlOp>) -> bool {
         hoist_loop_invariants_with(ops, None)
     }
