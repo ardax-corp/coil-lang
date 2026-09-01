@@ -18,6 +18,7 @@ use reporting::{
 };
 use rkyv::rancor::Error;
 
+use crate::host_grants::HostGrants;
 use crate::manifest::Manifest;
 use crate::Compiler;
 
@@ -80,6 +81,8 @@ pub struct Pipeline {
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
     extra_dload_stems: Vec<String>,
+    /// CLI / Pipeline API grants. Never copied from Manifest allow fields.
+    host_grants: HostGrants,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
@@ -259,7 +262,6 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).unwrap_or_default();
-            Self::apply_env_grants(&self.manifest);
         }
         self.reset_session();
         self.entry_file = Some(file.to_path_buf());
@@ -324,13 +326,13 @@ impl Pipeline {
         }
         self.project_root = root.clone();
         self.manifest = Manifest::load(&root).unwrap_or_default();
-        Self::apply_env_grants(&self.manifest);
     }
 
     /// Grant `dload` of `stem` for the SHA-256 of `path` (host/tests).
     ///
-    /// The CLI never calls this. Consumer stems are `[ffi] allow` plus lock
-    /// hashes, or allow plus `trusted = true` on that dep (hash skip only).
+    /// The CLI never calls this. Consumer stems are `--allow-dload` / 
+    /// [`Self::grant_dload_allow`] plus lock hashes, or allow plus
+    /// `trusted = true` on that dep (hash skip only).
     /// Host grants do not restore a first-party exemption.
     pub fn grant_dload_file(&mut self, stem: impl Into<String>, path: PathBuf) {
         self.extra_dload_grants.push((stem.into(), path));
@@ -341,10 +343,41 @@ impl Pipeline {
         self.extra_dload_stems.push(stem.into());
     }
 
-    fn apply_env_grants(m: &Manifest) {
-        // Applied per-Machine in `machine::wire_vm_host` / `set_env_grants`.
-        // Archives (`coil run` / `coil-embed`) stay deny-all.
-        let _ = m;
+    /// Consumer `dload` stem (`--allow-dload`). Still needs lock hash or `trusted`.
+    ///
+    /// Libc aliases stay denied at the gate even if listed here.
+    pub fn grant_dload_allow(&mut self, stem: impl Into<String>) {
+        self.host_grants.grant_dload_allow(stem);
+    }
+
+    /// Allow `Stream.attach` on Machines wired from this pipeline.
+    pub fn grant_attach(&mut self) {
+        self.host_grants.allow_attach = true;
+    }
+
+    /// Allow `env::exec` on Machines wired from this pipeline.
+    pub fn grant_exec(&mut self) {
+        self.host_grants.allow_exec = true;
+    }
+
+    /// Allow `env::exit` on Machines wired from this pipeline.
+    pub fn grant_exit(&mut self) {
+        self.host_grants.allow_exit = true;
+    }
+
+    /// Allow FFI process-exec symbols on Machines wired from this pipeline.
+    pub fn grant_ffi_exec(&mut self) {
+        self.host_grants.allow_ffi_exec = true;
+    }
+
+    /// Replace host grants (CLI / embedders). Does not read Manifest.
+    pub fn set_host_grants(&mut self, grants: HostGrants) {
+        self.host_grants = grants;
+    }
+
+    /// Host grants applied at VM wire time (deny-all until set).
+    pub fn host_grants(&self) -> &HostGrants {
+        &self.host_grants
     }
 
     pub fn extra_dload_stems(&self) -> &[String] {
@@ -380,7 +413,7 @@ impl Pipeline {
         let lock = crate::lockfile::Lockfile::load(&self.project_root);
         let trusted = lock.trusted_extra_stems(&self.manifest.dependencies);
         let mut gate = machine::DloadGate::from_consumer_trusted(
-            &self.manifest.ffi_allow,
+            &self.host_grants.allow_dload,
             lock.native_pins(),
             &trusted,
         );
@@ -390,7 +423,7 @@ impl Pipeline {
         for (stem, path) in &self.extra_dload_grants {
             let _ = gate.grant_file(stem, path);
         }
-        gate.set_allow_attach(self.manifest.allow_attach);
+        gate.set_allow_attach(self.host_grants.allow_attach);
         gate
     }
 
@@ -414,15 +447,14 @@ impl Pipeline {
         let base_dir = entry_path
             .and_then(|p| p.parent())
             .map(std::path::PathBuf::from);
-        let search: Vec<std::path::PathBuf> = self
-            .manifest
-            .ffi_search_paths
-            .iter()
-            .map(|p| self.project_root.join(p))
-            .collect();
+        let search = self.ffi_search_path_bufs();
         vm.set_ffi_paths(base_dir, search);
         vm.set_dload_gate(self.build_dload_gate());
-        Self::apply_env_grants(&self.manifest);
+        vm.set_env_grants(
+            self.host_grants.allow_exec,
+            self.host_grants.allow_exit,
+            self.host_grants.allow_ffi_exec,
+        );
         for layout in self.archived_struct_layouts() {
             vm.register_struct_layout(CStructLayout::from_archive(&layout));
         }
@@ -437,15 +469,25 @@ impl Pipeline {
     }
 
     pub fn ffi_search_path_bufs(&self) -> Vec<std::path::PathBuf> {
-        self.manifest
+        let mut search: Vec<std::path::PathBuf> = self
+            .manifest
             .ffi_search_paths
             .iter()
             .map(|p| self.project_root.join(p))
-            .collect()
-    }
-
-    pub fn apply_runtime_grants(&self) {
-        Self::apply_env_grants(&self.manifest);
+            .collect();
+        for p in &self.host_grants.ffi_search_paths {
+            let resolved = if p.is_absolute() {
+                p.clone()
+            } else {
+                std::env::current_dir()
+                    .unwrap_or_else(|_| PathBuf::from("."))
+                    .join(p)
+            };
+            if !search.iter().any(|s| s == &resolved) {
+                search.push(resolved);
+            }
+        }
+        search
     }
 
     /// Walk up from `start` looking for a directory that contains
@@ -515,6 +557,7 @@ impl Pipeline {
             include_tests: false,
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
+            host_grants: HostGrants::deny_all(),
             opt_level: crate::OptLevel::Standard,
             collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
@@ -527,7 +570,6 @@ impl Pipeline {
         match Manifest::load(&project_root) {
             Ok(m) => {
                 pipeline.manifest = m;
-                Self::apply_env_grants(&pipeline.manifest);
             }
             Err(e) => pipeline.emit_manifest_load_error(&project_root, e),
         }
@@ -1372,7 +1414,6 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-            Self::apply_env_grants(&self.manifest);
         }
         self.reset_session();
         self.entry_file = Some(entry.clone());
@@ -1422,7 +1463,6 @@ impl Pipeline {
         if root != self.project_root {
             self.project_root = root.clone();
             self.manifest = Manifest::load(&root).expect("Failed to load coil.toml for entry file");
-            Self::apply_env_grants(&self.manifest);
         }
         self.reset_session();
         self.entry_file = Some(entry.clone());

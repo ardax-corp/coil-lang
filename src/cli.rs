@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand};
-use compiler::OptLevel;
+use compiler::{HostGrants, OptLevel};
 
 pub(crate) const DEFAULT_OUT: &str = "out.hyc";
 
@@ -75,6 +75,7 @@ pub(crate) struct CliArgs {
     pub pgo_instrument: bool,
     pub pgo_use_profile: Option<String>,
     pub pgo_generate_profile: Option<String>,
+    pub host_grants: HostGrants,
 }
 
 /// SARIF / LSP diagnostic stream (commands that report through the compiler).
@@ -116,6 +117,55 @@ struct CompileProfileFlags {
     pgo_generate_profile: Option<String>,
 }
 
+/// Host capabilities. Default deny (same as a missing coil.toml).
+///
+/// Not read from Manifest. `coil run out.hyc` uses these flags for this
+/// invocation only. `--ffi-search-path` is lookup, not a dload grant.
+/// `dload("c")` stays denied even with `--allow-dload c`.
+#[derive(Args, Clone, Debug, Default)]
+struct HostGrantFlags {
+    /// Allow Stream.attach
+    #[arg(long)]
+    allow_attach: bool,
+    /// Allow env::exit
+    #[arg(long)]
+    allow_exit: bool,
+    /// Allow env::exec
+    #[arg(long)]
+    allow_exec: bool,
+    /// Allow FFI process-exec symbols (system, execve, …)
+    #[arg(long)]
+    allow_ffi_exec: bool,
+    /// Allow dload of STEM (repeatable). Still needs lock hash or trusted.
+    #[arg(long = "allow-dload", value_name = "STEM", action = clap::ArgAction::Append)]
+    allow_dload: Vec<String>,
+    /// Extra FFI library search directory (repeatable; lookup only)
+    #[arg(long = "ffi-search-path", value_name = "DIR", action = clap::ArgAction::Append)]
+    ffi_search_path: Vec<PathBuf>,
+}
+
+impl HostGrantFlags {
+    fn is_set(&self) -> bool {
+        self.allow_attach
+            || self.allow_exit
+            || self.allow_exec
+            || self.allow_ffi_exec
+            || !self.allow_dload.is_empty()
+            || !self.ffi_search_path.is_empty()
+    }
+
+    fn into_grants(self) -> HostGrants {
+        HostGrants {
+            allow_attach: self.allow_attach,
+            allow_exec: self.allow_exec,
+            allow_exit: self.allow_exit,
+            allow_ffi_exec: self.allow_ffi_exec,
+            allow_dload: self.allow_dload,
+            ffi_search_paths: self.ffi_search_path,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "coil",
@@ -123,7 +173,11 @@ struct CompileProfileFlags {
     about = "Coil compiler and runtime",
     disable_help_subcommand = true,
     after_help = "When no file is given, `coil` / `coil compile` use `[entry].file` from coil.toml.\n\
-Default diagnostics: pretty reports on stderr."
+Default diagnostics: pretty reports on stderr.\n\
+Host grants (`--allow-attach`, `--allow-exec`, `--allow-exit`, `--allow-ffi-exec`,\n\
+`--allow-dload STEM`) are CLI / Pipeline API only — coil.toml does not grant them.\n\
+`coil run out.hyc` uses this invocation's flags, not live coil.toml.\n\
+`--ffi-search-path` is lookup only. `dload(\"c\")` stays denied even if flagged."
 )]
 struct RawCli {
     #[command(flatten)]
@@ -132,6 +186,8 @@ struct RawCli {
     opt: OptLevelFlags,
     #[command(flatten)]
     profile: CompileProfileFlags,
+    #[command(flatten)]
+    grants: HostGrantFlags,
     /// Compile harness tests into the archive (default: omit)
     #[arg(long)]
     include_tests: bool,
@@ -152,6 +208,8 @@ enum RawCommand {
         opt: OptLevelFlags,
         #[command(flatten)]
         profile: CompileProfileFlags,
+        #[command(flatten)]
+        grants: HostGrantFlags,
         /// Compile harness tests into the archive (default: omit)
         #[arg(long)]
         include_tests: bool,
@@ -165,6 +223,8 @@ enum RawCommand {
     Run {
         #[command(flatten)]
         log: LogFlags,
+        #[command(flatten)]
+        grants: HostGrantFlags,
         /// Archive path
         archive: String,
     },
@@ -174,6 +234,8 @@ enum RawCommand {
         log: LogFlags,
         #[command(flatten)]
         opt: OptLevelFlags,
+        #[command(flatten)]
+        grants: HostGrantFlags,
         /// Stop after the first failed case
         #[arg(long)]
         fail_fast: bool,
@@ -188,6 +250,8 @@ enum RawCommand {
         opt: OptLevelFlags,
         #[command(flatten)]
         profile: CompileProfileFlags,
+        #[command(flatten)]
+        grants: HostGrantFlags,
         /// Packaged binary path (default: entry file stem)
         #[arg(short = 'o', long = "output", value_name = "PATH")]
         output: Option<String>,
@@ -232,6 +296,8 @@ enum RawCommand {
     Debug {
         #[command(flatten)]
         log: LogFlags,
+        #[command(flatten)]
+        grants: HostGrantFlags,
         /// Run commands from a script file
         #[arg(short = 'x', value_name = "SCRIPT")]
         script: Option<String>,
@@ -311,6 +377,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             pgo_instrument: false,
             pgo_use_profile: None,
             pgo_generate_profile: None,
+            host_grants: HostGrants::deny_all(),
         });
     }
 
@@ -376,6 +443,7 @@ fn cli_from(
     include_tests: bool,
     opt: OptLevelFlags,
     profile: CompileProfileFlags,
+    grants: HostGrantFlags,
 ) -> CliArgs {
     CliArgs {
         command,
@@ -388,6 +456,7 @@ fn cli_from(
         pgo_instrument: profile.pgo_instrument,
         pgo_use_profile: profile.pgo_use_profile,
         pgo_generate_profile: profile.pgo_generate_profile,
+        host_grants: grants.into_grants(),
     }
 }
 
@@ -398,6 +467,7 @@ impl RawCli {
             || self.profile.is_set()
             || self.include_tests
             || self.file.is_some()
+            || self.grants.is_set()
     }
 
     fn into_cli_args(self) -> Result<CliArgs, String> {
@@ -415,6 +485,7 @@ impl RawCli {
                 self.include_tests,
                 self.opt,
                 self.profile,
+                self.grants,
             ),
             Some(RawCommand::Lsp { stdio: _ }) => cli_from(
                 Command::Lsp,
@@ -422,6 +493,7 @@ impl RawCli {
                 false,
                 OptLevelFlags::default(),
                 CompileProfileFlags::default(),
+                HostGrantFlags::default(),
             ),
             Some(RawCommand::Fmt { paths, check: _ }) => {
                 if paths.is_empty() {
@@ -433,11 +505,13 @@ impl RawCli {
                     false,
                     OptLevelFlags::default(),
                     CompileProfileFlags::default(),
+                    HostGrantFlags::default(),
                 )
             }
             Some(RawCommand::Test {
                 log,
                 opt,
+                grants,
                 fail_fast,
                 path,
             }) => {
@@ -452,12 +526,14 @@ impl RawCli {
                     false,
                     opt,
                     CompileProfileFlags::default(),
+                    grants,
                 )
             }
             Some(RawCommand::Compile {
                 log,
                 opt,
                 profile,
+                grants,
                 include_tests,
                 output,
                 file,
@@ -475,19 +551,26 @@ impl RawCli {
                     include_tests,
                     opt,
                     profile,
+                    grants,
                 )
             }
-            Some(RawCommand::Run { log, archive }) => cli_from(
+            Some(RawCommand::Run {
+                log,
+                grants,
+                archive,
+            }) => cli_from(
                 Command::Run { archive },
                 log,
                 false,
                 OptLevelFlags::default(),
                 CompileProfileFlags::default(),
+                grants,
             ),
             Some(RawCommand::Package {
                 log,
                 opt,
                 profile,
+                grants,
                 output,
                 runner,
                 check_native,
@@ -516,6 +599,7 @@ impl RawCli {
                     false,
                     opt,
                     profile,
+                    grants,
                 )
             }
             Some(RawCommand::Natives {
@@ -526,6 +610,7 @@ impl RawCli {
                 false,
                 OptLevelFlags::default(),
                 CompileProfileFlags::default(),
+                HostGrantFlags::default(),
             ),
             Some(RawCommand::Dissect {
                 log,
@@ -550,10 +635,12 @@ impl RawCli {
                     false,
                     opt,
                     profile,
+                    HostGrantFlags::default(),
                 )
             }
             Some(RawCommand::Debug {
                 log,
+                grants,
                 script,
                 batch,
                 dap,
@@ -589,6 +676,7 @@ impl RawCli {
                     false,
                     OptLevelFlags::default(),
                     CompileProfileFlags::default(),
+                    grants,
                 )
             }
         })
@@ -978,5 +1066,51 @@ mod tests {
         .unwrap();
         assert_eq!(cli.pgo_generate_profile.as_deref(), Some("out.json"));
         assert!(parse_args(&args(&["test", "--pgo-instrument"])).is_err());
+    }
+
+    #[test]
+    fn parse_host_grant_flags_on_run_and_default() {
+        let cli = parse_args(&args(&[
+            "run",
+            "out.hyc",
+            "--allow-attach",
+            "--allow-exec",
+            "--allow-exit",
+            "--allow-ffi-exec",
+            "--allow-dload",
+            "tls",
+            "--allow-dload",
+            "crypto",
+            "--ffi-search-path",
+            "./native",
+        ]))
+        .unwrap();
+        assert!(cli.host_grants.allow_attach);
+        assert!(cli.host_grants.allow_exec);
+        assert!(cli.host_grants.allow_exit);
+        assert!(cli.host_grants.allow_ffi_exec);
+        assert_eq!(
+            cli.host_grants.allow_dload,
+            vec!["tls".to_string(), "crypto".to_string()]
+        );
+        assert_eq!(
+            cli.host_grants.ffi_search_paths,
+            vec![PathBuf::from("./native")]
+        );
+
+        let cli = parse_args(&args(&["--allow-exec", "examples/fib.hy"])).unwrap();
+        assert!(cli.host_grants.allow_exec);
+        assert!(!cli.host_grants.allow_attach);
+
+        let cli = parse_args(&args(&["run", "out.hyc"])).unwrap();
+        assert_eq!(cli.host_grants, HostGrants::deny_all());
+
+        let cli = parse_args(&args(&["compile", "--allow-dload", "c", "a.hy"])).unwrap();
+        assert_eq!(cli.host_grants.allow_dload, vec!["c".to_string()]);
+    }
+
+    #[test]
+    fn parse_rejects_parent_grant_flags_with_subcommand() {
+        assert!(parse_args(&args(&["--allow-exec", "compile", "a.hy"])).is_err());
     }
 }

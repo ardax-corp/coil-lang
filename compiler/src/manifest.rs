@@ -125,19 +125,18 @@ pub struct Manifest {
     pub entry: Option<PathBuf>,
     /// Extra directories searched when resolving FFI library paths.
     pub ffi_search_paths: Vec<PathBuf>,
-    /// Consumer `dload` stems (`[ffi] allow`), including crypto/tls/regex/time.
-    /// Each still needs a lock hash unless the matching dep is `trusted`.
+    /// Consumer `dload` stems. Parsed for spool; the language path ignores this
+    /// (use `--allow-dload` / [`crate::HostGrants`]).
     pub ffi_allow: Vec<String>,
     /// Direct native artifacts declared under `[[ffi.native]]`.
     pub ffi_natives: Vec<FfiNativeDecl>,
-    /// When false, `env::exec` fails at runtime with `ExecDisabled`.
+    /// Parsed `[env] allow_exec`. Spool may read it; the language path does not.
     pub allow_exec: bool,
-    /// When false, `Stream.attach` fails at runtime with `PermissionDenied`.
+    /// Parsed `[ffi] allow_attach`. Spool may read it; the language path does not.
     pub allow_attach: bool,
-    /// When false, `env::exit` panics instead of terminating the process.
+    /// Parsed `[env] allow_exit`. Spool may read it; the language path does not.
     pub allow_exit: bool,
-    /// When false, FFI `system` / `execve` (and aliases) are denied at resolve.
-    /// Independent of [`Self::allow_exec`].
+    /// Parsed `[env] allow_ffi_exec`. Spool may read it; the language path does not.
     pub allow_ffi_exec: bool,
     /// Optional `[package]` block (`name` + `version`, plus optional `coil` / `include`).
     pub package: Option<PackageInfo>,

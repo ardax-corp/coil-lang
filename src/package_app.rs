@@ -247,7 +247,7 @@ pub fn cmd_package(
     if check_native && uses_ffi {
         let libs = ffi_library_names_from_bytecode(&bytecode, &strings);
         let mut gate = machine::DloadGate::from_consumer_trusted(
-            &pipeline.manifest().ffi_allow,
+            &pipeline.host_grants().allow_dload,
             &pipeline.dload_native_pins(),
             pipeline.dload_trusted_stems(),
         );
@@ -257,12 +257,7 @@ pub fn cmd_package(
         for (stem, path) in pipeline.extra_dload_grants() {
             let _ = gate.grant_file(stem, path);
         }
-        let search: Vec<PathBuf> = pipeline
-            .manifest()
-            .ffi_search_paths
-            .iter()
-            .map(|p| pipeline.project_root().join(p))
-            .collect();
+        let search = pipeline.ffi_search_path_bufs();
         for name in &libs {
             if let Err(e) = machine::resolve_library(name, base_dir, &search, &gate) {
                 fail_and_exit(

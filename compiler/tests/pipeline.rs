@@ -1946,9 +1946,6 @@ fn main() {
 #[test]
 fn userland_dload_missing_library_returns_err() {
     let extra = r#"
-[ffi]
-allow = ["time"]
-
 [dependencies]
 time = { git = "https://example.com/coil-time.git", trusted = true }
 "#;
@@ -1957,7 +1954,7 @@ time = { git = "https://example.com/coil-time.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("time")),
-    );
+        &["time"]);
     assert_eq!(
         output, "missing",
         "allow+trusted `time` must not be denied; got {output:?}"
@@ -2177,6 +2174,7 @@ fn dload_gate_for_project(
     test_name: &str,
     toml_extra: &str,
     lock: Option<&str>,
+    dload_allow: &[&str],
 ) -> machine::DloadGate {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
@@ -2198,6 +2196,9 @@ fn dload_gate_for_project(
     let entry = dir.join("main.hy");
     std::fs::write(&entry, "fn main() {}\n").expect("write main.hy");
     let mut pipeline = Pipeline::new();
+    for stem in dload_allow {
+        pipeline.grant_dload_allow(*stem);
+    }
     pipeline
         .compile_src_from_file(entry.to_str().unwrap())
         .unwrap_or_else(|_| {
@@ -2233,6 +2234,25 @@ fn run_userland_dload_project(
     toml_extra: &str,
     lock: Option<&str>,
     src: &str,
+    dload_allow: &[&str],
+) -> String {
+    run_userland_dload_project_grants(
+        test_name,
+        toml_extra,
+        lock,
+        src,
+        dload_allow,
+        compiler::HostGrants::deny_all(),
+    )
+}
+
+fn run_userland_dload_project_grants(
+    test_name: &str,
+    toml_extra: &str,
+    lock: Option<&str>,
+    src: &str,
+    dload_allow: &[&str],
+    mut grants: compiler::HostGrants,
 ) -> String {
     let pid = std::process::id();
     let nanos = std::time::SystemTime::now()
@@ -2254,6 +2274,10 @@ fn run_userland_dload_project(
     let entry = dir.join("main.hy");
     std::fs::write(&entry, src).expect("write main.hy");
     let mut pipeline = Pipeline::new();
+    for stem in dload_allow {
+        grants.grant_dload_allow(*stem);
+    }
+    pipeline.set_host_grants(grants);
     let (bytecode, constants) = pipeline
         .compile_src_from_file(entry.to_str().unwrap())
         .unwrap_or_else(|_| {
@@ -2270,9 +2294,6 @@ fn run_userland_dload_project(
 #[test]
 fn userland_dload_trusted_extra_without_pin_is_missing_not_denied() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
@@ -2281,16 +2302,13 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-    );
+        &["plugin"]);
     assert_eq!(output, "missing");
 }
 
 #[test]
 fn userland_dload_trusted_extra_wrong_pin_is_missing_not_denied() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
@@ -2304,16 +2322,13 @@ sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         extra,
         Some(lock),
         &dload_kind_program(&missing_abs_dload("plugin")),
-    );
+        &["plugin"]);
     assert_eq!(output, "missing");
 }
 
 #[test]
 fn userland_dload_untrusted_extra_without_pin_is_denied() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = false }
 "#;
@@ -2322,7 +2337,7 @@ plugin = { git = "https://example.com/plugin.git", trusted = false }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-    );
+        &["plugin"]);
     assert_eq!(output, "denied");
 }
 
@@ -2337,8 +2352,30 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-    );
+        &[]);
     assert_eq!(output, "denied");
+}
+
+#[test]
+fn userland_dload_toml_ffi_allow_is_ignored() {
+    let extra = r#"
+[ffi]
+allow = ["plugin"]
+
+[dependencies]
+plugin = { git = "https://example.com/plugin.git", trusted = true }
+"#;
+    let output = run_userland_dload_project(
+        "toml_allow_ignored",
+        extra,
+        None,
+        &dload_kind_program(&missing_abs_dload("plugin")),
+        &[],
+    );
+    assert_eq!(
+        output, "denied",
+        "Manifest [ffi] allow must not grant dload, got {output:?}"
+    );
 }
 
 #[test]
@@ -2348,7 +2385,7 @@ fn userland_dload_trusted_c_is_denied() {
 c = { git = "https://example.com/libc.git", trusted = true }
 "#;
     let src = dload_kind_program("c");
-    let output = run_userland_dload_project("trusted_c", extra, None, &src);
+    let output = run_userland_dload_project("trusted_c", extra, None, &src, &[]);
     assert_eq!(output, "denied");
 }
 
@@ -2363,16 +2400,13 @@ crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-    );
+        &[]);
     assert_eq!(output, "denied");
 }
 
 #[test]
 fn userland_dload_trusted_coil_prefixed_dep_maps_to_extra_stem() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 coil-plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
@@ -2381,16 +2415,13 @@ coil-plugin = { git = "https://example.com/plugin.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-    );
+        &["plugin"]);
     assert_eq!(output, "missing");
 }
 
 #[test]
 fn userland_dload_omitted_trusted_extra_without_pin_is_denied() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 plugin = { git = "https://example.com/plugin.git" }
 "#;
@@ -2399,7 +2430,7 @@ plugin = { git = "https://example.com/plugin.git" }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-    );
+        &["plugin"]);
     assert_eq!(output, "denied");
 }
 
@@ -2410,21 +2441,18 @@ fn userland_dload_trusted_libc_is_denied() {
 libc = { git = "https://example.com/libc.git", trusted = true }
 "#;
     let output =
-        run_userland_dload_project("trusted_libc", extra, None, &dload_kind_program("libc"));
+        run_userland_dload_project("trusted_libc", extra, None, &dload_kind_program("libc"), &["libc"]);
     assert_eq!(output, "denied");
 }
 
 #[test]
 fn userland_dload_allowlisted_trusted_c_is_denied() {
     let extra = r#"
-[ffi]
-allow = ["c"]
-
 [dependencies]
 c = { git = "https://example.com/libc.git", trusted = true }
 "#;
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        run_userland_dload_project("trusted_allow_c", extra, None, &dload_kind_program("c"))
+        run_userland_dload_project("trusted_allow_c", extra, None, &dload_kind_program("c"), &["c"])
     }));
     match panicked {
         Ok(output) => assert_eq!(output, "denied"),
@@ -2441,9 +2469,6 @@ c = { git = "https://example.com/libc.git", trusted = true }
 #[test]
 fn userland_dload_crypto_allow_without_hash_or_trusted_is_denied() {
     let extra = r#"
-[ffi]
-allow = ["crypto"]
-
 [dependencies]
 crypto = { git = "https://example.com/coil-crypto.git" }
 "#;
@@ -2452,16 +2477,13 @@ crypto = { git = "https://example.com/coil-crypto.git" }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-    );
+        &["crypto"]);
     assert_eq!(output, "denied");
 }
 
 #[test]
 fn userland_dload_trusted_lock_native_stem_skips_hash() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 coil-http = { git = "https://example.com/http.git", trusted = true }
 "#;
@@ -2475,16 +2497,13 @@ stem = 'plugin'
         extra,
         Some(lock),
         &dload_kind_program(&missing_abs_dload("plugin")),
-    );
+        &["plugin"]);
     assert_eq!(output, "missing");
 }
 
 #[test]
 fn userland_dload_bootstrap_crypto_allow_plus_trusted_is_missing() {
     let extra = r#"
-[ffi]
-allow = ["crypto"]
-
 [dependencies]
 crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
 "#;
@@ -2493,16 +2512,13 @@ crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-    );
+        &["crypto"]);
     assert_eq!(output, "missing");
 }
 
 #[test]
 fn userland_dload_crypto_allow_plus_lock_hash_is_missing() {
     let extra = r#"
-[ffi]
-allow = ["crypto"]
-
 [dependencies]
 crypto = { git = "https://example.com/coil-crypto.git" }
 "#;
@@ -2516,20 +2532,17 @@ sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         extra,
         Some(lock),
         &dload_kind_program(&missing_abs_dload("crypto")),
-    );
+        &["crypto"]);
     assert_eq!(output, "missing");
 }
 
 #[test]
 fn pipeline_gate_trusted_extra_skips_native_hash() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
-    let gate = dload_gate_for_project("honor_skip_hash", extra, None);
+    let gate = dload_gate_for_project("honor_skip_hash", extra, None, &["plugin"]);
     gate.check_request("plugin")
         .expect("allow + trusted extra stem must pass");
     assert!(!gate.hash_required("plugin"));
@@ -2538,13 +2551,10 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
 #[test]
 fn pipeline_gate_omitted_trusted_extra_requires_hash() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 plugin = { git = "https://example.com/plugin.git" }
 "#;
-    let gate = dload_gate_for_project("omitted_requires_hash", extra, None);
+    let gate = dload_gate_for_project("omitted_requires_hash", extra, None, &["plugin"]);
     assert_library_denied(&gate, "plugin", "plugin");
     assert!(gate.hash_required("plugin"));
 }
@@ -2555,22 +2565,19 @@ fn pipeline_gate_trusted_without_allow_is_denied() {
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
-    let gate = dload_gate_for_project("trusted_no_allow_gate", extra, None);
+    let gate = dload_gate_for_project("trusted_no_allow_gate", extra, None, &[]);
     assert_library_denied(&gate, "plugin", "plugin");
 }
 
 #[test]
 fn pipeline_gate_allowlisted_trusted_c_is_library_denied() {
     let extra = r#"
-[ffi]
-allow = ["c", "plugin"]
-
 [dependencies]
 c = { git = "https://example.com/libc.git", trusted = true }
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
     let panicked = catch_unwind(AssertUnwindSafe(|| {
-        dload_gate_for_project("allow_trusted_c", extra, None)
+        dload_gate_for_project("allow_trusted_c", extra, None, &["c", "plugin"])
     }));
     match panicked {
         Ok(gate) => {
@@ -2591,13 +2598,10 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
 #[test]
 fn pipeline_gate_first_party_without_allow_is_denied() {
     let extra = r#"
-[ffi]
-allow = ["plugin"]
-
 [dependencies]
 plugin = { git = "https://example.com/plugin.git", trusted = true }
 "#;
-    let gate = dload_gate_for_project("first_party_no_allow", extra, None);
+    let gate = dload_gate_for_project("first_party_no_allow", extra, None, &["plugin"]);
     for stem in machine::DLOAD_PRODUCTION_STEMS {
         assert_library_denied(&gate, stem, stem);
         assert!(
@@ -2610,13 +2614,10 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
 #[test]
 fn pipeline_gate_crypto_allow_without_hash_or_trusted_is_denied() {
     let extra = r#"
-[ffi]
-allow = ["crypto"]
-
 [dependencies]
 crypto = { git = "https://example.com/coil-crypto.git" }
 "#;
-    let gate = dload_gate_for_project("crypto_allow_no_hash_gate", extra, None);
+    let gate = dload_gate_for_project("crypto_allow_no_hash_gate", extra, None, &["crypto"]);
     assert_library_denied(&gate, "crypto", "crypto");
     assert!(gate.hash_required("crypto"));
 }
@@ -2624,13 +2625,10 @@ crypto = { git = "https://example.com/coil-crypto.git" }
 #[test]
 fn pipeline_gate_bootstrap_crypto_allow_plus_trusted_skips_hash() {
     let extra = r#"
-[ffi]
-allow = ["crypto"]
-
 [dependencies]
 crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
 "#;
-    let gate = dload_gate_for_project("bootstrap_crypto_gate", extra, None);
+    let gate = dload_gate_for_project("bootstrap_crypto_gate", extra, None, &["crypto"]);
     gate.check_request("crypto")
         .expect("bootstrap crypto allow+trusted must pass");
     assert!(!gate.hash_required("crypto"));
@@ -2645,7 +2643,7 @@ fn userland_dload_first_party_trusted_without_allow_is_denied() {
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-        );
+            &[]);
         assert_eq!(output, "denied", "{stem} without [ffi] allow must be denied");
     }
 }
@@ -2654,7 +2652,7 @@ fn userland_dload_first_party_trusted_without_allow_is_denied() {
 fn userland_dload_first_party_allow_plus_trusted_is_missing() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
         let extra = format!(
-            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            "[dependencies]\n{}",
             first_party_dep_line(stem, Some(true))
         );
         let output = run_userland_dload_project(
@@ -2662,7 +2660,7 @@ fn userland_dload_first_party_allow_plus_trusted_is_missing() {
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-        );
+            &[stem]);
         assert_eq!(
             output, "missing",
             "{stem} allow+trusted must skip hash; missing file is LibraryNotFound"
@@ -2674,7 +2672,7 @@ fn userland_dload_first_party_allow_plus_trusted_is_missing() {
 fn userland_dload_first_party_allow_without_hash_or_trusted_is_denied() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
         let extra = format!(
-            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            "[dependencies]\n{}",
             first_party_dep_line(stem, None)
         );
         let output = run_userland_dload_project(
@@ -2682,7 +2680,7 @@ fn userland_dload_first_party_allow_without_hash_or_trusted_is_denied() {
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-        );
+            &[stem]);
         assert_eq!(
             output, "denied",
             "{stem} allow without trusted and without pin must be denied"
@@ -2694,7 +2692,7 @@ fn userland_dload_first_party_allow_without_hash_or_trusted_is_denied() {
 fn userland_dload_first_party_allow_trusted_false_without_pin_is_denied() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
         let extra = format!(
-            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            "[dependencies]\n{}",
             first_party_dep_line(stem, Some(false))
         );
         let output = run_userland_dload_project(
@@ -2702,7 +2700,7 @@ fn userland_dload_first_party_allow_trusted_false_without_pin_is_denied() {
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-        );
+            &[stem]);
         assert_eq!(
             output, "denied",
             "{stem} trusted = false must not skip native sha256"
@@ -2713,9 +2711,6 @@ fn userland_dload_first_party_allow_trusted_false_without_pin_is_denied() {
 #[test]
 fn userland_dload_bootstrap_coil_crypto_trusted_is_missing() {
     let extra = r#"
-[ffi]
-allow = ["crypto"]
-
 [dependencies]
 coil-crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
 "#;
@@ -2724,16 +2719,13 @@ coil-crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-    );
+        &["crypto"]);
     assert_eq!(output, "missing");
 }
 
 #[test]
 fn userland_dload_allowlisted_trusted_libc_is_denied() {
     let extra = r#"
-[ffi]
-allow = ["libc"]
-
 [dependencies]
 libc = { git = "https://example.com/libc.git", trusted = true }
 "#;
@@ -2743,7 +2735,7 @@ libc = { git = "https://example.com/libc.git", trusted = true }
             extra,
             None,
             &dload_kind_program("libc"),
-        )
+            &["libc"])
     }));
     match panicked {
         Ok(output) => assert_eq!(output, "denied"),
@@ -2761,10 +2753,10 @@ libc = { git = "https://example.com/libc.git", trusted = true }
 fn pipeline_gate_first_party_allow_without_hash_or_trusted_is_denied() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
         let extra = format!(
-            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            "[dependencies]\n{}",
             first_party_dep_line(stem, None)
         );
-        let gate = dload_gate_for_project(&format!("{stem}_gate_no_hash"), &extra, None);
+        let gate = dload_gate_for_project(&format!("{stem}_gate_no_hash"), &extra, None, &[stem]);
         assert_library_denied(&gate, stem, stem);
         assert!(gate.hash_required(stem), "{stem} must require a lock hash");
     }
@@ -2774,10 +2766,10 @@ fn pipeline_gate_first_party_allow_without_hash_or_trusted_is_denied() {
 fn pipeline_gate_first_party_allow_plus_trusted_skips_hash() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
         let extra = format!(
-            "[ffi]\nallow = [\"{stem}\"]\n\n[dependencies]\n{}",
+            "[dependencies]\n{}",
             first_party_dep_line(stem, Some(true))
         );
-        let gate = dload_gate_for_project(&format!("{stem}_gate_trusted"), &extra, None);
+        let gate = dload_gate_for_project(&format!("{stem}_gate_trusted"), &extra, None, &[stem]);
         gate.check_request(stem)
             .unwrap_or_else(|e| panic!("{stem} allow+trusted must pass, got {e:?}"));
         assert!(!gate.hash_required(stem), "{stem} trusted must skip hash");
@@ -8022,6 +8014,35 @@ fn main() {
 
 #[test]
 fn stream_attach_invalid_when_allow_attach() {
+    let extra = "";
+    let src = r#"
+use io::{stdout, write, attach, IoError};
+use string::{format, to_bytes};
+fn main() {
+    let s = stdout();
+    let r = attach(s, 0, 0, 0, 0, 0);
+    let msg = match r {
+        Result::Ok(_) => "ok",
+        Result::Err(e) => match e {
+            IoError::PermissionDenied => "denied",
+            IoError::InvalidInput => "invalid",
+            _ => "other",
+        },
+    };
+    write(stdout(), to_bytes(format("%s", msg)));
+}
+"#;
+    let mut grants = compiler::HostGrants::deny_all();
+    grants.allow_attach = true;
+    let output = run_userland_dload_project_grants("allow_attach_null", extra, None, src, &[], grants);
+    assert_eq!(
+        output, "invalid",
+        "allow_attach must reach pointer checks, got {output:?}"
+    );
+}
+
+#[test]
+fn stream_attach_denied_when_only_toml_allows() {
     let extra = "[ffi]\nallow_attach = true\n";
     let src = r#"
 use io::{stdout, write, attach, IoError};
@@ -8040,10 +8061,10 @@ fn main() {
     write(stdout(), to_bytes(format("%s", msg)));
 }
 "#;
-    let output = run_userland_dload_project("allow_attach_null", extra, None, src);
+    let output = run_userland_dload_project("toml_attach_ignored", extra, None, src, &[]);
     assert_eq!(
-        output, "invalid",
-        "allow_attach must reach pointer checks, got {output:?}"
+        output, "denied",
+        "Manifest [ffi] allow_attach must not grant Stream.attach, got {output:?}"
     );
 }
 
@@ -9499,7 +9520,7 @@ fn main() {
     std::fs::write(
         dir.join("coil.toml"),
         format!(
-            "[module]\nroots = [\"{}\"]\n[env]\nallow_exec = true\n",
+            "[module]\nroots = [\"{}\"]\n",
             workspace_stdlib().display()
         ),
     )

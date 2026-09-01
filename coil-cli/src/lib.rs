@@ -94,20 +94,25 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 /// Restores [`common::CStructLayout`] from the archive (CLI `.hyc` and packaged
 /// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
 ///
-/// Exec/exit/FFI-exec grants are **not** stored in `.hyc`. This path is deny-all
-/// unless `dload_gate` already encodes attach. In-memory `coil` still applies
-/// `[env]` via `wire_vm_host`.
+/// Exec/exit/FFI-exec grants are **not** stored in `.hyc`. Pass them for this
+/// invocation (`coil run --allow-exec`, …). Packaged embed stays deny-all
+/// unless `dload_gate` already encodes hashed natives from the trailer.
+/// `coil.toml` is not consulted for these grants.
 pub fn execute_archived_program(
     loaded: &LoadedArchive,
     entry: Option<&Path>,
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
+    allow_exec: bool,
+    allow_exit: bool,
+    allow_ffi_exec: bool,
 ) -> bool {
     let mut machine = Machine::<256>::with_operand_capacity(machine::DEFAULT_OPERAND_STACK_SLOTS);
     wire_standard_host_natives(&mut machine);
     if let Some(gate) = dload_gate {
         machine.set_dload_gate(gate);
     }
+    machine.set_env_grants(allow_exec, allow_exit, allow_ffi_exec);
 
     let base_dir = entry.and_then(|p| p.parent()).map(PathBuf::from);
     machine.set_ffi_paths(base_dir, ffi_search_paths);
@@ -249,8 +254,15 @@ pub fn try_run_embedded() -> Option<bool> {
         ffi_search_paths.push(parent.join("lib"));
     }
 
-    let panicked =
-        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate);
+    let panicked = execute_archived_program(
+        &loaded,
+        Some(exe.as_path()),
+        ffi_search_paths,
+        dload_gate,
+        false,
+        false,
+        false,
+    );
     Some(panicked)
 }
 

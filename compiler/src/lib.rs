@@ -17,6 +17,7 @@ pub use profile::{
     instrument_for_pgo_mut, last_instrument_map, optimize_with_profile, profile_from_runtime,
     set_current_profile, set_pgo_instrument,
 };
+mod host_grants;
 mod lockfile;
 mod manifest;
 mod monomorphize;
@@ -33,6 +34,7 @@ pub use dissect::{
     DissectArtifacts, FnSym, IlSnapshot, filter_symbols, format_bytecode, format_bytecode_section,
     format_il, format_symbol_index, matches_fn_pat,
 };
+pub use host_grants::HostGrants;
 pub use manifest::{
     DependencySpec, FfiNativeDecl, Manifest, ManifestError, PackageInfo, Scripts,
 };

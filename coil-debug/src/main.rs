@@ -1,22 +1,32 @@
 //! `coil-debug` binary entry.
 
+use std::path::PathBuf;
 use std::process::exit;
 
 use coil_debug::{DebugArgs, cmd_dap, cmd_debug};
+use compiler::HostGrants;
 use reporting::ReportConfig;
 
 fn print_help() {
     eprintln!(
         "Usage:\n\
          \x20 coil-debug [--log-json | --log-lsp] [--dap] [<file.hy>] [-x <script>] [--batch]\n\
+         \x20            [--allow-attach] [--allow-exit] [--allow-exec] [--allow-ffi-exec]\n\
+         \x20            [--allow-dload STEM]... [--ffi-search-path DIR]...\n\
          \n\
          Options:\n\
-         \x20 --dap         Debug Adapter Protocol over stdio (program from DAP launch)\n\
-         \x20 -x <script>   Run commands from a script file\n\
-         \x20 --batch       Non-interactive; exit after script / stdin\n\
-         \x20 --log-json    Emit SARIF 2.1 diagnostics on stdout\n\
-         \x20 --log-lsp     Emit LSP Diagnostic NDJSON on stdout\n\
-         \x20 -h, --help    Show this help"
+         \x20 --dap              Debug Adapter Protocol over stdio (program from DAP launch)\n\
+         \x20 -x <script>        Run commands from a script file\n\
+         \x20 --batch            Non-interactive; exit after script / stdin\n\
+         \x20 --log-json         Emit SARIF 2.1 diagnostics on stdout\n\
+         \x20 --log-lsp          Emit LSP Diagnostic NDJSON on stdout\n\
+         \x20 --allow-attach     Allow Stream.attach (default deny)\n\
+         \x20 --allow-exit       Allow env::exit (default deny)\n\
+         \x20 --allow-exec       Allow env::exec (default deny)\n\
+         \x20 --allow-ffi-exec   Allow FFI process-exec symbols (default deny)\n\
+         \x20 --allow-dload STEM Allow dload of STEM (repeatable; libc still denied)\n\
+         \x20 --ffi-search-path  Extra FFI lookup directory (repeatable; not a grant)\n\
+         \x20 -h, --help         Show this help"
     );
 }
 
@@ -27,6 +37,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
     let mut dap = false;
     let mut script: Option<String> = None;
     let mut filename: Option<String> = None;
+    let mut grants = HostGrants::deny_all();
     let mut i = 1usize;
     while i < args.len() {
         let a = &args[i];
@@ -39,6 +50,30 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
             "--log-json" => log_json = true,
             "--log-lsp" => log_lsp = true,
             "--batch" => batch = true,
+            "--allow-attach" => grants.allow_attach = true,
+            "--allow-exit" => grants.allow_exit = true,
+            "--allow-exec" => grants.allow_exec = true,
+            "--allow-ffi-exec" => grants.allow_ffi_exec = true,
+            "--allow-dload" => {
+                i += 1;
+                let stem = args
+                    .get(i)
+                    .ok_or_else(|| "missing STEM after --allow-dload".to_string())?;
+                grants.grant_dload_allow(stem.clone());
+            }
+            s if s.starts_with("--allow-dload=") => {
+                grants.grant_dload_allow(s.trim_start_matches("--allow-dload="));
+            }
+            "--ffi-search-path" => {
+                i += 1;
+                let dir = args
+                    .get(i)
+                    .ok_or_else(|| "missing DIR after --ffi-search-path".to_string())?;
+                grants.add_ffi_search_path(PathBuf::from(dir));
+            }
+            s if s.starts_with("--ffi-search-path=") => {
+                grants.add_ffi_search_path(PathBuf::from(s.trim_start_matches("--ffi-search-path=")));
+            }
             "-x" => {
                 i += 1;
                 let path = args
@@ -60,7 +95,13 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
     }
 
     if dap {
-        if filename.is_some() || script.is_some() || batch || log_json || log_lsp {
+        if filename.is_some()
+            || script.is_some()
+            || batch
+            || log_json
+            || log_lsp
+            || grants != HostGrants::deny_all()
+        {
             return Err("--dap cannot be combined with REPL flags or a positional file".into());
         }
         return Ok(None);
@@ -74,6 +115,7 @@ fn parse_args(args: &[String]) -> Result<Option<(ReportConfig, DebugArgs)>, Stri
             filename,
             script,
             batch,
+            grants,
         },
     )))
 }
