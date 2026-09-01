@@ -278,7 +278,8 @@ frame representation cheaper than `CALL` — not move the guard.
 Priority: medium to low until measured.
 
 `Machine::execute` stays outlined (`#[inline(never)]`). Dispatch prefetches the
-next `Byte` (and jump targets) with arch `_mm_prefetch` / `_prefetch`. Fused
+next `Byte` (and jump targets) with arch `_mm_prefetch` (x86_64) or `prfm`
+via stable `asm!` (aarch64; `_prefetch` is unstable). Fused
 inner ops share `fused::eval_*` helpers (same packed `u8` decode). A 256-entry
 `fn` table lost ~2% on mandelbrot; rustc 1.98 still has no stable `become` TCO
 for token-threading. Larger universal superinstructions or short trace fusion should be considered only if they improve multiple benchmarks. Keep symbolic IL

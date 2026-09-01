@@ -247,25 +247,27 @@ macro_rules! unary {
 }
 
 /// Software-prefetch the bytecode word at `ip` (no-op if past the end).
-/// `core::hint::prefetch_read` is still unstable (`hint_prefetch`); use arch
-/// prefetch on stable 1.98. T1 / LOCALITY2 so we do not shove the operand
-/// stack out of L1; HW already covers the sequential stream.
+/// `core::hint::prefetch_read` is still unstable (`hint_prefetch`).
+/// `_mm_prefetch` is stable on x86_64; `core::arch::aarch64::_prefetch` is
+/// not (`stdarch_aarch64_prefetch`). Use `prfm` via stable `asm!` instead.
 #[inline(always)]
 fn prefetch_code(code: &[Byte], ip: usize) {
     if ip >= code.len() {
         return;
     }
-    let ptr = unsafe { code.as_ptr().add(ip) }.cast::<i8>();
+    let ptr = unsafe { code.as_ptr().add(ip) };
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T1 }>(ptr);
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T1 }>(ptr.cast::<i8>());
     }
+    // pldl2keep ≈ x86 T1: L2, do not shove the operand stack out of L1.
     #[cfg(target_arch = "aarch64")]
     unsafe {
-        core::arch::aarch64::_prefetch::<
-            { core::arch::aarch64::_PREFETCH_READ },
-            { core::arch::aarch64::_PREFETCH_LOCALITY2 },
-        >(ptr);
+        core::arch::asm!(
+            "prfm pldl2keep, [{ptr}]",
+            ptr = in(reg) ptr,
+            options(readonly, nostack, preserves_flags),
+        );
     }
 }
 
