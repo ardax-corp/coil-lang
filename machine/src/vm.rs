@@ -246,12 +246,38 @@ macro_rules! unary {
     };
 }
 
+/// Software-prefetch the bytecode word at `ip` (no-op if past the end).
+/// `core::hint::prefetch_read` is still unstable (`hint_prefetch`).
+/// `_mm_prefetch` is stable on x86_64; `core::arch::aarch64::_prefetch` is
+/// not (`stdarch_aarch64_prefetch`). Use `prfm` via stable `asm!` instead.
 #[inline(always)]
-fn set_jump_target(ip: &mut usize, target: usize, code_len: usize) {
+fn prefetch_code(code: &[Byte], ip: usize) {
+    if ip >= code.len() {
+        return;
+    }
+    let ptr = unsafe { code.as_ptr().add(ip) };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T1 }>(ptr.cast::<i8>());
+    }
+    // pldl2keep ≈ x86 T1: L2, do not shove the operand stack out of L1.
+    #[cfg(target_arch = "aarch64")]
+    unsafe {
+        core::arch::asm!(
+            "prfm pldl2keep, [{ptr}]",
+            ptr = in(reg) ptr,
+            options(readonly, nostack, preserves_flags),
+        );
+    }
+}
+
+#[inline(always)]
+fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
     // Lowering may target `code.len()` as “fall out of the loop” (next `while`
     // check exits without fetching).
-    promise!(target <= code_len);
+    promise!(target <= code.len());
     *ip = target;
+    prefetch_code(code, target);
 }
 
 // type External = fn(&[Value]) -> Value;
@@ -2195,6 +2221,7 @@ impl<const S: usize> Machine<S> {
     /// enough to blow branch-mispredict rates on some CPUs while keeping
     /// dynamic instruction counts identical. A single outlined copy matches
     /// the non-LTO `machine` codegen (already identical to `main`'s).
+    /// Prefetch + fused jump tables live *inside* this outlined copy.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
@@ -2230,6 +2257,7 @@ impl<const S: usize> Machine<S> {
             promise!(ip < code_len);
             let opcode = unsafe { code.get_unchecked(ip) };
             ip += 1;
+            prefetch_code(code, ip);
 
             let bc = opcode.bytecode();
             // Release-only optimizer hint: must track the LAST `Instruction`
@@ -2532,16 +2560,16 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::JMP => {
-                    set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
+                    set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
                 }
                 Instruction::JMPF => {
                     if !self.stack.pop().as_bool() {
-                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
+                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
                     }
                 }
                 Instruction::JMPT => {
                     if self.stack.pop().as_bool() {
-                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code_len);
+                        set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
                     }
                 }
                 Instruction::CALL => {
@@ -2569,7 +2597,7 @@ impl<const S: usize> Machine<S> {
                             |frame| frame.set(callee_sp),
                         );
                         sp = callee_sp;
-                        set_jump_target(&mut ip, target, code_len);
+                        set_jump_target(&mut ip, target, code);
                     } else {
                         self.frames.rewrite_top_and_push(
                             |caller| caller.seek(ip + 1),
@@ -2590,7 +2618,7 @@ impl<const S: usize> Machine<S> {
                     // not past the args. Using `callee_sp + arity` would make
                     // subsequent LOAD/BinSlotImm read the wrong slots.
                     sp = callee_sp;
-                    set_jump_target(&mut ip, target, code_len);
+                    set_jump_target(&mut ip, target, code);
                 }
                 Instruction::CastIntToFloat => {
                     let v = self.stack.pop().as_int() as f64;
@@ -2650,35 +2678,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + slot < stack_cap);
                     let lhs = self.stack[sp + slot];
                     let rhs = Value::from(imm);
-                    let result = match Instruction::from(op) {
-                        Instruction::ADD => Value::from(lhs.as_int() + imm),
-                        Instruction::SUB => Value::from(lhs.as_int() - imm),
-                        Instruction::MUL => Value::from(lhs.as_int() * imm),
-                        Instruction::DIV => Value::from(lhs.as_int() / imm),
-                        Instruction::MOD => Value::from(lhs.as_int() % imm),
-                        Instruction::LE => Value::from((lhs.as_int() < rhs.as_int()) as i64),
-                        Instruction::LEQ => Value::from((lhs.as_int() <= rhs.as_int()) as i64),
-                        Instruction::GT => Value::from((lhs.as_int() > rhs.as_int()) as i64),
-                        Instruction::GEQ => Value::from((lhs.as_int() >= rhs.as_int()) as i64),
-                        Instruction::EQ => Value::from(
-                            crate::value_eq::values_eq(&self.heap, lhs, rhs) as i64
-                        ),
-                        Instruction::NEQ => Value::from(
-                            (!crate::value_eq::values_eq(&self.heap, lhs, rhs)) as i64
-                        ),
-                        Instruction::Pow => {
-                            let exp = imm.max(0) as u32;
-                            Value::from(lhs.as_int().pow(exp))
-                        }
-                        Instruction::BITAND => Value::from(lhs.as_int() & imm),
-                        Instruction::BITOR => Value::from(lhs.as_int() | imm),
-                        Instruction::SHL => Value::from(lhs.as_int() << imm),
-                        Instruction::SHR => Value::from(lhs.as_int() >> imm),
-                        Instruction::XOR => Value::from(lhs.as_int() ^ imm),
-                        Instruction::AND => Value::from(lhs.as_bool() && rhs.as_bool()),
-                        Instruction::OR => Value::from(lhs.as_bool() || rhs.as_bool()),
-                        _ => Value::default(),
-                    };
+                    let result = crate::fused::eval_bin(op, lhs, rhs, &self.heap);
                     self.stack.push(result);
                 }
                 // Fused `<cmp|cond>; JMPF/JMPT target`.
@@ -2695,26 +2695,9 @@ impl<const S: usize> Machine<S> {
                     let rhs = self.stack[tos - 1];
                     let lhs = self.stack[tos - 2];
                     self.stack.seek(tos - 2);
-                    let taken = match Instruction::from(op) {
-                        Instruction::LE => lhs.as_int() < rhs.as_int(),
-                        Instruction::LEQ => lhs.as_int() <= rhs.as_int(),
-                        Instruction::GT => lhs.as_int() > rhs.as_int(),
-                        Instruction::GEQ => lhs.as_int() >= rhs.as_int(),
-                        Instruction::EQ => crate::value_eq::values_eq(&self.heap, lhs, rhs),
-                        Instruction::NEQ => !crate::value_eq::values_eq(&self.heap, lhs, rhs),
-                        Instruction::LEF => lhs.as_float() < rhs.as_float(),
-                        Instruction::LEQF => lhs.as_float() <= rhs.as_float(),
-                        Instruction::GTF => lhs.as_float() > rhs.as_float(),
-                        Instruction::GEQF => lhs.as_float() >= rhs.as_float(),
-                        Instruction::AND => lhs.as_bool() && rhs.as_bool(),
-                        Instruction::OR => lhs.as_bool() || rhs.as_bool(),
-                        Instruction::BITAND => Value::from(lhs.as_int() & rhs.as_int()).as_bool(),
-                        Instruction::BITOR => Value::from(lhs.as_int() | rhs.as_int()).as_bool(),
-                        Instruction::XOR => Value::from(lhs.as_int() ^ rhs.as_int()).as_bool(),
-                        _ => false,
-                    };
+                    let taken = crate::fused::eval_cmp(op, lhs, rhs, &self.heap);
                     if taken == matches!(*bc, Instruction::CmpJmpt) {
-                        set_jump_target(&mut ip, target, code_len);
+                        set_jump_target(&mut ip, target, code);
                     }
                 }
                 // Fused `LOAD slot; CONST imm; <cond>; JMPF/JMPT` without stack traffic.
@@ -2727,26 +2710,9 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + slot < stack_cap);
                     let lhs = self.stack[sp + slot];
                     let rhs = Value::from(imm);
-                    let taken = match Instruction::from(op) {
-                        Instruction::LE => lhs.as_int() < rhs.as_int(),
-                        Instruction::LEQ => lhs.as_int() <= rhs.as_int(),
-                        Instruction::GT => lhs.as_int() > rhs.as_int(),
-                        Instruction::GEQ => lhs.as_int() >= rhs.as_int(),
-                        Instruction::EQ => crate::value_eq::values_eq(&self.heap, lhs, rhs),
-                        Instruction::NEQ => !crate::value_eq::values_eq(&self.heap, lhs, rhs),
-                        Instruction::LEF => lhs.as_float() < rhs.as_float(),
-                        Instruction::LEQF => lhs.as_float() <= rhs.as_float(),
-                        Instruction::GTF => lhs.as_float() > rhs.as_float(),
-                        Instruction::GEQF => lhs.as_float() >= rhs.as_float(),
-                        Instruction::AND => lhs.as_bool() && rhs.as_bool(),
-                        Instruction::OR => lhs.as_bool() || rhs.as_bool(),
-                        Instruction::BITAND => Value::from(lhs.as_int() & imm).as_bool(),
-                        Instruction::BITOR => Value::from(lhs.as_int() | imm).as_bool(),
-                        Instruction::XOR => Value::from(lhs.as_int() ^ imm).as_bool(),
-                        _ => false,
-                    };
+                    let taken = crate::fused::eval_cmp(op, lhs, rhs, &self.heap);
                     if taken == matches!(*bc, Instruction::BinSlotImmJmpt) {
-                        set_jump_target(&mut ip, target, code_len);
+                        set_jump_target(&mut ip, target, code);
                     }
                 }
                 Instruction::LogNotJmpf | Instruction::LogNotJmpt => {
@@ -2759,7 +2725,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let val = self.stack.pop();
                     if (val.as_int() == 0) == matches!(*bc, Instruction::LogNotJmpt) {
-                        set_jump_target(&mut ip, target, code_len);
+                        set_jump_target(&mut ip, target, code);
                     }
                 }
                 // Fused `BinSlotSlot; JMPF/JMPT` — pool packs (target<<32)|b.
@@ -2773,26 +2739,9 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + b < stack_cap);
                     let va = self.stack[sp + a];
                     let vb = self.stack[sp + b];
-                    let taken = match Instruction::from(op) {
-                        Instruction::LE => va.as_int() < vb.as_int(),
-                        Instruction::LEQ => va.as_int() <= vb.as_int(),
-                        Instruction::GT => va.as_int() > vb.as_int(),
-                        Instruction::GEQ => va.as_int() >= vb.as_int(),
-                        Instruction::EQ => crate::value_eq::values_eq(&self.heap, va, vb),
-                        Instruction::NEQ => !crate::value_eq::values_eq(&self.heap, va, vb),
-                        Instruction::LEF => va.as_float() < vb.as_float(),
-                        Instruction::LEQF => va.as_float() <= vb.as_float(),
-                        Instruction::GTF => va.as_float() > vb.as_float(),
-                        Instruction::GEQF => va.as_float() >= vb.as_float(),
-                        Instruction::AND => va.as_bool() && vb.as_bool(),
-                        Instruction::OR => va.as_bool() || vb.as_bool(),
-                        Instruction::BITAND => Value::from(va.as_int() & vb.as_int()).as_bool(),
-                        Instruction::BITOR => Value::from(va.as_int() | vb.as_int()).as_bool(),
-                        Instruction::XOR => Value::from(va.as_int() ^ vb.as_int()).as_bool(),
-                        _ => false,
-                    };
+                    let taken = crate::fused::eval_cmp(op, va, vb, &self.heap);
                     if taken == matches!(*bc, Instruction::BinSlotSlotJmpt) {
-                        set_jump_target(&mut ip, target, code_len);
+                        set_jump_target(&mut ip, target, code);
                     }
                 }
                 // Fused `LOAD src; CONST imm; <op>; STORE dest` — pool packs (dest<<32)|imm.
@@ -2805,35 +2754,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + slot < stack_cap);
                     let lhs = self.stack[sp + slot];
                     let rhs = Value::from(imm);
-                    let result = match Instruction::from(op) {
-                        Instruction::ADD => Value::from(lhs.as_int() + imm),
-                        Instruction::SUB => Value::from(lhs.as_int() - imm),
-                        Instruction::MUL => Value::from(lhs.as_int() * imm),
-                        Instruction::DIV => Value::from(lhs.as_int() / imm),
-                        Instruction::MOD => Value::from(lhs.as_int() % imm),
-                        Instruction::LE => Value::from((lhs.as_int() < rhs.as_int()) as i64),
-                        Instruction::LEQ => Value::from((lhs.as_int() <= rhs.as_int()) as i64),
-                        Instruction::GT => Value::from((lhs.as_int() > rhs.as_int()) as i64),
-                        Instruction::GEQ => Value::from((lhs.as_int() >= rhs.as_int()) as i64),
-                        Instruction::EQ => Value::from(
-                            crate::value_eq::values_eq(&self.heap, lhs, rhs) as i64
-                        ),
-                        Instruction::NEQ => Value::from(
-                            (!crate::value_eq::values_eq(&self.heap, lhs, rhs)) as i64
-                        ),
-                        Instruction::Pow => {
-                            let exp = imm.max(0) as u32;
-                            Value::from(lhs.as_int().pow(exp))
-                        }
-                        Instruction::BITAND => Value::from(lhs.as_int() & imm),
-                        Instruction::BITOR => Value::from(lhs.as_int() | imm),
-                        Instruction::SHL => Value::from(lhs.as_int() << imm),
-                        Instruction::SHR => Value::from(lhs.as_int() >> imm),
-                        Instruction::XOR => Value::from(lhs.as_int() ^ imm),
-                        Instruction::AND => Value::from(lhs.as_bool() && rhs.as_bool()),
-                        Instruction::OR => Value::from(lhs.as_bool() || rhs.as_bool()),
-                        _ => Value::default(),
-                    };
+                    let result = crate::fused::eval_bin(op, lhs, rhs, &self.heap);
                     let dest_idx = sp + dest;
                     promise!(dest_idx < stack_cap);
                     self.stack[dest_idx] = result;
@@ -2850,45 +2771,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + dest < stack_cap);
                     let va = self.stack[sp + a];
                     let vb = self.stack[sp + b];
-                    let result = match Instruction::from(op) {
-                        Instruction::ADD => Value::from(va.as_int() + vb.as_int()),
-                        Instruction::SUB => Value::from(va.as_int() - vb.as_int()),
-                        Instruction::MUL => Value::from(va.as_int() * vb.as_int()),
-                        Instruction::DIV => Value::from(va.as_int() / vb.as_int()),
-                        Instruction::MOD => Value::from(va.as_int() % vb.as_int()),
-                        Instruction::Pow => {
-                            let exp = vb.as_int().max(0) as u32;
-                            Value::from(va.as_int().pow(exp))
-                        }
-                        Instruction::BITAND => Value::from(va.as_int() & vb.as_int()),
-                        Instruction::BITOR => Value::from(va.as_int() | vb.as_int()),
-                        Instruction::SHL => Value::from(va.as_int() << vb.as_int()),
-                        Instruction::SHR => Value::from(va.as_int() >> vb.as_int()),
-                        Instruction::XOR => Value::from(va.as_int() ^ vb.as_int()),
-                        Instruction::AND => Value::from(va.as_bool() && vb.as_bool()),
-                        Instruction::OR => Value::from(va.as_bool() || vb.as_bool()),
-                        Instruction::LE => Value::from((va.as_int() < vb.as_int()) as i64),
-                        Instruction::LEQ => Value::from((va.as_int() <= vb.as_int()) as i64),
-                        Instruction::GT => Value::from((va.as_int() > vb.as_int()) as i64),
-                        Instruction::GEQ => Value::from((va.as_int() >= vb.as_int()) as i64),
-                        Instruction::EQ => Value::from(
-                            crate::value_eq::values_eq(&self.heap, va, vb) as i64
-                        ),
-                        Instruction::NEQ => Value::from(
-                            (!crate::value_eq::values_eq(&self.heap, va, vb)) as i64
-                        ),
-                        Instruction::ADDF => Value::from(va.as_float() + vb.as_float()),
-                        Instruction::SUBF => Value::from(va.as_float() - vb.as_float()),
-                        Instruction::MULF => Value::from(va.as_float() * vb.as_float()),
-                        Instruction::DIVF => Value::from(va.as_float() / vb.as_float()),
-                        Instruction::MODF => Value::from(va.as_float() % vb.as_float()),
-                        Instruction::LEF => Value::from((va.as_float() < vb.as_float()) as i64),
-                        Instruction::LEQF => Value::from((va.as_float() <= vb.as_float()) as i64),
-                        Instruction::GTF => Value::from((va.as_float() > vb.as_float()) as i64),
-                        Instruction::GEQF => Value::from((va.as_float() >= vb.as_float()) as i64),
-                        Instruction::PowF => Value::from(va.as_float().powf(vb.as_float())),
-                        _ => Value::default(),
-                    };
+                    let result = crate::fused::eval_bin(op, va, vb, &self.heap);
                     let dest_idx = sp + dest;
                     self.stack[dest_idx] = result;
                     let tell = self.stack.tell();
@@ -2925,45 +2808,7 @@ impl<const S: usize> Machine<S> {
                     promise!(tos >= 2);
                     let rhs = self.stack[tos - 1];
                     let lhs = self.stack[tos - 2];
-                    let ret_val = match Instruction::from(opcode.bin_return_op()) {
-                        Instruction::ADD => Value::from(lhs.as_int() + rhs.as_int()),
-                        Instruction::SUB => Value::from(lhs.as_int() - rhs.as_int()),
-                        Instruction::MUL => Value::from(lhs.as_int() * rhs.as_int()),
-                        Instruction::DIV => Value::from(lhs.as_int() / rhs.as_int()),
-                        Instruction::MOD => Value::from(lhs.as_int() % rhs.as_int()),
-                        Instruction::ADDF => Value::from(lhs.as_float() + rhs.as_float()),
-                        Instruction::SUBF => Value::from(lhs.as_float() - rhs.as_float()),
-                        Instruction::MULF => Value::from(lhs.as_float() * rhs.as_float()),
-                        Instruction::DIVF => Value::from(lhs.as_float() / rhs.as_float()),
-                        Instruction::MODF => Value::from(lhs.as_float() % rhs.as_float()),
-                        Instruction::LE => Value::from((lhs.as_int() < rhs.as_int()) as i64),
-                        Instruction::LEQ => Value::from((lhs.as_int() <= rhs.as_int()) as i64),
-                        Instruction::GT => Value::from((lhs.as_int() > rhs.as_int()) as i64),
-                        Instruction::GEQ => Value::from((lhs.as_int() >= rhs.as_int()) as i64),
-                        Instruction::EQ => Value::from(
-                            crate::value_eq::values_eq(&self.heap, lhs, rhs) as i64
-                        ),
-                        Instruction::NEQ => Value::from(
-                            (!crate::value_eq::values_eq(&self.heap, lhs, rhs)) as i64
-                        ),
-                        Instruction::LEF => Value::from((lhs.as_float() < rhs.as_float()) as i64),
-                        Instruction::LEQF => Value::from((lhs.as_float() <= rhs.as_float()) as i64),
-                        Instruction::GTF => Value::from((lhs.as_float() > rhs.as_float()) as i64),
-                        Instruction::GEQF => Value::from((lhs.as_float() >= rhs.as_float()) as i64),
-                        Instruction::BITAND => Value::from(lhs.as_int() & rhs.as_int()),
-                        Instruction::BITOR => Value::from(lhs.as_int() | rhs.as_int()),
-                        Instruction::SHL => Value::from(lhs.as_int() << rhs.as_int()),
-                        Instruction::SHR => Value::from(lhs.as_int() >> rhs.as_int()),
-                        Instruction::XOR => Value::from(lhs.as_int() ^ rhs.as_int()),
-                        Instruction::AND => Value::from(lhs.as_bool() && rhs.as_bool()),
-                        Instruction::OR => Value::from(lhs.as_bool() || rhs.as_bool()),
-                        Instruction::Pow => {
-                            let exp = rhs.as_int().max(0) as u32;
-                            Value::from(lhs.as_int().pow(exp))
-                        }
-                        Instruction::PowF => Value::from(lhs.as_float().powf(rhs.as_float())),
-                        _ => Value::default(),
-                    };
+                    let ret_val = crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.heap);
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
@@ -2978,45 +2823,7 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + b < stack_cap);
                     let va = self.stack[sp + a];
                     let vb = self.stack[sp + b];
-                    let result = match Instruction::from(op) {
-                        Instruction::ADD => Value::from(va.as_int() + vb.as_int()),
-                        Instruction::SUB => Value::from(va.as_int() - vb.as_int()),
-                        Instruction::MUL => Value::from(va.as_int() * vb.as_int()),
-                        Instruction::DIV => Value::from(va.as_int() / vb.as_int()),
-                        Instruction::MOD => Value::from(va.as_int() % vb.as_int()),
-                        Instruction::Pow => {
-                            let exp = vb.as_int().max(0) as u32;
-                            Value::from(va.as_int().pow(exp))
-                        }
-                        Instruction::BITAND => Value::from(va.as_int() & vb.as_int()),
-                        Instruction::BITOR => Value::from(va.as_int() | vb.as_int()),
-                        Instruction::SHL => Value::from(va.as_int() << vb.as_int()),
-                        Instruction::SHR => Value::from(va.as_int() >> vb.as_int()),
-                        Instruction::XOR => Value::from(va.as_int() ^ vb.as_int()),
-                        Instruction::AND => Value::from(va.as_bool() && vb.as_bool()),
-                        Instruction::OR => Value::from(va.as_bool() || vb.as_bool()),
-                        Instruction::ADDF => Value::from(va.as_float() + vb.as_float()),
-                        Instruction::SUBF => Value::from(va.as_float() - vb.as_float()),
-                        Instruction::MULF => Value::from(va.as_float() * vb.as_float()),
-                        Instruction::DIVF => Value::from(va.as_float() / vb.as_float()),
-                        Instruction::MODF => Value::from(va.as_float() % vb.as_float()),
-                        Instruction::LE => Value::from((va.as_int() < vb.as_int()) as i64),
-                        Instruction::LEQ => Value::from((va.as_int() <= vb.as_int()) as i64),
-                        Instruction::GT => Value::from((va.as_int() > vb.as_int()) as i64),
-                        Instruction::GEQ => Value::from((va.as_int() >= vb.as_int()) as i64),
-                        Instruction::EQ => Value::from(
-                            crate::value_eq::values_eq(&self.heap, va, vb) as i64
-                        ),
-                        Instruction::NEQ => Value::from(
-                            (!crate::value_eq::values_eq(&self.heap, va, vb)) as i64
-                        ),
-                        Instruction::LEF => Value::from((va.as_float() < vb.as_float()) as i64),
-                        Instruction::LEQF => Value::from((va.as_float() <= vb.as_float()) as i64),
-                        Instruction::GTF => Value::from((va.as_float() > vb.as_float()) as i64),
-                        Instruction::GEQF => Value::from((va.as_float() >= vb.as_float()) as i64),
-                        Instruction::PowF => Value::from(va.as_float().powf(vb.as_float())),
-                        _ => Value::default(),
-                    };
+                    let result = crate::fused::eval_bin(op, va, vb, &self.heap);
                     self.stack.push(result);
                 }
                 Instruction::NATIVE => {
@@ -3282,24 +3089,11 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + b < stack_cap);
                     let va = self.stack[sp + a].as_float();
                     let vb = self.stack[sp + b].as_float();
-                    let mag = match Instruction::from(bin_op) {
-                        Instruction::ADDF => va + vb,
-                        Instruction::SUBF => va - vb,
-                        Instruction::MULF => va * vb,
-                        Instruction::DIVF => va / vb,
-                        Instruction::MODF => va % vb,
-                        _ => f64::NAN,
-                    };
+                    let mag = crate::fused::eval_f64_bin(bin_op, va, vb);
                     let rhs = Value::from(unsafe { *constants.get_unchecked(float_idx) }).as_float();
-                    let taken = match Instruction::from(cmp_op) {
-                        Instruction::LEF => mag < rhs,
-                        Instruction::LEQF => mag <= rhs,
-                        Instruction::GTF => mag > rhs,
-                        Instruction::GEQF => mag >= rhs,
-                        _ => false,
-                    };
+                    let taken = crate::fused::eval_f64_cmp(cmp_op, mag, rhs);
                     if taken == matches!(*bc, Instruction::BinSlotSlotConstJmpt) {
-                        set_jump_target(&mut ip, target, code_len);
+                        set_jump_target(&mut ip, target, code);
                     }
                 }
                 Instruction::HALT => {
@@ -3670,7 +3464,7 @@ impl<const S: usize> Machine<S> {
                                 };
                                 self.stack.push(value);
                             }
-                            set_jump_target(&mut ip, target_offset, code_len);
+                            set_jump_target(&mut ip, target_offset, code);
                         }
                     }
                 }
@@ -4013,7 +3807,7 @@ impl<const S: usize> Machine<S> {
                         self.frames
                             .setup_current_and_advance(|frame| frame.set(callee_sp));
                         sp = callee_sp;
-                        set_jump_target(&mut ip, entry as usize, code_len);
+                        set_jump_target(&mut ip, entry as usize, code);
                         continue;
                     }
 
@@ -4083,7 +3877,7 @@ impl<const S: usize> Machine<S> {
                     self.frames
                         .setup_current_and_advance(|frame| frame.set(callee_sp));
                     sp = callee_sp;
-                    set_jump_target(&mut ip, target, code_len);
+                    set_jump_target(&mut ip, target, code);
                 }
                 Instruction::MakeFn => {
                     // Stack (bottom → TOS):
