@@ -416,8 +416,11 @@ fn main() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
             r#"
+fn make() -> Option<int> {
+    return Option::Some(1);
+}
 fn foo() -> int {
-    return match Option::Some(1) {
+    return match make() {
         Option::None => 0,
         Option::Some(n) => n,
     };
@@ -431,7 +434,7 @@ fn foo() -> int {
         let make_enum = bc
             .iter()
             .position(|b| matches!(*b.bytecode(), Instruction::MakeEnum))
-            .expect("expected MakeEnum for Option::Some(1)");
+            .expect("expected MakeEnum for returned Option::Some(1)");
         let jim = bc[make_enum..]
             .iter()
             .position(|b| matches!(*b.bytecode(), Instruction::JumpIfMatch))
@@ -1334,7 +1337,8 @@ fn main() {
     fn match_emits_jump_if_match_cascade() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
-            "match Option::Some(1) { \
+            "fn make() -> Option<int> { return Option::Some(1); } \
+ match make() { \
  Option::None() => 0, \
  Option::Some(v) => v, \
  };",
@@ -2445,7 +2449,8 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     fn match_jump_if_match_targets_are_patched_to_arm_offsets() {
         use common::Instruction;
         let (bc, pool) = compile_src(
-            "match Option::Some(1) { \
+            "fn make() -> Option<int> { return Option::Some(1); } \
+ match make() { \
  Option::None() => 0, \
  Option::Some(v) => v, \
  };",
@@ -2571,8 +2576,9 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     fn nested_match_in_loop_emits_expected_opcodes() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
-            "fn main() { \
- let x = Option::Some(0); \
+            "fn make() -> Option<int> { return Option::Some(0); } \
+ fn main() { \
+ let x = make(); \
  let i = 0; \
  while (i < 3) { \
  return match x { \
@@ -6901,7 +6907,7 @@ fn main() {
     }
 
     #[test]
-    fn ground_option_string_none_uses_pointer_niche() {
+    fn ground_option_string_none_unused_local_may_unbox() {
         let (bc, _) = compile_src(
             r#"
 fn main() {
@@ -6910,15 +6916,15 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "ground Option<string> None must box; opcodes={:?}",
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
+            "unused local must not revive pair returns; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn option_int_none_stays_boxed() {
+    fn option_int_none_unused_local_may_unbox() {
         let (bc, _) = compile_src(
             r#"
 fn main() {
@@ -6927,9 +6933,60 @@ fn main() {
 "#,
         );
         assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
+            "unused local must not revive pair returns; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn local_option_match_skips_make_enum() {
+        let (bc, _) = compile_src(
+            r#"
+fn main() {
+    let x = Option::Some(1);
+    let y = match x {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "in-frame Some/None match must not MakeEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::JumpIfMatch)),
+            "in-frame match must not JumpIfMatch a heap enum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn local_option_escape_at_call_still_make_enum() {
+        let (bc, _) = compile_src(
+            r#"
+fn take(Option<int> o) -> int {
+    return match o {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+}
+fn main() {
+    let x = Option::Some(1);
+    let y = take(x);
+}
+"#,
+        );
+        assert!(
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "Option<int> None must stay boxed; opcodes={:?}",
+            "escaping Some at a call must still box; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
