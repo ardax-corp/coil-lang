@@ -180,7 +180,10 @@ fn scan_uses(
             scan_uses(checker, recv, cands, escaped, nested_fn);
         }
         Expression::Assignment(lhs, rhs) => {
-            if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
+            if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
+                poison_idents(recv, cands, escaped);
+                scan_uses(checker, rhs, cands, escaped, nested_fn);
+            } else if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 if cands.contains_key(*n) {
                     let r = peel(rhs);
                     if nested_fn || !is_in_frame_ctor(r) {
@@ -193,18 +196,22 @@ fn scan_uses(
                         }
                     }
                     scan_uses(checker, rhs, cands, escaped, nested_fn);
-                } else if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
-                    poison_idents(recv, cands, escaped);
-                    scan_uses(checker, lhs, cands, escaped, nested_fn);
-                    scan_uses(checker, rhs, cands, escaped, nested_fn);
                 } else {
-                    scan_uses(checker, lhs, cands, escaped, nested_fn);
                     scan_uses(checker, rhs, cands, escaped, nested_fn);
                 }
             } else {
                 scan_uses(checker, lhs, cands, escaped, nested_fn);
                 scan_uses(checker, rhs, cands, escaped, nested_fn);
             }
+        }
+        Expression::CompoundAssign(lhs, _, rhs) => {
+            if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
+                poison_idents(recv, cands, escaped);
+            } else {
+                poison_idents(lhs, cands, escaped);
+            }
+            scan_uses(checker, lhs, cands, escaped, nested_fn);
+            scan_uses(checker, rhs, cands, escaped, nested_fn);
         }
         Expression::Call { name, args } => {
             let callee = peel(name);
@@ -803,6 +810,21 @@ fn main() {
             frame_local_count(src) >= 2,
             "expected binder + construct + match ident"
         );
+    }
+
+    #[test]
+    fn field_store_escapes() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn main() {
+    let p = new Point(1, 2);
+    p.x = 10;
+}
+"#;
+        assert_eq!(frame_local_count(src), 0, "field store must stay heap");
     }
 
     #[test]
