@@ -192,19 +192,14 @@ pub(crate) fn typed_fn_from_hashed_dload<T>(addr: i64) -> Result<T, IoErrorTag> 
 
 /// In-place attach on the same Stream object.
 ///
-/// `allow` is the per-Machine `[ffi] allow_attach` flag. `vtable` holds typed
-/// C function pointers (tests construct them; HostInvoke takes them from a
-/// hashed dload, never a raw `i64` transmute).
+/// `vtable` holds typed C function pointers (tests construct them; HostInvoke
+/// takes them from a hashed dload, never a raw `i64` transmute).
 pub fn stream_attach(
     heap: &mut Heap,
-    allow: bool,
     stream: Value,
     ptr: i64,
     vtable: StreamVTable,
 ) -> Result<Value, IoErrorTag> {
-    if !allow {
-        return Err(IoErrorTag::PermissionDenied);
-    }
     let ptr_nn = NonNull::new(ptr as *mut c_void).ok_or(IoErrorTag::InvalidInput)?;
     with_stream_mut(heap, stream, |s: &mut ObjStream| {
         if s.closed || s.handle.is_none() {
@@ -370,7 +365,7 @@ mod tests {
         let stream = alloc_stream(heap, NativeHandle::Tcp(sock), StreamKind::Tcp).expect("alloc");
         let session = XorSession::new(xor);
         let raw = Box::into_raw(session);
-        stream_attach(heap, true, stream, raw as i64, xor_vtable()).expect("attach");
+        stream_attach(heap, stream, raw as i64, xor_vtable()).expect("attach");
         assert!(
             with_stream_mut(heap, stream, |s| stream_is_attached(s)).unwrap(),
             "attach must set Attached + vtable"
@@ -524,7 +519,6 @@ mod tests {
         let raw = Box::into_raw(session);
         stream_attach(
             &mut heap,
-            true,
             stream,
             raw as i64,
             StreamVTable {
@@ -546,25 +540,28 @@ mod tests {
         drop(server);
     }
 
+    /// Hand-written attach (no compile-time `--allow-attach`) still attaches.
     #[test]
-    fn attach_denied_without_allow_attach() {
+    fn attach_succeeds_without_runtime_allow_flag() {
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
-        let err = stream_attach(&mut heap, false, stream, 1, xor_vtable()).unwrap_err();
-        assert_eq!(err, IoErrorTag::PermissionDenied);
-        assert!(!with_stream_mut(&mut heap, stream, |s| stream_is_attached(s)).unwrap());
+        let session = XorSession::new(0);
+        let raw = Box::into_raw(session);
+        stream_attach(&mut heap, stream, raw as i64, xor_vtable()).expect("attach");
+        assert!(with_stream_mut(&mut heap, stream, |s| stream_is_attached(s)).unwrap());
+        stream_close(&mut heap, stream).ok();
         drop(server);
     }
 
     #[test]
-    fn attach_null_session_is_invalid_when_allowed() {
+    fn attach_null_session_is_invalid() {
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let stream =
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
-        let err = stream_attach(&mut heap, true, stream, 0, xor_vtable()).unwrap_err();
+        let err = stream_attach(&mut heap, stream, 0, xor_vtable()).unwrap_err();
         assert_eq!(err, IoErrorTag::InvalidInput);
         drop(server);
     }
@@ -574,23 +571,8 @@ mod tests {
         let (client, server) = tcp_pair();
         let mut heap = Heap::default();
         let (stream, _ptr) = attach_xor(&mut heap, client, 0);
-        let err = stream_attach(&mut heap, true, stream, 1, xor_vtable()).unwrap_err();
+        let err = stream_attach(&mut heap, stream, 1, xor_vtable()).unwrap_err();
         assert_eq!(err, IoErrorTag::InvalidInput);
-        stream_close(&mut heap, stream).ok();
-        drop(server);
-    }
-
-    #[test]
-    fn allow_is_per_call_not_a_process_switch() {
-        let (client, server) = tcp_pair();
-        let mut heap = Heap::default();
-        let stream =
-            alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
-        let denied = stream_attach(&mut heap, false, stream, 1, xor_vtable()).unwrap_err();
-        assert_eq!(denied, IoErrorTag::PermissionDenied);
-        let session = XorSession::new(0);
-        let raw = Box::into_raw(session);
-        stream_attach(&mut heap, true, stream, raw as i64, xor_vtable()).expect("allow on this call");
         stream_close(&mut heap, stream).ok();
         drop(server);
     }

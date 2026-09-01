@@ -7,16 +7,6 @@ use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
 use crate::io::{alloc_result_err, alloc_result_ok};
 use crate::memory::{Heap, Member, ObjArray, Object};
 
-/// Runtime gate for `env::exec`. Prefer [`crate::Machine::set_env_grants`].
-/// No-op: grants live on the bound [`crate::thread::HostStateGuard`] Machine.
-pub fn set_allow_exec(_allow: bool) {}
-
-/// Runtime gate for `env::exit`. Prefer [`crate::Machine::set_env_grants`].
-pub fn set_allow_exit(_allow: bool) {}
-
-/// Runtime gate for FFI process-exec symbols. Prefer [`crate::Machine::set_env_grants`].
-pub fn set_allow_ffi_exec(_allow: bool) {}
-
 pub use common::is_ffi_exec_symbol;
 
 /// Tag indices for [`EnvError`](common::BUILTIN_ENV_ERROR_ENUM).
@@ -210,14 +200,12 @@ fn try_host_set_cwd(heap: &mut Heap, args: &[Value]) -> Result<(), EnvErrorTag> 
     Ok(())
 }
 
-/// Terminates the process (`std::process::exit`). Never returns when granted.
+/// Terminates the process (`std::process::exit`). Never returns.
 ///
-/// Denied unless the bound Machine has `[env] allow_exit`. Returns
-/// [`EnvErrorTag::ExecDisabled`] (same as denied exec). `allow_exec` does not grant this.
-pub fn host_exit(heap: &mut Heap, args: &[Value]) -> Value {
-    if !crate::thread::host_allow_exit() {
-        return alloc_result_env_err(heap, EnvErrorTag::ExecDisabled);
-    }
+/// Compile-time `--allow-exit` is the grant; archived bytecode with this op
+/// runs it. [`EnvErrorTag::ExecDisabled`] remains an ABI tag but is not
+/// produced here.
+pub fn host_exit(_heap: &mut Heap, args: &[Value]) -> Value {
     let code = if args.is_empty() { 0 } else { args[0].as_int() };
     std::process::exit(code as i32);
 }
@@ -229,9 +217,6 @@ pub fn host_exec(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 fn try_host_exec(heap: &mut Heap, args: &[Value]) -> Result<i64, EnvErrorTag> {
-    if !crate::thread::host_allow_exec() {
-        return Err(EnvErrorTag::ExecDisabled);
-    }
     if args.len() != 2 {
         return Err(EnvErrorTag::InvalidInput);
     }
@@ -240,8 +225,7 @@ fn try_host_exec(heap: &mut Heap, args: &[Value]) -> Result<i64, EnvErrorTag> {
         return Err(EnvErrorTag::InvalidInput);
     }
     let argv = value_as_string_array(heap, args[1])?;
-    // Inherits VM cwd + env; runtime gate is the bound Machine's
-    // CLI / Pipeline `allow_exec` (typecheck already requires `--allow-exec`).
+    // Inherits VM cwd + env. Typecheck already requires `--allow-exec`.
     let status = Command::new(&program)
         .args(&argv)
         .status()
@@ -377,82 +361,11 @@ mod tests {
         assert_eq!(enum_tag(&heap, r), Some(0));
     }
 
-    fn with_env_grants<R>(
-        allow_exec: bool,
-        allow_exit: bool,
-        allow_ffi_exec: bool,
-        f: impl FnOnce() -> R,
-    ) -> R {
-        let mut vm = crate::Machine::<8>::default();
-        vm.set_env_grants(allow_exec, allow_exit, allow_ffi_exec);
-        let _g = crate::thread::HostStateGuard::enter(&mut vm);
-        f()
-    }
-
-    #[test]
-    fn ffi_exec_symbols_are_denied_without_allow_ffi_exec() {
+    fn ffi_exec_symbols_are_classified() {
         assert!(is_ffi_exec_symbol("system"));
         assert!(is_ffi_exec_symbol("execve"));
         assert!(is_ffi_exec_symbol("_wsystem"));
         assert!(!is_ffi_exec_symbol("strlen"));
-        with_env_grants(true, false, false, || {
-            assert!(
-                !crate::thread::host_allow_ffi_exec(),
-                "allow_exec must not grant FFI system/execve"
-            );
-        });
-        with_env_grants(false, false, true, || {
-            assert!(crate::thread::host_allow_ffi_exec());
-        });
-    }
-
-    #[test]
-    fn host_exit_denied_when_flag_off() {
-        let mut heap = Heap::default();
-        let r = with_env_grants(true, false, false, || {
-            host_exit(&mut heap, &[Value::from(0_i64)])
-        });
-        assert_eq!(result_err_tag(&heap, r), EnvErrorTag::ExecDisabled);
-    }
-
-    #[test]
-    fn host_exec_disabled_when_flag_off() {
-        let mut heap = Heap::default();
-        let prog = heap.intern("true".into());
-        let args = make_string_array(&mut heap, &[]);
-        let r = host_exec(
-            &mut heap,
-            &[Value::from(prog.as_ptr() as *mut u8 as u64), args],
-        );
-        assert_eq!(result_err_tag(&heap, r), EnvErrorTag::ExecDisabled);
-    }
-
-    #[test]
-    fn env_grants_do_not_leak_across_machines() {
-        let mut allow = crate::Machine::<8>::default();
-        allow.set_env_grants(true, false, false);
-        let mut deny = crate::Machine::<8>::default();
-        deny.set_env_grants(false, false, false);
-        {
-            let _g = crate::thread::HostStateGuard::enter(&mut allow);
-            assert!(crate::thread::host_allow_exec());
-            assert!(!crate::thread::host_allow_exit());
-        }
-        {
-            let _g = crate::thread::HostStateGuard::enter(&mut deny);
-            assert!(!crate::thread::host_allow_exec());
-            assert!(!crate::thread::host_allow_ffi_exec());
-        }
-        assert!(allow.allow_exec());
-        assert!(!deny.allow_exec());
-    }
-
-    #[test]
-    fn default_machine_and_archive_path_are_deny_all() {
-        let m = crate::Machine::<8>::default();
-        assert!(!m.allow_exec());
-        assert!(!m.allow_exit());
-        assert!(!m.allow_ffi_exec());
     }
 
     #[test]
@@ -462,17 +375,16 @@ mod tests {
         let mut heap = Heap::default();
         let prog = heap.intern("true".into());
         let args = make_string_array(&mut heap, &[]);
-        let r = with_env_grants(true, false, false, || {
-            host_exec(
-                &mut heap,
-                &[Value::from(prog.as_ptr() as *mut u8 as u64), args],
-            )
-        });
+        let r = host_exec(
+            &mut heap,
+            &[Value::from(prog.as_ptr() as *mut u8 as u64), args],
+        );
         if enum_tag(&heap, r) != Some(0) {
             // Sandboxed CI may block spawning subprocesses.
             let tag = result_err_tag(&heap, r);
-            assert!(
-                tag == EnvErrorTag::ExecFailed || tag == EnvErrorTag::ExecDisabled,
+            assert_eq!(
+                tag,
+                EnvErrorTag::ExecFailed,
                 "unexpected exec error {:?}",
                 tag
             );

@@ -1,5 +1,5 @@
 //! Glue to attach a compiled program to a VM: standard HostInvoke table,
-//! dload/FFI paths, env grants, C struct layouts, thread program.
+//! dload/FFI paths, C struct layouts, thread program.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -16,19 +16,14 @@ pub struct VmHostSpec<'a> {
     pub entry_path: Option<&'a Path>,
     pub project_root: &'a Path,
     pub ffi_search_paths: &'a [PathBuf],
-    pub ffi_allow: &'a [String],
     pub native_pins: &'a [(String, String)],
     pub trusted_stems: &'a [String],
     pub extra_dload_stems: &'a [String],
     pub extra_dload_grants: &'a [(String, PathBuf)],
-    pub allow_exec: bool,
-    pub allow_exit: bool,
-    pub allow_ffi_exec: bool,
-    pub allow_attach: bool,
     pub c_structs: &'a [common::CStructLayout],
 }
 
-/// Standard natives, dload gate, env grants, FFI search, C layouts.
+/// Standard natives, dload integrity gate, FFI search, C layouts.
 pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) {
     crate::wire_standard_host_natives(vm);
 
@@ -41,7 +36,6 @@ pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) 
     vm.set_ffi_paths(base_dir, search);
 
     let mut gate = DloadGate::from_consumer_trusted(
-        spec.ffi_allow,
         spec.native_pins,
         spec.trusted_stems.iter().map(String::as_str),
     );
@@ -51,10 +45,7 @@ pub fn wire_vm_host<const N: usize>(vm: &mut Machine<N>, spec: &VmHostSpec<'_>) 
     for (stem, path) in spec.extra_dload_grants {
         let _ = gate.grant_file(stem, path);
     }
-    gate.set_allow_attach(spec.allow_attach);
     vm.set_dload_gate(gate);
-
-    vm.set_env_grants(spec.allow_exec, spec.allow_exit, spec.allow_ffi_exec);
 
     for layout in spec.c_structs {
         vm.register_struct_layout(CStructLayout::from_archive(layout));

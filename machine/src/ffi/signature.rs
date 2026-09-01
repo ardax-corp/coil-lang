@@ -60,15 +60,11 @@ pub enum FfiError {
     Unsupported(String),
     /// Bad library handle or out-of-range function id at invoke/declare time.
     InvalidHandle(String),
-    /// Shared library blocked by the `dload` gate (stem list / extra allow+hash).
+    /// Shared library blocked by the `dload` integrity gate (hash / trusted).
     LibraryDenied {
         name: String,
         stem: String,
         reason: String,
-    },
-    /// Process-exec symbol (`system`, `execve`, …) blocked unless `[env] allow_ffi_exec`.
-    SymbolDenied {
-        name: String,
     },
     /// FFI string argument contained an interior NUL.
     InteriorNul,
@@ -99,12 +95,6 @@ impl std::fmt::Display for FfiError {
             Self::InvalidHandle(msg) => write!(f, "{msg}"),
             Self::LibraryDenied { name, stem, reason } => {
                 write!(f, "FFI library `{name}` (stem `{stem}`) denied: {reason}")
-            }
-            Self::SymbolDenied { name } => {
-                write!(
-                    f,
-                    "FFI symbol `{name}` denied: process exec requires [env] allow_ffi_exec"
-                )
             }
             Self::InteriorNul => write!(f, "FFI string contains an interior NUL"),
         }

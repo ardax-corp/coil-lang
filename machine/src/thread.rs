@@ -389,9 +389,6 @@ pub(crate) struct MachineHostState {
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
     dload_gate: crate::ffi::DloadGate,
-    allow_exec: bool,
-    allow_exit: bool,
-    allow_ffi_exec: bool,
     pgo: crate::pgo::PgoCounters,
 }
 
@@ -410,9 +407,6 @@ impl HostStateGuard {
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
         let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
         let dload_gate = vm.dload_gate().clone();
-        let allow_exec = vm.allow_exec();
-        let allow_exit = vm.allow_exit();
-        let allow_ffi_exec = vm.allow_ffi_exec();
         let pgo = vm.pgo_counters().clone();
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
@@ -422,9 +416,6 @@ impl HostStateGuard {
                 io_reactor,
                 cpu_reactor,
                 dload_gate,
-                allow_exec,
-                allow_exit,
-                allow_ffi_exec,
                 pgo,
             });
         });
@@ -505,27 +496,6 @@ pub(crate) fn host_io_wait_no_help(
         Some(io) => io.wait_fd(handle, interest, timeout),
         None => IoReactor::new().wait_fd(handle, interest, timeout),
     }
-}
-
-/// Per-Machine `[ffi] allow_attach`. False when no VM is bound.
-pub(crate) fn host_allow_attach() -> bool {
-    HOST_STATE.with(|c| {
-        c.borrow()
-            .as_ref()
-            .is_some_and(|s| s.dload_gate.allow_attach())
-    })
-}
-
-pub(crate) fn host_allow_exec() -> bool {
-    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_exec))
-}
-
-pub(crate) fn host_allow_exit() -> bool {
-    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_exit))
-}
-
-pub(crate) fn host_allow_ffi_exec() -> bool {
-    HOST_STATE.with(|c| c.borrow().as_ref().is_some_and(|s| s.allow_ffi_exec))
 }
 
 pub(crate) fn host_pgo_hit(packed: i64) {
@@ -1005,11 +975,8 @@ pub struct ThreadSpawnContext {
     pub ffi_base_dir: Option<PathBuf>,
     /// `[ffi] search_paths` from the parent Machine.
     pub ffi_search_paths: Vec<PathBuf>,
-    /// Fail-closed `dload` gate (allow + lock hash / trusted / host grants).
+    /// Fail-closed `dload` integrity (lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,
-    pub allow_exec: bool,
-    pub allow_exit: bool,
-    pub allow_ffi_exec: bool,
     pub pgo: crate::pgo::PgoCounters,
 }
 
@@ -1026,9 +993,6 @@ impl Clone for ThreadSpawnContext {
             ffi_base_dir: self.ffi_base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
-            allow_exec: self.allow_exec,
-            allow_exit: self.allow_exit,
-            allow_ffi_exec: self.allow_ffi_exec,
             pgo: self.pgo.clone(),
         }
     }
