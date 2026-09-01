@@ -12,6 +12,12 @@ fn fib_entry() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/fib.hy")
 }
 
+fn apply_workspace_roots(cmd: &mut Command) {
+    for root in compiler::Pipeline::workspace_language_extra_roots() {
+        cmd.arg("--root").arg(root);
+    }
+}
+
 fn coil_on_entry(bin: &str, cwd: &Path, entry: &Path) -> Command {
     let mut cmd = Command::new(bin);
     cmd.current_dir(cwd);
