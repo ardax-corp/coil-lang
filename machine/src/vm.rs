@@ -94,6 +94,7 @@ thread_local! {
     static VM_ALLOC_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_GC_COUNT: AtomicU64 = const { AtomicU64::new(0) };
     static VM_MAKE_FAST_COUNT: AtomicU64 = const { AtomicU64::new(0) };
+    static VM_INTERN_STR_COUNT: AtomicU64 = const { AtomicU64::new(0) };
 }
 
 /// Record one managed heap object allocation.
@@ -115,6 +116,7 @@ pub fn reset_alloc_profile() {
     VM_ALLOC_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_GC_COUNT.with(|c| c.store(0, Ordering::Relaxed));
     VM_MAKE_FAST_COUNT.with(|c| c.store(0, Ordering::Relaxed));
+    VM_INTERN_STR_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 }
 
 #[cfg(not(any(test, feature = "vm_profile")))]
@@ -170,6 +172,32 @@ fn note_make_fast() {
 #[cfg(not(any(test, feature = "vm_profile")))]
 #[inline]
 fn note_make_fast() {}
+
+/// Record one `Heap::intern_str` (hash + intern table probe).
+#[cfg(any(test, feature = "vm_profile"))]
+#[inline]
+pub(crate) fn note_intern_str() {
+    VM_INTERN_STR_COUNT.with(|c| {
+        c.fetch_add(1, Ordering::Relaxed);
+    });
+}
+
+#[cfg(not(any(test, feature = "vm_profile")))]
+#[inline]
+pub(crate) fn note_intern_str() {}
+
+/// Number of `intern_str` calls since the last reset.
+#[cfg(any(test, feature = "vm_profile"))]
+#[must_use]
+pub fn intern_str_count() -> u64 {
+    VM_INTERN_STR_COUNT.with(|c| c.load(Ordering::Relaxed))
+}
+
+#[cfg(not(any(test, feature = "vm_profile")))]
+#[must_use]
+pub fn intern_str_count() -> u64 {
+    0
+}
 
 macro_rules! binary {
     ($stack: expr, $op:tt, $from: ident, $to: ident) => {
@@ -284,6 +312,10 @@ pub struct Machine<const S: usize> {
     program_code: Vec<RawByte>,
     program_constants: Vec<u64>,
     program_strings: Vec<String>,
+    /// Interned handle per `program_strings` index. Not a GC root: sweep
+    /// zeros the table so unmarked literals can die; STRING still stacks
+    /// the handle before `maybe_gc`.
+    program_string_cache: Vec<Value>,
     /// When > 0, `RETURN` captures into `nested_return` instead of unwinding to caller.
     nested_depth: u32,
     /// Stack of frame-stack lengths at each active [`call_function`] entry.
@@ -366,6 +398,7 @@ impl<const S: usize> Machine<S> {
             program_code: Vec::new(),
             program_constants: Vec::new(),
             program_strings: Vec::new(),
+            program_string_cache: Vec::new(),
             nested_depth: 0,
             nested_frame_depths: Vec::new(),
             nested_return: None,
@@ -613,7 +646,7 @@ impl<const S: usize> Machine<S> {
                 std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
             };
             self.program_constants = constants.to_vec();
-            self.program_strings = strings.to_vec();
+            self.install_program_strings(strings);
             self.sync_thread_program_from_current();
         }
         let mut ip = start_ip;
@@ -1025,6 +1058,8 @@ impl<const S: usize> Machine<S> {
             self.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
             unsafe { self.heap.sweep() };
+            // Cache is not a GC root; unmarked interned literals are gone.
+            self.program_string_cache.fill(Value::default());
             if !self.gc_deferred {
                 break;
             }
@@ -1263,12 +1298,28 @@ impl<const S: usize> Machine<S> {
         self.maybe_gc_after_alloc();
     }
 
+    fn install_program_strings(&mut self, strings: &[String]) {
+        self.program_strings = strings.to_vec();
+        self.program_string_cache.clear();
+        self.program_string_cache
+            .resize(self.program_strings.len(), Value::default());
+    }
+
     fn push_program_string(&mut self, idx: usize) {
+        let cached = unsafe { *self.program_string_cache.get_unchecked(idx) };
+        if likely(!cached.raw().is_null()) {
+            self.stack.push(cached);
+            return;
+        }
         let data = unsafe { self.program_strings.get_unchecked(idx) };
         let gc_string = self.heap.intern_str(data);
-        self.stack
-            .push(Value::from(gc_string.as_ptr() as *mut u8 as u64));
+        let handle = Value::from(gc_string.as_ptr() as *mut u8 as u64);
+        self.stack.push(handle);
         self.maybe_gc_after_alloc();
+        // Re-store after maybe-GC: sweep zeros the cache (not a root).
+        unsafe {
+            *self.program_string_cache.get_unchecked_mut(idx) = handle;
+        }
     }
 }
 
@@ -1831,7 +1882,7 @@ impl<const S: usize> Machine<S> {
     pub fn load_program(&mut self, code: &[RawByte], constants: &[u64], strings: &[String]) {
         self.program_code = code.to_vec();
         self.program_constants = constants.to_vec();
-        self.program_strings = strings.to_vec();
+        self.install_program_strings(strings);
         self.panicked = false;
     }
 
@@ -1912,7 +1963,7 @@ impl<const S: usize> Machine<S> {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
         };
         self.program_constants = constants.to_vec();
-        self.program_strings = strings.to_vec();
+        self.install_program_strings(strings);
         self.sync_thread_program_from_current();
         let mut ip = 0usize;
         loop {
