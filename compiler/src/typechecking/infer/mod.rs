@@ -180,6 +180,10 @@ pub struct Checker {
     module_locals: HashMap<ModuleId, HashMap<String, DefId>>,
     /// Sidecar: pre-walk [`NodeId`] → interned def (reset each `check_program`).
     def_ids_by_node: HashMap<NodeId, DefId>,
+    /// NodeIds whose ObjEnum / small-class value never leaves this frame.
+    pub(crate) frame_local: HashSet<NodeId>,
+    /// Identifier / construct nodes that are the last in-frame use of a local.
+    pub(crate) frame_local_last_use: HashSet<NodeId>,
     /// [`ModuleId`] for [`Self::current_module`].
     current_module_id: ModuleId,
 
