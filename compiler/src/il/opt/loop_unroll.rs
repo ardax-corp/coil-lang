@@ -21,6 +21,7 @@ pub struct LoopInfo {
 }
 
 /// Unroll every eligible loop whose trip count is ≤ `factor` (and ≤ 8).
+#[cfg(test)]
 pub fn unroll_loops(ops: &mut Vec<IlOp>, factor: usize) -> usize {
     unroll_loops_pgo(ops, factor, false)
 }

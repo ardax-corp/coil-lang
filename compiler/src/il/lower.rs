@@ -8,8 +8,9 @@ use std::collections::HashMap;
 
 use common::{Byte, DebugLoc, Instruction};
 
-use super::func::IlFunc;
 use super::builder::IlError;
+#[cfg(test)]
+use super::func::IlFunc;
 use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 use super::opt;
 
@@ -121,23 +122,25 @@ pub fn assert_no_residual_abs_jumps(ops: &[IlOp]) {
 /// Optimize and lower `ops` into VM bytecode.
 ///
 /// When `funcs` is empty, opts run on the whole buffer (unit tests). Production
-/// [`super::CodeBuf::lower_in_place`] rebuilds an owning [`super::IlModule`] and
-/// lowers through [`lower_module`].
-#[allow(dead_code)] // used by unit tests / re-exports
+/// uses [`super::CodeBuf::lower_in_place`] → [`lower_module_inner`].
+#[cfg(test)]
 pub fn lower(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
     try_lower(ops, pool).unwrap_or_else(|e| panic!("{e}"))
 }
 
 /// Lower `ops`, returning [`IlError::UnboundLabel`] instead of emitting JMP to PC 0.
+#[cfg(test)]
 pub fn try_lower(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlError> {
     try_lower_with_funcs(ops, &[], pool)
 }
 
 /// Rebuild [`super::IlModule`] from flat ops + spans, then [`lower_module`].
+#[cfg(test)]
 pub fn lower_with_funcs(ops: &[IlOp], funcs: &[IlFunc], pool: &mut Vec<u64>) -> Lowered {
     try_lower_with_funcs(ops, funcs, pool).unwrap_or_else(|e| panic!("{e}"))
 }
 
+#[cfg(test)]
 fn try_lower_with_funcs(
     ops: &[IlOp],
     funcs: &[IlFunc],
@@ -150,10 +153,12 @@ fn try_lower_with_funcs(
 /// Optimize an owning [`super::IlModule`] and lower once (fuse-select + PC assign).
 ///
 /// Pipeline: per-body opts/GVN → concat → whole-buffer multi_op → single lower.
+#[cfg(test)]
 pub fn lower_module(module: &mut super::IlModule, pool: &mut Vec<u64>) -> Lowered {
     try_lower_module(module, pool).unwrap_or_else(|e| panic!("{e}"))
 }
 
+#[cfg(test)]
 fn try_lower_module(
     module: &mut super::IlModule,
     pool: &mut Vec<u64>,
@@ -181,6 +186,7 @@ pub(crate) fn lower_module_inner(
 }
 
 /// Fuse-select + PC assign for an already-optimized op stream (no IL opts).
+#[cfg(test)]
 pub(crate) fn lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Lowered {
     try_lower_optimized(ops, pool).unwrap_or_else(|e| panic!("{e}"))
 }

@@ -608,7 +608,7 @@ impl Default for Checker {
 
 mod checker;
 mod sidecar;
-pub use sidecar::{PairNicheAbi, SelectedOverload, TypedSidecar};
+pub use sidecar::{SelectedOverload, TypedSidecar};
 
 
 /// Human-readable name of a payload shape, used in

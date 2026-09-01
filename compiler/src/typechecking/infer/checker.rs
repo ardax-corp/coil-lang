@@ -1606,6 +1606,7 @@ impl Checker {
     }
 
     /// [`DefId`] for one overload candidate (`0` is the set representative).
+    #[cfg(test)]
     pub fn interned_overload_def(&self, name: &str, candidate: u32) -> Option<DefId> {
         let (module, intern_name) = self.split_overload_intern_key(name);
         self.def_interner
@@ -8301,7 +8302,7 @@ impl Checker {
     ///
     /// This is the simplest form: a single message with a primary
     /// label at `range`. No help hint, no secondary labels. For richer
-    /// diagnostics use [`error_with_help`] or [`error_with_labels`].
+    /// diagnostics use [`error_with_help`].
     fn error(&mut self, code: ErrorCode, message: String, range: Range<usize>) -> Ty {
         self.messages.push(Message::error(code, message, range));
         Ty::Var(self.counter.fresh())
@@ -8329,8 +8330,8 @@ impl Checker {
     /// labels. Each secondary label is rendered by ariadne below the
     /// primary underline; use them to point at related source positions
     /// (e.g., "expected type comes from here", "found type comes from
-    /// here").
-    #[allow(dead_code)]
+    /// here"). Production diagnostics use [`error_with_help`].
+    #[cfg(test)]
     fn error_with_labels(
         &mut self,
         code: ErrorCode,

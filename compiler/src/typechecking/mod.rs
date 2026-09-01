@@ -31,7 +31,7 @@ pub use aggregate_arith::{is_matrix_ty, unwrap_matrix_ty, wrap_matrix_ty};
 pub use def_id::{DefId, DefInterner, DefKind, ModuleId};
 #[allow(unused_imports)] // public API re-export
 pub use infer::{
-    CStructDef, CallbackSigDef, Checker, ForInInfo, ForInKind, PairNicheAbi, SelectedOverload,
+    CStructDef, CallbackSigDef, Checker, ForInInfo, ForInKind, SelectedOverload,
     TypedSidecar,
 };
 #[allow(unused_imports)] // public API for kind-aware callers / tests
