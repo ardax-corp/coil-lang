@@ -694,6 +694,11 @@ struct Context {
     /// name → (base_slot, N). Escaping uses → `MakeArray`.
     stack_array_locals: HashMap<String, (u32, usize)>,
 
+    /// Frame-local ObjEnum: name → (payload_slot, tag_slot).
+    unboxed_enum_locals: HashMap<String, (u32, u32)>,
+    /// Frame-local small class: name → (base_slot, nfields).
+    unboxed_class_locals: HashMap<String, (u32, usize)>,
+
     prev: Option<Box<Self>>,
 }
 
@@ -866,6 +871,9 @@ pub struct Compiler {
     /// Force a contextually typed `Option::None` / `Option::Some` onto the
     /// pointer-niche path when its constructor node has no standalone type.
     force_niche_option: bool,
+    /// When > 0, frame-local ObjEnum construct/load emits `[payload, tag]`
+    /// in locals / on the stack instead of `MakeEnum`.
+    unbox_enum_context: u32,
 
     /// Emit and consume the two-slot `[payload, tag]` ABI for a unary
     /// `Option`/`Result` return while compiling a statically known function.
@@ -1018,6 +1026,7 @@ impl Default for Compiler {
             compiling_result_ok_is_result: false,
             force_heap_option: false,
             force_niche_option: false,
+            unbox_enum_context: 0,
             compiling_pair_mode: false,
             compiling_pair_is_option: false,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
@@ -1075,6 +1084,8 @@ impl<'ctx> Context {
             // Fresh overlay so inner `let` / destructure can shadow outer names.
             block_bindings: Some(HashMap::new()),
             stack_array_locals: self.stack_array_locals.clone(),
+            unboxed_enum_locals: self.unboxed_enum_locals.clone(),
+            unboxed_class_locals: self.unboxed_class_locals.clone(),
             prev: Some(Box::new(self.to_owned())),
         }
     }

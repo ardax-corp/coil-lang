@@ -3700,6 +3700,225 @@ impl Compiler {
             .or_else(|| self.node_id_of(node).and_then(|id| self.sidecar_ty(id)))
     }
 
+    fn node_is_frame_local(&self, node: &Output<'_>) -> bool {
+        let mut cur = node;
+        loop {
+            if let Some(id) = self.node_id_of(cur) {
+                if self.typed_sidecar.is_frame_local(id) {
+                    return true;
+                }
+            }
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        false
+    }
+
+    fn unboxed_enum_info(&self, name: &str) -> Option<(u32, u32)> {
+        self.context.unboxed_enum_locals.get(name).copied()
+    }
+
+    fn unboxed_class_info(&self, name: &str) -> Option<(u32, usize)> {
+        self.context.unboxed_class_locals.get(name).copied()
+    }
+
+    fn alloc_unboxed_enum_slots(&mut self, name: &str) -> (u32, u32) {
+        let payload = self.alloc_binding_slot(name);
+        let tag_name = format!("__unbox_tag_{name}");
+        let tag = self.context.variables.intern(tag_name) as u32;
+        self.context
+            .unboxed_enum_locals
+            .insert(name.to_string(), (payload, tag));
+        (payload, tag)
+    }
+
+    fn alloc_unboxed_class_slots(&mut self, name: &str, n: usize) -> u32 {
+        let base = self.alloc_binding_slot(name);
+        for i in 1..n {
+            let pad = format!("__unbox_cls_{name}_{i}");
+            let slot = self.context.variables.intern(pad) as u32;
+            debug_assert_eq!(slot, base + i as u32);
+        }
+        self.context
+            .unboxed_class_locals
+            .insert(name.to_string(), (base, n));
+        base
+    }
+
+    fn try_bind_frame_local(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        name: &str,
+        binder: &Output<'_>,
+        rhs_node: &Output<'_>,
+        rhs: &Output<'_>,
+        rhs_is_match: bool,
+    ) -> bool {
+        if !(self.node_is_frame_local(binder)
+            || self.node_is_frame_local(rhs_node)
+            || self.node_is_frame_local(rhs))
+        {
+            return false;
+        }
+        let ty = self
+            .sidecar_ty_of(binder)
+            .filter(|t| self.ty_is_unbox_local(t))
+            .or_else(|| {
+                self.sidecar_ty_of(rhs_node)
+                    .filter(|t| self.ty_is_unbox_local(t))
+            })
+            .or_else(|| {
+                self.sidecar_ty_of(rhs)
+                    .filter(|t| self.ty_is_unbox_local(t))
+            })
+            .or_else(|| self.ctor_unbox_ty(rhs_node));
+        let Some(ty) = ty else {
+            return false;
+        };
+        if self.checker.ty_is_class(&ty) {
+            let Some(cname) = Checker::class_name_of_ty(&ty) else {
+                return false;
+            };
+            let n = self
+                .context
+                .classes
+                .get(cname)
+                .map(|f| f.len())
+                .or_else(|| self.checker.class_fields(cname).map(|f| f.len()))
+                .unwrap_or(0);
+            if n < 1 {
+                return false;
+            }
+            let Expression::Instantiate(class, args) = rhs_node.1.as_ref() else {
+                return false;
+            };
+            let _ = self.next_emit_id();
+            self.skip_emit_ids_to_unwrapped(rhs);
+            let _ = self.next_emit_id(); // class name
+            let _ = class;
+            let base = self.alloc_unboxed_class_slots(name, n);
+            if let Some(args) = args {
+                for (i, arg) in args.iter().enumerate().take(n) {
+                    if rhs_is_match {
+                        self.emit_binding_rhs(arg);
+                        self.bytecode.push_store_pop(base + i as u32);
+                    } else {
+                        bytecode.append(&mut self.do_compile(arg));
+                        bytecode.push_store_pop(base + i as u32);
+                    }
+                }
+            }
+            return true;
+        }
+        if crate::typechecking::ty::is_option_ty(&ty)
+            || crate::typechecking::ty::is_result_ty(&ty)
+            || self.ty_is_frame_enum(&ty)
+        {
+            let _ = self.next_emit_id();
+            self.unbox_enum_context += 1;
+            if rhs_is_match {
+                self.emit_binding_rhs(rhs);
+            } else {
+                self.append_binding_rhs(bytecode, rhs);
+            }
+            self.unbox_enum_context -= 1;
+            let (payload, tag) = self.alloc_unboxed_enum_slots(name);
+            if rhs_is_match {
+                self.bytecode.push_store_pop(tag);
+                self.bytecode.push_store_pop(payload);
+            } else {
+                bytecode.push_store_pop(tag);
+                bytecode.push_store_pop(payload);
+            }
+            return true;
+        }
+        false
+    }
+
+    fn ctor_unbox_ty(&self, rhs_node: &Output<'_>) -> Option<Ty> {
+        match rhs_node.1.as_ref() {
+            Expression::Construct {
+                enum_name, fields, ..
+            } => {
+                let arity = match fields {
+                    parser::ast::EnumConstructPayload::Unit => 0,
+                    parser::ast::EnumConstructPayload::Tuple(args) => args.len(),
+                    parser::ast::EnumConstructPayload::Record(parts) => parts.len(),
+                };
+                if arity > 1 {
+                    return None;
+                }
+                let ty = Ty::Con((*enum_name).to_string());
+                self.ty_is_unbox_local(&ty).then_some(ty)
+            }
+            Expression::Instantiate(class, _) => {
+                let Expression::Identifier(n) = unwrap_expr_output(class).1.as_ref() else {
+                    return None;
+                };
+                let ty = Ty::Con((*n).to_string());
+                self.ty_is_unbox_local(&ty).then_some(ty)
+            }
+            _ => None,
+        }
+    }
+
+    fn ty_is_unbox_local(&self, ty: &Ty) -> bool {
+        if self.checker.ty_is_class(ty) {
+            let Some(name) = Checker::class_name_of_ty(ty) else {
+                return false;
+            };
+            if self.checker.class_has_drop(name) {
+                return false;
+            }
+            let n = self
+                .checker
+                .class_fields(name)
+                .map(|f| f.len())
+                .unwrap_or(0);
+            return n >= 1 && n <= 32;
+        }
+        crate::typechecking::ty::is_option_ty(ty)
+            || crate::typechecking::ty::is_result_ty(ty)
+            || self.ty_is_frame_enum(ty)
+    }
+
+    fn ty_is_frame_enum(&self, ty: &Ty) -> bool {
+        use crate::typechecking::ty::{is_option_ty, is_result_ty};
+        if is_option_ty(ty) || is_result_ty(ty) {
+            return true;
+        }
+        if self.checker.ty_is_class(ty) {
+            return false;
+        }
+        let name = match ty {
+            Ty::Con(n) | Ty::Sum { name: n, .. } => n.as_str(),
+            Ty::App(h, _) => match h.as_ref() {
+                Ty::Con(n) => n.as_str(),
+                _ => return false,
+            },
+            Ty::Constructor { owner, .. } => match owner.as_ref() {
+                Ty::Con(n) => n.as_str(),
+                Ty::App(h, _) => match h.as_ref() {
+                    Ty::Con(n) => n.as_str(),
+                    _ => return false,
+                },
+                _ => return false,
+            },
+            _ => return false,
+        };
+        if common::is_builtin_ffi_enum(name) {
+            return false;
+        }
+        let Some(vars) = self.checker.enum_variants(name) else {
+            return false;
+        };
+        let max_arity = vars.iter().map(|(_, _, p)| p.len()).max().unwrap_or(0);
+        max_arity <= 1 && !vars.is_empty()
+    }
+
     /// Extern setup is keyed by the declaration's short name (and, after
     /// B3, sometimes the module FQN). Call meaning is FQN via DefId.
     fn lookup_extern_runtime(&self, n: &str) -> Option<(u32, u32)> {
@@ -7470,6 +7689,8 @@ impl Compiler {
         }
 
         let prev_vars = std::mem::take(&mut self.context.variables);
+        let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
+        let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_fn_table_key = self.current_function_table_key.take();
@@ -7522,6 +7743,8 @@ impl Compiler {
         self.compiling_pair_mode = prev_pair_mode;
         self.compiling_pair_is_option = prev_pair_is_option;
         self.context.variables = prev_vars;
+        self.context.unboxed_enum_locals = prev_unboxed_enum;
+        self.context.unboxed_class_locals = prev_unboxed_class;
         self.polyfn_vars = prev_polyfn_vars;
         self.polyfn_sources = prev_polyfn_sources;
         self.current_function_table_key = prev_fn_table_key;
@@ -10283,7 +10506,17 @@ impl Compiler {
                             self.polyfn_vars.insert(name.clone());
                         }
                         let rhs_is_match = Self::rhs_is_match_expr(&children[1]);
-                        if is_const {
+                        let rhs_node = unwrap_expr_output(&children[1]);
+                        if self.try_bind_frame_local(
+                            &mut bytecode,
+                            &name,
+                            &children[0],
+                            rhs_node,
+                            &children[1],
+                            rhs_is_match,
+                        ) {
+                            is_binding = true;
+                        } else if is_const {
                             // Compile the RHS BEFORE interning the binding name.
                             // Match payload slots use `variables.len()` as the first
                             // free slot; interning early (e.g. `let v = match e`)
@@ -10318,7 +10551,6 @@ impl Compiler {
                             // Flat `codegen_var_type` is last-wins across functions
                             // (sibling tests often reuse `a`/`b`), so it must not be
                             // the sole source of `N`.
-                            let rhs_node = unwrap_expr_output(&children[1]);
                             let bind_ty = self
                                 .expr_codegen_ty(rhs_node)
                                 .or_else(|| self.codegen_expr_ty(&children[1]))
@@ -10469,6 +10701,8 @@ impl Compiler {
                 // the entry frame (bytecode before `main`).
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
                 let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
+                let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
+                let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
                 let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
                 let prev_fn_qualified = self.current_function_qualified.take();
@@ -10486,6 +10720,8 @@ impl Compiler {
                 self.push_const_env();
                 self.context.variables = Interner::default();
                 self.context.stack_array_locals.clear();
+                self.context.unboxed_enum_locals.clear();
+                self.context.unboxed_class_locals.clear();
                 self.expr_depth = 0;
                 if self.compiling_method {
                     let slot = self.context.variables.intern("self".to_string()) as u32;
@@ -10575,6 +10811,8 @@ impl Compiler {
                     .record_func_with_sp(table_key.clone(), entry, body_start, body_end, entry_sp);
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
+                self.context.unboxed_enum_locals = prev_unboxed_enum;
+                self.context.unboxed_class_locals = prev_unboxed_class;
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
 
@@ -11346,6 +11584,11 @@ impl Compiler {
                     .or_else(|| self.checker.static_slot_for_module_name(n))
                 {
                     bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(static_slot));
+                } else if let Some((payload, tag_slot)) = self.unboxed_enum_info(n) {
+                    bytecode.push_load(payload);
+                    if self.unbox_enum_context > 0 {
+                        bytecode.push_load(tag_slot);
+                    }
                 } else if let Some(slot) = self.lookup_slot(n) {
                     if let Some((base, len)) = self.stack_array_info(n) {
                         // Escape multi-slot local to a heap ObjArray.
@@ -12251,7 +12494,30 @@ impl Compiler {
                                 }
                             }
                             // Multi-slot stack array: rewrite slots in place.
-                            if let Some((base, n)) = self.stack_array_info(name) {
+                            if let Some((payload, tag_slot)) = self.unboxed_enum_info(name) {
+                                let _ = self.next_emit_id();
+                                self.unbox_enum_context += 1;
+                                self.append_binding_rhs(&mut bytecode, value);
+                                self.unbox_enum_context -= 1;
+                                bytecode.push_store_pop(tag_slot);
+                                bytecode.push_store_pop(payload);
+                            } else if let Some((base, n)) = self.unboxed_class_info(name) {
+                                let _ = self.next_emit_id();
+                                let rhs_node = unwrap_expr_output(value);
+                                if let Expression::Instantiate(_, args) = rhs_node.1.as_ref() {
+                                    self.skip_emit_ids_to_unwrapped(value);
+                                    let _ = self.next_emit_id();
+                                    if let Some(args) = args {
+                                        for (i, arg) in args.iter().enumerate().take(n) {
+                                            bytecode.append(&mut self.do_compile(arg));
+                                            bytecode.push_store_pop(base + i as u32);
+                                        }
+                                    }
+                                } else {
+                                    self.append_binding_rhs(&mut bytecode, value);
+                                    bytecode.push_store_pop(symbol as u32);
+                                }
+                            } else if let Some((base, n)) = self.stack_array_info(name) {
                                 // Assignment: `name` Identifier is pre-walked
                                 // before `value`; consume it when we skip emit.
                                 let _ = self.next_emit_id();
@@ -12624,6 +12890,41 @@ impl Compiler {
                 };
                 let arity = self.checker.arity_for(enum_name, variant_name).unwrap_or(0);
 
+                if self.unbox_enum_context > 0 {
+                    match fields {
+                        EnumConstructPayload::Unit if arity == 0 => {
+                            bytecode.push_const(0);
+                        }
+                        EnumConstructPayload::Tuple(args) if args.len() == 1 => {
+                            bytecode.append(&mut self.do_compile(&args[0]));
+                        }
+                        EnumConstructPayload::Record(parts) if parts.len() == 1 => {
+                            bytecode.append(&mut self.do_compile(&parts[0].value));
+                        }
+                        EnumConstructPayload::Unit => {
+                            bytecode.push_const(0);
+                        }
+                        EnumConstructPayload::Tuple(args) => {
+                            for arg in args {
+                                bytecode.append(&mut self.do_compile(arg));
+                            }
+                            if args.is_empty() {
+                                bytecode.push_const(0);
+                            }
+                        }
+                        EnumConstructPayload::Record(parts) => {
+                            for part in parts {
+                                bytecode.append(&mut self.do_compile(&part.value));
+                            }
+                            if parts.is_empty() {
+                                bytecode.push_const(0);
+                            }
+                        }
+                    }
+                    bytecode.push_const(tag as i32);
+                    return bytecode;
+                }
+
                 let pair_enum = self.pair_value_context
                     && (common::is_builtin_option_enum(enum_name)
                         || common::is_builtin_result_enum(enum_name))
@@ -12731,6 +13032,24 @@ impl Compiler {
             Expression::Access(receiver, field) => {
                 if self.try_emit_direct_class_field_access(&mut bytecode, receiver, field) {
                     return bytecode;
+                }
+                if let Expression::Identifier(name) = unwrap_expr_output(receiver).1.as_ref()
+                    && let Some((base, nfields)) = self.unboxed_class_info(name)
+                {
+                    let class_ty = self.receiver_type(receiver);
+                    let class_name = class_ty.as_ref().and_then(Checker::class_name_of_ty);
+                    let idx = class_name.and_then(|cn| {
+                        self.context.classes.get(cn).and_then(|fields| {
+                            fields.iter().position(|(fname, _)| fname == field)
+                        })
+                    });
+                    if let Some(idx) = idx {
+                        if idx < nfields {
+                            self.skip_emit_ids_to_unwrapped(receiver);
+                            bytecode.push_load(base + idx as u32);
+                            return bytecode;
+                        }
+                    }
                 }
                 bytecode.append(&mut self.do_compile(receiver));
 
@@ -13229,6 +13548,7 @@ impl Compiler {
         self.current_function_table_key = None;
         self.force_heap_option = false;
         self.force_niche_option = false;
+        self.unbox_enum_context = 0;
         self.compiling_pair_mode = false;
         self.pair_value_context = false;
         // Peel/unroll must not see other modules' bodies (label/CFG mix-up).

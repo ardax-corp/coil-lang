@@ -9,6 +9,9 @@ impl Compiler {
         scrutinee: &Output<'compiler>,
         arms: &[MatchArm<'compiler>],
     ) -> CodeBuf {
+        if self.try_compile_frame_local_match(scrutinee, arms) {
+            return CodeBuf::new();
+        }
         if (self.compiling_pair_mode
             || matches!(scrutinee.1.as_ref(), Expression::Call { .. }))
             && self.expr_is_pair_producer(scrutinee)
@@ -148,6 +151,165 @@ impl Compiler {
         let mut body_bc = self.do_compile(&arm.body);
         self.bytecode.append(&mut body_bc);
         self.context.match_bindings = saved_bindings;
+    }
+
+    /// Local ObjEnum that the checker proved never leaves this frame:
+    /// `[payload, tag]` in slots / on the stack, no `MakeEnum`.
+    fn try_compile_frame_local_match<'compiler>(
+        &mut self,
+        scrutinee: &Output<'compiler>,
+        arms: &[MatchArm<'compiler>],
+    ) -> bool {
+        if arms.is_empty() {
+            return false;
+        }
+        let mut peeled = scrutinee;
+        loop {
+            match peeled.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => peeled = inner,
+                Expression::Fragment(items) if items.len() == 1 => peeled = &items[0],
+                _ => break,
+            }
+        }
+        let ident = match peeled.1.as_ref() {
+            Expression::Identifier(n) => Some(*n),
+            _ => None,
+        };
+        let from_ident = ident.and_then(|n| self.unboxed_enum_info(n));
+        let from_fact = self.node_is_frame_local(scrutinee) || self.node_is_frame_local(peeled);
+        if from_ident.is_none() && !from_fact {
+            return false;
+        }
+        if matches!(peeled.1.as_ref(), Expression::Identifier(_)) && from_ident.is_none() {
+            return false;
+        }
+        if matches!(peeled.1.as_ref(), Expression::Construct { .. }) && !from_fact {
+            return false;
+        }
+        if !matches!(
+            peeled.1.as_ref(),
+            Expression::Identifier(_) | Expression::Construct { .. }
+        ) {
+            return false;
+        }
+
+        let mut arm_info: Vec<(u32, usize, Option<&str>)> = Vec::new();
+        let mut wildcard: Option<usize> = None;
+        for (index, arm) in arms.iter().enumerate() {
+            match &arm.pattern.1 {
+                Pattern::Constructor {
+                    enum_name,
+                    variant_name,
+                    payload,
+                } => {
+                    let Some(tag) = self.checker.tag_for(enum_name, variant_name) else {
+                        return false;
+                    };
+                    let arity = self.checker.arity_for(enum_name, variant_name).unwrap_or(0);
+                    if arity > 1 {
+                        return false;
+                    }
+                    let binding = match payload {
+                        PatternPayload::Unit => None,
+                        PatternPayload::Tuple(parts) if parts.len() == 1 => match &parts[0].1 {
+                            Pattern::Binding { name } => Some(*name),
+                            Pattern::Wildcard => None,
+                            _ => return false,
+                        },
+                        PatternPayload::Record(fields) if fields.len() == 1 => {
+                            match &fields[0].pattern.1 {
+                                Pattern::Binding { name } => Some(*name),
+                                Pattern::Wildcard => None,
+                                _ => return false,
+                            }
+                        }
+                        PatternPayload::Tuple(parts) if parts.is_empty() => None,
+                        _ => return false,
+                    };
+                    arm_info.push((tag, index, binding));
+                }
+                Pattern::Wildcard => wildcard = Some(index),
+                Pattern::Binding { name } => {
+                    arm_info.push((u32::MAX, index, Some(*name)));
+                }
+            }
+        }
+        if arm_info.is_empty() && wildcard.is_none() {
+            return false;
+        }
+
+        self.bytecode
+            .push_seek(self.context.variables.len() as u32);
+        self.unbox_enum_context += 1;
+        let mut scrutinee_bc = self.do_compile(scrutinee);
+        self.unbox_enum_context -= 1;
+        self.bytecode.append(&mut scrutinee_bc);
+
+        let mut bb = BlockBuilder::new();
+        let end = bb.fresh_label(self.bytecode.il_mut());
+        let n_dispatch = arm_info.len();
+        for (i, (tag, arm_idx, binding)) in arm_info.iter().enumerate() {
+            let is_last = i + 1 == n_dispatch && wildcard.is_none();
+            let miss = if is_last {
+                None
+            } else {
+                Some(bb.fresh_label(self.bytecode.il_mut()))
+            };
+            if *tag != u32::MAX && !is_last {
+                self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                self.bytecode.push_const(*tag as i32);
+                self.bytecode.push(Byte::new(Instruction::EQ));
+                bb.emit_jump_to_hinted(
+                    miss.expect("miss label"),
+                    BbJumpKind::JumpIfFalse,
+                    FuseHint::nofuse_value_under_jmp(),
+                    self.bytecode.il_mut(),
+                );
+                self.bytecode.push_pop();
+            } else if *tag != u32::MAX && is_last {
+                self.bytecode.push_pop();
+            } else if *tag == u32::MAX {
+                self.bytecode.push_pop();
+            }
+            let slot = binding.map(|name| {
+                let slot = self.context.variables.len() as u32;
+                self.context
+                    .variables
+                    .intern(format!("__unbox_match{slot}"));
+                self.record_debug_local(name, slot);
+                slot
+            });
+            if let Some(slot) = slot {
+                self.bytecode.push_store_pop(slot);
+            } else {
+                self.bytecode.push_pop();
+            }
+            self.compile_pair_match_body(&arms[*arm_idx], *binding, slot);
+            bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            if let Some(m) = miss {
+                bb.bind_label(m, self.bytecode.il_mut());
+            }
+        }
+        if let Some(w) = wildcard {
+            self.bytecode.push_pop();
+            self.bytecode.push_pop();
+            self.compile_pair_match_body(&arms[w], None, None);
+        }
+        bb.bind_label(end, self.bytecode.il_mut());
+        if let Some((payload, tag_slot)) = from_ident {
+            let last = self.node_id_of(peeled).is_some_and(|id| {
+                self.typed_sidecar.is_frame_local_last_use(id)
+            }) || self.node_id_of(scrutinee).is_some_and(|id| {
+                self.typed_sidecar.is_frame_local_last_use(id)
+            });
+            if last {
+                self.bytecode.push_const(0);
+                self.bytecode.push_store_pop(payload);
+                self.bytecode.push_const(0);
+                self.bytecode.push_store_pop(tag_slot);
+            }
+        }
+        true
     }
 
     /// Compile a niche-option match when both arms only inspect the null
