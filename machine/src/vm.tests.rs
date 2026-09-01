@@ -563,6 +563,69 @@
     }
 
     #[test]
+    fn call_without_array_pin_allocates_no_pin_map() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed(0, 3),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            Byte::new(Instruction::ConstReturnImm).with_operand_u32(1),
+        ]);
+        assert_eq!(vm.pop().as_int(), 1);
+        assert_eq!(vm.live_pin_map_count(), 0);
+    }
+
+    #[test]
+    fn fused_fib_leaves_no_pin_maps() {
+        let (code, pool) = fused_fib_bytecode(10);
+        let mut vm = Machine::<512>::default();
+        vm.run_with_pool(&code, &pool, &[], 0);
+        assert_eq!(vm.pop().as_int(), 55);
+        assert_eq!(vm.live_pin_map_count(), 0);
+    }
+
+    #[test]
+    fn array_pin_in_callee_drops_on_return() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            Byte::new(Instruction::CALL).with_call_packed(1, 6),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            load(0),
+            Byte::new(Instruction::ArrayPin).with_operand_u32(0),
+            const_int(1),
+            Byte::new(Instruction::IndexPin).with_operand_u32(0),
+            Byte::new(Instruction::RETURN),
+        ]);
+        assert_eq!(vm.pop().as_int(), 6);
+        assert_eq!(vm.live_pin_map_count(), 0);
+    }
+
+    #[test]
+    fn caller_pin_survives_inner_call_without_pin() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            load(0),
+            Byte::new(Instruction::ArrayPin).with_operand_u32(0),
+            Byte::new(Instruction::CALL).with_call_packed(0, 11),
+            const_int(1),
+            Byte::new(Instruction::IndexPin).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            Byte::new(Instruction::ConstReturnImm).with_operand_u32(0),
+        ]);
+        assert_eq!(vm.pop().as_int(), 6);
+        assert_eq!(vm.live_pin_map_count(), 1);
+    }
+
+    #[test]
     fn index_unchecked_reads_in_bounds_element() {
         let mut vm = Machine::<8>::default();
         vm.run(&[

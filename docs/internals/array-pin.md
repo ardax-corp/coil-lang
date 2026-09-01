@@ -33,8 +33,9 @@ Do not append another pin / ArrayPtr opcode. The product is these five.
 
 Not a `Value` fat pointer, not a generation stamp, not a nursery card.
 
-`Machine` keeps `frame_pins: ArrayVec<HashMap<u32, Object>, S>` in lockstep
-with `frames` (`machine/src/vm.rs`). Each call frame owns one map. Keys are
+`Machine` keeps `frame_pins: Vec<(usize, HashMap<u32, Object>)>`
+(`machine/src/vm.rs`). The `usize` is `frames.len()` at first `ArrayPin` on
+that frame. CALL does not allocate a map; `ArrayPin` inserts one. Keys are
 the array's **local slot** (the `ArrayPin` operand). Values are `Object`
 (`Copy` `Gc<ObjArray>` — a `NonNull<GcData<ObjArray>>` in
 `machine/src/memory/heap.rs`).
@@ -89,14 +90,15 @@ natives in `machine/src/vec_ops.rs`.
 
 There is no generation or pin-token opcode. A pin dies when:
 
-- the frame pops (`RETURN`, `pop_call_frame`, yield unwind);
+- the frame pops (`RETURN`, `pop_call_frame`, yield unwind) and that frame
+  had a map;
 - `ArrayPin` overwrites the same slot;
-- coroutine resume pushes a **fresh empty** map for each restored frame
-  (`push_pin_frame` after yield — see yield barrier below).
+- coroutine yield drops maps for unwound frames. Pins are not saved across
+  yield; `ArrayPin` after resume allocates again.
 
-`CALL` / `CallIndirect` / `call_function` push a new empty map for the
-callee; the caller's map stays on the previous frame and is still a GC root.
-`TailCall` reuses the current frame, so leftover pins remain until that
+`CALL` / `CallIndirect` / `call_function` do not push a pin map. The caller's
+map (if any) stays keyed by its frame depth and is still a GC root.
+`TailCall` reuses the current frame depth, so leftover pins remain until that
 frame returns. `TailCall` is already a length-proof barrier, so a proven
 loop body does not tail-call.
 
@@ -176,7 +178,7 @@ A generation / moving-GC stamp is unused while sweep is non-moving.
 
 `YieldCoro` / `YieldFromCoro` are length-proof barriers
 (`op_blocks_length_proof` in `compiler/src/il/pure_call.rs`), same family as
-`TailCall`. Resume pushes a **fresh empty** pin map; a pin emitted in a
+`TailCall`. Pins are not saved across yield; a pin emitted in a
 yielding counted loop would miss after the first suspend (`IndexPin*` **panic**).
 Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
 `IndexPin*` / `IndexUnchecked`. Pins are not persisted on `ObjCoroutine`.
