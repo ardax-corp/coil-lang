@@ -16,7 +16,6 @@ use super::opt::{self, OptimizeOptions};
 #[derive(Clone)]
 pub struct IlFuncBody {
     /// Span / entry metadata from emit-time [`IlFunc`].
-    #[allow(dead_code)] // retained for module hooks / diagnostics
     pub meta: IlFunc,
     pub ops: Vec<IlOp>,
 }
