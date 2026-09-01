@@ -435,7 +435,7 @@
         assert!(vm.heap().find_object_by_addr(keep.raw() as u64).is_some());
         let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
             Some(Object::String(gc)) => gc.as_ref().data.clone(),
-            other => panic!("expected interned keep string, got {other:?}"),
+            _ => panic!("expected interned keep string on the stack after GC"),
         };
         assert_eq!(text, "keep");
     }
