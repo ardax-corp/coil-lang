@@ -2377,6 +2377,9 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
         "Manifest [ffi] allow must not grant dload, got {output:?}"
     );
 }
+
+#[test]
+fn userland_dload_trusted_c_is_denied() {
     let extra = r#"
 [dependencies]
 c = { git = "https://example.com/libc.git", trusted = true }
