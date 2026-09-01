@@ -828,7 +828,10 @@ mod tests {
                 return;
             }
         };
-        resolve_symbol(&lib, "execve").expect("hand-written bytecode may resolve execve");
+        // POSIX `execve` is not exported by Windows CRT; `_wsystem` is the
+        // classified FFI-exec symbol that opens with the same libc handle.
+        let name = if cfg!(windows) { "_wsystem" } else { "execve" };
+        resolve_symbol(&lib, name).expect("hand-written bytecode may resolve FFI exec symbols");
     }
 
     #[cfg(not(target_os = "windows"))]
