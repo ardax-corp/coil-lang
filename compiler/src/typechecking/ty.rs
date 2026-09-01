@@ -309,10 +309,8 @@ pub const RECEIVER: &str = "Receiver";
 pub const MUTEX: &str = "Mutex";
 pub const RWLOCK: &str = "RwLock";
 /// Name of the `Root` type constructor (`gc::Root`).
-#[allow(dead_code)]
 pub const ROOT: &str = "Root";
 /// Name of the `Weak` type constructor (`gc::Weak`).
-#[allow(dead_code)]
 pub const WEAK: &str = "Weak";
 /// Name of the `List` type constructor.
 #[allow(dead_code)] // reserved for future list-type support
@@ -430,18 +428,12 @@ pub fn result_app_ty(ok: Ty, err: Ty) -> Ty {
 
 /// Build `Root<T>` as a type application.
 pub fn root_app_ty(inner: Ty) -> Ty {
-    Ty::App(
-        Box::new(Ty::Con(common::BUILTIN_ROOT_TYPE.into())),
-        vec![inner],
-    )
+    Ty::App(Box::new(Ty::Con(ROOT.into())), vec![inner])
 }
 
 /// Build `Weak<T>` as a type application.
 pub fn weak_app_ty(inner: Ty) -> Ty {
-    Ty::App(
-        Box::new(Ty::Con(common::BUILTIN_WEAK_TYPE.into())),
-        vec![inner],
-    )
+    Ty::App(Box::new(Ty::Con(WEAK.into())), vec![inner])
 }
 
 /// Build `Vec<T>` as a type application.

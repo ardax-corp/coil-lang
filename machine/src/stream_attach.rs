@@ -242,7 +242,7 @@ pub fn stream_park(heap: &mut Heap, stream: Value) -> Result<(), IoErrorTag> {
 }
 
 /// True when this stream dispatches read/write/close through an attached vtable.
-#[allow(dead_code)]
+#[cfg(test)]
 pub fn stream_is_attached(s: &ObjStream) -> bool {
     s.kind == StreamKind::Attached && s.attached.is_some()
 }
@@ -371,6 +371,10 @@ mod tests {
         let session = XorSession::new(xor);
         let raw = Box::into_raw(session);
         stream_attach(heap, true, stream, raw as i64, xor_vtable()).expect("attach");
+        assert!(
+            with_stream_mut(heap, stream, |s| stream_is_attached(s)).unwrap(),
+            "attach must set Attached + vtable"
+        );
         (stream, raw)
     }
 
@@ -550,6 +554,7 @@ mod tests {
             alloc_stream(&mut heap, NativeHandle::Tcp(client), StreamKind::Tcp).expect("alloc");
         let err = stream_attach(&mut heap, false, stream, 1, xor_vtable()).unwrap_err();
         assert_eq!(err, IoErrorTag::PermissionDenied);
+        assert!(!with_stream_mut(&mut heap, stream, |s| stream_is_attached(s)).unwrap());
         drop(server);
     }
 

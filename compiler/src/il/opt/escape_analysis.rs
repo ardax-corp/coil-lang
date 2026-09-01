@@ -84,6 +84,7 @@ pub fn is_stack_allocatable(site: &AllocSite) -> bool {
 }
 
 /// Scalarize every stack-allocatable `MakeArray` into consecutive locals.
+#[cfg(test)]
 pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
     allocate_on_stack_pgo(ops, info, true);
 }
@@ -171,6 +172,7 @@ fn allocate_on_stack_pgo(ops: &mut Vec<IlOp>, info: &EscapeInfo, prefer_hot: boo
 }
 
 /// Analyze then scalarize. No-op when every `MakeArray` escapes.
+#[cfg(test)]
 pub fn escape_analysis(ops: &mut Vec<IlOp>) {
     escape_analysis_pgo(ops, true);
 }

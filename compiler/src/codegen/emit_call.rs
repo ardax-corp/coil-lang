@@ -1261,10 +1261,4 @@ impl Compiler {
         bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(arity));
     }
 
-    /// Direct `CALL` when the callee entry is statically known (no stack target).
-    #[allow(dead_code)]
-    pub(super) fn emit_known_target_call(bytecode: &mut impl EmitBuf, target_offset: u32, arity: u32) {
-        bytecode.push(Byte::new(Instruction::CALL).with_call_packed(arity, target_offset));
-    }
-
 }

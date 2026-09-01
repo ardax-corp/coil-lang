@@ -289,7 +289,6 @@ fn group_arms_by_outer_tag(arms: &[MatchArm], checker: &Checker) -> Vec<TagGroup
 }
 
 /// True when an arm needs inner-pattern runtime tests (nested bindings/constructors).
-#[allow(dead_code)]
 fn arm_has_runtime_test(arm: &MatchArm) -> bool {
     /// Recursive helper: does the inner payload of this arm's
     /// outer Constructor pattern carry a `Binding` or further
@@ -325,7 +324,6 @@ fn arm_has_runtime_test(arm: &MatchArm) -> bool {
 }
 
 /// Emit inner-pattern tests after outer tag dispatch (multi-arm groups).
-#[allow(dead_code, unused_variables)]
 fn emit_inner_test<'compiler>(
     arm_idx: usize,
     checker: &Checker,
@@ -336,7 +334,7 @@ fn emit_inner_test<'compiler>(
     bytecode: &mut CodeBuf,
     bb: &mut BlockBuilder,
     pass_label: Option<crate::block_builder::Label>,
-    fail_label: crate::block_builder::Label,
+    _fail_label: crate::block_builder::Label,
     payload_base: u32,
 ) {
     use parser::ast::PatternPayload;
@@ -390,7 +388,7 @@ fn emit_inner_test<'compiler>(
                                 bytecode,
                                 bb,
                                 pass_label,
-                                fail_label,
+                                _fail_label,
                                 payload_base,
                             );
                         } else if let Some(label) = pass_label {
@@ -475,7 +473,7 @@ fn emit_inner_test<'compiler>(
                                 bytecode,
                                 bb,
                                 pass_label,
-                                fail_label,
+                                _fail_label,
                                 payload_base,
                             );
                         } else if let Some(label) = pass_label {
@@ -607,7 +605,6 @@ fn collect_pattern_binding_types_with_expected(
 /// `base` is the first payload slot (`context.variables.len()` at match
 /// entry). Slot 0 is reserved for the first function argument; trailing
 /// dictionary locals occupy 1..base-1 when `dict_arity > 0`.
-#[allow(dead_code)]
 fn next_available_slot(match_bindings: &HashMap<usize, HashMap<String, u32>>, base: u32) -> u32 {
     let mut max_slot = base.saturating_sub(1);
     for arm_bindings in match_bindings.values() {

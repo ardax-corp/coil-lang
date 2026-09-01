@@ -22,6 +22,7 @@ pub fn set_pgo_prioritize_hot_licm(on: bool) {
 /// BinSlot*, tuple/array/dict construction, non-trapping int arith, FORMAT
 /// concat, and `len`. Also sinks table-indexed `STRING` field keys, CSEs
 /// `LOAD; CastIntToFloat`, and moves invariant `len(a)` ([`bounds`]).
+#[cfg(test)]
 pub fn licm(ops: &mut Vec<IlOp>) {
     licm_with(ops, None);
 }
