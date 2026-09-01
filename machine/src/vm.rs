@@ -248,7 +248,8 @@ macro_rules! unary {
 
 /// Software-prefetch the bytecode word at `ip` (no-op if past the end).
 /// `core::hint::prefetch_read` is still unstable (`hint_prefetch`); use arch
-/// prefetch on stable 1.98.
+/// prefetch on stable 1.98. T1 / LOCALITY2 so we do not shove the operand
+/// stack out of L1; HW already covers the sequential stream.
 #[inline(always)]
 fn prefetch_code(code: &[Byte], ip: usize) {
     if ip >= code.len() {
@@ -257,13 +258,13 @@ fn prefetch_code(code: &[Byte], ip: usize) {
     let ptr = unsafe { code.as_ptr().add(ip) }.cast::<i8>();
     #[cfg(target_arch = "x86_64")]
     unsafe {
-        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T0 }>(ptr);
+        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T1 }>(ptr);
     }
     #[cfg(target_arch = "aarch64")]
     unsafe {
         core::arch::aarch64::_prefetch::<
             { core::arch::aarch64::_PREFETCH_READ },
-            { core::arch::aarch64::_PREFETCH_LOCALITY3 },
+            { core::arch::aarch64::_PREFETCH_LOCALITY2 },
         >(ptr);
     }
 }
