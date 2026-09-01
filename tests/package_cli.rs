@@ -278,6 +278,10 @@ url = "https://example.com/libsum.so"
     let packaged = Command::new(&bin)
         .args([
             "package",
+            "--allow-dload",
+            "sum",
+            "--ffi-search-path",
+            "./native",
             "src/main.hy",
             "-o",
             out.to_str().unwrap(),
