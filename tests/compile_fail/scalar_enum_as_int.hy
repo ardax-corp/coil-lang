@@ -1,6 +1,6 @@
 // Expected: compile failure — Status is not an int at the type level.
 enum Status {
-    Ok = 200,
+    Success = 200,
     NotFound = 404,
 }
 
@@ -9,5 +9,5 @@ fn take_int(int n) -> int {
 }
 
 fn main() {
-    take_int(Status::Ok);
+    take_int(Status::Success);
 }

@@ -506,12 +506,12 @@ fn example_scalar_enum_prints_ok_200() {
 #[test]
 fn scalar_enum_construct_emits_no_make_enum() {
     let src = r#"
-enum Status { Ok = 200, NotFound = 404 }
+enum HttpCode { Success = 200, NotFound = 404 }
 fn main() {
-    let s = Status::Ok;
+    let s = HttpCode::Success;
     let n = match s {
-        Status::Ok => s.value,
-        Status::NotFound => 0,
+        HttpCode::Success => s.value,
+        HttpCode::NotFound => 0,
     };
 }
 "#;
@@ -521,7 +521,7 @@ fn main() {
         !bytecode
             .iter()
             .any(|b| matches!(b.bytecode(), common::Instruction::MakeEnum)),
-        "scalar-backed Status::Ok must not allocate ObjEnum (MakeEnum)"
+        "scalar-backed HttpCode::Success must not allocate ObjEnum (MakeEnum)"
     );
 }
 

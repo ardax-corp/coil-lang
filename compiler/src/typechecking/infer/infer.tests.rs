@@ -8095,9 +8095,9 @@ fn main() {
 
     #[test]
     fn scalar_enum_non_exhaustive_reports_missing() {
-        let src = "enum Status { Ok = 200, NotFound = 404 } \
-                   let s = Status::Ok; \
-                   match s { Status::Ok => 1 };";
+        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
+                   let s = HttpCode::Success; \
+                   match s { HttpCode::Success => 1 };";
         let msgs = assert_messages(src);
         assert!(
             msgs.iter()
@@ -8109,18 +8109,18 @@ fn main() {
 
     #[test]
     fn scalar_enum_default_is_exhaustive() {
-        let src = "enum Status { Ok = 200, NotFound = 404 } \
-                   let s = Status::Ok; \
-                   match s { Status::Ok => 1, default => 0 };";
+        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
+                   let s = HttpCode::Success; \
+                   match s { HttpCode::Success => 1, default => 0 };";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
     }
 
     #[test]
     fn scalar_enum_is_not_an_int() {
-        let src = "enum Status { Ok = 200, NotFound = 404 } \
+        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
                    fn f(int n) -> int { return n; } \
-                   f(Status::Ok);";
+                   f(HttpCode::Success);";
         let msgs = assert_messages(src);
         assert!(
             msgs.iter().any(|m| m.message().contains("int") || m.message().contains("Status")),
@@ -8131,8 +8131,8 @@ fn main() {
 
     #[test]
     fn scalar_enum_value_field_is_int() {
-        let src = "enum Status { Ok = 200, NotFound = 404 } \
-                   let s = Status::Ok; \
+        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
+                   let s = HttpCode::Success; \
                    let n: int = s.value;";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());

@@ -1,12 +1,12 @@
 // Expected: compile failure — missing scalar case.
 enum Status {
-    Ok = 200,
+    Success = 200,
     NotFound = 404,
 }
 
 fn main() {
-    let s = Status::Ok;
+    let s = Status::Success;
     let _ = match s {
-        Status::Ok => 1,
+        Status::Success => 1,
     };
 }

@@ -1,6 +1,6 @@
 // Scalar-backed enums: unboxed backing word, nominal type, `.value`.
 enum Status {
-    Ok = 200,
+    Success = 200,
     NotFound = 404,
 }
 
@@ -24,13 +24,13 @@ enum Switch {
 
 fn describe(Status s) -> int {
     return match s {
-        Status::Ok => 1,
+        Status::Success => 1,
         default => 0,
     };
 }
 
 test("int scalar match and value") {
-    let s = Status::Ok;
+    let s = Status::Success;
     assert(describe(s) == 1)?;
     assert(s.value == 200)?;
     assert(Status::NotFound.value == 404)?;
@@ -38,7 +38,7 @@ test("int scalar match and value") {
 }
 
 test("inferred repr without attribute") {
-    assert(Status::Ok.value + Status::NotFound.value == 604)?;
+    assert(Status::Success.value + Status::NotFound.value == 604)?;
 }
 
 test("string float bool scalar") {
