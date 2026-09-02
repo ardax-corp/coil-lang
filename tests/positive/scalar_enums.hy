@@ -102,7 +102,10 @@ test("derived Eq Hash Show Ord") {
     assert(Status::Ok == Status::Ok)?;
     assert(Status::Ok != Status::NotFound)?;
     assert(Status::Ok < Status::NotFound)?;
-    assert(Status::Ok.show() == "Status.Ok")?;
+    assert(Status::Ok.show() == (200).show())?;
+    assert(Mode::Fast.show() == ("fast").show())?;
+    assert(Ratio::Half.show() == (0.5).show())?;
+    assert(Switch::On.show() == true.show())?;
     assert(hash_key(Status::Ok) == Status::Ok.hash())?;
     assert(Status::Ok.hash() != Status::NotFound.hash())?;
 }

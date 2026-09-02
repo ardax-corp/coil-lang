@@ -500,7 +500,7 @@ fn example_option_prints_42() {
 #[test]
 fn example_scalar_enum_prints_ok_200() {
     let output = run_example("examples/scalar_enum.hy");
-    assert_eq!(output, "ok 200 Status.Ok\n");
+    assert_eq!(output, "ok 200 200\n");
 }
 
 #[test]

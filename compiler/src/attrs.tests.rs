@@ -161,12 +161,12 @@
             .map(|n| format!("{:?}", n.1))
             .unwrap_or_default();
         assert!(
-            show_dbg.contains("Status.Ok") || show_dbg.contains("Status.Ok"),
-            "scalar Show should print Status.Ok, got: {show_dbg}"
+            show_dbg.contains("\"show\"") && show_dbg.contains("Call"),
+            "scalar Show should dispatch to backing show(), got: {show_dbg}"
         );
         assert!(
-            !show_dbg.contains("Status::Ok"),
-            "scalar Show should not use ::, got: {show_dbg}"
+            !show_dbg.contains("Status.Ok") && !show_dbg.contains("Status::Ok"),
+            "scalar Show should not print the qualified name, got: {show_dbg}"
         );
     }
 
