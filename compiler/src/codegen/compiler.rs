@@ -13190,7 +13190,7 @@ impl Compiler {
             // Forward: scrutinee, JUMP_IF_MATCH cascade, last-arm UNPACK/POP/STORE.
             // Reverse: arm bindings + bodies; non-first arms JMP to end.
             Expression::Match { scrutinee, arms } => bytecode.append(&mut self.compile_match_expr(scrutinee, arms)),
-            // Parser maps `_`/`default` to Pattern::Wildcard; arm consumes NodeId only.
+            // Parser maps `default` to Pattern::Default; arm consumes NodeId only.
             Expression::Default(_) => (),
 
             // --- Field access ---

@@ -14292,8 +14292,8 @@ impl Checker {
             Pattern::Wildcard => ArmCoverage {
                 tag: None,
                 inner: CoverageTree::Any,
-                is_catchall: true,
-                is_keyword_catchall: true,
+                is_catchall: false,
+                is_keyword_catchall: false,
                 range: range.clone(),
             },
             Pattern::Default => ArmCoverage {
@@ -14366,7 +14366,7 @@ impl Checker {
         let resolved = apply_ty_prune(&self.subst, &pending.scrutinee_ty);
 
         // Track which (outer tag, inner coverage) pairs have been
-        // seen and whether a catch-all (wildcard / binding) is
+        // seen and whether a catch-all (`default` / binding) is
         // present. Two arms with the same outer tag but DIFFERENT
         // inner coverage (e.g. `Result::Ok(Option::Some(v))` vs
         // `Result::Ok(Option::None)`) are both reachable — the
@@ -14401,7 +14401,7 @@ impl Checker {
             for r in keyword_catchalls.into_iter().skip(1) {
                 self.messages.push(Message::error(
                     ErrorCode::MultipleMatchCatchall,
-                    "Match has more than one catch-all (`_` / `default`)".to_string(),
+                    "Match has more than one catch-all (`default`)".to_string(),
                     r,
                 ));
             }
@@ -14409,8 +14409,8 @@ impl Checker {
         }
 
         if has_catchall {
-            // A wildcard / default / binding arm covers every remaining
-            // case. No further error needed.
+            // A `default` / binding arm covers every remaining
+            // case. Whole-arm `_` is illegal and does not close.
             return;
         }
 
@@ -14458,7 +14458,7 @@ impl Checker {
                     pending.match_range.clone(),
                 );
                 msg.with_help(
-                    "add a wildcard arm `_ => ...` or `default => ...` to cover the remaining cases"
+                    "add a `default => ...` arm to cover the remaining cases"
                         .to_string(),
                 );
                 self.messages.push(msg);

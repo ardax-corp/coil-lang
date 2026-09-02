@@ -2676,7 +2676,7 @@ fn synth_eq_enum<'a>(
     }
     // Defensive fallback (should be unreachable if exhaustive).
     arms.push(MatchArm {
-        pattern: span_pat(span, Pattern::Wildcard),
+        pattern: span_pat(span, Pattern::Default),
         body: at(span, Expression::Bool(false)),
     });
     let match_expr = at(
@@ -2880,7 +2880,7 @@ fn eq_variant_arm<'a>(
                     body: at(span, Expression::Bool(true)),
                 },
                 MatchArm {
-                    pattern: span_pat(span, Pattern::Wildcard),
+                    pattern: span_pat(span, Pattern::Default),
                     body: at(span, Expression::Bool(false)),
                 },
             ];
@@ -2918,7 +2918,7 @@ fn eq_variant_arm<'a>(
                     body: cmp,
                 },
                 MatchArm {
-                    pattern: span_pat(span, Pattern::Wildcard),
+                    pattern: span_pat(span, Pattern::Default),
                     body: at(span, Expression::Bool(false)),
                 },
             ];
@@ -2955,7 +2955,7 @@ fn eq_variant_arm<'a>(
                     body: cmp,
                 },
                 MatchArm {
-                    pattern: span_pat(span, Pattern::Wildcard),
+                    pattern: span_pat(span, Pattern::Default),
                     body: at(span, Expression::Bool(false)),
                 },
             ];
@@ -3071,7 +3071,7 @@ fn ord_method<'a>(
         arms.push(MatchArm { pattern, body });
     }
     arms.push(MatchArm {
-        pattern: span_pat(span, Pattern::Wildcard),
+        pattern: span_pat(span, Pattern::Default),
         body: at(span, Expression::Bool(false)),
     });
     let match_expr = at(
@@ -3115,7 +3115,7 @@ fn ord_outer_arm<'a>(
         });
     }
     inner_arms.push(MatchArm {
-        pattern: span_pat(span, Pattern::Wildcard),
+        pattern: span_pat(span, Pattern::Default),
         body: at(span, Expression::Bool(false)),
     });
     let body = at(
@@ -3441,7 +3441,7 @@ fn synth_hash_enum<'a>(
         });
     }
     arms.push(MatchArm {
-        pattern: span_pat(span, Pattern::Wildcard),
+        pattern: span_pat(span, Pattern::Default),
         body: int_zero(span),
     });
     let match_expr = at(
@@ -3568,7 +3568,7 @@ fn synth_serialize_enum<'a>(
         });
     }
     arms.push(MatchArm {
-        pattern: span_pat(span, Pattern::Wildcard),
+        pattern: span_pat(span, Pattern::Default),
         body: vec_new_call(span),
     });
     let match_expr = at(
