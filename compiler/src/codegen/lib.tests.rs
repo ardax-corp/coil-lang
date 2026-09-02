@@ -1366,17 +1366,17 @@ fn main() {
         );
     }
 
-    /// Codegen test 3: a wildcard match arm emits `POP` to
+    /// Codegen test 3: a `default` match arm emits `POP` to
     /// discard the scrutinee.
     #[test]
-    fn wildcard_match_arm_emits_pop() {
+    fn default_match_arm_emits_pop() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "let x = Option::Some(42); \
- match x { _ => 42 };",
+ match x { default => 42 };",
         );
 
-        // The wildcard arm is the LAST (and only) arm, reached
+        // The catch-all arm is the LAST (and only) arm, reached
         // by fall-through from the scrutinee. It emits `POP` to
         // discard the scrutinee.
         let pop_count = bc
@@ -1385,7 +1385,7 @@ fn main() {
             .count();
         assert!(
             pop_count >= 1,
-            "expected at least one POP for the wildcard scrutinee"
+            "expected at least one POP for the catch-all scrutinee"
         );
     }
 

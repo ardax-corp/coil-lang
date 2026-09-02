@@ -2085,8 +2085,32 @@ use string::{format, to_bytes};
     }
 
     #[test]
-    fn match_with_wildcard_no_exhaustiveness_error() {
+    fn match_with_default_no_exhaustiveness_error() {
+        let src = "let x = Option::Some(1); match x { default => 0 };";
+        let (mut c, _) = check(src);
+        let msgs = c.take_messages();
+        assert!(msgs.is_empty(), "{:?}", msgs);
+    }
+
+    #[test]
+    fn match_underscore_arm_is_error() {
         let src = "let x = Option::Some(1); match x { _ => 0 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.code() == Some(ErrorCode::UnderscoreMatchArm)),
+            "expected UnderscoreMatchArm (E0216), got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn match_nested_underscore_still_ok() {
+        let src = "let x = Option::Some(1); match x { Option::None() => 0, Option::Some(_) => 1 };";
+        let (mut c, _) = check(src);
+        let msgs = c.take_messages();
+        assert!(msgs.is_empty(), "{:?}", msgs);
+        let src = "let x = Result::Ok(1); match x { Result::Ok(_) => 0, Result::Err(_) => 1 };";
         let (mut c, _) = check(src);
         let msgs = c.take_messages();
         assert!(msgs.is_empty(), "{:?}", msgs);
@@ -7744,7 +7768,7 @@ fn main() {
             .parse(
                 r#"test("match imported enum") {
     let v = JsonValue::Null;
-    match v { JsonValue::Null => assert(true)?, _ => assert(false)? };
+    match v { JsonValue::Null => assert(true)?, default => assert(false)? };
 }"#,
             )
             .expect("parse test file");
@@ -7782,7 +7806,7 @@ test("match imported payload") {
     let v = JsonValue::Str("hi");
     match v {
         JsonValue::Str(s) => assert(s == "hi")?,
-        _ => assert(false)?,
+        default => assert(false)?,
     };
 }
 "#,
@@ -8090,12 +8114,32 @@ fn main() {
     }
 
     #[test]
-    fn match_user_enum_wildcard_suppresses_exhaustiveness_error() {
+    fn match_user_enum_default_suppresses_exhaustiveness_error() {
         let src = "enum Color { Red, Green, Blue } \
                    let c = Color::Red; \
-                   match c { _ => 0 };";
+                   match c { default => 0 };";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn match_user_enum_underscore_arm_does_not_close_exhaustiveness() {
+        let src = "enum Color { Red, Green, Blue } \
+                   let c = Color::Red; \
+                   match c { Color::Red => 1, _ => 0 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("default") && m.message().contains("`_`")),
+            "expected `_` catch-all error mentioning default, got: {:?}",
+            msgs
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("Non-exhaustive match")),
+            "whole-arm `_` must not close exhaustiveness, got: {:?}",
+            msgs
+        );
     }
 
     #[test]
@@ -8115,8 +8159,8 @@ fn main() {
         let msgs = assert_messages(src);
         assert!(
             msgs.iter()
-                .any(|m| m.message().contains("more than one catch-all")),
-            "expected mixed `_`/`default` error, got: {:?}",
+                .any(|m| m.message().contains("default") && m.message().contains("`_`")),
+            "expected `_` not-catch-all error, got: {:?}",
             msgs
         );
     }

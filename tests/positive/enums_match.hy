@@ -61,11 +61,11 @@ test("shuffled record construct") {
     assert(area(s) == 12)?;
 }
 
-test("wildcard arm") {
+test("default arm") {
     let c = Color::Red;
     let n = match c {
         Color::Blue => 9,
-        _ => 1,
+        default => 1,
     };
     assert(n == 1)?;
 }
