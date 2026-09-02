@@ -93,7 +93,7 @@ Constructor names are per-enum. Qualified form is canonical (`Status.Ok`, `Resul
 
 | Attribute | Target |
 |-----------|--------|
-| `#[derive(Show, Eq, Ord)]` | `enum`, `class` |
+| `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord use the backing word; Show/String print `Status.Ok`. Traits that cannot be derived on a payload enum also fail on a scalar enum. |
 | `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status.Ok = 200`); omitted when every case is the same simple literal type. Runtime is the unboxed literal; the type is still the enum and coerces to the backing in expression position |
 | User `attr` | `fn`, methods, `class` — must forward `...args` to `target(...args)` |
 
