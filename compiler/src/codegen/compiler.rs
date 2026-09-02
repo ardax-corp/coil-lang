@@ -3717,6 +3717,99 @@ impl Compiler {
         false
     }
 
+    fn node_in_bounds_index(&self, node: &Output<'_>) -> bool {
+        self.node_id_of(node)
+            .is_some_and(|id| self.typed_sidecar.is_in_bounds_index(id))
+    }
+
+    fn fn_param_is_sidecar_pin(&self, param: &str) -> bool {
+        let mut names: Vec<&str> = Vec::new();
+        if let Some(k) = self.current_function_table_key.as_deref() {
+            names.push(k);
+        }
+        if let Some(q) = self.current_function_qualified.as_deref() {
+            names.push(q);
+        }
+        names.iter().any(|fn_name| {
+            self.typed_sidecar.is_pin_param(fn_name, param)
+                || fn_name
+                    .split("$mono$")
+                    .next()
+                    .is_some_and(|stem| self.typed_sidecar.is_pin_param(stem, param))
+        })
+    }
+
+    fn emit_sidecar_array_pins(&mut self, args: &Output<'_>) {
+        let kids: Vec<&Output<'_>> = match args.1.as_ref() {
+            Expression::Fragment(xs) | Expression::List(xs) => xs.iter().collect(),
+            Expression::Argument { .. } => vec![args],
+            _ => return,
+        };
+        for a in kids {
+            let Expression::Argument { name, .. } = a.1.as_ref() else {
+                continue;
+            };
+            let id_pin = self
+                .node_id_of(a)
+                .is_some_and(|id| self.typed_sidecar.is_pin_array(id));
+            let fn_pin = self.fn_param_is_sidecar_pin(name);
+            if !id_pin && !fn_pin {
+                continue;
+            }
+            let Some(slot) = self.variable_slot(name) else {
+                continue;
+            };
+            self.bytecode.push_load(slot);
+            self.bytecode.push_array_pin(slot);
+            self.pinned_array_slots.insert(slot);
+        }
+    }
+
+    fn emit_index_from_parts(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        index_node: &Output<'_>,
+        target: &Output<'_>,
+        index: &Output<'_>,
+    ) {
+        let proven = self.node_in_bounds_index(index_node);
+        let pin_slot = match target.1.as_ref() {
+            Expression::Identifier(name) => self
+                .variable_slot(name)
+                .filter(|s| self.pinned_array_slots.contains(s)),
+            _ => None,
+        };
+        if proven && let Some(slot) = pin_slot {
+            if self.expr_may_clobber_operand_stack(index) {
+                bytecode.append(&mut self.do_compile(index));
+                let idx_slot = self.alloc_temp_slot();
+                bytecode.push_store_pop(idx_slot);
+                bytecode.push_load(idx_slot);
+            } else {
+                bytecode.append(&mut self.do_compile(index));
+            }
+            bytecode.push_index_pin_unchecked(slot);
+            return;
+        }
+        bytecode.append(&mut self.do_compile(target));
+        if self.expr_may_clobber_operand_stack(index) {
+            let tgt_slot = self.alloc_temp_slot();
+            bytecode.push_store_pop(tgt_slot);
+            bytecode.append(&mut self.do_compile(index));
+            let idx_slot = self.alloc_temp_slot();
+            bytecode.push_store_pop(idx_slot);
+            bytecode.push_load(tgt_slot);
+            bytecode.push_load(idx_slot);
+        } else {
+            bytecode.append(&mut self.do_compile(index));
+        }
+        if proven {
+            bytecode.push_index_unchecked();
+        } else {
+            bytecode.push_index();
+        }
+    }
+
     fn unboxed_enum_info(&self, name: &str) -> Option<(u32, u32)> {
         self.context.unboxed_enum_locals.get(name).copied()
     }
@@ -7691,6 +7784,7 @@ impl Compiler {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
         let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
+        let prev_pins = std::mem::take(&mut self.pinned_array_slots);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
         let prev_fn_table_key = self.current_function_table_key.take();
@@ -7719,6 +7813,7 @@ impl Compiler {
 
         let mut a = self.do_compile(args);
         self.bytecode.append(&mut a);
+        self.emit_sidecar_array_pins(args);
         for (slot, ty) in argument_unbox_tys.iter().enumerate() {
             if let Some(tag) = ty.as_ref().and_then(Self::ty_to_value_tag) {
                 self.bytecode.push_load(slot as u32);
@@ -7745,6 +7840,7 @@ impl Compiler {
         self.context.variables = prev_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.context.unboxed_class_locals = prev_unboxed_class;
+        self.pinned_array_slots = prev_pins;
         self.polyfn_vars = prev_polyfn_vars;
         self.polyfn_sources = prev_polyfn_sources;
         self.current_function_table_key = prev_fn_table_key;
@@ -8035,16 +8131,22 @@ impl Compiler {
             let prev_result_mode = self.compiling_result_mode;
             let prev_result_ok_is_result = self.compiling_result_ok_is_result;
             let prev_mono_clone = self.compiling_mono_clone;
+            let prev_pins = std::mem::take(&mut self.pinned_array_slots);
+            let prev_fn_qualified = self.current_function_qualified.take();
+            let prev_fn_table_key = self.current_function_table_key.take();
             self.context.variables = Interner::default();
             self.compiling_result_mode = self.checker.fn_is_result_mode(source_name);
             self.compiling_result_ok_is_result =
                 self.checker.fn_result_ok_is_result(source_name);
             self.compiling_mono_clone = true;
+            self.current_function_qualified = Some(qualified.to_string());
+            self.current_function_table_key = Some(qualified.to_string());
             self.mono_codegen_var_types.push(overrides);
 
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
+            self.emit_sidecar_array_pins(args);
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
@@ -8060,6 +8162,9 @@ impl Compiler {
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
+            self.current_function_qualified = prev_fn_qualified;
+            self.current_function_table_key = prev_fn_table_key;
+            self.pinned_array_slots = prev_pins;
             self.field_key_slots = prev_field_keys;
             self.context.variables = prev_fn_vars;
             self.polyfn_vars = prev_fn_polyfn_vars;
@@ -8433,6 +8538,7 @@ impl Compiler {
         binding_name: &str,
         array_already_on_stack: bool,
         iterable: Option<&Output<'_>>,
+        pin: bool,
     ) {
         let arr_slot = self.alloc_temp_slot();
         let idx_slot = self.alloc_temp_slot();
@@ -8449,6 +8555,12 @@ impl Compiler {
         self.bytecode.push_load(arr_slot);
         self.bytecode.push(Byte::new(Instruction::ArrayLen));
         self.bytecode.push_store_pop(len_slot);
+
+        if pin {
+            self.bytecode.push_load(arr_slot);
+            self.bytecode.push_array_pin(arr_slot);
+            self.pinned_array_slots.insert(arr_slot);
+        }
 
         // Consume binding Identifier NodeId (iterable → binding → body).
         let _ = self.next_emit_id();
@@ -8467,9 +8579,14 @@ impl Compiler {
         bb.emit_jump_to(exit_label, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
 
         // x = arr[idx]
-        self.bytecode.push_load(arr_slot);
-        self.bytecode.push_load(idx_slot);
-        self.bytecode.push_index();
+        if pin {
+            self.bytecode.push_load(idx_slot);
+            self.bytecode.push_index_pin_unchecked(arr_slot);
+        } else {
+            self.bytecode.push_load(arr_slot);
+            self.bytecode.push_load(idx_slot);
+            self.bytecode.push_index();
+        }
         self.bytecode.push_store_pop(binding_slot);
 
         self.loop_stack.push((continue_label, exit_label));
@@ -8512,7 +8629,7 @@ impl Compiler {
             self.bytecode.push_index();
         }
         self.bytecode.push_make_array(arity as u32);
-        self.emit_for_in_array_loop(body, binding_name, true, None);
+        self.emit_for_in_array_loop(body, binding_name, true, None, false);
     }
 
     /// Dict → `DictEntries` → array of `(string, V)` pairs → array for-in.
@@ -8520,7 +8637,7 @@ impl Compiler {
         let mut iter_bc = self.do_compile(iterable);
         self.bytecode.append(&mut iter_bc);
         self.bytecode.push(Byte::new(Instruction::DictEntries));
-        self.emit_for_in_array_loop(body, binding_name, true, None);
+        self.emit_for_in_array_loop(body, binding_name, true, None, false);
     }
 
     /// Lazy range for-in (`int`/`byte`/`float`).
@@ -9259,15 +9376,7 @@ impl Compiler {
                     bytecode.push_load(base + *i as u32);
                     return self.is_float_ty(target);
                 }
-                let tmp_arr = self.alloc_temp_slot();
-                let tmp_idx = self.alloc_temp_slot();
-                bytecode.append(&mut self.do_compile(arr));
-                bytecode.push_store_pop(tmp_arr);
-                bytecode.append(&mut self.do_compile(idx));
-                bytecode.push_store_pop(tmp_idx);
-                bytecode.push_load(tmp_arr);
-                bytecode.push_load(tmp_idx);
-                bytecode.push_index();
+                self.emit_index_from_parts(bytecode, target, arr, idx);
                 false
             }
             Expression::Index(_, None) => false,
@@ -9347,7 +9456,11 @@ impl Compiler {
                             bytecode.push_load(tmp_idx);
                             bytecode.push_load(tmp_val);
                         }
-                        bytecode.push(Byte::new(Instruction::StoreIndex));
+                        if self.node_in_bounds_index(target) {
+                            bytecode.push_store_index_unchecked();
+                        } else {
+                            bytecode.push(Byte::new(Instruction::StoreIndex));
+                        }
                         if leave_value_on_stack {
                             // StoreIndex leaves the value on the stack; keep it.
                         } else {
@@ -9367,7 +9480,11 @@ impl Compiler {
                     bytecode.push_load(tmp_arr);
                     bytecode.push_load(tmp_idx);
                     bytecode.push_load(tmp_val);
-                    bytecode.push(Byte::new(Instruction::StoreIndex));
+                    if self.node_in_bounds_index(target) {
+                        bytecode.push_store_index_unchecked();
+                    } else {
+                        bytecode.push(Byte::new(Instruction::StoreIndex));
+                    }
                     if let Some((base, n)) = stack_info {
                         bytecode.push_pop();
                         self.emit_unbox_stack_array(bytecode, tmp_arr, base, n);
@@ -10705,6 +10822,7 @@ impl Compiler {
                 let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
                 let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
+                let prev_pins = std::mem::take(&mut self.pinned_array_slots);
                 let prev_fn_qualified = self.current_function_qualified.take();
                 let prev_fn_table_key = self.current_function_table_key.take();
                 self.current_function_qualified = Some(qualified.clone());
@@ -10775,6 +10893,7 @@ impl Compiler {
                 self.bytecode.append(&mut a);
 
                 let body_start = self.bytecode.len();
+                self.emit_sidecar_array_pins(args);
                 // Provisional span so self-recursive peels can see the opening
                 // predicate while the body is still streaming into `self.bytecode`.
                 self.record_fn_span(table_key.clone(), body_start, body_start);
@@ -10815,6 +10934,7 @@ impl Compiler {
                 self.context.unboxed_class_locals = prev_unboxed_class;
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
+                self.pinned_array_slots = prev_pins;
 
                 self.emit_mono_specializations_for_function(
                     &qualified,
@@ -11003,22 +11123,7 @@ impl Compiler {
                 {
                     bytecode.push_load(base + *idx as u32);
                 } else {
-                    bytecode.append(&mut self.do_compile(target));
-                    // When the index stages binary operands (`len(a) - 1`),
-                    // STORE seeks the shared stack past the live receiver and
-                    // Index pops a temp (−1) instead of the Vec. Stash both.
-                    if self.expr_may_clobber_operand_stack(index) {
-                        let tgt_slot = self.alloc_temp_slot();
-                        bytecode.push_store_pop(tgt_slot);
-                        bytecode.append(&mut self.do_compile(index));
-                        let idx_slot = self.alloc_temp_slot();
-                        bytecode.push_store_pop(idx_slot);
-                        bytecode.push_load(tgt_slot);
-                        bytecode.push_load(idx_slot);
-                    } else {
-                        bytecode.append(&mut self.do_compile(index));
-                    }
-                    bytecode.push_index();
+                    self.emit_index_from_parts(&mut bytecode, ast, target, index);
                 }
             }
             Expression::Index(_, None) => {}
@@ -11315,7 +11420,16 @@ impl Compiler {
                     let kind = info.map(|i| i.kind).unwrap_or(ForInKind::Coroutine);
                     match kind {
                         ForInKind::Array => {
-                            self.emit_for_in_array_loop(body, &binding_name, false, Some(iterable));
+                            let pin = self_id
+                                .is_some_and(|id| self.typed_sidecar.is_for_in_pin(id))
+                                || self.typed_sidecar.is_for_in_pin_span(span.start, span.end);
+                            self.emit_for_in_array_loop(
+                                body,
+                                &binding_name,
+                                false,
+                                Some(iterable),
+                                pin,
+                            );
                         }
                         ForInKind::Tuple { arity } => {
                             self.emit_for_in_tuple(iterable, body, &binding_name, arity);

@@ -184,6 +184,16 @@ pub struct Checker {
     pub(crate) frame_local: HashSet<NodeId>,
     /// Identifier / construct nodes that are the last in-frame use of a local.
     pub(crate) frame_local_last_use: HashSet<NodeId>,
+    /// `arr[i]` nodes proven `0 <= i < len(arr)` with a stable length.
+    pub(crate) in_bounds_index: HashSet<NodeId>,
+    /// Array parameter nodes that may be `ArrayPin`'d for the whole frame.
+    pub(crate) pin_array: HashSet<NodeId>,
+    /// `(fn_name, param_name)` for helper pins (survives mono AST clones).
+    pub(crate) pin_params: HashSet<(String, String)>,
+    /// `for x in arr` loops whose synthetic index is in-bounds (length stable).
+    pub(crate) for_in_pin: HashSet<NodeId>,
+    /// For-in pin by source span (emit_idx / clone fallback).
+    pub(crate) for_in_pin_spans: HashSet<(usize, usize)>,
     /// [`ModuleId`] for [`Self::current_module`].
     current_module_id: ModuleId,
 

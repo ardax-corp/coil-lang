@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use common::{Byte, DebugLoc};
+use common::{Byte, DebugLoc, Instruction};
 
 use super::op::{EntryKind, FuseHint, IlJumpKind, IlOp, Label};
 
@@ -179,6 +179,30 @@ impl IlBuilder {
         self.push_op(IlOp::Index {
             loc: DebugLoc::unknown(),
         });
+    }
+
+    pub fn push_index_unchecked(&mut self) {
+        self.push_op(IlOp::IndexUnchecked {
+            loc: DebugLoc::unknown(),
+        });
+    }
+
+    pub fn push_array_pin(&mut self, slot: u32) {
+        self.push_op(IlOp::ArrayPin {
+            slot,
+            loc: DebugLoc::unknown(),
+        });
+    }
+
+    pub fn push_index_pin_unchecked(&mut self, slot: u32) {
+        self.push_op(IlOp::IndexPinUnchecked {
+            slot,
+            loc: DebugLoc::unknown(),
+        });
+    }
+
+    pub fn push_store_index_unchecked(&mut self) {
+        self.push_byte(Byte::new(Instruction::StoreIndexUnchecked));
     }
 
     pub fn push_make_tuple(&mut self, arity: u32) {

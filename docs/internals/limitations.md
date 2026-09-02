@@ -123,7 +123,12 @@ the array slot is length-invariant (archive minor 13). Unproven dynamic indices
 keep the checked opcodes: out-of-range read or write **panics** (archive major 4). Constant-index OOB stays a compile error.
 Helper-call loops stay checked unless the callee is a proven-pure user `fn`
 ([COI-99](https://linear.app/ardax/issue/COI-99)); host, FFI, yield, growing-array, and
-alias-push loops stay checked. [#192](https://github.com/ardax-corp/coil-lang/pull/192)
+alias-push loops stay checked. **Length/index sidecar facts** (`index_facts`)
+mark `arr[i]` NodeIds when `0 <= i < len(arr)` is proven in a counted loop,
+a callee `i < a.len()` guard, a caller that always passes a proven pair, or a
+length-stable `for-in`. Lowering consumes those facts as `IndexUnchecked` /
+`ArrayPin` / `IndexPinUnchecked`. Yield remains a barrier. Computed `MakeArray`
+(arity > 32 or non-immediates), `ArrayPush`, and host refuse the fact. [#192](https://github.com/ardax-corp/coil-lang/pull/192)
 nsieve checked `Index` went to 0; leftover cost on those sites was
 `find_object_by_addr` (addressed for proven loops by `IndexPin*`).
 

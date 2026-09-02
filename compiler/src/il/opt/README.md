@@ -267,6 +267,9 @@ float identities / pool fold.
   checked. Residual `Byte` `StoreIndex` is rewritten only when decoded.
 - **Tests:** `il/bounds.rs` `hoists_array_len_out_of_counted_loop` (calls
   `loop_bounds` directly), plus refuse tests for push / make-array.
+  Sidecar length/index facts (`typechecking/index_facts.rs`) feed codegen
+  `IndexUnchecked` / `ArrayPin` for helpers, for-in, and stride; pipeline
+  tests in `compiler/src/pipeline.rs`.
 
 ## `loop_unroll`
 

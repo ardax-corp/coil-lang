@@ -15,6 +15,7 @@ pub mod resolve;
 pub mod kind;
 pub mod loop_par;
 pub mod local_escape;
+pub mod index_facts;
 pub mod pretty;
 pub mod par_profit;
 pub mod purity;
