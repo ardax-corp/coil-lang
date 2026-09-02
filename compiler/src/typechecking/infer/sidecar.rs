@@ -36,6 +36,12 @@ pub struct TypedSidecar {
     frame_local: HashSet<NodeId>,
     /// Last in-frame use of a frame-local (drop payload/tag after this node).
     frame_local_last_use: HashSet<NodeId>,
+    /// Index expressions proven `0 <= i < len(arr)` with stable length.
+    in_bounds_index: HashSet<NodeId>,
+    /// Array parameter nodes to pin for the frame (`ArrayPin`).
+    pin_array: HashSet<NodeId>,
+    /// For-in loops whose element load is in-bounds (length stable).
+    for_in_pin: HashSet<NodeId>,
 }
 
 impl TypedSidecar {
@@ -84,6 +90,25 @@ impl TypedSidecar {
     pub fn is_frame_local_last_use(&self, id: NodeId) -> bool {
         self.frame_local_last_use.contains(&id)
     }
+
+    /// True when `id` is an `arr[i]` proven in-bounds with a stable length.
+    pub fn is_in_bounds_index(&self, id: NodeId) -> bool {
+        self.in_bounds_index.contains(&id)
+    }
+
+    pub fn in_bounds_index_ids(&self) -> &HashSet<NodeId> {
+        &self.in_bounds_index
+    }
+
+    /// True when `id` is an array parameter that may be pinned at function entry.
+    pub fn is_pin_array(&self, id: NodeId) -> bool {
+        self.pin_array.contains(&id)
+    }
+
+    /// True when `id` is a for-in loop whose synthetic index is in-bounds.
+    pub fn is_for_in_pin(&self, id: NodeId) -> bool {
+        self.for_in_pin.contains(&id)
+    }
 }
 
 impl Checker {
@@ -129,6 +154,9 @@ impl Checker {
             ffi_tags,
             frame_local: self.frame_local.clone(),
             frame_local_last_use: self.frame_local_last_use.clone(),
+            in_bounds_index: self.in_bounds_index.clone(),
+            pin_array: self.pin_array.clone(),
+            for_in_pin: self.for_in_pin.clone(),
         }
     }
 }

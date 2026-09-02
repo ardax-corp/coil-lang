@@ -77,6 +77,9 @@ impl Checker {
             def_ids_by_node: HashMap::new(),
             frame_local: HashSet::new(),
             frame_local_last_use: HashSet::new(),
+            in_bounds_index: HashSet::new(),
+            pin_array: HashSet::new(),
+            for_in_pin: HashSet::new(),
             current_module_id,
             host_grants: crate::HostGrants::deny_all(),
             dload_host_stems: Vec::new(),
@@ -1479,6 +1482,9 @@ impl Checker {
         self.def_ids_by_node.clear();
         self.frame_local.clear();
         self.frame_local_last_use.clear();
+        self.in_bounds_index.clear();
+        self.pin_array.clear();
+        self.for_in_pin.clear();
         self.current_module_id = self.def_interner.intern_module(&self.current_module);
 
         // Mint NodeIds for every AST node (pre-walk). The visit order
@@ -1561,6 +1567,7 @@ impl Checker {
         }
 
         crate::typechecking::local_escape::analyze_local_escape(self, ast);
+        crate::typechecking::index_facts::analyze_index_facts(self, ast);
 
         // Return the fully-resolved type so callers see e.g. `Foo`
         // rather than `Var(0)` even when the type was inferred
