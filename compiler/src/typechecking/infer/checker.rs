@@ -50,6 +50,13 @@ const INFER_RECURSION_LIMIT: u32 = 2000;
 /// process the way a genuine native stack overflow does.
 struct RecursionLimitExceeded;
 
+/// Result of resolving a bare constructor name (`Some`, `Ok`, `Red`).
+enum BareCtor {
+    Unique(String),
+    Ambiguous(Vec<String>),
+    None,
+}
+
 impl Checker {
     pub fn new() -> Self {
         let mut env = Env::new();
@@ -152,6 +159,7 @@ impl Checker {
             enum_payloads: BTreeMap::new(),
             enum_arities: BTreeMap::new(),
             enum_scalar: BTreeMap::new(),
+            bare_constructs_by_span: HashMap::new(),
             pending_exhaustive: Vec::new(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -209,9 +217,7 @@ impl Checker {
         self.register_builtin_ffi_type();
         self.register_builtin_option_result();
         // `IoError` is NOT registered here — it is not auto-imported.
-        // Registering its variants (esp. `Other`) globally would collide
-        // with user enums that use the same constructor names. Tags are
-        // installed on first `use io::…` that binds `IoError` or an IO fn.
+        // Tags are installed on first `use io::…` that binds `IoError` or an IO fn.
     }
 
     /// Synthetic `Vec<T>` class + inherent methods (host natives / method sugar).
@@ -1424,6 +1430,7 @@ impl Checker {
         self.enum_payloads.retain(|k, _| k.contains("::"));
         self.enum_arities.retain(|k, _| k.contains("::"));
         self.enum_scalar.retain(|k, _| k.contains("::"));
+        self.bare_constructs_by_span.clear();
         self.c_structs.clear();
         self.callback_sigs.clear();
         self.ffi_fn_ret_tys.clear();
@@ -4044,6 +4051,22 @@ impl Checker {
                         )),
                     );
                 }
+                match self.resolve_bare_constructor(name) {
+                    BareCtor::Unique(enum_name) => {
+                        self.record_bare_construct(&range, &enum_name, name);
+                        return self.infer_construct(
+                            &enum_name,
+                            name,
+                            &parser::ast::EnumConstructPayload::Unit,
+                            range,
+                            id,
+                        );
+                    }
+                    BareCtor::Ambiguous(enums) => {
+                        return self.ambiguous_bare_constructor(name, &enums, range);
+                    }
+                    BareCtor::None => {}
+                }
                 self.error(
                     ErrorCode::UnknownValue,
                     format!("Cannot find value `{}` in this scope", name),
@@ -4739,6 +4762,16 @@ impl Checker {
                     "import it with `use ffi::{dload, declare, invoke}`".to_string(),
                 ),
             );
+        }
+
+        if !has_named
+            && self.lookup_fn_scheme(&ident).is_none()
+            && !self.is_overloaded(&ident)
+        {
+            if let Some(ty) = self.try_infer_bare_constructor_call(&ident, args, range.clone(), id)
+            {
+                return ty;
+            }
         }
 
         // ── Overload-dispatch: select by argc + argument types ─────
@@ -12911,33 +12944,32 @@ impl Checker {
                     return;
                 }
 
-                // Check 2: variant name collides with a previously
-                // registered enum's variant name (cross-enum).
-                for vn in &variant_names {
-                    let taken = self.enum_tags.values().any(|tags| tags.contains_key(vn));
-                    if taken {
-                        let mut msg = Message::error(
-                            ErrorCode::DuplicateConstructor,
-                            format!(
-                                "Duplicate constructor `{}` (also declared by another enum)",
-                                vn
-                            ),
-                            node.0.into_range(),
-                        );
-                        msg.with_help(
-                            "constructor names must be unique across all enums".to_string(),
-                        );
-                        errors.push(msg);
-                        self.restore_generic_type_ctor(&name_str, previous_generic_ctor);
-                        self.pop_type_params_for_type_parsing(pushed);
-                        return;
+                // Check 2: variant names are unique *within* this enum.
+                // The same case name on another enum is allowed (`Status::Ok`
+                // next to prelude `Result::Ok`); bare use is then ambiguous.
+                {
+                    let mut seen = HashSet::new();
+                    for vn in &variant_names {
+                        if !seen.insert(vn) {
+                            let mut msg = Message::error(
+                                ErrorCode::DuplicateConstructor,
+                                format!(
+                                    "Duplicate constructor `{}` on enum `{}`",
+                                    vn, name_str
+                                ),
+                                node.0.into_range(),
+                            );
+                            msg.with_help(format!(
+                                "variant names must be unique on `{}`",
+                                name_str
+                            ));
+                            errors.push(msg);
+                            self.restore_generic_type_ctor(&name_str, previous_generic_ctor);
+                            self.pop_type_params_for_type_parsing(pushed);
+                            return;
+                        }
                     }
                 }
-
-                // Check 3: variant name shadows a built-in
-                // (currently no such checks — natives are registered
-                // with full names like `print` and don't share the
-                // `::` namespace. Reserved for future use.)
 
                 // Reserve. We use `BTreeMap` for tags (lookups are
                 // by variant name, not order). The `Vec` for
@@ -13393,6 +13425,93 @@ impl Checker {
             };
             let qualified = format!("{}::{}", name_str, vname);
             self.env.insert_top(qualified, scheme);
+        }
+    }
+
+    /// Enums in this program (short names) that declare `variant`.
+    ///
+    /// Module-qualified leftover keys and `FFIType` tags (unless imported)
+    /// are skipped so bare `Int` is not silently `ffi::types::Int`.
+    fn enums_declaring_variant(&self, variant: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .enum_tags
+            .iter()
+            .filter(|(enum_name, tags)| {
+                if !tags.contains_key(variant) {
+                    return false;
+                }
+                if enum_name.contains("::") {
+                    return false;
+                }
+                if common::is_builtin_ffi_enum(enum_name) {
+                    return self.ffi_tag_in_scope(variant);
+                }
+                true
+            })
+            .map(|(enum_name, _)| enum_name.clone())
+            .collect();
+        names.sort();
+        names
+    }
+
+    fn resolve_bare_constructor(&self, variant: &str) -> BareCtor {
+        let names = self.enums_declaring_variant(variant);
+        match names.len() {
+            0 => BareCtor::None,
+            1 => BareCtor::Unique(names.into_iter().next().unwrap()),
+            _ => BareCtor::Ambiguous(names),
+        }
+    }
+
+    fn record_bare_construct(&mut self, range: &Range<usize>, enum_name: &str, variant: &str) {
+        self.bare_constructs_by_span.insert(
+            (range.start, range.end),
+            (enum_name.to_string(), variant.to_string()),
+        );
+    }
+
+    fn ambiguous_bare_constructor(
+        &mut self,
+        variant: &str,
+        enums: &[String],
+        range: Range<usize>,
+    ) -> Ty {
+        let qualified: Vec<String> = enums
+            .iter()
+            .map(|en| format!("{}::{}", en, variant))
+            .collect();
+        self.error_with_help(
+            ErrorCode::DuplicateConstructor,
+            format!("Ambiguous constructor `{}`", variant),
+            range,
+            Some(format!(
+                "use a qualified constructor ({})",
+                qualified.join(" or ")
+            )),
+        )
+    }
+
+    fn try_infer_bare_constructor_call(
+        &mut self,
+        variant: &str,
+        args: &Option<Vec<Output>>,
+        range: Range<usize>,
+        call_id: Option<NodeId>,
+    ) -> Option<Ty> {
+        match self.resolve_bare_constructor(variant) {
+            BareCtor::None => None,
+            BareCtor::Ambiguous(enums) => {
+                Some(self.ambiguous_bare_constructor(variant, &enums, range))
+            }
+            BareCtor::Unique(enum_name) => {
+                self.record_bare_construct(&range, &enum_name, variant);
+                let fields = match args {
+                    None => parser::ast::EnumConstructPayload::Unit,
+                    Some(a) if a.is_empty() => parser::ast::EnumConstructPayload::Unit,
+                    Some(a) => parser::ast::EnumConstructPayload::Tuple(a.clone()),
+                };
+                Some(self.infer_construct(&enum_name, variant, &fields, range, call_id))
+            }
         }
     }
 
@@ -14669,6 +14788,11 @@ impl Checker {
         self.enum_tags
             .get(&key)
             .and_then(|t| t.get(variant_name).copied())
+    }
+
+    /// Bare constructor sugar resolved at this span (`Some(x)` → `Option::Some`).
+    pub fn bare_construct_at(&self, start: usize, end: usize) -> Option<&(String, String)> {
+        self.bare_constructs_by_span.get(&(start, end))
     }
 
     /// True when `enum_name` is a scalar-backed enum (unboxed simple value).

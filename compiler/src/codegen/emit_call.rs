@@ -28,6 +28,19 @@ impl Compiler {
             return bytecode;
         }
 
+        if let Expression::Identifier(_) = name.1.as_ref()
+            && let Some((en, vn)) = self.checker.bare_construct_at(span.start, span.end)
+        {
+            let en = en.clone();
+            let vn = vn.clone();
+            let fields = match args {
+                None => parser::ast::EnumConstructPayload::Unit,
+                Some(a) if a.is_empty() => parser::ast::EnumConstructPayload::Unit,
+                Some(a) => parser::ast::EnumConstructPayload::Tuple(a.clone()),
+            };
+            return self.compile_construct_expr(&en, &vn, &fields, ast);
+        }
+
         if let Expression::Identifier(fname) = name.1.as_ref() {
             if let Some(kind) = self.string_builtin_for_call(fname) {
                 let arg_slice = args.as_deref().unwrap_or(&[]);

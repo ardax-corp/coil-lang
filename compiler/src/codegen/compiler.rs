@@ -384,6 +384,210 @@ impl Compiler {
         }
     }
 
+    fn compile_construct_expr<'compiler>(
+        &mut self,
+        enum_name: &str,
+        variant_name: &str,
+        fields: &parser::ast::EnumConstructPayload<'compiler>,
+        ast: &(SimpleSpan, Box<Expression<'compiler>>),
+    ) -> CodeBuf {
+        let mut bytecode = CodeBuf::new();
+        use parser::ast::EnumConstructPayload;
+        // Look up the variant's tag and arity in the
+        // typechecker's tables. Unknown enum/variant is a
+        // type error with recovery — still walk children for
+        // NodeId alignment, but do not emit MakeEnum (and do
+        // not panic: release builds use panic=abort).
+        let Some(tag) = self.checker.tag_for(enum_name, variant_name) else {
+            let fqn = self.class_member_fqn(enum_name, variant_name);
+            // Match typechecker order for Unit form: static field
+            // wins over a same-named 0-arg static method.
+            if matches!(fields, EnumConstructPayload::Unit)
+                && let Some(slot) = self.checker.static_slot_index(&fqn)
+            {
+                bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
+                return bytecode;
+            }
+            // `Class::static_method(...)` — same surface as enum
+            // Construct; lower to a direct CALL or Entry{Call} when
+            // the method is compiled or reserved (COI-108 forward).
+            if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn) {
+                let arg_slice: &[Output] = match fields {
+                    EnumConstructPayload::Unit => &[],
+                    EnumConstructPayload::Tuple(args) => args.as_slice(),
+                    EnumConstructPayload::Record(parts) => {
+                        for part in parts {
+                            bytecode.append(&mut self.do_compile(&part.value));
+                        }
+                        // Record form is a type error for static
+                        // methods; still emit a CALL for recovery.
+                        let _ = self.emit_direct_fn_call(
+                            &mut bytecode,
+                            &fqn,
+                            parts.len() as u32,
+                        );
+                        return bytecode;
+                    }
+                };
+                let arity =
+                    self.emit_call_args_with_rest(&fqn, arg_slice, &mut bytecode, false);
+                let _ = self.emit_direct_fn_call(&mut bytecode, &fqn, arity);
+                return bytecode;
+            }
+            match fields {
+                EnumConstructPayload::Unit => {}
+                EnumConstructPayload::Tuple(args) => {
+                    for arg in args {
+                        bytecode.append(&mut self.do_compile(arg));
+                    }
+                }
+                EnumConstructPayload::Record(parts) => {
+                    for part in parts {
+                        bytecode.append(&mut self.do_compile(&part.value));
+                    }
+                }
+            }
+            return bytecode;
+        };
+        let arity = self.checker.arity_for(enum_name, variant_name).unwrap_or(0);
+
+        if let Some(backing) = self.checker.scalar_for(enum_name, variant_name).cloned() {
+            self.emit_scalar_backing(&backing, &mut bytecode);
+            return bytecode;
+        }
+
+        if self.unbox_enum_context > 0 {
+            match fields {
+                EnumConstructPayload::Unit if arity == 0 => {
+                    bytecode.push_const(0);
+                }
+                EnumConstructPayload::Tuple(args) if args.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&args[0]));
+                }
+                EnumConstructPayload::Record(parts) if parts.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&parts[0].value));
+                }
+                EnumConstructPayload::Unit => {
+                    bytecode.push_const(0);
+                }
+                EnumConstructPayload::Tuple(args) => {
+                    for arg in args {
+                        bytecode.append(&mut self.do_compile(arg));
+                    }
+                    if args.is_empty() {
+                        bytecode.push_const(0);
+                    }
+                }
+                EnumConstructPayload::Record(parts) => {
+                    for part in parts {
+                        bytecode.append(&mut self.do_compile(&part.value));
+                    }
+                    if parts.is_empty() {
+                        bytecode.push_const(0);
+                    }
+                }
+            }
+            bytecode.push_const(tag as i32);
+            return bytecode;
+        }
+
+        let pair_enum = self.pair_value_context
+            && (common::is_builtin_option_enum(enum_name)
+                || common::is_builtin_result_enum(enum_name))
+            && arity <= 1;
+        if pair_enum {
+            match fields {
+                EnumConstructPayload::Unit if arity == 0 => {
+                    // Keep a payload slot for `Option::None` so every
+                    // pair has the same `[payload, tag]` shape.
+                    bytecode.push_const(0);
+                }
+                EnumConstructPayload::Tuple(args) if args.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&args[0]));
+                }
+                EnumConstructPayload::Record(parts) if parts.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&parts[0].value));
+                }
+                _ => {}
+            }
+            if matches!(fields, EnumConstructPayload::Unit) && arity != 0 {
+                // Invalid constructor shapes are already reported by
+                // typechecking; keep the stack balanced for recovery.
+                bytecode.push_const(0);
+            }
+            bytecode.push_const(tag as i32);
+            return bytecode;
+        }
+
+        if common::is_builtin_option_enum(enum_name)
+            && !self.force_heap_option
+            && self
+                .codegen_expr_ty(ast)
+                .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+            || (common::is_builtin_option_enum(enum_name)
+                && !self.force_heap_option
+                && self.force_niche_option)
+        {
+            match (variant_name, fields) {
+                ("None", EnumConstructPayload::Unit) => {
+                    bytecode.push_const(0);
+                    return bytecode;
+                }
+                ("Some", EnumConstructPayload::Tuple(args)) if args.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&args[0]));
+                    return bytecode;
+                }
+                ("Some", EnumConstructPayload::Record(parts)) if parts.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&parts[0].value));
+                    return bytecode;
+                }
+                _ => {}
+            }
+        }
+
+        // Emit args in reverse declaration order for MAKE_ENUM stack discipline.
+        match fields {
+            EnumConstructPayload::Unit => {}
+            EnumConstructPayload::Tuple(args) => {
+                let in_generic = self
+                    .current_function_qualified
+                    .as_deref()
+                    .is_some_and(|n| self.generic_return_is_boxed(n));
+                for arg in args.iter().rev() {
+                    let mut arg_bc = self.do_compile(arg);
+                    if in_generic {
+                        if let Some(ty) = self.codegen_expr_ty(arg) {
+                            Self::emit_unbox_if_needed(&mut arg_bc, &ty);
+                        }
+                    }
+                    bytecode.append(&mut arg_bc);
+                }
+            }
+            EnumConstructPayload::Record(parts) => {
+                // Build a name → &Output map for the call site.
+                let call_site: std::collections::HashMap<&str, &Output> =
+                    parts.iter().map(|p| (p.name, &p.value)).collect();
+                let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
+                // Walk DECLARATION order REVERSED — so when
+                // MAKE_ENUM pops, payload[0] is `decl_fields[0]`.
+                for (decl_name, _) in decl_order.iter().rev() {
+                    if let Some(arg) = call_site.get(decl_name.as_str()) {
+                        bytecode.append(&mut self.do_compile(arg));
+                    }
+                    // Missing field: typechecker has already
+                    // reported; skip silently to keep bytecode
+                    // emission in lockstep with IDs.
+                }
+            }
+        }
+
+        // Emit MAKE_ENUM with the tag (upper 16) and
+        // arity (lower 16) packed in the operand.
+        bytecode.push_make_enum(tag as u16, arity as u16);
+        bytecode
+    }
+
+
     /// If `ast` folds to a scalar, emit it and return true.
     ///
     /// When `allow_mul_shl` is false, skip `x * 2^n` → `SHL` so trait/`Mul`
@@ -11729,6 +11933,17 @@ impl Compiler {
                     } else {
                         bytecode.push_load(slot);
                     }
+                } else if let Some((en, vn)) =
+                    self.checker.bare_construct_at(span.start, span.end)
+                {
+                    let en = en.clone();
+                    let vn = vn.clone();
+                    bytecode.append(&mut self.compile_construct_expr(
+                        &en,
+                        &vn,
+                        &parser::ast::EnumConstructPayload::Unit,
+                        ast,
+                    ));
                 } else {
                     // Not a local variable — check if it's a generic function
                     // escaping into a non-call position (e.g. `let f = id;`).
@@ -12964,198 +13179,12 @@ impl Compiler {
                 variant_name,
                 fields,
             } => {
-                use parser::ast::EnumConstructPayload;
-                // Look up the variant's tag and arity in the
-                // typechecker's tables. Unknown enum/variant is a
-                // type error with recovery — still walk children for
-                // NodeId alignment, but do not emit MakeEnum (and do
-                // not panic: release builds use panic=abort).
-                let Some(tag) = self.checker.tag_for(enum_name, variant_name) else {
-                    let fqn = self.class_member_fqn(enum_name, variant_name);
-                    // Match typechecker order for Unit form: static field
-                    // wins over a same-named 0-arg static method.
-                    if matches!(fields, EnumConstructPayload::Unit)
-                        && let Some(slot) = self.checker.static_slot_index(&fqn)
-                    {
-                        bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
-                        return bytecode;
-                    }
-                    // `Class::static_method(...)` — same surface as enum
-                    // Construct; lower to a direct CALL or Entry{Call} when
-                    // the method is compiled or reserved (COI-108 forward).
-                    if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn) {
-                        let arg_slice: &[Output] = match fields {
-                            EnumConstructPayload::Unit => &[],
-                            EnumConstructPayload::Tuple(args) => args.as_slice(),
-                            EnumConstructPayload::Record(parts) => {
-                                for part in parts {
-                                    bytecode.append(&mut self.do_compile(&part.value));
-                                }
-                                // Record form is a type error for static
-                                // methods; still emit a CALL for recovery.
-                                let _ = self.emit_direct_fn_call(
-                                    &mut bytecode,
-                                    &fqn,
-                                    parts.len() as u32,
-                                );
-                                return bytecode;
-                            }
-                        };
-                        let arity =
-                            self.emit_call_args_with_rest(&fqn, arg_slice, &mut bytecode, false);
-                        let _ = self.emit_direct_fn_call(&mut bytecode, &fqn, arity);
-                        return bytecode;
-                    }
-                    match fields {
-                        EnumConstructPayload::Unit => {}
-                        EnumConstructPayload::Tuple(args) => {
-                            for arg in args {
-                                bytecode.append(&mut self.do_compile(arg));
-                            }
-                        }
-                        EnumConstructPayload::Record(parts) => {
-                            for part in parts {
-                                bytecode.append(&mut self.do_compile(&part.value));
-                            }
-                        }
-                    }
-                    return bytecode;
-                };
-                let arity = self.checker.arity_for(enum_name, variant_name).unwrap_or(0);
-
-                if let Some(backing) = self.checker.scalar_for(enum_name, variant_name).cloned() {
-                    self.emit_scalar_backing(&backing, &mut bytecode);
-                    return bytecode;
-                }
-
-                if self.unbox_enum_context > 0 {
-                    match fields {
-                        EnumConstructPayload::Unit if arity == 0 => {
-                            bytecode.push_const(0);
-                        }
-                        EnumConstructPayload::Tuple(args) if args.len() == 1 => {
-                            bytecode.append(&mut self.do_compile(&args[0]));
-                        }
-                        EnumConstructPayload::Record(parts) if parts.len() == 1 => {
-                            bytecode.append(&mut self.do_compile(&parts[0].value));
-                        }
-                        EnumConstructPayload::Unit => {
-                            bytecode.push_const(0);
-                        }
-                        EnumConstructPayload::Tuple(args) => {
-                            for arg in args {
-                                bytecode.append(&mut self.do_compile(arg));
-                            }
-                            if args.is_empty() {
-                                bytecode.push_const(0);
-                            }
-                        }
-                        EnumConstructPayload::Record(parts) => {
-                            for part in parts {
-                                bytecode.append(&mut self.do_compile(&part.value));
-                            }
-                            if parts.is_empty() {
-                                bytecode.push_const(0);
-                            }
-                        }
-                    }
-                    bytecode.push_const(tag as i32);
-                    return bytecode;
-                }
-
-                let pair_enum = self.pair_value_context
-                    && (common::is_builtin_option_enum(enum_name)
-                        || common::is_builtin_result_enum(enum_name))
-                    && arity <= 1;
-                if pair_enum {
-                    match fields {
-                        EnumConstructPayload::Unit if arity == 0 => {
-                            // Keep a payload slot for `Option::None` so every
-                            // pair has the same `[payload, tag]` shape.
-                            bytecode.push_const(0);
-                        }
-                        EnumConstructPayload::Tuple(args) if args.len() == 1 => {
-                            bytecode.append(&mut self.do_compile(&args[0]));
-                        }
-                        EnumConstructPayload::Record(parts) if parts.len() == 1 => {
-                            bytecode.append(&mut self.do_compile(&parts[0].value));
-                        }
-                        _ => {}
-                    }
-                    if matches!(fields, EnumConstructPayload::Unit) && arity != 0 {
-                        // Invalid constructor shapes are already reported by
-                        // typechecking; keep the stack balanced for recovery.
-                        bytecode.push_const(0);
-                    }
-                    bytecode.push_const(tag as i32);
-                    return bytecode;
-                }
-
-                if common::is_builtin_option_enum(enum_name)
-                    && !self.force_heap_option
-                    && self
-                        .codegen_expr_ty(ast)
-                        .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
-                    || (common::is_builtin_option_enum(enum_name)
-                        && !self.force_heap_option
-                        && self.force_niche_option)
-                {
-                    match (*variant_name, fields) {
-                        ("None", EnumConstructPayload::Unit) => {
-                            bytecode.push_const(0);
-                            return bytecode;
-                        }
-                        ("Some", EnumConstructPayload::Tuple(args)) if args.len() == 1 => {
-                            bytecode.append(&mut self.do_compile(&args[0]));
-                            return bytecode;
-                        }
-                        ("Some", EnumConstructPayload::Record(parts)) if parts.len() == 1 => {
-                            bytecode.append(&mut self.do_compile(&parts[0].value));
-                            return bytecode;
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Emit args in reverse declaration order for MAKE_ENUM stack discipline.
-                match fields {
-                    EnumConstructPayload::Unit => {}
-                    EnumConstructPayload::Tuple(args) => {
-                        let in_generic = self
-                            .current_function_qualified
-                            .as_deref()
-                            .is_some_and(|n| self.generic_return_is_boxed(n));
-                        for arg in args.iter().rev() {
-                            let mut arg_bc = self.do_compile(arg);
-                            if in_generic {
-                                if let Some(ty) = self.codegen_expr_ty(arg) {
-                                    Self::emit_unbox_if_needed(&mut arg_bc, &ty);
-                                }
-                            }
-                            bytecode.append(&mut arg_bc);
-                        }
-                    }
-                    EnumConstructPayload::Record(parts) => {
-                        // Build a name → &Output map for the call site.
-                        let call_site: std::collections::HashMap<&str, &Output> =
-                            parts.iter().map(|p| (p.name, &p.value)).collect();
-                        let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
-                        // Walk DECLARATION order REVERSED — so when
-                        // MAKE_ENUM pops, payload[0] is `decl_fields[0]`.
-                        for (decl_name, _) in decl_order.iter().rev() {
-                            if let Some(arg) = call_site.get(decl_name.as_str()) {
-                                bytecode.append(&mut self.do_compile(arg));
-                            }
-                            // Missing field: typechecker has already
-                            // reported; skip silently to keep bytecode
-                            // emission in lockstep with IDs.
-                        }
-                    }
-                }
-
-                // Emit MAKE_ENUM with the tag (upper 16) and
-                // arity (lower 16) packed in the operand.
-                bytecode.push_make_enum(tag as u16, arity as u16);
+                bytecode.append(&mut self.compile_construct_expr(
+                    enum_name,
+                    variant_name,
+                    fields,
+                    ast,
+                ));
             }
             // --- Match codegen (threaded layout) ---
             // Forward: scrutinee, JUMP_IF_MATCH cascade, last-arm UNPACK/POP/STORE.

@@ -413,6 +413,9 @@ pub struct Checker {
     /// Present only for scalar-backed enums (unboxed Int/Float/String/Bool).
     enum_scalar: BTreeMap<String, Vec<crate::typechecking::ty::ScalarBacking>>,
 
+    /// Bare `Some`/`Ok`/`Red` (Call or Identifier) resolved to `Enum::Case`.
+    bare_constructs_by_span: HashMap<(usize, usize), (String, String)>,
+
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
 
