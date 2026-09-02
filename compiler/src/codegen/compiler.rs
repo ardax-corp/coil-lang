@@ -10891,9 +10891,9 @@ impl Compiler {
                 let entry_sp = self.context.variables.len() as u32;
 
                 self.bytecode.append(&mut a);
-                self.emit_sidecar_array_pins(args);
 
                 let body_start = self.bytecode.len();
+                self.emit_sidecar_array_pins(args);
                 // Provisional span so self-recursive peels can see the opening
                 // predicate while the body is still streaming into `self.bytecode`.
                 self.record_fn_span(table_key.clone(), body_start, body_start);
