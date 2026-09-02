@@ -369,6 +369,88 @@
     }
 
     #[test]
+    fn enum_scalar_discriminants_parse() {
+        let ast = decl_ast!(
+            r#"#[repr(int)] enum Status { Ok = 200, NotFound = 404, }"#
+        );
+        match ast {
+            Expression::EnumDecl { name, attrs, variants, .. } => {
+                assert_eq!(name, "Status");
+                assert_eq!(attrs[0].name, "repr");
+                assert_eq!(variants.len(), 2);
+                match variants[0].1.as_ref() {
+                    Expression::EnumVariant {
+                        name,
+                        discriminant: Some(d),
+                        ..
+                    } => {
+                        assert_eq!(*name, "Ok");
+                        assert!(matches!(d.1.as_ref(), Expression::Integer(200)));
+                    }
+                    other => panic!("expected Ok = 200, got {:?}", other),
+                }
+                match variants[1].1.as_ref() {
+                    Expression::EnumVariant {
+                        name,
+                        discriminant: Some(d),
+                        ..
+                    } => {
+                        assert_eq!(*name, "NotFound");
+                        assert!(matches!(d.1.as_ref(), Expression::Integer(404)));
+                    }
+                    other => panic!("expected NotFound = 404, got {:?}", other),
+                }
+            }
+            other => panic!("expected EnumDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn enum_repr_and_derive_attrs_stack() {
+        let ast = decl_ast!(
+            r#"#[repr(int)] #[derive(Show, Eq, Ord, Hash)] enum Status { Ok = 200, NotFound = 404 }"#
+        );
+        match ast {
+            Expression::EnumDecl { attrs, .. } => {
+                assert_eq!(attrs.len(), 2);
+                assert_eq!(attrs[0].name, "repr");
+                assert_eq!(attrs[1].name, "derive");
+            }
+            other => panic!("expected EnumDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn enum_string_and_bool_repr_parse() {
+        let ast = decl_ast!(r#"#[repr(string)] enum Mode { Fast = "fast", Slow = "slow" }"#);
+        match ast {
+            Expression::EnumDecl { variants, .. } => {
+                match variants[0].1.as_ref() {
+                    Expression::EnumVariant {
+                        discriminant: Some(d),
+                        ..
+                    } => assert!(matches!(d.1.as_ref(), Expression::String("fast"))),
+                    other => panic!("expected string discriminant, got {:?}", other),
+                }
+            }
+            other => panic!("expected EnumDecl, got {:?}", other),
+        }
+        let ast = decl_ast!("#[repr(bool)] enum Switch { Off = false, On = true }");
+        match ast {
+            Expression::EnumDecl { variants, .. } => {
+                match variants[1].1.as_ref() {
+                    Expression::EnumVariant {
+                        discriminant: Some(d),
+                        ..
+                    } => assert!(matches!(d.1.as_ref(), Expression::Bool(true))),
+                    other => panic!("expected bool discriminant, got {:?}", other),
+                }
+            }
+            other => panic!("expected EnumDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn enum_parses_to_enum_decl() {
         let ast = decl_ast!("enum Option { None, Some(int) }");
         match ast {
@@ -377,7 +459,7 @@
                 assert_eq!(variants.len(), 2);
 
                 match variants[0].1.as_ref() {
-                    Expression::EnumVariant { docs: _, name, payload } => {
+                    Expression::EnumVariant { docs: _, name, payload, .. } => {
                         assert_eq!(*name, "None");
                         assert!(matches!(payload, EnumVariantPayload::Unit));
                     }
@@ -385,7 +467,7 @@
                 }
 
                 match variants[1].1.as_ref() {
-                    Expression::EnumVariant { docs: _, name, payload } => {
+                    Expression::EnumVariant { docs: _, name, payload, .. } => {
                         assert_eq!(*name, "Some");
                         match payload {
                             EnumVariantPayload::Tuple(parts) => {
@@ -413,7 +495,7 @@
                 assert_eq!(name, "Shape");
                 assert_eq!(variants.len(), 1);
                 match variants[0].1.as_ref() {
-                    Expression::EnumVariant { docs: _, name, payload } => {
+                    Expression::EnumVariant { docs: _, name, payload, .. } => {
                         assert_eq!(*name, "Circle");
                         match payload {
                             EnumVariantPayload::Record(fields) => {
@@ -783,6 +865,22 @@
             Expression::Match { arms, .. } => {
                 assert_eq!(arms.len(), 1);
                 assert!(matches!(arms[0].pattern.1, Pattern::Wildcard));
+            }
+            other => panic!("expected Match, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn default_catch_all_parses() {
+        let ast = expr_ast!("match x { default => 0 }");
+        let inner = match ast {
+            Expression::Expr(e) => e.1.as_ref().clone(),
+            other => other,
+        };
+        match inner {
+            Expression::Match { arms, .. } => {
+                assert_eq!(arms.len(), 1);
+                assert!(matches!(arms[0].pattern.1, Pattern::Default));
             }
             other => panic!("expected Match, got {:?}", other),
         }

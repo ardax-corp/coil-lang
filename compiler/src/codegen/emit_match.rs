@@ -9,6 +9,9 @@ impl Compiler {
         scrutinee: &Output<'compiler>,
         arms: &[MatchArm<'compiler>],
     ) -> CodeBuf {
+        if self.try_compile_scalar_enum_match(scrutinee, arms) {
+            return CodeBuf::new();
+        }
         if self.try_compile_frame_local_match(scrutinee, arms) {
             return CodeBuf::new();
         }
@@ -34,6 +37,102 @@ impl Compiler {
             return result;
         }
         self.compile_match_expr_boxed(scrutinee, arms)
+    }
+
+    fn try_compile_scalar_enum_match<'compiler>(
+        &mut self,
+        scrutinee: &Output<'compiler>,
+        arms: &[MatchArm<'compiler>],
+    ) -> bool {
+        if arms.is_empty() {
+            return false;
+        }
+        let Some(ty) = self.codegen_expr_ty(scrutinee) else {
+            return false;
+        };
+        let Some(enum_name) = extract_enum_name(&ty) else {
+            return false;
+        };
+        if !self.checker.is_scalar_enum(&enum_name) {
+            return false;
+        }
+
+        self.bytecode
+            .push_seek(self.context.variables.len() as u32);
+        let mut scrutinee_bc = self.do_compile(scrutinee);
+        self.bytecode.append(&mut scrutinee_bc);
+
+        let mut bb = BlockBuilder::new();
+        let end = bb.fresh_label(self.bytecode.il_mut());
+        for (i, arm) in arms.iter().enumerate() {
+            let is_last = i + 1 == arms.len();
+            match &arm.pattern.1 {
+                Pattern::Integer(_) => return false,
+                Pattern::Wildcard | Pattern::Default => {
+                    self.bytecode.push_pop();
+                    let mut body = self.do_compile(&arm.body);
+                    self.bytecode.append(&mut body);
+                    if !is_last {
+                        bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+                    }
+                }
+                Pattern::Binding { name } => {
+                    let slot = self.context.variables.len() as u32;
+                    self.context
+                        .variables
+                        .intern(format!("__scalar_match{}", slot));
+                    self.record_debug_local(name, slot);
+                    self.bytecode.push_store_pop(slot);
+                    let mut inner = HashMap::new();
+                    inner.insert(name.to_string(), slot);
+                    let saved = self.push_match_bindings(inner);
+                    let mut body = self.do_compile(&arm.body);
+                    self.bytecode.append(&mut body);
+                    self.context.match_bindings = saved;
+                    if !is_last {
+                        bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+                    }
+                }
+                Pattern::Constructor {
+                    enum_name: en,
+                    variant_name,
+                    ..
+                } => {
+                    let Some(backing) = self.checker.scalar_for(en, variant_name).cloned() else {
+                        return false;
+                    };
+                    let miss = if is_last {
+                        None
+                    } else {
+                        Some(bb.fresh_label(self.bytecode.il_mut()))
+                    };
+                        if let Some(miss) = miss {
+                            self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                            let mut lit = CodeBuf::new();
+                            self.emit_scalar_backing(&backing, &mut lit);
+                            self.bytecode.append(&mut lit);
+                            self.bytecode.push(Byte::new(Instruction::EQ));
+                        bb.emit_jump_to_hinted(
+                            miss,
+                            BbJumpKind::JumpIfFalse,
+                            FuseHint::nofuse_value_under_jmp(),
+                            self.bytecode.il_mut(),
+                        );
+                    }
+                    self.bytecode.push_pop();
+                    let mut body = self.do_compile(&arm.body);
+                    self.bytecode.append(&mut body);
+                    if !is_last {
+                        bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+                        if let Some(miss) = miss {
+                            bb.bind_label(miss, self.bytecode.il_mut());
+                        }
+                    }
+                }
+            }
+        }
+        bb.bind_label(end, self.bytecode.il_mut());
+        true
     }
 
     pub(super) fn try_compile_pair_match<'compiler>(
@@ -119,7 +218,7 @@ impl Compiler {
             PatternPayload::Unit => None,
             PatternPayload::Tuple(parts) if parts.len() == 1 => match &parts[0].1 {
                 Pattern::Binding { name } => Some(*name),
-                Pattern::Wildcard => None,
+                Pattern::Wildcard | Pattern::Default => None,
                 _ => return None,
             },
             _ => return None,
@@ -213,13 +312,13 @@ impl Compiler {
                         PatternPayload::Unit => None,
                         PatternPayload::Tuple(parts) if parts.len() == 1 => match &parts[0].1 {
                             Pattern::Binding { name } => Some(*name),
-                            Pattern::Wildcard => None,
+                            Pattern::Wildcard | Pattern::Default => None,
                             _ => return false,
                         },
                         PatternPayload::Record(fields) if fields.len() == 1 => {
                             match &fields[0].pattern.1 {
                                 Pattern::Binding { name } => Some(*name),
-                                Pattern::Wildcard => None,
+                                Pattern::Wildcard | Pattern::Default => None,
                                 _ => return false,
                             }
                         }
@@ -228,7 +327,8 @@ impl Compiler {
                     };
                     arm_info.push((tag, index, binding));
                 }
-                Pattern::Wildcard => wildcard = Some(index),
+                Pattern::Wildcard | Pattern::Default => wildcard = Some(index),
+                Pattern::Integer(_) => return false,
                 Pattern::Binding { name } => {
                     arm_info.push((u32::MAX, index, Some(*name)));
                 }
@@ -340,7 +440,7 @@ impl Compiler {
                 {
                     let binding = match &parts[0].1 {
                         Pattern::Binding { name } => Some(*name),
-                        Pattern::Wildcard => None,
+                        Pattern::Wildcard | Pattern::Default => None,
                         _ => return false,
                     };
                     some = Some((index, binding));
@@ -354,7 +454,7 @@ impl Compiler {
                 {
                     fallback = Some((index, None));
                 }
-                Pattern::Wildcard => {
+                Pattern::Wildcard | Pattern::Default => {
                     fallback = Some((index, None));
                 }
                 Pattern::Binding { name } => {
@@ -561,7 +661,7 @@ impl Compiler {
                                     .with_operand_u32(arity as u32),
                             );
                         }
-                        Pattern::Wildcard => {
+                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
                             // Wildcard arm — POP the
                             // scrutinee.
                             self.bytecode.push_pop();
@@ -899,7 +999,7 @@ impl Compiler {
                                 true, // is_outer = true (forward pass handled UNPACK/JUMP_IF_MATCH)
                             );
                         }
-                        Pattern::Wildcard => {}
+                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                     }
                 } else {
                     // Not in a test chain: emit binding
@@ -943,7 +1043,7 @@ impl Compiler {
                                 true, // is_outer = true (forward pass handled UNPACK/JUMP_IF_MATCH)
                             );
                         }
-                        Pattern::Wildcard => {
+                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
                             // No bindings — the forward pass
                             // already emitted POP for the
                             // scrutinee.

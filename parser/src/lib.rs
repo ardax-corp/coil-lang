@@ -3008,15 +3008,25 @@ impl<'pratt> Pratt<'pratt> {
                     .padded()
                     .map_with(|_, e| (e.span(), Pattern::Wildcard)),
                 constructor,
-                text::ident().padded().try_map(|name, span| {
-                    if name == "default" {
-                        Err(Rich::custom(
-                            span,
-                            "match wildcard is `_`; `default` is not a pattern keyword",
-                        ))
+                text::int(10)
+                    .to_slice()
+                    .from_str()
+                    .validate(|v: Result<i64, ParseIntError>, e, emitter| match v {
+                        Ok(value) => value,
+                        Err(msg) => {
+                            emitter.emit(Rich::custom(e.span(), msg.to_string()));
+                            0_i64
+                        }
+                    })
+                    .padded()
+                    .map_with(|n, e| (e.span(), Pattern::Integer(n))),
+                text::ident().padded().map_with(|name, e| {
+                    let pat = if name == "default" {
+                        Pattern::Default
                     } else {
-                        Ok((span, Pattern::Binding { name }))
-                    }
+                        Pattern::Binding { name }
+                    };
+                    (e.span(), pat)
                 }),
             ))
         })
@@ -3102,16 +3112,46 @@ impl<'pratt> Pratt<'pratt> {
             .or_not()
             .map(|opt| opt.unwrap_or(EnumVariantPayload::Unit));
 
+        let scalar_lit = choice((
+            op!("-")
+                .ignore_then(self.int())
+                .map_with(|inner, e| {
+                    (
+                        e.span(),
+                        Box::new(Expression::Negate(inner)),
+                    )
+                }),
+            self.float(),
+            self.int(),
+            self.string(),
+            keyword!("true").map_with(|_, e| (e.span(), Box::new(Expression::Bool(true)))),
+            keyword!("false").map_with(|_, e| (e.span(), Box::new(Expression::Bool(false)))),
+        ));
+
+        let discriminant = op!("=")
+            .ignore_then(scalar_lit)
+            .or_not();
+
         self.docs_prefix()
             .then(text::ident().padded())
             .then(payload_choice)
-            .map_with(|((docs, name), payload), e| {
+            .then(discriminant)
+            .validate(|(((docs, name), payload), discriminant), e, emitter| {
+                if discriminant.is_some()
+                    && !matches!(payload, EnumVariantPayload::Unit)
+                {
+                    emitter.emit(Rich::custom(
+                        e.span(),
+                        "scalar discriminant `=` cannot mix with a tuple or record payload",
+                    ));
+                }
                 (
                     e.span(),
                     Box::new(Expression::EnumVariant {
                         docs,
                         name,
                         payload,
+                        discriminant,
                     }),
                 )
             })

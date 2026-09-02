@@ -411,7 +411,7 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
 /// Structural walk over patterns (no NodeIds).
 pub fn pre_walk_pattern(pattern: &Pattern, _table: &mut IdTable) {
     match pattern {
-        Pattern::Wildcard | Pattern::Binding { .. } => {}
+        Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } | Pattern::Integer(_) => {}
         Pattern::Constructor { payload, .. } => match payload {
             PatternPayload::Unit => {}
             PatternPayload::Tuple(parts) => {

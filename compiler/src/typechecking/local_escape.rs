@@ -582,6 +582,9 @@ fn is_unbox_ty(checker: &Checker, ty: &Ty) -> bool {
     if common::is_builtin_ffi_enum(name) {
         return false;
     }
+    if checker.is_scalar_enum(name) {
+        return false;
+    }
     let Some(vars) = checker.enum_variants(name) else {
         return false;
     };

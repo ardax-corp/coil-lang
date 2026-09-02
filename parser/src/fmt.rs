@@ -822,10 +822,19 @@ impl Formatter {
                 self.fmt_type_params(type_params);
                 self.fmt_comma_body(variants);
             }
-            Expression::EnumVariant { docs, name, payload } => {
+            Expression::EnumVariant {
+                docs,
+                name,
+                payload,
+                discriminant,
+            } => {
                 self.fmt_docs(docs);
                 self.push_str(name);
                 self.fmt_enum_variant_payload(payload);
+                if let Some(disc) = discriminant {
+                    self.push_str(" = ");
+                    self.fmt_output(disc);
+                }
             }
 
             Expression::Class {

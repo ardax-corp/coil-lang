@@ -58,7 +58,8 @@ pub use stack_bound::{
     BoundSource, DEFAULT_OPERAND_STACK_SLOTS, FnStackBound, MAX_OPERAND_STACK_SLOTS, StackBoundReport,
     analyze_stack_bounds, operand_slots_for_frames,
 };
-pub use ty::Ty;
+#[allow(unused_imports)] // public API re-export
+pub use ty::{ScalarBacking, Ty};
 #[allow(unused_imports)] // public API for Vec helpers / codegen
 pub use ty::{vec_app_ty, vec_element_ty};
 pub use virtual_modules::{

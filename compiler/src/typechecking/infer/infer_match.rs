@@ -6,7 +6,7 @@ use parser::ast::{Expression, MatchArm, Output, Pattern};
 use reporting::ErrorCode;
 
 use crate::typechecking::subst::apply_ty_prune;
-use crate::typechecking::ty::Ty;
+use crate::typechecking::ty::{int, Ty};
 
 use super::*;
 
@@ -182,9 +182,9 @@ impl Checker {
         use parser::ast::PatternPayload;
         match pattern {
             Pattern::Wildcard => {
-                // Wildcard matches anything, binds nothing. The
-                // body's bindings (if any) come from nested
-                // patterns; wildcard itself has no payload.
+                expected_ty.clone()
+            }
+            Pattern::Default => {
                 expected_ty.clone()
             }
             Pattern::Binding { name } => {
@@ -199,6 +199,15 @@ impl Checker {
                     .insert_top(name.to_string(), Scheme::mono(pruned.clone()));
                 self.record_codegen_var_type(name.to_string(), pruned.clone());
                 pruned
+            }
+            Pattern::Integer(_) => {
+                self.unify(
+                    expected_ty,
+                    &int(),
+                    pattern_range,
+                    "match integer pattern",
+                );
+                int()
             }
             Pattern::Constructor {
                 enum_name,

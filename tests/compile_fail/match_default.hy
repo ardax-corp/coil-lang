@@ -1,6 +1,11 @@
-// Expected: parse failure — match wildcard is `_` only.
+// Expected: compile failure — `_` and `default` cannot both catch-all.
+enum Status { Open, Closed }
+
 fn main() {
-    match 1 {
-        default => 0,
+    let s = Status::Open;
+    let _ = match s {
+        Status::Open => 1,
+        _ => 0,
+        default => 2,
     };
 }

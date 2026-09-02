@@ -52,7 +52,7 @@ const DERIVABLE: &[&str] = &[
     "Sensitive",
 ];
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr"];
 
 /// Result of attribute expansion before typechecking.
 #[derive(Default, Clone)]
@@ -141,6 +141,13 @@ fn validate_attrs(
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!("Attribute `max_depth` is not valid on {}", target),
+                span.into_range(),
+            ));
+        }
+        if attr.name == "repr" && target != "enum" {
+            messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!("Attribute `repr` is not valid on {}", target),
                 span.into_range(),
             ));
         }
@@ -1449,12 +1456,20 @@ fn rewrite_expr_inline<'a>(
                 variants: rewrite_outputs(variants, target, subs, decoratee_args),
             },
         ),
-        Expression::EnumVariant { docs, name, payload } => at(
+        Expression::EnumVariant {
+            docs,
+            name,
+            payload,
+            discriminant,
+        } => at(
             span,
             Expression::EnumVariant {
                 docs: docs.clone(),
                 name: *name,
                 payload: rewrite_enum_variant_payload(payload, target, subs, decoratee_args),
+                discriminant: discriminant
+                    .as_ref()
+                    .map(|d| rw(d)),
             },
         ),
         Expression::ExternStruct(decl) => at(
@@ -1740,7 +1755,7 @@ fn variant_metas<'a>(variants: &[Output<'a>]) -> Vec<VariantMeta<'a>> {
     variants
         .iter()
         .filter_map(|v| match v.1.as_ref() {
-            Expression::EnumVariant { docs: _, name, payload } => Some(VariantMeta {
+            Expression::EnumVariant { docs: _, name, payload, .. } => Some(VariantMeta {
                 name,
                 shape: match payload {
                     EnumVariantPayload::Unit => VariantShape::Unit,
@@ -1753,6 +1768,76 @@ fn variant_metas<'a>(variants: &[Output<'a>]) -> Vec<VariantMeta<'a>> {
             _ => None,
         })
         .collect()
+}
+
+fn unwrap_disc_expr<'e, 'a>(expr: &'a Expression<'e>) -> &'a Expression<'e> {
+    match expr {
+        Expression::Expr(e) | Expression::Group(e) | Expression::Positive(e) => {
+            unwrap_disc_expr(e.1.as_ref())
+        }
+        other => other,
+    }
+}
+
+fn disc_lit_kind(expr: &Expression<'_>) -> Option<&'static str> {
+    match unwrap_disc_expr(expr) {
+        Expression::Integer(_) => Some("int"),
+        Expression::Negate(inner) => match unwrap_disc_expr(inner.1.as_ref()) {
+            Expression::Integer(_) => Some("int"),
+            Expression::Float(_) => Some("float"),
+            _ => None,
+        },
+        Expression::Float(_) => Some("float"),
+        Expression::String(_) => Some("string"),
+        Expression::Bool(_) => Some("bool"),
+        _ => None,
+    }
+}
+
+/// Backing type when every case is a unit `= lit` (inferred or `#[repr]`).
+fn scalar_backing_ty_name<'a>(
+    attrs: &[Attribute<'a>],
+    variants: &[Output<'a>],
+) -> Option<&'a str> {
+    let mut from_repr = None;
+    for attr in attrs {
+        if attr.name != "repr" {
+            continue;
+        }
+        if let AttrArgs::Idents(ids) = &attr.args
+            && ids.len() == 1
+        {
+            match ids[0] {
+                "int" | "float" | "string" | "bool" => from_repr = Some(ids[0]),
+                _ => {}
+            }
+        }
+    }
+    if variants.is_empty() {
+        return None;
+    }
+    let mut inferred: Option<&str> = None;
+    for v in variants {
+        let Expression::EnumVariant {
+            payload,
+            discriminant,
+            ..
+        } = v.1.as_ref()
+        else {
+            continue;
+        };
+        if !matches!(payload, EnumVariantPayload::Unit) {
+            return None;
+        }
+        let disc = discriminant.as_ref()?;
+        let kind = disc_lit_kind(disc.1.as_ref())?;
+        match inferred {
+            None => inferred = Some(kind),
+            Some(k) if k != kind => return None,
+            Some(_) => {}
+        }
+    }
+    from_repr.or(inferred)
 }
 
 fn expand_decls<'a>(
@@ -1877,6 +1962,7 @@ fn expand_decls<'a>(
                 derives: Vec<&'a str>,
                 variants: Vec<VariantMeta<'a>>,
                 variant_nodes: Vec<Output<'a>>,
+                scalar_backing: Option<&'a str>,
             },
             Class {
                 name: &'a str,
@@ -1895,12 +1981,14 @@ fn expand_decls<'a>(
             } => {
                 validate_attrs(attrs, "enum", user_attrs, &mut messages, span, false);
                 let derives = derive_traits_from_attrs(attrs);
+                let scalar_backing = scalar_backing_ty_name(attrs, variants);
                 Some(Job::Enum {
                     name,
                     generic: !type_params.is_empty(),
                     derives,
                     variants: variant_metas(variants),
                     variant_nodes: variants.clone(),
+                    scalar_backing,
                 })
             }
             Expression::Class {
@@ -1980,6 +2068,7 @@ fn expand_decls<'a>(
                 derives,
                 variants,
                 variant_nodes,
+                scalar_backing,
             }) => Some(expand_enum(
                 span,
                 name,
@@ -1987,6 +2076,7 @@ fn expand_decls<'a>(
                 &derives,
                 &variants,
                 &variant_nodes,
+                scalar_backing,
                 &decls,
                 &mut messages,
             )),
@@ -2040,6 +2130,7 @@ fn expand_enum<'a>(
     derives: &[&'a str],
     variants: &[VariantMeta<'a>],
     _variant_nodes: &[Output<'a>],
+    scalar_backing: Option<&'a str>,
     decls: &[Output<'a>],
     messages: &mut Vec<Message>,
 ) -> Vec<Output<'a>> {
@@ -2063,20 +2154,25 @@ fn expand_enum<'a>(
             messages.push(msg);
             continue;
         }
-        match trait_name {
-            "Show" => out.push(synth_show_enum(span, name, variants)),
-            "Eq" => out.push(synth_eq_enum(span, name, variants)),
-            "Ord" => out.extend(synth_ord_enum(span, name, variants)),
-            "Default" => out.push(synth_default_enum(span, name, variants)),
-            "Hash" => out.push(synth_hash_enum(span, name, variants)),
-            "String" => out.push(synth_string_enum(span, name, variants)),
-            "Serialize" => out.push(synth_serialize_enum(span, name, variants)),
-            "Deserialize" => out.push(synth_deserialize_enum(span, name, variants)),
-            "Send" | "Sensitive" => out.push(synth_marker_impl(span, trait_name, name)),
+        match (trait_name, scalar_backing) {
+            ("Show", Some(backing)) => out.push(synth_show_scalar_enum(span, name, backing)),
+            ("Show", None) => out.push(synth_show_enum(span, name, variants)),
+            ("Eq", Some(backing)) => out.push(synth_eq_scalar_enum(span, name, backing)),
+            ("Eq", None) => out.push(synth_eq_enum(span, name, variants)),
+            ("Ord", Some(backing)) => out.extend(synth_ord_scalar_enum(span, name, backing)),
+            ("Ord", None) => out.extend(synth_ord_enum(span, name, variants)),
+            ("Default", _) => out.push(synth_default_enum(span, name, variants)),
+            ("Hash", Some(backing)) => out.push(synth_hash_scalar_enum(span, name, backing)),
+            ("Hash", None) => out.push(synth_hash_enum(span, name, variants)),
+            ("String", Some(backing)) => out.push(synth_string_scalar_enum(span, name, backing)),
+            ("String", None) => out.push(synth_string_enum(span, name, variants)),
+            ("Serialize", _) => out.push(synth_serialize_enum(span, name, variants)),
+            ("Deserialize", _) => out.push(synth_deserialize_enum(span, name, variants)),
+            ("Send" | "Sensitive", _) => out.push(synth_marker_impl(span, trait_name, name)),
             _ => unreachable!(),
         }
     }
-    push_default_display_impls(span, name, derives, decls, &mut out);
+    push_default_display_impls(span, name, derives, decls, scalar_backing, &mut out);
     out
 }
 
@@ -2122,7 +2218,7 @@ fn expand_class<'a>(
             _ => unreachable!(),
         }
     }
-    push_default_display_impls(span, name, derives, decls, &mut out);
+    push_default_display_impls(span, name, derives, decls, None, &mut out);
     out
 }
 
@@ -2139,13 +2235,22 @@ fn push_default_display_impls<'a>(
     name: &'a str,
     derives: &[&str],
     decls: &[Output<'a>],
+    scalar_backing: Option<&'a str>,
     out: &mut Vec<Output<'a>>,
 ) {
     if !derives.iter().any(|t| *t == "Show") && !has_explicit_impl(decls, "Show", name) {
-        out.push(synth_show_type_name(span, name));
+        if let Some(backing) = scalar_backing {
+            out.push(synth_show_scalar_enum(span, name, backing));
+        } else {
+            out.push(synth_show_type_name(span, name));
+        }
     }
     if !derives.iter().any(|t| *t == "String") && !has_explicit_impl(decls, "String", name) {
-        out.push(synth_string_type_name(span, name));
+        if let Some(backing) = scalar_backing {
+            out.push(synth_string_scalar_enum(span, name, backing));
+        } else {
+            out.push(synth_string_type_name(span, name));
+        }
     }
 }
 
@@ -2424,6 +2529,26 @@ fn typeclass_impl<'a>(
     )
 }
 
+fn let_bind<'a>(span: SimpleSpan, ty: &'a str, name: &'a str, init: Output<'a>) -> Output<'a> {
+    at(
+        span,
+        Expression::Fragment(vec![
+            at(span, Expression::Variable(name, Some(ty_name(span, ty)))),
+            init,
+        ]),
+    )
+}
+
+fn block_lets_return<'a>(
+    span: SimpleSpan,
+    lets: Vec<Output<'a>>,
+    value: Output<'a>,
+) -> Output<'a> {
+    let mut items: Vec<Output<'a>> = lets.into_iter().map(|l| stmt(span, l)).collect();
+    items.push(stmt(span, at(span, Expression::Return(value))));
+    at(span, Expression::Block(items))
+}
+
 // ── Show (enum) ─────────────────────────────────────────────────────────────
 
 fn synth_show_enum<'a>(
@@ -2582,6 +2707,156 @@ fn synth_eq_enum<'a>(
     );
 
     typeclass_impl(span, "Eq", enum_name, vec![eq_m, ne_m])
+}
+
+fn synth_eq_scalar_enum<'a>(
+    span: SimpleSpan,
+    enum_name: &'a str,
+    backing: &'a str,
+) -> Output<'a> {
+    let a = leak(format!("__eq_a_{}", enum_name));
+    let b = leak(format!("__eq_b_{}", enum_name));
+    let al = leak(format!("__eq_al_{}", enum_name));
+    let bl = leak(format!("__eq_bl_{}", enum_name));
+    let eq_body = block_lets_return(
+        span,
+        vec![
+            let_bind(span, backing, al, ident(span, a)),
+            let_bind(span, backing, bl, ident(span, b)),
+        ],
+        at(span, Expression::Eq(ident(span, al), ident(span, bl))),
+    );
+    let eq_m = method_fn(
+        span,
+        "eq",
+        vec![arg(span, enum_name, a), arg(span, enum_name, b)],
+        "bool",
+        eq_body,
+    );
+    let ne_cmp = at(span, Expression::Eq(ident(span, a), ident(span, b)));
+    let ne_body = block_return(span, at(span, Expression::LogicalNot(ne_cmp)));
+    let ne_m = method_fn(
+        span,
+        "ne",
+        vec![arg(span, enum_name, a), arg(span, enum_name, b)],
+        "bool",
+        ne_body,
+    );
+    typeclass_impl(span, "Eq", enum_name, vec![eq_m, ne_m])
+}
+
+fn synth_ord_scalar_enum<'a>(
+    span: SimpleSpan,
+    enum_name: &'a str,
+    backing: &'a str,
+) -> Vec<Output<'a>> {
+    let mut out = Vec::with_capacity(5);
+    for op in [OrdOp::Lt, OrdOp::Le, OrdOp::Gt, OrdOp::Ge] {
+        let a = leak(format!("__ord_{}_a_{}", op.name(), enum_name));
+        let b = leak(format!("__ord_{}_b_{}", op.name(), enum_name));
+        let al = leak(format!("__ord_{}_al_{}", op.name(), enum_name));
+        let bl = leak(format!("__ord_{}_bl_{}", op.name(), enum_name));
+        let cmp = match op {
+            OrdOp::Lt => at(span, Expression::Le(ident(span, al), ident(span, bl))),
+            OrdOp::Le => at(span, Expression::Leq(ident(span, al), ident(span, bl))),
+            OrdOp::Gt => at(span, Expression::Gt(ident(span, al), ident(span, bl))),
+            OrdOp::Ge => at(span, Expression::Geq(ident(span, al), ident(span, bl))),
+        };
+        let body = block_lets_return(
+            span,
+            vec![
+                let_bind(span, backing, al, ident(span, a)),
+                let_bind(span, backing, bl, ident(span, b)),
+            ],
+            cmp,
+        );
+        let method = method_fn(
+            span,
+            op.name(),
+            vec![arg(span, enum_name, a), arg(span, enum_name, b)],
+            "bool",
+            body,
+        );
+        out.push(typeclass_impl(span, op.trait_name(), enum_name, vec![method]));
+    }
+    out.push(typeclass_impl(span, "Ord", enum_name, vec![]));
+    out
+}
+
+fn synth_hash_scalar_enum<'a>(
+    span: SimpleSpan,
+    enum_name: &'a str,
+    backing: &'a str,
+) -> Output<'a> {
+    let p = leak(format!("__hash_{enum_name}"));
+    let n = leak(format!("__hash_n_{enum_name}"));
+    let body = block_lets_return(
+        span,
+        vec![let_bind(span, backing, n, ident(span, p))],
+        hash_of(span, ident(span, n)),
+    );
+    let m = method_fn(
+        span,
+        "hash",
+        vec![arg(span, enum_name, p)],
+        "int",
+        body,
+    );
+    typeclass_impl(span, "Hash", enum_name, vec![m])
+}
+
+fn ufcs_nullary<'a>(span: SimpleSpan, recv: Output<'a>, method: &'a str) -> Output<'a> {
+    at(
+        span,
+        Expression::Call {
+            name: at(span, Expression::Access(recv, method)),
+            args: None,
+        },
+    )
+}
+
+fn synth_show_scalar_enum<'a>(
+    span: SimpleSpan,
+    enum_name: &'a str,
+    backing: &'a str,
+) -> Output<'a> {
+    let p = leak(format!("__show_{enum_name}"));
+    let n = leak(format!("__show_n_{enum_name}"));
+    let body = block_lets_return(
+        span,
+        vec![let_bind(span, backing, n, ident(span, p))],
+        ufcs_nullary(span, ident(span, n), "show"),
+    );
+    let m = method_fn(
+        span,
+        "show",
+        vec![arg(span, enum_name, p)],
+        "string",
+        body,
+    );
+    typeclass_impl(span, "Show", enum_name, vec![m])
+}
+
+fn synth_string_scalar_enum<'a>(
+    span: SimpleSpan,
+    enum_name: &'a str,
+    backing: &'a str,
+) -> Output<'a> {
+    let p = leak(format!("__str_{enum_name}"));
+    let n = leak(format!("__str_n_{enum_name}"));
+    let body = block_lets_return(
+        span,
+        vec![let_bind(span, backing, n, ident(span, p))],
+        ufcs_nullary(span, ident(span, n), "show"),
+    );
+    let m = method_fn(
+        span,
+        "to_string",
+        vec![arg(span, enum_name, p)],
+        "string",
+        body,
+    );
+    typeclass_impl(span, "String", enum_name, vec![m])
 }
 
 fn eq_variant_arm<'a>(

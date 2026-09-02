@@ -1936,14 +1936,42 @@ use string::{format, to_bytes};
     }
 
     #[test]
-    fn duplicate_constructor_is_error() {
-        let msgs = assert_messages("enum A { Foo } enum B { Foo }");
+    fn same_constructor_name_on_two_enums_is_ok() {
+        let (mut c, _) = check("enum A { Foo } enum B { Foo }");
+        let msgs = c.take_messages();
+        assert!(msgs.is_empty(), "{:?}", msgs);
+    }
+
+    #[test]
+    fn duplicate_variant_on_same_enum_is_error() {
+        let msgs = assert_messages("enum A { Foo, Foo }");
         assert!(
             msgs.iter()
                 .any(|m| m.message().contains("Duplicate constructor")),
             "expected duplicate-constructor error, got: {:?}",
             msgs
         );
+    }
+
+    #[test]
+    fn bare_constructor_is_ambiguous_when_two_enums_share_a_case() {
+        let msgs = assert_messages("enum A { Foo } enum B { Foo } let x = Foo;");
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("Ambiguous constructor")),
+            "expected ambiguous bare constructor, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn status_ok_and_result_ok_coexist() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   let r = Result::Ok(1); \
+                   let n: int = s;";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
     }
 
     #[test]
@@ -2999,6 +3027,7 @@ fn main() { size_of("hi"); }
                         value: ty_int,
                     },
                 ]),
+                discriminant: None,
             })],
         });
         let construct = node(Expression::Construct {
@@ -3053,6 +3082,7 @@ fn main() { size_of("hi"); }
                         value: ty_int,
                     },
                 ]),
+                discriminant: None,
             })],
         });
         let binding = |name| (span, Pattern::Binding { name });
@@ -8066,6 +8096,147 @@ fn main() {
                    match c { _ => 0 };";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn match_default_catch_all_is_exhaustive() {
+        let src = "enum Color { Red, Green, Blue } \
+                   let c = Color::Red; \
+                   match c { Color::Red => 1, default => 0 };";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn match_default_and_wildcard_together_errors() {
+        let src = "enum Color { Red, Green } \
+                   let c = Color::Red; \
+                   match c { _ => 0, default => 1 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("more than one catch-all")),
+            "expected mixed `_`/`default` error, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn scalar_enum_non_exhaustive_reports_missing() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { Status::Ok => 1 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("Non-exhaustive match")),
+            "expected non-exhaustive scalar match, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn scalar_enum_default_is_exhaustive() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { Status::Ok => 1, default => 0 };";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_coerces_to_int() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   fn f(int n) -> int { return n; } \
+                   f(Status::Ok);";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_does_not_accept_raw_int() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   fn f(Status s) -> Status { return s; } \
+                   f(200);";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter().any(|m| m.message().contains("int") || m.message().contains("Status")),
+            "expected int vs Status mismatch, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn scalar_enum_let_int_annotation() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   let n: int = s;";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_plus_int() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let n: int = Status::Ok + 1;";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_derive_eq_show_hash_ord_typechecks() {
+        let src = r#"
+#[repr(int)]
+#[derive(Show, Eq, Ord, Hash)]
+enum Status { Ok = 200, NotFound = 404 }
+fn hash_key<T: Hash>(T k) -> int { return k.hash(); }
+let _eq = Status::Ok == Status::Ok;
+let _lt = Status::Ok < Status::NotFound;
+let _h = hash_key(Status::Ok);
+let _s = Status::Ok.show();
+"#;
+        let mut ast = Pratt::default().parse(src).expect("parse");
+        let _ = crate::attrs::expand_program(&mut ast);
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let msgs = c.take_messages();
+        assert!(
+            msgs.is_empty(),
+            "expected scalar derive Show/Eq/Ord/Hash to typecheck, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn scalar_enum_match_raw_int_is_error() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { 200 => 1, default => 0 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter().any(|m| m.message().contains("int") || m.message().contains("Status")),
+            "expected Status vs int match error, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn bare_option_some_is_prelude_sugar() {
+        let src = "let x = Some(1);";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn bare_ok_is_ambiguous_next_to_status() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } let x = Ok(1);";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("Ambiguous constructor")),
+            "expected ambiguous bare Ok, got: {:?}",
+            msgs
+        );
     }
 
     #[test]
