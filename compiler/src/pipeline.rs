@@ -2555,6 +2555,11 @@ fn main() -> int {
             "i < a.len() in callee should uncheck a[i]; body={:?}",
             at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
+        assert!(
+            at.iter().any(|b| is_pin_op(*b.bytecode())),
+            "callee-proven helper should ArrayPin; body={:?}",
+            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
     }
 
     #[test]

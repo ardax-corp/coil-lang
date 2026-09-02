@@ -3722,6 +3722,23 @@ impl Compiler {
             .is_some_and(|id| self.typed_sidecar.is_in_bounds_index(id))
     }
 
+    fn fn_param_is_sidecar_pin(&self, param: &str) -> bool {
+        let mut names: Vec<&str> = Vec::new();
+        if let Some(k) = self.current_function_table_key.as_deref() {
+            names.push(k);
+        }
+        if let Some(q) = self.current_function_qualified.as_deref() {
+            names.push(q);
+        }
+        names.iter().any(|fn_name| {
+            self.typed_sidecar.is_pin_param(fn_name, param)
+                || fn_name
+                    .split("$mono$")
+                    .next()
+                    .is_some_and(|stem| self.typed_sidecar.is_pin_param(stem, param))
+        })
+    }
+
     fn emit_sidecar_array_pins(&mut self, args: &Output<'_>) {
         let kids: Vec<&Output<'_>> = match args.1.as_ref() {
             Expression::Fragment(xs) | Expression::List(xs) => xs.iter().collect(),
@@ -3732,10 +3749,11 @@ impl Compiler {
             let Expression::Argument { name, .. } = a.1.as_ref() else {
                 continue;
             };
-            let Some(id) = self.node_id_of(a) else {
-                continue;
-            };
-            if !self.typed_sidecar.is_pin_array(id) {
+            let id_pin = self
+                .node_id_of(a)
+                .is_some_and(|id| self.typed_sidecar.is_pin_array(id));
+            let fn_pin = self.fn_param_is_sidecar_pin(name);
+            if !id_pin && !fn_pin {
                 continue;
             }
             let Some(slot) = self.variable_slot(name) else {
@@ -8113,16 +8131,22 @@ impl Compiler {
             let prev_result_mode = self.compiling_result_mode;
             let prev_result_ok_is_result = self.compiling_result_ok_is_result;
             let prev_mono_clone = self.compiling_mono_clone;
+            let prev_pins = std::mem::take(&mut self.pinned_array_slots);
+            let prev_fn_qualified = self.current_function_qualified.take();
+            let prev_fn_table_key = self.current_function_table_key.take();
             self.context.variables = Interner::default();
             self.compiling_result_mode = self.checker.fn_is_result_mode(source_name);
             self.compiling_result_ok_is_result =
                 self.checker.fn_result_ok_is_result(source_name);
             self.compiling_mono_clone = true;
+            self.current_function_qualified = Some(qualified.to_string());
+            self.current_function_table_key = Some(qualified.to_string());
             self.mono_codegen_var_types.push(overrides);
 
             let prev_fn_defers = std::mem::take(&mut self.fn_defers);
             let mut a = self.do_compile(args);
             self.bytecode.append(&mut a);
+            self.emit_sidecar_array_pins(args);
             let body_op_start = self.bytecode.ops().len();
             let prev_field_keys = std::mem::take(&mut self.field_key_slots);
             self.emit_field_key_prologue(body);
@@ -8138,6 +8162,9 @@ impl Compiler {
             self.compiling_result_mode = prev_result_mode;
             self.compiling_result_ok_is_result = prev_result_ok_is_result;
             self.compiling_mono_clone = prev_mono_clone;
+            self.current_function_qualified = prev_fn_qualified;
+            self.current_function_table_key = prev_fn_table_key;
+            self.pinned_array_slots = prev_pins;
             self.field_key_slots = prev_field_keys;
             self.context.variables = prev_fn_vars;
             self.polyfn_vars = prev_fn_polyfn_vars;
@@ -10795,6 +10822,7 @@ impl Compiler {
                 let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
                 let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
+                let prev_pins = std::mem::take(&mut self.pinned_array_slots);
                 let prev_fn_qualified = self.current_function_qualified.take();
                 let prev_fn_table_key = self.current_function_table_key.take();
                 self.current_function_qualified = Some(qualified.clone());
@@ -10863,6 +10891,7 @@ impl Compiler {
                 let entry_sp = self.context.variables.len() as u32;
 
                 self.bytecode.append(&mut a);
+                self.emit_sidecar_array_pins(args);
 
                 let body_start = self.bytecode.len();
                 // Provisional span so self-recursive peels can see the opening
@@ -10905,6 +10934,7 @@ impl Compiler {
                 self.context.unboxed_class_locals = prev_unboxed_class;
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
+                self.pinned_array_slots = prev_pins;
 
                 self.emit_mono_specializations_for_function(
                     &qualified,
@@ -11391,7 +11421,8 @@ impl Compiler {
                     match kind {
                         ForInKind::Array => {
                             let pin = self_id
-                                .is_some_and(|id| self.typed_sidecar.is_for_in_pin(id));
+                                .is_some_and(|id| self.typed_sidecar.is_for_in_pin(id))
+                                || self.typed_sidecar.is_for_in_pin_span(span.start, span.end);
                             self.emit_for_in_array_loop(
                                 body,
                                 &binding_name,
