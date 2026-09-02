@@ -99,6 +99,26 @@ impl CodeBuf {
         self.il.push_index();
     }
 
+    pub fn push_index_unchecked(&mut self) {
+        self.invalidate_lowered();
+        self.il.push_index_unchecked();
+    }
+
+    pub fn push_array_pin(&mut self, slot: u32) {
+        self.invalidate_lowered();
+        self.il.push_array_pin(slot);
+    }
+
+    pub fn push_index_pin_unchecked(&mut self, slot: u32) {
+        self.invalidate_lowered();
+        self.il.push_index_pin_unchecked(slot);
+    }
+
+    pub fn push_store_index_unchecked(&mut self) {
+        self.invalidate_lowered();
+        self.il.push_store_index_unchecked();
+    }
+
     pub fn push_make_tuple(&mut self, arity: u32) {
         self.invalidate_lowered();
         self.il.push_make_tuple(arity);
