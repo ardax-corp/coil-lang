@@ -2155,7 +2155,8 @@ fn expand_enum<'a>(
             continue;
         }
         match (trait_name, scalar_backing) {
-            ("Show", backing) => out.push(synth_show_enum(span, name, variants, backing)),
+            ("Show", Some(backing)) => out.push(synth_show_scalar_enum(span, name, backing)),
+            ("Show", None) => out.push(synth_show_enum(span, name, variants)),
             ("Eq", Some(backing)) => out.push(synth_eq_scalar_enum(span, name, backing)),
             ("Eq", None) => out.push(synth_eq_enum(span, name, variants)),
             ("Ord", Some(backing)) => out.extend(synth_ord_scalar_enum(span, name, backing)),
@@ -2163,14 +2164,15 @@ fn expand_enum<'a>(
             ("Default", _) => out.push(synth_default_enum(span, name, variants)),
             ("Hash", Some(backing)) => out.push(synth_hash_scalar_enum(span, name, backing)),
             ("Hash", None) => out.push(synth_hash_enum(span, name, variants)),
-            ("String", backing) => out.push(synth_string_enum(span, name, variants, backing)),
+            ("String", Some(backing)) => out.push(synth_string_scalar_enum(span, name, backing)),
+            ("String", None) => out.push(synth_string_enum(span, name, variants)),
             ("Serialize", _) => out.push(synth_serialize_enum(span, name, variants)),
             ("Deserialize", _) => out.push(synth_deserialize_enum(span, name, variants)),
             ("Send" | "Sensitive", _) => out.push(synth_marker_impl(span, trait_name, name)),
             _ => unreachable!(),
         }
     }
-    push_default_display_impls(span, name, derives, decls, &mut out);
+    push_default_display_impls(span, name, derives, decls, scalar_backing, &mut out);
     out
 }
 
@@ -2216,7 +2218,7 @@ fn expand_class<'a>(
             _ => unreachable!(),
         }
     }
-    push_default_display_impls(span, name, derives, decls, &mut out);
+    push_default_display_impls(span, name, derives, decls, None, &mut out);
     out
 }
 
@@ -2233,13 +2235,22 @@ fn push_default_display_impls<'a>(
     name: &'a str,
     derives: &[&str],
     decls: &[Output<'a>],
+    scalar_backing: Option<&'a str>,
     out: &mut Vec<Output<'a>>,
 ) {
     if !derives.iter().any(|t| *t == "Show") && !has_explicit_impl(decls, "Show", name) {
-        out.push(synth_show_type_name(span, name));
+        if let Some(backing) = scalar_backing {
+            out.push(synth_show_scalar_enum(span, name, backing));
+        } else {
+            out.push(synth_show_type_name(span, name));
+        }
     }
     if !derives.iter().any(|t| *t == "String") && !has_explicit_impl(decls, "String", name) {
-        out.push(synth_string_type_name(span, name));
+        if let Some(backing) = scalar_backing {
+            out.push(synth_string_scalar_enum(span, name, backing));
+        } else {
+            out.push(synth_string_type_name(span, name));
+        }
     }
 }
 
@@ -2544,16 +2555,13 @@ fn synth_show_enum<'a>(
     span: SimpleSpan,
     enum_name: &'a str,
     variants: &[VariantMeta<'a>],
-    scalar_backing: Option<&str>,
 ) -> Output<'a> {
     // Unique param name — `codegen_var_types` is a flat map keyed by
     // simple name; two derived `show(p)` methods would clobber each other.
     let p = leak(format!("__show_{}", enum_name));
-    let name_sep = if scalar_backing.is_some() { "." } else { "::" };
     let mut arms = Vec::new();
     for v in variants {
-        let (pattern, fmt, fmt_args) =
-            show_variant_arm(span, enum_name, v.name, &v.shape, p, name_sep);
+        let (pattern, fmt, fmt_args) = show_variant_arm(span, enum_name, v.name, &v.shape, p);
         let body = string_format_call(span, fmt, fmt_args);
         arms.push(MatchArm { pattern, body });
     }
@@ -2575,11 +2583,10 @@ fn show_variant_arm<'a>(
     vname: &'a str,
     shape: &VariantShape<'a>,
     recv: &'a str,
-    name_sep: &str,
 ) -> (PatternOut<'a>, &'static str, Vec<Output<'a>>) {
     match shape {
         VariantShape::Unit => {
-            let fmt = leak(format!("{}{}{}", enum_name, name_sep, vname));
+            let fmt = leak(format!("{}::{}", enum_name, vname));
             (
                 span_pat(
                     span,
@@ -2605,7 +2612,7 @@ fn show_variant_arm<'a>(
                 fmt_args.push(at(span, Expression::Access(ident(span, recv), fname)));
                 specs.push("%v");
             }
-            let fmt = leak(format!("{}{}{}({})", enum_name, name_sep, vname, specs.join(", ")));
+            let fmt = leak(format!("{}::{}({})", enum_name, vname, specs.join(", ")));
             (
                 span_pat(
                     span,
@@ -2629,9 +2636,8 @@ fn show_variant_arm<'a>(
                 specs.push(format!("{}: %v", fname));
             }
             let fmt = leak(format!(
-                "{}{}{} {{ {} }}",
+                "{}::{} {{ {} }}",
                 enum_name,
-                name_sep,
                 vname,
                 specs.join(", ")
             ));
@@ -2797,6 +2803,60 @@ fn synth_hash_scalar_enum<'a>(
         body,
     );
     typeclass_impl(span, "Hash", enum_name, vec![m])
+}
+
+fn ufcs_nullary<'a>(span: SimpleSpan, recv: Output<'a>, method: &'a str) -> Output<'a> {
+    at(
+        span,
+        Expression::Call {
+            name: at(span, Expression::Access(recv, method)),
+            args: None,
+        },
+    )
+}
+
+fn synth_show_scalar_enum<'a>(
+    span: SimpleSpan,
+    enum_name: &'a str,
+    backing: &'a str,
+) -> Output<'a> {
+    let p = leak(format!("__show_{enum_name}"));
+    let n = leak(format!("__show_n_{enum_name}"));
+    let body = block_lets_return(
+        span,
+        vec![let_bind(span, backing, n, ident(span, p))],
+        ufcs_nullary(span, ident(span, n), "show"),
+    );
+    let m = method_fn(
+        span,
+        "show",
+        vec![arg(span, enum_name, p)],
+        "string",
+        body,
+    );
+    typeclass_impl(span, "Show", enum_name, vec![m])
+}
+
+fn synth_string_scalar_enum<'a>(
+    span: SimpleSpan,
+    enum_name: &'a str,
+    backing: &'a str,
+) -> Output<'a> {
+    let p = leak(format!("__str_{enum_name}"));
+    let n = leak(format!("__str_n_{enum_name}"));
+    let body = block_lets_return(
+        span,
+        vec![let_bind(span, backing, n, ident(span, p))],
+        ufcs_nullary(span, ident(span, n), "show"),
+    );
+    let m = method_fn(
+        span,
+        "to_string",
+        vec![arg(span, enum_name, p)],
+        "string",
+        body,
+    );
+    typeclass_impl(span, "String", enum_name, vec![m])
 }
 
 fn eq_variant_arm<'a>(
@@ -3422,14 +3482,11 @@ fn synth_string_enum<'a>(
     span: SimpleSpan,
     enum_name: &'a str,
     variants: &[VariantMeta<'a>],
-    scalar_backing: Option<&str>,
 ) -> Output<'a> {
     let p = leak(format!("__str_{enum_name}"));
-    let name_sep = if scalar_backing.is_some() { "." } else { "::" };
     let mut arms = Vec::new();
     for v in variants {
-        let (pattern, fmt, fmt_args) =
-            show_variant_arm(span, enum_name, v.name, &v.shape, p, name_sep);
+        let (pattern, fmt, fmt_args) = show_variant_arm(span, enum_name, v.name, &v.shape, p);
         let body = string_format_call(span, fmt, fmt_args);
         arms.push(MatchArm { pattern, body });
     }
