@@ -82,6 +82,8 @@ impl Checker {
             pin_params: HashSet::new(),
             for_in_pin: HashSet::new(),
             for_in_pin_spans: HashSet::new(),
+            fn_effects: HashMap::new(),
+            pure_fn_names: HashSet::new(),
             current_module_id,
             host_grants: crate::HostGrants::deny_all(),
             dload_host_stems: Vec::new(),
@@ -1489,6 +1491,8 @@ impl Checker {
         self.pin_params.clear();
         self.for_in_pin.clear();
         self.for_in_pin_spans.clear();
+        self.fn_effects.clear();
+        self.pure_fn_names.clear();
         self.current_module_id = self.def_interner.intern_module(&self.current_module);
 
         // Mint NodeIds for every AST node (pre-walk). The visit order
@@ -1571,6 +1575,7 @@ impl Checker {
         }
 
         crate::typechecking::local_escape::analyze_local_escape(self, ast);
+        crate::typechecking::purity::record_fn_effects(self, ast);
         crate::typechecking::index_facts::analyze_index_facts(self, ast);
 
         // Return the fully-resolved type so callers see e.g. `Foo`

@@ -47,7 +47,7 @@ pipeline. No solo “pass” tests.
 | `iterative_optimization` | off | Re-run `optimize_once_at` until a no-op round or the cap. |
 | `max_optimization_iterations` | 10 | Cap, clamped to `1..=10`. |
 | `collect_stats` | off | Record per-pass counters into `OptStats`. |
-| `pure_call_ctx` | `None` | Pure user `fn` names + entries for COI-99 length-proof barriers. |
+| `pure_call_ctx` | `None` | Sidecar-proven pure user `fn` names + entries for COI-99 length-proof / LICM barriers (`$mono$` clones match the source bind). |
 | `pgo_prioritize_hot_loops` | on | Heat-order LICM / unroll / escape when a PGO profile is loaded. |
 | `loop_unroll_factor` | 8 | Trip cap for `loop_unroll` (clamped to 8). Parameter of that pass. |
 
@@ -564,6 +564,9 @@ and encode stay in `lower_optimized`. No post-lower `adjust_target`.
 - **Refusals:** Window that would pull a **label** or **abs-jump target** onto a
   non-first op; window that contains residual **`Byte`**; `*Return` fusion when
   window[0] is an **unconditional join** (stacked arm value must be popped).
+  **`Entry` CALL / TailCall** is never a fuse window member — LICM / bounds
+  may see through that `CALL` only when [`PureCallCtx`](../pure_call.rs)
+  (sidecar purity) proves the callee; impure `CALL` is a hoist barrier.
   **`FuseHint`** on the cond-jump (`nofuse` / `ValueUnderJmp`) refuses
   `*Jmpf`/`*Jmpt` fusion (pair-`?` / pair-match keep `EQ;JMPF`). A
   **`JoinLabel`** bind is a value join: same window-break as a label, including

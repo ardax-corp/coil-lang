@@ -13,12 +13,13 @@ const CORPUS: &[&str] = &[
 ];
 
 /// Fingerprints from B2 (pre-swap). Length + FNV-1a over opcode/operand.
-/// B3 must match; `UPDATE_B3_GOLDENS=1` reprints if the corpus moves.
+/// Gate 3 retargets unbounded `pass_value<T>` in `option_pair.hy` to a
+/// specialized CALL (shorter than BoxValue + shared body). `UPDATE_B3_GOLDENS=1` reprints.
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "e3676a48a2b745f0_522"),
     ("functions.hy", "09d523b5e92dc06e_390"),
     ("loops.hy", "0798a354fd32364d_267"),
-    ("option_pair.hy", "f3ddcf88d0d6c3df_372"),
+    ("option_pair.hy", "c05488f49d2a9012_370"),
     ("user_trait_dispatch.hy", "53fb084fd917f3fe_157"),
 ];
 

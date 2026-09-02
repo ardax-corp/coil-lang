@@ -5261,25 +5261,21 @@ fn main() {
         );
     }
 
-    /// Codegen test B3-2: when a concrete value is passed to a generic function,
-    /// the codegen must emit `BoxValue` immediately after the argument to wrap it
-    /// into an `ObjBoxed` heap object at the concrete→generic boundary.
-    ///
-    /// For `id(42)` where `fn id<T>(T x) -> T`, `42` is an `int` literal.
-    /// After compiling the `CONST 42`, codegen detects `is_generic_fn("id")`,
-    /// infers the argument's type as `int`, and emits `BoxValue` with tag
-    /// `ValueTag::Int`.
+    /// Codegen test B3-2: escaped unbounded `id<T>` keeps the shared
+    /// `BoxValue` ABI. Ground `id(42)` monomorphizes to a direct CALL (see
+    /// `unbounded_generic_helper_emits_direct_call`).
     #[test]
     fn generic_call_with_concrete_arg_emits_box_value() {
         use common::Instruction;
-        let (bc, _pool) = compile_src("fn id<T>(T x) -> T { return x; } fn main() { id(42); }");
+        let (bc, _pool) = compile_src(
+            "fn id<T>(T x) -> T { return x; } fn main() { let f = id; f(42); }",
+        );
         assert!(
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
-            "expected BoxValue for concrete int arg passed to generic fn id<T>; bytecode opcodes: {:?}",
+            "expected BoxValue for concrete int arg passed through escaped PolyFn id<T>; bytecode opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
-        // The BoxValue operand should encode ValueTag::Int (= 0).
         let box_ops: Vec<u32> = bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::BoxValue))
@@ -5295,30 +5291,55 @@ fn main() {
         );
     }
 
-    /// Codegen test: `fn id<T>(T x) -> T { return x; }` called with a
-    /// concrete `int` argument must emit BOTH `BoxValue` (arg boxing) AND
-    /// `UnboxValue` (return unboxing) in the bytecode.
-    ///
-    /// The unbox is required so the caller receives a raw `i64`, not an
-    /// `ObjBoxed` heap pointer, when the generic return type is instantiated
-    /// to a concrete primitive.
+    /// Ground `id(42)` specializes to a native CALL (no BoxValue / CallIndirect).
     #[test]
-    fn generic_call_emits_box_and_unbox() {
+    fn unbounded_generic_helper_emits_direct_call() {
         use common::Instruction;
         let (bc, _pool) = compile_src("fn id<T>(T x) -> T { return x; } fn main() { id(42); }");
         assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::CALL)),
+            "ground unbounded helper must CALL the clone; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::CallIndirect)),
+            "ground unbounded helper must not use CallIndirect; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
+            "specialized id<int> must not box; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::UnboxValue)),
+            "specialized id<int> must not unbox; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Escaped `let f = id; f(42)` still boxes at the PolyFn boundary.
+    #[test]
+    fn generic_call_emits_box_and_unbox() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src(
+            "fn id<T>(T x) -> T { return x; } fn main() { let f = id; f(42); }",
+        );
+        assert!(
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::BoxValue)),
-            "expected BoxValue for concrete int arg to generic fn id<T>; opcodes: {:?}",
+            "expected BoxValue for concrete int arg to escaped PolyFn id<T>; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
         assert!(
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::UnboxValue)),
-            "expected UnboxValue after generic fn call returns concrete int; opcodes: {:?}",
+            "expected UnboxValue after escaped PolyFn returns concrete int; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
-        // The UnboxValue operand should encode ValueTag::Int (= 0).
         let unbox_ops: Vec<u32> = bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::UnboxValue))

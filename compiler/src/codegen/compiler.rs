@@ -13728,7 +13728,7 @@ impl Compiler {
         } else {
             HashSet::new()
         };
-        self.pure_fns = crate::typechecking::analyze_pure_fns(ast);
+        self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
         if auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;

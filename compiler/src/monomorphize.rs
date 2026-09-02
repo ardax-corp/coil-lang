@@ -133,6 +133,7 @@ struct GenericFnSig {
     def_id: DefId,
     fn_name: String,
     type_params: Vec<String>,
+    #[allow(dead_code)] // kept on the sig for bound-aware planning / tests
     type_param_bounds: Vec<Vec<String>>,
     /// For each formal: which type-parameter index it references (if any).
     param_type_params: Vec<Option<usize>>,
@@ -149,9 +150,9 @@ struct MonoCandidate {
 /// Explicit monomorphize pass: after check, before emit.
 ///
 /// Generic functions with ground type arguments specialize to a direct CALL.
-/// Unbounded `id<T>` stays on the shared `BoxValue`/`UnboxValue` path.
+/// Unbounded `id<T>` and bounded `add<T: Num>` both clone a ground body.
 /// Dictionaries stay on the shared generic body when a type argument is still
-/// a parameter (PolyFn / CallIndirect).
+/// a parameter (PolyFn / CallIndirect), or when a specialization cap is hit.
 /// Keys are [`DefId`] + interned [`Ty`] ids from checker subst, not Display.
 pub fn run_monomorphize_pass(module: &str, ast: &Output, checker: &Checker) -> MonoPlan {
     let mut intern = TyInterner::default();
@@ -300,7 +301,7 @@ fn candidate_for_call(
     checker: &Checker,
     intern: &mut TyInterner,
 ) -> Option<MonoSpecialization> {
-    if sig.type_params.is_empty() || sig.type_param_bounds.iter().all(|bounds| bounds.is_empty()) {
+    if sig.type_params.is_empty() {
         return None;
     }
 
@@ -943,9 +944,18 @@ mod tests {
     }
 
     #[test]
-    fn leaves_unbounded_id_on_shared_path_for_mvp() {
+    fn plans_unbounded_id_as_direct_call() {
         let plan = plan("fn id<T>(T x) -> T { return x; } fn main() { id(1); }");
-        assert!(plan.specializations.is_empty());
+        assert_eq!(
+            plan.specializations.len(),
+            1,
+            "ground unbounded helpers specialize to CALL: {plan:?}"
+        );
+        assert_eq!(plan.specializations[0].fn_name, "id");
+        assert_eq!(
+            plan.ty(plan.specializations[0].key.subst[0]),
+            Some(&Ty::Con("int".into()))
+        );
     }
 
     #[test]

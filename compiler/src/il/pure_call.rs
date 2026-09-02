@@ -34,12 +34,14 @@ impl PureCallCtx {
             .is_some_and(|n| self.name_is_pure(n))
     }
 
-    /// Exact bind name, or a single `::` suffix against the AST short name.
+    /// Exact bind name, `$mono$` clone of a pure bind, or a single `::` suffix
+    /// against the AST short name.
     fn name_is_pure(&self, name: &str) -> bool {
-        if self.pure_fns.contains(name) {
+        let stem = name.split("$mono$").next().unwrap_or(name);
+        if self.pure_fns.contains(stem) {
             return true;
         }
-        match name.rsplit_once("::") {
+        match stem.rsplit_once("::") {
             Some((prefix, short)) if !prefix.contains("::") => self.pure_fns.contains(short),
             _ => false,
         }
@@ -226,6 +228,8 @@ mod tests {
         assert!(op_blocks_length_proof(&op, Some(&impure)));
         assert!(op_blocks_licm(&op, Some(&impure)));
         assert!(!op_blocks_licm(&op, Some(&pure)));
+        let host = IlOp::HostInvoke { arity: 1, loc: loc() };
+        assert!(op_blocks_licm(&host, Some(&pure)));
     }
 
     #[test]
@@ -236,5 +240,7 @@ mod tests {
         assert!(ctx.call_is_pure(Label(3)));
         ctx.label_callees.insert(4, "mod::Type::sq".into());
         assert!(!ctx.call_is_pure(Label(4)));
+        ctx.label_callees.insert(5, "sq$mono$3$0".into());
+        assert!(ctx.call_is_pure(Label(5)));
     }
 }
