@@ -78,6 +78,12 @@ pub enum ErrorCode {
     UnreachableArm,
     UnknownConstructorPattern,
     AmbiguousField,
+    /// `#[repr(...)]` / `=` scalar enum is invalid (mixed backing, missing `=`).
+    InvalidEnumRepr,
+    /// Two scalar enum cases share the same backing value.
+    DuplicateEnumDiscriminant,
+    /// More than one `_` / `default` catch-all in a match.
+    MultipleMatchCatchall,
 
     // --- Format / print (E03xx) ---
     FormatSpecifierMismatch,
@@ -166,6 +172,9 @@ impl ErrorCode {
             Self::UnreachableArm => "E0210",
             Self::UnknownConstructorPattern => "E0211",
             Self::AmbiguousField => "E0212",
+            Self::InvalidEnumRepr => "E0213",
+            Self::DuplicateEnumDiscriminant => "E0214",
+            Self::MultipleMatchCatchall => "E0215",
             Self::FormatSpecifierMismatch => "E0300",
             Self::FormatArityMismatch => "E0301",
             Self::IndexOutOfBounds => "E0400",
@@ -243,6 +252,9 @@ impl ErrorCode {
             Self::UnreachableArm => "unreachable match arm",
             Self::UnknownConstructorPattern => "unknown constructor in pattern",
             Self::AmbiguousField => "ambiguous field access",
+            Self::InvalidEnumRepr => "invalid scalar enum representation",
+            Self::DuplicateEnumDiscriminant => "duplicate scalar enum discriminant",
+            Self::MultipleMatchCatchall => "multiple match catch-all arms",
             Self::FormatSpecifierMismatch => "format specifier type mismatch",
             Self::FormatArityMismatch => "format argument count mismatch",
             Self::IndexOutOfBounds => "index out of bounds",
@@ -328,6 +340,9 @@ mod tests {
             | UnreachableArm
             | UnknownConstructorPattern
             | AmbiguousField
+            | InvalidEnumRepr
+            | DuplicateEnumDiscriminant
+            | MultipleMatchCatchall
             | FormatSpecifierMismatch
             | FormatArityMismatch
             | IndexOutOfBounds
@@ -395,6 +410,9 @@ mod tests {
             UnreachableArm,
             UnknownConstructorPattern,
             AmbiguousField,
+            InvalidEnumRepr,
+            DuplicateEnumDiscriminant,
+            MultipleMatchCatchall,
             FormatSpecifierMismatch,
             FormatArityMismatch,
             IndexOutOfBounds,

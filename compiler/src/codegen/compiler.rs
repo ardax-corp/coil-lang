@@ -365,6 +365,25 @@ impl Compiler {
         }
     }
 
+    fn emit_scalar_backing(
+        &mut self,
+        backing: &crate::typechecking::ty::ScalarBacking,
+        bytecode: &mut CodeBuf,
+    ) {
+        use crate::typechecking::ty::ScalarBacking;
+        match backing {
+            ScalarBacking::Int(n) => self.emit_const_value(&ConstValue::Int(*n), bytecode),
+            ScalarBacking::Float(bits) => {
+                self.emit_const_value(&ConstValue::Float(f64::from_bits(*bits)), bytecode)
+            }
+            ScalarBacking::Bool(b) => self.emit_const_value(&ConstValue::Bool(*b), bytecode),
+            ScalarBacking::String(s) => {
+                let unescaped = unescape_coil_string(s);
+                self.push_string_literal(bytecode, unescaped);
+            }
+        }
+    }
+
     /// If `ast` folds to a scalar, emit it and return true.
     ///
     /// When `allow_mul_shl` is false, skip `x * 2^n` → `SHL` so trait/`Mul`
@@ -13004,6 +13023,11 @@ impl Compiler {
                 };
                 let arity = self.checker.arity_for(enum_name, variant_name).unwrap_or(0);
 
+                if let Some(backing) = self.checker.scalar_for(enum_name, variant_name).cloned() {
+                    self.emit_scalar_backing(&backing, &mut bytecode);
+                    return bytecode;
+                }
+
                 if self.unbox_enum_context > 0 {
                     match fields {
                         EnumConstructPayload::Unit if arity == 0 => {
@@ -13168,6 +13192,15 @@ impl Compiler {
                 bytecode.append(&mut self.do_compile(receiver));
 
                 let receiver_ty = self.receiver_type(receiver);
+                if *field == "value" {
+                    if let Some(ty) = receiver_ty.as_ref() {
+                        if let Some(name) = extract_enum_name(ty) {
+                            if self.checker.is_scalar_enum(&name) {
+                                return bytecode;
+                            }
+                        }
+                    }
+                }
                 let is_record =
                     matches!(&receiver_ty, Some(crate::typechecking::Ty::Record { .. }));
                 let is_class = receiver_ty

@@ -89,6 +89,36 @@ pub enum EnumVariantPayloadTy {
     Record(Vec<(String, Ty)>),
 }
 
+/// Runtime word for a scalar-backed enum case (`#[repr(int)]` / `Case = lit`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum ScalarBacking {
+    Int(i64),
+    /// IEEE bits so backing values can be `Eq`/`Hash`.
+    Float(u64),
+    String(String),
+    Bool(bool),
+}
+
+impl ScalarBacking {
+    pub fn kind_name(&self) -> &'static str {
+        match self {
+            ScalarBacking::Int(_) => "int",
+            ScalarBacking::Float(_) => "float",
+            ScalarBacking::String(_) => "string",
+            ScalarBacking::Bool(_) => "bool",
+        }
+    }
+
+    pub fn ty(&self) -> Ty {
+        match self {
+            ScalarBacking::Int(_) => int(),
+            ScalarBacking::Float(_) => float(),
+            ScalarBacking::String(_) => string(),
+            ScalarBacking::Bool(_) => boolean(),
+        }
+    }
+}
+
 impl EnumVariantPayloadTy {
     pub fn field_count(&self) -> usize {
         match self {

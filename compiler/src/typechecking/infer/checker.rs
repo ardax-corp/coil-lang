@@ -151,6 +151,7 @@ impl Checker {
             enum_tags: BTreeMap::new(),
             enum_payloads: BTreeMap::new(),
             enum_arities: BTreeMap::new(),
+            enum_scalar: BTreeMap::new(),
             pending_exhaustive: Vec::new(),
             async_functions: std::collections::HashSet::new(),
             async_depth: 0,
@@ -1422,6 +1423,7 @@ impl Checker {
         self.enum_tags.retain(|k, _| k.contains("::"));
         self.enum_payloads.retain(|k, _| k.contains("::"));
         self.enum_arities.retain(|k, _| k.contains("::"));
+        self.enum_scalar.retain(|k, _| k.contains("::"));
         self.c_structs.clear();
         self.callback_sigs.clear();
         self.ffi_fn_ret_tys.clear();
@@ -3547,6 +3549,13 @@ impl Checker {
     ) -> Ty {
         let receiver_ty = self.infer(receiver);
         let resolved = apply_ty_prune(&self.subst, &receiver_ty);
+        if field == "value" {
+            if let Some(name) = Self::enum_name_of_resolved(&resolved) {
+                if let Some(vty) = self.scalar_value_ty(&name) {
+                    return vty;
+                }
+            }
+        }
         match strip_readonly(&resolved) {
             Ty::Sum { name, variants } => {
                 self.access_field_in_sum(name, variants, None, field, range)
@@ -12575,6 +12584,214 @@ impl Checker {
         }
     }
 
+    fn finish_scalar_enum(
+        &mut self,
+        name_str: &str,
+        attrs: &[parser::ast::Attribute<'_>],
+        variants: &[Output<'_>],
+        type_params: &[parser::ast::TypeParam<'_>],
+        range: Range<usize>,
+        errors: &mut Vec<Message>,
+    ) {
+        use crate::typechecking::ty::ScalarBacking;
+        use parser::ast::{AttrArgs, EnumVariantPayload};
+
+        let mut declared_kind: Option<&str> = None;
+        let mut saw_repr = false;
+        for attr in attrs {
+            if attr.name != "repr" {
+                continue;
+            }
+            if saw_repr {
+                errors.push(Message::error(
+                    ErrorCode::InvalidEnumRepr,
+                    format!("enum `{name_str}` has more than one `#[repr(...)]`"),
+                    range.clone(),
+                ));
+                return;
+            }
+            saw_repr = true;
+            match &attr.args {
+                AttrArgs::Idents(ids) if ids.len() == 1 => match ids[0] {
+                    "int" | "float" | "string" | "bool" => declared_kind = Some(ids[0]),
+                    other => {
+                        errors.push(Message::error(
+                            ErrorCode::InvalidEnumRepr,
+                            format!(
+                                "`#[repr({other})]` is not a scalar backing; use int, float, string, or bool"
+                            ),
+                            range.clone(),
+                        ));
+                        return;
+                    }
+                },
+                _ => {
+                    errors.push(Message::error(
+                        ErrorCode::InvalidEnumRepr,
+                        format!(
+                            "`#[repr(...)]` on enum `{name_str}` must be `#[repr(int)]`, `#[repr(float)]`, `#[repr(string)]`, or `#[repr(bool)]`"
+                        ),
+                        range.clone(),
+                    ));
+                    return;
+                }
+            }
+        }
+
+        let mut discs: Vec<(&str, Option<ScalarBacking>, bool)> = Vec::new();
+        for v in variants {
+            let Expression::EnumVariant {
+                name: vname,
+                payload,
+                discriminant,
+                ..
+            } = v.1.as_ref()
+            else {
+                continue;
+            };
+            let has_payload = !matches!(payload, EnumVariantPayload::Unit);
+            let backing = discriminant
+                .as_ref()
+                .and_then(|d| Self::scalar_from_expr(d.1.as_ref()));
+            if discriminant.is_some() && backing.is_none() {
+                errors.push(Message::error(
+                    ErrorCode::InvalidEnumRepr,
+                    format!(
+                        "variant `{name_str}::{vname}` discriminant must be an int, float, string, or bool literal"
+                    ),
+                    v.0.into_range(),
+                ));
+                return;
+            }
+            discs.push((*vname, backing, has_payload));
+        }
+
+        if discs.is_empty() {
+            if saw_repr {
+                errors.push(Message::error(
+                    ErrorCode::InvalidEnumRepr,
+                    format!(
+                        "`#[repr(...)]` on enum `{name_str}` requires every case to have a `=` literal"
+                    ),
+                    range,
+                ));
+            }
+            return;
+        }
+
+        let any_disc = discs.iter().any(|(_, b, _)| b.is_some());
+        let all_disc = discs.iter().all(|(_, b, _)| b.is_some());
+        let any_payload = discs.iter().any(|(_, _, p)| *p);
+
+        if saw_repr || any_disc {
+            if !type_params.is_empty() {
+                errors.push(Message::error(
+                    ErrorCode::InvalidEnumRepr,
+                    format!(
+                        "scalar-backed enum `{name_str}` cannot have type parameters"
+                    ),
+                    range.clone(),
+                ));
+                return;
+            }
+            if any_payload {
+                errors.push(Message::error(
+                    ErrorCode::InvalidEnumRepr,
+                    format!(
+                        "enum `{name_str}` cannot mix payload variants with `=` scalar cases"
+                    ),
+                    range.clone(),
+                ));
+                return;
+            }
+            if !all_disc {
+                errors.push(Message::error(
+                    ErrorCode::InvalidEnumRepr,
+                    format!(
+                        "every case of scalar-backed enum `{name_str}` needs `= <literal>` (no auto-increment)"
+                    ),
+                    range.clone(),
+                ));
+                return;
+            }
+        } else {
+            return;
+        }
+
+        let mut values: Vec<ScalarBacking> = Vec::with_capacity(discs.len());
+        let mut inferred: Option<&str> = declared_kind;
+        for (vname, backing, _) in &discs {
+            let Some(val) = backing.clone() else {
+                continue;
+            };
+            let kind = val.kind_name();
+            match inferred {
+                None => inferred = Some(kind),
+                Some(want) if want != kind => {
+                    errors.push(Message::error(
+                        ErrorCode::InvalidEnumRepr,
+                        format!(
+                            "enum `{name_str}` mixes `{want}` and `{kind}` backing; all `=` literals must share one simple type"
+                        ),
+                        range.clone(),
+                    ));
+                    return;
+                }
+                Some(_) => {}
+            }
+            if let Some(want) = declared_kind {
+                if kind != want {
+                    errors.push(Message::error(
+                        ErrorCode::InvalidEnumRepr,
+                        format!(
+                            "variant `{name_str}::{vname}` is `{kind}` but the enum is `#[repr({want})]`"
+                        ),
+                        range.clone(),
+                    ));
+                    return;
+                }
+            }
+            values.push(val);
+        }
+
+        for i in 0..values.len() {
+            for j in 0..i {
+                if values[i] == values[j] {
+                    errors.push(Message::error(
+                        ErrorCode::DuplicateEnumDiscriminant,
+                        format!(
+                            "duplicate backing value on `{name_str}::{}` and `{name_str}::{}`",
+                            discs[j].0, discs[i].0
+                        ),
+                        range.clone(),
+                    ));
+                    return;
+                }
+            }
+        }
+
+        self.enum_scalar.insert(name_str.to_string(), values);
+    }
+
+    fn scalar_from_expr(expr: &Expression<'_>) -> Option<crate::typechecking::ty::ScalarBacking> {
+        use crate::typechecking::ty::ScalarBacking;
+        match expr {
+            Expression::Integer(n) => Some(ScalarBacking::Int(*n)),
+            Expression::Float(n) => Some(ScalarBacking::Float(n.to_bits())),
+            Expression::String(s) => Some(ScalarBacking::String((*s).to_string())),
+            Expression::Bool(b) => Some(ScalarBacking::Bool(*b)),
+            Expression::Negate(inner) => match inner.1.as_ref() {
+                Expression::Integer(n) => Some(ScalarBacking::Int(-*n)),
+                Expression::Float(n) => Some(ScalarBacking::Float((-n).to_bits())),
+                _ => None,
+            },
+            Expression::Group(inner) | Expression::Expr(inner) => {
+                Self::scalar_from_expr(inner.1.as_ref())
+            }
+            _ => None,
+        }
+    }
+
     /// Pre-pass: register enum shapes before main inference (forward refs).
     fn pre_register_enums(&mut self, ast: &Output) -> Result<(), Vec<Message>> {
         let mut errors = Vec::new();
@@ -12594,10 +12811,10 @@ impl Checker {
             }
             Expression::EnumDecl {
                 docs: _,
+                attrs,
                 name,
                 type_params,
                 variants,
-                ..
             } => {
                 let name_str = self.qualify_module_name(name);
                 let previous_generic_ctor = self.register_generic_type_ctor(name, type_params);
@@ -12611,6 +12828,7 @@ impl Checker {
                         docs: _,
                         name: vname,
                         payload,
+                        ..
                     } = v.1.as_ref()
                     {
                         variant_names.push(vname.to_string());
@@ -12673,6 +12891,7 @@ impl Checker {
                     self.enum_tags.remove(&name_str);
                     self.enum_payloads.remove(&name_str);
                     self.enum_arities.remove(&name_str);
+                    self.enum_scalar.remove(&name_str);
                     self.generics.generic_type_ctors.remove(&name_str);
                     self.generics.nominal_type_modules.remove(&name_str);
                 }
@@ -12750,6 +12969,14 @@ impl Checker {
                 self.enum_tags.insert(name_str.clone(), tag_map);
                 self.enum_payloads.insert(name_str.clone(), payloads);
                 self.enum_arities.insert(name_str.clone(), arities);
+                self.finish_scalar_enum(
+                    &name_str,
+                    attrs,
+                    variants,
+                    type_params,
+                    node.0.into_range(),
+                    errors,
+                );
                 self.generics
                     .register_nominal_type(&name_str, &self.current_module);
                 self.pop_type_params_for_type_parsing(pushed);
@@ -13089,6 +13316,7 @@ impl Checker {
                 docs: _,
                 name: vname,
                 payload,
+                ..
             } = v.1.as_ref()
             {
                 let vname_str = vname.to_string();
@@ -13868,7 +14096,7 @@ impl Checker {
         enum_tags: &BTreeMap<String, BTreeMap<String, u32>>,
     ) -> CoverageTree {
         match pattern {
-            Pattern::Wildcard | Pattern::Binding { .. } => CoverageTree::Any,
+            Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } => CoverageTree::Any,
             Pattern::Constructor {
                 enum_name,
                 variant_name,
@@ -13928,12 +14156,21 @@ impl Checker {
                 tag: None,
                 inner: CoverageTree::Any,
                 is_catchall: true,
+                is_keyword_catchall: true,
+                range: range.clone(),
+            },
+            Pattern::Default => ArmCoverage {
+                tag: None,
+                inner: CoverageTree::Any,
+                is_catchall: true,
+                is_keyword_catchall: true,
                 range: range.clone(),
             },
             Pattern::Binding { .. } => ArmCoverage {
                 tag: None,
                 inner: CoverageTree::Any,
                 is_catchall: true,
+                is_keyword_catchall: false,
                 range: range.clone(),
             },
             Pattern::Constructor {
@@ -13956,6 +14193,7 @@ impl Checker {
                     tag,
                     inner,
                     is_catchall: false,
+                    is_keyword_catchall: false,
                     range: range.clone(),
                 }
             }
@@ -13994,7 +14232,11 @@ impl Checker {
         // unreachable.
         let mut seen: BTreeMap<u32, BTreeSet<CoverageTree>> = BTreeMap::new();
         let mut has_catchall = false;
+        let mut keyword_catchalls: Vec<Range<usize>> = Vec::new();
         for arm in &pending.arms {
+            if arm.is_keyword_catchall {
+                keyword_catchalls.push(arm.range.clone());
+            }
             if arm.is_catchall {
                 has_catchall = true;
             } else if let Some(t) = arm.tag {
@@ -14011,8 +14253,19 @@ impl Checker {
             }
         }
 
+        if keyword_catchalls.len() > 1 {
+            for r in keyword_catchalls.into_iter().skip(1) {
+                self.messages.push(Message::error(
+                    ErrorCode::MultipleMatchCatchall,
+                    "Match has more than one catch-all (`_` / `default`)".to_string(),
+                    r,
+                ));
+            }
+            return;
+        }
+
         if has_catchall {
-            // A wildcard / binding arm covers every remaining
+            // A wildcard / default / binding arm covers every remaining
             // case. No further error needed.
             return;
         }
@@ -14061,7 +14314,8 @@ impl Checker {
                     pending.match_range.clone(),
                 );
                 msg.with_help(
-                    "add a wildcard arm `_ => ...` to cover the remaining cases".to_string(),
+                    "add a wildcard arm `_ => ...` or `default => ...` to cover the remaining cases"
+                        .to_string(),
                 );
                 self.messages.push(msg);
             }
@@ -14415,6 +14669,32 @@ impl Checker {
         self.enum_tags
             .get(&key)
             .and_then(|t| t.get(variant_name).copied())
+    }
+
+    /// True when `enum_name` is a scalar-backed enum (unboxed simple value).
+    pub fn is_scalar_enum(&self, enum_name: &str) -> bool {
+        let key = self.registry_enum_key(enum_name);
+        self.enum_scalar.contains_key(&key)
+    }
+
+    /// Backing word for a scalar enum variant.
+    pub fn scalar_for(
+        &self,
+        enum_name: &str,
+        variant_name: &str,
+    ) -> Option<&crate::typechecking::ty::ScalarBacking> {
+        let key = self.registry_enum_key(enum_name);
+        let tag = self.tag_for(enum_name, variant_name)?;
+        self.enum_scalar.get(&key).and_then(|v| v.get(tag as usize))
+    }
+
+    /// Type of `.value` on a scalar-backed enum (`int` / `float` / `string` / `bool`).
+    pub fn scalar_value_ty(&self, enum_name: &str) -> Option<Ty> {
+        let key = self.registry_enum_key(enum_name);
+        self.enum_scalar
+            .get(&key)
+            .and_then(|v| v.first())
+            .map(|b| b.ty())
     }
 
     /// Payload arity for `(enum_name, variant_name)`.
@@ -15533,6 +15813,19 @@ impl Checker {
         // wrong for this AST node, and overwriting a correct entry
         // would be worse than skipping this insertion.
         ty
+    }
+
+    /// Field access on enum record payloads (`specific_tag` narrows the variant).
+    fn enum_name_of_resolved(ty: &Ty) -> Option<String> {
+        match strip_readonly(ty) {
+            Ty::Con(name) | Ty::Sum { name, .. } => Some(name.clone()),
+            Ty::Constructor { owner, .. } => Self::enum_name_of_resolved(owner),
+            Ty::App(head, _) => match head.as_ref() {
+                Ty::Con(n) => Some(n.clone()),
+                _ => None,
+            },
+            _ => None,
+        }
     }
 
     /// Field access on enum record payloads (`specific_tag` narrows the variant).

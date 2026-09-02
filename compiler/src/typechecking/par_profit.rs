@@ -621,7 +621,7 @@ impl Scan<'_> {
                 self.walk(scrutinee, on_return);
                 for arm in arms {
                     match &arm.pattern.1 {
-                        Pattern::Wildcard | Pattern::Binding { .. } => {
+                        Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } => {
                             self.walk(&arm.body, on_return);
                         }
                         Pattern::Constructor { .. } => {

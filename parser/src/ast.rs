@@ -454,6 +454,8 @@ pub enum Expression<'expr> {
         docs: Vec<&'expr str>,
         name: &'expr str,
         payload: EnumVariantPayload<'expr>,
+        /// Optional `= lit` scalar discriminant (`Ok = 200`).
+        discriminant: Option<Output<'expr>>,
     },
     /// Qualified constructor application `EnumName::Variant(...)`.
     Construct {
@@ -613,6 +615,8 @@ pub struct LetFieldPattern<'expr> {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Pattern<'expr> {
     Wildcard,
+    /// `default =>` match-arm catch-all (same coverage as `_`).
+    Default,
     Binding {
         name: &'expr str,
     },
@@ -806,6 +810,7 @@ impl<'a> Display for Pattern<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Wildcard => write!(f, "_"),
+            Self::Default => write!(f, "default"),
             Self::Binding { name } => write!(f, "{}", name),
             Self::Constructor {
                 enum_name,
@@ -1177,66 +1182,87 @@ impl<'a> Display for Expression<'a> {
                 let vs = variants
                     .iter()
                     .map(|v| match v.1.as_ref() {
-                        Self::EnumVariant { name, payload, .. } => match payload {
-                            EnumVariantPayload::Unit => name.to_string(),
-                            EnumVariantPayload::Tuple(parts) => {
-                                if parts.is_empty() {
-                                    name.to_string()
-                                } else {
-                                    format!(
-                                        "{}({})",
-                                        name,
-                                        parts
-                                            .iter()
-                                            .map(|p| p.1.to_string())
-                                            .collect::<Vec<String>>()
-                                            .join(", ")
-                                    )
+                        Self::EnumVariant {
+                            name,
+                            payload,
+                            discriminant,
+                            ..
+                        } => {
+                            let mut s = match payload {
+                                EnumVariantPayload::Unit => name.to_string(),
+                                EnumVariantPayload::Tuple(parts) => {
+                                    if parts.is_empty() {
+                                        name.to_string()
+                                    } else {
+                                        format!(
+                                            "{}({})",
+                                            name,
+                                            parts
+                                                .iter()
+                                                .map(|p| p.1.to_string())
+                                                .collect::<Vec<String>>()
+                                                .join(", ")
+                                        )
+                                    }
                                 }
+                                EnumVariantPayload::Record(fields) => {
+                                    let parts: Vec<String> = fields
+                                        .iter()
+                                        .map(|rf| format!("{}: {}", rf.name, rf.value.1))
+                                        .collect();
+                                    format!("{} {{ {} }}", name, parts.join(", "))
+                                }
+                            };
+                            if let Some(disc) = discriminant {
+                                s.push_str(" = ");
+                                s.push_str(&disc.1.to_string());
                             }
-                            EnumVariantPayload::Record(fields) => {
-                                let parts: Vec<String> = fields
-                                    .iter()
-                                    .map(|rf| format!("{}: {}", rf.name, rf.value.1))
-                                    .collect();
-                                format!("{} {{ {} }}", name, parts.join(", "))
-                            }
-                        },
+                            s
+                        }
                         _ => String::from("?"),
                     })
                     .collect::<Vec<String>>()
                     .join(", ");
                 write!(f, "{}enum {}{} {{ {} }}", attr_prefix, name, tp, vs)
             }
-            Self::EnumVariant { docs, name, payload } => {
+            Self::EnumVariant {
+                docs,
+                name,
+                payload,
+                discriminant,
+            } => {
                 write!(f, "{}", fmt_docs(docs))?;
                 match payload {
-                EnumVariantPayload::Unit => write!(f, "{}", name),
-                EnumVariantPayload::Tuple(parts) => {
-                    if parts.is_empty() {
-                        write!(f, "{}", name)
-                    } else {
-                        write!(
-                            f,
-                            "{}({})",
-                            name,
-                            parts
-                                .iter()
-                                .map(|p| p.1.to_string())
-                                .collect::<Vec<String>>()
-                                .join(", ")
-                        )
+                    EnumVariantPayload::Unit => write!(f, "{}", name)?,
+                    EnumVariantPayload::Tuple(parts) => {
+                        if parts.is_empty() {
+                            write!(f, "{}", name)?;
+                        } else {
+                            write!(
+                                f,
+                                "{}({})",
+                                name,
+                                parts
+                                    .iter()
+                                    .map(|p| p.1.to_string())
+                                    .collect::<Vec<String>>()
+                                    .join(", ")
+                            )?;
+                        }
+                    }
+                    EnumVariantPayload::Record(fields) => {
+                        let parts: Vec<String> = fields
+                            .iter()
+                            .map(|rf| format!("{}: {}", rf.name, rf.value.1))
+                            .collect();
+                        write!(f, "{} {{ {} }}", name, parts.join(", "))?;
                     }
                 }
-                EnumVariantPayload::Record(fields) => {
-                    let parts: Vec<String> = fields
-                        .iter()
-                        .map(|rf| format!("{}: {}", rf.name, rf.value.1))
-                        .collect();
-                    write!(f, "{} {{ {} }}", name, parts.join(", "))
+                if let Some(disc) = discriminant {
+                    write!(f, " = {}", disc.1)?;
                 }
-                }
-            },
+                Ok(())
+            }
             Self::Construct {
                 enum_name,
                 variant_name,

@@ -182,9 +182,9 @@ impl Checker {
         use parser::ast::PatternPayload;
         match pattern {
             Pattern::Wildcard => {
-                // Wildcard matches anything, binds nothing. The
-                // body's bindings (if any) come from nested
-                // patterns; wildcard itself has no payload.
+                expected_ty.clone()
+            }
+            Pattern::Default => {
                 expected_ty.clone()
             }
             Pattern::Binding { name } => {

@@ -2999,6 +2999,7 @@ fn main() { size_of("hi"); }
                         value: ty_int,
                     },
                 ]),
+                discriminant: None,
             })],
         });
         let construct = node(Expression::Construct {
@@ -3053,6 +3054,7 @@ fn main() { size_of("hi"); }
                         value: ty_int,
                     },
                 ]),
+                discriminant: None,
             })],
         });
         let binding = |name| (span, Pattern::Binding { name });
@@ -8064,6 +8066,74 @@ fn main() {
         let src = "enum Color { Red, Green, Blue } \
                    let c = Color::Red; \
                    match c { _ => 0 };";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn match_default_catch_all_is_exhaustive() {
+        let src = "enum Color { Red, Green, Blue } \
+                   let c = Color::Red; \
+                   match c { Color::Red => 1, default => 0 };";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn match_default_and_wildcard_together_errors() {
+        let src = "enum Color { Red, Green } \
+                   let c = Color::Red; \
+                   match c { _ => 0, default => 1 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("more than one catch-all")),
+            "expected mixed `_`/`default` error, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn scalar_enum_non_exhaustive_reports_missing() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { Status::Ok => 1 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("Non-exhaustive match")),
+            "expected non-exhaustive scalar match, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn scalar_enum_default_is_exhaustive() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { Status::Ok => 1, default => 0 };";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_is_not_an_int() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   fn f(int n) -> int { return n; } \
+                   f(Status::Ok);";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter().any(|m| m.message().contains("int") || m.message().contains("Status")),
+            "expected Status vs int mismatch, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn scalar_enum_value_field_is_int() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   let n: int = s.value;";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
     }

@@ -410,6 +410,8 @@ pub struct Checker {
     enum_tags: BTreeMap<String, BTreeMap<String, u32>>,
     enum_payloads: BTreeMap<String, Vec<EnumVariantPayloadTy>>,
     enum_arities: BTreeMap<String, Vec<usize>>,
+    /// Present only for scalar-backed enums (unboxed Int/Float/String/Bool).
+    enum_scalar: BTreeMap<String, Vec<crate::typechecking::ty::ScalarBacking>>,
 
     /// Match exhaustiveness checks deferred until substitution is closed.
     pending_exhaustive: Vec<PendingExhaustive>,
@@ -616,9 +618,11 @@ struct ArmCoverage {
     /// The inner pattern's coverage, when this arm's pattern is a
     /// Constructor with a payload coverage tree.
     inner: CoverageTree,
-    /// True if the arm was a wildcard (`_`) or a binding (`name`).
+    /// True if the arm was a wildcard (`_`), `default`, or a binding (`name`).
     /// Such arms cover all remaining cases (Rust-style).
     is_catchall: bool,
+    /// True for `_` and `default` (not identifier bindings).
+    is_keyword_catchall: bool,
     /// The arm's source range — used for the "unreachable arm"
     /// diagnostic.
     range: Range<usize>,

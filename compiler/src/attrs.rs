@@ -52,7 +52,7 @@ const DERIVABLE: &[&str] = &[
     "Sensitive",
 ];
 
-const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth"];
+const KNOWN_ATTRS: &[&str] = &["derive", "ffi", "test", "max_depth", "repr"];
 
 /// Result of attribute expansion before typechecking.
 #[derive(Default, Clone)]
@@ -141,6 +141,13 @@ fn validate_attrs(
             messages.push(Message::error(
                 ErrorCode::GenericTypeError,
                 format!("Attribute `max_depth` is not valid on {}", target),
+                span.into_range(),
+            ));
+        }
+        if attr.name == "repr" && target != "enum" {
+            messages.push(Message::error(
+                ErrorCode::GenericTypeError,
+                format!("Attribute `repr` is not valid on {}", target),
                 span.into_range(),
             ));
         }
@@ -1449,12 +1456,20 @@ fn rewrite_expr_inline<'a>(
                 variants: rewrite_outputs(variants, target, subs, decoratee_args),
             },
         ),
-        Expression::EnumVariant { docs, name, payload } => at(
+        Expression::EnumVariant {
+            docs,
+            name,
+            payload,
+            discriminant,
+        } => at(
             span,
             Expression::EnumVariant {
                 docs: docs.clone(),
                 name: *name,
                 payload: rewrite_enum_variant_payload(payload, target, subs, decoratee_args),
+                discriminant: discriminant
+                    .as_ref()
+                    .map(|d| rw(d)),
             },
         ),
         Expression::ExternStruct(decl) => at(
@@ -1740,7 +1755,7 @@ fn variant_metas<'a>(variants: &[Output<'a>]) -> Vec<VariantMeta<'a>> {
     variants
         .iter()
         .filter_map(|v| match v.1.as_ref() {
-            Expression::EnumVariant { docs: _, name, payload } => Some(VariantMeta {
+            Expression::EnumVariant { docs: _, name, payload, .. } => Some(VariantMeta {
                 name,
                 shape: match payload {
                     EnumVariantPayload::Unit => VariantShape::Unit,
