@@ -1,6 +1,7 @@
 // Scalar-backed enums: unboxed backing word, nominal type, `.value`.
+// Constructors are per-enum (`Status::Ok` next to prelude `Result::Ok`).
 enum Status {
-    Success = 200,
+    Ok = 200,
     NotFound = 404,
 }
 
@@ -22,15 +23,20 @@ enum Switch {
     On = true,
 }
 
+enum Color {
+    Red,
+    Green,
+}
+
 fn describe(Status s) -> int {
     return match s {
-        Status::Success => 1,
+        Status::Ok => 1,
         default => 0,
     };
 }
 
 test("int scalar match and value") {
-    let s = Status::Success;
+    let s = Status::Ok;
     assert(describe(s) == 1)?;
     assert(s.value == 200)?;
     assert(Status::NotFound.value == 404)?;
@@ -38,7 +44,7 @@ test("int scalar match and value") {
 }
 
 test("inferred repr without attribute") {
-    assert(Status::Success.value + Status::NotFound.value == 604)?;
+    assert(Status::Ok.value + Status::NotFound.value == 604)?;
 }
 
 test("string float bool scalar") {
@@ -50,4 +56,22 @@ test("string float bool scalar") {
         Mode::Slow => 2,
     };
     assert(m == 2)?;
+}
+
+test("Status.Ok next to Result.Ok") {
+    let s = Status::Ok;
+    let r = Result::Ok(1);
+    assert(s.value == 200)?;
+    assert(match r {
+        Result::Ok(v) => v,
+        Result::Err(_) => 0,
+    } == 1)?;
+}
+
+test("payload enum still constructs") {
+    let c = Color::Red;
+    assert(match c {
+        Color::Red => 1,
+        Color::Green => 0,
+    } == 1)?;
 }

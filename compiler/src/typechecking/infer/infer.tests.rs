@@ -1936,14 +1936,42 @@ use string::{format, to_bytes};
     }
 
     #[test]
-    fn duplicate_constructor_is_error() {
-        let msgs = assert_messages("enum A { Foo } enum B { Foo }");
+    fn same_constructor_name_on_two_enums_is_ok() {
+        let (mut c, _) = check("enum A { Foo } enum B { Foo }");
+        let msgs = c.take_messages();
+        assert!(msgs.is_empty(), "{:?}", msgs);
+    }
+
+    #[test]
+    fn duplicate_variant_on_same_enum_is_error() {
+        let msgs = assert_messages("enum A { Foo, Foo }");
         assert!(
             msgs.iter()
                 .any(|m| m.message().contains("Duplicate constructor")),
             "expected duplicate-constructor error, got: {:?}",
             msgs
         );
+    }
+
+    #[test]
+    fn bare_constructor_is_ambiguous_when_two_enums_share_a_case() {
+        let msgs = assert_messages("enum A { Foo } enum B { Foo } let x = Foo;");
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("Ambiguous constructor")),
+            "expected ambiguous bare constructor, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn status_ok_and_result_ok_coexist() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   let r = Result::Ok(1); \
+                   let n: int = s.value;";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
     }
 
     #[test]
@@ -8095,9 +8123,9 @@ fn main() {
 
     #[test]
     fn scalar_enum_non_exhaustive_reports_missing() {
-        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
-                   let s = HttpCode::Success; \
-                   match s { HttpCode::Success => 1 };";
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { Status::Ok => 1 };";
         let msgs = assert_messages(src);
         assert!(
             msgs.iter()
@@ -8109,18 +8137,18 @@ fn main() {
 
     #[test]
     fn scalar_enum_default_is_exhaustive() {
-        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
-                   let s = HttpCode::Success; \
-                   match s { HttpCode::Success => 1, default => 0 };";
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { Status::Ok => 1, default => 0 };";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
     }
 
     #[test]
     fn scalar_enum_is_not_an_int() {
-        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
                    fn f(int n) -> int { return n; } \
-                   f(HttpCode::Success);";
+                   f(Status::Ok);";
         let msgs = assert_messages(src);
         assert!(
             msgs.iter().any(|m| m.message().contains("int") || m.message().contains("Status")),
@@ -8131,11 +8159,30 @@ fn main() {
 
     #[test]
     fn scalar_enum_value_field_is_int() {
-        let src = "enum HttpCode { Success = 200, NotFound = 404 } \
-                   let s = HttpCode::Success; \
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
                    let n: int = s.value;";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn bare_option_some_is_prelude_sugar() {
+        let src = "let x = Some(1);";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn bare_ok_is_ambiguous_next_to_status() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } let x = Ok(1);";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter()
+                .any(|m| m.message().contains("Ambiguous constructor")),
+            "expected ambiguous bare Ok, got: {:?}",
+            msgs
+        );
     }
 
     #[test]
