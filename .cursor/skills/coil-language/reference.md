@@ -23,7 +23,8 @@ lambda      fn (T x) use (y) => expr   // first-class fn values
 array lit   [1, 2, 3]
 tuple       (a, b)
 dict        { key: val, … }
-enum ctor   Color.Red, Option.Some(x)
+enum ctor   Status.Ok, Option.Some(x), Color.Red
+raise       raise "msg"
 raise       raise "msg"
 try?        expr?              // Result early return
 default     expr ?? default
@@ -61,20 +62,22 @@ Sync adapters exist for blocking-style loops on non-blocking streams — see [io
 
 ```coil
 fn fallible() -> Result<int, string> {
-    if bad { return Err("oops"); }
-  return Ok(42);
+    if bad { return Result.Err("oops"); }
+    return Result.Ok(42);
 }
 
 fn caller() -> Result<int, string> {
     let x = fallible()?;   // propagate Err
-    return Ok(x + 1);
+    return Result.Ok(x + 1);
 }
 
 match opt {
-    None => 0,
-    Some(v) => v,
+    Option.None => 0,
+    Option.Some(v) => v,
 }
 ```
+
+Constructor names are per-enum. Qualified form is canonical (`Status.Ok`, `Result.Ok(x)`, `Option.Some(x)`). Bare `Some`/`None`/`Ok`/`Err` is prelude sugar only when a single in-scope enum owns that case; otherwise it is a compile error and you must write `Enum.Case`.
 
 `assert(cond)?` in tests — returns `Result<(), string>`.
 
@@ -91,7 +94,7 @@ match opt {
 | Attribute | Target |
 |-----------|--------|
 | `#[derive(Show, Eq, Ord)]` | `enum`, `class` |
-| `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Case = lit`); omitted when every case is the same simple literal type |
+| `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status.Ok = 200`); omitted when every case is the same simple literal type |
 | User `attr` | `fn`, methods, `class` — must forward `...args` to `target(...args)` |
 
 Tests are `test("desc") { … }` statements, not `#[test]` on `fn`.
