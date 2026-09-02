@@ -6,7 +6,7 @@ use parser::ast::{Expression, MatchArm, Output, Pattern};
 use reporting::ErrorCode;
 
 use crate::typechecking::subst::apply_ty_prune;
-use crate::typechecking::ty::Ty;
+use crate::typechecking::ty::{int, Ty};
 
 use super::*;
 
@@ -199,6 +199,15 @@ impl Checker {
                     .insert_top(name.to_string(), Scheme::mono(pruned.clone()));
                 self.record_codegen_var_type(name.to_string(), pruned.clone());
                 pruned
+            }
+            Pattern::Integer(_) => {
+                self.unify(
+                    expected_ty,
+                    &int(),
+                    pattern_range,
+                    "match integer pattern",
+                );
+                int()
             }
             Pattern::Constructor {
                 enum_name,

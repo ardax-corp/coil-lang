@@ -3556,13 +3556,6 @@ impl Checker {
     ) -> Ty {
         let receiver_ty = self.infer(receiver);
         let resolved = apply_ty_prune(&self.subst, &receiver_ty);
-        if field == "value" {
-            if let Some(name) = Self::enum_name_of_resolved(&resolved) {
-                if let Some(vty) = self.scalar_value_ty(&name) {
-                    return vty;
-                }
-            }
-        }
         match strip_readonly(&resolved) {
             Ty::Sum { name, variants } => {
                 self.access_field_in_sum(name, variants, None, field, range)
@@ -5565,6 +5558,9 @@ impl Checker {
         let rt = Self::peel_comparison_ty(&self.infer(rhs));
         let lt = apply_ty_prune(&self.subst, &lt);
         let rt = apply_ty_prune(&self.subst, &rt);
+        if self.cmp_scalar_enum_with_backing(&lt, &rt) {
+            return boolean();
+        }
         // `b == "/"` — single-byte string literal compares as `byte`.
         if Self::is_byte_ty(&lt) && Self::is_string_ty(&rt) {
             if self.try_mark_string_literal_as_byte(rhs) {
@@ -5717,6 +5713,9 @@ impl Checker {
 
         let lp = apply_ty_prune(&self.subst, &lt);
         let rp = apply_ty_prune(&self.subst, &rt);
+        if let Some(backing) = self.arith_scalar_enum_backing(&lp, &rp) {
+            return backing;
+        }
         // Nominal `Matrix` — `*` is matmul (Mul), `+`/`-` are element-wise.
         // Must run before aggregate zip so nested-array data inside Matrix
         // is not treated as Hadamard product.
@@ -6467,7 +6466,13 @@ impl Checker {
             if let Expression::Branch(cond, body) = branch.1.as_ref() {
                 if let Some(c) = cond {
                     let ct = self.infer(c);
-                    self.unify(&ct, &boolean(), &c.0.into_range(), "if condition");
+                    self.coerce_or_unify(
+                        &boolean(),
+                        &ct,
+                        Some(c),
+                        &c.0.into_range(),
+                        "if condition",
+                    );
                 }
                 let body_ty = self.infer(body);
                 if first {
@@ -6673,9 +6678,10 @@ impl Checker {
         }
 
         let cond_ty = self.infer(&args[0]);
-        self.unify(
-            &cond_ty,
+        self.coerce_or_unify(
             &boolean(),
+            &cond_ty,
+            Some(&args[0]),
             &args[0].0.into_range(),
             "assert condition",
         );
@@ -7848,6 +7854,9 @@ impl Checker {
                 return expected;
             }
         }
+        if let Some(coerced) = self.coerce_scalar_enum_to_backing(&expected, &actual) {
+            return coerced;
+        }
         match (&expected, &actual) {
             (
                 Ty::Existential {
@@ -8352,7 +8361,15 @@ impl Checker {
         match (&a, &b) {
             (Ty::Never, _) => b,
             (_, Ty::Never) => a,
-            _ => self.unify(&a, &b, range, ctx),
+            _ => {
+                if let Some(t) = self.coerce_scalar_enum_to_backing(&a, &b) {
+                    return t;
+                }
+                if let Some(t) = self.coerce_scalar_enum_to_backing(&b, &a) {
+                    return t;
+                }
+                self.unify(&a, &b, range, ctx)
+            }
         }
     }
 
@@ -14216,6 +14233,7 @@ impl Checker {
     ) -> CoverageTree {
         match pattern {
             Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } => CoverageTree::Any,
+            Pattern::Integer(_) => CoverageTree::Any,
             Pattern::Constructor {
                 enum_name,
                 variant_name,
@@ -14289,6 +14307,13 @@ impl Checker {
                 tag: None,
                 inner: CoverageTree::Any,
                 is_catchall: true,
+                is_keyword_catchall: false,
+                range: range.clone(),
+            },
+            Pattern::Integer(_) => ArmCoverage {
+                tag: None,
+                inner: CoverageTree::Any,
+                is_catchall: false,
                 is_keyword_catchall: false,
                 range: range.clone(),
             },
@@ -14723,6 +14748,12 @@ impl Checker {
             if matches!(spec, 'i' | 'd' | 'b' | 'x' | 'u' | 'p') && Self::is_byte_ty(arg_ty) {
                 return;
             }
+            if self
+                .coerce_scalar_enum_to_backing(&expected_ty, arg_ty)
+                .is_some()
+            {
+                return;
+            }
             self.unify(
                 arg_ty,
                 &expected_ty,
@@ -14812,13 +14843,43 @@ impl Checker {
         self.enum_scalar.get(&key).and_then(|v| v.get(tag as usize))
     }
 
-    /// Type of `.value` on a scalar-backed enum (`int` / `float` / `string` / `bool`).
+    /// Backing type of a scalar-backed enum (`int` / `float` / `string` / `bool`).
     pub fn scalar_value_ty(&self, enum_name: &str) -> Option<Ty> {
         let key = self.registry_enum_key(enum_name);
         self.enum_scalar
             .get(&key)
             .and_then(|v| v.first())
             .map(|b| b.ty())
+    }
+
+    fn scalar_backing_ty_of(&self, ty: &Ty) -> Option<Ty> {
+        let name = Self::enum_name_of_resolved(ty)?;
+        self.scalar_value_ty(&name)
+    }
+
+    /// `Status` in an `int` (etc.) position: one-way coerce to the backing word.
+    fn coerce_scalar_enum_to_backing(&self, expected: &Ty, actual: &Ty) -> Option<Ty> {
+        let backing = self.scalar_backing_ty_of(actual)?;
+        match (expected, &backing) {
+            (Ty::Con(e), Ty::Con(b)) if e == b => Some(expected.clone()),
+            _ => None,
+        }
+    }
+
+    fn arith_scalar_enum_backing(&self, lp: &Ty, rp: &Ty) -> Option<Ty> {
+        let lb = self.scalar_backing_ty_of(lp);
+        let rb = self.scalar_backing_ty_of(rp);
+        match (lb, rb) {
+            (Some(b), Some(o)) if b == o => Some(b),
+            (Some(b), None) if matches!((lp, rp), (_, Ty::Con(_))) && rp == &b => Some(b),
+            (None, Some(b)) if matches!((lp, rp), (Ty::Con(_), _)) && lp == &b => Some(b),
+            _ => None,
+        }
+    }
+
+    fn cmp_scalar_enum_with_backing(&self, lt: &Ty, rt: &Ty) -> bool {
+        self.coerce_scalar_enum_to_backing(rt, lt).is_some()
+            || self.coerce_scalar_enum_to_backing(lt, rt).is_some()
     }
 
     /// Payload arity for `(enum_name, variant_name)`.

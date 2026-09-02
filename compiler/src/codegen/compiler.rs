@@ -13221,15 +13221,6 @@ impl Compiler {
                 bytecode.append(&mut self.do_compile(receiver));
 
                 let receiver_ty = self.receiver_type(receiver);
-                if *field == "value" {
-                    if let Some(ty) = receiver_ty.as_ref() {
-                        if let Some(name) = extract_enum_name(ty) {
-                            if self.checker.is_scalar_enum(&name) {
-                                return bytecode;
-                            }
-                        }
-                    }
-                }
                 let is_record =
                     matches!(&receiver_ty, Some(crate::typechecking::Ty::Record { .. }));
                 let is_class = receiver_ty

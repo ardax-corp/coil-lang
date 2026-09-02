@@ -67,6 +67,7 @@ impl Compiler {
         for (i, arm) in arms.iter().enumerate() {
             let is_last = i + 1 == arms.len();
             match &arm.pattern.1 {
+                Pattern::Integer(_) => return false,
                 Pattern::Wildcard | Pattern::Default => {
                     self.bytecode.push_pop();
                     let mut body = self.do_compile(&arm.body);
@@ -327,6 +328,7 @@ impl Compiler {
                     arm_info.push((tag, index, binding));
                 }
                 Pattern::Wildcard | Pattern::Default => wildcard = Some(index),
+                Pattern::Integer(_) => return false,
                 Pattern::Binding { name } => {
                     arm_info.push((u32::MAX, index, Some(*name)));
                 }
@@ -659,7 +661,7 @@ impl Compiler {
                                     .with_operand_u32(arity as u32),
                             );
                         }
-                        Pattern::Wildcard | Pattern::Default => {
+                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
                             // Wildcard arm — POP the
                             // scrutinee.
                             self.bytecode.push_pop();
@@ -997,7 +999,7 @@ impl Compiler {
                                 true, // is_outer = true (forward pass handled UNPACK/JUMP_IF_MATCH)
                             );
                         }
-                        Pattern::Wildcard | Pattern::Default => {}
+                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                     }
                 } else {
                     // Not in a test chain: emit binding
@@ -1041,7 +1043,7 @@ impl Compiler {
                                 true, // is_outer = true (forward pass handled UNPACK/JUMP_IF_MATCH)
                             );
                         }
-                        Pattern::Wildcard | Pattern::Default => {
+                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
                             // No bindings — the forward pass
                             // already emitted POP for the
                             // scrutinee.

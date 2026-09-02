@@ -295,7 +295,7 @@ fn arm_has_runtime_test(arm: &MatchArm) -> bool {
     /// nested `Constructor` (i.e., a value to extract)?
     fn inner_carries_value(pattern: &Pattern) -> bool {
         match pattern {
-            Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } => false,
+            Pattern::Wildcard | Pattern::Default | Pattern::Binding { .. } | Pattern::Integer(_) => false,
             Pattern::Constructor { payload, .. } => match payload {
                 PatternPayload::Unit => false,
                 PatternPayload::Tuple(parts) => parts
@@ -353,7 +353,7 @@ fn emit_inner_test<'compiler>(
             let mut any_nested_ctor = false;
             for sub in parts {
                 match &sub.1 {
-                    Pattern::Wildcard | Pattern::Default => {
+                    Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
                         bytecode.push_pop();
                     }
                     Pattern::Binding { name } => {
@@ -437,7 +437,7 @@ fn emit_inner_test<'compiler>(
                     }
                 };
                 match sub_pat {
-                    Pattern::Wildcard | Pattern::Default => {
+                    Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
                         bytecode.push_pop();
                     }
                     Pattern::Binding { name } => {
@@ -523,7 +523,7 @@ fn collect_pattern_binding_types(
     out: &mut HashMap<String, Ty>,
 ) {
     match pattern {
-        Pattern::Wildcard | Pattern::Default => {}
+        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
         Pattern::Binding { .. } => {
             // Bare `name =>` needs the scrutinee type from the side-table;
             // caller may fill that in. Constructor/record payloads below
@@ -586,7 +586,7 @@ fn collect_pattern_binding_types_with_expected(
     out: &mut HashMap<String, Ty>,
 ) {
     match pattern {
-        Pattern::Wildcard | Pattern::Default => {}
+        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
         Pattern::Binding { name } => {
             if let Some(ty) = expected {
                 if !is_open_schema_ty(checker, enum_name, ty) {
@@ -1113,7 +1113,7 @@ fn emit_pattern_binding<'compiler>(
 ) {
     use parser::ast::PatternPayload;
     match pattern {
-        Pattern::Wildcard | Pattern::Default => {
+        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
             if consume_values {
                 bytecode.push_pop();
             }
