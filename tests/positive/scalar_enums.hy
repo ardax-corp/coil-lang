@@ -1,5 +1,4 @@
-// Scalar-backed enums: unboxed backing word, nominal type, `.value`.
-// Constructors are per-enum (`Status::Ok` next to prelude `Result::Ok`).
+// Scalar-backed enums: unboxed backing word, nominal type, coerce to backing.
 enum Status {
     Ok = 200,
     NotFound = 404,
@@ -35,22 +34,35 @@ fn describe(Status s) -> int {
     };
 }
 
-test("int scalar match and value") {
+fn take_int(int n) -> int {
+    return n;
+}
+
+fn take_status(Status s) -> Status {
+    return s;
+}
+
+test("int scalar match and coerce") {
     let s = Status::Ok;
     assert(describe(s) == 1)?;
-    assert(s.value == 200)?;
-    assert(Status::NotFound.value == 404)?;
+    let n: int = Status::Ok;
+    assert(n == 200)?;
+    assert(Status::NotFound + 0 == 404)?;
     assert(describe(Status::NotFound) == 0)?;
+    assert(take_int(Status::Ok) == 200)?;
+    let kept = take_status(Status::NotFound);
+    assert(describe(kept) == 0)?;
 }
 
 test("inferred repr without attribute") {
-    assert(Status::Ok.value + Status::NotFound.value == 604)?;
+    assert(Status::Ok + Status::NotFound == 604)?;
 }
 
 test("string float bool scalar") {
-    assert(Mode::Fast.value == "fast")?;
-    assert(Ratio::Half.value == 0.5)?;
-    assert(Switch::On.value)?;
+    let mode: string = Mode::Fast;
+    assert(mode == "fast")?;
+    assert(Ratio::Half + 0.0 == 0.5)?;
+    assert(Switch::On)?;
     let m = match Mode::Slow {
         Mode::Fast => 1,
         Mode::Slow => 2,
@@ -61,7 +73,7 @@ test("string float bool scalar") {
 test("Status.Ok next to Result.Ok") {
     let s = Status::Ok;
     let r = Result::Ok(1);
-    assert(s.value == 200)?;
+    assert(s + 0 == 200)?;
     assert(match r {
         Result::Ok(v) => v,
         Result::Err(_) => 0,
@@ -74,4 +86,8 @@ test("payload enum still constructs") {
         Color::Red => 1,
         Color::Green => 0,
     } == 1)?;
+}
+
+test("Status.Ok plus one") {
+    assert(Status::Ok + 1 == 201)?;
 }

@@ -510,7 +510,7 @@ enum HttpCode { Ok = 200, NotFound = 404 }
 fn main() {
     let s = HttpCode::Ok;
     let n = match s {
-        HttpCode::Ok => s.value,
+        HttpCode::Ok => s,
         HttpCode::NotFound => 0,
     };
 }

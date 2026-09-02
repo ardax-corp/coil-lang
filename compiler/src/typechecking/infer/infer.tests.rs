@@ -1969,7 +1969,7 @@ use string::{format, to_bytes};
         let src = "enum Status { Ok = 200, NotFound = 404 } \
                    let s = Status::Ok; \
                    let r = Result::Ok(1); \
-                   let n: int = s.value;";
+                   let n: int = s;";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
     }
@@ -8145,25 +8145,55 @@ fn main() {
     }
 
     #[test]
-    fn scalar_enum_is_not_an_int() {
+    fn scalar_enum_coerces_to_int() {
         let src = "enum Status { Ok = 200, NotFound = 404 } \
                    fn f(int n) -> int { return n; } \
                    f(Status::Ok);";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_does_not_accept_raw_int() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   fn f(Status s) -> Status { return s; } \
+                   f(200);";
         let msgs = assert_messages(src);
         assert!(
             msgs.iter().any(|m| m.message().contains("int") || m.message().contains("Status")),
-            "expected Status vs int mismatch, got: {:?}",
+            "expected int vs Status mismatch, got: {:?}",
             msgs
         );
     }
 
     #[test]
-    fn scalar_enum_value_field_is_int() {
+    fn scalar_enum_let_int_annotation() {
         let src = "enum Status { Ok = 200, NotFound = 404 } \
                    let s = Status::Ok; \
-                   let n: int = s.value;";
+                   let n: int = s;";
         let (mut c, _) = check(src);
         assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_plus_int() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let n: int = Status::Ok + 1;";
+        let (mut c, _) = check(src);
+        assert!(c.take_messages().is_empty(), "{:?}", c.take_messages());
+    }
+
+    #[test]
+    fn scalar_enum_match_raw_int_is_error() {
+        let src = "enum Status { Ok = 200, NotFound = 404 } \
+                   let s = Status::Ok; \
+                   match s { 200 => 1, default => 0 };";
+        let msgs = assert_messages(src);
+        assert!(
+            msgs.iter().any(|m| m.message().contains("int") || m.message().contains("Status")),
+            "expected Status vs int match error, got: {:?}",
+            msgs
+        );
     }
 
     #[test]
