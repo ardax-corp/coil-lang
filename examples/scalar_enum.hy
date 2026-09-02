@@ -1,0 +1,22 @@
+// Scalar-backed enums: the runtime word is the `=` literal, the type is the enum.
+use io::{stdout};
+use io::sync::{write_all};
+use string::{format, to_bytes};
+
+#[repr(int)]
+enum Status {
+    Ok = 200,
+    NotFound = 404,
+}
+
+fn label(Status s) -> string {
+    return match s {
+        Status::Ok => "ok",
+        default => "other",
+    };
+}
+
+fn main() {
+    let s = Status::Ok;
+    write_all(stdout(), to_bytes(format("%s %i\n", label(s), s.value)));
+}

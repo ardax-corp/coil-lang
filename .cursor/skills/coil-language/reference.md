@@ -16,7 +16,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 call        f(a, b, name: v)
 index       arr[i]
 field       rec.field (chained)
-match       match e { pat => expr, … }
+match       match e { pat => expr, … }   // `_` or `default` catch-all (one per match)
 if          if cond { … } else { … }
 block       { stmts; expr }
 lambda      fn (T x) use (y) => expr   // first-class fn values
@@ -34,7 +34,7 @@ for         for x in iter { … }
 
 ## Pattern forms (match / let)
 
-- Literals, identifiers, `_`, tuple `(a,b)`, record `{ x, y }`, enum `E.A`, `E.B(x)`.
+- Literals, identifiers, `_`, `default` (match-arm catch-all), tuple `(a,b)`, record `{ x, y }`, enum `E.A`, `E.B(x)`.
 - Nested record patterns on enum variants use slot-based unpack (compiler detail).
 - `let` destructuring: tuples and records only (no enum ctor patterns in `let`).
 
@@ -91,6 +91,7 @@ match opt {
 | Attribute | Target |
 |-----------|--------|
 | `#[derive(Show, Eq, Ord)]` | `enum`, `class` |
+| `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Case = lit`); omitted when every case is the same simple literal type |
 | User `attr` | `fn`, methods, `class` — must forward `...args` to `target(...args)` |
 
 Tests are `test("desc") { … }` statements, not `#[test]` on `fn`.

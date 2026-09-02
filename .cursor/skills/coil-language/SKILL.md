@@ -65,7 +65,7 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 | Variables | `let x = e;` / `const x = e;`; destructuring `let (a,b) = …`, `let { x } = …` |
 | Control | `if`/`else`, `while`, `for x in iter`, `break`/`continue` |
 | Types | Primitives `int` `float` `string` `bool` `byte`; arrays `[T]` / `[T; N]`; tuples; dicts as anonymous records |
-| Enums | `enum E { A, B(T) }`; `match e { … }` with record/nested patterns |
+| Enums | `enum E { A, B(T) }`; `match e { … }` with record/nested patterns. `default` is a match-arm catch-all like `_` (one of `_`/`default` per match). Scalar-backed: `#[repr(int)]` / `float` / `string` / `bool` or inferred when every case is `Case = lit` of one simple type. Runtime is the unboxed literal; type is still `E`. Read the word with `.value`. Payload enums stay boxed. |
 | Errors | Built-in `Option`/`Result`; `raise`, `?`, `??`, `?.` |
 | Classes | `class C { … }`, `impl C { … }`, `new C(…)` — prefer methods for type-tied ops; inherent `fn drop()` is a GC-time finalizer |
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |

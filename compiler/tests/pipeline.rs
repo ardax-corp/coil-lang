@@ -498,6 +498,34 @@ fn example_option_prints_42() {
 }
 
 #[test]
+fn example_scalar_enum_prints_ok_200() {
+    let output = run_example("examples/scalar_enum.hy");
+    assert_eq!(output, "ok 200\n");
+}
+
+#[test]
+fn scalar_enum_construct_emits_no_make_enum() {
+    let src = r#"
+enum Status { Ok = 200, NotFound = 404 }
+fn main() {
+    let s = Status::Ok;
+    let n = match s {
+        Status::Ok => s.value,
+        Status::NotFound => 0,
+    };
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, _) = pipeline.compile_src(src).expect("scalar enum should compile");
+    assert!(
+        !bytecode
+            .iter()
+            .any(|b| matches!(b.bytecode(), common::Instruction::MakeEnum)),
+        "scalar-backed Status::Ok must not allocate ObjEnum (MakeEnum)"
+    );
+}
+
+#[test]
 fn example_generics_uses_builtin_dictionary_abi() {
     let output = run_example("examples/generics.hy");
     assert_eq!(output, "7424.0427");
