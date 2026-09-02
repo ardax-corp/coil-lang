@@ -2456,6 +2456,80 @@
         );
     }
 
+    /// `FfiLoad` / `load_userland_library` insert `ObjLibrary` into
+    /// `userland_libraries` by heap addr. Those addrs must be GC roots for the
+    /// life of the VM; otherwise sweep recycles the Library and `FfiInvoke`
+    /// fails with `invalid library handle`.
+    #[test]
+    #[cfg(not(target_os = "windows"))]
+    fn userland_library_survives_gc_for_ffi_invoke() {
+        use crate::ffi::FfiSignature;
+        use crate::memory::FfiType;
+        use crate::{Member, ObjString};
+
+        let Some((lib_name, lib_path)) = crate::ffi::require_examples_libsum() else {
+            return;
+        };
+
+        let mut vm = Machine::<512>::default();
+        vm.dload_gate_mut()
+            .grant_file("sum", &lib_path)
+            .unwrap_or_else(|e| panic!("grant {lib_name}: {e}"));
+        let lib_val = vm
+            .load_userland_library(lib_path.to_str().unwrap())
+            .unwrap_or_else(|e| panic!("load {lib_name}: {e}"));
+        let lib_addr = lib_val.raw() as u64;
+        let sig = FfiSignature::from_parts("sum", vec![FfiType::Int, FfiType::Int], FfiType::Int)
+            .unwrap();
+        let fn_id = vm
+            .register_ffi_function(lib_val, sig)
+            .unwrap_or_else(|e| panic!("declare sum: {e}"));
+
+        // Unrooted junk + explicit collect: the Coil handle is not on the VM
+        // stack or in statics, only in `userland_libraries`.
+        vm.heap_mut().set_gc_threshold_for_test(0);
+        for _ in 0..64 {
+            let _ = vm
+                .heap_mut()
+                .alloc(ObjString::from("gc-pressure"), Object::String);
+        }
+        vm.collect_garbage();
+
+        assert!(
+            matches!(
+                vm.heap().find_object_by_addr(lib_addr),
+                Some(Object::Library(_))
+            ),
+            "dload ObjLibrary at 0x{lib_addr:x} must stay live across GC"
+        );
+
+        install_program(
+            &mut vm,
+            &[
+                load(0),
+                load(1),
+                const_int(40),
+                const_int(2),
+                Byte::new(Instruction::MakeTuple).with_operand_u32(2),
+                Byte::new(Instruction::FfiInvoke).with_operand_u32(2),
+                Byte::new(Instruction::RETURN),
+            ],
+        );
+        let out = vm.call_function(0, &[lib_val, Value::from(fn_id as i64)]);
+        assert!(
+            vm.result_is_ok(out),
+            "FfiInvoke after GC must not yield invalid library handle"
+        );
+        let ok_int = match vm.heap().find_object_by_addr(out.raw() as u64) {
+            Some(Object::Enum(gc)) => match gc.as_ref().payload.first() {
+                Some(Member::Value(v)) => v.as_int(),
+                _ => panic!("expected Result::Ok int payload"),
+            },
+            _ => panic!("expected Result enum from FfiInvoke"),
+        };
+        assert_eq!(ok_int, 42);
+    }
+
     /// C → coil callback via `apply_cb` in libsum.so.
     #[test]
     #[cfg(not(target_os = "windows"))]
