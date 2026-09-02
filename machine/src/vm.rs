@@ -1133,6 +1133,10 @@ impl<const S: usize> Machine<S> {
                 roots.push(obj.addr());
             }
         }
+        // `FfiLoad` keeps `ObjLibrary` in `userland_libraries` for the VM
+        // lifetime; the Coil handle is only an addr. Root those keys so GC
+        // cannot sweep a live dload and `FfiInvoke` hit `invalid library handle`.
+        roots.extend(self.userland_libraries.keys().copied());
         roots
     }
 
