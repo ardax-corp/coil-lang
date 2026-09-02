@@ -82,8 +82,10 @@ pub enum ErrorCode {
     InvalidEnumRepr,
     /// Two scalar enum cases share the same backing value.
     DuplicateEnumDiscriminant,
-    /// More than one `_` / `default` catch-all in a match.
+    /// More than one `default` catch-all in a match.
     MultipleMatchCatchall,
+    /// `_` used as a whole match arm; catch-all is `default` only.
+    UnderscoreMatchArm,
 
     // --- Format / print (E03xx) ---
     FormatSpecifierMismatch,
@@ -175,6 +177,7 @@ impl ErrorCode {
             Self::InvalidEnumRepr => "E0213",
             Self::DuplicateEnumDiscriminant => "E0214",
             Self::MultipleMatchCatchall => "E0215",
+            Self::UnderscoreMatchArm => "E0216",
             Self::FormatSpecifierMismatch => "E0300",
             Self::FormatArityMismatch => "E0301",
             Self::IndexOutOfBounds => "E0400",
@@ -255,6 +258,7 @@ impl ErrorCode {
             Self::InvalidEnumRepr => "invalid scalar enum representation",
             Self::DuplicateEnumDiscriminant => "duplicate scalar enum discriminant",
             Self::MultipleMatchCatchall => "multiple match catch-all arms",
+            Self::UnderscoreMatchArm => "`_` is not a match catch-all",
             Self::FormatSpecifierMismatch => "format specifier type mismatch",
             Self::FormatArityMismatch => "format argument count mismatch",
             Self::IndexOutOfBounds => "index out of bounds",
@@ -343,6 +347,7 @@ mod tests {
             | InvalidEnumRepr
             | DuplicateEnumDiscriminant
             | MultipleMatchCatchall
+            | UnderscoreMatchArm
             | FormatSpecifierMismatch
             | FormatArityMismatch
             | IndexOutOfBounds
@@ -413,6 +418,7 @@ mod tests {
             InvalidEnumRepr,
             DuplicateEnumDiscriminant,
             MultipleMatchCatchall,
+            UnderscoreMatchArm,
             FormatSpecifierMismatch,
             FormatArityMismatch,
             IndexOutOfBounds,
