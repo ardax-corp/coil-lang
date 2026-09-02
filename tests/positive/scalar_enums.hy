@@ -5,9 +5,6 @@ enum Status {
     Ok = 200,
     NotFound = 404,
 }
-    Ok = 200,
-    NotFound = 404,
-}
 
 #[repr(string)]
 enum Mode {
