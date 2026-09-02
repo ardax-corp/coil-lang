@@ -792,8 +792,8 @@ impl Compiler {
                 let target_offset = mono_offset.or(offset);
                 let lookup_name = strip_overload_key(&n).to_string();
                 let pair_kind = self.pair_return_kind(&lookup_name);
-                let is_generic =
-                    self.checker.is_generic_fn(&lookup_name) && mono_offset.is_none();
+                let is_generic_src = self.checker.is_generic_fn(&lookup_name);
+                let is_generic = is_generic_src && mono_offset.is_none();
                 // Only box bare `T` args for the shared dict ABI. Nested
                 // params like `[T]` (e.g. `collections::sort`) keep the
                 // native representation even when not monomorphized.
@@ -808,7 +808,7 @@ impl Compiler {
                 }
 
                 if pair_kind.is_none()
-                    && !is_generic
+                    && !is_generic_src
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
                     && self.try_emit_inline_direct_call(&n, Some(arg_slice), &mut bytecode)
@@ -819,7 +819,7 @@ impl Compiler {
                 // One-level self-unroll: peel recursive callee body once;
                 // nested self-calls remain CALL/Entry.
                 if pair_kind.is_none()
-                    && !is_generic
+                    && !is_generic_src
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
                     && self.try_emit_self_unroll_call(&n, Some(arg_slice), &mut bytecode)
@@ -830,7 +830,7 @@ impl Compiler {
                 // Base-case peel that reads leaf args in place instead of
                 // spilling them; falls through to the spilling peel below.
                 if let Some(off) = target_offset
-                    && !is_generic
+                    && !is_generic_src
                     && !is_instance_method_fqn(&self.checker, &lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
@@ -849,7 +849,7 @@ impl Compiler {
                 // Instance methods with known entries use CALL (not CallIndirect).
                 if let Some(off) = target_offset
                     && pair_kind.is_none()
-                    && !is_generic
+                    && !is_generic_src
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
                     && self.try_emit_predicate_peel_call(
