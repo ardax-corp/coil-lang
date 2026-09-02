@@ -9,7 +9,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 - `never` from `return`/`raise`/`panic` and proven-infinite loops absorbs in joins.
 - Path completeness: concrete non-unit returns need all paths to exit (`E0111`).
 - Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/casts.md) (`/docs/references/casts`).
-- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status.Ok`, `Status.Ok + 1`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
+- Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status.Ok`, `Status.Ok + 1`). Show/String of a scalar case is the backing (`Status.Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
 
 ## Expression forms
 
@@ -93,7 +93,7 @@ Constructor names are per-enum. Qualified form is canonical (`Status.Ok`, `Resul
 
 | Attribute | Target |
 |-----------|--------|
-| `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord use the backing word; Show/String print `Status.Ok`. Traits that cannot be derived on a payload enum also fail on a scalar enum. |
+| `#[derive(Show, Eq, Ord, Hash)]` | `enum`, `class` — composes with `#[repr(int)]` (etc.) on scalar-backed enums. Eq/Hash/Ord/Show/String use the backing word (`Status.Ok` shows as `200`). Traits that cannot be derived on a payload enum also fail on a scalar enum. |
 | `#[repr(int)]` / `float` / `string` / `bool` | `enum` — scalar-backed cases (`Status.Ok = 200`); omitted when every case is the same simple literal type. Runtime is the unboxed literal; the type is still the enum and coerces to the backing in expression position |
 | User `attr` | `fn`, methods, `class` — must forward `...args` to `target(...args)` |
 
