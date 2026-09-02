@@ -56,6 +56,12 @@ interior `*mut Value` into `elements`.
 `il::bounds::rewrite_array_pins` (`compiler/src/il/bounds.rs`), after
 `rewrite_proven_index_ops`. Driven from LICM's `loop_bounds` call.
 
+Codegen also consumes [`index_facts`](../../compiler/src/typechecking/index_facts.rs)
+sidecar bits: a proven helper `f(a, i)` pins `a` at function entry and emits
+`IndexPinUnchecked`; a length-stable `for x in arr` pins the iterable temp
+and uses `IndexPinUnchecked` for the element load. No new opcodes. Yield still
+clears facts — do not pin across `YieldCoro`.
+
 For each counted loop (`LE` / post-canon `GT` header; unit `+1` or invariant
 positive stride) and each length-invariant array slot in `len_arrays`:
 
