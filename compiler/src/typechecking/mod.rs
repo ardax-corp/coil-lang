@@ -50,7 +50,8 @@ pub use par_profit::{
 pub use par_profit::par_work_units;
 #[allow(unused_imports)] // public API re-export
 pub use purity::{
-    RecursivePureSet, analyze_pure_fns, analyze_recursive_fns, analyze_recursive_pure,
+    EffectFlags, RecursivePureSet, analyze_fn_effects, analyze_pure_fns, analyze_recursive_fns,
+    analyze_recursive_pure,
 };
 #[allow(unused_imports)] // public API re-export
 pub use stack_bound::{

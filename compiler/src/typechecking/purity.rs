@@ -1,8 +1,9 @@
-//! Whole-function purity for automatic parallelization of recursive binops.
+//! Whole-function purity / effects for auto-par, LICM, and the typed sidecar.
 //!
 //! A function is **pure** when its body has no observable host side effects
-//! (IO / threads / FFI / yield) and only calls other pure user functions.
-//! **Recursive pure** functions may be auto-parallelized at `f(a) ⊕ f(b)` sites.
+//! (IO / threads / FFI / yield / attach) and only calls other pure user
+//! functions. Unknown callees are conservatively impure. **Recursive pure**
+//! functions may be auto-parallelized at `f(a) ⊕ f(b)` sites.
 
 use std::collections::{HashMap, HashSet};
 
@@ -11,10 +12,53 @@ use parser::ast::{EnumConstructPayload, Expression, Output};
 /// Names of user functions that are pure and self-recursive.
 pub type RecursivePureSet = HashSet<String>;
 
+/// Observable effects that kill purity. Empty flags are pure.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct EffectFlags(u16);
+
+impl EffectFlags {
+    pub const HOST: u16 = 1 << 0;
+    pub const FFI: u16 = 1 << 1;
+    pub const HEAP_MUT: u16 = 1 << 2;
+    pub const YIELD: u16 = 1 << 3;
+    pub const THREAD: u16 = 1 << 4;
+    pub const GC: u16 = 1 << 5;
+    pub const IO: u16 = 1 << 6;
+    pub const ATTACH_PARK: u16 = 1 << 7;
+    pub const UNKNOWN: u16 = 1 << 8;
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn from_bits(bits: u16) -> Self {
+        Self(bits)
+    }
+
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub const fn is_pure(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn contains(self, bit: u16) -> bool {
+        self.0 & bit != 0
+    }
+
+    pub const fn union(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+
+    pub fn insert(&mut self, bit: u16) {
+        self.0 |= bit;
+    }
+}
+
 #[derive(Default)]
 struct FnFacts {
-    /// Definitely impure ops in the body (host, FFI, yield, …).
-    local_impure: bool,
+    local: EffectFlags,
     /// Callee names (unqualified Identifier call targets).
     callees: HashSet<String>,
 }
@@ -128,18 +172,22 @@ fn collect_toplevel_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) 
     }
 }
 
+/// Per-function effect flags after call-graph closure (unknown → impure).
+pub fn analyze_fn_effects(ast: &Output<'_>) -> HashMap<String, EffectFlags> {
+    let facts = collect_fn_facts(ast);
+    effect_closure(&facts)
+}
+
 /// Names of user functions with no observable side effects.
 ///
 /// Unlike [`analyze_recursive_pure`] this keeps non-recursive functions, so
 /// callers that only need "safe to evaluate on another thread" (loop IPA) can
 /// admit ordinary helpers such as `fn sq(int i) -> int { i * i }`.
 pub fn analyze_pure_fns(ast: &Output<'_>) -> HashSet<String> {
-    let facts = collect_fn_facts(ast);
-    let impure = impure_closure(&facts);
-    facts
-        .keys()
-        .filter(|name| !impure.contains(*name))
-        .cloned()
+    analyze_fn_effects(ast)
+        .into_iter()
+        .filter(|(_, flags)| flags.is_pure())
+        .map(|(name, _)| name)
         .collect()
 }
 
@@ -157,27 +205,66 @@ pub fn analyze_recursive_pure(ast: &Output<'_>) -> RecursivePureSet {
 /// Fixed point of "impure if locally impure, or any callee is impure / not a
 /// user `fn`" over the call graph.
 fn impure_closure(facts: &HashMap<String, FnFacts>) -> HashSet<String> {
+    effect_closure(facts)
+        .into_iter()
+        .filter(|(_, flags)| !flags.is_pure())
+        .map(|(name, _)| name)
+        .collect()
+}
+
+fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFlags> {
     let user_fns: HashSet<&String> = facts.keys().collect();
-    let mut impure: HashSet<String> = HashSet::new();
+    let mut out: HashMap<String, EffectFlags> = HashMap::new();
     for (name, f) in facts {
-        if f.local_impure || f.callees.iter().any(|c| !user_fns.contains(c)) {
-            impure.insert(name.clone());
+        let mut flags = f.local;
+        for c in &f.callees {
+            if !user_fns.contains(c) {
+                flags = flags.union(classify_unknown_callee(c));
+            }
         }
+        out.insert(name.clone(), flags);
     }
     let mut changed = true;
     while changed {
         changed = false;
         for (name, f) in facts {
-            if impure.contains(name) {
-                continue;
+            let mut flags = out[name];
+            for c in &f.callees {
+                if let Some(&callee) = out.get(c) {
+                    flags = flags.union(callee);
+                }
             }
-            if f.callees.iter().any(|c| impure.contains(c)) {
-                impure.insert(name.clone());
+            if flags != out[name] {
+                out.insert(name.clone(), flags);
                 changed = true;
             }
         }
     }
-    impure
+    out
+}
+
+/// Host / virtual-module names that are not user `fn`s.
+fn classify_unknown_callee(name: &str) -> EffectFlags {
+    let short = name.rsplit("::").next().unwrap_or(name);
+    let mut flags = EffectFlags::empty();
+    match short {
+        "attach" | "park" => flags.insert(EffectFlags::ATTACH_PARK),
+        "spawn" | "join" | "detach" | "channel" | "send" | "recv" | "try_send" | "try_recv"
+        | "close" | "mutex" | "with_lock" | "lock" | "try_lock" | "unlock" | "rwlock"
+        | "with_read" | "with_write" | "try_read" | "try_write" => {
+            flags.insert(EffectFlags::THREAD)
+        }
+        "root" | "unroot" | "weak" | "upgrade" | "heap_bytes" | "collect"
+        | "register_finalizer" => flags.insert(EffectFlags::GC),
+        "dload" | "declare" | "invoke" => flags.insert(EffectFlags::FFI),
+        "stdin" | "stdout" | "stderr" | "open" | "read" | "write" | "write_from" | "write_all"
+        | "await_readable" | "await_writable" | "drive" | "wait_ready" | "from_bytes"
+        | "to_bytes" | "connect" | "connect_timeout" | "listen" | "accept" | "peer_addr"
+        | "local_addr" | "set_nodelay" | "shutdown" | "bind" | "send_to" | "recv_from"
+        | "local_port" | "format" => flags.insert(EffectFlags::IO),
+        _ => flags.insert(EffectFlags::UNKNOWN | EffectFlags::HOST),
+    }
+    flags
 }
 
 fn collect_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
@@ -390,14 +477,14 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         | Expression::TypeOf(inner)
         | Expression::Readonly(inner)
         | Expression::OptionalAccess(inner, _) => walk_body(inner, facts),
-        Expression::Panic(_)
-        | Expression::Yield(_)
-        | Expression::YieldFrom(_)
-        | Expression::Resume(_, _)
-        | Expression::Declare(_)
-        | Expression::Invoke(_)
-        | Expression::Defer { .. } => {
-            facts.local_impure = true;
+        Expression::Yield(_) | Expression::YieldFrom(_) | Expression::Resume(_, _) => {
+            facts.local.insert(EffectFlags::YIELD);
+        }
+        Expression::Declare(_) | Expression::Invoke(_) => {
+            facts.local.insert(EffectFlags::FFI);
+        }
+        Expression::Panic(_) | Expression::Defer { .. } => {
+            facts.local.insert(EffectFlags::UNKNOWN);
         }
         Expression::Add(a, b)
         | Expression::Sub(a, b)
@@ -430,7 +517,7 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                 peel(lhs).1.as_ref(),
                 Expression::Index(_, _) | Expression::Access(_, _)
             ) {
-                facts.local_impure = true;
+                facts.local.insert(EffectFlags::HEAP_MUT);
             }
             walk_body(lhs, facts);
             walk_body(rhs, facts);
@@ -440,7 +527,7 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                 peel(target).1.as_ref(),
                 Expression::Index(_, _) | Expression::Access(_, _)
             ) {
-                facts.local_impure = true;
+                facts.local.insert(EffectFlags::HEAP_MUT);
             }
             walk_body(target, facts);
         }
@@ -449,8 +536,11 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
                 Expression::Identifier(n) => {
                     facts.callees.insert((*n).to_string());
                 }
+                Expression::QualifiedAccess { owner, member } => {
+                    facts.callees.insert(format!("{owner}::{member}"));
+                }
                 _ => {
-                    facts.local_impure = true;
+                    facts.local.insert(EffectFlags::UNKNOWN);
                 }
             }
             walk_body(name, facts);
@@ -507,7 +597,7 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         Expression::Constant(_, Some(init)) => walk_body(init, facts),
         Expression::LetDestructure { rhs, .. } => walk_body(rhs, facts),
         Expression::Lambda { .. } => {
-            facts.local_impure = true;
+            facts.local.insert(EffectFlags::UNKNOWN);
         }
         Expression::Function {
             body: Some(body), ..
@@ -533,6 +623,22 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
         Expression::Fragment(items) if items.len() == 1 => peel(&items[0]),
         _ => expr,
     }
+}
+
+/// Fill [`Checker::fn_effects`] / [`Checker::pure_fn_names`] after infer.
+pub fn record_fn_effects(checker: &mut super::infer::Checker, ast: &Output<'_>) {
+    checker.fn_effects.clear();
+    checker.pure_fn_names.clear();
+    let effects = analyze_fn_effects(ast);
+    for (name, flags) in &effects {
+        if flags.is_pure() {
+            checker.pure_fn_names.insert(name.clone());
+        }
+        if let Some(id) = checker.def_id_of(name) {
+            checker.fn_effects.insert(id, *flags);
+        }
+    }
+    debug_assert_eq!(checker.pure_fn_names, analyze_pure_fns(ast));
 }
 
 #[cfg(test)]
@@ -834,5 +940,48 @@ fn main() { return; }
             !set.contains("pack"),
             "record ctor payloads must not hide impurity: {set:?}"
         );
+    }
+
+    #[test]
+    fn sidecar_records_pure_helper_and_host_callee() {
+        use crate::typechecking::infer::Checker;
+
+        let ast = parse_ast(
+            r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn add(int a, int b) -> int { return a + b; }
+fn shout(int n) -> int {
+    write(stdout(), to_bytes(format("%i", n)));
+    return n;
+}
+fn main() { return; }
+"#,
+        );
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let side = c.typed_sidecar();
+        assert!(side.name_is_pure("add"), "add must stay pure");
+        assert!(!side.name_is_pure("shout"), "host write must be impure");
+        let add_id = c.def_id_of("add").expect("add DefId");
+        let shout_id = c.def_id_of("shout").expect("shout DefId");
+        assert!(side.is_pure_def(add_id));
+        assert!(!side.is_pure_def(shout_id));
+        let shout_fx = side.effects(shout_id).expect("shout effects");
+        assert!(
+            shout_fx.contains(EffectFlags::IO) || shout_fx.contains(EffectFlags::UNKNOWN),
+            "shout should record IO/unknown, got {shout_fx:?}"
+        );
+    }
+
+    #[test]
+    fn sidecar_mono_stem_matches_pure_name() {
+        let ast = parse_ast("fn sq(int x) -> int { return x * x; } fn main() { return; }");
+        let mut c = crate::typechecking::infer::Checker::new();
+        let _ = c.check_program(&ast);
+        let side = c.typed_sidecar();
+        assert!(side.name_is_pure("sq$mono$1$0"));
+        assert!(side.name_is_pure("util::sq"));
+        assert!(!side.name_is_pure("mod::Type::sq"));
     }
 }

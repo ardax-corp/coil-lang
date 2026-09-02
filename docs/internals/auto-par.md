@@ -16,16 +16,19 @@ stays sequential.
 
 ## Purity analysis
 
-After typecheck, codegen runs [`purity`](../../compiler/src/typechecking/purity.rs)
-over the AST:
+After typecheck, [`purity`](../../compiler/src/typechecking/purity.rs) walks
+the AST and records [`EffectFlags`](../../compiler/src/typechecking/purity.rs)
+on the typed sidecar (`DefId` + bind names). Codegen copies those names into
+`PureCallCtx` for LICM / length proofs:
 
 - A function is **locally impure** if it uses `panic` / `yield` / FFI / `defer`,
   mutates via index/field assignment, or calls a non-identifier callee.
-- Calls to names that are not user `fn`s (e.g. imported `write_all`, `spawn`)
-  are impure.
+- Calls to names that are not user `fn`s (e.g. imported `write_all`, `spawn`,
+  `collect`, `attach`) take the matching effect bit (unknown names are impure).
 - Impurity propagates through the user-function call graph (fixed point).
 - `analyze_pure_fns` returns everything that survives; `analyze_recursive_pure`
-  keeps only the subset that **calls itself**.
+  keeps only the subset that **calls itself**. `$mono$` clones of a pure bind
+  stay pure for LICM.
 
 Expression IPA runs on **any pure** function whose body contains a fork site
 (self-calls or independent helper calls). Loop IPA also needs pure body callees.

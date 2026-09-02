@@ -10,7 +10,6 @@ use parser::ast::{AssignOp, EnumConstructPayload, Expression, Output};
 
 use super::id::NodeId;
 use super::infer::{Checker, ForInKind};
-use super::purity::analyze_pure_fns;
 use super::ty::{strip_readonly, vec_element_ty, Ty};
 
 const MAX_FACT_ARRAY_ARITY: usize = 32;
@@ -86,7 +85,7 @@ pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     checker.for_in_pin.clear();
     checker.for_in_pin_spans.clear();
 
-    let pure = analyze_pure_fns(ast);
+    let pure = checker.pure_fn_names.clone();
     let mut calls: Vec<CallSite> = Vec::new();
     let mut used_as_value: HashSet<String> = HashSet::new();
     collect_value_uses(ast, &mut used_as_value);

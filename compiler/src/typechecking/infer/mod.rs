@@ -194,6 +194,10 @@ pub struct Checker {
     pub(crate) for_in_pin: HashSet<NodeId>,
     /// For-in pin by source span (emit_idx / clone fallback).
     pub(crate) for_in_pin_spans: HashSet<(usize, usize)>,
+    /// Whole-function effect bits keyed by [`DefId`] (empty = pure).
+    pub(crate) fn_effects: HashMap<DefId, crate::typechecking::purity::EffectFlags>,
+    /// Bind names proven pure (LICM / index facts / auto-par).
+    pub(crate) pure_fn_names: HashSet<String>,
     /// [`ModuleId`] for [`Self::current_module`].
     current_module_id: ModuleId,
 
