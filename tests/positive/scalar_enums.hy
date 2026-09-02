@@ -1,5 +1,10 @@
 // Scalar-backed enums: unboxed backing word, nominal type, coerce to backing.
+#[repr(int)]
+#[derive(Show, Eq, Ord, Hash)]
 enum Status {
+    Ok = 200,
+    NotFound = 404,
+}
     Ok = 200,
     NotFound = 404,
 }
@@ -90,4 +95,28 @@ test("payload enum still constructs") {
 
 test("Status.Ok plus one") {
     assert(Status::Ok + 1 == 201)?;
+}
+
+fn hash_key<T: Hash>(T k) -> int {
+    return k.hash();
+}
+
+test("derived Eq Hash Show Ord") {
+    assert(Status::Ok == Status::Ok)?;
+    assert(Status::Ok != Status::NotFound)?;
+    assert(Status::Ok < Status::NotFound)?;
+    assert(Status::Ok.show() == "Status.Ok")?;
+    assert(hash_key(Status::Ok) == Status::Ok.hash())?;
+    assert(Status::Ok.hash() != Status::NotFound.hash())?;
+}
+
+#[repr(int)]
+#[derive(Ord)]
+enum Rank {
+    High = 10,
+    Low = 1,
+}
+
+test("Ord uses backing word not declaration order") {
+    assert(Rank::Low < Rank::High)?;
 }

@@ -6,6 +6,7 @@ use io::sync::{write_all};
 use string::{format, to_bytes};
 
 #[repr(int)]
+#[derive(Show, Eq, Ord, Hash)]
 enum Status {
     Ok = 200,
     NotFound = 404,
@@ -20,5 +21,5 @@ fn label(Status s) -> string {
 
 fn main() {
     let s = Status::Ok;
-    write_all(stdout(), to_bytes(format("%s %i\n", label(s), s)));
+    write_all(stdout(), to_bytes(format("%s %i %v\n", label(s), s, s)));
 }

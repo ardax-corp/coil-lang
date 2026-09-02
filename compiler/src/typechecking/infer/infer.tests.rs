@@ -8184,6 +8184,30 @@ fn main() {
     }
 
     #[test]
+    fn scalar_enum_derive_eq_show_hash_ord_typechecks() {
+        let src = r#"
+#[repr(int)]
+#[derive(Show, Eq, Ord, Hash)]
+enum Status { Ok = 200, NotFound = 404 }
+fn hash_key<T: Hash>(T k) -> int { return k.hash(); }
+let _eq = Status::Ok == Status::Ok;
+let _lt = Status::Ok < Status::NotFound;
+let _h = hash_key(Status::Ok);
+let _s = Status::Ok.show();
+"#;
+        let mut ast = Pratt::default().parse(src).expect("parse");
+        let _ = crate::attrs::expand_program(&mut ast);
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        let msgs = c.take_messages();
+        assert!(
+            msgs.is_empty(),
+            "expected scalar derive Show/Eq/Ord/Hash to typecheck, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
     fn scalar_enum_match_raw_int_is_error() {
         let src = "enum Status { Ok = 200, NotFound = 404 } \
                    let s = Status::Ok; \

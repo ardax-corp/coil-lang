@@ -1364,15 +1364,28 @@ fn compile_messages(src: &str) -> Vec<String> {
 }
 
 #[test]
-fn derive_unknown_trait_reports_diagnostic() {
-    let msgs = compile_messages("#[derive(Clone)] enum Color { Red } fn main() {}");
-    assert!(
-        msgs.iter()
-            .any(|m| m.contains("Cannot derive unknown or non-derivable trait `Clone`")),
-        "expected unknown-trait derive diagnostic, got: {:?}",
-        msgs
-    );
-}
+    fn derive_unknown_trait_reports_diagnostic() {
+        let msgs = compile_messages("#[derive(Clone)] enum Color { Red } fn main() {}");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Cannot derive unknown or non-derivable trait `Clone`")),
+            "expected unknown-trait derive diagnostic, got: {:?}",
+            msgs
+        );
+    }
+
+    #[test]
+    fn derive_clone_on_scalar_enum_reports_same_diagnostic() {
+        let msgs = compile_messages(
+            "#[repr(int)] #[derive(Clone)] enum Status { Ok = 200, NotFound = 404 } fn main() {}",
+        );
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("Cannot derive unknown or non-derivable trait `Clone`")),
+            "expected Clone-on-scalar-enum diagnostic, got: {:?}",
+            msgs
+        );
+    }
 
 #[test]
 fn derive_non_derivable_trait_reports_diagnostic() {

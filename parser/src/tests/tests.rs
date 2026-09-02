@@ -406,6 +406,21 @@
     }
 
     #[test]
+    fn enum_repr_and_derive_attrs_stack() {
+        let ast = decl_ast!(
+            r#"#[repr(int)] #[derive(Show, Eq, Ord, Hash)] enum Status { Ok = 200, NotFound = 404 }"#
+        );
+        match ast {
+            Expression::EnumDecl { attrs, .. } => {
+                assert_eq!(attrs.len(), 2);
+                assert_eq!(attrs[0].name, "repr");
+                assert_eq!(attrs[1].name, "derive");
+            }
+            other => panic!("expected EnumDecl, got {:?}", other),
+        }
+    }
+
+    #[test]
     fn enum_string_and_bool_repr_parse() {
         let ast = decl_ast!(r#"#[repr(string)] enum Mode { Fast = "fast", Slow = "slow" }"#);
         match ast {

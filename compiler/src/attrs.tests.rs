@@ -122,6 +122,55 @@
     }
 
     #[test]
+    fn derive_and_repr_compose_on_scalar_enum() {
+        let (exp, decls) = expand_src(
+            "#[repr(int)] #[derive(Show, Eq, Ord, Hash)] enum Status { Ok = 200, NotFound = 404 } fn main() {}",
+        );
+        assert!(
+            exp.messages.is_empty(),
+            "repr+derive should expand, got: {:?}",
+            exp.messages
+        );
+        assert!(
+            impl_method_names(&decls, "Show").contains(&"show".to_string()),
+            "expected Show::show"
+        );
+        assert!(
+            impl_method_names(&decls, "Eq").contains(&"eq".to_string()),
+            "expected Eq::eq"
+        );
+        assert!(
+            impl_method_names(&decls, "Hash").contains(&"hash".to_string()),
+            "expected Hash::hash"
+        );
+        assert!(
+            decls.iter().any(|n| matches!(
+                n.1.as_ref(),
+                Expression::TypeClassImpl { class, .. } if *class == "Lt"
+            )),
+            "expected Ord/Lt instance"
+        );
+        let show_dbg = decls
+            .iter()
+            .find(|n| {
+                matches!(
+                    n.1.as_ref(),
+                    Expression::TypeClassImpl { class, .. } if *class == "Show"
+                )
+            })
+            .map(|n| format!("{:?}", n.1))
+            .unwrap_or_default();
+        assert!(
+            show_dbg.contains("Status.Ok") || show_dbg.contains("Status.Ok"),
+            "scalar Show should print Status.Ok, got: {show_dbg}"
+        );
+        assert!(
+            !show_dbg.contains("Status::Ok"),
+            "scalar Show should not use ::, got: {show_dbg}"
+        );
+    }
+
+    #[test]
     fn default_show_string_use_type_name_when_no_derive() {
         let (_exp, decls) = expand_src("class Point { pub x: int, pub y: int } fn main() {}");
         assert!(
