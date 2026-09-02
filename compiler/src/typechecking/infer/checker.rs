@@ -14764,6 +14764,21 @@ impl Checker {
         }
 
         let expected = format_specifier_type(spec);
+        let backing_expected = match spec {
+            'i' | 'd' | 'b' | 'x' | 'u' | 'p' => Some(int()),
+            'f' => Some(float()),
+            's' => Some(string()),
+            'z' => Some(boolean()),
+            _ => None,
+        };
+        if let Some(expected_ty) = backing_expected {
+            if self
+                .coerce_scalar_enum_to_backing(&expected_ty, arg_ty)
+                .is_some()
+            {
+                return;
+            }
+        }
         if !type_matches_specifier(arg_ty, spec) {
             let mut msg = Message::error(
                 ErrorCode::FormatSpecifierMismatch,
@@ -14853,7 +14868,8 @@ impl Checker {
     }
 
     fn scalar_backing_ty_of(&self, ty: &Ty) -> Option<Ty> {
-        let name = Self::enum_name_of_resolved(ty)?;
+        let resolved = apply_ty_prune(&self.subst, ty);
+        let name = Self::enum_name_of_resolved(&resolved)?;
         self.scalar_value_ty(&name)
     }
 
