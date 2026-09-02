@@ -1669,6 +1669,7 @@ mod tests {
 
     use reporting::{ErrorCode, Message, MessageKind, ReportConfig, ReportFormat};
 
+    use common::Instruction;
     use super::Pipeline;
 
     /// Cloneable in-memory writer so tests can inspect sink output.
@@ -2395,6 +2396,240 @@ fn main() -> int {
                 .iter()
                 .map(|b| b.bytecode().mnemonic())
                 .collect::<Vec<_>>()
+        );
+    }
+
+    fn fn_ops<'a>(
+        bytecode: &'a [common::Byte],
+        syms: &[common::FnDebugSym],
+        name: &str,
+    ) -> &'a [common::Byte] {
+        let idx = syms.iter().position(|s| s.name == name).unwrap_or_else(|| {
+            let names: Vec<&str> = syms.iter().map(|s| s.name.as_str()).collect();
+            panic!("missing fn_symbol `{name}`; have {names:?}");
+        });
+        let start = syms[idx].entry_pc as usize;
+        let end = syms
+            .get(idx + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bytecode.len());
+        &bytecode[start..end]
+    }
+
+    fn is_unchecked_index(op: common::Instruction) -> bool {
+        matches!(
+            op,
+            Instruction::IndexUnchecked | Instruction::IndexPinUnchecked
+        )
+    }
+
+    fn is_pin_op(op: common::Instruction) -> bool {
+        matches!(
+            op,
+            Instruction::ArrayPin
+                | Instruction::IndexPin
+                | Instruction::IndexPinUnchecked
+                | Instruction::StoreIndexPin
+                | Instruction::StoreIndexPinUnchecked
+        )
+    }
+
+    #[test]
+    fn for_in_stable_length_pins() {
+        use common::Instruction;
+        let src = r#"
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    let n = 8;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let acc = 0;
+    for x in b {
+        acc = acc + x;
+    }
+    return acc;
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline.compile_src(src).expect("compile for-in pin");
+        let syms = pipeline.program_debug().fn_symbols;
+        let main = fn_ops(&bytecode, &syms, "main");
+        assert!(
+            main.iter().any(|b| is_pin_op(*b.bytecode())),
+            "stable for-in should pin; body={:?}",
+            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            main.iter().any(|b| is_unchecked_index(*b.bytecode())
+                || *b.bytecode() == Instruction::IndexPinUnchecked),
+            "stable for-in should uncheck the element load; body={:?}",
+            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn helper_caller_proof_unchecks_and_pins() {
+        use common::Instruction;
+        let src = r#"
+fn at(Vec<int> a, int i) -> int {
+    let t = 0;
+    let k = 0;
+    while k < 4 {
+        t = t + 1;
+        k = k + 1;
+    }
+    return a[i] + t - 4;
+}
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    let n = 8;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let acc = 0;
+    let j = 0;
+    while j < len(b) {
+        acc = acc + at(b, j);
+        j = j + 1;
+    }
+    return acc;
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline
+            .compile_src(src)
+            .expect("compile helper caller proof");
+        let syms = pipeline.program_debug().fn_symbols;
+        let at = fn_ops(&bytecode, &syms, "at");
+        let calls = bytecode
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::CALL)
+            .count();
+        assert!(calls >= 1, "at must remain a CALL; otherwise the test is vacuous");
+        assert!(
+            at.iter().any(|b| is_unchecked_index(*b.bytecode())),
+            "caller-proven at(a,i) should uncheck a[i]; body={:?}",
+            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            at.iter().any(|b| is_pin_op(*b.bytecode())),
+            "caller-proven helper should ArrayPin; body={:?}",
+            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn helper_callee_len_guard_unchecks() {
+        let src = r#"
+fn at(Vec<int> a, int i) -> int {
+    let t = 0;
+    let k = 0;
+    while k < 4 {
+        t = t + 1;
+        k = k + 1;
+    }
+    if i >= 0 && i < a.len() {
+        return a[i] + t - 4;
+    }
+    return 0;
+}
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    b.push(3);
+    return at(b, 0);
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline
+            .compile_src(src)
+            .expect("compile helper callee guard");
+        let syms = pipeline.program_debug().fn_symbols;
+        let at = fn_ops(&bytecode, &syms, "at");
+        assert!(
+            at.iter().any(|b| is_unchecked_index(*b.bytecode())),
+            "i < a.len() in callee should uncheck a[i]; body={:?}",
+            at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn stride_two_counted_loop_unchecks() {
+        let src = r#"
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    let n = 16;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let acc = 0;
+    let j = 0;
+    while j < len(b) {
+        acc = acc + b[j];
+        j = j + 2;
+    }
+    return acc;
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline.compile_src(src).expect("compile stride");
+        let stats = crate::last_bounds_stats();
+        let unchecked = bytecode
+            .iter()
+            .filter(|b| is_unchecked_index(*b.bytecode()))
+            .count();
+        assert!(
+            stats.proven_index >= 1 || unchecked >= 1,
+            "i += 2 under j < len should uncheck; stats={stats:?} unchecked={unchecked}"
+        );
+        let pins = bytecode.iter().filter(|b| is_pin_op(*b.bytecode())).count();
+        assert!(
+            pins >= 1,
+            "stride loop should still pin; stats={stats:?}"
+        );
+    }
+
+    #[test]
+    fn mutation_call_keeps_checked_index() {
+        let src = r#"
+fn grow(Vec<int> a, int x) {
+    a.push(x);
+}
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    let n = 4;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let j = 0;
+    while j < len(b) {
+        grow(b, b[j]);
+        j = j + 1;
+    }
+    return 0;
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline.compile_src(src).expect("compile mutation");
+        let stats = crate::last_bounds_stats();
+        assert_eq!(stats.proven_index, 0, "grow must not prove Index; stats={stats:?}");
+        let main = fn_ops(&bytecode, &pipeline.program_debug().fn_symbols, "main");
+        let scan_unchecked = main
+            .iter()
+            .filter(|b| is_unchecked_index(*b.bytecode()))
+            .count();
+        assert_eq!(
+            scan_unchecked, 0,
+            "mutating helper must keep checked Index; body={:?}",
+            main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
     }
 
