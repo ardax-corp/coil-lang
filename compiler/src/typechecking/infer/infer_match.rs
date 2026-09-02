@@ -47,6 +47,17 @@ impl Checker {
             // points near the offending pattern instead of at byte
             // 0 of the source.
             let pattern_range = arm.pattern.0.into_range();
+            if matches!(arm.pattern.1, Pattern::Wildcard) {
+                let mut msg = Message::error(
+                    ErrorCode::UnderscoreMatchArm,
+                    "`_` is not a match catch-all; use `default`".to_string(),
+                    pattern_range.clone(),
+                );
+                msg.with_help(
+                    "nested `_` in constructors, tuples, and records is still allowed".to_string(),
+                );
+                self.messages.push(msg);
+            }
             let pat_ty = self.infer_pattern(&arm.pattern.1, &resolved_scrutinee, &pattern_range);
 
             // Narrow an Identifier scrutinee to the matched variant so

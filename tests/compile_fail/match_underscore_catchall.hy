@@ -1,4 +1,4 @@
-// Expected: compile failure — `_` is not a catch-all (`default` is).
+// Expected: compile failure — `_` is not a whole-arm catch-all.
 enum Status { Open, Closed }
 
 fn main() {
@@ -6,6 +6,5 @@ fn main() {
     let _ = match s {
         Status::Open => 1,
         _ => 0,
-        default => 2,
     };
 }

@@ -17,7 +17,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 call        f(a, b, name: v)
 index       arr[i]
 field       rec.field (chained)
-match       match e { pat => expr, … }   // `_` or `default` catch-all (one per match)
+match       match e { pat => expr, … }   // catch-all is `default` only (not `_`)
 if          if cond { … } else { … }
 block       { stmts; expr }
 lambda      fn (T x) use (y) => expr   // first-class fn values
@@ -35,7 +35,7 @@ for         for x in iter { … }
 
 ## Pattern forms (match / let)
 
-- Literals, identifiers, `_`, `default` (match-arm catch-all), tuple `(a,b)`, record `{ x, y }`, enum `E.A`, `E.B(x)`.
+- Literals, identifiers, `_` (nested wildcard only), `default` (whole-arm catch-all), tuple `(a,b)`, record `{ x, y }`, enum `E.A`, `E.B(x)`.
 - Nested record patterns on enum variants use slot-based unpack (compiler detail).
 - `let` destructuring: tuples and records only (no enum ctor patterns in `let`).
 

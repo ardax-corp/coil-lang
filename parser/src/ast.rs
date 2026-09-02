@@ -615,7 +615,7 @@ pub struct LetFieldPattern<'expr> {
 #[derive(Clone, PartialEq, Debug)]
 pub enum Pattern<'expr> {
     Wildcard,
-    /// `default =>` match-arm catch-all (same coverage as `_`).
+    /// `default =>` match-arm catch-all. Whole-arm `_` is illegal.
     Default,
     Binding {
         name: &'expr str,

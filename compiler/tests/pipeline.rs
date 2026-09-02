@@ -2121,7 +2121,7 @@ fn main() {{
         Result::Err(e) => match e.kind {{
             ErrorKind::LibraryNotFound => "missing",
             ErrorKind::Other => "denied",
-            _ => "other",
+            default => "other",
         }},
     }};
     write(stdout(), to_bytes(format("%s", msg)));
@@ -2155,7 +2155,7 @@ fn main() {{
         Result::Err(e) => match e.kind {{
             ErrorKind::LibraryNotFound => "missing",
             ErrorKind::Other => "denied",
-            _ => "other",
+            default => "other",
         }},
     }};
     write(stdout(), to_bytes(format("%s", msg)));
@@ -5746,7 +5746,7 @@ use string::{format, to_bytes};
 fn fibm(int n) -> int {
     if n <= 1 { return n; }
     return match n {
-        _ => fibm(n - 1) + fibm(n - 2),
+        default => fibm(n - 1) + fibm(n - 2),
     };
 }
 fn main() {
@@ -7626,7 +7626,7 @@ fn main() {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e {
             ThreadError::Disconnected => "disc",
-            _ => "other",
+            default => "other",
         },
     };
     write(stdout(), to_bytes(format("%s", msg)));
@@ -7651,7 +7651,7 @@ fn main() {
         Result::Ok(_) => "ok",
         Result::Err(e) => match e {
             ThreadError::WouldBlock => "wb",
-            _ => "other",
+            default => "other",
         },
     };
     write(stdout(), to_bytes(format("%s", msg)));
@@ -7699,7 +7699,7 @@ fn main() {
         Result::Ok(_) => "joined",
         Result::Err(e) => match e {
             ThreadError::JoinFailed => "jf",
-            _ => "other",
+            default => "other",
         },
     };
     write(stdout(), to_bytes(format("%s", msg)));
@@ -8168,7 +8168,7 @@ fn main() {
         Result::Err(e) => match e {
             IoError::PermissionDenied => "denied",
             IoError::InvalidInput => "invalid",
-            _ => "other",
+            default => "other",
         },
     };
     write(stdout(), to_bytes(format("%s", msg)));
