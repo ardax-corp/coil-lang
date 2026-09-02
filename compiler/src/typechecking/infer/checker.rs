@@ -79,7 +79,9 @@ impl Checker {
             frame_local_last_use: HashSet::new(),
             in_bounds_index: HashSet::new(),
             pin_array: HashSet::new(),
+            pin_params: HashSet::new(),
             for_in_pin: HashSet::new(),
+            for_in_pin_spans: HashSet::new(),
             current_module_id,
             host_grants: crate::HostGrants::deny_all(),
             dload_host_stems: Vec::new(),
@@ -1484,7 +1486,9 @@ impl Checker {
         self.frame_local_last_use.clear();
         self.in_bounds_index.clear();
         self.pin_array.clear();
+        self.pin_params.clear();
         self.for_in_pin.clear();
+        self.for_in_pin_spans.clear();
         self.current_module_id = self.def_interner.intern_module(&self.current_module);
 
         // Mint NodeIds for every AST node (pre-walk). The visit order

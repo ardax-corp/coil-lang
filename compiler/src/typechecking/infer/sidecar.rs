@@ -40,8 +40,9 @@ pub struct TypedSidecar {
     in_bounds_index: HashSet<NodeId>,
     /// Array parameter nodes to pin for the frame (`ArrayPin`).
     pin_array: HashSet<NodeId>,
-    /// For-in loops whose element load is in-bounds (length stable).
+    pin_params: HashSet<(String, String)>,
     for_in_pin: HashSet<NodeId>,
+    for_in_pin_spans: HashSet<(usize, usize)>,
 }
 
 impl TypedSidecar {
@@ -105,9 +106,19 @@ impl TypedSidecar {
         self.pin_array.contains(&id)
     }
 
+    pub fn is_pin_param(&self, fn_name: &str, param: &str) -> bool {
+        let short = fn_name.rsplit("::").next().unwrap_or(fn_name);
+        self.pin_params.contains(&(fn_name.to_string(), param.to_string()))
+            || self.pin_params.contains(&(short.to_string(), param.to_string()))
+    }
+
     /// True when `id` is a for-in loop whose synthetic index is in-bounds.
     pub fn is_for_in_pin(&self, id: NodeId) -> bool {
         self.for_in_pin.contains(&id)
+    }
+
+    pub fn is_for_in_pin_span(&self, start: usize, end: usize) -> bool {
+        self.for_in_pin_spans.contains(&(start, end))
     }
 }
 
@@ -156,7 +167,9 @@ impl Checker {
             frame_local_last_use: self.frame_local_last_use.clone(),
             in_bounds_index: self.in_bounds_index.clone(),
             pin_array: self.pin_array.clone(),
+            pin_params: self.pin_params.clone(),
             for_in_pin: self.for_in_pin.clone(),
+            for_in_pin_spans: self.for_in_pin_spans.clone(),
         }
     }
 }

@@ -82,7 +82,9 @@ struct CallSite {
 pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     checker.in_bounds_index.clear();
     checker.pin_array.clear();
+    checker.pin_params.clear();
     checker.for_in_pin.clear();
+    checker.for_in_pin_spans.clear();
 
     let pure = analyze_pure_fns(ast);
     let mut calls: Vec<CallSite> = Vec::new();
@@ -94,7 +96,8 @@ pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
 
     walk_tree(checker, ast, &pure, &mut Env::default(), &mut calls);
 
-    apply_interproc(checker, ast, &shapes, &calls, &used_as_value, &pure);
+    apply_interproc(checker, ast, &shapes, &calls, &used_as_value);
+    pin_callee_proven_params(checker, ast, &shapes);
 }
 
 fn collect_fn_shapes(
@@ -346,9 +349,9 @@ fn walk_tree(
             walk_tree(checker, inner, pure, env, calls);
         }
         Expression::Yield(inner) | Expression::YieldFrom(inner) => {
-            walk_tree(checker, inner, pure, env, calls);
             env.yielded = true;
             env.lt_len.clear();
+            walk_tree(checker, inner, pure, env, calls);
         }
         Expression::Add(a, b)
         | Expression::Sub(a, b)
@@ -609,17 +612,24 @@ fn walk_loop(
             .is_some_and(|i| matches!(i.kind, ForInKind::Array))
             || checker
                 .for_in_info_span(loop_node.0.start, loop_node.0.end)
-                .is_some_and(|i| matches!(i.kind, ForInKind::Array));
+                .is_some_and(|i| matches!(i.kind, ForInKind::Array))
+            || nid(checker, iterable)
+                .and_then(|id| checker.lookup_at(id))
+                .as_ref()
+                .is_some_and(is_arrayish);
         walk_tree(checker, body, pure, &mut body_env, calls);
         let stable = !body_env.yielded
             && !body_env.all_len_poison
             && arr_name
                 .as_ref()
                 .is_none_or(|a| !body_env.len_poison.contains(a));
-        if kind_array && stable && !env.yielded
-            && let Some(id) = nid(checker, loop_node)
-        {
-            checker.for_in_pin.insert(id);
+        if kind_array && stable && !env.yielded {
+            if let Some(id) = nid(checker, loop_node) {
+                checker.for_in_pin.insert(id);
+            }
+            checker
+                .for_in_pin_spans
+                .insert((loop_node.0.start, loop_node.0.end));
         }
         env.finish_nested_region(&body_env);
         let _ = binding;
@@ -731,7 +741,6 @@ fn apply_interproc(
     shapes: &[(String, Vec<(String, NodeId, bool)>)],
     calls: &[CallSite],
     used_as_value: &HashSet<String>,
-    pure: &HashSet<String>,
 ) {
     for (fname, params) in shapes {
         if used_as_value.contains(fname) {
@@ -779,9 +788,63 @@ fn apply_interproc(
                 mark_callee_indices(checker, body, aname, iname);
                 pin = true;
             }
-            if pin && (pure.contains(fname) || !contains_push(body)) {
+            if pin {
                 checker.pin_array.insert(*aid);
+                checker.pin_params.insert((fname.clone(), aname.clone()));
             }
+        }
+    }
+}
+
+/// Pin array params that the callee itself proves (`i < a.len()` in-body).
+fn pin_callee_proven_params(
+    checker: &mut Checker,
+    ast: &Output<'_>,
+    shapes: &[(String, Vec<(String, NodeId, bool)>)],
+) {
+    for (fname, params) in shapes {
+        let Some(body) = fn_body(ast, fname) else {
+            continue;
+        };
+        if contains_yield(body) {
+            continue;
+        }
+        for (aname, aid, is_a) in params {
+            if !*is_a {
+                continue;
+            }
+            if body_has_in_bounds_index_of(checker, body, aname) {
+                checker.pin_array.insert(*aid);
+                checker.pin_params.insert((fname.clone(), aname.clone()));
+            }
+        }
+    }
+}
+
+fn body_has_in_bounds_index_of(checker: &Checker, body: &Output<'_>, arr: &str) -> bool {
+    match body.1.as_ref() {
+        Expression::Index(base, Some(_)) => {
+            ident_name(base).as_deref() == Some(arr)
+                && nid(checker, body).is_some_and(|id| checker.in_bounds_index.contains(&id))
+                || {
+                    let mut hit = false;
+                    walk_children(body, &mut |c| {
+                        if body_has_in_bounds_index_of(checker, c, arr) {
+                            hit = true;
+                        }
+                    });
+                    hit
+                }
+        }
+        Expression::Yield(_) | Expression::YieldFrom(_) => false,
+        _ => {
+            let mut hit = false;
+            walk_children(body, &mut |c| {
+                if body_has_in_bounds_index_of(checker, c, arr) {
+                    hit = true;
+                }
+            });
+            hit
         }
     }
 }
@@ -813,32 +876,6 @@ fn contains_yield(ast: &Output<'_>) -> bool {
             let mut hit = false;
             walk_children(ast, &mut |c| {
                 if contains_yield(c) {
-                    hit = true;
-                }
-            });
-            hit
-        }
-    }
-}
-
-fn contains_push(ast: &Output<'_>) -> bool {
-    match ast.1.as_ref() {
-        Expression::Call { name, .. } => {
-            matches!(peel(name).1.as_ref(), Expression::Access(_, field) if *field == "push")
-                || {
-                    let mut hit = false;
-                    walk_children(ast, &mut |c| {
-                        if contains_push(c) {
-                            hit = true;
-                        }
-                    });
-                    hit
-                }
-        }
-        _ => {
-            let mut hit = false;
-            walk_children(ast, &mut |c| {
-                if contains_push(c) {
                     hit = true;
                 }
             });
@@ -1040,6 +1077,46 @@ fn main() {
         assert!(
             s.in_bounds_index_ids().is_empty(),
             "yield must refuse in-bounds facts"
+        );
+    }
+
+    #[test]
+    fn helper_caller_records_pin_param() {
+        let src = r#"
+fn at(Vec<int> a, int i) -> int {
+    let t = 0;
+    let k = 0;
+    while k < 4 {
+        t = t + 1;
+        k = k + 1;
+    }
+    return a[i] + t - 4;
+}
+fn main() -> int {
+    let b: Vec<int> = Vec::new();
+    let n = 8;
+    let i = 0;
+    while i < n {
+        b.push(i);
+        i = i + 1;
+    }
+    let acc = 0;
+    let j = 0;
+    while j < len(b) {
+        acc = acc + at(b, j);
+        j = j + 1;
+    }
+    return acc;
+}
+"#;
+        let s = sidecar(src);
+        assert!(
+            !s.in_bounds_index_ids().is_empty(),
+            "caller-proven a[i] should be in-bounds"
+        );
+        assert!(
+            s.is_pin_param("at", "a"),
+            "helper param a should be pin_params"
         );
     }
 }
