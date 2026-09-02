@@ -3008,6 +3008,18 @@ impl<'pratt> Pratt<'pratt> {
                     .padded()
                     .map_with(|_, e| (e.span(), Pattern::Wildcard)),
                 constructor,
+                text::int(10)
+                    .to_slice()
+                    .from_str()
+                    .validate(|v: Result<i64, ParseIntError>, e, emitter| match v {
+                        Ok(value) => value,
+                        Err(msg) => {
+                            emitter.emit(Rich::custom(e.span(), msg.to_string()));
+                            0_i64
+                        }
+                    })
+                    .padded()
+                    .map_with(|n, e| (e.span(), Pattern::Integer(n))),
                 text::ident().padded().map_with(|name, e| {
                     let pat = if name == "default" {
                         Pattern::Default

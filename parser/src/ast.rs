@@ -620,6 +620,9 @@ pub enum Pattern<'expr> {
     Binding {
         name: &'expr str,
     },
+    /// Integer literal pattern (`200 =>`). Unifies with the scrutinee type
+    /// (so `match status { 200 => … }` is a type error, not a Status case).
+    Integer(i64),
     Constructor {
         enum_name: &'expr str,
         variant_name: &'expr str,
@@ -812,6 +815,7 @@ impl<'a> Display for Pattern<'a> {
             Self::Wildcard => write!(f, "_"),
             Self::Default => write!(f, "default"),
             Self::Binding { name } => write!(f, "{}", name),
+            Self::Integer(n) => write!(f, "{}", n),
             Self::Constructor {
                 enum_name,
                 variant_name,
