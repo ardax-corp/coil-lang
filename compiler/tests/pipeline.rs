@@ -6285,6 +6285,50 @@ fn main() {
 }
 
 #[test]
+fn local_option_match_unbox_runs() {
+    let output = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let x = Option::Some(41);
+    let y = match x {
+        Option::Some(v) => v + 1,
+        Option::None => 0,
+    };
+    let z = match Option::None {
+        Option::Some(_) => 9,
+        Option::None => 2,
+    };
+    write(stdout(), to_bytes(format("%i,%i", y, z)));
+}
+"#,
+    );
+    assert_eq!(output, "42,2");
+}
+
+#[test]
+fn local_option_escape_at_call_still_matches() {
+    let output = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn take(Option<int> o) -> int {
+    return match o {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+}
+fn main() {
+    let x = Option::Some(7);
+    write(stdout(), to_bytes(format("%i", take(x))));
+}
+"#,
+    );
+    assert_eq!(output, "7");
+}
+
+#[test]
 fn direct_class_field_access_avoids_temporary_object() {
     let src = r#"
 use io::{stdout, write};
@@ -6424,9 +6468,8 @@ fn main() {
     );
 }
 
-/// Named locals keep a heap instance (COI-84). Temp `new C(args).field` elides;
-/// `let p = new C(args); p.field` does not — identity, methods, mutation, and
-/// `fn drop()` are observable without a whole-function escape scan.
+/// Named locals keep a heap instance when they escape (calls, returns, fields).
+/// A unique local that is only field-read may unbox into frame slots.
 #[test]
 fn named_local_class_stays_heap_allocated() {
     let src = r#"
@@ -6436,9 +6479,12 @@ class Point {
     pub x: int,
     pub y: int,
 }
+fn take(Point p) -> int {
+    return p.x;
+}
 fn main() {
     let p = new Point(5, 6);
-    write(stdout(), to_bytes(format("%i", p.x)));
+    write(stdout(), to_bytes(format("%i", take(p))));
 }
 "#;
     let output = run_example_src(src);
@@ -6461,17 +6507,52 @@ fn main() {
         main_code
             .iter()
             .any(|byte| matches!(byte.bytecode(), common::Instruction::InitTyped)),
-        "named local must stay InitTyped; opcodes: {:?}",
+        "escaping named local must stay InitTyped; opcodes: {:?}",
         main_code
             .iter()
             .map(|b| b.bytecode().mnemonic())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn named_local_class_field_read_unboxes_when_no_escape() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn main() {
+    let p = new Point(5, 6);
+    write(stdout(), to_bytes(format("%i", p.x)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "5");
+
+    let mut pipeline = test_pipeline();
+    let (bytecode, _) = pipeline.compile_src(src).expect("unbox named local");
+    let symbols = pipeline.program_debug().fn_symbols;
+    let main = symbols
+        .iter()
+        .position(|symbol| symbol.name == "main")
+        .expect("main symbol");
+    let start = symbols[main].entry_pc as usize;
+    let end = symbols
+        .get(main + 1)
+        .map(|symbol| symbol.entry_pc as usize)
+        .unwrap_or(bytecode.len());
+    let main_code = &bytecode[start..end];
     assert!(
-        main_code
-            .iter()
-            .any(|byte| matches!(byte.bytecode(), common::Instruction::GetField)),
-        "named local field read must use GetField; opcodes: {:?}",
+        main_code.iter().all(|byte| {
+            !matches!(
+                byte.bytecode(),
+                common::Instruction::InitTyped | common::Instruction::GetField
+            )
+        }),
+        "non-escaping named local field read should unbox; opcodes: {:?}",
         main_code
             .iter()
             .map(|b| b.bytecode().mnemonic())
