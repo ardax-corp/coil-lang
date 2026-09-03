@@ -12,6 +12,8 @@ use std::thread;
 use parking_lot::RawMutex;
 use parking_lot::lock_api::RawMutex as RawMutexOps;
 
+use crate::AddrHashBuilder;
+
 /// Per-root-VM registry of undetached spawns (shared with nested workers via
 /// [`ThreadSpawnContext`]). Process-global storage was wrong: parallel tests /
 /// multiple `Machine`s would steal each other's joins via `mem::take`.
@@ -695,14 +697,14 @@ fn is_immediate_value(heap: &Heap, v: Value) -> bool {
 }
 
 pub fn value_to_portable(heap: &Heap, v: Value) -> Result<PortableValue, ThreadErrorTag> {
-    let mut visited = HashSet::new();
+    let mut visited: HashSet<u64, AddrHashBuilder> = HashSet::default();
     encode_value(heap, v, &mut visited)
 }
 
 fn encode_value(
     heap: &Heap,
     v: Value,
-    visited: &mut HashSet<u64>,
+    visited: &mut HashSet<u64, AddrHashBuilder>,
 ) -> Result<PortableValue, ThreadErrorTag> {
     if is_immediate_value(heap, v) {
         return Ok(PortableValue::Immediate(v.raw() as u64));
@@ -807,7 +809,7 @@ fn encode_value(
 fn encode_object(
     heap: &Heap,
     obj: Object,
-    visited: &mut HashSet<u64>,
+    visited: &mut HashSet<u64, AddrHashBuilder>,
 ) -> Result<PortableValue, ThreadErrorTag> {
     encode_value(heap, Value::from(obj.addr()), visited)
 }

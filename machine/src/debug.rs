@@ -5,6 +5,8 @@
 
 use std::collections::HashSet;
 
+use crate::AddrHashBuilder;
+
 /// Why the VM paused for the debugger.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StopReason {
@@ -45,7 +47,7 @@ pub enum StepMode {
 /// Attached to a [`crate::Machine`] for interactive / scripted debugging.
 #[derive(Debug, Clone, Default)]
 pub struct DebugController {
-    breakpoints: HashSet<usize>,
+    breakpoints: HashSet<usize, AddrHashBuilder>,
     step_mode: StepMode,
     /// Ignore a breakpoint at this PC once (continue / stepi from a hit).
     skip_bp_pc: Option<usize>,
@@ -62,7 +64,7 @@ impl DebugController {
         Self::default()
     }
 
-    pub fn breakpoints(&self) -> &HashSet<usize> {
+    pub fn breakpoints(&self) -> &HashSet<usize, AddrHashBuilder> {
         &self.breakpoints
     }
 

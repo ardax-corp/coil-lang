@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::AddrHashBuilder;
 use crate::io::IoErrorTag;
 use crate::io_handle::WaitHandle;
 
@@ -54,7 +55,7 @@ struct AsyncWait {
 
 struct Inner {
     next_token: AtomicU64,
-    waits: Mutex<HashMap<WaitToken, AsyncWait>>,
+    waits: Mutex<HashMap<WaitToken, AsyncWait, AddrHashBuilder>>,
     ready: Mutex<Vec<WaitToken>>,
     cvar: Condvar,
 }
@@ -69,7 +70,7 @@ impl IoReactor {
         Arc::new(Self {
             inner: Inner {
                 next_token: AtomicU64::new(1),
-                waits: Mutex::new(HashMap::new()),
+                waits: Mutex::new(HashMap::default()),
                 ready: Mutex::new(Vec::new()),
                 cvar: Condvar::new(),
             },
@@ -341,7 +342,7 @@ impl Default for IoReactor {
         Self {
             inner: Inner {
                 next_token: AtomicU64::new(1),
-                waits: Mutex::new(HashMap::new()),
+                waits: Mutex::new(HashMap::default()),
                 ready: Mutex::new(Vec::new()),
                 cvar: Condvar::new(),
             },
