@@ -1180,9 +1180,17 @@ fn try_fold_const_bin_local(window: &[Byte; 3], pool: &mut Vec<u64>) -> Option<B
     Some(Byte::new(Instruction::CONST).with_const_pool(idx as u32))
 }
 
+/// True for a one-word `RETURN` (default / old archives). A two-slot
+/// `RETURN` (operand `2`) must never fuse into `*ReturnImm`/`BinReturn` —
+/// those forms return exactly one value and would silently drop the
+/// `[payload, tag]` pair's other half.
+fn is_one_word_return(byte: &Byte) -> bool {
+    *byte.bytecode() == Instruction::RETURN && byte.return_words() == 1
+}
+
 fn try_fuse_load_return_local(window: &[Byte; 2]) -> Option<Byte> {
     let slot = load_slot(&window[0])?;
-    if *window[1].bytecode() != Instruction::RETURN {
+    if !is_one_word_return(&window[1]) {
         return None;
     }
     Some(Byte::new(Instruction::LoadReturnSlot).with_operand_u32(slot as u32))
@@ -1190,7 +1198,7 @@ fn try_fuse_load_return_local(window: &[Byte; 2]) -> Option<Byte> {
 
 fn try_fuse_const_return_local(window: &[Byte; 2]) -> Option<Byte> {
     let value = const_inline_value(&window[0])?;
-    if *window[1].bytecode() != Instruction::RETURN {
+    if !is_one_word_return(&window[1]) {
         return None;
     }
     Some(Byte::new(Instruction::ConstReturnImm).with_operand_u32(value as u32))
@@ -1201,7 +1209,7 @@ fn try_fuse_bin_return_local(window: &[Byte; 2]) -> Option<Byte> {
     if !is_bin_op(op) {
         return None;
     }
-    if *window[1].bytecode() != Instruction::RETURN {
+    if !is_one_word_return(&window[1]) {
         return None;
     }
     Some(Byte::new(Instruction::BinReturn).with_bin_return(op as u8))
