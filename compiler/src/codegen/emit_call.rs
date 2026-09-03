@@ -383,19 +383,7 @@ impl Compiler {
                     fqn
                 };
                 if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn) {
-                    let niche_vec_method = (self.expr_is_niche_option(ast)
-                        || self.force_niche_option)
-                        && (fqn == format!("{}::pop", common::BUILTIN_VEC_TYPE)
-                            || fqn == format!("{}::remove", common::BUILTIN_VEC_TYPE));
-                    let call_name = if niche_vec_method {
-                        if fqn.ends_with("::pop") {
-                            format!("{}::__niche_pop", common::BUILTIN_VEC_TYPE)
-                        } else {
-                            format!("{}::__niche_remove", common::BUILTIN_VEC_TYPE)
-                        }
-                    } else {
-                        fqn.clone()
-                    };
+                    let call_name = fqn.clone();
                     // Inline `Vec::push` as ArrayPush — avoids CALL/frame for fill loops.
                     // Stage when the value may STORE/Seek (format, match, `new
                     // Class`, …): locals and the operand stack share memory, so
@@ -546,12 +534,11 @@ impl Compiler {
                     if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
                         self.missing_call_target(&call_name, span.into_range());
                     }
-                    if !niche_vec_method
-                        && (self.expr_is_niche_option(ast) || self.force_niche_option)
+                    if (self.expr_is_niche_option(ast) || self.force_niche_option)
                         && (lookup_name == format!("{}::pop", common::BUILTIN_VEC_TYPE)
                             || lookup_name == format!("{}::remove", common::BUILTIN_VEC_TYPE))
                     {
-                        bytecode.push(Byte::new(Instruction::HeapOptionToNiche));
+                        Self::emit_boxed_option_to_niche(&mut bytecode);
                     }
                     if is_generic && self.generic_return_is_boxed(&lookup_name) {
                         if let Some(call_ty) = self.codegen_expr_ty(ast) {
@@ -1011,7 +998,7 @@ impl Compiler {
                 if (self.expr_is_niche_option(ast) || self.force_niche_option)
                     && vec_option_call
                 {
-                    bytecode.push(Byte::new(Instruction::HeapOptionToNiche));
+                    Self::emit_boxed_option_to_niche(&mut bytecode);
                 }
                 if pair_kind.is_some() && !self.pair_value_context {
                     self.emit_pair_to_heap_after_call(&mut bytecode, &lookup_name);
@@ -1024,11 +1011,12 @@ impl Compiler {
                     if is_generic && self.generic_return_is_boxed(&lookup_name) {
                     if let Some(call_ty) = self.codegen_expr_ty(ast) {
                         Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
-                        if self.niche_option_inner_ty(&call_ty).is_some() {
-                            bytecode.push(Byte::new(Instruction::HeapOptionToNiche));
-                        }
                     }
-                }
+                    } else if is_generic
+                        && (self.expr_is_niche_option(ast) || self.force_niche_option)
+                    {
+                        Self::emit_boxed_option_to_niche(&mut bytecode);
+                    }
             } else if self.fn_entry_labels.contains_key(&n) {
                 // Reserved by phased emit (COI-109) but body not yet bound.
                 let lookup_name = strip_overload_key(&n).to_string();
@@ -1157,9 +1145,6 @@ impl Compiler {
                     };
                     if let Some(ty) = unbox_ty {
                         Self::emit_unbox_if_needed(&mut bytecode, &ty);
-                        if self.niche_option_inner_ty(&ty).is_some() {
-                            bytecode.push(Byte::new(Instruction::HeapOptionToNiche));
-                        }
                     }
                 }
             } else {
