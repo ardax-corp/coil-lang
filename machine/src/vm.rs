@@ -1111,13 +1111,13 @@ impl<const S: usize> Machine<S> {
     fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
         let mut roots = self.heap.take_gc_roots();
         for v in self.stack.as_slice() {
-            let addr = v.raw() as u64;
+            let addr = v.heap_addr();
             if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
                 roots.push(addr);
             }
         }
         for v in &self.statics {
-            let addr = v.raw() as u64;
+            let addr = v.heap_addr();
             if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
                 roots.push(addr);
             }
@@ -1308,7 +1308,7 @@ impl<const S: usize> Machine<S> {
             if i >= 64 {
                 break;
             }
-            let addr = v.raw() as u64;
+            let addr = v.heap_addr();
             if addr != 0 && heap.find_object_by_addr(addr).is_some() {
                 mask |= 1u64 << i;
             }
@@ -1322,7 +1322,7 @@ impl<const S: usize> Machine<S> {
             if mask != 0 && i < 64 && mask & (1u64 << i) == 0 {
                 continue;
             }
-            let addr = v.raw() as u64;
+            let addr = v.heap_addr();
             if addr != 0 && heap.find_object_by_addr(addr).is_some() {
                 roots.push(addr);
             }
