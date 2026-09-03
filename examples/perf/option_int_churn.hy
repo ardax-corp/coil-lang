@@ -1,7 +1,6 @@
-// Integer-payload Option allocation: helper RETURNS Option<int>.
-// No int niche exists yet; each call heap-allocates ObjEnum.
-// Explicit return poisons #278 frame-local unboxing (local_escape.rs).
-// Heap-payload counterpart: examples/perf/gc_churn.hy.
+// Integer-payload Option: helper RETURNS Option<int> as two stack slots
+// (tag + payload) on direct CALL. Immediate match uses #278 EQ/JMPF.
+// Pointer-niche Option<heap> stays one word (see gc_churn.hy).
 // ITERS=20000000 (period-10 checksum 42 * 2e6); release VM-only ~1-3s.
 use io::{stdout};
 use io::sync::{write_all};

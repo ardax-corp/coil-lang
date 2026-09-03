@@ -7049,13 +7049,23 @@ fn main() {
         assert!(
             !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
-            "unary Option<int> return must stay boxed; opcodes={:?}",
+            "must not revive ReturnPair; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::RETURN) && b.return_words() >= 2),
+            "Option<int> helper must RETURN two slots; opcodes={:?}",
+            bc.iter().map(|b| format!("{:?}({})", b.bytecode(), b.operand_u32())).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() >= 2),
+            "direct CALL of Option<int> helper must set CALL_RET2; opcodes={:?}",
+            bc.iter().map(|b| format!("{:?}({})", b.bytecode(), b.operand_u32())).collect::<Vec<_>>()
         );
         assert!(
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "unary Option<int> return must MakeEnum; opcodes={:?}",
+            "bind site of Option<int> still boxes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -7554,6 +7564,141 @@ fn main() {
     }
 
     #[test]
+    fn option_int_direct_match_skips_make_enum() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Option<int> {
+    return Option::Some(1);
+}
+fn main() {
+    let y = match give() {
+        Option::Some(n) => n,
+        Option::None => 0,
+    };
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::ReturnPair)),
+            "immediate match on Option<int> CALL must stay unboxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() >= 2),
+            "direct Option<int> CALL must be two-slot; opcodes={:?}",
+            bc.iter().map(|b| format!("{:?}({})", b.bytecode(), b.operand_u32())).collect::<Vec<_>>()
+        );
+    }
+
+    fn result_int_direct_match_skips_make_enum() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Result<int, int> {
+    return Result::Ok(1);
+}
+fn main() {
+    let y = match give() {
+        Result::Ok(n) => n,
+        Result::Err(e) => e,
+    };
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::ReturnPair)),
+            "immediate match on Result<int,int> CALL must stay unboxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::RETURN) && b.return_words() >= 2),
+            "Result<int,int> helper must RETURN two slots"
+        );
+    }
+
+    fn niche_option_string_call_stays_unary() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Option<string> {
+    return Option::None;
+}
+fn main() {
+    let _ = give();
+}
+"#,
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() >= 2),
+            "niched Option<string> CALL stays one word; opcodes={:?}",
+            bc.iter().map(|b| format!("{:?}({})", b.bytecode(), b.operand_u32())).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(b.bytecode(), Instruction::RETURN) && b.return_words() >= 2),
+            "niched Option<string> RETURN stays one word"
+        );
+    }
+
+    fn user_payload_enum_return_is_two_slot() {
+        let (bc, _) = compile_src(
+            r#"
+enum Cell { Num(int), Empty }
+fn give() -> Cell {
+    return Cell::Num(3);
+}
+fn main() {
+    let y = match give() {
+        Cell::Num(n) => n,
+        Cell::Empty => 0,
+    };
+}
+"#,
+        );
+        assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() >= 2),
+            "arity-1 payload enum CALL must be two-slot; opcodes={:?}",
+            bc.iter().map(|b| format!("{:?}({})", b.bytecode(), b.operand_u32())).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::ReturnPair)),
+            "immediate match on payload enum CALL must stay unboxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    fn option_int_callindirect_stays_unary_wrapper() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Option<int> {
+    return Option::Some(1);
+}
+fn main() {
+    let f = give;
+    let y = match f() {
+        Option::Some(n) => n,
+        Option::None => 0,
+    };
+}
+"#,
+        );
+        assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::CallIndirect)),
+            "function value must CallIndirect; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() >= 2),
+            "wrapper still CALL-ret2 the real body"
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "CallIndirect boundary must box; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
     fn option_int_still_boxes() {
         let (bc, _) = compile_src(
             r#"
