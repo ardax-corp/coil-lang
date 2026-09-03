@@ -2456,7 +2456,8 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
         use common::Instruction;
         let (bc, pool) = compile_src(
             "fn make() -> Option<int> { return Option::Some(1); } \
- match make() { \
+ let x = make(); \
+ match x { \
  Option::None() => 0, \
  Option::Some(v) => v, \
  };",
