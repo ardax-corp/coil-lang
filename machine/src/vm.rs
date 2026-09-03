@@ -2683,14 +2683,34 @@ impl<const S: usize> Machine<S> {
                     self.maybe_gc_after_alloc();
                 }
                 Instruction::RETURN => {
-                    let ret_val = self.stack.pop();
-                    if self.capture_nested_return(ret_val) {
-                        return false;
+                    if unlikely(opcode.return_words() >= 2) {
+                        // Two-slot `[payload, tag]` return (tag on top).
+                        // Direct CALL/RETURN of a known ≤2-word layout never
+                        // crosses a `call_function` re-entrant boundary (FFI/
+                        // coroutine targets always go through a boxed
+                        // wrapper), so `capture_nested_return` never needs
+                        // the tag here.
+                        promise!(self.stack.tell() >= 2);
+                        let tag = self.stack.pop();
+                        let payload = self.stack.pop();
+                        if self.capture_nested_return(payload) {
+                            return false;
+                        }
+                        let return_sp = self.pop_call_frame();
+                        self.stack.seek(return_sp);
+                        self.stack.push(payload);
+                        self.stack.push(tag);
+                        self.after_return(&mut ip, &mut sp);
+                    } else {
+                        let ret_val = self.stack.pop();
+                        if self.capture_nested_return(ret_val) {
+                            return false;
+                        }
+                        let return_sp = self.pop_call_frame();
+                        self.stack.seek(return_sp);
+                        self.stack.push(ret_val);
+                        self.after_return(&mut ip, &mut sp);
                     }
-                    let return_sp = self.pop_call_frame();
-                    self.stack.seek(return_sp);
-                    self.stack.push(ret_val);
-                    self.after_return(&mut ip, &mut sp);
                 }
                 // Fused `LOAD slot; CONST imm; <binop>` — compute in place
                 // (same shape as `BinSlotSlot`) to avoid two temp pushes.

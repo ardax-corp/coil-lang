@@ -685,6 +685,54 @@
     }
 
     #[test]
+    fn two_word_call_return_leaves_payload_and_tag() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed_ret(0, 3, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            // callee: push payload, then tag; two-slot RETURN.
+            Byte::new(Instruction::CONST).with_const_inline(42),
+            Byte::new(Instruction::CONST).with_const_inline(7),
+            Byte::new(Instruction::RETURN).with_operand_u32(2),
+        ]);
+        assert_eq!(vm.pop().as_int(), 7, "tag on top");
+        assert_eq!(vm.pop().as_int(), 42, "payload below tag");
+    }
+
+    #[test]
+    fn two_word_call_return_with_args_consumes_arity_and_keeps_pair() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CONST).with_const_inline(10),
+            Byte::new(Instruction::CONST).with_const_inline(20),
+            Byte::new(Instruction::CALL).with_call_packed_ret(2, 5, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            // callee(a, b): payload = a + b, tag = 1.
+            Byte::new(Instruction::LOAD).with_operand_u32(0),
+            Byte::new(Instruction::LOAD).with_operand_u32(1),
+            Byte::new(Instruction::ADD),
+            Byte::new(Instruction::CONST).with_const_inline(1),
+            Byte::new(Instruction::RETURN).with_operand_u32(2),
+        ]);
+        assert_eq!(vm.pop().as_int(), 1, "tag on top");
+        assert_eq!(vm.pop().as_int(), 30, "payload = 10 + 20");
+    }
+
+    #[test]
+    fn one_word_call_return_still_default_after_two_word_support() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed(0, 3),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            Byte::new(Instruction::ConstReturnImm).with_operand_u32(9),
+        ]);
+        assert_eq!(vm.pop().as_int(), 9);
+    }
+
+    #[test]
     fn fused_fib_leaves_no_pin_maps() {
         let (code, pool) = fused_fib_bytecode(10);
         let mut vm = Machine::<512>::default();

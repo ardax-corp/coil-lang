@@ -987,6 +987,14 @@ impl ArchivedByte {
         self
     }
 
+    /// CALL/TailCall with an explicit return width (`1` or `2` stack words).
+    /// See [`Byte::with_call_packed_ret`].
+    pub fn with_call_packed_ret(mut self, arity: u32, target: u32, ret_words: u32) -> Self {
+        let bit = if ret_words >= 2 { Byte::CALL_RET2_BIT } else { 0 };
+        self.operands = (bit | ((arity & 0x7F) << 24) | (target & 0xFFFFFF)).into();
+        self
+    }
+
     pub fn with_const_inline(mut self, value: i32) -> Self {
         self.operands = (value as u32).into();
         self
