@@ -50,6 +50,8 @@ CPU_BENCH=(
     examples/perf/operators_loop.hy
     examples/perf/match_sum.hy
     examples/perf/gc_churn.hy
+    examples/perf/option_int_churn.hy
+    examples/perf/result_int_churn.hy
 )
 
 CROSS_LANG=(
