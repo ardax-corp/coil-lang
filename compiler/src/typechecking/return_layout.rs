@@ -160,7 +160,7 @@ fn ty_is_closed(ty: &Ty) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{option_ty, result_ty};
+    use crate::typechecking::ty::{option_ty, result_ty, STRING};
 
     fn checker() -> Checker {
         Checker::new()
@@ -176,7 +176,7 @@ mod tests {
     #[test]
     fn option_string_stays_one_word_niche() {
         let c = checker();
-        let ty = option_ty(Ty::Con(super::ty::STRING.into()));
+        let ty = option_ty(Ty::Con(STRING.into()));
         assert_eq!(two_word_return_kind(&c, &ty), None);
     }
 
@@ -190,14 +190,14 @@ mod tests {
     #[test]
     fn result_int_string_is_two_word() {
         let c = checker();
-        let ty = result_ty(Ty::Con(INT.into()), Ty::Con(super::ty::STRING.into()));
+        let ty = result_ty(Ty::Con(INT.into()), Ty::Con(STRING.into()));
         assert_eq!(two_word_return_kind(&c, &ty), Some(false));
     }
 
     #[test]
     fn result_string_string_stays_one_word_niche() {
         let c = checker();
-        let s = Ty::Con(super::ty::STRING.into());
+        let s = Ty::Con(STRING.into());
         let ty = result_ty(s.clone(), s);
         assert_eq!(two_word_return_kind(&c, &ty), None);
     }

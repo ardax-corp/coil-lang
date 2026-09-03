@@ -1059,7 +1059,7 @@ mod tests {
         for arity in [0u32, 2, 3] {
             let seed = arity + 2;
             let (il, bc) = entry_call_tell_after(arity, seed);
-            let call = shift(seed, call_arity_delta(arity));
+            let call = shift(seed, call_result_delta(arity, false));
             let jim = shift(seed, signed_arity_delta(arity));
             assert_eq!(bc.known(), Some(call), "bytecode CALL arity {arity}");
             assert_eq!(il, bc, "IL Entry{{Call}} arity {arity} must match CALL");
