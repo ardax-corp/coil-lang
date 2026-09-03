@@ -8,6 +8,7 @@ pub mod const_eval;
 pub mod control_flow;
 pub mod def_id;
 pub mod env;
+pub mod fn_value_escape;
 pub mod generics;
 pub mod id;
 pub mod infer;

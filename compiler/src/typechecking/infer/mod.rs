@@ -184,6 +184,10 @@ pub struct Checker {
     pub(crate) frame_local: HashSet<NodeId>,
     /// Identifier / construct nodes that are the last in-frame use of a local.
     pub(crate) frame_local_last_use: HashSet<NodeId>,
+    /// Bare (unqualified) names that appear as a function *value* somewhere
+    /// in this compile unit — not just as a direct `Call` target. See
+    /// [`crate::typechecking::fn_value_escape`].
+    pub(crate) fn_value_escaped: HashSet<String>,
     /// `arr[i]` nodes proven `0 <= i < len(arr)` with a stable length.
     pub(crate) in_bounds_index: HashSet<NodeId>,
     /// Array parameter nodes that may be `ArrayPin`'d for the whole frame.
