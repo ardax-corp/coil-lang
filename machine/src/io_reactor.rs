@@ -12,9 +12,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::AddrHashBuilder;
 use crate::io::IoErrorTag;
 use crate::io_handle::WaitHandle;
-use crate::AddrHashBuilder;
 
 /// Readiness interest for a native IO handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
