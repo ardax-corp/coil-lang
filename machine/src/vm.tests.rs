@@ -685,6 +685,22 @@
     }
 
     #[test]
+    fn two_slot_call_return_moves_payload_and_tag() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed_ret(0, 3, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::NOOP),
+            const_int(42),
+            const_int(1),
+            Byte::new(Instruction::RETURN).with_operand_u32(2),
+        ]);
+        let tag = vm.pop().as_int();
+        let payload = vm.pop().as_int();
+        assert_eq!((payload, tag), (42, 1));
+    }
+
+    #[test]
     fn fused_fib_leaves_no_pin_maps() {
         let (code, pool) = fused_fib_bytecode(10);
         let mut vm = Machine::<512>::default();
