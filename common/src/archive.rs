@@ -35,9 +35,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      virtual crypto HostInvoke slots; holes collapse. Package IO is
 ///      `stream_attach` / `stream_park` only. coil-crypto is a `dload` package.
 ///
+/// Major 4 / minor 0: current opcode set after the major-4 reset.
+/// 1 — `InitTyped` packs field count with type_id; typed instances use
+///     dense slots; `LoadField`/`SetField` index those slots.
+///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 0;
+pub const ARCHIVE_MINOR: u16 = 1;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -322,9 +326,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 0);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 0));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.0");
+        assert_eq!(ARCHIVE_MINOR, 1);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 1));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.1");
     }
 
     #[test]

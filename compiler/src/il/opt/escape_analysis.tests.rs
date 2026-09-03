@@ -134,7 +134,10 @@ fn keeps_heap_when_stored_to_field() {
             slot: 1,
             loc: loc(),
         },
-        IlOp::SetField { loc: loc() },
+        IlOp::SetField {
+            loc: loc(),
+            index: None,
+        },
         IlOp::Pop { loc: loc() },
         IlOp::Halt { loc: loc() },
     ]);

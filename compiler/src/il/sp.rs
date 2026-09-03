@@ -68,9 +68,11 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
         IlOp::MakeTuple { arity, .. } | IlOp::MakeArray { arity, .. } => Some(1 - *arity as i32),
         IlOp::MakeEnum { arity, .. } => Some(1 - *arity as i32),
         IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } | IlOp::LoadField { .. } => Some(0),
-        // GetField: pop target+name, push value (−1). SetField: pop value+target+name, push value (−2).
+        // GetField: pop target+name, push value (−1).
+        // SetField: name form −2; slot form (no name) −1.
         IlOp::GetField { .. } => Some(-1),
-        IlOp::SetField { .. } => Some(-2),
+        IlOp::SetField { index: Some(_), .. } => Some(-1),
+        IlOp::SetField { index: None, .. } => Some(-2),
         // HostInvoke: pop fn_id + arity args, push result (delta −arity).
         IlOp::HostInvoke { arity, .. } => Some(-(*arity as i32)),
         IlOp::Print { .. } => Some(-1),
@@ -215,7 +217,13 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::HostInvokeNiche => Some(-1),
         Instruction::FloatChainStore => Some(0),
         Instruction::PRINT | Instruction::GetField => Some(-1),
-        Instruction::SetField => Some(-2),
+        Instruction::SetField => {
+            if common::set_field_slot_index(byte.operand_u32()).is_some() {
+                Some(-1)
+            } else {
+                Some(-2)
+            }
+        }
         // STRING pushes the ObjString; DATA is a stack-neutral archive tombstone.
         Instruction::DATA => Some(0),
         // FORMAT n: pop n args + format string, push result (−n). n==0 is a no-op.
@@ -677,7 +685,14 @@ mod tests {
             Some(0)
         );
         assert_eq!(stack_delta(&IlOp::GetField { loc: loc() }), Some(-1));
-        assert_eq!(stack_delta(&IlOp::SetField { loc: loc() }), Some(-2));
+        assert_eq!(stack_delta(&IlOp::SetField { loc: loc(), index: None }), Some(-2));
+        assert_eq!(
+            stack_delta(&IlOp::SetField {
+                loc: loc(),
+                index: Some(1)
+            }),
+            Some(-1)
+        );
         assert_eq!(
             stack_delta(&IlOp::HostInvoke {
                 arity: 3,
