@@ -22,6 +22,8 @@ User code does not name these directly; the compiler emits them:
 | `ArrayPin` / `IndexPin*` / `StoreIndexPin*` | Pinned array indexing: `ArrayPin` caches the array in the frame pin table; `IndexPin*` / `StoreIndexPin*` skip per-site `find_object_by_addr`. Layout: [array-pin.md](array-pin.md) |
 | `NEGF` | Float unary negate (IEEE sign-bit flip); replaces `CONST -1; MULF` |
 | `InitTyped` | Allocate a class instance. Operand `[31:16] field_count`, `[15:0] type_id`. Non-zero field count pre-sizes dense slots; `INIT` remains for untyped bags / old archives. Typed field get/set uses `LoadField` / indexed `SetField` (bit 31). |
+| `CALL` | Direct call. Operand `[23:0]` target, `[30:24]` arity (0..=127). Bit 31 (`CALL_RET2`) is a two-slot `[payload, tag]` return; clear means one word (old archives with arity `< 128` stay unary). |
+| `RETURN` | Operand `0` (or omitted) copies one word; operand `2` copies payload then tag. No new opcode. |
 
 ---
 
