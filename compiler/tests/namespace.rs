@@ -1289,6 +1289,144 @@ fn worker_dload_sees_parent_ffi_search_paths() {
     );
 }
 
+/// Cross-file hole: defining a two-slot `Result<int,int>` helper in one
+/// module and taking its address in another must keep the boxed ABI so
+/// `CallIndirect` + `match` cannot stack-smash / mis-decode the tag.
+#[test]
+fn two_slot_result_address_taken_in_other_module_stays_boxed() {
+    let files = [
+        (
+            "src/arith.hy",
+            r#"
+fn div(int a, int b) -> Result<int, int> {
+    if b == 0 {
+        return Result::Err(-1);
+    }
+    return Result::Ok(a / b);
+}
+"#,
+        ),
+        (
+            "src/main.hy",
+            r#"
+use arith::{div};
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn main() {
+    let f = div;
+    let ok = match f(10, 2) {
+        Result::Ok(q) => q,
+        Result::Err(_) => 0,
+    };
+    let err = match f(1, 0) {
+        Result::Ok(_) => 0,
+        Result::Err(e) => e,
+    };
+    write(stdout(), to_bytes(format("%i,%i", ok, err)));
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project(
+        "two_slot_escape_cross_file",
+        &manifest_src_and_stdlib(),
+        &files,
+        "src/main.hy",
+    );
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+            Ok(pair) => pair,
+            Err(()) => {
+                for msg in pipeline.messages() {
+                    eprintln!("PIPELINE ERROR: {}", msg.message());
+                }
+                panic!("compile failed");
+            }
+        };
+        let has_two_word_return = bytecode.iter().any(|b| {
+            *b.bytecode() == common::Instruction::RETURN && b.return_words() == 2
+        });
+        assert!(
+            !has_two_word_return,
+            "escaped arith::div must keep boxed RETURN, found RETURN operand 2"
+        );
+        let has_call_indirect = bytecode
+            .iter()
+            .any(|b| *b.bytecode() == common::Instruction::CallIndirect);
+        assert!(
+            has_call_indirect,
+            "address-of div must lower to CallIndirect"
+        );
+        let output = run_bytecode(bytecode, constants, &pipeline);
+        assert_eq!(output, "5,-1");
+    });
+}
+
+/// Direct CALL across modules (address never taken) still uses two-slot RETURN.
+#[test]
+fn two_slot_result_direct_cross_module_call_keeps_pair_abi() {
+    let files = [
+        (
+            "src/arith.hy",
+            r#"
+fn div(int a, int b) -> Result<int, int> {
+    if b == 0 {
+        return Result::Err(-1);
+    }
+    return Result::Ok(a / b);
+}
+"#,
+        ),
+        (
+            "src/main.hy",
+            r#"
+use arith::{div};
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn main() {
+    let ok = match div(10, 2) {
+        Result::Ok(q) => q,
+        Result::Err(_) => 0,
+    };
+    write(stdout(), to_bytes(format("%i", ok)));
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project(
+        "two_slot_direct_cross_file",
+        &manifest_src_and_stdlib(),
+        &files,
+        "src/main.hy",
+    );
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+            Ok(pair) => pair,
+            Err(()) => {
+                for msg in pipeline.messages() {
+                    eprintln!("PIPELINE ERROR: {}", msg.message());
+                }
+                panic!("compile failed");
+            }
+        };
+        let has_two_word_return = bytecode.iter().any(|b| {
+            *b.bytecode() == common::Instruction::RETURN && b.return_words() == 2
+        });
+        assert!(
+            has_two_word_return,
+            "direct-only arith::div should keep two-slot RETURN"
+        );
+        let output = run_bytecode(bytecode, constants, &pipeline);
+        assert_eq!(output, "5");
+    });
+}
+
 static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct CwdLockGuard(std::sync::MutexGuard<'static, ()>);
