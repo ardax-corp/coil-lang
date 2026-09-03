@@ -9581,8 +9581,12 @@ impl Compiler {
             }
             Expression::Access(receiver, field) => {
                 bytecode.append(&mut self.do_compile(receiver));
-                self.emit_field_name(bytecode, field);
-                bytecode.push_get_field();
+                if let Some(idx) = self.class_field_slot(receiver, field) {
+                    bytecode.push_load_field(idx);
+                } else {
+                    self.emit_field_name(bytecode, field);
+                    bytecode.push_get_field();
+                }
                 matches!(
                     self.receiver_type(receiver),
                     Some(crate::typechecking::Ty::Con(ref n))
@@ -9627,8 +9631,12 @@ impl Compiler {
                     bytecode.push(Byte::new(Instruction::DUPLICATE));
                 }
                 bytecode.append(&mut self.do_compile(receiver));
-                self.emit_field_name(bytecode, field);
-                bytecode.push_set_field();
+                if let Some(idx) = self.class_field_slot(receiver, field) {
+                    bytecode.push_set_field_slot(idx);
+                } else {
+                    self.emit_field_name(bytecode, field);
+                    bytecode.push_set_field();
+                }
                 // SetField leaves the value; caller uses leave_value_on_stack /
                 // discard_statement_value to keep or POP.
             }
@@ -10044,6 +10052,31 @@ impl Compiler {
             map.insert(p.clone(), a.clone());
         }
         Some(subst_ty_params(&fty, &map))
+    }
+
+    /// Declaration-order slot for a known class field, or `None` for dicts.
+    fn class_field_slot_of_ty(&self, ty: &Ty, field: &str) -> Option<u32> {
+        if !self.checker.ty_is_class(ty) {
+            return None;
+        }
+        let name = Checker::class_name_of_ty(ty)?;
+        if let Some(fields) = self.context.classes.get(name) {
+            return fields
+                .iter()
+                .find(|(n, _)| n == field)
+                .map(|(_, idx)| *idx as u32);
+        }
+        self.checker.class_fields(name).and_then(|fs| {
+            fs.iter()
+                .position(|(n, _)| n == field)
+                .map(|i| i as u32)
+        })
+    }
+
+    fn class_field_slot(&self, receiver: &Output<'_>, field: &str) -> Option<u32> {
+        self.receiver_type(receiver)
+            .as_ref()
+            .and_then(|ty| self.class_field_slot_of_ty(ty, field))
     }
 
     /// True when `expr` is (or produces) the built-in `Option` sum.
@@ -11578,12 +11611,14 @@ impl Compiler {
                 } else {
                     let fields = self.context.classes.get(&name).cloned().unwrap_or_default();
                     let type_id = self.checker.class_type_id(&name);
-                    bytecode
-                        .push(Byte::new(Instruction::InitTyped).with_operand_u32(type_id));
-                    // SetField stack order is value, target, name (same as
-                    // Assignment to Access). Stash the instance, then for
-                    // each ctor arg emit that sequence and discard the
-                    // value SetField pushes back.
+                    let nfields = fields.len() as u32;
+                    bytecode.push(
+                        Byte::new(Instruction::InitTyped)
+                            .with_operand_u32(common::pack_init_typed(type_id, nfields)),
+                    );
+                    // SetField stack order is value, target[, name]. Stash the
+                    // instance, then for each ctor arg emit that sequence and
+                    // discard the value SetField pushes back.
                     //
                     // `StorePop` keeps the instance at `tmp` with the cursor
                     // past that slot — so the stashed value is already TOS
@@ -11596,11 +11631,10 @@ impl Compiler {
                     let tmp_inst = self.alloc_temp_slot();
                     bytecode.push_store_pop(tmp_inst);
                     if let Some(arg_list) = args {
-                        for (arg, (fname, _)) in arg_list.iter().zip(fields.iter()) {
+                        for (i, (arg, _)) in arg_list.iter().zip(fields.iter()).enumerate() {
                             bytecode.append(&mut self.do_compile(arg));
                             bytecode.push_load(tmp_inst);
-                            self.emit_field_name(&mut bytecode, fname);
-                            bytecode.push_set_field();
+                            bytecode.push_set_field_slot(i as u32);
                             bytecode.push_pop();
                         }
                     }
@@ -12736,8 +12770,12 @@ impl Compiler {
                 Expression::Access(target_expr, field) => {
                     self.append_binding_rhs(&mut bytecode, value);
                     bytecode.append(&mut self.do_compile(target_expr));
-                    self.emit_field_name(&mut bytecode, field);
-                    bytecode.push_set_field();
+                    if let Some(idx) = self.class_field_slot(target_expr, field) {
+                        bytecode.push_set_field_slot(idx);
+                    } else {
+                        self.emit_field_name(&mut bytecode, field);
+                        bytecode.push_set_field();
+                    }
                     // Value left on stack for expression result; ExprStatement POPs.
                 }
                 Expression::Index(arr, None) => {
@@ -13194,8 +13232,8 @@ impl Compiler {
             Expression::Default(_) => (),
 
             // --- Field access ---
-            // receiver bytecode + LoadField(index) or GetField(name) for
-            // dicts / class instances.
+            // receiver bytecode + LoadField(index) for enums and typed
+            // class instances; GetField(name) for dicts / records.
             Expression::Access(receiver, field) => {
                 if self.try_emit_direct_class_field_access(&mut bytecode, receiver, field) {
                     return bytecode;
@@ -13226,8 +13264,8 @@ impl Compiler {
                 let is_class = receiver_ty
                     .as_ref()
                     .is_some_and(|ty| self.checker.ty_is_class(ty));
-                // LoadField only for confirmed sum record payloads.
-                // Prefer GetField for classes and anonymous records.
+                // LoadField for confirmed sum record payloads and typed class
+                // slots. GetField for anonymous records / dicts.
                 // `extract_enum_name` alone is unsafe (Ty::Con class
                 // names look like enums) — require field_index_for
                 // or an is_class check. Unknown receivers that are
@@ -13266,7 +13304,12 @@ impl Compiler {
                 };
                 if let Some(field_index) = enum_field_index {
                     bytecode.push_load_field(field_index as u32);
-                } else if is_record || is_class {
+                } else if let Some(idx) = receiver_ty
+                    .as_ref()
+                    .and_then(|ty| self.class_field_slot_of_ty(ty, field))
+                {
+                    bytecode.push_load_field(idx);
+                } else if is_record {
                     self.emit_field_name(&mut bytecode, field);
                     bytecode.push_get_field();
                 } else {
@@ -13582,7 +13625,12 @@ impl Compiler {
                     };
                     if let Some(field_index) = enum_field_index {
                         self.bytecode.push_load_field(field_index as u32);
-                    } else if is_record || is_class {
+                    } else if let Some(idx) = inner_ty
+                        .as_ref()
+                        .and_then(|ty| self.class_field_slot_of_ty(ty, field))
+                    {
+                        self.bytecode.push_load_field(idx);
+                    } else if is_record {
                         let mut field_bc = CodeBuf::new();
                         self.emit_field_name(&mut field_bc, field);
                         self.bytecode.append(&mut field_bc);
@@ -13652,7 +13700,12 @@ impl Compiler {
                 };
                 if let Some(field_index) = enum_field_index {
                     self.bytecode.push_load_field(field_index as u32);
-                } else if is_record || is_class {
+                } else if let Some(idx) = inner_ty
+                    .as_ref()
+                    .and_then(|ty| self.class_field_slot_of_ty(ty, field))
+                {
+                    self.bytecode.push_load_field(idx);
+                } else if is_record {
                     if let Some(&slot) = self.field_key_slots.get(*field) {
                         self.bytecode.push_load(slot);
                     } else {
