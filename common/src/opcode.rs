@@ -78,7 +78,7 @@ pub enum Instruction {
     // MakeEnum:     [31:16] tag, [15:0] arity
     // JumpIfMatch:  [31:16] tag, [15:0] pool index → 32-bit target
     // Unpack:       [31:0] arity
-    // LoadField:    [15:0] field_index
+    // LoadField:    [15:0] field_index (enum payload or typed instance slot)
     MakeEnum,
     JumpIfMatch,
     Unpack,
@@ -107,7 +107,9 @@ pub enum Instruction {
     MakeArray,
     Index,
 
-    // Records — MakeDict: [15:0] field count; GetField/SetField: no operand
+    // Records — MakeDict: [15:0] field count
+    // GetField: interned name (dicts / type_id 0)
+    // SetField: operand 0 = interned name; bit 31 set → slot in [15:0] (no name)
     MakeDict,
     GetField,
     SetField,
@@ -314,8 +316,10 @@ pub enum Instruction {
 
     /// Allocate a class instance stamped with a compile-time type id.
     ///
-    /// Operand is `type_id` (`0` is unused — prefer [`Self::INIT`] for untyped
-    /// bags such as dicts). Existing [`Self::INIT`] stays for old archives.
+    /// Operand: `[31:16] field_count`, `[15:0] type_id`. `type_id == 0` is
+    /// unused — prefer [`Self::INIT`] for untyped bags such as dicts.
+    /// Existing [`Self::INIT`] stays for old archives. Packed `field_count`
+    /// pre-sizes a dense slot vector; `0` keeps a named table (legacy).
     InitTyped,
 
     /// Jump-if-true twins of the `*Jmpf` family (same operand packing).
@@ -354,6 +358,41 @@ impl From<u8> for Instruction {
 impl From<Instruction> for u8 {
     fn from(val: Instruction) -> Self {
         val as u8
+    }
+}
+
+/// `InitTyped` operand: `[31:16] field_count`, `[15:0] type_id`.
+#[inline]
+#[must_use]
+pub const fn pack_init_typed(type_id: u32, field_count: u32) -> u32 {
+    ((field_count & 0xFFFF) << 16) | (type_id & 0xFFFF)
+}
+
+/// Unpack [`pack_init_typed`]: `(type_id, field_count)`.
+#[inline]
+#[must_use]
+pub const fn unpack_init_typed(operand: u32) -> (u32, u32) {
+    (operand & 0xFFFF, operand >> 16)
+}
+
+/// `SetField` stores by slot when this bit is set; `[15:0]` is the index.
+pub const SET_FIELD_SLOT_BIT: u32 = 1 << 31;
+
+/// Pack a typed-instance `SetField` operand (no interned name on the stack).
+#[inline]
+#[must_use]
+pub const fn pack_set_field_slot(index: u32) -> u32 {
+    SET_FIELD_SLOT_BIT | (index & 0xFFFF)
+}
+
+/// Slot index when `operand` is an indexed [`Instruction::SetField`].
+#[inline]
+#[must_use]
+pub const fn set_field_slot_index(operand: u32) -> Option<u32> {
+    if operand & SET_FIELD_SLOT_BIT != 0 {
+        Some(operand & 0xFFFF)
+    } else {
+        None
     }
 }
 
@@ -1305,6 +1344,15 @@ mod tests {
         assert_eq!(inc.inc_dec_parts(), (5, true, false));
         let dec = Byte::new(Instruction::DEC).with_inc_dec(2, false, true);
         assert_eq!(dec.inc_dec_parts(), (2, false, true));
+    }
+
+    #[test]
+    fn pack_init_typed_round_trip() {
+        let op = pack_init_typed(7, 2);
+        assert_eq!(unpack_init_typed(op), (7, 2));
+        assert_eq!(unpack_init_typed(7), (7, 0));
+        assert_eq!(set_field_slot_index(0), None);
+        assert_eq!(set_field_slot_index(pack_set_field_slot(3)), Some(3));
     }
 
     #[test]
