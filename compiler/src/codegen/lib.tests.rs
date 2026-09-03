@@ -7329,8 +7329,8 @@ fn main() {
             "mismatched-Result method Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
-            "mismatched-Result method Try must JumpIfMatch a heap enum; opcodes={ops:?}",
+            ops.iter().any(|op| matches!(op, Instruction::BITAND)),
+            "mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
         );
         assert!(
             !bc.windows(4).any(|w| {
@@ -7381,8 +7381,8 @@ fn main() {
             "forward mismatched-Result Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
-            "forward mismatched-Result Try must JumpIfMatch a heap enum; opcodes={ops:?}",
+            ops.iter().any(|op| matches!(op, Instruction::BITAND)),
+            "forward mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
         );
         assert!(
             !bc.windows(4).any(|w| {
