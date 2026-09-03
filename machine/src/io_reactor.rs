@@ -14,6 +14,7 @@ use std::time::{Duration, Instant};
 
 use crate::io::IoErrorTag;
 use crate::io_handle::WaitHandle;
+use crate::AddrHashBuilder;
 
 /// Readiness interest for a native IO handle.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,7 +55,7 @@ struct AsyncWait {
 
 struct Inner {
     next_token: AtomicU64,
-    waits: Mutex<HashMap<WaitToken, AsyncWait>>,
+    waits: Mutex<HashMap<WaitToken, AsyncWait, AddrHashBuilder>>,
     ready: Mutex<Vec<WaitToken>>,
     cvar: Condvar,
 }
@@ -69,7 +70,7 @@ impl IoReactor {
         Arc::new(Self {
             inner: Inner {
                 next_token: AtomicU64::new(1),
-                waits: Mutex::new(HashMap::new()),
+                waits: Mutex::new(HashMap::default()),
                 ready: Mutex::new(Vec::new()),
                 cvar: Condvar::new(),
             },
@@ -341,7 +342,7 @@ impl Default for IoReactor {
         Self {
             inner: Inner {
                 next_token: AtomicU64::new(1),
-                waits: Mutex::new(HashMap::new()),
+                waits: Mutex::new(HashMap::default()),
                 ready: Mutex::new(Vec::new()),
                 cvar: Condvar::new(),
             },

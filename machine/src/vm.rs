@@ -16,8 +16,9 @@ use common::{
 };
 
 use crate::{
-    CStructLayout, CoroState, Frame, GcData, Heap, Member, ObjArray, ObjBoxed, ObjCoroutine, ObjEnum,
-    ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object, RefCoroutine, Stack,
+    AddrHashBuilder, CStructLayout, CoroState, Frame, GcData, Heap, Member, ObjArray, ObjBoxed,
+    ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object, RefCoroutine,
+    Stack,
 };
 #[cfg(any(test, feature = "debugger"))]
 use crate::{DebugController, StopReason};
@@ -328,7 +329,7 @@ pub struct Machine<const S: usize> {
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
-    userland_libraries: std::collections::HashMap<u64, std::sync::Arc<Object>>,
+    userland_libraries: std::collections::HashMap<u64, std::sync::Arc<Object>, AddrHashBuilder>,
     resume_stack: Vec<ResumeCtx>,
     /// Directory of the entry script (for relative `dload` paths).
     base_dir: Option<PathBuf>,
@@ -389,9 +390,9 @@ pub struct Machine<const S: usize> {
     /// IO readiness reactor (sync adapters + async waiters).
     io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
     /// `type_id` → drop method entry PC (empty = no user finalizers).
-    finalizer_by_type: std::collections::HashMap<u32, u32>,
+    finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>,
     /// Drop entry PCs (for explicit `obj.drop()` once-bit intercept).
-    finalizer_pcs: std::collections::HashSet<u32>,
+    finalizer_pcs: std::collections::HashSet<u32, AddrHashBuilder>,
     /// True while a mark/finalize/sweep cycle is running.
     gc_in_progress: bool,
     /// Nested `gc_collect` during a finalizer; run another cycle after.
@@ -420,7 +421,7 @@ impl<const S: usize> Machine<S> {
             output: None,
             natives: crate::ffi::Natives::new(),
             libraries: std::collections::HashMap::new(),
-            userland_libraries: std::collections::HashMap::new(),
+            userland_libraries: std::collections::HashMap::default(),
             resume_stack: Vec::new(),
             base_dir: None,
             ffi_search_paths: Vec::new(),
@@ -451,8 +452,8 @@ impl<const S: usize> Machine<S> {
             worker_cap,
             reactor,
             io_reactor: crate::io_reactor::IoReactor::new(),
-            finalizer_by_type: std::collections::HashMap::new(),
-            finalizer_pcs: std::collections::HashSet::new(),
+            finalizer_by_type: std::collections::HashMap::default(),
+            finalizer_pcs: std::collections::HashSet::default(),
             gc_in_progress: false,
             gc_deferred: false,
         }
@@ -537,7 +538,7 @@ impl<const S: usize> Machine<S> {
 
     fn rebuild_pc_line_cache(&mut self) {
         use std::collections::HashMap;
-        let mut texts: HashMap<u32, String> = HashMap::new();
+        let mut texts: HashMap<u32, String, AddrHashBuilder> = HashMap::default();
         self.pc_lines.clear();
         self.pc_lines.reserve(self.program_debug.debug_locs.len());
         for loc in &self.program_debug.debug_locs {
