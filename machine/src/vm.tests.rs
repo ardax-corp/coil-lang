@@ -1,5 +1,6 @@
     use common::{
-        ArchivedByte as Byte, ArchivedInstruction as Instruction, Byte as RawByte, Value,
+        pack_init_typed, pack_set_field_slot, ArchivedByte as Byte,
+        ArchivedInstruction as Instruction, Byte as RawByte, Value,
     };
 
     use super::{
@@ -4682,6 +4683,30 @@
         vm.collect_garbage();
         let v = vm.pop();
         assert_eq!(vm.instance_meta(v), Some((7, false)));
+    }
+
+    #[test]
+    fn typed_instance_slot_load_and_store() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::InitTyped).with_operand_u32(pack_init_typed(4, 2)),
+            store_pop(0),
+            const_int(42),
+            Byte::new(Instruction::LOAD).with_load_store_slot(0),
+            Byte::new(Instruction::SetField).with_operand_u32(pack_set_field_slot(0)),
+            Byte::new(Instruction::POP),
+            const_int(9),
+            Byte::new(Instruction::LOAD).with_load_store_slot(0),
+            Byte::new(Instruction::SetField).with_operand_u32(pack_set_field_slot(1)),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::LOAD).with_load_store_slot(0),
+            load_field(0),
+            Byte::new(Instruction::LOAD).with_load_store_slot(0),
+            load_field(1),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 9);
+        assert_eq!(vm.pop().as_int(), 42);
     }
 
     #[test]

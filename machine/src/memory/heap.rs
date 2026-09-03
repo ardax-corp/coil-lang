@@ -656,13 +656,7 @@ impl Object {
     pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
         match self {
             Self::String(_) => {}
-            Self::Instance(i) => i.as_ref().fields.iter().for_each(|(k, v)| {
-                k.mark();
-
-                if let Member::Object(i) = v {
-                    i.mark(grey_objects);
-                }
-            }),
+            Self::Instance(i) => i.as_ref().mark_members(grey_objects),
             Self::Enum(e) => {
                 for member in &e.as_ref().payload {
                     if let Member::Object(o) = member {
@@ -958,8 +952,14 @@ pub enum Member {
     Object(Object),
 }
 
+/// Named intern table (`type_id == 0` / `INIT`) or dense typed slots.
+enum InstanceStorage {
+    Table(Table<Member>),
+    Slots(Vec<Member>),
+}
+
 pub struct ObjInstance {
-    fields: Table<Member>,
+    storage: InstanceStorage,
     /// Compile-time class identity (`0` = none / dict / legacy `INIT`).
     pub type_id: u32,
     /// Set when `drop` has run (GC or explicit); drop must not run twice.
@@ -970,7 +970,7 @@ impl ObjInstance {
     #[must_use]
     pub fn default() -> Self {
         Self {
-            fields: Table::default(),
+            storage: InstanceStorage::Table(Table::default()),
             type_id: 0,
             finalized: false,
         }
@@ -978,31 +978,138 @@ impl ObjInstance {
 
     #[must_use]
     pub fn with_type_id(type_id: u32) -> Self {
+        Self::with_type_id_and_fields(type_id, 0)
+    }
+
+    /// Typed instances (`type_id != 0`) use a dense slot vector of `nfields`.
+    /// `nfields == 0` keeps a named table so legacy `InitTyped` + GetField still works.
+    #[must_use]
+    pub fn with_type_id_and_fields(type_id: u32, nfields: usize) -> Self {
+        let storage = if type_id != 0 && nfields > 0 {
+            InstanceStorage::Slots(vec![Member::Value(Value::from(0i64)); nfields])
+        } else {
+            InstanceStorage::Table(Table::default())
+        };
         Self {
-            fields: Table::default(),
+            storage,
             type_id,
             finalized: false,
         }
     }
 
     pub fn set(&mut self, key: RefString, value: Member) {
-        self.fields.insert(key, value);
+        match &mut self.storage {
+            InstanceStorage::Table(table) => {
+                table.insert(key, value);
+            }
+            InstanceStorage::Slots(_) => {}
+        }
     }
 
     pub fn get(&self, key: RefString) -> Option<Member> {
-        self.fields.get(key)
+        match &self.storage {
+            InstanceStorage::Table(table) => table.get(key),
+            InstanceStorage::Slots(_) => None,
+        }
+    }
+
+    pub fn slot(&self, index: usize) -> Option<Member> {
+        match &self.storage {
+            InstanceStorage::Slots(slots) => slots.get(index).copied(),
+            InstanceStorage::Table(_) => None,
+        }
+    }
+
+    pub fn set_slot(&mut self, index: usize, value: Member) {
+        match &mut self.storage {
+            InstanceStorage::Slots(slots) => {
+                if let Some(slot) = slots.get_mut(index) {
+                    *slot = value;
+                }
+            }
+            InstanceStorage::Table(_) => {}
+        }
+    }
+
+    pub fn slot_len(&self) -> Option<usize> {
+        match &self.storage {
+            InstanceStorage::Slots(slots) => Some(slots.len()),
+            InstanceStorage::Table(_) => None,
+        }
+    }
+
+    pub fn slots(&self) -> Option<&[Member]> {
+        match &self.storage {
+            InstanceStorage::Slots(slots) => Some(slots),
+            InstanceStorage::Table(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_slots(type_id: u32, slots: Vec<Member>) -> Self {
+        Self {
+            storage: InstanceStorage::Slots(slots),
+            type_id,
+            finalized: false,
+        }
     }
 
     /// Iterate live `(key, value)` entries in table order (DictEntries).
-    pub fn iter_fields(&self) -> impl Iterator<Item = (RefString, Member)> + '_ {
-        self.fields.iter()
+    /// Typed slot instances have no interned names.
+    pub fn iter_fields(&self) -> InstanceFieldIter<'_> {
+        match &self.storage {
+            InstanceStorage::Table(table) => InstanceFieldIter::Table(table.iter()),
+            InstanceStorage::Slots(_) => InstanceFieldIter::Empty,
+        }
+    }
+
+    fn mark_members(&self, grey_objects: &mut Vec<Object>) {
+        match &self.storage {
+            InstanceStorage::Table(table) => {
+                table.iter().for_each(|(k, v)| {
+                    k.mark();
+                    if let Member::Object(o) = v {
+                        o.mark(grey_objects);
+                    }
+                });
+            }
+            InstanceStorage::Slots(slots) => {
+                for member in slots {
+                    if let Member::Object(o) = member {
+                        o.mark(grey_objects);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Named-field walk for dicts; empty for dense typed slots.
+pub enum InstanceFieldIter<'a> {
+    Table(Iter<'a, Member>),
+    Empty,
+}
+
+impl Iterator for InstanceFieldIter<'_> {
+    type Item = (RefString, Member);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::Table(it) => it.next(),
+            Self::Empty => None,
+        }
     }
 }
 
 impl GcSized for ObjInstance {
     fn size(&self) -> usize {
-        // `Table` entry storage uses Rust's global allocator, not the VM heap.
-        std::mem::size_of::<Self>()
+        match &self.storage {
+            // `Table` entry storage uses Rust's global allocator, not the VM heap.
+            InstanceStorage::Table(_) => std::mem::size_of::<Self>(),
+            InstanceStorage::Slots(slots) => {
+                std::mem::size_of::<Self>() + slots.capacity() * std::mem::size_of::<Member>()
+            }
+        }
     }
 }
 

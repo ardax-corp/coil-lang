@@ -12,7 +12,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{
     ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Byte as RawByte,
-    ProgramDebug, Value, byte_to_position, likely, promise, unlikely,
+    ProgramDebug, Value, byte_to_position, likely, promise, set_field_slot_index, unlikely,
+    unpack_init_typed,
 };
 
 use crate::{
@@ -2658,10 +2659,11 @@ impl<const S: usize> Machine<S> {
                     self.maybe_gc_after_alloc();
                 }
                 Instruction::InitTyped => {
-                    let type_id = opcode.operand_u32();
-                    let (_, mut r) = self
-                        .heap
-                        .alloc(ObjInstance::with_type_id(type_id), Object::Instance);
+                    let (type_id, nfields) = unpack_init_typed(opcode.operand_u32());
+                    let (_, mut r) = self.heap.alloc(
+                        ObjInstance::with_type_id_and_fields(type_id, nfields as usize),
+                        Object::Instance,
+                    );
                     let _ = r.as_mut();
                     self.stack.push(Value::from(r.as_ptr().addr() as u64));
                     self.maybe_gc_after_alloc();
@@ -3292,26 +3294,43 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(result);
                 }
                 Instruction::SetField => {
-                    let name_val = self.stack.pop();
-                    let target_val = self.stack.pop();
-                    let value = self.stack.pop();
-                    let key = Self::intern_key(&mut self.heap, name_val);
-                    let target_addr = target_val.raw() as u64;
-                    if let Some(crate::memory::Object::Instance(mut gc)) =
-                        Self::find_object_by_addr(&self.heap, target_addr)
-                    {
-                        let member = if let Some(obj) =
-                            Self::find_object_by_addr(&self.heap, value.raw() as u64)
+                    if let Some(slot) = set_field_slot_index(opcode.operand_u32()) {
+                        let target_val = self.stack.pop();
+                        let value = self.stack.pop();
+                        let target_addr = target_val.raw() as u64;
+                        if let Some(crate::memory::Object::Instance(mut gc)) =
+                            Self::find_object_by_addr(&self.heap, target_addr)
                         {
-                            crate::memory::Member::Object(obj)
+                            let idx = slot as usize;
+                            promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
+                            gc.as_mut()
+                                .set_slot(idx, Self::value_as_member(&self.heap, value));
                         } else {
-                            crate::memory::Member::Value(value)
-                        };
-                        gc.as_mut().set(key, member);
+                            return self.runtime_panic(
+                                "SetField on non-instance",
+                                ip.saturating_sub(1),
+                            );
+                        }
+                        self.stack.push(value);
                     } else {
-                        return self.runtime_panic("SetField on non-instance", ip.saturating_sub(1));
+                        let name_val = self.stack.pop();
+                        let target_val = self.stack.pop();
+                        let value = self.stack.pop();
+                        let key = Self::intern_key(&mut self.heap, name_val);
+                        let target_addr = target_val.raw() as u64;
+                        if let Some(crate::memory::Object::Instance(mut gc)) =
+                            Self::find_object_by_addr(&self.heap, target_addr)
+                        {
+                            let member = Self::value_as_member(&self.heap, value);
+                            gc.as_mut().set(key, member);
+                        } else {
+                            return self.runtime_panic(
+                                "SetField on non-instance",
+                                ip.saturating_sub(1),
+                            );
+                        }
+                        self.stack.push(value);
                     }
-                    self.stack.push(value);
                 }
                 Instruction::StoreIndex | Instruction::StoreIndexUnchecked => {
                     let value = self.stack.pop();
@@ -3399,9 +3418,10 @@ impl<const S: usize> Machine<S> {
                         Some(crate::memory::Object::Array(gc)) => gc.as_ref().elements.len(),
                         Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements.len(),
                         Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
-                        Some(crate::memory::Object::Instance(gc)) => {
-                            gc.as_ref().iter_fields().count()
-                        }
+                        Some(crate::memory::Object::Instance(gc)) => gc
+                            .as_ref()
+                            .slot_len()
+                            .unwrap_or_else(|| gc.as_ref().iter_fields().count()),
                         _ => 0,
                     };
                     self.stack.push(Value::from(len as i64));
@@ -3506,26 +3526,36 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().raw() as u64;
 
-                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                        .and_then(|o| match o {
-                            Object::Enum(e) => Some(e),
-                            _ => None,
-                        });
-
-                    if let Some(enum_ref) = obj_enum {
-                        let enum_ref = enum_ref.as_ref();
-                        promise!(field_index < enum_ref.payload.len());
-                        let member = unsafe { enum_ref.payload.get_unchecked(field_index) };
-                        let value = match member {
-                            Member::Value(v) => *v,
-                            Member::Object(o) => Value::from(o.addr()),
-                        };
-                        self.stack.push(value);
-                    } else {
-                        // Non-enum receiver (e.g. class Instance misrouted
-                        // through LoadField). Push a sentinel so the pop
-                        // above does not leave the stack short.
-                        self.stack.push(Value::default());
+                    match Self::find_object_by_addr(&self.heap, scrutinee_addr) {
+                        Some(Object::Enum(enum_ref)) => {
+                            let enum_ref = enum_ref.as_ref();
+                            promise!(field_index < enum_ref.payload.len());
+                            let member = unsafe { enum_ref.payload.get_unchecked(field_index) };
+                            let value = match member {
+                                Member::Value(v) => *v,
+                                Member::Object(o) => Value::from(o.addr()),
+                            };
+                            self.stack.push(value);
+                        }
+                        Some(Object::Instance(gc)) => {
+                            if let Some(n) = gc.as_ref().slot_len() {
+                                promise!(field_index < n);
+                                let member = gc
+                                    .as_ref()
+                                    .slot(field_index)
+                                    .unwrap_or(Member::Value(Value::default()));
+                                let value = match member {
+                                    Member::Value(v) => v,
+                                    Member::Object(o) => Value::from(o.addr()),
+                                };
+                                self.stack.push(value);
+                            } else {
+                                self.stack.push(Value::default());
+                            }
+                        }
+                        _ => {
+                            self.stack.push(Value::default());
+                        }
                     }
                 }
                 Instruction::UnpackAt => {
