@@ -576,24 +576,55 @@ impl Byte {
         self
     }
 
-    /// CALL: [31:24] arity, [23:0] target (24 bits).
-    pub fn with_call_packed(mut self, arity: u32, target: u32) -> Self {
+    /// CALL bit 31: two-slot direct return (payload+tag). Clear means 1 word,
+    /// so archives that packed arity in `[31:24]` with arity `< 128` still
+    /// mean a unary return.
+    pub const CALL_RET2: u32 = 1 << 31;
+
+    /// CALL: `[30:24]` arity (0..=127), `[23:0]` target, bit 31 = two-slot return.
+    pub fn with_call_packed(self, arity: u32, target: u32) -> Self {
+        self.with_call_packed_ret(arity, target, 1)
+    }
+
+    pub fn with_call_packed_ret(mut self, arity: u32, target: u32, ret_words: u8) -> Self {
         debug_assert!(target <= 0xFFFFFF, "CALL target exceeds 24-bit encoding");
-        self.operands = (arity << 24) | (target & 0xFFFFFF);
+        debug_assert!(arity <= 0x7F, "CALL arity exceeds 7-bit encoding");
+        let mut op = (arity << 24) | (target & 0xFFFFFF);
+        if ret_words >= 2 {
+            op |= Self::CALL_RET2;
+        }
+        self.operands = op;
         self
     }
 
     pub fn call_parts(&self) -> (usize, usize) {
         (
-            (self.operands >> 24) as usize,
+            ((self.operands >> 24) & 0x7F) as usize,
             (self.operands & 0xFFFFFF) as usize,
         )
     }
 
+    /// Direct CALL/RETURN result slots: `1` (boxed/scalar) or `2` (tag+payload).
+    pub fn call_ret_words(&self) -> u8 {
+        if self.operands & Self::CALL_RET2 != 0 {
+            2
+        } else {
+            1
+        }
+    }
+
+    /// `RETURN` operand `0` is one word (old archives); `2` copies two slots.
+    pub fn return_words(&self) -> u8 {
+        let n = self.operands;
+        if n >= 2 { 2 } else { 1 }
+    }
+
     pub fn with_value_u32(mut self, v: u32) -> Self {
-        if matches!(self.bytecode, Instruction::CALL) {
-            let arity = self.operands;
-            return self.with_call_packed(arity, v);
+        if matches!(self.bytecode, Instruction::CALL | Instruction::TailCall | Instruction::MakeCoro)
+        {
+            let (arity, _) = self.call_parts();
+            let ret = self.call_ret_words();
+            return self.with_call_packed_ret(arity as u32, v, ret);
         }
         self.operands = (self.operands & 0xFFFF_0000) | (v & 0xFFFF);
         self
@@ -946,8 +977,16 @@ impl ArchivedByte {
         self
     }
 
-    pub fn with_call_packed(mut self, arity: u32, target: u32) -> Self {
-        self.operands = ((arity << 24) | (target & 0xFFFFFF)).into();
+    pub fn with_call_packed(self, arity: u32, target: u32) -> Self {
+        self.with_call_packed_ret(arity, target, 1)
+    }
+
+    pub fn with_call_packed_ret(mut self, arity: u32, target: u32, ret_words: u8) -> Self {
+        let mut op = (arity << 24) | (target & 0xFFFFFF);
+        if ret_words >= 2 {
+            op |= Byte::CALL_RET2;
+        }
+        self.operands = op.into();
         self
     }
 
@@ -1014,7 +1053,17 @@ impl ArchivedByte {
 
     pub fn call_parts(&self) -> (usize, usize) {
         let op: u32 = self.operands.into();
-        ((op >> 24) as usize, (op & 0xFFFFFF) as usize)
+        (((op >> 24) & 0x7F) as usize, (op & 0xFFFFFF) as usize)
+    }
+
+    pub fn call_ret_words(&self) -> u8 {
+        let op: u32 = self.operands.into();
+        if op & Byte::CALL_RET2 != 0 { 2 } else { 1 }
+    }
+
+    pub fn return_words(&self) -> u8 {
+        let n: u32 = self.operands.into();
+        if n >= 2 { 2 } else { 1 }
     }
 
     pub fn jump_if_match_target(&self, pool: &[u64]) -> usize {
@@ -1282,7 +1331,15 @@ mod tests {
     fn call_packed_round_trips_arity_and_target() {
         let b = Byte::new(Instruction::CALL).with_call_packed(3, 0x123456);
         assert_eq!(b.call_parts(), (3, 0x123456));
+        assert_eq!(b.call_ret_words(), 1);
         assert_eq!(b.value_u32(), 0x123456);
+        let two = Byte::new(Instruction::CALL).with_call_packed_ret(2, 0x10, 2);
+        assert_eq!(two.call_parts(), (2, 0x10));
+        assert_eq!(two.call_ret_words(), 2);
+        let unary = Byte::new(Instruction::RETURN);
+        assert_eq!(unary.return_words(), 1);
+        let pair = Byte::new(Instruction::RETURN).with_operand_u32(2);
+        assert_eq!(pair.return_words(), 2);
     }
 
     #[test]
