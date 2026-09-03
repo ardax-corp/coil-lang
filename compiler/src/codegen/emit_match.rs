@@ -224,11 +224,6 @@ impl Compiler {
         else {
             return None;
         };
-        if !common::is_builtin_option_enum(enum_name)
-            && !common::is_builtin_result_enum(enum_name)
-        {
-            return None;
-        }
         let tag = checker.tag_for(enum_name, variant_name)?;
         let binding = match payload {
             PatternPayload::Unit => None,

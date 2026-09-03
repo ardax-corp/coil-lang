@@ -7987,7 +7987,7 @@ impl Compiler {
         let Some(is_option) = self.pair_return_kind(lookup_name) else {
             return;
         };
-        if self.pair_value_context {
+        if self.pair_value_context || self.unbox_enum_context > 0 {
             return;
         }
         self.emit_pair_box(bytecode, is_option);
@@ -8071,6 +8071,8 @@ impl Compiler {
         if !self.compiling_pair_mode {
             return false;
         }
+        // Nested Option/Result payloads must stay boxed; only the returned
+        // enum uses `[payload, tag]`.
         self.expr_ty_is_return_ty(ast)
             && self.codegen_expr_ty(ast).is_none_or(|ty| {
                 crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
@@ -8138,10 +8140,22 @@ impl Compiler {
                 }
                 None
             }
-            Expression::Construct { .. } if self.pair_value_context || self.unbox_enum_context > 0 => {
-                self.codegen_expr_ty(cur).and_then(|ty| {
-                    crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
-                })
+            Expression::Construct { enum_name, .. }
+                if self.pair_value_context
+                    || self.unbox_enum_context > 0
+                    || self.construct_is_pair_return(enum_name, cur) =>
+            {
+                self.codegen_expr_ty(cur)
+                    .and_then(|ty| {
+                        crate::typechecking::return_layout::two_word_return_kind(
+                            &self.checker,
+                            &ty,
+                        )
+                    })
+                    .or_else(|| {
+                        self.compiling_pair_mode
+                            .then_some(self.compiling_pair_is_option)
+                    })
             }
             Expression::Identifier(n) if self.unboxed_enum_info(n).is_some() => {
                 self.codegen_expr_ty(cur).and_then(|ty| {
@@ -13734,7 +13748,9 @@ impl Compiler {
                     self.checker.fn_result_ok_is_result(&fn_name);
                 let prev_pair_mode = self.compiling_pair_mode;
                 let prev_pair_is_option = self.compiling_pair_is_option;
-                let pair_kind = self.pair_return_kind(&fn_name);
+                // Harness `main` uses JumpIfMatch on a boxed Result.
+                self.pin_pair_return_kind(&fn_name, None);
+                let pair_kind = None;
                 self.compiling_pair_mode = pair_kind.is_some();
                 self.compiling_pair_is_option = pair_kind.unwrap_or(false);
 
