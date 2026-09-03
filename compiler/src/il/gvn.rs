@@ -1147,7 +1147,10 @@ mod tests {
                 index: 1,
                 loc: loc(),
             },
-            IlOp::SetField { loc: loc() },
+            IlOp::SetField {
+                loc: loc(),
+                index: None,
+            },
             IlOp::Load {
                 slot: 0,
                 loc: loc(),
@@ -1225,7 +1228,10 @@ mod tests {
                 slot: 1,
                 loc: loc(),
             },
-            IlOp::SetField { loc: loc() },
+            IlOp::SetField {
+                loc: loc(),
+                index: None,
+            },
             IlOp::Pop { loc: loc() },
             IlOp::Load {
                 slot: 0,

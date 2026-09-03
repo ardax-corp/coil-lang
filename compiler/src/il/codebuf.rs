@@ -159,6 +159,11 @@ impl CodeBuf {
         self.il.push_set_field();
     }
 
+    pub fn push_set_field_slot(&mut self, index: u32) {
+        self.invalidate_lowered();
+        self.il.push_set_field_slot(index);
+    }
+
     pub fn push_host_invoke(&mut self, arity: u32) {
         self.invalidate_lowered();
         self.il.push_host_invoke(arity);

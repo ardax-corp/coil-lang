@@ -198,8 +198,10 @@ pub enum IlOp {
     GetField {
         loc: DebugLoc,
     },
-    /// Dict / class field write — pop value + target + name, push value.
+    /// Dict field write — pop value + target + name, push value.
+    /// `index: Some(i)` is a typed-instance slot store (no name; delta −1).
     SetField {
+        index: Option<u32>,
         loc: DebugLoc,
     },
     /// Host native call — pop fn id + `arity` args; push result (delta −arity).
@@ -396,7 +398,10 @@ impl IlOp {
                 loc,
             },
             Instruction::GetField => Self::GetField { loc },
-            Instruction::SetField => Self::SetField { loc },
+            Instruction::SetField => Self::SetField {
+                index: common::set_field_slot_index(byte.operand_u32()),
+                loc,
+            },
             Instruction::HostInvoke => Self::HostInvoke {
                 arity: byte.operand_u32(),
                 loc,
@@ -483,7 +488,12 @@ impl IlOp {
                 Byte::new(Instruction::LoadField).with_operand_u32(*index)
             }
             IlOp::GetField { .. } => Byte::new(Instruction::GetField),
-            IlOp::SetField { .. } => Byte::new(Instruction::SetField),
+            IlOp::SetField { index, .. } => match index {
+                Some(i) => {
+                    Byte::new(Instruction::SetField).with_operand_u32(common::pack_set_field_slot(*i))
+                }
+                None => Byte::new(Instruction::SetField),
+            },
             IlOp::HostInvoke { arity, .. } => {
                 Byte::new(Instruction::HostInvoke).with_operand_u32(*arity)
             }
@@ -601,7 +611,7 @@ impl IlOp {
             | IlOp::UnboxValue { loc, .. }
             | IlOp::LoadField { loc, .. }
             | IlOp::GetField { loc }
-            | IlOp::SetField { loc }
+            | IlOp::SetField { loc, .. }
             | IlOp::HostInvoke { loc, .. }
             | IlOp::Print { loc }
             | IlOp::Return { loc }
@@ -645,7 +655,7 @@ impl IlOp {
             | IlOp::UnboxValue { loc: l, .. }
             | IlOp::LoadField { loc: l, .. }
             | IlOp::GetField { loc: l }
-            | IlOp::SetField { loc: l }
+            | IlOp::SetField { loc: l, .. }
             | IlOp::HostInvoke { loc: l, .. }
             | IlOp::Print { loc: l }
             | IlOp::Return { loc: l }
@@ -1133,6 +1143,7 @@ mod tests {
             },
             IlOp::SetField {
                 loc: DebugLoc::unknown(),
+                index: None,
             },
             IlOp::HostInvoke {
                 arity: 2,

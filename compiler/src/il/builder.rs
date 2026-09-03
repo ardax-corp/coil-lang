@@ -256,6 +256,14 @@ impl IlBuilder {
 
     pub fn push_set_field(&mut self) {
         self.push_op(IlOp::SetField {
+            index: None,
+            loc: DebugLoc::unknown(),
+        });
+    }
+
+    pub fn push_set_field_slot(&mut self, index: u32) {
+        self.push_op(IlOp::SetField {
+            index: Some(index),
             loc: DebugLoc::unknown(),
         });
     }

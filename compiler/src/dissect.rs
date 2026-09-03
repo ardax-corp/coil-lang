@@ -245,6 +245,14 @@ fn format_operands(
             format!("arity={} slot={}", byte.operand_u16(0), byte.operand_u16(1))
         }
         Instruction::LoadField => format!("index={}", byte.operand_u32()),
+        Instruction::InitTyped => {
+            let (tid, n) = common::unpack_init_typed(byte.operand_u32());
+            format!("type_id={tid} fields={n}")
+        }
+        Instruction::SetField => match common::set_field_slot_index(byte.operand_u32()) {
+            Some(i) => format!("slot={i}"),
+            None => String::new(),
+        },
         Instruction::MakeTuple | Instruction::MakeArray | Instruction::MakeDict => {
             format!("arity={}", byte.operand_u32())
         }
@@ -437,7 +445,10 @@ fn format_il_op(op: &IlOp) -> String {
         IlOp::UnboxValue { tag, .. } => format!("UnboxValue tag={tag}"),
         IlOp::LoadField { index, .. } => format!("LoadField index={index}"),
         IlOp::GetField { .. } => "GetField".to_string(),
-        IlOp::SetField { .. } => "SetField".to_string(),
+        IlOp::SetField { index, .. } => match index {
+            Some(i) => format!("SetField slot={i}"),
+            None => "SetField".to_string(),
+        },
         IlOp::HostInvoke { arity, .. } => format!("HostInvoke arity={arity}"),
         IlOp::Print { .. } => "PRINT".to_string(),
         IlOp::Return { .. } => "RETURN".to_string(),

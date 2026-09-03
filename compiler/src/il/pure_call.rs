@@ -184,7 +184,13 @@ mod tests {
             None
         ));
         assert!(op_blocks_length_proof(&IlOp::GetField { loc: loc() }, None));
-        assert!(op_blocks_length_proof(&IlOp::SetField { loc: loc() }, None));
+        assert!(op_blocks_length_proof(
+            &IlOp::SetField {
+                loc: loc(),
+                index: None
+            },
+            None
+        ));
     }
 
     #[test]
