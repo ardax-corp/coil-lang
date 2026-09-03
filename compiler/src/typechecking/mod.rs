@@ -19,6 +19,7 @@ pub mod index_facts;
 pub mod pretty;
 pub mod par_profit;
 pub mod purity;
+pub mod return_layout;
 pub mod stack_bound;
 pub mod subst;
 pub mod ty;
