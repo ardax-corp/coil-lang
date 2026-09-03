@@ -14849,8 +14849,8 @@ impl Checker {
         self.enum_scalar.contains_key(&key)
     }
 
-    /// Bare names that appear as a function *value* somewhere in this
-    /// compile unit (see [`crate::typechecking::fn_value_escape`]).
+    /// Names that appear as a function *value* in this module
+    /// (see [`crate::typechecking::fn_value_escape`]).
     pub fn fn_value_escaped_names(&self) -> &HashSet<String> {
         &self.fn_value_escaped
     }
