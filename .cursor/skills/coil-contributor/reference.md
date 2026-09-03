@@ -29,7 +29,7 @@
 - `ConstEnv`: scalar const folding; constant branch/loop elimination; loop unroll ≤8.
 - Tiny direct-call inlining; one-level self-`CALL` peel; `TailCall` for eligible recursion.
 - Match: threaded layout, `JumpIfMatch`, nested records use `UnpackAt` (slot-based).
-- Enum fields: `LoadField` (index); dict/class fields: `GetField`/`SetField` (string keys).
+- Enum fields: `LoadField` (index); typed class fields: `LoadField` / `SetField` with slot operand; dict fields: `GetField`/`SetField` (interned names).
 
 ## VM / values
 
