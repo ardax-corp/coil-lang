@@ -7667,8 +7667,14 @@ fn main() {
         );
         assert!(
             !bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum | Instruction::ReturnPair)),
-            "immediate match on payload enum CALL must stay unboxed; opcodes={:?}",
+                .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
+            "must not revive ReturnPair; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::EQ | Instruction::CmpJmpf | Instruction::CmpJmpt)),
+            "immediate match on payload enum CALL uses tag EQ; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
