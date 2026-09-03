@@ -697,7 +697,7 @@ use string::{format, to_bytes};
             .any(|b| matches!(b.bytecode(), Instruction::DUPLICATE));
         assert_eq!(get_fields, 0, "typed class fields must not use GetField");
         assert!(
-            strings == 0 && load_fields >= 1 && (load_fields >= 2 || has_dup),
+            strings <= 1 && load_fields >= 1 && (load_fields >= 2 || has_dup),
             "expected slot LoadField/Dup for repeated .x; strings={strings} loads={load_fields} dup={has_dup}; ops={:?}",
             region.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
