@@ -1727,6 +1727,27 @@
     }
 
     #[test]
+    fn jump_if_match_does_not_treat_tagged_err_as_enum() {
+        let mut vm = Machine::<16>::default();
+        let strings = vec!["n".to_string()];
+        let mut bytecode = Vec::new();
+        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
+        bytecode.push(Byte::new(Instruction::CONST).with_const_inline(1));
+        bytecode.push(Byte::new(Instruction::BITOR));
+        bytecode.push(jump_if_match(0, 0));
+        bytecode.push(Byte::new(Instruction::POP));
+        bytecode.push(Byte::new(Instruction::HALT));
+        let panic_arm = bytecode.len();
+        bytecode.push(Byte::new(Instruction::Panic));
+        let constants = [panic_arm as u64];
+        vm.run_with_pool(&bytecode, &constants, &strings, 0);
+        assert!(
+            !vm.panicked(),
+            "Result Err (pointer | 1) must not JumpIfMatch as ObjEnum Ok"
+        );
+    }
+
+    #[test]
     fn format_concat_survives_gc_triggered_at_intern() {
         let mut vm = Machine::<16>::default();
         vm.heap_mut().set_gc_threshold_for_test(0);

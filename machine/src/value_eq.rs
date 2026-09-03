@@ -40,7 +40,8 @@ fn values_eq_rec(
         return false;
     }
     // Heap-heap Result: `Ok` is aligned, `Err` is `pointer | 1`.
-    if (aa & 1) != (bb & 1) {
+    // Tagged words are equal only when the raw words match (handled above).
+    if (aa & 1) != (bb & 1) || (aa & 1) != 0 {
         return false;
     }
     if let Some(&mapped) = fwd.get(&aa) {

@@ -844,6 +844,18 @@ impl<const S: usize> Machine<S> {
         heap.find_object_by_addr(addr)
     }
 
+    /// `ObjEnum` at an exact slot. Heap-heap Result `Err` (`pointer | 1`) is
+    /// not an enum cell — do not strip bit 0 here (GC marking already does).
+    fn find_enum_exact(heap: &Heap, addr: u64) -> Option<crate::memory::Gc<crate::memory::ObjEnum>> {
+        if addr & 1 != 0 {
+            return None;
+        }
+        match Self::find_object_by_addr(heap, addr) {
+            Some(Object::Enum(e)) => Some(e),
+            _ => None,
+        }
+    }
+
     fn pop_call_frame(&mut self) -> usize {
         self.pop_pin_map_for_current_frame();
         self.frames.pop().get()
@@ -3471,11 +3483,7 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.peek().raw() as u64;
 
-                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                        .and_then(|o| match o {
-                            Object::Enum(e) => Some(e),
-                            _ => None,
-                        });
+                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
 
                     if let Some(enum_ref) = obj_enum {
                         let enum_ref = enum_ref.as_ref();
@@ -3503,11 +3511,7 @@ impl<const S: usize> Machine<S> {
                     promise!(self.stack.tell() > 0);
                     let scrutinee_addr = self.stack.pop().raw() as u64;
 
-                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                        .and_then(|o| match o {
-                            Object::Enum(e) => Some(e),
-                            _ => None,
-                        });
+                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
 
                     if let Some(enum_ref) = obj_enum {
                         let enum_ref = enum_ref.as_ref();
@@ -3572,11 +3576,7 @@ impl<const S: usize> Machine<S> {
                     promise!(slot < self.stack.tell());
                     let scrutinee_addr = self.stack[slot].raw() as u64;
 
-                    let obj_enum = Self::find_object_by_addr(&self.heap, scrutinee_addr)
-                        .and_then(|o| match o {
-                            Object::Enum(e) => Some(e),
-                            _ => None,
-                        });
+                    let obj_enum = Self::find_enum_exact(&self.heap, scrutinee_addr);
 
                     if let Some(enum_ref) = obj_enum {
                         let enum_ref = enum_ref.as_ref();
