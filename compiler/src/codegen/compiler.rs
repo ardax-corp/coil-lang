@@ -10341,10 +10341,10 @@ impl Compiler {
         bytecode.push(Byte::new(Instruction::BITOR));
     }
 
-    /// `CONST -2; BITAND` — clear bit 0 before using an `Err` payload.
+    /// `CONST 1; XOR` — clear bit 0 on an `Err` payload (bit is known set).
     fn push_result_untag(bytecode: &mut CodeBuf) {
-        bytecode.push_const(-2);
-        bytecode.push(Byte::new(Instruction::BITAND));
+        bytecode.push_const(1);
+        bytecode.push(Byte::new(Instruction::XOR));
     }
 
     /// `DUP; CONST 1; BITAND` — TOS becomes the Result `Err` bit.
