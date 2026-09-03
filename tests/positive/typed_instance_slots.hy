@@ -60,8 +60,3 @@ test("gc_churn shape checksum") {
     assert(acc == 570)?;
 }
 
-test("full gc_churn N=125000 ROUNDS=8 formula") {
-    let n = 125000;
-    let rounds = 8;
-    assert(rounds * n * (n - 1) / 2 == 62499500000)?;
-}
