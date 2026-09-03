@@ -652,12 +652,10 @@ use string::{format, to_bytes};
             }
             "#,
         );
-        // Key cached once in Point::twice_x; ignore STRING ops in later
-        // default Show/String / builtin thunks (Range::to_vec uses GetField).
-        let first_get = bc
+        let first_load = bc
             .iter()
             .enumerate()
-            .filter(|(_, b)| matches!(b.bytecode(), Instruction::GetField))
+            .filter(|(_, b)| matches!(b.bytecode(), Instruction::LoadField))
             .find(|(i, _)| {
                 let end = (*i + 24).min(bc.len());
                 !bc[*i..end]
@@ -665,13 +663,13 @@ use string::{format, to_bytes};
                     .any(|b| matches!(b.bytecode(), Instruction::ArrayPush))
             })
             .map(|(i, _)| i)
-            .expect("expected GetField in twice_x");
-        let region_start = bc[..first_get]
+            .expect("expected LoadField in twice_x");
+        let region_start = bc[..first_load]
             .iter()
             .rposition(|b| matches!(b.bytecode(), Instruction::RETURN))
             .map(|i| i + 1)
             .unwrap_or(0);
-        let region_end = bc[first_get..]
+        let region_end = bc[first_load..]
             .iter()
             .position(|b| {
                 matches!(
@@ -679,12 +677,16 @@ use string::{format, to_bytes};
                     Instruction::RETURN | Instruction::BinReturn
                 )
             })
-            .map(|i| first_get + i)
+            .map(|i| first_load + i)
             .unwrap_or(bc.len() - 1);
         let region = &bc[region_start..=region_end];
         let strings = region
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::STRING))
+            .count();
+        let load_fields = region
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::LoadField))
             .count();
         let get_fields = region
             .iter()
@@ -693,9 +695,10 @@ use string::{format, to_bytes};
         let has_dup = region
             .iter()
             .any(|b| matches!(b.bytecode(), Instruction::DUPLICATE));
+        assert_eq!(get_fields, 0, "typed class fields must not use GetField");
         assert!(
-            strings <= 1 && get_fields >= 1 && (get_fields >= 2 || has_dup),
-            "expected ≤1 STRING for repeated .x plus GetField/Dup; strings={strings} gets={get_fields} dup={has_dup}; ops={:?}",
+            strings == 0 && load_fields >= 1 && (load_fields >= 2 || has_dup),
+            "expected slot LoadField/Dup for repeated .x; strings={strings} loads={load_fields} dup={has_dup}; ops={:?}",
             region.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -6901,6 +6904,19 @@ fn main() {
             bc.iter()
                 .all(|b| !matches!(b.bytecode(), Instruction::INIT)),
             "new Class should not emit legacy INIT"
+        );
+        let init = bc
+            .iter()
+            .find(|b| matches!(b.bytecode(), Instruction::InitTyped))
+            .expect("InitTyped");
+        let (tid, nfields) = common::unpack_init_typed(init.operand_u32());
+        assert_ne!(tid, 0);
+        assert_eq!(nfields, 1, "Box has one instance field");
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::LoadField)),
+            "typed field read should be LoadField; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
     }
 

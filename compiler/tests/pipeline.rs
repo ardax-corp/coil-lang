@@ -6631,13 +6631,85 @@ fn main() {
     assert!(
         main_code
             .iter()
-            .any(|byte| matches!(byte.bytecode(), common::Instruction::GetField)),
-        "drop class temp must GetField the heap instance; opcodes: {:?}",
+            .any(|byte| matches!(byte.bytecode(), common::Instruction::LoadField)),
+        "drop class temp must LoadField the heap instance; opcodes: {:?}",
         main_code
             .iter()
             .map(|b| b.bytecode().mnemonic())
             .collect::<Vec<_>>()
     );
+}
+
+#[test]
+fn class_field_access_emits_load_field_not_get_field() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn main() {
+    let p = new Point(1, 2);
+    p.x = 3;
+    write(stdout(), to_bytes(format("%i", p.x + p.y)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "5");
+
+    let mut pipeline = test_pipeline();
+    let (bytecode, _) = pipeline.compile_src(src).expect("class slots");
+    assert!(
+        bytecode
+            .iter()
+            .any(|b| matches!(b.bytecode(), common::Instruction::LoadField)),
+        "class reads must use LoadField"
+    );
+    let named_set = bytecode.iter().any(|b| {
+        matches!(b.bytecode(), common::Instruction::SetField)
+            && common::set_field_slot_index(b.operand_u32()).is_none()
+    });
+    assert!(
+        !named_set,
+        "class stores must not use interned-name SetField"
+    );
+}
+
+#[test]
+fn dict_field_access_keeps_interned_get_field() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let d = { foo: 7 };
+    write(stdout(), to_bytes(format("%i", d.foo)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "7");
+
+    let mut pipeline = test_pipeline();
+    let (bytecode, _) = pipeline.compile_src(src).expect("dict getfield");
+    assert!(
+        bytecode
+            .iter()
+            .any(|b| matches!(b.bytecode(), common::Instruction::GetField)),
+        "dict reads must use interned-name GetField"
+    );
+    assert!(
+        bytecode
+            .iter()
+            .any(|b| matches!(b.bytecode(), common::Instruction::MakeDict)),
+        "anonymous record must stay MakeDict"
+    );
+}
+
+#[test]
+fn gc_churn_example_checksum() {
+    let src = include_str!("../../examples/perf/gc_churn.hy");
+    let output = run_example_src(src);
+    assert_eq!(output, "62499500000");
 }
 
 #[test]
