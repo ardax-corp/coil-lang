@@ -7804,6 +7804,32 @@ impl Compiler {
         Some(Self::peel_fn_return_ty(&applied))
     }
 
+    /// True when `name` is used as a function value anywhere we can see.
+    /// Whole-program seed wins when present; the per-file sidecar is the
+    /// single-module fallback and a fail-closed extra union.
+    fn is_fn_value_escaped(&self, name: &str) -> bool {
+        let short = name.rsplit("::").next().unwrap_or(name);
+        if let Some(set) = &self.fn_value_escaped_program {
+            if set.contains(name) || set.contains(short) {
+                return true;
+            }
+        }
+        self.typed_sidecar.is_fn_value_escaped(name)
+    }
+
+    /// Record names used as function values across every AST in this compile.
+    /// Call before emitting any module so two-slot RETURN cannot race a
+    /// later `CallIndirect` in another file.
+    pub fn set_fn_value_escaped_program(&mut self, names: HashSet<String>) {
+        self.fn_value_escaped_program = Some(names);
+        self.pair_return_kinds.borrow_mut().clear();
+    }
+
+    pub fn clear_fn_value_escaped_program(&mut self) {
+        self.fn_value_escaped_program = None;
+        self.pair_return_kinds.borrow_mut().clear();
+    }
+
     /// `Some(enum_name)` for a compiled function whose direct CALL/RETURN can
     /// use the known ≤2-word `[payload, tag]` ABI (see
     /// `typechecking::return_layout`). Niched heap `Option<T>` / heap-heap
@@ -7833,11 +7859,11 @@ impl Compiler {
         if self.coroutine_fns.contains(name) {
             return None;
         }
-        // `CallIndirect` / `MakeFn` / `MakePolyFn` / FFI-callback targets
-        // keep the one-word boxed ABI (task cut) — a name whose address is
-        // ever taken in this compile unit must not widen its RETURN, or a
-        // caller reaching it indirectly would see the wrong stack shape.
-        if self.typed_sidecar.is_fn_value_escaped(name) {
+        // `CallIndirect` / `MakeFn` / `MakePolyFn` / FFI-callback / spawn
+        // targets keep the one-word boxed ABI. Prefer the package-wide
+        // seed (every AST in this compile) over the per-file sidecar:
+        // file A taking `&f` while file B defines `f` is otherwise a hole.
+        if self.is_fn_value_escaped(name) {
             return None;
         }
         let lookup = strip_overload_key(name);
