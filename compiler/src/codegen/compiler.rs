@@ -491,34 +491,6 @@ impl Compiler {
             return bytecode;
         }
 
-        let pair_enum = self.pair_value_context
-            && (common::is_builtin_option_enum(enum_name)
-                || common::is_builtin_result_enum(enum_name))
-            && arity <= 1;
-        if pair_enum {
-            match fields {
-                EnumConstructPayload::Unit if arity == 0 => {
-                    // Keep a payload slot for `Option::None` so every
-                    // pair has the same `[payload, tag]` shape.
-                    bytecode.push_const(0);
-                }
-                EnumConstructPayload::Tuple(args) if args.len() == 1 => {
-                    bytecode.append(&mut self.do_compile(&args[0]));
-                }
-                EnumConstructPayload::Record(parts) if parts.len() == 1 => {
-                    bytecode.append(&mut self.do_compile(&parts[0].value));
-                }
-                _ => {}
-            }
-            if matches!(fields, EnumConstructPayload::Unit) && arity != 0 {
-                // Invalid constructor shapes are already reported by
-                // typechecking; keep the stack balanced for recovery.
-                bytecode.push_const(0);
-            }
-            bytecode.push_const(tag as i32);
-            return bytecode;
-        }
-
         if common::is_builtin_option_enum(enum_name)
             && !self.force_heap_option
             && self
@@ -1116,6 +1088,8 @@ impl Compiler {
     }
 
     fn inline_is_return(op: &IlOp) -> bool {
+        // A two-slot RETURN never qualifies: it pops/pushes `[payload, tag]`,
+        // not the single joined value this diamond-inline path assumes.
         op.is_plain_return()
             || matches!(
                 op,
@@ -1125,11 +1099,10 @@ impl Compiler {
                 op.as_plain_byte(),
                 Some(b) if matches!(
                     *b.bytecode(),
-                    Instruction::RETURN
-                        | Instruction::LoadReturnSlot
+                    Instruction::LoadReturnSlot
                         | Instruction::ConstReturnImm
                         | Instruction::BinReturn
-                )
+                ) || (*b.bytecode() == Instruction::RETURN && b.return_words() == 1)
             )
     }
 
@@ -1256,6 +1229,7 @@ impl Compiler {
             return false;
         }
         let last = ops.last().unwrap();
+        // A two-slot RETURN never qualifies — see `inline_is_return`.
         let terminal_ok = last.is_plain_return()
             || matches!(
                 last,
@@ -1268,8 +1242,7 @@ impl Compiler {
                     Instruction::LoadReturnSlot
                         | Instruction::ConstReturnImm
                         | Instruction::BinReturn
-                        | Instruction::RETURN
-                )
+                ) || (*b.bytecode() == Instruction::RETURN && b.return_words() == 1)
             );
         if !terminal_ok {
             return false;
@@ -7831,108 +7804,318 @@ impl Compiler {
         Some(Self::peel_fn_return_ty(&applied))
     }
 
-    /// Return `Some(is_option)` for a compiled function whose unary return
-    /// can use the pair ABI. Always `None` while Option/Result stay boxed
-    /// (`ObjEnum`; pair/niche opcodes are tombstones).
-    fn pair_return_kind(&self, name: &str) -> Option<bool> {
+    /// `Some(enum_name)` for a compiled function whose direct CALL/RETURN can
+    /// use the known ≤2-word `[payload, tag]` ABI (see
+    /// `typechecking::return_layout`). Niched heap `Option<T>` / heap-heap
+    /// `Result<T, E>`, unbounded `T`, and coroutines stay `None` (boxed
+    /// `ObjEnum` / one-word ABI); those opcodes remain tombstones.
+    fn two_word_return_kind(&self, name: &str) -> Option<String> {
         if let Some(cached) = self.pair_return_kinds.borrow().get(name) {
-            return *cached;
+            return cached.clone();
         }
-        let kind = self.compute_pair_return_kind(name);
+        let kind = self.compute_two_word_return_kind(name);
         self.pair_return_kinds
             .borrow_mut()
-            .insert(name.to_string(), kind);
+            .insert(name.to_string(), kind.clone());
         kind
     }
 
     /// Pin a verdict so later queries cannot disagree with it. Definition sites
     /// use this for shapes only they can see (a coroutine body never returns a
     /// pair, however its return type reads).
-    fn pin_pair_return_kind(&self, name: &str, kind: Option<bool>) {
+    fn pin_two_word_return_kind(&self, name: &str, kind: Option<String>) {
         self.pair_return_kinds
             .borrow_mut()
             .insert(name.to_string(), kind);
     }
 
-    fn compute_pair_return_kind(&self, _name: &str) -> Option<bool> {
-        None
+    fn compute_two_word_return_kind(&self, name: &str) -> Option<String> {
+        if self.coroutine_fns.contains(name) {
+            return None;
+        }
+        // `CallIndirect` / `MakeFn` / `MakePolyFn` / FFI-callback targets
+        // keep the one-word boxed ABI (task cut) — a name whose address is
+        // ever taken in this compile unit must not widen its RETURN, or a
+        // caller reaching it indirectly would see the wrong stack shape.
+        if self.typed_sidecar.is_fn_value_escaped(name) {
+            return None;
+        }
+        let lookup = strip_overload_key(name);
+        // `Compiler::fn_return_ty` falls back to the *currently compiling*
+        // function's own return type when a name lookup misses — it is not
+        // a general by-name lookup, so it must not feed this classifier
+        // (querying an unrelated name like `len` would otherwise silently
+        // pick up the caller's own return type).
+        let ty = self
+            .checker
+            .fn_return_ty(name)
+            .or_else(|| self.checker.fn_return_ty(lookup))?;
+        crate::typechecking::return_layout::two_word_return_enum(&self.checker, &ty)
     }
 
-    /// Emit `ReturnPair`, tagging it with the enclosing function's pair kind so
-    /// the VM can re-box the two slots when the frame is a host entry.
-    fn push_return_pair(&mut self) {
-        self.bytecode.push(
-            Byte::new(Instruction::ReturnPair)
-                .with_operand_u32(u32::from(self.compiling_pair_is_option)),
-        );
+    /// Two-slot `RETURN` (operand `2`): pops the callee frame's `[payload,
+    /// tag]` and re-pushes both for the caller. Old archives never set this
+    /// operand, so they stay one word.
+    fn push_return_two_word(&mut self) {
+        self.bytecode.push_return_two_word();
     }
 
-    /// Box a unary `Option`/`Result` call return before storing or re-matching.
-    fn emit_pair_to_heap_after_call(&self, bytecode: &mut CodeBuf, lookup_name: &str) {
-        if let Some(is_option) = self.pair_return_kind(lookup_name)
-            && !self.pair_value_context
+    /// `true` when `callee` is a statically resolvable direct call (free
+    /// function, qualified name, or a method whose receiver type is known)
+    /// whose own two-word classification is `enum_name` — i.e. calling it
+    /// leaves `[payload, tag]` matching the caller's own pair shape, so the
+    /// caller can forward the pair without boxing.
+    fn direct_call_two_word_kind(&self, callee: &Output) -> Option<String> {
+        match callee.1.as_ref() {
+            Expression::Identifier(name) => {
+                if self.lookup_slot(name).is_some() {
+                    return None;
+                }
+                let resolved = self.resolve_free_fn(name);
+                self.two_word_return_kind(&resolved)
+                    .or_else(|| self.two_word_return_kind(name))
+            }
+            Expression::QualifiedAccess { owner, member } => {
+                self.two_word_return_kind(&format!("{owner}::{member}"))
+            }
+            Expression::Access(recv, method) => {
+                let owner = self
+                    .receiver_type(recv)
+                    .or_else(|| self.codegen_expr_ty(recv))
+                    .and_then(|ty| Checker::class_name_of_ty(&ty).map(str::to_string))?;
+                if let Some(fqn) = self
+                    .context
+                    .methods
+                    .get(&owner)
+                    .and_then(|m| m.get(*method))
+                    .cloned()
+                {
+                    return self.two_word_return_kind(&fqn);
+                }
+                self.two_word_return_kind(&format!("{owner}::{method}"))
+            }
+            Expression::Group(inner) | Expression::Expr(inner) => {
+                self.direct_call_two_word_kind(inner)
+            }
+            _ => None,
+        }
+    }
+
+    /// `Some(enum_name)` when `expr` is a direct `Call` whose target is
+    /// classified two-word, peeling `Group`/`Expr` wrappers.
+    fn expr_direct_call_two_word_kind(&self, expr: &Output) -> Option<String> {
+        let mut cur = expr;
+        loop {
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        match cur.1.as_ref() {
+            Expression::Call { name, .. } => self.direct_call_two_word_kind(name),
+            _ => None,
+        }
+    }
+
+    /// `true` when `expr` is a direct `Construct` of `enum_name` (peeling
+    /// `Group`/`Expr`), the fast, alloc-free producer of a `[payload, tag]`
+    /// pair for that exact enum. A payload that itself nests a `Construct`/
+    /// `Instantiate` (e.g. `Result::Err(HttpError::NotFound)`) must not take
+    /// this path — `unbox_enum_context` is a plain counter, so compiling
+    /// that nested value under it would wrongly unbox it into a second
+    /// pair too (same hazard `local_escape::payload_contains_construct`
+    /// already fences off for the frame-local case).
+    fn expr_is_construct_of(expr: &Output, enum_name: &str) -> bool {
+        let mut cur = expr;
+        loop {
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        let Expression::Construct {
+            enum_name: en,
+            fields,
+            ..
+        } = cur.1.as_ref()
+        else {
+            return false;
+        };
+        *en == enum_name && !Self::payload_contains_nested_construct(fields)
+    }
+
+    fn payload_contains_nested_construct(fields: &parser::ast::EnumConstructPayload<'_>) -> bool {
+        use parser::ast::EnumConstructPayload;
+        fn nests(expr: &Output) -> bool {
+            let mut cur = expr;
+            loop {
+                match cur.1.as_ref() {
+                    Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                    Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                    _ => break,
+                }
+            }
+            matches!(
+                cur.1.as_ref(),
+                Expression::Construct { .. } | Expression::Instantiate(_, _)
+            )
+        }
+        match fields {
+            EnumConstructPayload::Unit => false,
+            EnumConstructPayload::Tuple(args) => args.iter().any(nests),
+            EnumConstructPayload::Record(parts) => parts.iter().any(|p| nests(&p.value)),
+        }
+    }
+
+    /// Compile `expr` (the value returned from a two-word `enum_name`
+    /// function) as `[payload, tag]` for a two-slot `RETURN`. Prefers the
+    /// alloc-free paths — a direct `Construct` of `enum_name`, or a
+    /// pass-through direct `CALL` of another two-word function returning the
+    /// same enum — and falls back to ordinary (boxed) compilation plus an
+    /// unbox cascade for anything else (e.g. a variable, a nested match).
+    fn emit_two_word_return_value(&mut self, bytecode: &mut CodeBuf, expr: &Output, enum_name: &str) {
+        let is_fast_construct = Self::expr_is_construct_of(expr, enum_name);
+        let is_fast_call = !is_fast_construct
+            && self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
+        if is_fast_construct || is_fast_call {
+            self.unbox_enum_context += 1;
+            self.append_with_existential_pack(bytecode, expr);
+            self.unbox_enum_context -= 1;
+            return;
+        }
+        // Result-mode implicit auto-wrap: a bare `return v` that is not
+        // itself a `Result` construct means `return Result::Ok(v)`. The raw
+        // value already *is* the `Ok` payload for a two-word Result (`Ok`
+        // is always an immediate for this layout) — no unbox needed.
+        if enum_name == common::BUILTIN_RESULT_ENUM
+            && self.compiling_result_mode
+            && !self.skip_result_ok_wrap_for_return(expr)
         {
-            bytecode.push(
-                Byte::new(Instruction::PairToHeap)
-                    .with_operand_u32(u32::from(is_option)),
+            self.append_with_existential_pack(bytecode, expr);
+            bytecode.push_const(0); // Ok's builtin tag
+            return;
+        }
+        self.append_with_existential_pack(bytecode, expr);
+        Self::emit_unbox_enum_to_pair(&self.checker, bytecode, enum_name);
+    }
+
+    /// Convert the boxed `ObjEnum` pointer on top of `bytecode`'s stack into
+    /// `[payload, tag]` using only generic opcodes (`JumpIfMatch` / `Unpack`
+    /// / `CONST` / `JMP`) — one branch per declared variant besides the last,
+    /// which needs no jump. Never a new opcode (task cut): the same
+    /// dispatch `compile_match_expr_boxed` already emits for a boxed match.
+    /// A free function (not `&self`) so callers can pass `&self.checker`
+    /// alongside `&mut self.bytecode` without a borrow conflict.
+    fn emit_unbox_enum_to_pair(checker: &Checker, bytecode: &mut CodeBuf, enum_name: &str) {
+        let Some(mut variants) = checker.enum_variants(enum_name).filter(|v| !v.is_empty()) else {
+            bytecode.push_pop();
+            bytecode.push_const(0);
+            bytecode.push_const(0);
+            return;
+        };
+        let last = variants.pop().expect("checked non-empty");
+        let mut bb = BlockBuilder::new();
+        let end = bb.fresh_label(bytecode.il_mut());
+        let mut hit_labels = Vec::with_capacity(variants.len());
+        for (_, tag, payload) in &variants {
+            let label = bb.fresh_label(bytecode.il_mut());
+            hit_labels.push(label);
+            bb.emit_jump_to(
+                label,
+                BbJumpKind::JumpIfMatch {
+                    tag: *tag,
+                    arity: payload.len() as u32,
+                },
+                bytecode.il_mut(),
             );
         }
-    }
-
-    fn expr_is_pair_producer(&self, expr: &Output) -> bool {
-        self.expr_pair_producer_kind(expr).is_some()
-    }
-
-    /// `Some(is_option)` when the expression is emitted in the pair ABI, i.e. it
-    /// leaves `[payload, tag]` rather than a heap enum.
-    fn expr_pair_producer_kind(&self, _expr: &Output) -> Option<bool> {
-        None
-    }
-
-    /// True when the expression yields a pair that *is* the enclosing function's
-    /// return enum, so its tag can serve as the `ReturnPair` tag. An enum of the
-    /// other kind — or a same-kind enum nested one level down, as in
-    /// `Result<Result<int, E>, E>` — is an ordinary payload and must be boxed.
-    fn expr_pairs_with_return(&self, expr: &Output) -> bool {
-        self.compiling_pair_mode
-            && self.expr_pair_producer_kind(expr) == Some(self.compiling_pair_is_option)
-            && self.expr_ty_is_return_ty(expr)
-    }
-
-    /// `Some(is_option)` when a heap `expr` holds the very enum the enclosing
-    /// pair-mode function returns, so it can be split into `[payload, tag]`
-    /// rather than boxed as an `Ok`/`Some` payload.
-    fn expr_is_return_enum(&self, expr: &Output) -> Option<bool> {
-        let kind = self.expr_pair_enum_kind(expr)?;
-        (kind == self.compiling_pair_is_option && self.expr_ty_is_return_ty(expr)).then_some(kind)
-    }
-
-    /// Whether the expression's type is the enclosing function's return type.
-    /// Unknown on either side counts as a match: the caller has already checked
-    /// the enum kind, and that is then all the evidence there is.
-    fn expr_ty_is_return_ty(&self, expr: &Output) -> bool {
-        match (self.codegen_expr_ty(expr), self.compiling_fn_return_ty()) {
-            (Some(expr_ty), Some(ret_ty)) => Self::enum_nesting_eq(&expr_ty, &ret_ty),
-            _ => true,
+        // Fallthrough: every `JumpIfMatch` above missed (peek-only), so the
+        // enum pointer is still on the stack as the last variant.
+        let (_, last_tag, last_payload) = &last;
+        bytecode.push(Byte::new(Instruction::Unpack).with_operand_u32(last_payload.len() as u32));
+        if last_payload.is_empty() {
+            bytecode.push_const(0);
         }
+        bytecode.push_const(*last_tag as i32);
+        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        for (label, (_, tag, payload)) in hit_labels.into_iter().zip(variants.iter()) {
+            bb.bind_label(label, bytecode.il_mut());
+            // `JumpIfMatch` already popped the enum and pushed the payload.
+            if payload.is_empty() {
+                bytecode.push_const(0);
+            }
+            bytecode.push_const(*tag as i32);
+            bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        }
+        bb.bind_label(end, bytecode.il_mut());
     }
 
-    /// Compare two types by how deeply `Option`/`Result` nest in them, so that
-    /// `Result<int, E>` and `Result<Result<int, E>, E>` are told apart. Peeling
-    /// with the `ty` accessors keeps this blind to which shape (`App`, `Sum`,
-    /// `Constructor`) each side happens to carry.
-    fn enum_nesting_eq(a: &Ty, b: &Ty) -> bool {
-        use crate::typechecking::ty::{option_inner, result_ok_err};
-        match (result_ok_err(a), result_ok_err(b)) {
-            (Some((a_ok, _)), Some((b_ok, _))) => return Self::enum_nesting_eq(&a_ok, &b_ok),
-            (Some(_), None) | (None, Some(_)) => return false,
-            (None, None) => {}
+    /// Box the `[payload, tag]` pair (tag on top) left by a direct two-word
+    /// `CALL` into an `ObjEnum`, using `STORE` / `LOAD` / `EQ` / `JMPF` /
+    /// `MakeEnum` — one branch per declared variant besides the last, which
+    /// needs no compare. Called whenever a two-word call's result is not
+    /// immediately matched or forwarded as another pair.
+    fn emit_box_pair_to_enum(
+        checker: &Checker,
+        bytecode: &mut CodeBuf,
+        enum_name: &str,
+        tag_slot: u32,
+        payload_slot: u32,
+    ) {
+        let Some(mut variants) = checker.enum_variants(enum_name).filter(|v| !v.is_empty()) else {
+            bytecode.push_pop();
+            bytecode.push_pop();
+            bytecode.push_make_enum(0, 0);
+            return;
+        };
+        bytecode.push_store_pop(tag_slot);
+        bytecode.push_store_pop(payload_slot);
+        let last = variants.pop().expect("checked non-empty");
+        let mut bb = BlockBuilder::new();
+        let end = bb.fresh_label(bytecode.il_mut());
+        for (_, tag, payload) in &variants {
+            let miss = bb.fresh_label(bytecode.il_mut());
+            bytecode.push_load(tag_slot);
+            bytecode.push_const(*tag as i32);
+            bytecode.push(Byte::new(Instruction::EQ));
+            bb.emit_jump_to_hinted(
+                miss,
+                BbJumpKind::JumpIfFalse,
+                FuseHint::nofuse_value_under_jmp(),
+                bytecode.il_mut(),
+            );
+            if !payload.is_empty() {
+                bytecode.push_load(payload_slot);
+            }
+            bytecode.push_make_enum(*tag as u16, payload.len() as u16);
+            bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+            bb.bind_label(miss, bytecode.il_mut());
         }
-        match (option_inner(a), option_inner(b)) {
-            (Some(a_inner), Some(b_inner)) => Self::enum_nesting_eq(&a_inner, &b_inner),
-            (Some(_), None) | (None, Some(_)) => false,
-            (None, None) => a == b,
+        let (_, last_tag, last_payload) = &last;
+        if !last_payload.is_empty() {
+            bytecode.push_load(payload_slot);
         }
+        bytecode.push_make_enum(*last_tag as u16, last_payload.len() as u16);
+        bb.bind_label(end, bytecode.il_mut());
+    }
+
+    /// Box the `[payload, tag]` pair left by a direct two-word `CALL` into
+    /// an `ObjEnum` (allocates the two temp slots, then delegates to
+    /// [`Self::emit_box_pair_to_enum`]).
+    fn emit_box_pair_after_call(&mut self, bytecode: &mut CodeBuf, enum_name: &str) {
+        // The CALL just left `[payload, tag]` live on the operand stack
+        // above any interned locals — count both so `alloc_temp_slot`
+        // cannot hand out a slot that aliases either value (it would
+        // otherwise corrupt one of them: `STORE` pops-then-writes one
+        // slot at a time, so a self-aliasing multi-slot STORE clobbers
+        // the first slot before its old value is popped for the second).
+        self.expr_depth += 2;
+        let tag_slot = self.alloc_temp_slot();
+        let payload_slot = self.alloc_temp_slot();
+        self.expr_depth -= 2;
+        Self::emit_box_pair_to_enum(&self.checker, bytecode, enum_name, tag_slot, payload_slot);
     }
 
     /// Return type of the function whose body is being compiled.
@@ -7944,10 +8127,6 @@ impl Compiler {
         self.checker
             .fn_return_ty(name)
             .or_else(|| self.fn_return_ty(name))
-    }
-
-    fn expr_pair_enum_kind(&self, _expr: &Output) -> Option<bool> {
-        None
     }
 
     fn emit_host_option_boundary(&mut self, expr: &Output) {
@@ -7967,9 +8146,14 @@ impl Compiler {
     fn emit_fallthrough_return(&mut self, _name: &str, _span: SimpleSpan) {
         self.emit_run_defers();
         self.bytecode.push_const(0);
-        if self.compiling_pair_mode {
+        if self.compiling_two_word_enum.is_some() {
+            // Unreachable for a genuine two-word layout in well-typed code
+            // (Ok/inner is required to be an immediate, never unit) — HM
+            // already diagnoses non-unit fall-through as E0111. Keep this
+            // a safe no-alloc default: payload `0`, tag `0` (Ok / first
+            // variant), same shape as any other pair.
             self.bytecode.push_const(0);
-            self.push_return_pair();
+            self.push_return_two_word();
         } else if self.compiling_result_mode {
             self.wrap_result_ok_on_stack();
             self.bytecode.push_return();
@@ -8076,16 +8260,13 @@ impl Compiler {
         let prev_result_ok_is_result = self.compiling_result_ok_is_result;
         self.compiling_result_mode = self.checker.fn_is_result_mode(name);
         self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
-        let prev_pair_mode = self.compiling_pair_mode;
-        let prev_pair_is_option = self.compiling_pair_is_option;
-        let pair_kind = if *is_coro {
-            self.pin_pair_return_kind(&qualified, None);
+        let prev_two_word_enum = self.compiling_two_word_enum.clone();
+        self.compiling_two_word_enum = if *is_coro {
+            self.pin_two_word_return_kind(&qualified, None);
             None
         } else {
-            self.pair_return_kind(&qualified)
+            self.two_word_return_kind(&qualified)
         };
-        self.compiling_pair_mode = pair_kind.is_some();
-        self.compiling_pair_is_option = pair_kind.unwrap_or(false);
         let prev_fn_defers = std::mem::take(&mut self.fn_defers);
 
         let mut a = self.do_compile(args);
@@ -8112,8 +8293,7 @@ impl Compiler {
         self.fn_defers = prev_fn_defers;
         self.compiling_result_mode = prev_result_mode;
         self.compiling_result_ok_is_result = prev_result_ok_is_result;
-        self.compiling_pair_mode = prev_pair_mode;
-        self.compiling_pair_is_option = prev_pair_is_option;
+        self.compiling_two_word_enum = prev_two_word_enum;
         self.context.variables = prev_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.context.unboxed_class_locals = prev_unboxed_class;
@@ -11407,16 +11587,13 @@ impl Compiler {
                 let prev_result_ok_is_result = self.compiling_result_ok_is_result;
                 self.compiling_result_mode = self.checker.fn_is_result_mode(name);
                 self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
-                let prev_pair_mode = self.compiling_pair_mode;
-                let prev_pair_is_option = self.compiling_pair_is_option;
-                let pair_kind = if *is_coro {
-                    self.pin_pair_return_kind(&table_key, None);
+                let prev_two_word_enum = self.compiling_two_word_enum.clone();
+                self.compiling_two_word_enum = if *is_coro {
+                    self.pin_two_word_return_kind(&table_key, None);
                     None
                 } else {
-                    self.pair_return_kind(&table_key)
+                    self.two_word_return_kind(&table_key)
                 };
-                self.compiling_pair_mode = pair_kind.is_some();
-                self.compiling_pair_is_option = pair_kind.unwrap_or(false);
 
                 let mut a = self.do_compile(args);
 
@@ -11471,8 +11648,7 @@ impl Compiler {
                 self.fn_defers = prev_fn_defers;
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
-                self.compiling_pair_mode = prev_pair_mode;
-                self.compiling_pair_is_option = prev_pair_is_option;
+                self.compiling_two_word_enum = prev_two_word_enum;
                 self.pop_const_env();
                 if !self.compiling_method {
                     self.checker.set_current_function(prev_checker_fn);
@@ -11703,7 +11879,7 @@ impl Compiler {
             Expression::Invoke(args) => self.emit_ffi_invoke(*span, args),
             Expression::Return(expr) | Expression::ImplicitReturn(expr) => {
                 let tail_match = self.return_is_tail_match(expr);
-                if !self.compiling_pair_mode
+                if self.compiling_two_word_enum.is_none()
                     && !tail_match
                     && self.try_emit_tail_call_expr(expr, &mut bytecode)
                 {
@@ -11724,26 +11900,14 @@ impl Compiler {
                 // Each defer thunk returns a sentinel that we POP so the
                 // pending return value stays on top for RETURN.
                 // Flush the value into `self.bytecode` before labeled defers.
-                let pair_expr = self.expr_pairs_with_return(expr);
-                let pair_enum_kind = self.expr_is_return_enum(expr);
-                let previous_pair_context = self.pair_value_context;
-                self.pair_value_context = pair_expr;
-                self.append_with_existential_pack(&mut bytecode, expr);
-                self.pair_value_context = previous_pair_context;
+                if let Some(enum_name) = self.compiling_two_word_enum.clone() {
+                    self.emit_two_word_return_value(&mut bytecode, expr, &enum_name);
+                } else {
+                    self.append_with_existential_pack(&mut bytecode, expr);
+                }
                 self.match_tail_call = false;
                 // Result-mode functions: bare `return v` becomes `Ok(v)`.
-                if self.compiling_pair_mode {
-                    if !pair_expr {
-                        if let Some(is_option) = pair_enum_kind {
-                            bytecode.push(
-                                Byte::new(Instruction::HeapToPair)
-                                    .with_operand_u32(u32::from(is_option)),
-                            );
-                        } else {
-                            bytecode.push_const(0);
-                        }
-                    }
-                } else if self.compiling_result_mode {
+                if self.compiling_two_word_enum.is_none() && self.compiling_result_mode {
                     // Explicit flat `return Result::Ok/Err` already builds the
                     // enum — do not Ok-wrap again (COI-113). Nested Result Ok
                     // payloads still wrap.
@@ -11756,8 +11920,8 @@ impl Compiler {
                 self.bytecode.append(&mut bytecode);
                 self.emit_run_defers();
                 if !matches!(child.borrow(), Expression::ImplicitReturn(_)) {
-                    if self.compiling_pair_mode {
-                        self.push_return_pair();
+                    if self.compiling_two_word_enum.is_some() {
+                        self.push_return_two_word();
                     } else {
                         self.bytecode.push_return();
                     }
@@ -13450,11 +13614,8 @@ impl Compiler {
                 self.compiling_result_mode = self.checker.fn_is_result_mode(&fn_name);
                 self.compiling_result_ok_is_result =
                     self.checker.fn_result_ok_is_result(&fn_name);
-                let prev_pair_mode = self.compiling_pair_mode;
-                let prev_pair_is_option = self.compiling_pair_is_option;
-                let pair_kind = self.pair_return_kind(&fn_name);
-                self.compiling_pair_mode = pair_kind.is_some();
-                self.compiling_pair_is_option = pair_kind.unwrap_or(false);
+                let prev_two_word_enum = self.compiling_two_word_enum.clone();
+                self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
 
                 let body_op_start = self.bytecode.ops().len();
                 let prev_field_keys = std::mem::take(&mut self.field_key_slots);
@@ -13482,8 +13643,7 @@ impl Compiler {
 
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
-                self.compiling_pair_mode = prev_pair_mode;
-                self.compiling_pair_is_option = prev_pair_is_option;
+                self.compiling_two_word_enum = prev_two_word_enum;
                 self.field_key_slots = prev_field_keys;
                 self.context.variables = prev_fn_vars;
                 self.polyfn_vars = prev_fn_polyfn_vars;
@@ -13632,18 +13792,20 @@ impl Compiler {
 
             // --- Error-handling operators (desugar to MakeEnum / JumpIfMatch) ---
             Expression::Raise(expr) => {
-                // `raise e` → push e, wrap Err(e), RETURN.
+                // `raise e` → push e, wrap Err(e), RETURN. `raise` only
+                // targets Result-mode functions, so `Err`'s builtin tag (`1`)
+                // is always correct when the enclosing function is two-word.
                 let mut expr_bc = self.do_compile(expr);
                 self.emit_bytes(*span, &mut expr_bc);
-                if self.compiling_pair_mode {
+                if self.compiling_two_word_enum.is_some() {
                     self.bytecode.push_const(1);
                 } else {
                     self.wrap_result_err_on_stack();
                 }
                 self.pad_debug_locs();
                 let loc = self.loc_from_span(*span);
-                if self.compiling_pair_mode {
-                    self.push_return_pair();
+                if self.compiling_two_word_enum.is_some() {
+                    self.push_return_two_word();
                 } else {
                     self.bytecode.push_return_at(loc);
                 }
@@ -13685,45 +13847,18 @@ impl Compiler {
             }
             Expression::Try(inner) => {
                 // `e?` → if Ok/Some, leave payload; else RETURN the failure.
+                // `inner` always compiles to its ordinary (boxed / niche)
+                // representation here — two-word calls auto-box unless
+                // immediately consumed, and `?` never opts into that.
                 let is_option = self.expr_is_option(inner);
                 let success_tag: u32 = if is_option { 1 } else { 0 }; // Some=1, Ok=0
 
-                let pair_inner = self.expr_pairs_with_return(inner);
-                // Mismatched Ok/Some payloads still leave a ReturnPair on the
-                // stack (`pair_producer`); keep pair context so the call is not
-                // boxed before the tag check below.
-                let pair_producer =
-                    self.compiling_pair_mode && self.expr_is_pair_producer(inner);
-                let previous_pair_context = self.pair_value_context;
-                self.pair_value_context = pair_inner || pair_producer;
                 let mut inner_bc = self.do_compile(inner);
-                self.pair_value_context = previous_pair_context;
                 self.bytecode.append(&mut inner_bc);
 
                 let mut bb = BlockBuilder::new();
                 let success = bb.fresh_label(self.bytecode.il_mut());
-                if pair_inner || pair_producer {
-                    let failure = bb.fresh_label(self.bytecode.il_mut());
-                    let after_failure = bb.fresh_label(self.bytecode.il_mut());
-                    self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-                    self.bytecode.push_const(success_tag as i32);
-                    self.bytecode.push(Byte::new(Instruction::EQ));
-                    bb.emit_jump_to_hinted(
-                        failure,
-                        BbJumpKind::JumpIfFalse,
-                        FuseHint::nofuse_value_under_jmp(),
-                        self.bytecode.il_mut(),
-                    );
-                    self.bytecode.push_pop();
-                    bb.emit_jump_to(
-                        after_failure,
-                        BbJumpKind::Unconditional,
-                        self.bytecode.il_mut(),
-                    );
-                    bb.bind_label(failure, self.bytecode.il_mut());
-                    self.push_return_pair();
-                    bb.bind_label(after_failure, self.bytecode.il_mut());
-                } else if self.expr_is_niche_option(inner) {
+                if self.expr_is_niche_option(inner) {
                     Self::push_niche_eq_zero(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -13731,11 +13866,13 @@ impl Compiler {
                         FuseHint::nofuse_value_under_jmp(),
                         self.bytecode.il_mut(),
                     );
-                    if self.compiling_pair_mode {
+                    if self.compiling_two_word_enum.is_some() {
+                        // `?` on Option requires the enclosing function to
+                        // also return Option — `None`'s builtin tag is `0`.
                         self.bytecode.push_pop();
                         self.bytecode.push_const(0);
                         self.bytecode.push_const(0);
-                        self.push_return_pair();
+                        self.push_return_two_word();
                     } else {
                         self.bytecode.push_return();
                     }
@@ -13748,30 +13885,18 @@ impl Compiler {
                         FuseHint::nofuse_value_under_jmp(),
                         self.bytecode.il_mut(),
                     );
-                    if self.compiling_pair_mode {
+                    if self.compiling_two_word_enum.is_some() {
+                        // Clear the niche `Err` bit to recover the real
+                        // payload, then tag it `1` (`Err`'s builtin tag).
+                        Self::push_result_untag(&mut self.bytecode);
                         self.bytecode.push_const(1);
-                        self.push_return_pair();
+                        self.push_return_two_word();
                     } else {
                         if !self.return_is_niche_result() {
                             Self::emit_niche_result_to_boxed(&mut self.bytecode);
                         }
                         self.bytecode.push_return();
                     }
-                    bb.bind_label(success, self.bytecode.il_mut());
-                } else if self.compiling_pair_mode {
-                    bb.emit_jump_to(
-                        success,
-                        BbJumpKind::JumpIfMatch {
-                            tag: success_tag,
-                            arity: 1,
-                        },
-                        self.bytecode.il_mut(),
-                    );
-                    self.bytecode.push(
-                        Byte::new(Instruction::HeapToPair)
-                            .with_operand_u32(u32::from(is_option)),
-                    );
-                    self.push_return_pair();
                     bb.bind_label(success, self.bytecode.il_mut());
                 } else {
                     bb.emit_jump_to(
@@ -13782,9 +13907,13 @@ impl Compiler {
                         },
                         self.bytecode.il_mut(),
                     );
-                    // Miss: failure value still on stack — propagate via
-                    // the ordinary boxed return.
-                    self.bytecode.push_return();
+                    // Miss: failure value (boxed `ObjEnum`) still on stack.
+                    if let Some(enum_name) = self.compiling_two_word_enum.clone() {
+                        Self::emit_unbox_enum_to_pair(&self.checker, &mut self.bytecode, &enum_name);
+                        self.push_return_two_word();
+                    } else {
+                        self.bytecode.push_return();
+                    }
                     bb.bind_label(success, self.bytecode.il_mut());
                 }
                 // Payload left on stack for the caller (e.g. StorePop).
@@ -13831,16 +13960,9 @@ impl Compiler {
                 let niche_lhs = self.expr_is_niche_option(lhs);
                 let niche_result_lhs = self.expr_is_niche_result(lhs);
 
-                let direct_pair_lhs = matches!(
-                    lhs.1.as_ref(),
-                    Expression::Call { .. } | Expression::Construct { .. }
-                );
-                let pair_lhs = !niche_lhs
-                    && !niche_result_lhs
-                    && self.expr_is_pair_producer(lhs)
-                    && (self.compiling_pair_mode || direct_pair_lhs);
-                let previous_pair_context = self.pair_value_context;
-                self.pair_value_context = pair_lhs;
+                // `lhs` always compiles to its ordinary (boxed / niche)
+                // representation — a two-word call auto-boxes unless
+                // immediately consumed, and `??` never opts into that.
                 let previous_niche_context = self.force_niche_option;
                 self.force_niche_option = niche_lhs;
                 let previous_result_niche = self.force_niche_result;
@@ -13848,33 +13970,12 @@ impl Compiler {
                 let mut lhs_bc = self.do_compile(lhs);
                 self.force_niche_result = previous_result_niche;
                 self.force_niche_option = previous_niche_context;
-                self.pair_value_context = previous_pair_context;
                 self.bytecode.append(&mut lhs_bc);
 
                 let mut bb = BlockBuilder::new();
                 let success = bb.fresh_label(self.bytecode.il_mut());
                 let end = bb.fresh_label(self.bytecode.il_mut());
-                if pair_lhs {
-                    let failure = bb.fresh_label(self.bytecode.il_mut());
-                    self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-                    self.bytecode.push_const(success_tag as i32);
-                    self.bytecode.push(Byte::new(Instruction::EQ));
-                    bb.emit_jump_to_hinted(
-                        failure,
-                        BbJumpKind::JumpIfFalse,
-                        FuseHint::nofuse_value_under_jmp(),
-                        self.bytecode.il_mut(),
-                    );
-                    self.bytecode.push_pop();
-                    bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
-                    bb.bind_label(failure, self.bytecode.il_mut());
-                    self.bytecode.push_pop();
-                    self.bytecode.push_pop();
-                    let mut rhs_bc = self.do_compile(rhs);
-                    self.bytecode.append(&mut rhs_bc);
-                    bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
-                    bb.bind_label(success, self.bytecode.il_mut());
-                } else if niche_lhs {
+                if niche_lhs {
                     Self::push_niche_eq_zero(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -14108,8 +14209,7 @@ impl Compiler {
         self.force_heap_result = false;
         self.force_niche_result = false;
         self.unbox_enum_context = 0;
-        self.compiling_pair_mode = false;
-        self.pair_value_context = false;
+        self.compiling_two_word_enum = None;
         // Peel/unroll must not see other modules' bodies (label/CFG mix-up).
         self.fn_bytecode_spans.clear();
         if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {

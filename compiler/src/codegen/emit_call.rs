@@ -293,7 +293,6 @@ impl Compiler {
                 if !self.emit_direct_fn_call(&mut bytecode, &fqn, nargs) {
                     self.missing_call_target(&fqn, span.into_range());
                 }
-                self.emit_pair_to_heap_after_call(&mut bytecode, &fqn);
                 return bytecode;
             }
 
@@ -545,10 +544,6 @@ impl Compiler {
                             Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                         }
                     }
-                    self.emit_pair_to_heap_after_call(
-                        &mut bytecode,
-                        strip_overload_key(&fqn),
-                    );
                 } else {
                     let mut message = Message::error(
                         ErrorCode::UnknownFunction,
@@ -791,7 +786,7 @@ impl Compiler {
                 let mono_offset = self.mono_call_offset(&n, args.as_ref());
                 let target_offset = mono_offset.or(offset);
                 let lookup_name = strip_overload_key(&n).to_string();
-                let pair_kind = self.pair_return_kind(&lookup_name);
+                let pair_kind = self.two_word_return_kind(&lookup_name);
                 let is_generic_src = self.checker.is_generic_fn(&lookup_name);
                 let is_generic = is_generic_src && mono_offset.is_none();
                 // Only box bare `T` args for the shared dict ABI. Nested
@@ -984,9 +979,19 @@ impl Compiler {
                 } else {
                     crate::il::EntryKind::Call
                 };
+                let two_word = matches!(entry_kind, crate::il::EntryKind::Call)
+                    .then(|| pair_kind.clone())
+                    .flatten();
+                let ret_words = if two_word.is_some() { 2 } else { 1 };
                 if let Some(off) = mono_offset {
-                    bytecode.push(Self::packed_entry_byte(entry_kind, arity, off as u32));
-                } else if !self.emit_named_entry(&mut bytecode, &n, arity, entry_kind) {
+                    bytecode.push(Self::packed_entry_byte_ret(
+                        entry_kind,
+                        arity,
+                        off as u32,
+                        ret_words,
+                    ));
+                } else if !self.emit_named_entry_ret(&mut bytecode, &n, arity, entry_kind, ret_words)
+                {
                     self.missing_call_target(&n, span.into_range());
                 }
                 let vec_option_call = [
@@ -1000,8 +1005,10 @@ impl Compiler {
                 {
                     Self::emit_boxed_option_to_niche(&mut bytecode);
                 }
-                if pair_kind.is_some() && !self.pair_value_context {
-                    self.emit_pair_to_heap_after_call(&mut bytecode, &lookup_name);
+                if let Some(enum_name) = two_word {
+                    if self.unbox_enum_context == 0 {
+                        self.emit_box_pair_after_call(&mut bytecode, &enum_name);
+                    }
                 }
                 // Generic→concrete unbox: only when the return type
                 // parameter was boxed as a top-level argument
@@ -1020,7 +1027,6 @@ impl Compiler {
             } else if self.fn_entry_labels.contains_key(&n) {
                 // Reserved by phased emit (COI-109) but body not yet bound.
                 let lookup_name = strip_overload_key(&n).to_string();
-                let pair_kind = self.pair_return_kind(&lookup_name);
                 let arg_slice = args.as_deref().unwrap_or(&[]);
                 self.consume_spread_emit_ids(arg_slice);
                 let value_arity = self.emit_call_args_with_rest(
@@ -1040,9 +1046,6 @@ impl Compiler {
                         span.into_range(),
                     ));
                     self.messages.push(message);
-                }
-                if pair_kind.is_some() && !self.pair_value_context {
-                    self.emit_pair_to_heap_after_call(&mut bytecode, &lookup_name);
                 }
             } else if let Some(slot) = self.lookup_slot(&identifier) {
                 // Local holding a function value: escaped PolyFn
@@ -1097,15 +1100,6 @@ impl Compiler {
                     Byte::new(Instruction::CallIndirect)
                         .with_operand_u32(value_arity | (dict_count << 16)),
                 );
-                if polyfn_source.is_none()
-                    && !self.pair_value_context
-                    && let Some(is_option) = self.expr_pair_enum_kind(ast)
-                {
-                    bytecode.push(
-                        Byte::new(Instruction::PairToHeap)
-                            .with_operand_u32(u32::from(is_option)),
-                    );
-                }
                 // Generic→concrete unbox for polyfn call site.
                 if self.local_polyfn_call_needs_unbox(
                     &identifier,
@@ -1179,7 +1173,57 @@ impl Compiler {
         arity: u32,
         kind: crate::il::EntryKind,
     ) -> bool {
-        self.emit_named_entry_ret(dest, name, arity, kind, 1)
+        match kind {
+            crate::il::EntryKind::Call => {
+                let two_word = self.two_word_return_kind(name);
+                let ret_words = if two_word.is_some() { 2 } else { 1 };
+                let ok = self.emit_named_entry_ret(dest, name, arity, kind, ret_words);
+                if ok
+                    && self.unbox_enum_context == 0
+                    && let Some(enum_name) = two_word
+                {
+                    self.emit_box_pair_after_call(dest, &enum_name);
+                }
+                ok
+            }
+            crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn => {
+                if !self.deny_two_word_address_of(name, 0..0) {
+                    return false;
+                }
+                self.emit_named_entry_ret(dest, name, arity, kind, 1)
+            }
+            _ => self.emit_named_entry_ret(dest, name, arity, kind, 1),
+        }
+    }
+
+    /// `true` when `name`'s two-word classification is safe to ignore here
+    /// (i.e. it stays one word — the common case). `false` when `name`
+    /// returns a known two-word layout: this call site takes its address
+    /// (`CodePtr` / `MakePolyFn` / FFI callback / partial application),
+    /// which needs the one-word ABI (task cut: `CallIndirect`, PolyFn,
+    /// FFI, coroutines keep boxed `ObjEnum`). Records a diagnostic instead
+    /// of silently mis-encoding the target as a unary entry.
+    pub(super) fn deny_two_word_address_of(
+        &mut self,
+        name: &str,
+        range: std::ops::Range<usize>,
+    ) -> bool {
+        let Some(enum_name) = self.two_word_return_kind(name) else {
+            return true;
+        };
+        let mut message = Message::error(
+            ErrorCode::CodegenError,
+            format!(
+                "`{name}` returns a known two-word `{enum_name}` layout and cannot be used as a function value"
+            ),
+            range.clone(),
+        );
+        message.push(DiagLabel::new(
+            "direct calls are fine; taking its address (assigning it, passing it as a callback, or partially applying it) is not supported for this return layout".to_string(),
+            range,
+        ));
+        self.messages.push(message);
+        false
     }
 
     /// Same as [`Self::emit_named_entry`] with an explicit `CALL` return
@@ -1218,7 +1262,29 @@ impl Compiler {
         arity: u32,
         kind: crate::il::EntryKind,
     ) -> bool {
-        self.emit_named_entry_on_module_ret(name, arity, kind, 1)
+        match kind {
+            crate::il::EntryKind::Call => {
+                let two_word = self.two_word_return_kind(name);
+                let ret_words = if two_word.is_some() { 2 } else { 1 };
+                let ok = self.emit_named_entry_on_module_ret(name, arity, kind, ret_words);
+                if ok
+                    && self.unbox_enum_context == 0
+                    && let Some(enum_name) = two_word
+                {
+                    let mut bytecode = std::mem::take(&mut self.bytecode);
+                    self.emit_box_pair_after_call(&mut bytecode, &enum_name);
+                    self.bytecode = bytecode;
+                }
+                ok
+            }
+            crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn => {
+                if !self.deny_two_word_address_of(name, 0..0) {
+                    return false;
+                }
+                self.emit_named_entry_on_module_ret(name, arity, kind, 1)
+            }
+            _ => self.emit_named_entry_on_module_ret(name, arity, kind, 1),
+        }
     }
 
     /// Same as [`Self::emit_named_entry_on_module`] with an explicit `CALL`
@@ -1242,10 +1308,6 @@ impl Compiler {
         } else {
             false
         }
-    }
-
-    pub(super) fn packed_entry_byte(kind: crate::il::EntryKind, arity: u32, offset: u32) -> Byte {
-        Self::packed_entry_byte_ret(kind, arity, offset, 1)
     }
 
     pub(super) fn packed_entry_byte_ret(

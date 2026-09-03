@@ -794,11 +794,11 @@ pub struct Compiler {
     /// Qualified names of `async fn` declarations (emit `MakeCoro` at call sites).
     coroutine_fns: std::collections::HashSet<String>,
 
-    /// Memoized pair-ABI verdicts, keyed by the name codegen looks a function up
-    /// by. The type env fills in as bodies are compiled, so an unmemoized query
-    /// can answer differently for a body and for a later caller — see
-    /// [`Compiler::pair_return_kind`].
-    pair_return_kinds: std::cell::RefCell<HashMap<String, Option<bool>>>,
+    /// Memoized two-word-return verdicts (enum name or boxed), keyed by the
+    /// name codegen looks a function up by. The type env fills in as bodies
+    /// are compiled, so an unmemoized query can answer differently for a
+    /// body and for a later caller — see [`Compiler::two_word_return_kind`].
+    pair_return_kinds: std::cell::RefCell<HashMap<String, Option<String>>>,
 
     /// Counter for compiler-generated temporary slots.
     temp_counter: u32,
@@ -883,16 +883,11 @@ pub struct Compiler {
     /// in locals / on the stack instead of `MakeEnum`.
     unbox_enum_context: u32,
 
-    /// Emit and consume the two-slot `[payload, tag]` ABI for a unary
-    /// `Option`/`Result` return while compiling a statically known function.
-    compiling_pair_mode: bool,
-    /// Whether [`Self::compiling_pair_mode`]'s return is an `Option` (tag 0 is
-    /// then payload-less `None`). Travels in the `ReturnPair` operand so a host
-    /// entry can re-box the pair.
-    compiling_pair_is_option: bool,
-    /// The current expression is allowed to remain in the pair ABI instead of
-    /// being materialized back into a heap enum.
-    pair_value_context: bool,
+    /// Enum name when the function whose body is being compiled uses the
+    /// two-slot `[payload, tag]` `CALL`/`RETURN` ABI for a known ≤2-word
+    /// return layout (`None` while boxed `ObjEnum` / niche / unbounded `T`).
+    /// See [`Compiler::two_word_return_kind`].
+    compiling_two_word_enum: Option<String>,
 
     /// Harness metadata: `(description, bytecode offset)` for each
     /// top-level `test("…") { … }` case, in source order.
@@ -1038,10 +1033,8 @@ impl Default for Compiler {
             force_heap_result: false,
             force_niche_result: false,
             unbox_enum_context: 0,
-            compiling_pair_mode: false,
-            compiling_pair_is_option: false,
+            compiling_two_word_enum: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
-            pair_value_context: false,
             test_cases: Vec::new(),
             user_main_defined: false,
             include_tests: false,
