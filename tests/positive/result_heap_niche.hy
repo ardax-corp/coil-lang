@@ -32,12 +32,14 @@ test("result heap try and coalesce") {
 
 test("ok is not err even with the same object") {
     let n = new Node(1);
-    let same_ok = Result::Ok(n) == Result::Ok(n);
-    let same_err = Result::Err(n) == Result::Err(n);
-    let mixed = Result::Ok(n) == Result::Err(n);
-    assert(same_ok)?;
-    assert(same_err)?;
-    assert(!mixed)?;
+    let ok: Result<Node, Node> = Result::Ok(n);
+    let err: Result<Node, Node> = Result::Err(n);
+    assert(ok == ok)?;
+    assert(err == err)?;
+    assert(!(ok == err))?;
+    assert(Result::Ok(n) == Result::Ok(n))?;
+    assert(Result::Err(n) == Result::Err(n))?;
+    assert(!(Result::Ok(n) == Result::Err(n)))?;
 }
 
 test("err payload survives gc") {
