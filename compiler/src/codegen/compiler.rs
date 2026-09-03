@@ -545,6 +545,30 @@ impl Compiler {
             }
         }
 
+        if self.should_niche_result_construct(enum_name, ast) {
+            match (variant_name, fields) {
+                ("Ok", EnumConstructPayload::Tuple(args)) if args.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&args[0]));
+                    return bytecode;
+                }
+                ("Ok", EnumConstructPayload::Record(parts)) if parts.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&parts[0].value));
+                    return bytecode;
+                }
+                ("Err", EnumConstructPayload::Tuple(args)) if args.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&args[0]));
+                    Self::push_result_err_bit(&mut bytecode);
+                    return bytecode;
+                }
+                ("Err", EnumConstructPayload::Record(parts)) if parts.len() == 1 => {
+                    bytecode.append(&mut self.do_compile(&parts[0].value));
+                    Self::push_result_err_bit(&mut bytecode);
+                    return bytecode;
+                }
+                _ => {}
+            }
+        }
+
         // Emit args in reverse declaration order for MAKE_ENUM stack discipline.
         match fields {
             EnumConstructPayload::Unit => {}
@@ -6117,6 +6141,9 @@ impl Compiler {
                 if self.expr_is_niche_option(arg) {
                     Self::emit_niche_option_to_boxed(&mut self.bytecode);
                 }
+                if self.expr_is_niche_result(arg) {
+                    Self::emit_niche_result_to_boxed(&mut self.bytecode);
+                }
                 // Box using the lookup head so enum Constructs get Enum tag.
                 Self::emit_box_if_needed(&mut self.bytecode, &lookup_ty);
                 let _ = self.emit_named_entry_on_module(&fqn, 1, crate::il::EntryKind::Call);
@@ -6167,6 +6194,9 @@ impl Compiler {
                 let lookup_ty = Self::show_lookup_ty_for_instance(&other);
                 if self.niche_option_inner_ty(&other).is_some() {
                     Self::emit_niche_option_to_boxed(&mut self.bytecode);
+                }
+                if self.niche_result_ok_err_ty(&other).is_some() {
+                    Self::emit_niche_result_to_boxed(&mut self.bytecode);
                 }
                 if let Some(instance) = self
                     .checker
@@ -7237,6 +7267,9 @@ impl Compiler {
             // fold any bytes returned in the local vec (non-host subexprs).
             let mut arg_bc = self.do_compile(arg);
             self.bytecode.append(&mut arg_bc);
+            if self.expr_is_niche_result(arg) {
+                Self::emit_niche_result_to_boxed(&mut self.bytecode);
+            }
             let slot = self.alloc_temp_slot();
             self.bytecode.push_store_pop(slot);
             arg_slots.push(slot);
@@ -7913,6 +7946,9 @@ impl Compiler {
         if self.expr_is_niche_option(expr) {
             Self::emit_boxed_option_to_niche(&mut self.bytecode);
         }
+        if self.expr_is_niche_result(expr) {
+            Self::emit_boxed_result_to_niche(&mut self.bytecode);
+        }
     }
 
     /// Emit defers + unit fall-through return when a body does not end in a return.
@@ -7927,7 +7963,7 @@ impl Compiler {
             self.bytecode.push_const(0);
             self.push_return_pair();
         } else if self.compiling_result_mode {
-            Self::emit_ok_or_some_wrap(&mut self.bytecode, false);
+            self.wrap_result_ok_on_stack();
             self.bytecode.push_return();
         } else {
             self.bytecode.push_return();
@@ -10118,7 +10154,7 @@ impl Compiler {
     /// Return the payload type when `Option<T>` can use `0` as `None`.
     ///
     /// Only ground heap values qualify: immediates and nested/generic Option
-    /// stay boxed `ObjEnum`. Result stays boxed (Ok/Err both carry payloads).
+    /// stay boxed `ObjEnum`.
     fn niche_option_inner_ty(&self, ty: &Ty) -> Option<Ty> {
         use crate::typechecking::subst::apply_ty_prune;
         use crate::typechecking::ty::{is_option_ty, option_inner, strip_readonly};
@@ -10149,6 +10185,59 @@ impl Compiler {
             Expression::Group(inner) | Expression::Expr(inner) => Self::is_option_construct(inner),
             _ => false,
         }
+    }
+
+    fn is_result_construct(expr: &Output) -> bool {
+        match expr.1.as_ref() {
+            Expression::Construct { enum_name, .. } => {
+                common::is_builtin_result_enum(enum_name)
+            }
+            Expression::Group(inner) | Expression::Expr(inner) => Self::is_result_construct(inner),
+            _ => false,
+        }
+    }
+
+    /// `(T, E)` when both Result payloads are ground heap objects.
+    ///
+    /// `Ok` is the aligned pointer; `Err` is `pointer | 1`. Mixed immediates
+    /// (`Result<int, _>`, `Result<_, int>`, `Result<int, int>`) stay `ObjEnum`.
+    fn niche_result_ok_err_ty(&self, ty: &Ty) -> Option<(Ty, Ty)> {
+        use crate::typechecking::subst::apply_ty_prune;
+        use crate::typechecking::ty::{result_ok_err, strip_readonly};
+
+        let ty = apply_ty_prune(self.checker.subst(), ty);
+        let ty = strip_readonly(&ty);
+        let (ok, err) = result_ok_err(ty)?;
+        if Self::niche_heap_only_ty(&ok, &self.checker)
+            && Self::niche_heap_only_ty(&err, &self.checker)
+        {
+            Some((ok, err))
+        } else {
+            None
+        }
+    }
+
+    fn expr_is_niche_result(&self, expr: &Output) -> bool {
+        self.codegen_expr_ty(expr)
+            .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
+    }
+
+    fn return_is_niche_result(&self) -> bool {
+        self.compiling_fn_return_ty()
+            .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
+    }
+
+    fn should_niche_result_construct(
+        &self,
+        enum_name: &str,
+        ast: &Output<'_>,
+    ) -> bool {
+        common::is_builtin_result_enum(enum_name)
+            && !self.force_heap_result
+            && (self
+                .codegen_expr_ty(ast)
+                .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
+                || self.force_niche_result)
     }
 
     /// True when `T` is a ground heap object, so `Option<T>` can use address `0` as `None`.
@@ -10246,15 +10335,87 @@ impl Compiler {
         bb.bind_label(end, bytecode.il_mut());
     }
 
+    /// `CONST 1; BITOR` — set the Result `Err` discriminant on a heap pointer.
+    fn push_result_err_bit(bytecode: &mut CodeBuf) {
+        bytecode.push_const(1);
+        bytecode.push(Byte::new(Instruction::BITOR));
+    }
+
+    /// `CONST -2; BITAND` — clear bit 0 before using an `Err` payload.
+    fn push_result_untag(bytecode: &mut CodeBuf) {
+        bytecode.push_const(-2);
+        bytecode.push(Byte::new(Instruction::BITAND));
+    }
+
+    /// `DUP; CONST 1; BITAND` — TOS becomes the Result `Err` bit.
+    fn push_result_is_err(bytecode: &mut CodeBuf) {
+        bytecode.push(Byte::new(Instruction::DUPLICATE));
+        bytecode.push_const(1);
+        bytecode.push(Byte::new(Instruction::BITAND));
+    }
+
+    /// Boxed `ObjEnum` Result → pointer niche (`Ok` aligned / `Err` `| 1`).
+    fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf) {
+        let mut bb = BlockBuilder::new();
+        let ok = bb.fresh_label(bytecode.il_mut());
+        let err = bb.fresh_label(bytecode.il_mut());
+        let end = bb.fresh_label(bytecode.il_mut());
+        bb.emit_jump_to(
+            ok,
+            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+            bytecode.il_mut(),
+        );
+        bb.emit_jump_to(
+            err,
+            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
+            bytecode.il_mut(),
+        );
+        bb.bind_label(err, bytecode.il_mut());
+        Self::push_result_err_bit(bytecode);
+        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(ok, bytecode.il_mut());
+        bb.bind_label(end, bytecode.il_mut());
+    }
+
+    /// Pointer-niche Result → boxed `ObjEnum` via the Err bit / MakeEnum.
+    fn emit_niche_result_to_boxed(bytecode: &mut CodeBuf) {
+        let mut bb = BlockBuilder::new();
+        let err = bb.fresh_label(bytecode.il_mut());
+        let end = bb.fresh_label(bytecode.il_mut());
+        Self::push_result_is_err(bytecode);
+        bb.emit_jump_to(err, BbJumpKind::JumpIfTrue, bytecode.il_mut());
+        bytecode.push_make_enum(0, 1);
+        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(err, bytecode.il_mut());
+        Self::push_result_untag(bytecode);
+        bytecode.push_make_enum(1, 1);
+        bb.bind_label(end, bytecode.il_mut());
+    }
+
     /// Wrap the top-of-stack value as `Ok(v)` (Result) or `Some(v)` (Option).
     fn emit_ok_or_some_wrap(bytecode: &mut impl EmitBuf, is_option: bool) {
         let tag = if is_option { 1u16 } else { 0u16 }; // Some=1, Ok=0
         bytecode.push_make_enum(tag, 1);
     }
 
+    fn wrap_result_ok_on_stack(&mut self) {
+        if self.return_is_niche_result() {
+            return;
+        }
+        Self::emit_ok_or_some_wrap(&mut self.bytecode, false);
+    }
+
     /// Wrap the top-of-stack value as `Result::Err(e)`.
     fn emit_result_err(bytecode: &mut impl EmitBuf) {
         bytecode.push_make_enum(1, 1); // Err tag=1 arity=1
+    }
+
+    fn wrap_result_err_on_stack(&mut self) {
+        if self.return_is_niche_result() {
+            Self::push_result_err_bit(&mut self.bytecode);
+        } else {
+            Self::emit_result_err(&mut self.bytecode);
+        }
     }
 
     /// Emit `Matrix` ops (`*`, `+`, `-`, unary `-`) when the typechecker
@@ -11540,7 +11701,9 @@ impl Compiler {
                 {
                     if self.compiling_result_mode {
                         if !self.skip_result_ok_wrap_for_return(expr) {
-                            Self::emit_ok_or_some_wrap(&mut bytecode, false);
+                            if !self.return_is_niche_result() {
+                                Self::emit_ok_or_some_wrap(&mut bytecode, false);
+                            }
                         }
                     }
                     return bytecode;
@@ -11577,7 +11740,9 @@ impl Compiler {
                     // enum — do not Ok-wrap again (COI-113). Nested Result Ok
                     // payloads still wrap.
                     if !self.skip_result_ok_wrap_for_return(expr) {
-                        Self::emit_ok_or_some_wrap(&mut bytecode, false);
+                        if !self.return_is_niche_result() {
+                            Self::emit_ok_or_some_wrap(&mut bytecode, false);
+                        }
                     }
                 }
                 self.bytecode.append(&mut bytecode);
@@ -13465,7 +13630,7 @@ impl Compiler {
                 if self.compiling_pair_mode {
                     self.bytecode.push_const(1);
                 } else {
-                    Self::emit_result_err(&mut self.bytecode);
+                    self.wrap_result_err_on_stack();
                 }
                 self.pad_debug_locs();
                 let loc = self.loc_from_span(*span);
@@ -13567,6 +13732,24 @@ impl Compiler {
                         self.bytecode.push_return();
                     }
                     bb.bind_label(success, self.bytecode.il_mut());
+                } else if self.expr_is_niche_result(inner) {
+                    Self::push_result_is_err(&mut self.bytecode);
+                    bb.emit_jump_to_hinted(
+                        success,
+                        BbJumpKind::JumpIfFalse,
+                        FuseHint::nofuse_value_under_jmp(),
+                        self.bytecode.il_mut(),
+                    );
+                    if self.compiling_pair_mode {
+                        self.bytecode.push_const(1);
+                        self.push_return_pair();
+                    } else {
+                        if !self.return_is_niche_result() {
+                            Self::emit_niche_result_to_boxed(&mut self.bytecode);
+                        }
+                        self.bytecode.push_return();
+                    }
+                    bb.bind_label(success, self.bytecode.il_mut());
                 } else if self.compiling_pair_mode {
                     bb.emit_jump_to(
                         success,
@@ -13638,19 +13821,24 @@ impl Compiler {
                 let is_option = self.expr_is_option(lhs);
                 let success_tag: u32 = if is_option { 1 } else { 0 };
                 let niche_lhs = self.expr_is_niche_option(lhs);
+                let niche_result_lhs = self.expr_is_niche_result(lhs);
 
                 let direct_pair_lhs = matches!(
                     lhs.1.as_ref(),
                     Expression::Call { .. } | Expression::Construct { .. }
                 );
                 let pair_lhs = !niche_lhs
+                    && !niche_result_lhs
                     && self.expr_is_pair_producer(lhs)
                     && (self.compiling_pair_mode || direct_pair_lhs);
                 let previous_pair_context = self.pair_value_context;
                 self.pair_value_context = pair_lhs;
                 let previous_niche_context = self.force_niche_option;
                 self.force_niche_option = niche_lhs;
+                let previous_result_niche = self.force_niche_result;
+                self.force_niche_result = niche_result_lhs;
                 let mut lhs_bc = self.do_compile(lhs);
+                self.force_niche_result = previous_result_niche;
                 self.force_niche_option = previous_niche_context;
                 self.pair_value_context = previous_pair_context;
                 self.bytecode.append(&mut lhs_bc);
@@ -13680,6 +13868,19 @@ impl Compiler {
                     bb.bind_label(success, self.bytecode.il_mut());
                 } else if niche_lhs {
                     Self::push_niche_eq_zero(&mut self.bytecode);
+                    bb.emit_jump_to_hinted(
+                        success,
+                        BbJumpKind::JumpIfFalse,
+                        FuseHint::nofuse_value_under_jmp(),
+                        self.bytecode.il_mut(),
+                    );
+                    self.bytecode.push_pop();
+                    let mut rhs_bc = self.do_compile(rhs);
+                    self.bytecode.append(&mut rhs_bc);
+                    bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+                    bb.bind_label(success, self.bytecode.il_mut());
+                } else if niche_result_lhs {
+                    Self::push_result_is_err(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
                         BbJumpKind::JumpIfFalse,
@@ -13896,6 +14097,8 @@ impl Compiler {
         self.current_function_table_key = None;
         self.force_heap_option = false;
         self.force_niche_option = false;
+        self.force_heap_result = false;
+        self.force_niche_result = false;
         self.unbox_enum_context = 0;
         self.compiling_pair_mode = false;
         self.pair_value_context = false;
