@@ -7599,5 +7599,4 @@ fn main() {
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
-}
 
