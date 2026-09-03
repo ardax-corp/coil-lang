@@ -112,6 +112,7 @@ fn keeps_heap_when_passed_to_call() {
             arity: 1,
             target: Label(9),
             loc: loc(),
+        ret_words: 1,
         },
         IlOp::Pop { loc: loc() },
         IlOp::Halt { loc: loc() },

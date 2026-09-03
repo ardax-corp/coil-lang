@@ -116,16 +116,28 @@ impl IlBuilder {
     }
 
     pub fn emit_entry(&mut self, kind: EntryKind, arity: u32, target: Label) {
-        self.emit_entry_at(kind, arity, target, DebugLoc::unknown());
+        self.emit_entry_ret(kind, arity, target, DebugLoc::unknown(), 1);
     }
 
     pub fn emit_entry_at(&mut self, kind: EntryKind, arity: u32, target: Label, loc: DebugLoc) {
+        self.emit_entry_ret(kind, arity, target, loc, 1);
+    }
+
+    pub fn emit_entry_ret(
+        &mut self,
+        kind: EntryKind,
+        arity: u32,
+        target: Label,
+        loc: DebugLoc,
+        ret_words: u8,
+    ) {
         self.targeted.insert(target.0);
         self.ops.push(IlOp::Entry {
             kind,
             arity,
             target,
             loc,
+            ret_words: ret_words.max(1),
         });
     }
 
@@ -340,6 +352,7 @@ impl IlBuilder {
                     arity,
                     target,
                     loc,
+                    ret_words,
                 } => {
                     let nid = map_label(target.0, self);
                     self.targeted.insert(nid);
@@ -348,6 +361,7 @@ impl IlBuilder {
                         arity,
                         target: Label(nid),
                         loc,
+                        ret_words,
                     });
                 }
                 other_op => self.ops.push(other_op),

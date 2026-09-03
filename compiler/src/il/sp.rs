@@ -102,8 +102,9 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
         IlOp::Entry {
             kind: EntryKind::Call | EntryKind::MakeCoro,
             arity,
+            ret_words,
             ..
-        } => Some(1 - *arity as i32),
+        } => Some(*ret_words as i32 - *arity as i32),
         IlOp::Entry {
             kind: EntryKind::TailCall,
             ..
@@ -182,7 +183,13 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::BinSlotSlotStore => Some(0),
         Instruction::CmpJmpf | Instruction::CmpJmpt => Some(-2),
         Instruction::LogNotJmpf | Instruction::LogNotJmpt => Some(-1),
-        Instruction::RETURN | Instruction::LoadReturnSlot | Instruction::ConstReturnImm => Some(-1),
+        Instruction::RETURN | Instruction::LoadReturnSlot | Instruction::ConstReturnImm => {
+            if insn == Instruction::RETURN {
+                Some(-(byte.return_words() as i32))
+            } else {
+                Some(-1)
+            }
+        }
         Instruction::ReturnPair => Some(-2),
         Instruction::BinReturn => Some(-2),
         Instruction::HALT | Instruction::NOOP => Some(0),
@@ -210,7 +217,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::MakeEnum => Some(1 - byte.operand_u16(1) as i32),
         Instruction::CALL | Instruction::MakeCoro => {
             let (arity, _) = byte.call_parts();
-            Some(1 - arity as i32)
+            Some(byte.call_ret_words() as i32 - arity as i32)
         }
         Instruction::TailCall => None,
         Instruction::HostInvoke => Some(-((byte.operand_u32() & 0xFFFF) as i32)),
@@ -346,7 +353,7 @@ pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
             // Modeling the arithmetic delta lets mem_fwd emit Dup;Store that
             // later operand pops destroy (http parse_url / bytes_slice hang).
             let after = if is_nested_call_return(op) {
-                Sp::Known(1)
+                Sp::Known(op.call_ret_words() as i32)
             } else {
                 before.apply(stack_delta(op))
             };
@@ -572,12 +579,14 @@ mod tests {
             arity: 2,
             target: Label(0),
             loc: loc(),
+        ret_words: 1,
         };
         let tail = IlOp::Entry {
             kind: EntryKind::TailCall,
             arity: 1,
             target: Label(0),
             loc: loc(),
+        ret_words: 1,
         };
         assert_eq!(stack_delta(&call), Some(-1));
         assert_eq!(stack_delta(&tail), None);
@@ -593,12 +602,14 @@ mod tests {
             arity: 0,
             target: Label(0),
             loc: loc(),
+        ret_words: 1,
         };
         let coro0 = IlOp::Entry {
             kind: EntryKind::MakeCoro,
             arity: 0,
             target: Label(0),
             loc: loc(),
+        ret_words: 1,
         };
         assert_eq!(stack_delta(&call0), Some(1));
         assert_eq!(stack_delta(&coro0), Some(1));
@@ -765,7 +776,8 @@ mod tests {
                 arity: 2,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc: loc() },
         ];
         let info = analyze(&ops);
@@ -785,7 +797,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc: loc() },
         ];
         let info = analyze(&ops);
@@ -810,7 +823,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc: loc() },
         ];
         let info = analyze(&ops);
@@ -828,7 +842,8 @@ mod tests {
                 arity: 1,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Label(Label(0)),
             IlOp::Return { loc: loc() },
         ];

@@ -1648,7 +1648,8 @@ mod tell {
                 arity,
                 target: Label(0),
                 loc: loc(),
-            }
+            ret_words: 1,
+        }
         }
 
         fn counts(ops: &[IlOp]) -> (usize, usize) {
@@ -1797,7 +1798,8 @@ mod tell {
                     arity: 2,
                     target: Label(0),
                     loc: loc(),
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc: loc() },
             ];
             let before = ops.clone();
@@ -2510,7 +2512,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Load {
                 slot: 1,
                 loc: loc(),
@@ -2633,21 +2636,24 @@ mod tests {
                 arity: 3,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::StorePop { slot: 6, loc: loc() },
             IlOp::Entry {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 3,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::StorePop { slot: 11, loc: loc() },
             IlOp::Entry {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 3,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::StorePop { slot: 16, loc: loc() },
             IlOp::Load { slot: 6, loc: loc() },
             IlOp::StorePop { slot: 7, loc: loc() },
@@ -3113,7 +3119,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Load {
                 slot: 3,
                 loc: loc(),
@@ -3196,7 +3203,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Load {
                 slot: 0,
                 loc: loc(),

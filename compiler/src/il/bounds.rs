@@ -1749,7 +1749,8 @@ mod hoist {
                 arity: 2,
                 target: Label(9),
                 loc: loc(),
-            };
+            ret_words: 1,
+        };
             let before = ops.clone();
             assert!(!hoist_loop_invariants(&mut ops));
             assert!(ops == before);
@@ -2830,7 +2831,8 @@ mod tests {
                 arity: 1,
                 target: Label(9),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Pop { loc: loc() },
             IlOp::Load { slot: 1, loc: loc() },
             IlOp::Const { imm: 1, loc: loc() },
@@ -2905,7 +2907,8 @@ mod tests {
                 arity: 1,
                 target: Label(9),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Pop { loc: loc() },
             IlOp::Load { slot: 1, loc: loc() },
             IlOp::Const { imm: 1, loc: loc() },

@@ -496,7 +496,8 @@ mod tests {
                     arity: 1,
                     target: callee_entry,
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc },
             ],
         });
@@ -550,7 +551,8 @@ mod tests {
                     arity: 1,
                     target: callee_entry,
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc },
             ],
         });
@@ -593,7 +595,8 @@ mod tests {
                     arity: 0,
                     target: emit_entry,
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc },
             ],
         });
@@ -645,7 +648,8 @@ mod tests {
                     arity: 0,
                     target: emit_entry,
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc },
             ],
         });
@@ -694,7 +698,8 @@ mod tests {
                     arity: 0,
                     target: method,
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc },
             ],
         });
@@ -731,7 +736,8 @@ mod tests {
                 arity: 0,
                 target: drop_entry,
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(99),

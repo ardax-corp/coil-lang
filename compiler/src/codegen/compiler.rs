@@ -492,9 +492,11 @@ impl Compiler {
         }
 
         let pair_enum = self.pair_value_context
-            && (common::is_builtin_option_enum(enum_name)
-                || common::is_builtin_result_enum(enum_name))
-            && arity <= 1;
+            && arity <= 1
+            && self.codegen_expr_ty(ast).is_some_and(|ty| {
+                crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
+                    .is_some()
+            });
         if pair_enum {
             match fields {
                 EnumConstructPayload::Unit if arity == 0 => {
@@ -1000,8 +1002,18 @@ impl Compiler {
             return false;
         };
         // Packed abs PC; CodeBuf::push rewrites to IlOp::Entry via entry_at_offset.
-        bytecode
-            .push(Byte::new(Instruction::TailCall).with_call_packed(arity as u32, target as u32));
+        let ret_words = if self.pair_return_kind(&cur).is_some()
+            || self.pair_return_kind(&lookup).is_some()
+        {
+            2
+        } else {
+            1
+        };
+        bytecode.push(Byte::new(Instruction::TailCall).with_call_packed_ret(
+            arity as u32,
+            target as u32,
+            ret_words,
+        ));
         true
     }
 
@@ -2662,6 +2674,7 @@ impl Compiler {
                     arity,
                     target,
                     loc,
+                    ret_words,
                 } => {
                     if !allow_calls {
                         return false;
@@ -2677,6 +2690,7 @@ impl Compiler {
                         arity: *arity,
                         target: *target,
                         loc: *loc,
+                        ret_words: *ret_words,
                     });
                     saw_value = true;
                 }
@@ -5671,12 +5685,12 @@ impl Compiler {
         self.bytecode.append(&mut fn_bc);
 
         for elem in &tuple_elements {
-            if let Expression::Identifier(name) = elem.1.as_ref()
-                && let Some(&offset) = self.functions.get(*name)
-            {
-                self.bytecode
-                    .push(Byte::new(Instruction::CodePtr).with_operand_u32(offset as u32));
-                continue;
+            if let Expression::Identifier(name) = elem.1.as_ref() {
+                let mut ptr = CodeBuf::new();
+                if self.emit_named_entry(&mut ptr, name, 0, crate::il::EntryKind::CodePtr) {
+                    self.bytecode.append(&mut ptr);
+                    continue;
+                }
             }
             let mut bc = self.do_compile(elem);
             self.bytecode.append(&mut bc);
@@ -7823,9 +7837,9 @@ impl Compiler {
         Some(Self::peel_fn_return_ty(&applied))
     }
 
-    /// Return `Some(is_option)` for a compiled function whose unary return
-    /// can use the pair ABI. Always `None` while Option/Result stay boxed
-    /// (`ObjEnum`; pair/niche opcodes are tombstones).
+    /// Return `Some(is_option)` when a compiled function's known return layout
+    /// is two stack slots (`[payload, tag]`). Niched heap Option / heap-heap
+    /// Result and unbounded `T` stay `None` (one-word boxed/scalar ABI).
     fn pair_return_kind(&self, name: &str) -> Option<bool> {
         if let Some(cached) = self.pair_return_kinds.borrow().get(name) {
             return *cached;
@@ -7846,29 +7860,209 @@ impl Compiler {
             .insert(name.to_string(), kind);
     }
 
-    fn compute_pair_return_kind(&self, _name: &str) -> Option<bool> {
-        None
-    }
-
-    /// Emit `ReturnPair`, tagging it with the enclosing function's pair kind so
-    /// the VM can re-box the two slots when the frame is a host entry.
-    fn push_return_pair(&mut self) {
-        self.bytecode.push(
-            Byte::new(Instruction::ReturnPair)
-                .with_operand_u32(u32::from(self.compiling_pair_is_option)),
-        );
-    }
-
-    /// Box a unary `Option`/`Result` call return before storing or re-matching.
-    fn emit_pair_to_heap_after_call(&self, bytecode: &mut CodeBuf, lookup_name: &str) {
-        if let Some(is_option) = self.pair_return_kind(lookup_name)
-            && !self.pair_value_context
-        {
-            bytecode.push(
-                Byte::new(Instruction::PairToHeap)
-                    .with_operand_u32(u32::from(is_option)),
-            );
+    fn compute_pair_return_kind(&self, name: &str) -> Option<bool> {
+        if self.coroutine_fns.contains(name) {
+            return None;
         }
+        let lookup = strip_overload_key(name);
+        if let Some(def) = self.checker.def_id_of(lookup).or_else(|| self.checker.def_id_of(name))
+            && self.typed_sidecar.is_two_word_return(def)
+        {
+            let ty = self
+                .checker
+                .fn_return_ty(name)
+                .or_else(|| self.checker.fn_return_ty(lookup))
+                .or_else(|| self.fn_return_ty(name))?;
+            return crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty);
+        }
+        let ty = self
+            .checker
+            .fn_return_ty(name)
+            .or_else(|| self.checker.fn_return_ty(lookup))
+            .or_else(|| self.fn_return_ty(name))?;
+        crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
+    }
+
+    fn unary_thunk_key(name: &str) -> String {
+        format!("__unary_ret::{name}")
+    }
+
+    /// `CodePtr` / `CallIndirect` / FFI targets use a one-word wrapper around a
+    /// two-slot body so those boundaries stay on the boxed ABI.
+    fn ensure_unary_boundary_target(&mut self, name: &str) -> String {
+        if self.pair_return_kind(name).is_none()
+            && self
+                .pair_return_kind(strip_overload_key(name))
+                .is_none()
+        {
+            return name.to_string();
+        }
+        let thunk = Self::unary_thunk_key(name);
+        if !self.fn_entry_labels.contains_key(&thunk) {
+            self.reserve_function_entry(thunk.clone());
+            if !self.pending_unary_thunks.iter().any(|n| n == name) {
+                self.pending_unary_thunks.push(name.to_string());
+            }
+        }
+        thunk
+    }
+
+    fn call_frame_arity(&self, name: &str) -> u32 {
+        let lookup = strip_overload_key(name);
+        let (fixed, _) = self
+            .fn_arities
+            .get(name)
+            .or_else(|| self.fn_arities.get(lookup))
+            .copied()
+            .unwrap_or((0, false));
+        let mut arity = fixed;
+        if let Some((owner, _)) = lookup.rsplit_once("::")
+            && (self.checker.is_class(owner) || is_instance_method_fqn(&self.checker, lookup))
+        {
+            arity += 1;
+        }
+        let dict = {
+            let n = self.checker.dict_arity_for(name);
+            if n > 0 {
+                n
+            } else {
+                self.checker.dict_arity_for(lookup)
+            }
+        };
+        arity + dict as u32
+    }
+
+    fn emit_pending_unary_thunks(&mut self) {
+        let names = std::mem::take(&mut self.pending_unary_thunks);
+        for name in names {
+            self.emit_unary_return_thunk(&name);
+        }
+    }
+
+    fn emit_unary_return_thunk(&mut self, name: &str) {
+        let Some(is_option) = self
+            .pair_return_kind(name)
+            .or_else(|| self.pair_return_kind(strip_overload_key(name)))
+        else {
+            return;
+        };
+        let thunk = Self::unary_thunk_key(name);
+        self.pin_pair_return_kind(&thunk, None);
+        let arity = self.call_frame_arity(name);
+        let prev_vars = std::mem::take(&mut self.context.variables);
+        let prev_depth = self.expr_depth;
+        self.expr_depth = 0;
+        self.context.variables = Interner::default();
+        for i in 0..arity {
+            let _ = self.context.variables.intern(format!("__a{i}"));
+        }
+        let _ = self.bind_function_entry(thunk.clone());
+        let body_start = self.bytecode.len();
+        let entry_sp = arity;
+        for i in 0..arity {
+            self.bytecode.push_load(i);
+        }
+        if !self.emit_named_entry_on_module(name, arity, crate::il::EntryKind::Call) {
+            self.missing_call_target(name, 0..0);
+        }
+        let mut box_bc = CodeBuf::new();
+        self.emit_pair_box(&mut box_bc, is_option);
+        self.bytecode.append(&mut box_bc);
+        self.bytecode.push_return();
+        let body_end = self.bytecode.len();
+        self.record_fn_span(thunk.clone(), body_start, body_end);
+        let entry = self.fn_entry_labels.get(&thunk).copied();
+        self.bytecode
+            .record_func_with_sp(thunk, entry, body_start, body_end, entry_sp);
+        self.context.variables = prev_vars;
+        self.expr_depth = prev_depth;
+    }
+
+    /// Two-slot `RETURN` (operand `2`). Old archives omit the operand (one word).
+    fn push_return_pair(&mut self) {
+        self.bytecode
+            .push(Byte::new(Instruction::RETURN).with_operand_u32(2));
+    }
+
+    /// Box `[payload, tag]` into `ObjEnum` using MakeEnum + EQ/JMPF.
+    fn emit_pair_to_heap_after_call(&mut self, bytecode: &mut CodeBuf, lookup_name: &str) {
+        let Some(is_option) = self.pair_return_kind(lookup_name) else {
+            return;
+        };
+        if self.pair_value_context {
+            return;
+        }
+        self.emit_pair_box(bytecode, is_option);
+    }
+
+    fn emit_pair_box(&mut self, bytecode: &mut CodeBuf, is_option: bool) {
+        let tag_slot = self.alloc_temp_slot();
+        let payload_slot = self.alloc_temp_slot();
+        bytecode.push_store_pop(tag_slot);
+        bytecode.push_store_pop(payload_slot);
+        let mut bb = BlockBuilder::new();
+        let other = bb.fresh_label(bytecode.il_mut());
+        let end = bb.fresh_label(bytecode.il_mut());
+        bytecode.push_load(tag_slot);
+        if is_option {
+            bytecode.push_const(1);
+        } else {
+            bytecode.push_const(0);
+        }
+        bytecode.push(Byte::new(Instruction::EQ));
+        bb.emit_jump_to(other, BbJumpKind::JumpIfFalse, bytecode.il_mut());
+        if is_option {
+            bytecode.push_load(payload_slot);
+            bytecode.push_make_enum(1, 1);
+        } else {
+            bytecode.push_load(payload_slot);
+            bytecode.push_make_enum(0, 1);
+        }
+        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(other, bytecode.il_mut());
+        if is_option {
+            bytecode.push_make_enum(0, 0);
+        } else {
+            bytecode.push_load(payload_slot);
+            bytecode.push_make_enum(1, 1);
+        }
+        bb.bind_label(end, bytecode.il_mut());
+    }
+
+    fn emit_heap_to_pair(bytecode: &mut CodeBuf, is_option: bool) {
+        let mut bb = BlockBuilder::new();
+        let hit = bb.fresh_label(bytecode.il_mut());
+        let miss = bb.fresh_label(bytecode.il_mut());
+        let end = bb.fresh_label(bytecode.il_mut());
+        let success_tag = if is_option { 1u32 } else { 0u32 };
+        let fail_tag = if is_option { 0u32 } else { 1u32 };
+        let success_arity = 1u32;
+        let fail_arity = if is_option { 0u32 } else { 1u32 };
+        bb.emit_jump_to(
+            hit,
+            BbJumpKind::JumpIfMatch {
+                tag: success_tag,
+                arity: success_arity,
+            },
+            bytecode.il_mut(),
+        );
+        bb.emit_jump_to(
+            miss,
+            BbJumpKind::JumpIfMatch {
+                tag: fail_tag,
+                arity: fail_arity,
+            },
+            bytecode.il_mut(),
+        );
+        bb.bind_label(hit, bytecode.il_mut());
+        bytecode.push_const(success_tag as i32);
+        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(miss, bytecode.il_mut());
+        if is_option {
+            bytecode.push_const(0);
+        }
+        bytecode.push_const(fail_tag as i32);
+        bb.bind_label(end, bytecode.il_mut());
     }
 
     fn expr_is_pair_producer(&self, expr: &Output) -> bool {
@@ -7877,8 +8071,76 @@ impl Compiler {
 
     /// `Some(is_option)` when the expression is emitted in the pair ABI, i.e. it
     /// leaves `[payload, tag]` rather than a heap enum.
-    fn expr_pair_producer_kind(&self, _expr: &Output) -> Option<bool> {
-        None
+    fn expr_pair_producer_kind(&self, expr: &Output) -> Option<bool> {
+        let mut cur = expr;
+        loop {
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        match cur.1.as_ref() {
+            Expression::Call { name, .. } => {
+                if let Expression::Identifier(n) = name.1.as_ref() {
+                    if self.lookup_slot(n).is_some() {
+                        return None;
+                    }
+                    let resolved = self.resolve_free_fn(n);
+                    if let Some(kind) = self.pair_return_kind(&resolved) {
+                        return Some(kind);
+                    }
+                    return self.pair_return_kind(n);
+                }
+                if let Expression::QualifiedAccess { owner, member } = name.1.as_ref() {
+                    let fqn = format!("{owner}::{member}");
+                    return self.pair_return_kind(&fqn);
+                }
+                if let Expression::Access(recv, method) = name.1.as_ref() {
+                    let owner = self
+                        .receiver_type(recv)
+                        .or_else(|| self.codegen_expr_ty(recv))
+                        .and_then(|ty| Checker::class_name_of_ty(&ty).map(|s| s.to_string()))
+                        .unwrap_or_default();
+                    if let Some(fqn) = self
+                        .context
+                        .methods
+                        .get(&owner)
+                        .and_then(|m| m.get(*method))
+                        .cloned()
+                    {
+                        return self.pair_return_kind(&fqn);
+                    }
+                    if !owner.is_empty() {
+                        return self.pair_return_kind(&format!("{owner}::{method}"));
+                    }
+                }
+                None
+            }
+            Expression::Construct { .. } if self.pair_value_context || self.unbox_enum_context > 0 => {
+                self.codegen_expr_ty(cur).and_then(|ty| {
+                    crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
+                })
+            }
+            Expression::Identifier(n) if self.unboxed_enum_info(n).is_some() => {
+                self.codegen_expr_ty(cur).and_then(|ty| {
+                    crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
+                })
+            }
+            _ => None,
+        }
+    }
+
+    fn expr_pair_enum_kind(&self, expr: &Output) -> Option<bool> {
+        let ty = self.codegen_expr_ty(expr)?;
+        use crate::typechecking::ty::{is_option_ty, is_result_ty};
+        if is_option_ty(&ty) {
+            Some(true)
+        } else if is_result_ty(&ty) {
+            Some(false)
+        } else {
+            crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
+        }
     }
 
     /// True when the expression yields a pair that *is* the enclosing function's
@@ -7938,9 +8200,6 @@ impl Compiler {
             .or_else(|| self.fn_return_ty(name))
     }
 
-    fn expr_pair_enum_kind(&self, _expr: &Output) -> Option<bool> {
-        None
-    }
 
     fn emit_host_option_boundary(&mut self, expr: &Output) {
         if self.expr_is_niche_option(expr) {
@@ -7985,7 +8244,10 @@ impl Compiler {
                 | IlOp::ConstReturnImm { .. }
                 | IlOp::BinReturn { .. }
                 | IlOp::Halt { .. } => return true,
-                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ReturnPair => {
+                IlOp::Byte { byte, .. }
+                    if *byte.bytecode() == Instruction::ReturnPair
+                        || (*byte.bytecode() == Instruction::RETURN && byte.return_words() >= 2) =>
+                {
                     return true;
                 }
                 op if op.is_plain_return() => return true,
@@ -11727,10 +11989,7 @@ impl Compiler {
                 if self.compiling_pair_mode {
                     if !pair_expr {
                         if let Some(is_option) = pair_enum_kind {
-                            bytecode.push(
-                                Byte::new(Instruction::HeapToPair)
-                                    .with_operand_u32(u32::from(is_option)),
-                            );
+                            Self::emit_heap_to_pair(&mut bytecode, is_option);
                         } else {
                             bytecode.push_const(0);
                         }
@@ -12361,27 +12620,37 @@ impl Compiler {
                                 .unwrap_or(0);
                             (fa, rest, resolved_n.clone())
                         };
-                        if let Some(&entry_offset) = self
-                            .functions
-                            .get(&entry_key)
-                            .or_else(|| self.functions.get(&resolved_n))
+                        let ptr_name = if self.functions.contains_key(&entry_key)
+                            || self.fn_entry_labels.contains_key(&entry_key)
                         {
-                            // Prefer codegen-recorded arity: multi-file
-                            // `check_program` clears `fn_param_names`, so
-                            // imported names would otherwise MakeFn with
-                            // arity 0 and break `spawn(f, arg)`.
+                            Some(entry_key.as_str())
+                        } else if self.functions.contains_key(&resolved_n)
+                            || self.fn_entry_labels.contains_key(&resolved_n)
+                        {
+                            Some(resolved_n.as_str())
+                        } else {
+                            None
+                        };
+                        if let Some(ptr_name) = ptr_name {
                             let (fa, is_rest) = self
                                 .fn_arities
-                                .get(&entry_key)
+                                .get(ptr_name)
+                                .or_else(|| self.fn_arities.get(&entry_key))
                                 .or_else(|| self.fn_arities.get(&resolved_n))
                                 .copied()
                                 .map(|(a, r)| (a as usize, r))
                                 .unwrap_or((fa, is_rest));
                             bytecode.push_const(0);
-                            bytecode.push(
-                                Byte::new(Instruction::CodePtr)
-                                    .with_operand_u32(entry_offset as u32),
-                            );
+                            if !self.emit_named_entry(
+                                &mut bytecode,
+                                ptr_name,
+                                0,
+                                crate::il::EntryKind::CodePtr,
+                            ) {
+                                bytecode.push(
+                                    Byte::new(Instruction::CodePtr).with_operand_u32(0),
+                                );
+                            }
                             bytecode.push(
                                 Byte::new(Instruction::MakeFn)
                                     .with_operand_u32(make_fn_operand(0, 0, fa as u32, is_rest)),
@@ -13741,6 +14010,7 @@ impl Compiler {
                         self.bytecode.il_mut(),
                     );
                     if self.compiling_pair_mode {
+                        Self::push_result_untag(&mut self.bytecode);
                         self.bytecode.push_const(1);
                         self.push_return_pair();
                     } else {
@@ -13759,10 +14029,7 @@ impl Compiler {
                         },
                         self.bytecode.il_mut(),
                     );
-                    self.bytecode.push(
-                        Byte::new(Instruction::HeapToPair)
-                            .with_operand_u32(u32::from(is_option)),
-                    );
+                    Self::emit_heap_to_pair(&mut self.bytecode, is_option);
                     self.push_return_pair();
                     bb.bind_label(success, self.bytecode.il_mut());
                 } else {
@@ -14281,6 +14548,7 @@ impl Compiler {
     }
 
     fn finalize_bytecode_inner(&mut self, capture_il: bool) -> FinalizeIlOut {
+        self.emit_pending_unary_thunks();
         // Splice static initializers + `extern` setup into the IL before lower.
         // Order: user static inits, then FFI dlopen/declare, then JMP → main.
         let setup_pos = self.program_start_offset as usize;

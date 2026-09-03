@@ -41,7 +41,7 @@ enum Slot {
     /// Residual [`IlOp::Byte`] cold set. Fuse-select refuses any window that includes it.
     Cold(Byte, DebugLoc),
     Jump(IlJumpKind, Label, DebugLoc, FuseHint),
-    Entry(EntryKind, u32, Label, DebugLoc),
+    Entry(EntryKind, u32, Label, DebugLoc, u8),
     PrologueJmp(DebugLoc),
     CmpJmpf(u8, Label, DebugLoc, bool),
     LogNotJmpf(Label, DebugLoc, bool),
@@ -80,7 +80,7 @@ impl Slot {
             Slot::Byte(_, l)
             | Slot::Cold(_, l)
             | Slot::Jump(_, _, l, _)
-            | Slot::Entry(_, _, _, l)
+            | Slot::Entry(_, _, _, l, _)
             | Slot::PrologueJmp(l)
             | Slot::CmpJmpf(_, _, l, _)
             | Slot::LogNotJmpf(_, l, _)
@@ -273,12 +273,13 @@ pub(crate) fn fuse_select(ops: &[IlOp], pool: &mut Vec<u64>) -> FuseOut {
                 arity,
                 target,
                 loc,
+                ret_words,
             } => {
                 let idx = pre_slots.len();
                 if !pending.is_empty() {
                     binds_at.insert(idx, std::mem::take(&mut pending));
                 }
-                pre_slots.push(Slot::Entry(*kind, *arity, *target, *loc));
+                pre_slots.push(Slot::Entry(*kind, *arity, *target, *loc, *ret_words));
             }
             IlOp::PrologueJmp { loc } => {
                 let idx = pre_slots.len();
@@ -765,12 +766,14 @@ fn encode_slot(
                 }
             }
         }
-        Slot::Entry(kind, arity, target, _) => {
+        Slot::Entry(kind, arity, target, _, ret_words) => {
             let pc = resolve(labels, *target)?;
             match kind {
-                EntryKind::Call => Byte::new(Instruction::CALL).with_call_packed(*arity, pc),
+                EntryKind::Call => {
+                    Byte::new(Instruction::CALL).with_call_packed_ret(*arity, pc, *ret_words)
+                }
                 EntryKind::TailCall => {
-                    Byte::new(Instruction::TailCall).with_call_packed(*arity, pc)
+                    Byte::new(Instruction::TailCall).with_call_packed_ret(*arity, pc, *ret_words)
                 }
                 EntryKind::MakeCoro => {
                     Byte::new(Instruction::MakeCoro).with_call_packed(*arity, pc)

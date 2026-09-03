@@ -286,7 +286,9 @@ impl Compiler {
         };
         let from_ident = ident.and_then(|n| self.unboxed_enum_info(n));
         let from_fact = self.node_is_frame_local(scrutinee) || self.node_is_frame_local(peeled);
-        if from_ident.is_none() && !from_fact {
+        let from_call = matches!(peeled.1.as_ref(), Expression::Call { .. })
+            && self.expr_is_pair_producer(peeled);
+        if from_ident.is_none() && !from_fact && !from_call {
             return false;
         }
         if matches!(peeled.1.as_ref(), Expression::Identifier(_)) && from_ident.is_none() {
@@ -297,7 +299,7 @@ impl Compiler {
         }
         if !matches!(
             peeled.1.as_ref(),
-            Expression::Identifier(_) | Expression::Construct { .. }
+            Expression::Identifier(_) | Expression::Construct { .. } | Expression::Call { .. }
         ) {
             return false;
         }
@@ -350,9 +352,14 @@ impl Compiler {
 
         self.bytecode
             .push_seek(self.context.variables.len() as u32);
+        let prev_pair = self.pair_value_context;
+        if from_call {
+            self.pair_value_context = true;
+        }
         self.unbox_enum_context += 1;
         let mut scrutinee_bc = self.do_compile(scrutinee);
         self.unbox_enum_context -= 1;
+        self.pair_value_context = prev_pair;
         self.bytecode.append(&mut scrutinee_bc);
 
         let mut bb = BlockBuilder::new();

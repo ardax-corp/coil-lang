@@ -62,6 +62,7 @@ fn counted_while(trips_imm: i32, with_call: bool, with_break: bool) -> Vec<IlOp>
             arity: 0,
             target: Label(9),
             loc: loc(),
+        ret_words: 1,
         });
         ops.push(IlOp::Pop { loc: loc() });
     }

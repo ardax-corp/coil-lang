@@ -95,6 +95,7 @@ pub(crate) fn remap_label_space(
                 arity,
                 target,
                 loc,
+                ret_words,
             } => IlOp::Entry {
                 kind: *kind,
                 arity: *arity,
@@ -103,6 +104,7 @@ pub(crate) fn remap_label_space(
                 // (`prior` collides when two bodies reuse 0..n).
                 target: Label(map.get(&target.0).copied().unwrap_or(target.0)),
                 loc: *loc,
+                ret_words: *ret_words,
             },
             other => other.clone(),
         })

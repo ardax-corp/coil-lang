@@ -266,6 +266,8 @@ pub enum IlOp {
         arity: u32,
         target: Label,
         loc: DebugLoc,
+        /// Direct CALL result slots (`1` or `2`). Ignored for CodePtr / MakePolyFn.
+        ret_words: u8,
     },
     /// Prologue JMP placeholder (`u32::MAX`); patched by the pipeline after lower.
     PrologueJmp {
@@ -407,6 +409,7 @@ impl IlOp {
                 loc,
             },
             Instruction::PRINT => Self::Print { loc },
+            Instruction::RETURN if byte.operand_u32() >= 2 => Self::Byte { byte, loc },
             Instruction::RETURN => Self::Return { loc },
             Instruction::HALT => Self::Halt { loc },
             Instruction::BinSlotImm => {
@@ -582,8 +585,34 @@ impl IlOp {
         matches!(self, IlOp::Return { .. })
             || matches!(
                 self,
-                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::RETURN
+                IlOp::Byte { byte, .. }
+                    if *byte.bytecode() == Instruction::RETURN && byte.return_words() < 2
             )
+    }
+
+    pub fn return_words(&self) -> u8 {
+        match self {
+            IlOp::Return { .. } => 1,
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::RETURN => {
+                byte.return_words()
+            }
+            _ => 1,
+        }
+    }
+
+    pub fn call_ret_words(&self) -> u8 {
+        match self {
+            IlOp::Entry { ret_words, .. } => (*ret_words).max(1),
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::CALL | Instruction::TailCall | Instruction::MakeCoro
+                ) =>
+            {
+                byte.call_ret_words()
+            }
+            _ => 1,
+        }
     }
 
     pub fn loc(&self) -> DebugLoc {
@@ -946,6 +975,7 @@ mod tests {
             arity: 1,
             target: Label(1),
             loc: DebugLoc::unknown(),
+        ret_words: 1,
         };
         assert!(entry.as_encode_byte().is_none());
         assert!(entry.is_control());

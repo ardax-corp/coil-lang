@@ -154,6 +154,7 @@ mod tests {
             target: Label(0),
             arity: 0,
             loc: loc(),
+        ret_words: 1,
         }];
         assert_eq!(estimate_inline_cost(&call), 25);
     }

@@ -382,6 +382,7 @@ mod tests {
             arity: 0,
             target: foo_l,
             loc: DebugLoc::unknown(),
+        ret_words: 1,
         });
         buf.push_pop();
         buf.push_return();

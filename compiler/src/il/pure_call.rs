@@ -138,6 +138,7 @@ mod tests {
             arity: 1,
             target: Label(7),
             loc: loc(),
+        ret_words: 1,
         };
         assert!(!op_blocks_length_proof(&op, Some(&ctx)));
     }
@@ -149,6 +150,7 @@ mod tests {
             arity: 1,
             target: Label(1),
             loc: loc(),
+        ret_words: 1,
         };
         assert!(op_blocks_length_proof(&op, None));
     }
@@ -229,6 +231,7 @@ mod tests {
             arity: 1,
             target: Label(7),
             loc: loc(),
+        ret_words: 1,
         };
         assert!(!op_blocks_length_proof(&op, Some(&pure)));
         assert!(op_blocks_length_proof(&op, Some(&impure)));

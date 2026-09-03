@@ -250,7 +250,7 @@ fn resolve_variadic_ffi_tags(
     Some(tags)
 }
 
-fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
+pub(super) fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
     checker.generics().instances.iter().any(|instance| {
         instance
             .method_fqns
@@ -894,6 +894,9 @@ pub struct Compiler {
     /// being materialized back into a heap enum.
     pair_value_context: bool,
 
+    /// Two-slot callees that need a one-word `CodePtr`/`CallIndirect` wrapper.
+    pending_unary_thunks: Vec<String>,
+
     /// Harness metadata: `(description, bytecode offset)` for each
     /// top-level `test("…") { … }` case, in source order.
     test_cases: Vec<(String, u32)>,
@@ -1042,6 +1045,7 @@ impl Default for Compiler {
             compiling_pair_is_option: false,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
             pair_value_context: false,
+            pending_unary_thunks: Vec::new(),
             test_cases: Vec::new(),
             user_main_defined: false,
             include_tests: false,

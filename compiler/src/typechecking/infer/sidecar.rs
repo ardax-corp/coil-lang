@@ -47,6 +47,8 @@ pub struct TypedSidecar {
     /// Effect bits per function DefId (empty = pure). Missing DefId is unknown/impure.
     fn_effects: HashMap<DefId, EffectFlags>,
     pure_fn_names: HashSet<String>,
+    /// Ground functions whose return type uses the two-slot CALL/RETURN ABI.
+    two_word_returns: HashSet<DefId>,
 }
 
 impl TypedSidecar {
@@ -149,6 +151,11 @@ impl TypedSidecar {
             _ => false,
         }
     }
+
+    /// True when `id` is a function whose direct CALL/RETURN uses two stack slots.
+    pub fn is_two_word_return(&self, id: DefId) -> bool {
+        self.two_word_returns.contains(&id)
+    }
 }
 
 impl Checker {
@@ -184,6 +191,15 @@ impl Checker {
             tys_by_span.insert(span, apply_ty_prune(subst, ty));
         }
 
+        let mut two_word_returns = HashSet::new();
+        for (name, def) in &self.local_defs {
+            if let Some(ty) = self.fn_return_ty(name)
+                && crate::typechecking::return_layout::two_word_return_kind(self, &ty).is_some()
+            {
+                two_word_returns.insert(*def);
+            }
+        }
+
         TypedSidecar {
             tys,
             tys_by_span,
@@ -201,6 +217,7 @@ impl Checker {
             for_in_pin_spans: self.for_in_pin_spans.clone(),
             fn_effects: self.fn_effects.clone(),
             pure_fn_names: self.pure_fn_names.clone(),
+            two_word_returns,
         }
     }
 }

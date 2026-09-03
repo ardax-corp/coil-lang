@@ -170,7 +170,8 @@ fn edge_effects_with_next(byte: &Byte, next: Option<&Byte>, pool: &[u64]) -> (Ef
         Instruction::PairJumpIfTag => (Effect::Delta(0), Effect::Delta(-1)),
         Instruction::CALL => {
             let (arity, _) = byte.call_parts();
-            let e = Effect::Delta(call_result_delta(arity as u32, next_is_pair_to_heap(next)));
+            let pair = byte.call_ret_words() >= 2 || next_is_pair_to_heap(next);
+            let e = Effect::Delta(call_result_delta(arity as u32, pair));
             (e, e)
         }
         Instruction::CallIndirect if next_is_pair_to_heap(next) => {
@@ -291,13 +292,8 @@ fn signed_arity_delta(arity: u32) -> i32 {
     arity.min(i32::MAX as u32) as i32 - 1
 }
 
-/// `CALL` / `MakeCoro`: pop `arity` args, push one result. The callee frame base
-/// is `tell - arity` and the matching return seeks back to it before pushing.
-fn call_arity_delta(arity: u32) -> i32 {
-    call_result_delta(arity, false)
-}
-
-/// Unary return pushes one value; `ReturnPair` leaves payload+tag (two).
+/// Unary return pushes one value; two-slot CALL bit 31 / RETURN operand 2
+/// leaves payload+tag.
 fn call_result_delta(arity: u32, pair_return: bool) -> i32 {
     let results = if pair_return { 2 } else { 1 };
     results - arity.min(i32::MAX as u32) as i32
@@ -306,8 +302,15 @@ fn call_result_delta(arity: u32, pair_return: bool) -> i32 {
 fn effect_il(op: &IlOp, pool: &[u64]) -> Effect {
     match op {
         IlOp::StorePop { slot, .. } => Effect::DeltaThenFloor(-1, slot.saturating_add(1)),
-        IlOp::Entry { kind, arity, .. } => match kind {
-            EntryKind::Call | EntryKind::MakeCoro => Effect::Delta(call_arity_delta(*arity)),
+        IlOp::Entry {
+            kind,
+            arity,
+            ret_words,
+            ..
+        } => match kind {
+            EntryKind::Call | EntryKind::MakeCoro => {
+                Effect::Delta(call_result_delta(*arity, *ret_words >= 2))
+            }
             EntryKind::TailCall => Effect::Terminator,
             EntryKind::CodePtr | EntryKind::MakePolyFn => Effect::Delta(1),
         },
@@ -349,10 +352,11 @@ fn edge_effects_il_with_next(op: &IlOp, next: Option<&IlOp>, pool: &[u64]) -> (E
     if let IlOp::Entry {
         kind: EntryKind::Call,
         arity,
+        ret_words,
         ..
     } = op
     {
-        let pair = next.is_some_and(il_is_pair_to_heap);
+        let pair = *ret_words >= 2 || next.is_some_and(il_is_pair_to_heap);
         let e = Effect::Delta(call_result_delta(*arity, pair));
         return (e, e);
     }
@@ -673,6 +677,7 @@ pub fn entry_call_tell_after(arity: u32, seed: u32) -> (Tell, Tell) {
             arity,
             target: super::op::Label(0),
             loc,
+        ret_words: 1,
         },
         IlOp::Return { loc },
     ];
@@ -763,7 +768,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc },
         ];
         let tell = analyze_il_at(&ops, 0);
@@ -791,7 +797,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc },
         ];
         let tell = analyze_il_at(&ops, 0);
@@ -819,7 +826,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc },
         ];
         let tell = analyze_il_at(&ops, 0);
@@ -961,7 +969,8 @@ mod tests {
                 arity: 3,
                 target: Label(0),
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc },
         ];
         let info = analyze_il_at(&ops, 3);
@@ -980,7 +989,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc },
         ];
         let info = analyze_il_at(&ops, 2);
@@ -1020,7 +1030,8 @@ mod tests {
                     arity,
                     target: Label(0),
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::byte(Byte::new(Instruction::PairToHeap)),
                 IlOp::Return { loc },
             ];
@@ -1084,7 +1095,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc },
         ];
         let mut pool = Vec::new();
@@ -1174,7 +1186,8 @@ mod tests {
                 arity: 0,
                 target: Label(0),
                 loc,
-            },
+            ret_words: 1,
+        },
             IlOp::Return { loc },
             // Bind the Call target so C3 lower succeeds; this test is about
             // arity mismatch, not unbound labels.
@@ -1188,6 +1201,7 @@ mod tests {
             arity: 2,
             target: Label(0),
             loc,
+        ret_words: 1,
         };
         let ranges = vec![("f".to_string(), 0, lowered.bytecode.len())];
         let mut seeds = std::collections::HashMap::new();
@@ -1283,7 +1297,8 @@ mod tests {
                     arity,
                     target: Label(0),
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc },
             ];
             let coro = vec![
@@ -1292,7 +1307,8 @@ mod tests {
                     arity,
                     target: Label(0),
                     loc,
-                },
+                ret_words: 1,
+        },
                 IlOp::Return { loc },
             ];
             let entry = arity + 1;

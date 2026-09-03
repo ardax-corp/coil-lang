@@ -830,6 +830,7 @@ impl Compiler {
                 // Base-case peel that reads leaf args in place instead of
                 // spilling them; falls through to the spilling peel below.
                 if let Some(off) = target_offset
+                    && pair_kind.is_none()
                     && !is_generic_src
                     && !is_instance_method_fqn(&self.checker, &lookup_name)
                     && !self.coroutine_fns.contains(&n)
@@ -909,7 +910,14 @@ impl Compiler {
                     }
                     let n_filled = mask.count_ones();
                     bytecode.push_const(mask as i32);
-                    bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(off as u32));
+                    if !self.emit_named_entry(
+                        &mut bytecode,
+                        &lookup_name,
+                        0,
+                        crate::il::EntryKind::CodePtr,
+                    ) {
+                        bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(off as u32));
+                    }
                     bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(
                         make_fn_operand(0, n_filled, fa as u32, is_rest),
                     ));
@@ -985,7 +993,13 @@ impl Compiler {
                     crate::il::EntryKind::Call
                 };
                 if let Some(off) = mono_offset {
-                    bytecode.push(Self::packed_entry_byte(entry_kind, arity, off as u32));
+                    let ret_words = if pair_kind.is_some() { 2 } else { 1 };
+                    bytecode.push(Self::packed_entry_byte_ret(
+                        entry_kind,
+                        arity,
+                        off as u32,
+                        ret_words,
+                    ));
                 } else if !self.emit_named_entry(&mut bytecode, &n, arity, entry_kind) {
                     self.missing_call_target(&n, span.into_range());
                 }
@@ -1097,15 +1111,7 @@ impl Compiler {
                     Byte::new(Instruction::CallIndirect)
                         .with_operand_u32(value_arity | (dict_count << 16)),
                 );
-                if polyfn_source.is_none()
-                    && !self.pair_value_context
-                    && let Some(is_option) = self.expr_pair_enum_kind(ast)
-                {
-                    bytecode.push(
-                        Byte::new(Instruction::PairToHeap)
-                            .with_operand_u32(u32::from(is_option)),
-                    );
-                }
+                // CallIndirect keeps the one-word boxed ABI.
                 // Generic→concrete unbox for polyfn call site.
                 if self.local_polyfn_call_needs_unbox(
                     &identifier,
@@ -1179,12 +1185,41 @@ impl Compiler {
         arity: u32,
         kind: crate::il::EntryKind,
     ) -> bool {
+        let name_buf;
+        let name = if matches!(
+            kind,
+            crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn
+        ) {
+            name_buf = self.ensure_unary_boundary_target(name);
+            name_buf.as_str()
+        } else {
+            name
+        };
+        let ret_words = if matches!(kind, crate::il::EntryKind::Call | crate::il::EntryKind::TailCall)
+        {
+            if self.pair_return_kind(name).is_some()
+                || self
+                    .pair_return_kind(strip_overload_key(name))
+                    .is_some()
+            {
+                2
+            } else {
+                1
+            }
+        } else {
+            1
+        };
         if let Some(&offset) = self.functions.get(name) {
-            dest.push(Self::packed_entry_byte(kind, arity, offset as u32));
+            dest.push(Self::packed_entry_byte_ret(
+                kind,
+                arity,
+                offset as u32,
+                ret_words,
+            ));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
             self.bytecode.append(dest);
-            self.bytecode.emit_entry(kind, arity, label);
+            self.bytecode.emit_entry_ret(kind, arity, label, ret_words);
             true
         } else {
             false
@@ -1198,12 +1233,25 @@ impl Compiler {
         arity: u32,
         kind: crate::il::EntryKind,
     ) -> bool {
+        let ret_words = if matches!(kind, crate::il::EntryKind::MakeCoro) {
+            1
+        } else if self.pair_return_kind(name).is_some()
+            || self.pair_return_kind(strip_overload_key(name)).is_some()
+        {
+            2
+        } else {
+            1
+        };
         if let Some(&offset) = self.functions.get(name) {
-            self.bytecode
-                .push(Self::packed_entry_byte(kind, arity, offset as u32));
+            self.bytecode.push(Self::packed_entry_byte_ret(
+                kind,
+                arity,
+                offset as u32,
+                ret_words,
+            ));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
-            self.bytecode.emit_entry(kind, arity, label);
+            self.bytecode.emit_entry_ret(kind, arity, label, ret_words);
             true
         } else {
             false
@@ -1211,6 +1259,15 @@ impl Compiler {
     }
 
     pub(super) fn packed_entry_byte(kind: crate::il::EntryKind, arity: u32, offset: u32) -> Byte {
+        Self::packed_entry_byte_ret(kind, arity, offset, 1)
+    }
+
+    pub(super) fn packed_entry_byte_ret(
+        kind: crate::il::EntryKind,
+        arity: u32,
+        offset: u32,
+        ret_words: u8,
+    ) -> Byte {
         let inst = match kind {
             crate::il::EntryKind::Call => Instruction::CALL,
             crate::il::EntryKind::TailCall => Instruction::TailCall,
@@ -1222,7 +1279,8 @@ impl Compiler {
             crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn => {
                 Byte::new(inst).with_operand_u32(offset)
             }
-            _ => Byte::new(inst).with_call_packed(arity, offset),
+            crate::il::EntryKind::MakeCoro => Byte::new(inst).with_call_packed(arity, offset),
+            _ => Byte::new(inst).with_call_packed_ret(arity, offset, ret_words),
         }
     }
 

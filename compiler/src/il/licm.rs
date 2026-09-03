@@ -2021,7 +2021,8 @@ mod tests {
                 arity: 0,
                 target: Label(9),
                 loc: loc(),
-            },
+            ret_words: 1,
+        },
             IlOp::Pop { loc: loc() },
         ]);
         ops.extend(counted_latch());
