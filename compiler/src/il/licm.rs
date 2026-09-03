@@ -2020,8 +2020,7 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 0,
                 target: Label(9),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::Pop { loc: loc() },
         ]);
         ops.extend(counted_latch());

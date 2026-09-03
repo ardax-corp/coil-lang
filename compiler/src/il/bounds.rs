@@ -1571,7 +1571,7 @@ mod hoist {
                 },
                 IlOp::Label(Label(1)),
                 IlOp::Load { slot: 1, loc: loc() },
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ]
         }
 
@@ -1748,8 +1748,7 @@ mod hoist {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 2,
                 target: Label(9),
-                loc: loc(),
-            };
+                loc: loc(), ret_words: 1,};
             let before = ops.clone();
             assert!(!hoist_loop_invariants(&mut ops));
             assert!(ops == before);
@@ -2691,7 +2690,7 @@ mod tests {
                 slot: 2,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         loop_bounds(&mut ops);
         let stats = last_bounds_stats();
@@ -2753,7 +2752,7 @@ mod tests {
  hint: Default::default(), },
             IlOp::Label(Label(1)),
             IlOp::Load { slot: 2, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         optimize(&mut ops, &OptimizeOptions::default(), &mut Vec::new());
         let stats = last_bounds_stats();
@@ -2829,8 +2828,7 @@ mod tests {
                 kind: EntryKind::Call,
                 arity: 1,
                 target: Label(9),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::Pop { loc: loc() },
             IlOp::Load { slot: 1, loc: loc() },
             IlOp::Const { imm: 1, loc: loc() },
@@ -2904,8 +2902,7 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 1,
                 target: Label(9),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::Pop { loc: loc() },
             IlOp::Load { slot: 1, loc: loc() },
             IlOp::Const { imm: 1, loc: loc() },
@@ -3401,7 +3398,7 @@ mod tests {
         use crate::il::op::IlJumpKind;
 
         let mut ops = vec![
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(10),
@@ -3419,7 +3416,7 @@ mod tests {
                 loc: loc(),
                 hint: Default::default(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(10),
@@ -3433,7 +3430,7 @@ mod tests {
                 loc: loc(),
                 hint: Default::default(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let lp = NaturalLoop {
             header: 2,

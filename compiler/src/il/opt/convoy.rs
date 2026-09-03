@@ -800,7 +800,7 @@ pub(super) fn clone_shared_return(ops: &mut Vec<IlOp>) {
         }
 
         for j in jump_only_jmps {
-            ops[j] = IlOp::Return { loc };
+            ops[j] = IlOp::Return { loc, ret_words: 1 };
             changed = true;
         }
         r += 1;

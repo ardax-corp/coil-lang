@@ -94,7 +94,7 @@ fn loop_with_invariant_store(read_after: bool, read_in_loop: bool, variant: bool
             slot: 1,
             loc: loc(),
         });
-        ops.push(IlOp::Return { loc: loc() });
+        ops.push(IlOp::Return { loc: loc(), ret_words: 1});
     } else {
         ops.push(IlOp::Halt { loc: loc() });
     }

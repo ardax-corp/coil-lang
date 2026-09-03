@@ -79,8 +79,9 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
         IlOp::Bin { .. } => Some(-1),
         // Slot forms push a computed value without consuming eval-stack args.
         IlOp::BinSlotImm { .. } | IlOp::BinSlotSlot { .. } => Some(1),
-        // Terminators: treat as consuming the returned value for fall-through SP.
-        IlOp::Return { .. } | IlOp::LoadReturnSlot { .. } | IlOp::ConstReturnImm { .. } => Some(-1),
+        // Terminators: treat as consuming the returned value(s) for fall-through SP.
+        IlOp::Return { ret_words, .. } => Some(-(*ret_words as i32)),
+        IlOp::LoadReturnSlot { .. } | IlOp::ConstReturnImm { .. } => Some(-1),
         IlOp::BinReturn { .. } => Some(-2),
         IlOp::Halt { .. } => Some(0),
         IlOp::Jump {
@@ -102,16 +103,14 @@ pub fn stack_delta(op: &IlOp) -> Option<i32> {
         IlOp::Entry {
             kind: EntryKind::Call | EntryKind::MakeCoro,
             arity,
-            ..
-        } => Some(1 - *arity as i32),
+            ret_words,
+            .. } => Some(*ret_words as i32 - *arity as i32),
         IlOp::Entry {
             kind: EntryKind::TailCall,
-            ..
-        } => None,
+            .. } => None,
         IlOp::Entry {
             kind: EntryKind::CodePtr | EntryKind::MakePolyFn,
-            ..
-        } => Some(1),
+            .. } => Some(1),
         IlOp::PrologueJmp { .. } => Some(0),
         IlOp::Byte { byte, .. } => byte_stack_delta(*byte.bytecode(), byte),
     }
@@ -182,7 +181,8 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::BinSlotSlotStore => Some(0),
         Instruction::CmpJmpf | Instruction::CmpJmpt => Some(-2),
         Instruction::LogNotJmpf | Instruction::LogNotJmpt => Some(-1),
-        Instruction::RETURN | Instruction::LoadReturnSlot | Instruction::ConstReturnImm => Some(-1),
+        Instruction::RETURN => Some(-(byte.return_words() as i32)),
+        Instruction::LoadReturnSlot | Instruction::ConstReturnImm => Some(-1),
         Instruction::ReturnPair => Some(-2),
         Instruction::BinReturn => Some(-2),
         Instruction::HALT | Instruction::NOOP => Some(0),
@@ -208,7 +208,11 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
             Some(1 - 2 * arity)
         }
         Instruction::MakeEnum => Some(1 - byte.operand_u16(1) as i32),
-        Instruction::CALL | Instruction::MakeCoro => {
+        Instruction::CALL => {
+            let (arity, _) = byte.call_parts();
+            Some(byte.call_ret_words() as i32 - arity as i32)
+        }
+        Instruction::MakeCoro => {
             let (arity, _) = byte.call_parts();
             Some(1 - arity as i32)
         }
@@ -254,8 +258,7 @@ fn is_terminator(op: &IlOp) -> bool {
             | IlOp::BinReturn { .. }
             | IlOp::Entry {
                 kind: EntryKind::TailCall,
-                ..
-            }
+                .. }
     ) || matches!(
         op.as_encode_byte(),
         Some(b) if matches!(
@@ -271,19 +274,26 @@ fn is_terminator(op: &IlOp) -> bool {
     )
 }
 
-/// True when `op` is a nested direct call whose VM return resets tell to
-/// `frame_base + 1` (return value only).
-fn is_nested_call_return(op: &IlOp) -> bool {
-    matches!(
-        op,
+/// When `op` is a nested direct call, the VM return resets tell to
+/// `frame_base + ret_words` (`1` boxed word, or `2` for a known ≤2-word
+/// direct `CALL`; `MakeCoro` is always `1`).
+fn nested_call_return_words(op: &IlOp) -> Option<i32> {
+    match op {
         IlOp::Entry {
-            kind: EntryKind::Call | EntryKind::MakeCoro,
+            kind: EntryKind::Call,
+            ret_words,
             ..
-        }
-    ) || matches!(
-        op.as_plain_byte(),
-        Some(b) if matches!(*b.bytecode(), Instruction::CALL | Instruction::MakeCoro)
-    )
+        } => Some(*ret_words as i32),
+        IlOp::Entry {
+            kind: EntryKind::MakeCoro,
+            ..
+        } => Some(1),
+        _ => match op.as_plain_byte() {
+            Some(b) if *b.bytecode() == Instruction::CALL => Some(b.call_ret_words() as i32),
+            Some(b) if *b.bytecode() == Instruction::MakeCoro => Some(1),
+            _ => None,
+        },
+    }
 }
 
 /// Compute SP-in for each op. Entry SP is 0 at index 0; unknown effects poison.
@@ -345,8 +355,8 @@ pub fn analyze_at(ops: &[IlOp], entry_sp: i32) -> SpInfo {
             // result → relative height is always 1, not `before + (1 - arity)`.
             // Modeling the arithmetic delta lets mem_fwd emit Dup;Store that
             // later operand pops destroy (http parse_url / bytes_slice hang).
-            let after = if is_nested_call_return(op) {
-                Sp::Known(1)
+            let after = if let Some(ret_words) = nested_call_return_words(op) {
+                Sp::Known(ret_words)
             } else {
                 before.apply(stack_delta(op))
             };
@@ -403,7 +413,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(0), Sp::Known(0));
@@ -433,7 +443,7 @@ mod tests {
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 2, loc: loc() },
             IlOp::Label(Label(2)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         // After JMPF, SP is 0 on both arms; each CONST → 1 at join.
@@ -463,7 +473,7 @@ mod tests {
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 2, loc: loc() },
             IlOp::Label(Label(2)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(7), Sp::Unknown);
@@ -485,7 +495,7 @@ mod tests {
             IlOp::byte(Byte::new(Instruction::STRING).with_operand_u32(0)),
             IlOp::byte(Byte::new(Instruction::FORMAT).with_operand_u32(1)),
             IlOp::Print { loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(0), Sp::Known(0));
@@ -571,14 +581,12 @@ mod tests {
             kind: EntryKind::Call,
             arity: 2,
             target: Label(0),
-            loc: loc(),
-        };
+            loc: loc(), ret_words: 1,};
         let tail = IlOp::Entry {
             kind: EntryKind::TailCall,
             arity: 1,
             target: Label(0),
-            loc: loc(),
-        };
+            loc: loc(), ret_words: 1,};
         assert_eq!(stack_delta(&call), Some(-1));
         assert_eq!(stack_delta(&tail), None);
     }
@@ -592,14 +600,12 @@ mod tests {
             kind: EntryKind::Call,
             arity: 0,
             target: Label(0),
-            loc: loc(),
-        };
+            loc: loc(), ret_words: 1,};
         let coro0 = IlOp::Entry {
             kind: EntryKind::MakeCoro,
             arity: 0,
             target: Label(0),
-            loc: loc(),
-        };
+            loc: loc(), ret_words: 1,};
         assert_eq!(stack_delta(&call0), Some(1));
         assert_eq!(stack_delta(&coro0), Some(1));
         assert_ne!(
@@ -619,7 +625,7 @@ mod tests {
                 slot: 5,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(0), Sp::Known(0));
@@ -733,7 +739,7 @@ mod tests {
         );
         let ops = vec![
             IlOp::byte(Byte::new(Instruction::STRING).with_operand_u32(1)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(0), Sp::Known(0));
@@ -764,9 +770,8 @@ mod tests {
                 kind: EntryKind::Call,
                 arity: 2,
                 target: Label(0),
-                loc: loc(),
-            },
-            IlOp::Return { loc: loc() },
+                loc: loc(), ret_words: 1,},
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(2), Sp::Known(2));
@@ -784,9 +789,8 @@ mod tests {
                 kind: EntryKind::MakeCoro,
                 arity: 0,
                 target: Label(0),
-                loc: loc(),
-            },
-            IlOp::Return { loc: loc() },
+                loc: loc(), ret_words: 1,},
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(3), Sp::Known(3));
@@ -809,9 +813,8 @@ mod tests {
                 kind: EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc: loc(),
-            },
-            IlOp::Return { loc: loc() },
+                loc: loc(), ret_words: 1,},
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(3), Sp::Known(3));
@@ -827,10 +830,9 @@ mod tests {
                 kind: EntryKind::TailCall,
                 arity: 1,
                 target: Label(0),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::Label(Label(0)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = analyze(&ops);
         assert_eq!(info.sp_before(1), Sp::Known(1));

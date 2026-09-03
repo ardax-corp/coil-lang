@@ -70,7 +70,7 @@ fn scalarizes_non_escaping_index() {
         },
         IlOp::Const { imm: 0, loc: loc() },
         IlOp::Index { loc: loc() },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     let info = analyze_escapes(&ops);
     assert!(is_stack_allocatable(&info.allocs[0]));
@@ -91,7 +91,7 @@ fn keeps_heap_when_array_is_returned() {
             slot: 0,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     let info = analyze_escapes(&ops);
     assert!(!is_stack_allocatable(&info.allocs[0]));
@@ -111,8 +111,7 @@ fn keeps_heap_when_passed_to_call() {
             kind: EntryKind::Call,
             arity: 1,
             target: Label(9),
-            loc: loc(),
-        },
+            loc: loc(), ret_words: 1,},
         IlOp::Pop { loc: loc() },
         IlOp::Halt { loc: loc() },
     ]);
@@ -172,7 +171,7 @@ fn scalarizes_len_of_non_escaping_array() {
             loc: loc(),
         },
         IlOp::byte(Byte::new(Instruction::ArrayLen)),
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     escape_analysis(&mut ops);
     assert!(!has_make_array(&ops));
@@ -200,7 +199,7 @@ fn scalarizes_const_store_index() {
         },
         IlOp::Const { imm: 1, loc: loc() },
         IlOp::Index { loc: loc() },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     escape_analysis(&mut ops);
     assert!(!has_make_array(&ops));
@@ -220,7 +219,7 @@ fn isolated_optimize_flag_runs_pass() {
         },
         IlOp::Const { imm: 1, loc: loc() },
         IlOp::Index { loc: loc() },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     optimize(&mut ops, &isolated(), &mut Vec::new());
     assert!(!has_make_array(&ops));
@@ -236,7 +235,7 @@ fn isolated_optimize_off_leaves_make_array() {
         },
         IlOp::Const { imm: 0, loc: loc() },
         IlOp::Index { loc: loc() },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     let mut opts = isolated();
     opts.escape_analysis = false;
@@ -274,7 +273,7 @@ fn keeps_heap_when_elements_are_computed() {
         },
         IlOp::Const { imm: 0, loc: loc() },
         IlOp::Index { loc: loc() },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ];
     assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
     escape_analysis(&mut ops);

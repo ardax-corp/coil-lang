@@ -1200,8 +1200,7 @@ impl Compiler {
             match op {
                 IlOp::Entry {
                     kind: EntryKind::TailCall,
-                    ..
-                } => {
+                    .. } => {
                     // Tail-call bodies leave dead fallthrough and rely on
                     // post-emit opts for arg order — unsafe to peel pre-opt.
                     return false;
@@ -1209,8 +1208,7 @@ impl Compiler {
                 IlOp::Entry {
                     kind: EntryKind::Call,
                     target,
-                    ..
-                } => {
+                    .. } => {
                     if *target == self_entry {
                         saw_self_call = true;
                     }
@@ -2662,8 +2660,12 @@ impl Compiler {
                     arity,
                     target,
                     loc,
+                    ret_words,
                 } => {
-                    if !allow_calls {
+                    if !allow_calls || *ret_words >= 2 {
+                        // Two-word CALL leaves `[payload, tag]`; this peel path
+                        // only understands a single joined value. Refuse rather
+                        // than mis-join the pair.
                         return false;
                     }
                     // Peel is an expression context: TailCall would replace the
@@ -2677,10 +2679,16 @@ impl Compiler {
                         arity: *arity,
                         target: *target,
                         loc: *loc,
+                        ret_words: 1,
                     });
                     saw_value = true;
                 }
-                IlOp::Return { .. } => {
+                IlOp::Return { ret_words, .. } => {
+                    if *ret_words >= 2 {
+                        // Two-word return would leave `[payload, tag]` at the
+                        // join instead of one value. Refuse this peel.
+                        return false;
+                    }
                     // Arm/function return → jump to join with value on stack.
                     self.bytecode.push_op(IlOp::Jump {
                         kind: IlJumpKind::Unconditional,

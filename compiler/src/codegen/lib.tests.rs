@@ -3505,8 +3505,7 @@ fn main() {
         };
         let returned = guard(vec![
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
             IlOp::Load {
                 slot: 2,
                 loc: DebugLoc::unknown(),
@@ -3968,8 +3967,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
     }
 
@@ -3991,8 +3989,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
         // ConstPool is a pure producer in the widened micro-inline set.
         assert!(Compiler::is_tiny_inline_il(&[
@@ -4001,8 +3998,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
         // Typed STRING (literal `return "…"`) is a pure micro-body producer.
         assert!(Compiler::is_tiny_inline_il(&[
@@ -4011,8 +4007,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
         assert!(!Compiler::is_tiny_inline_il(&[
             IlOp::HostInvoke {
@@ -4020,8 +4015,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
     }
 
@@ -4130,8 +4124,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
             IlOp::Load {
                 slot: 0,
                 loc: DebugLoc::unknown(),
@@ -4145,8 +4138,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ];
         assert!(Compiler::is_tiny_inline_diamond_il(&ops));
         assert!(Compiler::is_tiny_inline_il(&ops));

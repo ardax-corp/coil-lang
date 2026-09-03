@@ -120,12 +120,26 @@ impl IlBuilder {
     }
 
     pub fn emit_entry_at(&mut self, kind: EntryKind, arity: u32, target: Label, loc: DebugLoc) {
+        self.emit_entry_ret_at(kind, arity, target, loc, 1);
+    }
+
+    /// `EntryKind::Call` with an explicit return width (`1` or `2` words).
+    /// Every other kind should keep `ret_words = 1`.
+    pub fn emit_entry_ret_at(
+        &mut self,
+        kind: EntryKind,
+        arity: u32,
+        target: Label,
+        loc: DebugLoc,
+        ret_words: u32,
+    ) {
         self.targeted.insert(target.0);
         self.ops.push(IlOp::Entry {
             kind,
             arity,
             target,
             loc,
+            ret_words,
         });
     }
 
@@ -148,11 +162,20 @@ impl IlBuilder {
     pub fn push_return(&mut self) {
         self.push_op(IlOp::Return {
             loc: DebugLoc::unknown(),
+            ret_words: 1,
         });
     }
 
     pub fn push_return_at(&mut self, loc: DebugLoc) {
-        self.push_op(IlOp::Return { loc });
+        self.push_op(IlOp::Return { loc, ret_words: 1 });
+    }
+
+    /// Two-slot `RETURN`: pops/pushes `[payload, tag]` instead of one word.
+    pub fn push_return_two_word(&mut self) {
+        self.push_op(IlOp::Return {
+            loc: DebugLoc::unknown(),
+            ret_words: 2,
+        });
     }
 
     pub fn push_load(&mut self, slot: u32) {
@@ -340,6 +363,7 @@ impl IlBuilder {
                     arity,
                     target,
                     loc,
+                    ret_words,
                 } => {
                     let nid = map_label(target.0, self);
                     self.targeted.insert(nid);
@@ -348,6 +372,7 @@ impl IlBuilder {
                         arity,
                         target: Label(nid),
                         loc,
+                        ret_words,
                     });
                 }
                 other_op => self.ops.push(other_op),
@@ -402,8 +427,7 @@ impl IlBuilder {
                     target: Label(id), ..
                 }
                 | IlOp::Entry {
-                    target: Label(id), ..
-                } => {
+                    target: Label(id), .. } => {
                     let nid = *remap.entry(*id).or_insert_with(|| {
                         let n = self.next_label_id;
                         self.next_label_id += 1;
@@ -422,8 +446,7 @@ impl IlBuilder {
                 target: Label(id), ..
             }
             | IlOp::Entry {
-                target: Label(id), ..
-            } = op
+                target: Label(id), .. } = op
             {
                 self.targeted.insert(*id);
             }

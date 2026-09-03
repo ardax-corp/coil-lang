@@ -685,7 +685,7 @@ mod tests {
         let mut ops = vec![
             IlOp::Const { imm: 3, loc: loc() },
             IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[0], IlOp::Const { imm: 3, .. }));
@@ -698,7 +698,7 @@ mod tests {
             IlOp::Const { imm: 3, loc: loc() },
             IlOp::Const { imm: 3, loc: loc() },
             IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[0], IlOp::Const { imm: 3, .. }));
@@ -718,7 +718,7 @@ mod tests {
                 slot: 2,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let blocks = build_blocks(&ops);
         gvn_within_blocks(&mut ops, &blocks);
@@ -736,7 +736,7 @@ mod tests {
                 loc: loc(),
             },
             IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[2], IlOp::Const { imm: 3, .. }));
@@ -752,7 +752,7 @@ mod tests {
                 loc: loc(),
             },
             IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[2], IlOp::Const { imm: 3, .. }));
@@ -764,7 +764,7 @@ mod tests {
         let mut ops = vec![
             IlOp::String { idx: 4, loc: loc() },
             IlOp::String { idx: 4, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[0], IlOp::String { idx: 4, .. }));
@@ -787,7 +787,7 @@ mod tests {
             IlOp::byte(common::Byte::new(Instruction::FORMAT).with_operand_u32(2)),
             IlOp::String { idx: 3, loc: loc() }, // c
             IlOp::byte(common::Byte::new(Instruction::FORMAT).with_operand_u32(2)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         let pct_s = ops
@@ -819,7 +819,7 @@ mod tests {
             IlOp::byte(common::Byte::new(Instruction::FORMAT).with_operand_u32(2)),
             IlOp::String { idx: 4, loc: loc() },
             IlOp::byte(common::Byte::new(Instruction::FORMAT).with_operand_u32(2)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         let pct_s = ops
@@ -835,7 +835,7 @@ mod tests {
         let mut ops = vec![
             IlOp::String { idx: 4, loc: loc() },
             IlOp::String { idx: 5, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[0], IlOp::String { idx: 4, .. }));
@@ -865,7 +865,7 @@ mod tests {
             IlOp::String { idx: 7, loc: loc() },
             IlOp::Label(Label(2)),
             IlOp::String { idx: 7, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let join = ops
             .iter()
@@ -906,7 +906,7 @@ mod tests {
             IlOp::String { idx: 2, loc: loc() },
             IlOp::Label(Label(2)),
             IlOp::String { idx: 1, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before_len = ops.len();
         cfg_gvn(&mut ops);
@@ -930,7 +930,7 @@ mod tests {
         let mut ops = vec![
             IlOp::ConstPool { idx: 2, loc: loc() },
             IlOp::ConstPool { idx: 2, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[0], IlOp::ConstPool { idx: 2, .. }));
@@ -959,7 +959,7 @@ mod tests {
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Label(Label(2)),
             IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         let consts = ops
@@ -1001,7 +1001,7 @@ mod tests {
                 slot: 3,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let info = sp::analyze(&ops);
         assert!(
@@ -1038,7 +1038,7 @@ mod tests {
             IlOp::Const { imm: 2, loc: loc() },
             IlOp::Label(Label(2)),
             IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before_len = ops.len();
         cfg_gvn(&mut ops);
@@ -1089,7 +1089,7 @@ mod tests {
                 slot: 3,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let join = ops
             .iter()
@@ -1127,7 +1127,7 @@ mod tests {
                 index: 1,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[0], IlOp::Load { slot: 0, .. }));
@@ -1159,7 +1159,7 @@ mod tests {
                 index: 1,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = ops.len();
         cfg_gvn(&mut ops);
@@ -1193,7 +1193,7 @@ mod tests {
                 loc: loc(),
             },
             IlOp::GetField { loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert_eq!(
@@ -1242,7 +1242,7 @@ mod tests {
                 loc: loc(),
             },
             IlOp::GetField { loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert_eq!(
@@ -1287,7 +1287,7 @@ mod tests {
                 loc: loc(),
             },
             IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         let join_loads = ops
@@ -1309,7 +1309,7 @@ mod tests {
                 op: Instruction::MUL,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(
@@ -1323,7 +1323,7 @@ mod tests {
         let mut ops = vec![
             IlOp::Const { imm: 3, loc: loc() },
             IlOp::Const { imm: 3, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         cfg_gvn(&mut ops);
         assert!(matches!(ops[1], IlOp::Dup { .. }));

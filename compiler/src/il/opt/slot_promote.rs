@@ -1410,8 +1410,7 @@ mod tell {
             IlOp::Entry {
                 kind: EntryKind::TailCall,
                 arity,
-                ..
-            } => Some(*arity),
+                .. } => Some(*arity),
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::TailCall => {
                 Some(byte.call_parts().0 as u32)
             }
@@ -1647,8 +1646,7 @@ mod tell {
                 kind: EntryKind::TailCall,
                 arity,
                 target: Label(0),
-                loc: loc(),
-            }
+                loc: loc(), ret_words: 1,}
         }
 
         fn counts(ops: &[IlOp]) -> (usize, usize) {
@@ -1687,7 +1685,7 @@ mod tell {
                 IlOp::StorePop { slot: 2, loc: loc() },
                 IlOp::Load { slot: 2, loc: loc() },
                 IlOp::Pop { loc: loc() },
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             slot_promote_at(&mut ops, 2);
             assert_eq!(counts(&ops), (1, 1));
@@ -1699,7 +1697,7 @@ mod tell {
             let mut ops = vec![
                 IlOp::Const { imm: 1, loc: loc() },
                 IlOp::StorePop { slot: 3, loc: loc() },
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             slot_promote_at(&mut ops, 3);
             assert_eq!(counts(&ops), (0, 1));
@@ -1796,9 +1794,8 @@ mod tell {
                     kind: EntryKind::Call,
                     arity: 2,
                     target: Label(0),
-                    loc: loc(),
-                },
-                IlOp::Return { loc: loc() },
+                    loc: loc(), ret_words: 1,},
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             let before = ops.clone();
             slot_promote_at(&mut ops, 3);
@@ -1814,7 +1811,7 @@ mod tell {
                 IlOp::Const { imm: 1, loc: loc() },
                 IlOp::StorePop { slot: 3, loc: loc() },
                 IlOp::Load { slot: 3, loc: loc() },
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             let before = ops.clone();
             slot_promote_at(&mut ops, 3);
@@ -2142,7 +2139,7 @@ mod tell {
                     hint: Default::default(),
                 },
                 IlOp::Label(Label(1)),
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             optimize_at(&mut ops, &seek_promote_opts(true), 2, &mut Vec::new());
             assert!(seek_before_latch(&ops));
@@ -2214,7 +2211,7 @@ mod tell {
                     hint: Default::default(),
                 },
                 IlOp::Label(Label(3)),
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             seek_normalize_back_edges(&mut ops, 2);
             let seeks = ops.iter().filter(|op| is_seek(op)).count();
@@ -2254,7 +2251,7 @@ mod tests {
                 slot: 1,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -2284,7 +2281,7 @@ mod tests {
                 imm: 1,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 7);
         assert!(
@@ -2335,7 +2332,7 @@ mod tests {
                 slot: 1,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -2418,7 +2415,7 @@ mod tests {
                 slot: 1,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(matches!(ops[9], IlOp::Load { slot: 1, .. }));
@@ -2487,7 +2484,7 @@ mod tests {
                 slot: 7,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 8);
         assert!(
@@ -2509,13 +2506,12 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::Load {
                 slot: 1,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(matches!(ops[3], IlOp::Load { slot: 1, .. }));
@@ -2549,7 +2545,7 @@ mod tests {
                 slot: 6,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 7);
         assert!(
@@ -2609,7 +2605,7 @@ mod tests {
                 slot: 7,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 13);
         assert!(
@@ -2632,22 +2628,19 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 3,
                 target: Label(0),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::StorePop { slot: 6, loc: loc() },
             IlOp::Entry {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 3,
                 target: Label(0),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::StorePop { slot: 11, loc: loc() },
             IlOp::Entry {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 3,
                 target: Label(0),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::StorePop { slot: 16, loc: loc() },
             IlOp::Load { slot: 6, loc: loc() },
             IlOp::StorePop { slot: 7, loc: loc() },
@@ -2658,7 +2651,7 @@ mod tests {
             IlOp::Load { slot: 7, loc: loc() },
             IlOp::Load { slot: 12, loc: loc() },
             IlOp::Load { slot: 17, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -2704,7 +2697,7 @@ mod tests {
             },
             IlOp::Pop { loc: loc() },
             IlOp::Load { slot: 3, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -2744,7 +2737,7 @@ mod tests {
             },
             IlOp::Label(Label(1)),
             IlOp::Load { slot: 5, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -2778,7 +2771,7 @@ mod tests {
                 slot: 4,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -2850,7 +2843,7 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Label(Label(2)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -3028,7 +3021,7 @@ mod tests {
                 slot: 5,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -3073,7 +3066,7 @@ mod tests {
                 slot: 5,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -3112,13 +3105,12 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::Load {
                 slot: 3,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 0);
         assert!(
@@ -3161,7 +3153,7 @@ mod tests {
                 slot: 3,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 0);
         assert!(
@@ -3195,13 +3187,12 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc: loc(),
-            },
+                loc: loc(), ret_words: 1,},
             IlOp::Load {
                 slot: 0,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 1);
         assert!(
@@ -3237,7 +3228,7 @@ mod tests {
                 slot: 5,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(
@@ -3282,7 +3273,7 @@ mod tests {
                 slot: 6,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         let redirected = ops.iter().any(|op| match op {
@@ -3364,7 +3355,7 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Label(Label(1)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         slot_promote(&mut ops, 3);
         assert!(

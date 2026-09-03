@@ -41,7 +41,8 @@ enum Slot {
     /// Residual [`IlOp::Byte`] cold set. Fuse-select refuses any window that includes it.
     Cold(Byte, DebugLoc),
     Jump(IlJumpKind, Label, DebugLoc, FuseHint),
-    Entry(EntryKind, u32, Label, DebugLoc),
+    /// `EntryKind::Call` return width (`1` or `2` words); other kinds are `1`.
+    Entry(EntryKind, u32, Label, DebugLoc, u32),
     PrologueJmp(DebugLoc),
     CmpJmpf(u8, Label, DebugLoc, bool),
     LogNotJmpf(Label, DebugLoc, bool),
@@ -80,7 +81,7 @@ impl Slot {
             Slot::Byte(_, l)
             | Slot::Cold(_, l)
             | Slot::Jump(_, _, l, _)
-            | Slot::Entry(_, _, _, l)
+            | Slot::Entry(_, _, _, l, _)
             | Slot::PrologueJmp(l)
             | Slot::CmpJmpf(_, _, l, _)
             | Slot::LogNotJmpf(_, l, _)
@@ -273,12 +274,13 @@ pub(crate) fn fuse_select(ops: &[IlOp], pool: &mut Vec<u64>) -> FuseOut {
                 arity,
                 target,
                 loc,
+                ret_words,
             } => {
                 let idx = pre_slots.len();
                 if !pending.is_empty() {
                     binds_at.insert(idx, std::mem::take(&mut pending));
                 }
-                pre_slots.push(Slot::Entry(*kind, *arity, *target, *loc));
+                pre_slots.push(Slot::Entry(*kind, *arity, *target, *loc, *ret_words));
             }
             IlOp::PrologueJmp { loc } => {
                 let idx = pre_slots.len();
@@ -765,10 +767,12 @@ fn encode_slot(
                 }
             }
         }
-        Slot::Entry(kind, arity, target, _) => {
+        Slot::Entry(kind, arity, target, _, ret_words) => {
             let pc = resolve(labels, *target)?;
             match kind {
-                EntryKind::Call => Byte::new(Instruction::CALL).with_call_packed(*arity, pc),
+                EntryKind::Call => {
+                    Byte::new(Instruction::CALL).with_call_packed_ret(*arity, pc, *ret_words)
+                }
                 EntryKind::TailCall => {
                     Byte::new(Instruction::TailCall).with_call_packed(*arity, pc)
                 }
@@ -2068,8 +2072,7 @@ mod tests {
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ];
         let mut pool = Vec::new();
         let lowered = lower(&ops, &mut pool);
@@ -2114,8 +2117,7 @@ mod tests {
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ];
         let mut pool = Vec::new();
         let lowered = lower(&ops, &mut pool);
@@ -2138,8 +2140,7 @@ mod tests {
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ];
         let mut pool = Vec::new();
         let lowered = lower(&ops, &mut pool);
@@ -2159,7 +2160,7 @@ mod tests {
             IlOp::Dup { loc },
             IlOp::Pop { loc },
             IlOp::Const { imm: 5, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
             IlOp::Dup { loc },
             IlOp::Pop { loc },
         ];
@@ -2206,7 +2207,7 @@ mod tests {
             IlOp::Load { slot: 3, loc },
             IlOp::Label(Label(2)),
             IlOp::Load { slot: 3, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let emit_end = ops.iter().filter(|op| op.emits_code()).count();
         let funcs = vec![IlFunc::new("f", None, 0, emit_end)];
@@ -2249,7 +2250,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc,
             },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let mut pool = Vec::new();
         let lowered = lower(&ops, &mut pool);
@@ -2278,7 +2279,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc,
             },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let mut pool = vec![common::Value::from(3_i64).raw() as u64];
         let lowered = lower(&ops, &mut pool);
@@ -2300,7 +2301,7 @@ mod tests {
     #[test]
     fn lower_module_inner_captures_pre_fuse_ops_only_when_requested() {
         let loc = DebugLoc::unknown();
-        let ops = vec![IlOp::Const { imm: 1, loc }, IlOp::Return { loc }];
+        let ops = vec![IlOp::Const { imm: 1, loc }, IlOp::Return { loc, ret_words: 1}];
         let mut pool = Vec::new();
         let mut module = crate::il::IlModule::from_flat(&ops, &[]);
         let plain = lower_module_inner(

@@ -1179,12 +1179,32 @@ impl Compiler {
         arity: u32,
         kind: crate::il::EntryKind,
     ) -> bool {
+        self.emit_named_entry_ret(dest, name, arity, kind, 1)
+    }
+
+    /// Same as [`Self::emit_named_entry`] with an explicit `CALL` return
+    /// width (`1` or `2` words). Non-`Call` kinds ignore `ret_words`.
+    pub(super) fn emit_named_entry_ret(
+        &mut self,
+        dest: &mut CodeBuf,
+        name: &str,
+        arity: u32,
+        kind: crate::il::EntryKind,
+        ret_words: u32,
+    ) -> bool {
         if let Some(&offset) = self.functions.get(name) {
-            dest.push(Self::packed_entry_byte(kind, arity, offset as u32));
+            dest.push(Self::packed_entry_byte_ret(
+                kind,
+                arity,
+                offset as u32,
+                ret_words,
+            ));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
             self.bytecode.append(dest);
-            self.bytecode.emit_entry(kind, arity, label);
+            self.bytecode
+                .il_mut()
+                .emit_entry_ret_at(kind, arity, label, DebugLoc::unknown(), ret_words);
             true
         } else {
             false
@@ -1198,12 +1218,26 @@ impl Compiler {
         arity: u32,
         kind: crate::il::EntryKind,
     ) -> bool {
+        self.emit_named_entry_on_module_ret(name, arity, kind, 1)
+    }
+
+    /// Same as [`Self::emit_named_entry_on_module`] with an explicit `CALL`
+    /// return width (`1` or `2` words). Non-`Call` kinds ignore `ret_words`.
+    pub(super) fn emit_named_entry_on_module_ret(
+        &mut self,
+        name: &str,
+        arity: u32,
+        kind: crate::il::EntryKind,
+        ret_words: u32,
+    ) -> bool {
         if let Some(&offset) = self.functions.get(name) {
             self.bytecode
-                .push(Self::packed_entry_byte(kind, arity, offset as u32));
+                .push(Self::packed_entry_byte_ret(kind, arity, offset as u32, ret_words));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
-            self.bytecode.emit_entry(kind, arity, label);
+            self.bytecode
+                .il_mut()
+                .emit_entry_ret_at(kind, arity, label, DebugLoc::unknown(), ret_words);
             true
         } else {
             false
@@ -1211,6 +1245,15 @@ impl Compiler {
     }
 
     pub(super) fn packed_entry_byte(kind: crate::il::EntryKind, arity: u32, offset: u32) -> Byte {
+        Self::packed_entry_byte_ret(kind, arity, offset, 1)
+    }
+
+    pub(super) fn packed_entry_byte_ret(
+        kind: crate::il::EntryKind,
+        arity: u32,
+        offset: u32,
+        ret_words: u32,
+    ) -> Byte {
         let inst = match kind {
             crate::il::EntryKind::Call => Instruction::CALL,
             crate::il::EntryKind::TailCall => Instruction::TailCall,
@@ -1221,6 +1264,9 @@ impl Compiler {
         match kind {
             crate::il::EntryKind::CodePtr | crate::il::EntryKind::MakePolyFn => {
                 Byte::new(inst).with_operand_u32(offset)
+            }
+            crate::il::EntryKind::Call => {
+                Byte::new(inst).with_call_packed_ret(arity, offset, ret_words)
             }
             _ => Byte::new(inst).with_call_packed(arity, offset),
         }

@@ -78,9 +78,9 @@ mod tests {
                 loc: loc(),
                 hint: Default::default(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
             IlOp::Label(Label(1)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let map = super::super::instrument::instrument_for_pgo_named(&ops, "f");
         let a = fn_shape_checksum(&ops, &map, "f");
