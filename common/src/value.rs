@@ -144,6 +144,16 @@ impl<'a> Value {
         // (self.0 as usize >> 3) as _
     }
 
+    /// Heap address with the Result `Err` low bit cleared (`pointer | 1`).
+    ///
+    /// `Ok` is an aligned object pointer; `Err` sets bit 0. GC and root
+    /// marking must look up the aligned address. Immediates and `Option`
+    /// (`None` = 0) are unchanged: `0 & !1 == 0`.
+    #[inline]
+    pub fn heap_addr(&self) -> u64 {
+        (self.0 as u64) & !1
+    }
+
     pub fn inc_int(&mut self) -> &Self {
         self.replace((self.as_int() + 1) as _);
         self
@@ -194,6 +204,10 @@ mod tests {
     #[test]
     fn ptr_tagging() {
         assert_eq!(Value::from(0).as_int(), 0);
+        assert_eq!(Value::from(0).heap_addr(), 0);
+        let tagged = Value::from(0x100u64 | 1);
+        assert_eq!(tagged.heap_addr(), 0x100);
+        assert_eq!(Value::from(0x100u64).heap_addr(), 0x100);
         assert_eq!(Value::from(0.0).as_float(), 0.0);
 
         assert_eq!(Value::from(MIN_INT).as_int(), MIN_INT);

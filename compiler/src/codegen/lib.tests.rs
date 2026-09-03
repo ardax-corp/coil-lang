@@ -7329,8 +7329,8 @@ fn main() {
             "mismatched-Result method Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
-            "mismatched-Result method Try must JumpIfMatch a heap enum; opcodes={ops:?}",
+            ops.iter().any(|op| matches!(op, Instruction::BITAND)),
+            "mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
         );
         assert!(
             !bc.windows(4).any(|w| {
@@ -7381,8 +7381,8 @@ fn main() {
             "forward mismatched-Result Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            ops.iter().any(|op| matches!(op, Instruction::JumpIfMatch)),
-            "forward mismatched-Result Try must JumpIfMatch a heap enum; opcodes={ops:?}",
+            ops.iter().any(|op| matches!(op, Instruction::BITAND)),
+            "forward mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
         );
         assert!(
             !bc.windows(4).any(|w| {
@@ -7596,6 +7596,118 @@ fn main() {
                     | Instruction::ReturnPair
             )),
             "gc_churn must not revive tombstoned pair/niche opcodes; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn ground_result_two_classes_uses_pointer_niche() {
+        let (bc, _) = compile_src(
+            r#"
+class Box {
+    pub n: int,
+}
+fn give() -> Result<Box, Box> {
+    return Result::Ok(new Box(1));
+}
+fn main() {
+    let x = give();
+    let y = match x {
+        Result::Ok(b) => b.n,
+        Result::Err(e) => e.n,
+    };
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "Result<class, class> Ok must not MakeEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::OptionNicheToHeap
+                    | Instruction::HeapOptionToNiche
+                    | Instruction::HostInvokeNiche
+                    | Instruction::ReturnPair
+            )),
+            "must not revive niche ISA family; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn result_int_payload_still_boxes() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Result<int, int> {
+    return Result::Ok(1);
+}
+fn main() {
+    let x = give();
+    let y = match x {
+        Result::Ok(n) => n,
+        Result::Err(e) => e,
+    };
+}
+"#,
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "Result<int, int> must stay boxed ObjEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn result_mixed_int_heap_still_boxes() {
+        let (bc, _) = compile_src(
+            r#"
+class Box {
+    pub n: int,
+}
+fn give_ok() -> Result<int, Box> {
+    return Result::Ok(1);
+}
+fn give_err() -> Result<Box, int> {
+    return Result::Err(1);
+}
+fn main() {
+    let _ = give_ok();
+    let _ = give_err();
+}
+"#,
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "Result with an immediate payload must stay boxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn result_heap_churn_does_not_make_enum() {
+        let src = include_str!("../../../examples/perf/result_heap_churn.hy");
+        let (bc, _) = compile_src(src);
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "result_heap_churn must not allocate ObjEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::OptionNicheToHeap
+                    | Instruction::HeapOptionToNiche
+                    | Instruction::HostInvokeNiche
+                    | Instruction::ReturnPair
+            )),
+            "result_heap_churn must not revive tombstoned pair/niche opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }

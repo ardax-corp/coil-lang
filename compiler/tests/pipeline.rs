@@ -6713,6 +6713,13 @@ fn gc_churn_example_checksum() {
 }
 
 #[test]
+fn result_heap_churn_example_checksum() {
+    let src = include_str!("../../examples/perf/result_heap_churn.hy");
+    let output = run_example_src(src);
+    assert_eq!(output, "130000000");
+}
+
+#[test]
 fn pointer_niche_option_match_and_coalesce() {
     let output = run_example_src(
         r#"

@@ -297,8 +297,10 @@ impl Heap {
     }
 
     /// Mark a `Value` if it is a live heap pointer.
+    ///
+    /// Strips the Result `Err` low bit before lookup so tagged payloads stay live.
     pub fn mark_value(&self, v: Value, gray: &mut Vec<Object>) {
-        let addr = v.raw() as u64;
+        let addr = v.heap_addr();
         if addr == 0 {
             return;
         }
@@ -349,7 +351,7 @@ impl Heap {
                 let weak = gc.as_ref();
                 if !weak.cleared.get() {
                     let target = weak.target.get();
-                    let addr = target.raw() as u64;
+                    let addr = target.heap_addr();
                     if addr != 0
                         && let Some(referent) = self.find_object_by_addr(addr)
                         && !referent.is_marked()
@@ -648,6 +650,14 @@ impl Object {
         }
     }
 
+    /// Mark a stored member, including Result `Err` tagged pointers in `Value`.
+    fn mark_member(heap: &Heap, member: &Member, grey_objects: &mut Vec<Self>) {
+        match member {
+            Member::Object(o) => o.mark(grey_objects),
+            Member::Value(v) => heap.mark_value(*v, grey_objects),
+        }
+    }
+
     /// Mark direct heap references held by this object.
     ///
     /// Aggregates that store raw [`Value`]s (arrays, tuples, fn captures,
@@ -657,12 +667,10 @@ impl Object {
     pub fn mark_references(&self, heap: &Heap, grey_objects: &mut Vec<Self>) {
         match self {
             Self::String(_) => {}
-            Self::Instance(i) => i.as_ref().mark_members(grey_objects),
+            Self::Instance(i) => i.as_ref().mark_members(heap, grey_objects),
             Self::Enum(e) => {
-                for member in &e.as_ref().payload {
-                    if let Member::Object(o) = member {
-                        o.mark(grey_objects);
-                    }
+                for member in e.as_ref().payload.iter() {
+                    Self::mark_member(heap, member, grey_objects);
                 }
             }
             Self::Library(_) => {}
@@ -690,22 +698,16 @@ impl Object {
                     Object::Coroutine(*delegate).mark(grey_objects);
                 }
             }
-            Self::Boxed(b) => {
-                if let Member::Object(o) = &b.as_ref().payload {
-                    o.mark(grey_objects);
-                }
-            }
+            Self::Boxed(b) => Self::mark_member(heap, &b.as_ref().payload, grey_objects),
             Self::Root(r) => {
-                if let Some(Member::Object(o)) = &r.as_ref().payload {
-                    o.mark(grey_objects);
+                if let Some(member) = &r.as_ref().payload {
+                    Self::mark_member(heap, member, grey_objects);
                 }
             }
             Self::Weak(_) => {}
             Self::PolyFn(p) => {
                 for captured in p.as_ref().captured_dicts.iter().flatten() {
-                    if let Member::Object(o) = captured {
-                        o.mark(grey_objects);
-                    }
+                    Self::mark_member(heap, captured, grey_objects);
                 }
             }
             Self::Fn(f) => {
@@ -1064,21 +1066,17 @@ impl ObjInstance {
         }
     }
 
-    fn mark_members(&self, grey_objects: &mut Vec<Object>) {
+    fn mark_members(&self, heap: &Heap, grey_objects: &mut Vec<Object>) {
         match &self.storage {
             InstanceStorage::Table(table) => {
                 table.iter().for_each(|(k, v)| {
                     k.mark();
-                    if let Member::Object(o) = v {
-                        o.mark(grey_objects);
-                    }
+                    Object::mark_member(heap, &v, grey_objects);
                 });
             }
             InstanceStorage::Slots(slots) => {
                 for member in slots {
-                    if let Member::Object(o) = member {
-                        o.mark(grey_objects);
-                    }
+                    Object::mark_member(heap, member, grey_objects);
                 }
             }
         }
@@ -2349,6 +2347,20 @@ mod tests {
             Some(Object::String(_))
         ));
         assert!(heap.find_object_by_addr(addr.wrapping_add(1)).is_none());
+    }
+
+    #[test]
+    fn mark_value_strips_result_err_low_bit() {
+        let mut heap = Heap::default();
+        let (obj, _) = heap.alloc(ObjString::from("err"), Object::String);
+        let tagged = Value::from(obj.addr() | 1);
+        assert!(heap.find_object_by_addr(tagged.raw() as u64).is_none());
+        let mut gray = Vec::new();
+        heap.mark_value(tagged, &mut gray);
+        assert_eq!(gray.len(), 1);
+        heap.mark_from_roots(&[tagged.heap_addr()]);
+        unsafe { heap.sweep() };
+        assert!(heap.find_object_by_addr(obj.addr()).is_some());
     }
 
     #[test]

@@ -874,6 +874,11 @@ pub struct Compiler {
     /// Force a contextually typed `Option::None` / `Option::Some` onto the
     /// pointer-niche path when its constructor node has no standalone type.
     force_niche_option: bool,
+    /// Force heap-heap `Result` expressions back to `ObjEnum` for boxed match.
+    force_heap_result: bool,
+    /// Force `Result::Ok` / `Result::Err` onto the pointer-niche path when
+    /// the constructor node has no standalone type.
+    force_niche_result: bool,
     /// When > 0, frame-local ObjEnum construct/load emits `[payload, tag]`
     /// in locals / on the stack instead of `MakeEnum`.
     unbox_enum_context: u32,
@@ -1030,6 +1035,8 @@ impl Default for Compiler {
             compiling_result_ok_is_result: false,
             force_heap_option: false,
             force_niche_option: false,
+            force_heap_result: false,
+            force_niche_result: false,
             unbox_enum_context: 0,
             compiling_pair_mode: false,
             compiling_pair_is_option: false,
