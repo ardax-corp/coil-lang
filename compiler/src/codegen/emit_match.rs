@@ -483,8 +483,7 @@ impl Compiler {
         let end_label = bb.fresh_label(self.bytecode.il_mut());
 
         // Keep the niche value for the selected arm while testing a duplicate.
-        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-        self.bytecode.push(Byte::new(Instruction::LogNot));
+        Self::push_niche_eq_zero(&mut self.bytecode);
         bb.emit_jump_to(
             fallback_label,
             BbJumpKind::JumpIfTrue,
@@ -597,8 +596,7 @@ impl Compiler {
                 && self.expr_is_niche_option(scrutinee)
                 && !Self::is_option_construct(scrutinee)
             {
-                self.bytecode
-                    .push(Byte::new(Instruction::OptionNicheToHeap));
+                Self::emit_niche_option_to_boxed(&mut self.bytecode);
             }
 
             // First payload slot after locals + scrutinee temps.

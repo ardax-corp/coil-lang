@@ -19,7 +19,7 @@ const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "e3676a48a2b745f0_522"),
     ("functions.hy", "09d523b5e92dc06e_390"),
     ("loops.hy", "0798a354fd32364d_267"),
-    ("option_pair.hy", "f5cce4183dcd1f17_368"),
+    ("option_pair.hy", "5ece2424ffb81d62_386"),
     ("user_trait_dispatch.hy", "53fb084fd917f3fe_157"),
 ];
 

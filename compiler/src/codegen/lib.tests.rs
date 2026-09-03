@@ -7495,15 +7495,107 @@ fn main() {
 class Box {
     pub n: int,
 }
+fn give() -> Option<Box> {
+    return Option::None;
+}
 fn main() {
-    let x: Option<Box> = Option::None;
+    let x = give();
+    let y = match x {
+        Option::Some(_) => 1,
+        Option::None => 0,
+    };
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "ground Option<class> None must niche as CONST 0; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn ground_option_class_some_uses_pointer_niche() {
+        let (bc, _) = compile_src(
+            r#"
+class Box {
+    pub n: int,
+}
+fn give() -> Option<Box> {
+    return Option::Some(new Box(1));
+}
+fn main() {
+    let x = give();
+    let y = match x {
+        Option::Some(b) => b.n,
+        Option::None => 0,
+    };
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "escaping Option<class> Some must not MakeEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(
+                    b.bytecode(),
+                    Instruction::OptionNicheToHeap
+                        | Instruction::HeapOptionToNiche
+                        | Instruction::HostInvokeNiche
+                )),
+            "must not revive niche ISA family; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn option_int_still_boxes() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Option<int> {
+    return Option::Some(1);
+}
+fn main() {
+    let x = give();
+    let y = match x {
+        Option::Some(n) => n,
+        Option::None => 0,
+    };
 }
 "#,
         );
         assert!(
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "ground Option<class> None must box; opcodes={:?}",
+            "Option<int> must stay boxed ObjEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn gc_churn_option_node_does_not_make_enum() {
+        let src = include_str!("../../../examples/perf/gc_churn.hy");
+        let (bc, _) = compile_src(src);
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "gc_churn Option<Node> must not allocate ObjEnum Some; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::OptionNicheToHeap
+                    | Instruction::HeapOptionToNiche
+                    | Instruction::HostInvokeNiche
+                    | Instruction::ReturnPair
+            )),
+            "gc_churn must not revive tombstoned pair/niche opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
