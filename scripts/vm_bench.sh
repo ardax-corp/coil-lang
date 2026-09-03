@@ -34,6 +34,7 @@ declare -A EXPECTED=(
     ["examples/perf/fib.hy"]="2178309"
     ["examples/perf/bool_guard.hy"]="45"
     ["examples/inline_wrapped_call.hy"]="13"
+    ["examples/perf/gc_churn.hy"]="62499500000"
 )
 
 # CPU-focused subset for poop / quick timing (no FFI, no modules).
@@ -46,6 +47,7 @@ CPU_BENCH=(
     examples/perf/numeric.hy
     examples/perf/operators_loop.hy
     examples/perf/match_sum.hy
+    examples/perf/gc_churn.hy
 )
 
 CROSS_LANG=(
