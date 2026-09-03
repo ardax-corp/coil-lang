@@ -202,6 +202,7 @@ mod tests {
         assert_eq!(two_word_return_kind(&c, &ty), None);
     }
 
+    #[test]
     fn unbounded_option_is_not_two_word() {
         let c = checker();
         let ty = option_ty(Ty::Var(crate::typechecking::ty::TyVarId(0)));

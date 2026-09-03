@@ -491,12 +491,10 @@ impl Compiler {
             return bytecode;
         }
 
-        let pair_enum = self.pair_value_context
-            && arity <= 1
-            && self.codegen_expr_ty(ast).is_some_and(|ty| {
-                crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
-                    .is_some()
-            });
+        let pair_enum = arity <= 1
+            && (self.pair_value_context
+                || self.unbox_enum_context > 0
+                || self.construct_is_pair_return(enum_name, ast));
         if pair_enum {
             match fields {
                 EnumConstructPayload::Unit if arity == 0 => {
@@ -8065,6 +8063,29 @@ impl Compiler {
         bb.bind_label(end, bytecode.il_mut());
     }
 
+    fn construct_is_pair_return(
+        &self,
+        enum_name: &str,
+        ast: &(SimpleSpan, Box<Expression<'_>>),
+    ) -> bool {
+        if !self.compiling_pair_mode {
+            return false;
+        }
+        self.expr_ty_is_return_ty(ast)
+            && self.codegen_expr_ty(ast).is_none_or(|ty| {
+                crate::typechecking::return_layout::two_word_return_kind(&self.checker, &ty)
+                    .is_some()
+                    || match &ty {
+                        crate::typechecking::Ty::Con(n)
+                        | crate::typechecking::Ty::Sum { name: n, .. } => n == enum_name,
+                        crate::typechecking::Ty::App(h, _) => {
+                            matches!(h.as_ref(), crate::typechecking::Ty::Con(n) if n == enum_name)
+                        }
+                        _ => false,
+                    }
+            })
+    }
+
     fn expr_is_pair_producer(&self, expr: &Output) -> bool {
         self.expr_pair_producer_kind(expr).is_some()
     }
@@ -11971,7 +11992,7 @@ impl Compiler {
                     return bytecode;
                 }
 
-                if tail_match {
+                if tail_match || Self::rhs_is_match_expr(expr) {
                     self.match_tail_call = true;
                 }
                 // Evaluate the return value first, then run defers (LIFO).

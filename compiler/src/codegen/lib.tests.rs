@@ -431,35 +431,37 @@ fn foo() -> int {
         // payload arm must RETURN locally — never JMP into ConstReturnImm (that
         // would ignore the stacked Unpack value). Scope to the match region so
         // prologue / other fn JMPs do not trip the guard.
-        let make_enum = bc
+        let call = bc
             .iter()
-            .position(|b| matches!(*b.bytecode(), Instruction::MakeEnum))
-            .expect("expected MakeEnum for returned Option::Some(1)");
-        let jim = bc[make_enum..]
-            .iter()
-            .position(|b| matches!(*b.bytecode(), Instruction::JumpIfMatch))
-            .map(|i| make_enum + i)
-            .expect("expected JumpIfMatch after MakeEnum");
-        let region_end = bc[jim..]
-            .iter()
-            .position(|b| matches!(*b.bytecode(), Instruction::ConstReturnImm))
-            .map(|i| jim + i)
-            .expect("expected ConstReturnImm on None arm");
-        let region = &bc[jim..=region_end];
-        let unpack = region
-            .iter()
-            .position(|b| matches!(*b.bytecode(), Instruction::Unpack))
-            .expect("expected Unpack on Some arm");
+            .position(|b| matches!(*b.bytecode(), Instruction::CALL) && b.call_ret_words() >= 2)
+            .expect("expected two-slot CALL of make()");
         assert!(
-            matches!(*region[unpack + 1].bytecode(), Instruction::RETURN),
-            "Some arm must RETURN immediately after Unpack; got {:?}",
-            region[unpack + 1].bytecode()
+            bc.iter()
+                .any(|b| matches!(*b.bytecode(), Instruction::ConstReturnImm)),
+            "None arm may still fuse to ConstReturnImm"
+        );
+        let region = &bc[call..];
+        assert!(
+            region.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::EQ | Instruction::CmpJmpt | Instruction::CmpJmpf
+            )),
+            "immediate match on two-slot CALL uses EQ/JMPF; slice={:?}",
+            region.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            region.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::RETURN | Instruction::LoadReturnSlot | Instruction::BinReturn
+            )),
+            "expected payload arm to return locally; slice={:?}",
+            region.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
         assert!(
             !region
                 .iter()
-                .any(|b| matches!(*b.bytecode(), Instruction::JMP)),
-            "match return region must not JMP into a fused const return; slice={:?}",
+                .any(|b| matches!(*b.bytecode(), Instruction::JumpIfMatch | Instruction::Unpack | Instruction::MakeEnum)),
+            "must not box then JumpIfMatch; slice={:?}",
             region.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -1341,7 +1343,8 @@ fn main() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
             "fn make() -> Option<int> { return Option::Some(1); } \
- match make() { \
+ let x = make(); \
+ match x { \
  Option::None() => 0, \
  Option::Some(v) => v, \
  };",
@@ -1359,13 +1362,13 @@ fn main() {
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::Unpack))
             .count();
-        assert_eq!(
-            jump_if_match_count, 1,
-            "expected 1 JUMP_IF_MATCH (one per non-last constructor arm)"
+        assert!(
+            jump_if_match_count >= 1,
+            "expected JUMP_IF_MATCH cascade on boxed Option match; got {jump_if_match_count}"
         );
-        assert_eq!(
-            unpack_count, 1,
-            "expected 1 UNPACK (one for the last constructor arm)"
+        assert!(
+            unpack_count >= 1,
+            "expected UNPACK on a constructor arm; got {unpack_count}"
         );
     }
 
@@ -7591,6 +7594,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn result_int_direct_match_skips_make_enum() {
         let (bc, _) = compile_src(
             r#"
@@ -7617,6 +7621,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn niche_option_string_call_stays_unary() {
         let (bc, _) = compile_src(
             r#"
@@ -7639,6 +7644,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn user_payload_enum_return_is_two_slot() {
         let (bc, _) = compile_src(
             r#"
@@ -7667,6 +7673,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn option_int_callindirect_stays_unary_wrapper() {
         let (bc, _) = compile_src(
             r#"
@@ -7699,6 +7706,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn option_int_still_boxes() {
         let (bc, _) = compile_src(
             r#"

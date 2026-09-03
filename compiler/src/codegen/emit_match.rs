@@ -191,7 +191,9 @@ impl Compiler {
             self.bytecode.push_pop(); // payload
         }
         self.compile_pair_match_body(&arms[0], first.1, first_slot);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        if !self.match_tail_call {
+            bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        }
 
         bb.bind_label(fallback, self.bytecode.il_mut());
         self.bytecode.push_pop(); // second tag
@@ -202,7 +204,11 @@ impl Compiler {
             self.bytecode.push_pop(); // payload
         }
         self.compile_pair_match_body(&arms[1], second.1, second_slot);
-        bb.bind_label(end, self.bytecode.il_mut());
+        if self.suppress_match_fusion_barrier {
+            bb.bind_label(end, self.bytecode.il_mut());
+        } else {
+            bb.bind_join_label(end, self.bytecode.il_mut());
+        }
         true
     }
 
@@ -259,6 +265,25 @@ impl Compiler {
         let saved_bindings = self.push_match_bindings(inner);
         let mut body_bc = self.do_compile(&arm.body);
         self.bytecode.append(&mut body_bc);
+        if self.match_tail_call {
+            let last_returns = self.bytecode.ops().last().is_some_and(|op| {
+                op.is_plain_return()
+                    || op.return_words() >= 2
+                    || matches!(
+                        op,
+                        crate::il::IlOp::ConstReturnImm { .. }
+                            | crate::il::IlOp::LoadReturnSlot { .. }
+                            | crate::il::IlOp::BinReturn { .. }
+                    )
+            });
+            if !last_returns {
+                if self.compiling_pair_mode {
+                    self.push_return_pair();
+                } else {
+                    self.bytecode.push_return();
+                }
+            }
+        }
         self.context.match_bindings = saved_bindings;
     }
 
@@ -403,7 +428,7 @@ impl Compiler {
             }
             self.compile_pair_match_body(&arms[*arm_idx], *binding, slot);
             let more = i + 1 < n_dispatch || wildcard.is_some();
-            if more {
+            if more && !self.match_tail_call {
                 bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
             }
             if let Some(m) = miss {
@@ -415,7 +440,11 @@ impl Compiler {
             self.bytecode.push_pop();
             self.compile_pair_match_body(&arms[w], None, None);
         }
-        bb.bind_label(end, self.bytecode.il_mut());
+        if self.suppress_match_fusion_barrier {
+            bb.bind_label(end, self.bytecode.il_mut());
+        } else {
+            bb.bind_join_label(end, self.bytecode.il_mut());
+        }
         if let Some((payload, tag_slot)) = from_ident {
             let last = self.node_id_of(peeled).is_some_and(|id| {
                 self.typed_sidecar.is_frame_local_last_use(id)
