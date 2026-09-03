@@ -10205,11 +10205,13 @@ impl Compiler {
         }
     }
 
-    /// `DUP; CONST 0; EQ` — TOS becomes “is None” for a pointer-niche Option.
+    /// `DUP; LogNot` — TOS becomes “is None” for a pointer-niche Option (`0`).
+    ///
+    /// `CONST 0; EQ; JMPT` currently joins into `ConstReturnImm 0` and drops
+    /// the Some payload (`optional_text`). LogNot is the same zero test.
     fn push_niche_eq_zero(bytecode: &mut CodeBuf) {
         bytecode.push(Byte::new(Instruction::DUPLICATE));
-        bytecode.push_const(0);
-        bytecode.push(Byte::new(Instruction::EQ));
+        bytecode.push(Byte::new(Instruction::LogNot));
     }
 
     /// Boxed `ObjEnum` Option → pointer niche (`0` / payload) via JumpIfMatch.
