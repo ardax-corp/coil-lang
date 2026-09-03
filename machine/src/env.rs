@@ -5,7 +5,7 @@ use std::process::Command;
 use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
 
 use crate::io::{alloc_result_err, alloc_result_ok};
-use crate::memory::{Heap, Member, ObjArray, Object};
+use crate::memory::{Heap, ObjArray, Object};
 
 pub use common::is_ffi_exec_symbol;
 
@@ -20,7 +20,7 @@ pub enum EnvErrorTag {
     Other = 4,
 }
 
-fn alloc_enum(heap: &mut Heap, tag: u32, payload: Vec<Member>) -> Value {
+fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<crate::EnumPayload>) -> Value {
     heap.alloc_enum_value(tag, payload)
 }
 
@@ -262,6 +262,7 @@ pub use host_var as env_var;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::memory::Member;
     use std::sync::Mutex;
 
     static ENV_TEST_GUARD: Mutex<()> = Mutex::new(());

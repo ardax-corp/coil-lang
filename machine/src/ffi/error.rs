@@ -56,10 +56,10 @@ pub fn alloc_ffi_error(heap: &mut Heap, kind: FfiErrorKindTag, message: String) 
     alloc_enum(
         heap,
         0,
-        vec![
+        crate::EnumPayload::two(
             member_from_value(heap, kind_val),
             member_from_value(heap, msg_val),
-        ],
+        ),
     )
 }
 
@@ -69,7 +69,7 @@ pub fn alloc_result_ffi_err(heap: &mut Heap, kind: FfiErrorKindTag, message: Str
     crate::io::alloc_result_err(heap, err)
 }
 
-fn alloc_enum(heap: &mut Heap, tag: u32, payload: Vec<Member>) -> Value {
+fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<crate::EnumPayload>) -> Value {
     heap.alloc_enum_value(tag, payload)
 }
 

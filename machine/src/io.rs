@@ -14,7 +14,7 @@ use common::{BUILTIN_IO_ERROR_VARIANTS, BUILTIN_OPTION_VARIANTS, BUILTIN_RESULT_
 
 use crate::io_handle::{NativeHandle, WaitHandle};
 use crate::io_reactor::Interest;
-use crate::memory::{Heap, Member, ObjArray, ObjStream, ObjTuple, Object, StreamKind};
+use crate::memory::{EnumPayload, Heap, Member, ObjArray, ObjStream, ObjTuple, Object, StreamKind};
 
 type OutputRedirect = *mut (dyn Write + Send);
 
@@ -151,32 +151,32 @@ impl IoErrorTag {
 /// Allocate `Result::Ok(payload)` on the heap.
 pub fn alloc_result_ok(heap: &mut Heap, payload: Value) -> Value {
     let _ = BUILTIN_RESULT_VARIANTS;
-    alloc_enum(heap, 0, vec![member_from_value(heap, payload)])
+    alloc_enum(heap, 0, EnumPayload::one(member_from_value(heap, payload)))
 }
 
 /// Allocate `Result::Err(payload)` on the heap.
 pub fn alloc_result_err(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, vec![member_from_value(heap, payload)])
+    alloc_enum(heap, 1, EnumPayload::one(member_from_value(heap, payload)))
 }
 
 /// Allocate `Option::None`.
 pub fn alloc_option_none(heap: &mut Heap) -> Value {
     let _ = BUILTIN_OPTION_VARIANTS;
-    alloc_enum(heap, 0, vec![])
+    alloc_enum(heap, 0, EnumPayload::empty())
 }
 
 /// Allocate `Option::Some(payload)`.
 pub fn alloc_option_some(heap: &mut Heap, payload: Value) -> Value {
-    alloc_enum(heap, 1, vec![member_from_value(heap, payload)])
+    alloc_enum(heap, 1, EnumPayload::one(member_from_value(heap, payload)))
 }
 
 /// Allocate a unit-payload `IoError` variant.
 pub fn alloc_io_error(heap: &mut Heap, tag: IoErrorTag) -> Value {
     let _ = BUILTIN_IO_ERROR_VARIANTS;
-    alloc_enum(heap, tag as u32, vec![])
+    alloc_enum(heap, tag as u32, EnumPayload::empty())
 }
 
-fn alloc_enum(heap: &mut Heap, tag: u32, payload: Vec<Member>) -> Value {
+fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<EnumPayload>) -> Value {
     heap.alloc_enum_value(tag, payload)
 }
 

@@ -170,7 +170,8 @@ impl Heap {
     }
 
     /// Allocate an enum value, reusing the immortal object for unit variants.
-    pub fn alloc_enum_value(&mut self, tag: u32, payload: Vec<Member>) -> common::Value {
+    pub fn alloc_enum_value(&mut self, tag: u32, payload: impl Into<EnumPayload>) -> common::Value {
+        let payload = payload.into();
         let object = if payload.is_empty() {
             self.immortal_unit_enum(tag)
         } else {
@@ -380,7 +381,7 @@ impl Heap {
         }
         let obj_enum = crate::memory::ObjEnum {
             tag,
-            payload: Vec::new(),
+            payload: EnumPayload::empty(),
         };
         let (object, _) = self.alloc(obj_enum, Object::Enum);
         self.immortal_enums.insert(tag, object);
@@ -1113,15 +1114,126 @@ impl GcSized for ObjInstance {
     }
 }
 
-/// Heap-allocated enum variant (`tag` + flat `Member` payload).
+/// Max payload arity stored inside [`ObjEnum`] without a Rust `Vec`.
+///
+/// Covers unary `Option`/`Result` and arity-2 `Tree::Node(Tree, Tree)`.
+/// Each extra slot is `size_of::<Member>()` on every enum, including those
+/// hot unary paths, so the cap stays at 2; larger variants spill.
+pub const ENUM_INLINE_ARITY: usize = 2;
+
+/// Flat enum payload: inline slots up to [`ENUM_INLINE_ARITY`], else a `Vec`.
+pub struct EnumPayload {
+    inner: EnumPayloadInner,
+}
+
+enum EnumPayloadInner {
+    Inline {
+        len: u8,
+        slots: [Member; ENUM_INLINE_ARITY],
+    },
+    Spill(Vec<Member>),
+}
+
+impl EnumPayload {
+    /// Empty payload (arity-0). Immortal unit enums use this, not a `Vec`.
+    #[inline]
+    pub fn empty() -> Self {
+        Self {
+            inner: EnumPayloadInner::Inline {
+                len: 0,
+                slots: [Member::Value(Value::default()); ENUM_INLINE_ARITY],
+            },
+        }
+    }
+
+    /// Unary payload without a heap `Vec` (Option/Result).
+    #[inline]
+    pub fn one(member: Member) -> Self {
+        let mut slots = [Member::Value(Value::default()); ENUM_INLINE_ARITY];
+        slots[0] = member;
+        Self {
+            inner: EnumPayloadInner::Inline { len: 1, slots },
+        }
+    }
+
+    /// Arity-2 payload without a heap `Vec` (`Tree::Node`).
+    #[inline]
+    pub fn two(a: Member, b: Member) -> Self {
+        Self {
+            inner: EnumPayloadInner::Inline {
+                len: 2,
+                slots: [a, b],
+            },
+        }
+    }
+
+    /// Build from owned members; spills only when `members.len()` exceeds the cap.
+    pub fn from_vec(members: Vec<Member>) -> Self {
+        match members.len() {
+            0 => Self::empty(),
+            1 => Self::one(members[0]),
+            2 => Self::two(members[0], members[1]),
+            _ => Self {
+                inner: EnumPayloadInner::Spill(members),
+            },
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[Member] {
+        match &self.inner {
+            EnumPayloadInner::Inline { len, slots } => &slots[..*len as usize],
+            EnumPayloadInner::Spill(v) => v.as_slice(),
+        }
+    }
+
+    /// True when payload lives in the object header (no spill `Vec`).
+    #[inline]
+    pub fn is_inline(&self) -> bool {
+        matches!(self.inner, EnumPayloadInner::Inline { .. })
+    }
+
+    fn spill_capacity(&self) -> usize {
+        match &self.inner {
+            EnumPayloadInner::Inline { .. } => 0,
+            EnumPayloadInner::Spill(v) => v.capacity(),
+        }
+    }
+}
+
+impl From<Vec<Member>> for EnumPayload {
+    fn from(members: Vec<Member>) -> Self {
+        Self::from_vec(members)
+    }
+}
+
+impl ops::Deref for EnumPayload {
+    type Target = [Member];
+
+    #[inline]
+    fn deref(&self) -> &[Member] {
+        self.as_slice()
+    }
+}
+
+impl<'a> IntoIterator for &'a EnumPayload {
+    type Item = &'a Member;
+    type IntoIter = std::slice::Iter<'a, Member>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_slice().iter()
+    }
+}
+
+/// Heap-allocated enum variant (`tag` + inline-or-spill `Member` payload).
 pub struct ObjEnum {
     pub tag: u32,
-    pub payload: Vec<Member>,
+    pub payload: EnumPayload,
 }
 
 impl GcSized for ObjEnum {
     fn size(&self) -> usize {
-        std::mem::size_of::<Self>() + self.payload.capacity() * std::mem::size_of::<Member>()
+        std::mem::size_of::<Self>() + self.payload.spill_capacity() * std::mem::size_of::<Member>()
     }
 }
 
@@ -2089,7 +2201,7 @@ mod tests {
         // 2. Allocate the enum with the string in its payload.
         let enum_value = ObjEnum {
             tag: 0,
-            payload: vec![string_member],
+            payload: EnumPayload::one(string_member),
         };
         let (enum_obj, _enum_ref) = heap.alloc(enum_value, Object::Enum);
         let enum_addr = enum_obj.addr();
@@ -2127,7 +2239,7 @@ mod tests {
         let (inner_obj, _inner_ref) = heap.alloc(
             ObjEnum {
                 tag: 1,
-                payload: vec![],
+                payload: EnumPayload::empty(),
             },
             Object::Enum,
         );
@@ -2137,7 +2249,7 @@ mod tests {
         // `Member::Object`.
         let outer = ObjEnum {
             tag: 0,
-            payload: vec![Member::Object(inner_obj)],
+            payload: EnumPayload::one(Member::Object(inner_obj)),
         };
         let (outer_obj, _outer_ref) = heap.alloc(outer, Object::Enum);
         let outer_addr = outer_obj.addr();
@@ -2171,6 +2283,60 @@ mod tests {
             "outer enum at 0x{:x} was collected despite being a GC root",
             outer_addr
         );
+    }
+
+    #[test]
+    fn enum_payload_inlines_upto_cap_and_spills_above() {
+        assert!(EnumPayload::empty().is_inline());
+        assert!(EnumPayload::one(Member::Value(Value::from(1i64))).is_inline());
+        assert!(
+            EnumPayload::two(
+                Member::Value(Value::from(1i64)),
+                Member::Value(Value::from(2i64)),
+            )
+            .is_inline()
+        );
+        let spilled = EnumPayload::from_vec(vec![
+            Member::Value(Value::from(0i64)),
+            Member::Value(Value::from(1i64)),
+            Member::Value(Value::from(2i64)),
+        ]);
+        assert!(!spilled.is_inline());
+        assert_eq!(spilled.len(), 3);
+        match spilled[2] {
+            Member::Value(v) => assert_eq!(v.as_int(), 2),
+            Member::Object(_) => panic!("expected immediate"),
+        }
+    }
+
+    #[test]
+    fn enum_gc_marks_spilled_payload_pointers() {
+        let mut heap = Heap::default();
+        let (a, _) = heap.alloc(ObjString::from("a"), Object::String);
+        let (b, _) = heap.alloc(ObjString::from("b"), Object::String);
+        let (c, _) = heap.alloc(ObjString::from("c"), Object::String);
+        let payload = EnumPayload::from_vec(vec![
+            Member::Object(a),
+            Member::Object(b),
+            Member::Object(c),
+        ]);
+        assert!(!payload.is_inline());
+        let (enum_obj, enum_ref) = heap.alloc(ObjEnum { tag: 0, payload }, Object::Enum);
+        assert_eq!(enum_ref.as_ref().payload.len(), 3);
+
+        let mut gray = Vec::new();
+        heap.trace(&[enum_obj.addr()]);
+        enum_obj.mark_references(&heap, &mut gray);
+        while let Some(obj) = gray.pop() {
+            obj.mark_references(&heap, &mut gray);
+        }
+        unsafe { heap.sweep() };
+
+        let live = live_object_addrs(&heap);
+        assert!(live.contains(&a.addr()));
+        assert!(live.contains(&b.addr()));
+        assert!(live.contains(&c.addr()));
+        assert!(live.contains(&enum_obj.addr()));
     }
 
     #[test]

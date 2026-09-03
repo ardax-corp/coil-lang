@@ -124,8 +124,8 @@ use common::{BUILTIN_RESULT_VARIANTS, BUILTIN_THREAD_ERROR_VARIANTS, Byte, Progr
 use crate::ffi::Natives;
 use crate::io::{alloc_result_err, alloc_result_ok};
 use crate::memory::{
-    Heap, Member, ObjArray, ObjEnum, ObjInstance, ObjReceiver, ObjRwLock, ObjSender, ObjThread,
-    ObjThreadMutex, ObjTuple, Object,
+    EnumPayload, Heap, Member, ObjArray, ObjEnum, ObjInstance, ObjReceiver, ObjRwLock, ObjSender,
+    ObjThread, ObjThreadMutex, ObjTuple, Object,
 };
 use crate::vm::Machine;
 
@@ -693,7 +693,7 @@ fn member_from_value(heap: &Heap, value: Value) -> Member {
     }
 }
 
-fn alloc_enum(heap: &mut Heap, tag: u32, payload: Vec<Member>) -> Value {
+fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<EnumPayload>) -> Value {
     heap.alloc_enum_value(tag, payload)
 }
 
@@ -869,7 +869,7 @@ fn decode_portable(heap: &mut Heap, p: PortableValue) -> Result<Value, ThreadErr
             let (obj, _) = heap.alloc(
                 ObjEnum {
                     tag,
-                    payload: members,
+                    payload: EnumPayload::from_vec(members),
                 },
                 Object::Enum,
             );
@@ -1639,7 +1639,7 @@ mod tests {
         let (en, _) = heap.alloc(
             ObjEnum {
                 tag: 3,
-                payload: vec![Member::Value(Value::from(11_i64))],
+                payload: EnumPayload::one(Member::Value(Value::from(11_i64))),
             },
             Object::Enum,
         );
@@ -1660,7 +1660,7 @@ mod tests {
         let (node, _) = heap.alloc(
             ObjEnum {
                 tag: 1,
-                payload: vec![Member::Object(leaf), Member::Object(leaf)],
+                payload: EnumPayload::two(Member::Object(leaf), Member::Object(leaf)),
             },
             Object::Enum,
         );
@@ -1689,14 +1689,14 @@ mod tests {
         let (shared, _) = heap.alloc(
             ObjEnum {
                 tag: 0,
-                payload: vec![Member::Value(Value::from(7_i64))],
+                payload: EnumPayload::one(Member::Value(Value::from(7_i64))),
             },
             Object::Enum,
         );
         let (node, _) = heap.alloc(
             ObjEnum {
                 tag: 1,
-                payload: vec![Member::Object(shared), Member::Object(shared)],
+                payload: EnumPayload::two(Member::Object(shared), Member::Object(shared)),
             },
             Object::Enum,
         );

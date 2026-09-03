@@ -18,7 +18,8 @@ use common::{
 
 use crate::{
     AddrHashBuilder, CStructLayout, CoroState, Frame, GcData, Heap, Member, ObjArray, ObjBoxed,
-    ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object, RefCoroutine,
+    EnumPayload, ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object,
+    RefCoroutine,
     Stack,
 };
 #[cfg(any(test, feature = "debugger"))]
@@ -1276,26 +1277,27 @@ impl<const S: usize> Machine<S> {
 
     /// Copy `n` stack values in MakeEnum pop order (TOS → payload[0]).
     /// Codegen reverse-pushes constructor args so this yields declaration order.
+    /// Arity ≤ [`crate::ENUM_INLINE_ARITY`] stays off the Rust global allocator.
     #[inline]
-    fn stack_copy_enum_payload(heap: &Heap, stack: &Stack<Value>, sp: usize, n: usize) -> Vec<Member> {
+    fn stack_copy_enum_payload(
+        heap: &Heap,
+        stack: &Stack<Value>,
+        sp: usize,
+        n: usize,
+    ) -> EnumPayload {
         match n {
-            0 => Vec::new(),
-            1 => vec![Self::value_as_member(heap, stack[sp - 1])],
-            2 => vec![
+            0 => EnumPayload::empty(),
+            1 => EnumPayload::one(Self::value_as_member(heap, stack[sp - 1])),
+            2 => EnumPayload::two(
                 Self::value_as_member(heap, stack[sp - 1]),
                 Self::value_as_member(heap, stack[sp - 2]),
-            ],
-            3 => vec![
-                Self::value_as_member(heap, stack[sp - 1]),
-                Self::value_as_member(heap, stack[sp - 2]),
-                Self::value_as_member(heap, stack[sp - 3]),
-            ],
+            ),
             _ => {
                 let mut payload = Vec::with_capacity(n);
                 for i in 0..n {
                     payload.push(Self::value_as_member(heap, stack[sp - 1 - i]));
                 }
-                payload
+                EnumPayload::from_vec(payload)
             }
         }
     }

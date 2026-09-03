@@ -304,6 +304,7 @@
 
         assert_eq!(obj.tag, 5);
         assert_eq!(obj.payload.len(), 2);
+        assert!(obj.payload.is_inline());
         assert!(
             matches!(obj.payload[0], Member::Object(Object::String(_))),
             "the top operand must land in payload[0]"
@@ -898,8 +899,38 @@
                 let e = gc.as_ref();
                 assert_eq!(e.tag, 1);
                 assert_eq!(e.payload.len(), 2);
+                assert!(e.payload.is_inline(), "arity-2 Node must stay inline");
             }
             _ => panic!("expected Node enum"),
+        }
+    }
+
+    /// Arity above [`crate::ENUM_INLINE_ARITY`] uses a spill `Vec`.
+    #[test]
+    fn make_enum_arity3_spills_payload() {
+        use crate::Member;
+
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            const_int(1),
+            const_int(2),
+            const_int(3),
+            make_enum(4, 3),
+            Byte::new(Instruction::HALT),
+        ]);
+        let addr = vm.pop().raw() as u64;
+        match vm.heap().find_object_by_addr(addr) {
+            Some(Object::Enum(gc)) => {
+                let e = gc.as_ref();
+                assert_eq!(e.tag, 4);
+                assert_eq!(e.payload.len(), 3);
+                assert!(!e.payload.is_inline());
+                match e.payload[0] {
+                    Member::Value(v) => assert_eq!(v.as_int(), 3),
+                    Member::Object(_) => panic!("expected immediate TOS in payload[0]"),
+                }
+            }
+            _ => panic!("expected spilled enum"),
         }
     }
 
@@ -1408,7 +1439,7 @@
         let (inner_obj, _) = heap.alloc(
             ObjEnum {
                 tag: 99,
-                payload: vec![],
+                payload: crate::EnumPayload::empty(),
             },
             Object::Enum,
         );
@@ -1419,7 +1450,10 @@
         let (outer_obj, _) = heap.alloc(
             ObjEnum {
                 tag: 0,
-                payload: vec![Member::Object(inner_obj), Member::Object(string_obj)],
+                payload: crate::EnumPayload::two(
+                    Member::Object(inner_obj),
+                    Member::Object(string_obj),
+                ),
             },
             Object::Enum,
         );
