@@ -8125,3 +8125,151 @@ fn main() {
         );
     }
 
+    #[test]
+    fn int_int_product_return_skips_make_tuple() {
+        let (bc, _) = compile_src(
+            r#"
+fn pair(int i) -> (int, int) {
+    return (i, i + 1);
+}
+fn main() {
+    let (a, b) = pair(1);
+    let _ = a + b;
+}
+"#,
+        );
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "direct (int, int) CALL must be two-slot; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            "destructure of two-slot product must not box ObjTuple; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::HeapToPair
+            )),
+            "must not revive pair opcodes; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn int_int_product_bind_index_skips_make_tuple() {
+        let (bc, _) = compile_src(
+            r#"
+fn pair(int i) -> (int, int) {
+    return (i, i + 1);
+}
+fn main() {
+    let p = pair(3);
+    let _ = p[0] + p[1];
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            "bind+index of two-slot product must not box; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::Index)),
+            "const index into unboxed product should LOAD slots; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn int_int_product_escape_boxes() {
+        let (bc, _) = compile_src(
+            r#"
+fn pair(int i) -> (int, int) {
+    return (i, i + 1);
+}
+fn take((int, int) p) -> int {
+    return p[0] + p[1];
+}
+fn main() {
+    let _ = take(pair(1));
+}
+"#,
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            "escaping two-slot product must box at the heap consumer; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn mixed_heap_product_stays_boxed() {
+        let (bc, _) = compile_src(
+            r#"
+fn pair(int n) -> (int, string) {
+    return (n, "x");
+}
+fn main() {
+    let (a, b) = pair(1);
+    let _ = a;
+    let _ = b;
+}
+"#,
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            "mixed-heap product must stay boxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "mixed-heap product CALL must stay one-word; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn pair_int_churn_stays_two_slot() {
+        let src = include_str!("../../../examples/perf/pair_int_churn.hy");
+        let (bc, _) = compile_src(src);
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "pair_int_churn must use two-slot CALL; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeTuple)),
+            "pair_int_churn must not allocate ObjTuple; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::HeapToPair
+            )),
+            "pair_int_churn must not revive pair opcodes; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
