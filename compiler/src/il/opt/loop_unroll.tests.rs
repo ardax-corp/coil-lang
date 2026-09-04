@@ -282,13 +282,6 @@ fn factor_smaller_than_trips_skips() {
 }
 
 #[test]
-fn pgo_prefer_hot_without_profile_still_unrolls() {
-    let mut ops = counted_while(3, false, false);
-    unroll_loops_pgo(&mut ops, 8, true);
-    assert!(!has_back_edge_to_header(&ops));
-}
-
-#[test]
 fn optimize_pipeline_unrolls_counted_while() {
     let mut ops = counted_while(3, false, false);
     optimize(&mut ops, &OptimizeOptions::default(), &mut Vec::new());

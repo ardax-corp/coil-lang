@@ -238,9 +238,6 @@ impl Pipeline {
             }
             c.set_opt_level(self.opt_level);
             c.set_collect_opt_stats(self.collect_opt_stats);
-            if let Some(id) = c.native_id(common::PGO_HIT_NATIVE) {
-                crate::profile::set_pgo_native_id(Some(id as i32));
-            }
             c
         })
     }
@@ -1546,19 +1543,6 @@ impl Pipeline {
         self.collect_opt_stats = on;
         if self.compiler.get().is_some() {
             self.compiler_lazy_mut().set_collect_opt_stats(on);
-        }
-    }
-
-    /// Load a PGO profile for layout and inlining (COI-132). `None` clears it.
-    pub fn set_pgo_profile(&mut self, profile: Option<crate::ProfileData>) {
-        crate::profile::set_current_profile(profile);
-    }
-
-    /// Insert `pgo_hit` counters after per-function IL opts (`--pgo-instrument`).
-    pub fn set_pgo_instrument(&mut self, on: bool) {
-        crate::profile::set_pgo_instrument(on);
-        if let Some(id) = self.compiler_lazy().native_id(common::PGO_HIT_NATIVE) {
-            crate::profile::set_pgo_native_id(Some(id as i32));
         }
     }
 

@@ -339,7 +339,6 @@ pub struct Machine<const S: usize> {
     ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` integrity (lock hash or trusted).
     dload_gate: crate::ffi::DloadGate,
-    pgo: crate::pgo::PgoCounters,
     /// Registered C struct layouts for pass-by-value FFI.
     struct_layouts: Vec<CStructLayout>,
     /// Keeps libffi callback trampolines alive (ties lifetime to VM run).
@@ -428,7 +427,6 @@ impl<const S: usize> Machine<S> {
             base_dir: None,
             ffi_search_paths: Vec::new(),
             dload_gate: crate::ffi::DloadGate::deny_all(),
-            pgo: crate::pgo::PgoCounters::new(),
             struct_layouts: Vec::new(),
             ffi_closures: Vec::new(),
             program_code: Vec::new(),
@@ -478,22 +476,6 @@ impl<const S: usize> Machine<S> {
 
     pub fn dload_gate(&self) -> &crate::ffi::DloadGate {
         &self.dload_gate
-    }
-
-    pub fn pgo_counters(&self) -> &crate::pgo::PgoCounters {
-        &self.pgo
-    }
-
-    pub fn pgo_snapshot(&self) -> crate::pgo::PgoSnapshot {
-        self.pgo.snapshot()
-    }
-
-    pub fn pgo_reset(&self) {
-        self.pgo.reset();
-    }
-
-    pub fn set_pgo_counters(&mut self, pgo: crate::pgo::PgoCounters) {
-        self.pgo = pgo;
     }
 
     /// Host/test stems with no lock hash. Does not restore a first-party exemption.
@@ -1518,7 +1500,6 @@ impl<const S: usize> Machine<S> {
             ffi_base_dir: self.base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
-            pgo: self.pgo.clone(),
         })
     }
 

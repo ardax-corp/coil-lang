@@ -18,7 +18,6 @@ pub mod math_libm;
 mod memory;
 mod opcode;
 pub mod packed_la;
-pub mod pgo;
 pub mod reactor;
 pub mod runtime_wire;
 pub mod stream_attach;
@@ -35,7 +34,7 @@ pub use ffi::*;
 pub use fs::FS_WIRING;
 pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING};
 pub use host_natives::{
-    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE, PGO_HIT_NATIVE,
+    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE,
     STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE, build_standard_host_natives,
     wire_standard_host_natives,
 };
