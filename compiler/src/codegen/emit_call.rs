@@ -528,19 +528,19 @@ impl Compiler {
                         0
                     };
                     let call_arity = 1 + nargs + dict_count as u32;
-                    if let Some(native) = Self::vec_option_host_native(&lookup_name) {
-                        let layout = self.host_enum_layout_for_expr(ast);
+                    let niche_vec = Self::vec_option_host_native(&lookup_name).filter(|_| {
+                        self.host_enum_layout_for_expr(ast)
+                            == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                    });
+                    if let Some(native) = niche_vec {
                         if !self.emit_host_invoke_from_call_args(
                             &mut bytecode,
                             native,
                             call_arity,
-                            layout,
-                        ) {
-                            if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
-                                self.missing_call_target(&call_name, span.into_range());
-                            } else {
-                                self.emit_vec_option_thunk_fallback(&mut bytecode, ast);
-                            }
+                            common::HOST_ENUM_LAYOUT_OPTION_NICHE,
+                        ) && !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity)
+                        {
+                            self.missing_call_target(&call_name, span.into_range());
                         }
                     } else if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
                         self.missing_call_target(&call_name, span.into_range());
@@ -989,15 +989,18 @@ impl Compiler {
                     .then(|| pair_kind.clone())
                     .flatten();
                 let ret_words = if two_word.is_some() { 2 } else { 1 };
-                let vec_host = Self::vec_option_host_native(&lookup_name)
-                    .or_else(|| Self::vec_option_host_native(&n));
-                if let Some(native) = vec_host {
-                    let layout = self.host_enum_layout_for_expr(ast);
+                let niche_vec = Self::vec_option_host_native(&lookup_name)
+                    .or_else(|| Self::vec_option_host_native(&n))
+                    .filter(|_| {
+                        self.host_enum_layout_for_expr(ast)
+                            == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                    });
+                if let Some(native) = niche_vec {
                     if !self.emit_host_invoke_from_call_args(
                         &mut bytecode,
                         native,
                         arity,
-                        layout,
+                        common::HOST_ENUM_LAYOUT_OPTION_NICHE,
                     ) {
                         if let Some(off) = mono_offset {
                             bytecode.push(Self::packed_entry_byte_ret(
@@ -1006,7 +1009,6 @@ impl Compiler {
                                 off as u32,
                                 ret_words,
                             ));
-                            self.emit_vec_option_thunk_fallback(&mut bytecode, ast);
                         } else if !self.emit_named_entry_ret(
                             &mut bytecode,
                             &n,
@@ -1015,8 +1017,6 @@ impl Compiler {
                             ret_words,
                         ) {
                             self.missing_call_target(&n, span.into_range());
-                        } else {
-                            self.emit_vec_option_thunk_fallback(&mut bytecode, ast);
                         }
                     }
                 } else if let Some(off) = mono_offset {

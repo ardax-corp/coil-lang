@@ -7279,7 +7279,14 @@ impl Compiler {
         let layout = result
             .map(|e| self.host_enum_layout_for_expr(e))
             .unwrap_or(common::HOST_ENUM_LAYOUT_BOXED);
-        self.bytecode.push_host_invoke_layout(arity as u32, layout);
+        if matches!(
+            layout,
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        ) {
+            self.bytecode.push_host_invoke_layout(arity as u32, layout);
+        } else {
+            self.bytecode.push_host_invoke(arity as u32);
+        }
         // Result stays on the stack for the caller (ExprStatement POPs it).
         self.expr_depth = depth_on_entry;
     }
@@ -7563,8 +7570,8 @@ impl Compiler {
                 compiler.bytecode.push_load(slot);
             }
             // Shared thunk: T is unknown, so HostInvoke stays Boxed.
-            // Niche call sites HostInvoke directly; CALL-thunk fallback
-            // converts after return (`emit_vec_option_thunk_fallback`).
+            // Heap-niche pop/remove HostInvoke at the call site; int /
+            // boxed Vec keep this CALL + layout-0 body.
             compiler
                 .bytecode
                 .push_host_invoke(slots.len() as u32);
@@ -8221,17 +8228,16 @@ impl Compiler {
         for slot in slots {
             bytecode.push_load(slot);
         }
-        bytecode.push_host_invoke_layout(arity, layout);
+        if matches!(
+            layout,
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        ) {
+            bytecode.push_host_invoke_layout(arity, layout);
+        } else {
+            bytecode.push_host_invoke(arity);
+        }
         self.expr_depth -= arity;
         true
-    }
-
-    /// After a CALL to the shared `Vec::pop`/`remove` thunk (always boxed),
-    /// convert to the call's HM layout. HostInvoke call sites skip this.
-    fn emit_vec_option_thunk_fallback(&mut self, bytecode: &mut CodeBuf, ast: &Output) {
-        if self.host_enum_layout_for_expr(ast) == common::HOST_ENUM_LAYOUT_OPTION_NICHE {
-            Self::emit_boxed_option_to_niche(bytecode);
-        }
     }
 
     /// Emit defers + unit fall-through return when a body does not end in a return.
