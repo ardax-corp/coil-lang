@@ -2,7 +2,8 @@
 
 use common::Value;
 
-use crate::io::{alloc_result_err, alloc_result_ok, value_as_string};
+use crate::host_enum::pack_result_or_panic;
+use crate::io::{alloc_result_ok, value_as_string};
 use crate::memory::Heap;
 
 fn string_val(heap: &mut Heap, text: &str) -> Value {
@@ -12,7 +13,7 @@ fn string_val(heap: &mut Heap, text: &str) -> Value {
 
 fn err_msg(heap: &mut Heap, text: &str) -> Value {
     let msg = string_val(heap, text);
-    alloc_result_err(heap, msg)
+    pack_result_or_panic(heap, Err(msg))
 }
 
 /// `ord(string) -> Result<byte, string>` — UTF-8 code unit must fit in `byte`.
@@ -46,7 +47,7 @@ pub fn prelude_char(heap: &mut Heap, args: &[Value]) -> Value {
     let mut buf = [0u8; 4];
     let encoded = ch.encode_utf8(&mut buf);
     let s = string_val(heap, encoded);
-    alloc_result_ok(heap, s)
+    pack_result_or_panic(heap, Ok(s))
 }
 
 /// Content hash for `Hash` on `string` — returns the interned `ObjString` FNV hash as `int`.

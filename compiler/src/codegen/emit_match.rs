@@ -28,6 +28,16 @@ impl Compiler {
             self.force_heap_option = previous;
             return result;
         }
+        if self.expr_is_unit_result_niche(scrutinee) {
+            if self.try_compile_unit_result_niche_match(scrutinee, arms) {
+                return CodeBuf::new();
+            }
+            let previous = self.force_heap_result;
+            self.force_heap_result = true;
+            let result = self.compile_match_expr_boxed(scrutinee, arms);
+            self.force_heap_result = previous;
+            return result;
+        }
         if self.expr_is_niche_result(scrutinee) {
             if self.try_compile_niche_result_match(scrutinee, arms) {
                 return CodeBuf::new();
@@ -436,6 +446,111 @@ impl Compiler {
         true
     }
 
+    /// Compile `Result<(), E>`: `Ok` is `0`, `Err` is the error pointer.
+    fn try_compile_unit_result_niche_match<'compiler>(
+        &mut self,
+        scrutinee: &Output<'compiler>,
+        arms: &[MatchArm<'compiler>],
+    ) -> bool {
+        if arms.len() != 2 || !self.expr_is_unit_result_niche(scrutinee) {
+            return false;
+        }
+
+        let mut ok: Option<(usize, Option<&str>)> = None;
+        let mut err: Option<(usize, Option<&str>)> = None;
+        for (index, arm) in arms.iter().enumerate() {
+            match &arm.pattern.1 {
+                Pattern::Constructor {
+                    enum_name,
+                    variant_name,
+                    payload: PatternPayload::Tuple(parts),
+                } if common::is_builtin_result_enum(enum_name)
+                    && *variant_name == "Ok"
+                    && parts.len() == 1 =>
+                {
+                    let binding = match &parts[0].1 {
+                        Pattern::Binding { name } => Some(*name),
+                        Pattern::Wildcard | Pattern::Default => None,
+                        _ => return false,
+                    };
+                    ok = Some((index, binding));
+                }
+                Pattern::Constructor {
+                    enum_name,
+                    variant_name,
+                    payload: PatternPayload::Tuple(parts),
+                } if common::is_builtin_result_enum(enum_name)
+                    && *variant_name == "Err"
+                    && parts.len() == 1 =>
+                {
+                    let binding = match &parts[0].1 {
+                        Pattern::Binding { name } => Some(*name),
+                        Pattern::Wildcard | Pattern::Default => None,
+                        _ => return false,
+                    };
+                    err = Some((index, binding));
+                }
+                _ => return false,
+            }
+        }
+        let Some((ok_index, ok_binding)) = ok else {
+            return false;
+        };
+        let Some((err_index, err_binding)) = err else {
+            return false;
+        };
+
+        self.bytecode
+            .push_seek(self.context.variables.len() as u32);
+        let previous_niche_context = self.force_niche_result;
+        self.force_niche_result = true;
+        let mut scrutinee_bc = self.do_compile(scrutinee);
+        self.force_niche_result = previous_niche_context;
+        self.bytecode.append(&mut scrutinee_bc);
+
+        let mut bb = BlockBuilder::new();
+        let ok_label = bb.fresh_label(self.bytecode.il_mut());
+        let end_label = bb.fresh_label(self.bytecode.il_mut());
+
+        Self::push_niche_eq_zero(&mut self.bytecode);
+        bb.emit_jump_to(ok_label, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
+
+        let err_slot = err_binding.map(|name| {
+            let slot = self.context.variables.len() as u32;
+            self.context
+                .variables
+                .intern(format!("__niche_match{}", slot));
+            self.record_debug_local(name, slot);
+            slot
+        });
+        if let Some(slot) = err_slot {
+            self.bytecode.push_store_pop(slot);
+        } else {
+            self.bytecode.push_pop();
+        }
+        self.compile_niche_match_body(&arms[err_index], err_binding, err_slot);
+        bb.emit_jump_to(end_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
+
+        bb.bind_label(ok_label, self.bytecode.il_mut());
+        let ok_slot = ok_binding.map(|name| {
+            let slot = self.context.variables.len() as u32;
+            self.context
+                .variables
+                .intern(format!("__niche_match{}", slot));
+            self.record_debug_local(name, slot);
+            slot
+        });
+        if let Some(slot) = ok_slot {
+            self.bytecode.push_store_pop(slot);
+        } else {
+            self.bytecode.push_pop();
+        }
+        self.compile_niche_match_body(&arms[ok_index], ok_binding, ok_slot);
+
+        bb.bind_label(end_label, self.bytecode.il_mut());
+        true
+    }
+
     /// Compile a heap-heap Result match: bit 0 set means `Err`.
     fn try_compile_niche_result_match<'compiler>(
         &mut self,
@@ -613,6 +728,12 @@ impl Compiler {
                 && !Self::is_option_construct(scrutinee)
             {
                 Self::emit_niche_option_to_boxed(&mut self.bytecode);
+            }
+            if self.force_heap_result
+                && self.expr_is_unit_result_niche(scrutinee)
+                && !Self::is_result_construct(scrutinee)
+            {
+                Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
             }
             if self.force_heap_result
                 && self.expr_is_niche_result(scrutinee)

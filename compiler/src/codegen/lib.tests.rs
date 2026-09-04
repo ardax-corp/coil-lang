@@ -7215,6 +7215,100 @@ fn main() {
         );
     }
 
+    #[test]
+    fn result_unit_probe_sets_option_niche_layout() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+use io::{result_unit_probe};
+fn main() {
+    let _ = result_unit_probe(0);
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("result_unit_probe", 1);
+        let bc = compiler.compile("", &mut ast);
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::HostInvoke)
+                    && common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+            }),
+            "Result<(), IoError> host must set OptionNiche; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !host_niche_immediately_unwraps(&bc),
+            "unit Result HostInvoke must not JumpIfMatch-unwrap; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn from_bytes_sets_result_niche_layout() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+use string::{from_bytes, to_bytes};
+fn main() {
+    let _ = from_bytes(to_bytes("hi"));
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("to_bytes", 1);
+        compiler.register_native_id("from_bytes", 2);
+        let bc = compiler.compile("", &mut ast);
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::HostInvoke)
+                    && common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_RESULT_NICHE
+            }),
+            "Result<string, IoError> host must set ResultNiche; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn write_result_int_stays_boxed_host_layout() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+use io::{stdout, write};
+use string::{to_bytes};
+fn main() {
+    let _ = write(stdout(), to_bytes("x"));
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("stdout", 1);
+        compiler.register_native_id("write", 2);
+        compiler.register_native_id("to_bytes", 3);
+        let bc = compiler.compile("", &mut ast);
+        assert!(
+            bc.iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+                .any(|b| {
+                    common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_BOXED
+                }),
+            "Result<int, IoError> write must stay boxed; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
     fn host_niche_immediately_unwraps(bc: &[Byte]) -> bool {
         bc.windows(2).any(|w| {
             matches!(w[0].bytecode(), Instruction::HostInvoke)

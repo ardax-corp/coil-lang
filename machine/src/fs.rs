@@ -6,6 +6,7 @@ use std::time::UNIX_EPOCH;
 
 use common::Value;
 
+use crate::host_enum::pack_result_or_panic;
 use crate::io::{
     IoErrorTag, alloc_io_error, alloc_result_err, alloc_result_ok, as_result_int, as_result_unit,
     as_result_value, value_as_string,
@@ -82,7 +83,7 @@ where
         Ok(p) => f(heap, &p),
         Err(tag) => {
             let err = alloc_io_error(heap, tag);
-            alloc_result_err(heap, err)
+            pack_result_or_panic(heap, Err(err))
         }
     }
 }
@@ -95,7 +96,7 @@ where
         (Ok(p0), Ok(p1)) => f(heap, &p0, &p1),
         (Err(tag), _) | (_, Err(tag)) => {
             let err = alloc_io_error(heap, tag);
-            alloc_result_err(heap, err)
+            pack_result_or_panic(heap, Err(err))
         }
     }
 }
@@ -223,7 +224,8 @@ pub fn fs_symlink(heap: &mut Heap, target: Value, link: Value) -> Value {
         #[cfg(not(any(unix, windows)))]
         {
             let _ = (heap, original, link_path);
-            alloc_result_err(heap, alloc_io_error(heap, IoErrorTag::Other))
+            let err = alloc_io_error(heap, IoErrorTag::Other);
+            pack_result_or_panic(heap, Err(err))
         }
     })
 }
@@ -258,7 +260,7 @@ pub fn fs_realpath(heap: &mut Heap, path: Value) -> Value {
 
 fn wrong_arity(heap: &mut Heap) -> Value {
     let err = alloc_io_error(heap, IoErrorTag::InvalidInput);
-    alloc_result_err(heap, err)
+    pack_result_or_panic(heap, Err(err))
 }
 
 macro_rules! fs_host_1 {

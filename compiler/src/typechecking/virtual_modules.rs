@@ -216,6 +216,8 @@ pub enum IoBuiltin {
     StreamAttach,
     /// Park this coro on the stream fd (`Stream.park`).
     StreamPark,
+    /// Host-edge `Result<(), IoError>` probe (`Ok` = 0 / `Err` = pointer).
+    ResultUnitProbe,
 }
 
 impl IoBuiltin {
@@ -251,6 +253,7 @@ impl IoBuiltin {
             Self::UdpLocalPort => "local_port",
             Self::StreamAttach => "attach",
             Self::StreamPark => "park",
+            Self::ResultUnitProbe => "result_unit_probe",
         }
     }
 
@@ -286,6 +289,7 @@ impl IoBuiltin {
             Self::UdpLocalPort => "udp_local_port",
             Self::StreamAttach => "stream_attach",
             Self::StreamPark => "stream_park",
+            Self::ResultUnitProbe => "result_unit_probe",
         }
     }
 
@@ -308,6 +312,7 @@ impl IoBuiltin {
             Self::ToBytes,
             Self::StreamAttach,
             Self::StreamPark,
+            Self::ResultUnitProbe,
         ]
     }
 
@@ -372,6 +377,7 @@ impl IoBuiltin {
             Self::WriteFrom,
             Self::StreamAttach,
             Self::StreamPark,
+            Self::ResultUnitProbe,
         ]
     }
 }

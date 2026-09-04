@@ -112,7 +112,7 @@ impl Compiler {
                 }
                 crate::typechecking::PreludeFn::Ord
                 | crate::typechecking::PreludeFn::Char => {
-                    self.emit_prelude_host_call(arg_slice, kind.as_str());
+                    self.emit_prelude_host_call(arg_slice, kind.as_str(), Some(ast));
                 }
                 crate::typechecking::PreludeFn::Sin
                 | crate::typechecking::PreludeFn::Cos
@@ -126,6 +126,7 @@ impl Compiler {
                     self.emit_prelude_host_call(
                         arg_slice,
                         kind.math_native_name().expect("scalar math native"),
+                        Some(ast),
                     );
                 }
             }

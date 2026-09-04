@@ -83,6 +83,8 @@ pub fn build_standard_host_natives(
     push_stream_park(&mut out, &mut register_id);
     // Append-only after stream_park: process clocks (no Instant HashMap).
     push_wiring(&mut out, &mut register_id, CLOCK_WIRING, "clock");
+    // Append-only after clocks: `Result<(), IoError>` pack probe (no IO).
+    push_result_unit_probe(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -131,6 +133,30 @@ fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl F
             crate::stream_attach::stream_attach(heap, args[0], args[1].as_int(), vtable)
         })();
         Ok(Some(as_result_value(heap, r)))
+    })));
+}
+
+fn push_result_unit_probe(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    use crate::io::{as_result_unit, IoErrorTag};
+    let sig = FfiSignature::from_parts(
+        common::RESULT_UNIT_PROBE_NATIVE.to_string(),
+        vec![FfiType::Int],
+        FfiType::Int,
+    )
+    .expect("result_unit_probe signature");
+    let id = out.len();
+    register_id(common::RESULT_UNIT_PROBE_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let n = args.first().map(|v| v.as_int()).unwrap_or(0);
+        let r = if n < 0 {
+            Err(IoErrorTag::InvalidInput)
+        } else {
+            Ok(())
+        };
+        Ok(Some(as_result_unit(heap, r)))
     })));
 }
 
@@ -938,7 +964,14 @@ mod tests {
             names.get(pgo + 4).map(String::as_str),
             Some(CLOCK_MONO_NANOS_NATIVE)
         );
-        assert_eq!(names.last().map(String::as_str), Some(CLOCK_SLEEP_MS_NATIVE));
+        assert_eq!(
+            names.get(pgo + 5).map(String::as_str),
+            Some(CLOCK_SLEEP_MS_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::RESULT_UNIT_PROBE_NATIVE)
+        );
     }
 
     /// COI-232: 120/121 are live attach/park, not leftover TLS/crypto stubs.
@@ -1144,5 +1177,9 @@ mod tests {
         assert_eq!(common::host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(122));
         assert_eq!(common::host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(123));
         assert_eq!(common::host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(124));
+        assert_eq!(
+            common::host_native_id(common::RESULT_UNIT_PROBE_NATIVE),
+            Some(125)
+        );
     }
 }

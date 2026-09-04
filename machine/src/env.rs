@@ -4,6 +4,7 @@ use std::process::Command;
 
 use common::{BUILTIN_ENV_ERROR_VARIANTS, BUILTIN_RESULT_VARIANTS, Value};
 
+use crate::host_enum::{pack_result_or_panic, pack_result_unit_or_panic};
 use crate::io::{alloc_result_err, alloc_result_ok};
 use crate::memory::{Heap, ObjArray, Object};
 
@@ -38,15 +39,21 @@ pub fn alloc_result_env_err(heap: &mut Heap, tag: EnvErrorTag) -> Value {
 
 pub fn as_result_value(heap: &mut Heap, r: Result<Value, EnvErrorTag>) -> Value {
     match r {
-        Ok(v) => alloc_result_ok(heap, v),
-        Err(tag) => alloc_result_env_err(heap, tag),
+        Ok(v) => pack_result_or_panic(heap, Ok(v)),
+        Err(tag) => {
+            let err = alloc_env_error(heap, tag);
+            pack_result_or_panic(heap, Err(err))
+        }
     }
 }
 
 pub fn as_result_unit(heap: &mut Heap, r: Result<(), EnvErrorTag>) -> Value {
     match r {
-        Ok(()) => alloc_result_ok(heap, Value::default()),
-        Err(tag) => alloc_result_env_err(heap, tag),
+        Ok(()) => pack_result_unit_or_panic(heap, Ok(())),
+        Err(tag) => {
+            let err = alloc_env_error(heap, tag);
+            pack_result_unit_or_panic(heap, Err(err))
+        }
     }
 }
 
