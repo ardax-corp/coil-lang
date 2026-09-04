@@ -409,8 +409,7 @@ fn format_il_op(op: &IlOp) -> String {
             kind,
             arity,
             target,
-            ..
-        } => {
+            .. } => {
             let k = match kind {
                 EntryKind::Call => "CALL",
                 EntryKind::TailCall => "TailCall",

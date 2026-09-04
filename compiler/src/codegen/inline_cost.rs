@@ -84,8 +84,7 @@ fn is_callish(op: &IlOp) -> bool {
         op,
         IlOp::Entry {
             kind: EntryKind::Call | EntryKind::TailCall | EntryKind::MakeCoro,
-            ..
-        } | IlOp::HostInvoke { .. }
+            .. } | IlOp::HostInvoke { .. }
     ) || matches!(
         op.as_encode_byte(),
         Some(b) if matches!(
@@ -153,8 +152,7 @@ mod tests {
             kind: EntryKind::Call,
             target: Label(0),
             arity: 0,
-            loc: loc(),
-        }];
+            loc: loc(), ret_words: 1,}];
         assert_eq!(estimate_inline_cost(&call), 25);
     }
 

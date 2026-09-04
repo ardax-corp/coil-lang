@@ -15,14 +15,6 @@ impl Compiler {
         if self.try_compile_frame_local_match(scrutinee, arms) {
             return CodeBuf::new();
         }
-        if (self.compiling_pair_mode
-            || matches!(scrutinee.1.as_ref(), Expression::Call { .. }))
-            && self.expr_is_pair_producer(scrutinee)
-            && self.expr_pair_enum_kind(scrutinee).is_some()
-            && self.try_compile_pair_match(scrutinee, arms)
-        {
-            return CodeBuf::new();
-        }
         if self.expr_is_niche_option(scrutinee) {
             if self.try_compile_niche_option_match(scrutinee, arms) {
                 return CodeBuf::new();
@@ -145,107 +137,6 @@ impl Compiler {
         true
     }
 
-    pub(super) fn try_compile_pair_match<'compiler>(
-        &mut self,
-        scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
-    ) -> bool {
-        if arms.len() != 2 {
-            return false;
-        }
-        let Some(first) = Self::pair_match_arm_info(&self.checker, &arms[0]) else {
-            return false;
-        };
-        let Some(second) = Self::pair_match_arm_info(&self.checker, &arms[1]) else {
-            return false;
-        };
-        if first.0 == second.0 {
-            return false;
-        }
-
-        self.bytecode
-            .push_seek(self.context.variables.len() as u32);
-        let previous_pair_context = self.pair_value_context;
-        self.pair_value_context = true;
-        let mut scrutinee_bc = self.do_compile(scrutinee);
-        self.pair_value_context = previous_pair_context;
-        self.bytecode.append(&mut scrutinee_bc);
-
-        let mut bb = BlockBuilder::new();
-        let fallback = bb.fresh_label(self.bytecode.il_mut());
-        let end = bb.fresh_label(self.bytecode.il_mut());
-        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-        self.bytecode.push_const(first.0 as i32);
-        self.bytecode.push(Byte::new(Instruction::EQ));
-        bb.emit_jump_to_hinted(
-            fallback,
-            BbJumpKind::JumpIfFalse,
-            FuseHint::nofuse_value_under_jmp(),
-            self.bytecode.il_mut(),
-        );
-        self.bytecode.push_pop(); // tag
-        let first_slot = self.alloc_pair_match_binding(first.1);
-        if let Some(slot) = first_slot {
-            self.bytecode.push_store_pop(slot);
-        } else {
-            self.bytecode.push_pop(); // payload
-        }
-        self.compile_pair_match_body(&arms[0], first.1, first_slot);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
-
-        bb.bind_label(fallback, self.bytecode.il_mut());
-        self.bytecode.push_pop(); // second tag
-        let second_slot = self.alloc_pair_match_binding(second.1);
-        if let Some(slot) = second_slot {
-            self.bytecode.push_store_pop(slot);
-        } else {
-            self.bytecode.push_pop(); // payload
-        }
-        self.compile_pair_match_body(&arms[1], second.1, second_slot);
-        bb.bind_label(end, self.bytecode.il_mut());
-        true
-    }
-
-    fn pair_match_arm_info<'a>(
-        checker: &Checker,
-        arm: &'a MatchArm<'a>,
-    ) -> Option<(u32, Option<&'a str>)> {
-        let Pattern::Constructor {
-            enum_name,
-            variant_name,
-            payload,
-        } = &arm.pattern.1
-        else {
-            return None;
-        };
-        if !common::is_builtin_option_enum(enum_name)
-            && !common::is_builtin_result_enum(enum_name)
-        {
-            return None;
-        }
-        let tag = checker.tag_for(enum_name, variant_name)?;
-        let binding = match payload {
-            PatternPayload::Unit => None,
-            PatternPayload::Tuple(parts) if parts.len() == 1 => match &parts[0].1 {
-                Pattern::Binding { name } => Some(*name),
-                Pattern::Wildcard | Pattern::Default => None,
-                _ => return None,
-            },
-            _ => return None,
-        };
-        Some((tag, binding))
-    }
-
-    fn alloc_pair_match_binding(&mut self, binding: Option<&str>) -> Option<u32> {
-        let name = binding?;
-        let slot = self.context.variables.len() as u32;
-        self.context
-            .variables
-            .intern(format!("__pair_match{}", slot));
-        self.record_debug_local(name, slot);
-        Some(slot)
-    }
-
     fn compile_pair_match_body(
         &mut self,
         arm: &MatchArm<'_>,
@@ -286,7 +177,13 @@ impl Compiler {
         };
         let from_ident = ident.and_then(|n| self.unboxed_enum_info(n));
         let from_fact = self.node_is_frame_local(scrutinee) || self.node_is_frame_local(peeled);
-        if from_ident.is_none() && !from_fact {
+        // A direct CALL of a known ≤2-word return layout leaves `[payload,
+        // tag]` the same way a frame-local Construct does — same lowering,
+        // reused across the call boundary instead of just within a frame.
+        let from_call = matches!(peeled.1.as_ref(), Expression::Call { .. })
+            .then(|| self.expr_direct_call_two_word_kind(peeled))
+            .flatten();
+        if from_ident.is_none() && !from_fact && from_call.is_none() {
             return false;
         }
         if matches!(peeled.1.as_ref(), Expression::Identifier(_)) && from_ident.is_none() {
@@ -295,9 +192,12 @@ impl Compiler {
         if matches!(peeled.1.as_ref(), Expression::Construct { .. }) && !from_fact {
             return false;
         }
+        if matches!(peeled.1.as_ref(), Expression::Call { .. }) && from_call.is_none() {
+            return false;
+        }
         if !matches!(
             peeled.1.as_ref(),
-            Expression::Identifier(_) | Expression::Construct { .. }
+            Expression::Identifier(_) | Expression::Construct { .. } | Expression::Call { .. }
         ) {
             return false;
         }

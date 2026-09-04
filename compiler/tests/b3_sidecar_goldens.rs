@@ -15,11 +15,18 @@ const CORPUS: &[&str] = &[
 /// Fingerprints from B2 (pre-swap). Length + FNV-1a over opcode/operand.
 /// Gate 3 retargets unbounded `pass_value<T>` in `option_pair.hy` to a
 /// specialized CALL (shorter than BoxValue + shared body). `UPDATE_B3_GOLDENS=1` reprints.
+/// `option_pair.hy` changes again here: `parse_pair` returns a known
+/// ≤2-word `Result<int, string>` layout, and `match_pair` directly matches
+/// `parse_pair(...)` (the alloc-free two-slot fast path). `parse_pair`'s
+/// address is also taken (`indirect_pair`'s `let function = parse_pair;`),
+/// so the escape sidecar keeps it boxed there — `CallIndirect` stays on the
+/// one-word ABI (task cut) — while `chain_pair` (never escaped) still uses
+/// the two-slot ABI end to end.
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "e3676a48a2b745f0_522"),
     ("functions.hy", "09d523b5e92dc06e_390"),
     ("loops.hy", "0798a354fd32364d_267"),
-    ("option_pair.hy", "5ece2424ffb81d62_386"),
+    ("option_pair.hy", "02a183fc747da2d9_399"),
     ("user_trait_dispatch.hy", "53fb084fd917f3fe_157"),
 ];
 

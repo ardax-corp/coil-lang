@@ -583,11 +583,37 @@ impl Byte {
         self
     }
 
+    /// Bit 31 of a `CALL`/`TailCall` operand: two-slot `[payload, tag]`
+    /// return instead of one boxed word. Clear (old archives, or any
+    /// arity `<= 127` that never sets it) means one word.
+    pub const CALL_RET2_BIT: u32 = 1 << 31;
+
+    /// CALL/TailCall with an explicit return width: `[31]` = `ret_words == 2`,
+    /// `[30:24]` arity (0..=127), `[23:0]` target. Old `with_call_packed`
+    /// callers never set bit 31, so their arity stays byte-shaped as long as
+    /// it fits in 7 bits (true for every arity this compiler emits).
+    pub fn with_call_packed_ret(mut self, arity: u32, target: u32, ret_words: u32) -> Self {
+        debug_assert!(target <= 0xFFFFFF, "CALL target exceeds 24-bit encoding");
+        debug_assert!(arity <= 0x7F, "CALL arity exceeds 7-bit encoding");
+        let bit = if ret_words >= 2 { Self::CALL_RET2_BIT } else { 0 };
+        self.operands = bit | ((arity & 0x7F) << 24) | (target & 0xFFFFFF);
+        self
+    }
+
     pub fn call_parts(&self) -> (usize, usize) {
         (
-            (self.operands >> 24) as usize,
+            ((self.operands >> 24) & 0x7F) as usize,
             (self.operands & 0xFFFFFF) as usize,
         )
+    }
+
+    /// `1` (default / old archives) or `2` two-slot `[payload, tag]` return.
+    pub fn call_ret_words(&self) -> u32 {
+        if self.operands & Self::CALL_RET2_BIT != 0 {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn with_value_u32(mut self, v: u32) -> Self {
@@ -643,6 +669,16 @@ impl Byte {
 
     pub fn operand_u32(&self) -> u32 {
         self.operands
+    }
+
+    /// `RETURN` operand: `0` (old archives / default) means one word;
+    /// `2` means the callee left `[payload, tag]` for the caller.
+    pub fn return_words(&self) -> u32 {
+        if self.operands >= 2 {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn operand_u16(&self, index: usize) -> u16 {
@@ -951,6 +987,14 @@ impl ArchivedByte {
         self
     }
 
+    /// CALL/TailCall with an explicit return width (`1` or `2` stack words).
+    /// See [`Byte::with_call_packed_ret`].
+    pub fn with_call_packed_ret(mut self, arity: u32, target: u32, ret_words: u32) -> Self {
+        let bit = if ret_words >= 2 { Byte::CALL_RET2_BIT } else { 0 };
+        self.operands = (bit | ((arity & 0x7F) << 24) | (target & 0xFFFFFF)).into();
+        self
+    }
+
     pub fn with_const_inline(mut self, value: i32) -> Self {
         self.operands = (value as u32).into();
         self
@@ -979,6 +1023,17 @@ impl ArchivedByte {
     pub fn with_value_u32(mut self, v: u32) -> Self {
         self.operands = v.into();
         self
+    }
+
+    /// `RETURN` operand: `0` (old archives / default) means one word;
+    /// `2` means the callee left `[payload, tag]` for the caller.
+    pub fn return_words(&self) -> u32 {
+        let op: u32 = self.operands.into();
+        if op >= 2 {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn value_u32(&self) -> u32 {
@@ -1014,7 +1069,17 @@ impl ArchivedByte {
 
     pub fn call_parts(&self) -> (usize, usize) {
         let op: u32 = self.operands.into();
-        ((op >> 24) as usize, (op & 0xFFFFFF) as usize)
+        (((op >> 24) & 0x7F) as usize, (op & 0xFFFFFF) as usize)
+    }
+
+    /// `1` (default / old archives) or `2` two-slot `[payload, tag]` return.
+    pub fn call_ret_words(&self) -> u32 {
+        let op: u32 = self.operands.into();
+        if op & Byte::CALL_RET2_BIT != 0 {
+            2
+        } else {
+            1
+        }
     }
 
     pub fn jump_if_match_target(&self, pool: &[u64]) -> usize {
@@ -1283,6 +1348,33 @@ mod tests {
         let b = Byte::new(Instruction::CALL).with_call_packed(3, 0x123456);
         assert_eq!(b.call_parts(), (3, 0x123456));
         assert_eq!(b.value_u32(), 0x123456);
+        assert_eq!(b.call_ret_words(), 1);
+    }
+
+    #[test]
+    fn call_packed_ret_two_words_round_trips_and_sets_bit() {
+        let b = Byte::new(Instruction::CALL).with_call_packed_ret(5, 0x1000, 2);
+        assert_eq!(b.call_parts(), (5, 0x1000));
+        assert_eq!(b.call_ret_words(), 2);
+
+        let one = Byte::new(Instruction::CALL).with_call_packed_ret(5, 0x1000, 1);
+        assert_eq!(one.call_parts(), (5, 0x1000));
+        assert_eq!(one.call_ret_words(), 1);
+    }
+
+    #[test]
+    fn call_packed_ret_two_words_leaves_old_call_packed_one_word() {
+        // Old archives never set bit 31 through `with_call_packed`.
+        let b = Byte::new(Instruction::CALL).with_call_packed(3, 0x123456);
+        assert_eq!(b.call_ret_words(), 1);
+    }
+
+    #[test]
+    fn return_words_default_is_one_two_is_pair() {
+        let one = Byte::new(Instruction::RETURN);
+        assert_eq!(one.return_words(), 1);
+        let two = Byte::new(Instruction::RETURN).with_operand_u32(2);
+        assert_eq!(two.return_words(), 2);
     }
 
     #[test]

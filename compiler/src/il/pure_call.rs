@@ -64,8 +64,7 @@ pub fn op_blocks_length_proof(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
         IlOp::Entry {
             kind: EntryKind::Call,
             target,
-            ..
-        } => !ctx.as_ref().is_some_and(|c| c.call_is_pure(*target)),
+            .. } => !ctx.as_ref().is_some_and(|c| c.call_is_pure(*target)),
         IlOp::Entry { .. } => true,
         IlOp::Jump {
             kind: IlJumpKind::JumpIfMatch { .. },
@@ -98,8 +97,7 @@ pub fn op_blocks_licm(op: &IlOp, ctx: Option<&PureCallCtx>) -> bool {
         IlOp::Entry {
             kind: EntryKind::Call,
             target,
-            ..
-        } => !ctx.as_ref().is_some_and(|c| c.call_is_pure(*target)),
+            .. } => !ctx.as_ref().is_some_and(|c| c.call_is_pure(*target)),
         IlOp::Entry { .. } => true,
         IlOp::Jump {
             kind: IlJumpKind::JumpIfMatch { .. },
@@ -137,8 +135,7 @@ mod tests {
             kind: EntryKind::Call,
             arity: 1,
             target: Label(7),
-            loc: loc(),
-        };
+            loc: loc(), ret_words: 1,};
         assert!(!op_blocks_length_proof(&op, Some(&ctx)));
     }
 
@@ -148,8 +145,7 @@ mod tests {
             kind: EntryKind::Call,
             arity: 1,
             target: Label(1),
-            loc: loc(),
-        };
+            loc: loc(), ret_words: 1,};
         assert!(op_blocks_length_proof(&op, None));
     }
 
@@ -228,8 +224,7 @@ mod tests {
             kind: EntryKind::Call,
             arity: 1,
             target: Label(7),
-            loc: loc(),
-        };
+            loc: loc(), ret_words: 1,};
         assert!(!op_blocks_length_proof(&op, Some(&pure)));
         assert!(op_blocks_length_proof(&op, Some(&impure)));
         assert!(op_blocks_licm(&op, Some(&impure)));

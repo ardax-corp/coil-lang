@@ -397,7 +397,7 @@ mod tests {
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Pop { loc: loc() },
             IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
             IlOp::Halt { loc: loc() },
         ];
         let funcs = vec![IlFunc::new("f", None, 2, 4)];
@@ -414,11 +414,11 @@ mod tests {
         let ops = vec![
             IlOp::Const { imm: 0, loc: loc() },
             IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
             IlOp::Dup { loc: loc() },
             IlOp::Pop { loc: loc() },
             IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
             IlOp::Halt { loc: loc() },
         ];
         let funcs = vec![IlFunc::new("a", None, 1, 3), IlFunc::new("b", None, 5, 7)];
@@ -446,7 +446,7 @@ mod tests {
                     hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
-                IlOp::Return { loc },
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         m.funcs.push(IlFuncBody {
@@ -459,7 +459,7 @@ mod tests {
                     hint: Default::default(),
                 },
                 IlOp::Label(Label(0)),
-                IlOp::Return { loc },
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         let (flat, _, _) = m.to_flat();
@@ -486,7 +486,7 @@ mod tests {
         let mut m = IlModule::default();
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("callee", Some(callee_entry), 0, 2),
-            ops: vec![IlOp::Label(callee_entry), IlOp::Return { loc }],
+            ops: vec![IlOp::Label(callee_entry), IlOp::Return { loc, ret_words: 1}],
         });
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("caller", None, 0, 2),
@@ -495,9 +495,8 @@ mod tests {
                     kind: EntryKind::Call,
                     arity: 1,
                     target: callee_entry,
-                    loc,
-                },
-                IlOp::Return { loc },
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         let (flat, _, _) = m.to_flat();
@@ -535,12 +534,12 @@ mod tests {
                 IlOp::Label(Label(0)),
                 IlOp::Label(Label(1)),
                 IlOp::Label(callee_entry),
-                IlOp::Return { loc },
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("callee", Some(callee_entry), 0, 2),
-            ops: vec![IlOp::Label(callee_entry), IlOp::Return { loc }],
+            ops: vec![IlOp::Label(callee_entry), IlOp::Return { loc, ret_words: 1}],
         });
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("caller", None, 0, 2),
@@ -549,9 +548,8 @@ mod tests {
                     kind: EntryKind::Call,
                     arity: 1,
                     target: callee_entry,
-                    loc,
-                },
-                IlOp::Return { loc },
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         let (flat, _, _) = m.to_flat();
@@ -583,7 +581,7 @@ mod tests {
         let mut m = IlModule::default();
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("callee", Some(emit_entry), 0, 2),
-            ops: vec![IlOp::Label(Label(3)), IlOp::Return { loc }],
+            ops: vec![IlOp::Label(Label(3)), IlOp::Return { loc, ret_words: 1}],
         });
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("caller", None, 0, 2),
@@ -592,9 +590,8 @@ mod tests {
                     kind: EntryKind::Call,
                     arity: 0,
                     target: emit_entry,
-                    loc,
-                },
-                IlOp::Return { loc },
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         let (flat, _, _) = m.to_flat();
@@ -630,12 +627,12 @@ mod tests {
             ops: vec![
                 IlOp::Label(Label(0)),
                 IlOp::Label(emit_entry),
-                IlOp::Return { loc },
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("callee", Some(emit_entry), 0, 2),
-            ops: vec![IlOp::Label(Label(3)), IlOp::Return { loc }],
+            ops: vec![IlOp::Label(Label(3)), IlOp::Return { loc, ret_words: 1}],
         });
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("caller", None, 0, 2),
@@ -644,9 +641,8 @@ mod tests {
                     kind: EntryKind::Call,
                     arity: 0,
                     target: emit_entry,
-                    loc,
-                },
-                IlOp::Return { loc },
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         let (flat, _, _) = m.to_flat();
@@ -683,7 +679,7 @@ mod tests {
             ops: vec![
                 IlOp::Label(Label(1)),
                 IlOp::Label(method),
-                IlOp::Return { loc },
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         m.funcs.push(IlFuncBody {
@@ -693,9 +689,8 @@ mod tests {
                     kind: EntryKind::Call,
                     arity: 0,
                     target: method,
-                    loc,
-                },
-                IlOp::Return { loc },
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
             ],
         });
         let (flat, _, _) = m.to_flat();
@@ -730,8 +725,7 @@ mod tests {
                 kind: EntryKind::CodePtr,
                 arity: 0,
                 target: drop_entry,
-                loc,
-            },
+                loc, ret_words: 1,},
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target: Label(99),
@@ -741,7 +735,7 @@ mod tests {
         ];
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("drop", Some(drop_entry), 0, 2),
-            ops: vec![IlOp::Label(drop_entry), IlOp::Return { loc }],
+            ops: vec![IlOp::Label(drop_entry), IlOp::Return { loc, ret_words: 1}],
         });
         let (flat, _, _) = m.to_flat();
         let drop_label = flat
@@ -757,8 +751,7 @@ mod tests {
                 IlOp::Entry {
                     kind: EntryKind::CodePtr,
                     target,
-                    ..
-                } => Some(target.0),
+                    .. } => Some(target.0),
                 _ => None,
             })
             .expect("prologue CodePtr");
@@ -772,7 +765,7 @@ mod tests {
     fn with_entries_preserves_entry_map() {
         let ops = vec![
             IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let funcs = vec![IlFunc::new("f", Some(Label(9)), 0, 2)];
         let mut entries = HashMap::new();
@@ -787,7 +780,7 @@ mod tests {
     fn with_entries_survives_empty_funcs_from_flat() {
         let ops = vec![
             IlOp::Const { imm: 1, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let mut entries = HashMap::new();
         entries.insert(0usize, Label(3));
@@ -804,7 +797,7 @@ mod tests {
                 IlOp::Dup { loc: loc() },
                 IlOp::Pop { loc: loc() },
                 IlOp::Const { imm: 1, loc: loc() },
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ],
             ..IlModule::default()
         };
@@ -823,7 +816,7 @@ mod tests {
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Dup { loc: loc() },
             IlOp::Pop { loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let funcs = vec![IlFunc::new("f", None, 2, 6)];
         let mut m = IlModule::from_flat(&ops, &funcs);
@@ -865,7 +858,7 @@ mod tests {
             hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
-        ops.push(IlOp::Return { loc: loc() });
+        ops.push(IlOp::Return { loc: loc(), ret_words: 1});
         let body_emit_end = ops.iter().filter(|op| op.emits_code()).count();
 
         let mut body_only: Vec<IlOp> = ops[body_start..].to_vec();
@@ -915,7 +908,7 @@ mod tests {
             hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
-        ops.push(IlOp::Return { loc: loc() });
+        ops.push(IlOp::Return { loc: loc(), ret_words: 1});
         let emit_end = ops.iter().filter(|op| op.emits_code()).count();
         let funcs = vec![IlFunc::new("f", None, 0, emit_end)];
         let mut m = IlModule::from_flat(&ops, &funcs);

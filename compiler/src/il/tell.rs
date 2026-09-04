@@ -170,7 +170,8 @@ fn edge_effects_with_next(byte: &Byte, next: Option<&Byte>, pool: &[u64]) -> (Ef
         Instruction::PairJumpIfTag => (Effect::Delta(0), Effect::Delta(-1)),
         Instruction::CALL => {
             let (arity, _) = byte.call_parts();
-            let e = Effect::Delta(call_result_delta(arity as u32, next_is_pair_to_heap(next)));
+            let pair = byte.call_ret_words() >= 2 || next_is_pair_to_heap(next);
+            let e = Effect::Delta(call_result_delta(arity as u32, pair));
             (e, e)
         }
         Instruction::CallIndirect if next_is_pair_to_heap(next) => {
@@ -291,13 +292,8 @@ fn signed_arity_delta(arity: u32) -> i32 {
     arity.min(i32::MAX as u32) as i32 - 1
 }
 
-/// `CALL` / `MakeCoro`: pop `arity` args, push one result. The callee frame base
-/// is `tell - arity` and the matching return seeks back to it before pushing.
-fn call_arity_delta(arity: u32) -> i32 {
-    call_result_delta(arity, false)
-}
-
-/// Unary return pushes one value; `ReturnPair` leaves payload+tag (two).
+/// Unary return pushes one value; two-slot CALL bit 31 / RETURN operand 2
+/// leaves payload+tag.
 fn call_result_delta(arity: u32, pair_return: bool) -> i32 {
     let results = if pair_return { 2 } else { 1 };
     results - arity.min(i32::MAX as u32) as i32
@@ -306,8 +302,14 @@ fn call_result_delta(arity: u32, pair_return: bool) -> i32 {
 fn effect_il(op: &IlOp, pool: &[u64]) -> Effect {
     match op {
         IlOp::StorePop { slot, .. } => Effect::DeltaThenFloor(-1, slot.saturating_add(1)),
-        IlOp::Entry { kind, arity, .. } => match kind {
-            EntryKind::Call | EntryKind::MakeCoro => Effect::Delta(call_arity_delta(*arity)),
+        IlOp::Entry {
+            kind,
+            arity,
+            ret_words,
+            ..
+        } => match kind {
+            EntryKind::Call => Effect::Delta(call_result_delta(*arity, *ret_words >= 2)),
+            EntryKind::MakeCoro => Effect::Delta(call_result_delta(*arity, false)),
             EntryKind::TailCall => Effect::Terminator,
             EntryKind::CodePtr | EntryKind::MakePolyFn => Effect::Delta(1),
         },
@@ -349,10 +351,10 @@ fn edge_effects_il_with_next(op: &IlOp, next: Option<&IlOp>, pool: &[u64]) -> (E
     if let IlOp::Entry {
         kind: EntryKind::Call,
         arity,
-        ..
-    } = op
+        ret_words,
+        .. } = op
     {
-        let pair = next.is_some_and(il_is_pair_to_heap);
+        let pair = *ret_words >= 2 || next.is_some_and(il_is_pair_to_heap);
         let e = Effect::Delta(call_result_delta(*arity, pair));
         return (e, e);
     }
@@ -379,8 +381,7 @@ fn il_is_unconditional_transfer(op: &IlOp) -> bool {
             ..
         } | IlOp::Entry {
             kind: EntryKind::TailCall,
-            ..
-        } | IlOp::PrologueJmp { .. }
+            .. } | IlOp::PrologueJmp { .. }
     ) || matches!(
         op,
         IlOp::Return { .. }
@@ -512,16 +513,13 @@ fn il_op_tag(op: &IlOp) -> &'static str {
     match op {
         IlOp::Entry {
             kind: EntryKind::Call,
-            ..
-        } => "Entry{Call}",
+            .. } => "Entry{Call}",
         IlOp::Entry {
             kind: EntryKind::MakeCoro,
-            ..
-        } => "Entry{MakeCoro}",
+            .. } => "Entry{MakeCoro}",
         IlOp::Entry {
             kind: EntryKind::TailCall,
-            ..
-        } => "Entry{TailCall}",
+            .. } => "Entry{TailCall}",
         IlOp::StorePop { .. } => "StorePop",
         IlOp::Load { .. } => "Load",
         IlOp::Const { .. } | IlOp::ConstPool { .. } => "Const",
@@ -616,8 +614,7 @@ pub(crate) fn diff_il_against_bytecode(
                 op,
                 IlOp::Entry {
                     kind: EntryKind::Call,
-                    ..
-                }
+                    .. }
             ) {
                 report.saw_call = true;
             }
@@ -673,8 +670,9 @@ pub fn entry_call_tell_after(arity: u32, seed: u32) -> (Tell, Tell) {
             arity,
             target: super::op::Label(0),
             loc,
+            ret_words: 1,
         },
-        IlOp::Return { loc },
+        IlOp::Return { loc, ret_words: 1 },
     ];
     let il = analyze_il_at(&ops, seed).tell_before(1);
     let code = vec![
@@ -691,7 +689,7 @@ pub fn store_pop_tell_after(slot: u32, seed: u32) -> (Tell, Tell) {
     let ops = vec![
         IlOp::Const { imm: 1, loc },
         IlOp::StorePop { slot, loc },
-        IlOp::Return { loc },
+        IlOp::Return { loc, ret_words: 1 },
     ];
     let il = analyze_il_at(&ops, seed).tell_before(2);
     let code = vec![
@@ -739,7 +737,7 @@ mod tests {
         let ops = vec![
             IlOp::Const { imm: 1, loc },
             IlOp::StorePop { slot: 5, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
         let sp = crate::il::sp::analyze(&ops);
@@ -762,9 +760,8 @@ mod tests {
                 kind: EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc,
-            },
-            IlOp::Return { loc },
+                loc, ret_words: 1,},
+            IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
         let sp = crate::il::sp::analyze(&ops);
@@ -790,9 +787,8 @@ mod tests {
                 kind: EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc,
-            },
-            IlOp::Return { loc },
+                loc, ret_words: 1,},
+            IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
         let sp = crate::il::sp::analyze(&ops);
@@ -818,9 +814,8 @@ mod tests {
                 kind: EntryKind::MakeCoro,
                 arity: 0,
                 target: Label(0),
-                loc,
-            },
-            IlOp::Return { loc },
+                loc, ret_words: 1,},
+            IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
         let sp = crate::il::sp::analyze(&ops);
@@ -839,7 +834,7 @@ mod tests {
             IlOp::Const { imm: 1, loc },
             IlOp::Const { imm: 2, loc },
             IlOp::byte(Byte::new(Instruction::Seek).with_operand_u32(4)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let tell = analyze_il_at(&ops, 0);
         let sp = crate::il::sp::analyze(&ops);
@@ -916,7 +911,7 @@ mod tests {
         let ops = vec![
             IlOp::Const { imm: 1, loc },
             IlOp::StorePop { slot: 5, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         let low = analyze_il_at(&ops, 0);
@@ -938,9 +933,9 @@ mod tests {
                 loc,
                 hint: Default::default(),
             },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
             IlOp::Label(Label(0)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let info = analyze_il_at(&ops, 0);
         // Const → 1; JMPF pops → 0 on fall-through and taken.
@@ -960,9 +955,8 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 3,
                 target: Label(0),
-                loc,
-            },
-            IlOp::Return { loc },
+                loc, ret_words: 1,},
+            IlOp::Return { loc, ret_words: 1},
         ];
         let info = analyze_il_at(&ops, 3);
         assert_eq!(info.tell_before(3).known(), Some(6));
@@ -979,9 +973,8 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc,
-            },
-            IlOp::Return { loc },
+                loc, ret_words: 1,},
+            IlOp::Return { loc, ret_words: 1},
         ];
         let info = analyze_il_at(&ops, 2);
         assert_eq!(info.tell_before(0).known(), Some(2));
@@ -1019,10 +1012,9 @@ mod tests {
                     kind: crate::il::op::EntryKind::Call,
                     arity,
                     target: Label(0),
-                    loc,
-                },
+                    loc, ret_words: 1,},
                 IlOp::byte(Byte::new(Instruction::PairToHeap)),
-                IlOp::Return { loc },
+                IlOp::Return { loc, ret_words: 1},
             ];
             let il = analyze_il_at(&ops, seed);
             assert_eq!(il.tell_before(1).known(), Some(after_call));
@@ -1048,7 +1040,7 @@ mod tests {
         for arity in [0u32, 2, 3] {
             let seed = arity + 2;
             let (il, bc) = entry_call_tell_after(arity, seed);
-            let call = shift(seed, call_arity_delta(arity));
+            let call = shift(seed, call_result_delta(arity, false));
             let jim = shift(seed, signed_arity_delta(arity));
             assert_eq!(bc.known(), Some(call), "bytecode CALL arity {arity}");
             assert_eq!(il, bc, "IL Entry{{Call}} arity {arity} must match CALL");
@@ -1083,9 +1075,8 @@ mod tests {
                 kind: EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc,
-            },
-            IlOp::Return { loc },
+                loc, ret_words: 1,},
+            IlOp::Return { loc, ret_words: 1},
         ];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
@@ -1120,7 +1111,7 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Label(Label(1)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
             IlOp::Label(Label(8)),
         ];
         let mut pool = Vec::new();
@@ -1139,7 +1130,7 @@ mod tests {
     #[test]
     fn diff_il_skips_fused_window_tails_sharing_post_pc() {
         let loc = common::DebugLoc::unknown();
-        let ops = vec![IlOp::Const { imm: 7, loc }, IlOp::Return { loc }];
+        let ops = vec![IlOp::Const { imm: 7, loc }, IlOp::Return { loc, ret_words: 1}];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
         assert_eq!(lowered.bytecode.len(), 1, "Const;Return must fuse");
@@ -1173,9 +1164,8 @@ mod tests {
                 kind: EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc,
-            },
-            IlOp::Return { loc },
+                loc, ret_words: 1,},
+            IlOp::Return { loc, ret_words: 1},
             // Bind the Call target so C3 lower succeeds; this test is about
             // arity mismatch, not unbound labels.
             IlOp::Label(Label(0)),
@@ -1187,8 +1177,7 @@ mod tests {
             kind: EntryKind::Call,
             arity: 2,
             target: Label(0),
-            loc,
-        };
+            loc, ret_words: 1,};
         let ranges = vec![("f".to_string(), 0, lowered.bytecode.len())];
         let mut seeds = std::collections::HashMap::new();
         seeds.insert(0, 3);
@@ -1220,7 +1209,7 @@ mod tests {
     #[test]
     fn diff_il_skips_ranges_without_entry_seeds() {
         let loc = common::DebugLoc::unknown();
-        let ops = vec![IlOp::Const { imm: 1, loc }, IlOp::Return { loc }];
+        let ops = vec![IlOp::Const { imm: 1, loc }, IlOp::Return { loc, ret_words: 1}];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
         let ranges = vec![("f".to_string(), 0, lowered.bytecode.len())];
@@ -1248,9 +1237,9 @@ mod tests {
                 loc,
                 hint: Default::default(),
             },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
             IlOp::Label(Label(0)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let mut pool = Vec::new();
         let lowered = super::super::lower::lower_optimized(&ops, &mut pool);
@@ -1282,18 +1271,16 @@ mod tests {
                     kind: crate::il::op::EntryKind::Call,
                     arity,
                     target: Label(0),
-                    loc,
-                },
-                IlOp::Return { loc },
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
             ];
             let coro = vec![
                 IlOp::Entry {
                     kind: crate::il::op::EntryKind::MakeCoro,
                     arity,
                     target: Label(0),
-                    loc,
-                },
-                IlOp::Return { loc },
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
             ];
             let entry = arity + 1;
             let after_call = analyze_il_at(&call, entry).tell_before(1).known();
@@ -1321,9 +1308,9 @@ mod tests {
                 loc,
                 hint: Default::default(),
             },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
             IlOp::Label(Label(0)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let info = analyze_il_at(&ops, 3);
         // Fall-through keeps cursor; taken edge applies arity-1 (= +1) → 4.

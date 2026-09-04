@@ -549,7 +549,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         canonicalize_operand_order(&mut ops, &[]);
         assert!(matches!(ops[0], IlOp::Load { slot: 0, .. }));
@@ -683,7 +683,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         optimize(
             &mut ops,

@@ -180,7 +180,7 @@ fn ssa_gvn_cse_at_join_when_preds_agree() {
             op: Instruction::ADD,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ];
     ssa_gvn(&mut ops);
     let join = ops
@@ -234,7 +234,7 @@ fn ssa_gvn_preserves_div() {
             op: Instruction::DIV,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ];
     ssa_gvn(&mut ops);
     let divs = ops

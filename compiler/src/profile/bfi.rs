@@ -138,10 +138,10 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Const { imm: 0, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 2, loc: loc() },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let map = super::super::instrument::instrument_for_pgo_named(&ops, "f");
         let mut profile = ProfileData::new();

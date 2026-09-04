@@ -40,7 +40,7 @@ fn latch_copy() -> Vec<IlOp> {
             slot: 7,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]
 }
 
@@ -88,7 +88,7 @@ fn refuses_load_of_carried_slot_in_region() {
             slot: 7,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ];
     assert_eq!(tos_carry(&mut ops, 8), 0);
 }
@@ -119,7 +119,7 @@ fn refuses_store_back_to_carried_slot() {
             slot: 7,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ];
     assert_eq!(tos_carry(&mut ops, 8), 0);
 }
@@ -151,7 +151,7 @@ fn refuses_control_flow_in_region() {
             slot: 7,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ];
     assert_eq!(tos_carry(&mut ops, 8), 0);
 }
@@ -182,7 +182,7 @@ fn refuses_bin_slot_that_reads_carried_slot() {
             slot: 7,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ];
     assert_eq!(tos_carry(&mut ops, 8), 0);
 }
@@ -226,7 +226,7 @@ fn mandelbrot_latch() -> Vec<IlOp> {
             slot: 7,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]
 }
 

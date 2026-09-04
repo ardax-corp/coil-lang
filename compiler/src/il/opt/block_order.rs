@@ -303,7 +303,7 @@ mod tests {
     }
 
     fn ret() -> IlOp {
-        IlOp::Return { loc: loc() }
+        IlOp::Return { loc: loc(), ret_words: 1}
     }
 
     fn c(n: i32) -> IlOp {

@@ -61,8 +61,7 @@ fn counted_while(trips_imm: i32, with_call: bool, with_break: bool) -> Vec<IlOp>
             kind: crate::il::op::EntryKind::Call,
             arity: 0,
             target: Label(9),
-            loc: loc(),
-        });
+            loc: loc(), ret_words: 1,});
         ops.push(IlOp::Pop { loc: loc() });
     }
     if with_break {
@@ -98,7 +97,7 @@ fn counted_while(trips_imm: i32, with_call: bool, with_break: bool) -> Vec<IlOp>
             slot: 0,
             loc: loc(),
         },
-        IlOp::Return { loc: loc() },
+        IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     ops
 }

@@ -46,8 +46,9 @@ impl CodeBuf {
         // Error-recovery paths may emit after a failed finalize/lower.
         self.lowered = None;
         self.lowered_locs = None;
-        if let Some((kind, arity, label)) = self.entry_from_abs_byte(b) {
-            self.il.emit_entry(kind, arity, label);
+        if let Some((kind, arity, label, ret_words)) = self.entry_from_abs_byte(b) {
+            self.il
+                .emit_entry_ret_at(kind, arity, label, DebugLoc::unknown(), ret_words);
         } else {
             self.il.push_byte(b);
         }
@@ -77,6 +78,12 @@ impl CodeBuf {
     pub fn push_return_at(&mut self, loc: DebugLoc) {
         self.invalidate_lowered();
         self.il.push_return_at(loc);
+    }
+
+    /// Two-slot `RETURN`: pops/pushes `[payload, tag]` instead of one word.
+    pub fn push_return_two_word(&mut self) {
+        self.invalidate_lowered();
+        self.il.push_return_two_word();
     }
 
     pub fn push_load(&mut self, slot: u32) {
@@ -184,33 +191,34 @@ impl CodeBuf {
         self.il.push_string(idx);
     }
 
-    /// If `b` is a call-like op targeting a known entry PC, return Entry parts.
-    fn entry_from_abs_byte(&self, b: Byte) -> Option<(EntryKind, u32, Label)> {
+    /// If `b` is a call-like op targeting a known entry PC, return Entry parts
+    /// `(kind, arity, target, ret_words)`.
+    fn entry_from_abs_byte(&self, b: Byte) -> Option<(EntryKind, u32, Label, u32)> {
         match *b.bytecode() {
             Instruction::CALL => {
                 let (arity, target) = b.call_parts();
                 let label = *self.entry_at_offset.get(&target)?;
-                Some((EntryKind::Call, arity as u32, label))
+                Some((EntryKind::Call, arity as u32, label, b.call_ret_words()))
             }
             Instruction::TailCall => {
                 let (arity, target) = b.call_parts();
                 let label = *self.entry_at_offset.get(&target)?;
-                Some((EntryKind::TailCall, arity as u32, label))
+                Some((EntryKind::TailCall, arity as u32, label, 1))
             }
             Instruction::MakeCoro => {
                 let (arity, target) = b.call_parts();
                 let label = *self.entry_at_offset.get(&target)?;
-                Some((EntryKind::MakeCoro, arity as u32, label))
+                Some((EntryKind::MakeCoro, arity as u32, label, 1))
             }
             Instruction::CodePtr => {
                 let target = b.operand_u32() as usize;
                 let label = *self.entry_at_offset.get(&target)?;
-                Some((EntryKind::CodePtr, 0, label))
+                Some((EntryKind::CodePtr, 0, label, 1))
             }
             Instruction::MakePolyFn => {
                 let target = b.operand_u32() as usize;
                 let label = *self.entry_at_offset.get(&target)?;
-                Some((EntryKind::MakePolyFn, 0, label))
+                Some((EntryKind::MakePolyFn, 0, label, 1))
             }
             _ => None,
         }
@@ -253,19 +261,21 @@ impl CodeBuf {
             }
             if emitting >= from_code {
                 if let IlOp::Byte { byte, loc } = op {
-                    if let Some((kind, arity, label)) = self.entry_from_abs_byte(*byte) {
-                        rewrites.push((i, kind, arity, label, *loc));
+                    if let Some((kind, arity, label, ret_words)) = self.entry_from_abs_byte(*byte)
+                    {
+                        rewrites.push((i, kind, arity, label, *loc, ret_words));
                     }
                 }
             }
             emitting += 1;
         }
-        for (i, kind, arity, target, loc) in rewrites {
+        for (i, kind, arity, target, loc, ret_words) in rewrites {
             self.il.ops_mut()[i] = IlOp::Entry {
                 kind,
                 arity,
                 target,
                 loc,
+                ret_words,
             };
         }
     }

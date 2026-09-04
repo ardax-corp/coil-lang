@@ -414,13 +414,19 @@ fn main() {
     #[test]
     fn return_match_keeps_fusion_barrier() {
         use common::Instruction;
+        // `make()` is bound to `r` before the match so the scrutinee is a
+        // plain identifier, not a direct CALL — the two-slot immediate-match
+        // fast path (same lowering as a frame-local match, #278-style) only
+        // fires on a direct `match callee(...) { ... }`, so this keeps the
+        // original boxed `ObjEnum` shape this test asserts on.
         let (bc, _pool) = compile_src(
             r#"
 fn make() -> Option<int> {
     return Option::Some(1);
 }
 fn foo() -> int {
-    return match make() {
+    let r = make();
+    return match r {
         Option::None => 0,
         Option::Some(n) => n,
     };
@@ -1339,9 +1345,13 @@ fn main() {
     #[test]
     fn match_emits_jump_if_match_cascade() {
         use common::Instruction;
+        // `r` decouples the scrutinee from a direct CALL so the two-slot
+        // immediate-match fast path does not fire — see
+        // `return_match_keeps_fusion_barrier`.
         let (bc, _pool) = compile_src(
             "fn make() -> Option<int> { return Option::Some(1); } \
- match make() { \
+ let r = make(); \
+ match r { \
  Option::None() => 0, \
  Option::Some(v) => v, \
  };",
@@ -2451,9 +2461,13 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     #[test]
     fn match_jump_if_match_targets_are_patched_to_arm_offsets() {
         use common::Instruction;
+        // `r` decouples the scrutinee from a direct CALL so the two-slot
+        // immediate-match fast path does not fire — see
+        // `return_match_keeps_fusion_barrier`.
         let (bc, pool) = compile_src(
             "fn make() -> Option<int> { return Option::Some(1); } \
- match make() { \
+ let r = make(); \
+ match r { \
  Option::None() => 0, \
  Option::Some(v) => v, \
  };",
@@ -3505,8 +3519,7 @@ fn main() {
         };
         let returned = guard(vec![
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
             IlOp::Load {
                 slot: 2,
                 loc: DebugLoc::unknown(),
@@ -3968,8 +3981,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
     }
 
@@ -3991,8 +4003,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
         // ConstPool is a pure producer in the widened micro-inline set.
         assert!(Compiler::is_tiny_inline_il(&[
@@ -4001,8 +4012,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
         // Typed STRING (literal `return "…"`) is a pure micro-body producer.
         assert!(Compiler::is_tiny_inline_il(&[
@@ -4011,8 +4021,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
         assert!(!Compiler::is_tiny_inline_il(&[
             IlOp::HostInvoke {
@@ -4020,8 +4029,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ]));
     }
 
@@ -4130,8 +4138,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
             IlOp::Load {
                 slot: 0,
                 loc: DebugLoc::unknown(),
@@ -4145,8 +4152,7 @@ fn run() -> int { return add(1, 2); }
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: DebugLoc::unknown(),
-            },
+                loc: DebugLoc::unknown(), ret_words: 1,},
         ];
         assert!(Compiler::is_tiny_inline_diamond_il(&ops));
         assert!(Compiler::is_tiny_inline_il(&ops));
@@ -7295,6 +7301,20 @@ fn main() {
         );
     }
 
+    /// True for a plain `BITAND`, or a `CmpJmpf`/`CmpJmpt` fused superinstruction
+    /// whose comparison op is `BITAND` — `branch_opt`/fuse-select may fold the
+    /// niche-Result Err-bit test (`DUP; CONST 1; BITAND; JMPF`) into one op
+    /// once a `DUPLICATE` keeps the pointer alive under the jump.
+    fn tests_err_bit(b: &Byte) -> bool {
+        match b.bytecode() {
+            Instruction::BITAND => true,
+            Instruction::CmpJmpf | Instruction::CmpJmpt => {
+                b.cmp_jmpf_parts().0 == Instruction::BITAND as u8
+            }
+            _ => false,
+        }
+    }
+
     /// COI-108: `self.inner()?` with a different Ok payload must keep the
     /// ReturnPair and use the tag EQ/JMPF path — not PairToHeap + JumpIfMatch.
     #[test]
@@ -7329,7 +7349,7 @@ fn main() {
             "mismatched-Result method Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            ops.iter().any(|op| matches!(op, Instruction::BITAND)),
+            bc.iter().any(|b| tests_err_bit(b)),
             "mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
         );
         assert!(
@@ -7381,7 +7401,7 @@ fn main() {
             "forward mismatched-Result Try must not box before pair tag check; opcodes={ops:?}",
         );
         assert!(
-            ops.iter().any(|op| matches!(op, Instruction::BITAND)),
+            bc.iter().any(|b| tests_err_bit(b)),
             "forward mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
         );
         assert!(

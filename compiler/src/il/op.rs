@@ -213,8 +213,12 @@ pub enum IlOp {
     Print {
         loc: DebugLoc,
     },
+    /// `ret_words`: `1` (default) is a boxed one-word return; `2` pops
+    /// `[payload, tag]` from the callee frame and re-pushes both for the
+    /// caller (direct two-slot CALL/RETURN of a known ≤2-word layout).
     Return {
         loc: DebugLoc,
+        ret_words: u32,
     },
     Halt {
         loc: DebugLoc,
@@ -261,11 +265,18 @@ pub enum IlOp {
         hint: FuseHint,
     },
     /// CALL / TailCall / MakeCoro / CodePtr / MakePolyFn with a label target.
+    ///
+    /// `ret_words` is only meaningful for `EntryKind::Call`: `1` (default) is
+    /// the boxed one-word ABI; `2` is a direct call of a known ≤2-word
+    /// return layout (`[payload, tag]` left on the caller stack). Every
+    /// other `EntryKind` always carries `1` — TailCall/MakeCoro/CodePtr/
+    /// MakePolyFn never leave a two-word pair for this op itself.
     Entry {
         kind: EntryKind,
         arity: u32,
         target: Label,
         loc: DebugLoc,
+        ret_words: u32,
     },
     /// Prologue JMP placeholder (`u32::MAX`); patched by the pipeline after lower.
     PrologueJmp {
@@ -407,7 +418,10 @@ impl IlOp {
                 loc,
             },
             Instruction::PRINT => Self::Print { loc },
-            Instruction::RETURN => Self::Return { loc },
+            Instruction::RETURN => Self::Return {
+                loc,
+                ret_words: byte.return_words(),
+            },
             Instruction::HALT => Self::Halt { loc },
             Instruction::BinSlotImm => {
                 let (op, slot, imm) = byte.bin_slot_imm_parts();
@@ -498,7 +512,9 @@ impl IlOp {
                 Byte::new(Instruction::HostInvoke).with_operand_u32(*arity)
             }
             IlOp::Print { .. } => Byte::new(Instruction::PRINT),
-            IlOp::Return { .. } => Byte::new(Instruction::RETURN),
+            IlOp::Return { ret_words, .. } => {
+                Byte::new(Instruction::RETURN).with_operand_u32(if *ret_words >= 2 { 2 } else { 0 })
+            }
             IlOp::Halt { .. } => Byte::new(Instruction::HALT),
             IlOp::Bin { op, .. } => Byte::new(*op),
             IlOp::BinSlotImm { op, slot, imm, .. } => {
@@ -574,15 +590,18 @@ impl IlOp {
         )
     }
 
-    /// Plain terminal `RETURN` (typed or residual `Byte`).
+    /// Plain one-word terminal `RETURN` (typed or residual `Byte`).
     ///
     /// Fused `*Return` variants are excluded — convoy opts and tiny-inline use
-    /// this to find a real `RETURN` sink, not a fused return producer.
+    /// this to find a real `RETURN` sink, not a fused return producer. A
+    /// two-word `RETURN` (`ret_words == 2`) is excluded too: it pops/pushes
+    /// `[payload, tag]`, not the single value these passes assume.
     pub fn is_plain_return(&self) -> bool {
-        matches!(self, IlOp::Return { .. })
+        matches!(self, IlOp::Return { ret_words: 1, .. })
             || matches!(
                 self,
-                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::RETURN
+                IlOp::Byte { byte, .. }
+                    if *byte.bytecode() == Instruction::RETURN && byte.return_words() == 1
             )
     }
 
@@ -614,7 +633,7 @@ impl IlOp {
             | IlOp::SetField { loc, .. }
             | IlOp::HostInvoke { loc, .. }
             | IlOp::Print { loc }
-            | IlOp::Return { loc }
+            | IlOp::Return { loc, .. }
             | IlOp::Halt { loc }
             | IlOp::Bin { loc, .. }
             | IlOp::BinSlotImm { loc, .. }
@@ -658,7 +677,7 @@ impl IlOp {
             | IlOp::SetField { loc: l, .. }
             | IlOp::HostInvoke { loc: l, .. }
             | IlOp::Print { loc: l }
-            | IlOp::Return { loc: l }
+            | IlOp::Return { loc: l, .. }
             | IlOp::Halt { loc: l }
             | IlOp::Bin { loc: l, .. }
             | IlOp::BinSlotImm { loc: l, .. }
@@ -946,6 +965,7 @@ mod tests {
             arity: 1,
             target: Label(1),
             loc: DebugLoc::unknown(),
+            ret_words: 1,
         };
         assert!(entry.as_encode_byte().is_none());
         assert!(entry.is_control());
@@ -987,11 +1007,22 @@ mod tests {
     fn is_plain_return_excludes_fused_returns() {
         assert!(
             IlOp::Return {
-                loc: DebugLoc::unknown()
+                loc: DebugLoc::unknown(),
+                ret_words: 1,
             }
             .is_plain_return()
         );
         assert!(IlOp::byte(Byte::new(Instruction::RETURN)).is_plain_return());
+        assert!(
+            !IlOp::Return {
+                loc: DebugLoc::unknown(),
+                ret_words: 2,
+            }
+            .is_plain_return()
+        );
+        assert!(
+            !IlOp::byte(Byte::new(Instruction::RETURN).with_operand_u32(2)).is_plain_return()
+        );
         assert!(
             !IlOp::ConstReturnImm {
                 imm: 0,
@@ -1043,6 +1074,7 @@ mod tests {
             },
             IlOp::Return {
                 loc: DebugLoc::unknown(),
+                ret_words: 1,
             },
             IlOp::Halt {
                 loc: DebugLoc::unknown(),

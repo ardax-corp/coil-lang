@@ -1,6 +1,6 @@
 use std::{
     borrow::Borrow,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
@@ -884,18 +884,6 @@ impl Pipeline {
             .collect()
     }
 
-    /// Compile every discovered module in dependency order.
-    fn compile_discovered_modules(&mut self) {
-        for item in self.worklist_in_dependency_order() {
-            let is_entry = self
-                .entry_file
-                .as_ref()
-                .map(|e| *e == item.file)
-                .unwrap_or(false);
-            self.compile_file(item, is_entry);
-        }
-    }
-
     /// Add `file` to the worklist if not already
     /// processed. Computes and caches the file's
     /// namespace.
@@ -958,6 +946,43 @@ impl Pipeline {
         self.worklist.clear();
         self.module_deps.clear();
         self.ast_cache.clear();
+        if let Some(c) = self.compiler.get_mut() {
+            c.clear_fn_value_escaped_program();
+        }
+    }
+
+    /// Walk every cached AST (and optional in-memory entry) before emit so
+    /// two-slot RETURN cannot be chosen for a function whose address is
+    /// taken in another file of this compile.
+    fn seed_fn_value_escapes(&mut self, extra: Option<&(parser::SimpleSpan, Box<Expression<'_>>)>) {
+        let mut names = HashSet::new();
+        for cached in self.ast_cache.values() {
+            if let Some(ast) = cached.ast() {
+                crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
+            }
+        }
+        if let Some(ast) = extra {
+            crate::typechecking::fn_value_escape::collect_fn_value_escaped(ast, &mut names);
+        }
+        self.compiler_lazy_mut()
+            .set_fn_value_escaped_program(names);
+    }
+
+    /// Compile every discovered module in dependency order.
+    fn compile_discovered_modules(&mut self) {
+        self.seed_fn_value_escapes(None);
+        self.emit_discovered_modules();
+    }
+
+    fn emit_discovered_modules(&mut self) {
+        for item in self.worklist_in_dependency_order() {
+            let is_entry = self
+                .entry_file
+                .as_ref()
+                .map(|e| *e == item.file)
+                .unwrap_or(false);
+            self.compile_file(item, is_entry);
+        }
     }
 
     /// Parse (and expand) `file` into [`Self::ast_cache`]. Returns false on I/O.
@@ -1318,7 +1343,8 @@ impl Pipeline {
         // `compile_src_from_file`, without requiring a temp file.
         self.enqueue_uses(path, src, &ast);
         self.discover_all();
-        self.compile_discovered_modules();
+        self.seed_fn_value_escapes(Some(&ast));
+        self.emit_discovered_modules();
         if self.failed || self.had_errors() {
             return Err(());
         }

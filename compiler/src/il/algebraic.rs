@@ -398,7 +398,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Load { slot: 1, .. }));
@@ -417,7 +417,7 @@ mod tests {
                 op: Instruction::MUL,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Const { imm: 0, .. }));
@@ -438,7 +438,7 @@ mod tests {
                 op: Instruction::SUB,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Const { imm: 0, .. }));
@@ -453,7 +453,7 @@ mod tests {
                 op: Instruction::EQ,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
@@ -465,7 +465,7 @@ mod tests {
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::byte(common::Byte::new(Instruction::NOT)),
             IlOp::byte(common::Byte::new(Instruction::NOT)),
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert_eq!(ops.len(), 2);
@@ -481,7 +481,7 @@ mod tests {
                 imm: 0,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Load { slot: 3, .. }));
@@ -500,7 +500,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = ops.clone();
         algebraic_simplify(&mut ops, &mut Vec::new());
@@ -520,7 +520,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Load { slot: 5, .. }));
@@ -536,7 +536,7 @@ mod tests {
                 imm: 0,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Const { imm: 0, .. }));
@@ -551,7 +551,7 @@ mod tests {
                 op: Instruction::ADD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::ConstPool { idx: 3, .. }));
@@ -579,7 +579,7 @@ mod tests {
                 op: Instruction::BITAND,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Load { slot: 2, .. }));
@@ -598,7 +598,7 @@ mod tests {
                 op: Instruction::Pow,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Load { slot: 1, .. }));
@@ -624,7 +624,7 @@ mod tests {
                 op: Instruction::Pow,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
@@ -645,7 +645,7 @@ mod tests {
                 op: Instruction::BITAND,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Const { imm: 42, .. }));
@@ -662,7 +662,7 @@ mod tests {
                 op: Instruction::DIV,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = div0.clone();
         algebraic_simplify(&mut div0, &mut Vec::new());
@@ -675,7 +675,7 @@ mod tests {
                 op: Instruction::MOD,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = mod0.clone();
         algebraic_simplify(&mut mod0, &mut Vec::new());
@@ -691,7 +691,7 @@ mod tests {
                 op: Instruction::SHL,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = shl.clone();
         algebraic_simplify(&mut shl, &mut Vec::new());
@@ -710,7 +710,7 @@ mod tests {
                 op: Instruction::Pow,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut pow1, &mut Vec::new());
         assert!(matches!(pow1[0], IlOp::Load { slot: 2, .. }));
@@ -726,7 +726,7 @@ mod tests {
                 op: Instruction::BITAND,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut and0, &mut Vec::new());
         assert!(matches!(and0[0], IlOp::Const { imm: 0, .. }));
@@ -742,7 +742,7 @@ mod tests {
                 op: Instruction::SUB,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before_len = ops.len();
         algebraic_simplify(&mut ops, &mut Vec::new());
@@ -778,7 +778,7 @@ mod tests {
                 op: Instruction::MUL,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(
@@ -814,7 +814,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut pool);
         assert!(matches!(ops[0], IlOp::Load { slot: 1, .. }));
@@ -834,7 +834,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut pool);
         assert!(matches!(ops[0], IlOp::Load { slot: 4, .. }));
@@ -854,7 +854,7 @@ mod tests {
                 op: Instruction::MULF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut pool);
         assert!(matches!(ops[0], IlOp::Load { slot: 2, .. }));
@@ -874,7 +874,7 @@ mod tests {
                 op: Instruction::MULF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut pool);
         assert!(matches!(ops[0], IlOp::Load { slot: 3, .. }));
@@ -894,7 +894,7 @@ mod tests {
                 op: Instruction::SUBF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = ops.clone();
         algebraic_simplify(&mut ops, &mut pool);
@@ -921,7 +921,7 @@ mod tests {
                 op: Instruction::MULF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = ops.clone();
         algebraic_simplify(&mut ops, &mut pool);
@@ -944,7 +944,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before_neg = neg.len();
         algebraic_simplify(&mut neg, &mut pool);
@@ -960,7 +960,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before_nan = nan_ops.len();
         algebraic_simplify(&mut nan_ops, &mut pool);
@@ -980,7 +980,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = ops.len();
         algebraic_simplify(&mut ops, &mut Vec::new());
@@ -1002,7 +1002,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before = ops.len();
         algebraic_simplify(&mut ops, &mut vec![F64_PLUS_ZERO]);
@@ -1019,7 +1019,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut pool);
         assert!(matches!(ops[0], IlOp::ConstPool { idx: 2, .. }));
@@ -1042,7 +1042,7 @@ mod tests {
                 IlOp::ConstPool { idx: 0, loc: loc() },
                 IlOp::ConstPool { idx: 1, loc: loc() },
                 IlOp::Bin { op, loc: loc() },
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             algebraic_simplify(&mut ops, &mut pool);
             assert!(
@@ -1067,7 +1067,7 @@ mod tests {
                 IlOp::ConstPool { idx: 0, loc: loc() },
                 IlOp::ConstPool { idx: 1, loc: loc() },
                 IlOp::Bin { op, loc: loc() },
-                IlOp::Return { loc: loc() },
+                IlOp::Return { loc: loc(), ret_words: 1},
             ];
             let before = ops.len();
             algebraic_simplify(&mut ops, &mut pool);
@@ -1087,7 +1087,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut pool);
         assert!(matches!(ops[0], IlOp::ConstPool { idx: 2, .. }));
@@ -1101,7 +1101,7 @@ mod tests {
                 op: Instruction::MULF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops_inf, &mut pool_inf);
         assert!(matches!(ops_inf[0], IlOp::ConstPool { idx: 2, .. }));
@@ -1118,7 +1118,7 @@ mod tests {
                 op: Instruction::LEF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut ops, &mut pool);
         assert!(matches!(ops[0], IlOp::Const { imm: 1, .. }));
@@ -1133,7 +1133,7 @@ mod tests {
                 op: Instruction::GTF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         algebraic_simplify(&mut gtf, &mut pool2);
         assert!(matches!(gtf[0], IlOp::Const { imm: 1, .. }));
@@ -1158,7 +1158,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         let before_len = ops.len();
         algebraic_simplify(&mut ops, &mut pool);
@@ -1185,7 +1185,7 @@ mod tests {
                 op: Instruction::ADDF,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         optimize(
             &mut ops,

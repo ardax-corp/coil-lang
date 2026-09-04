@@ -27,8 +27,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         mem_fwd(&mut ops, 0);
         assert!(matches!(ops[0], IlOp::StorePop { slot: 5, .. }));
@@ -66,8 +65,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         let before = ops.clone();
         mem_fwd(&mut ops, 0);
@@ -95,7 +93,7 @@
                 hint: Default::default(),
             },
             IlOp::Label(Label(0)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         mem_fwd(&mut ops, 0);
         assert!(
@@ -118,11 +116,10 @@
                 kind: crate::il::op::EntryKind::Call,
                 arity: 0,
                 target: Label(0),
-                loc,
-            },
+                loc, ret_words: 1,},
             IlOp::StorePop { slot: 4, loc },
             IlOp::Load { slot: 4, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         // Deep frame; nullary CALL must not leave modeled height 6.
         mem_fwd(&mut ops, 5);
@@ -373,8 +370,7 @@
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         clone_shared_return(&mut ops);
         assert!(
@@ -1002,8 +998,7 @@
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         return_convoy(&mut ops);
         assert!(
@@ -1032,8 +1027,7 @@
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         return_convoy(&mut ops);
         assert!(
@@ -1062,8 +1056,7 @@
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         bin_join_convoy(&mut ops);
         assert!(ops.iter().any(|op| matches!(
@@ -1096,8 +1089,7 @@
             imm,
             IlOp::Label(Label(0)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         bin_join_convoy(&mut ops);
         let imm_count = ops
@@ -1138,7 +1130,7 @@
                 loc,
             },
             IlOp::Pop { loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         stack_dce(&mut ops);
@@ -1158,7 +1150,7 @@
                 loc,
             },
             IlOp::byte(Byte::new(Instruction::Unpack).with_operand_u32(1)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         stack_dce(&mut ops);
@@ -1179,7 +1171,7 @@
                 loc,
             },
             IlOp::LoadField { index: 0, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         stack_dce(&mut ops);
@@ -1206,7 +1198,7 @@
                 loc,
                 hint: Default::default(),
             },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         stack_dce(&mut ops);
@@ -1231,7 +1223,7 @@
             IlOp::Const { imm: 7, loc },
             IlOp::StorePop { slot: 3, loc },
             IlOp::Load { slot: 3, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         mem_fwd(&mut ops, 5);
         assert!(matches!(ops[1], IlOp::Dup { .. }));
@@ -1245,7 +1237,7 @@
             IlOp::Const { imm: 7, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1263,7 +1255,7 @@
             IlOp::Const { imm: 7, loc },
             IlOp::StorePop { slot: 5, loc },
             IlOp::Load { slot: 5, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 0);
@@ -1285,7 +1277,7 @@
             IlOp::Const { imm: 9, loc },
             IlOp::StorePop { slot: 0, loc },
             IlOp::Load { slot: 2, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1307,7 +1299,7 @@
             },
             IlOp::Label(Label(0)),
             IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1323,7 +1315,7 @@
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 1, loc },
             IlOp::GetField { loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1340,7 +1332,7 @@
             IlOp::Load { slot: 1, loc },
             IlOp::Const { imm: 2, loc },
             IlOp::MakeArray { arity: 2, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1360,7 +1352,7 @@
             },
             IlOp::StorePop { slot: 2, loc },
             IlOp::Load { slot: 2, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1387,7 +1379,7 @@
             },
             IlOp::StorePop { slot: 2, loc },
             IlOp::Load { slot: 2, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1409,7 +1401,7 @@
             IlOp::String { idx: 1, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 2);
@@ -1431,7 +1423,7 @@
                 loc,
             },
             IlOp::StorePop { slot: 2, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         dead_store_at(&mut ops, 3);
@@ -1451,7 +1443,7 @@
                 loc,
             },
             IlOp::StorePop { slot: 2, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         dead_store_at(&mut ops, 3);
@@ -1467,7 +1459,7 @@
             IlOp::Load { slot: 1, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1483,7 +1475,7 @@
             IlOp::StorePop { slot: 1, loc },
             IlOp::HostInvoke { arity: 0, loc },
             IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         copy_prop(&mut ops, 3);
@@ -1501,7 +1493,7 @@
                 byte: Byte::new(Instruction::FfiInvoke).with_operand_u32(0),
                 loc,
             },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
 
         dead_store_at(&mut ops, 4);
@@ -1527,8 +1519,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store_at(&mut ops, 10);
         assert!(!ops.iter().any(|op| matches!(op, IlOp::StorePop { .. })));
@@ -1552,8 +1543,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store(&mut ops);
         assert!(
@@ -1574,8 +1564,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         let before = ops.clone();
         mem_fwd(&mut ops, 0);
@@ -1594,8 +1583,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store_at(&mut ops, 9);
         assert!(!ops.iter().any(|op| matches!(op, IlOp::StorePop { .. })));
@@ -1630,8 +1618,7 @@
             },
             IlOp::Label(Label(1)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store(&mut ops);
         assert!(
@@ -1664,8 +1651,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store_at(&mut ops, 6);
         assert!(
@@ -1696,8 +1682,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store_at(&mut ops, 4);
         assert!(
@@ -1724,8 +1709,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store_at(&mut ops, 5);
         assert!(
@@ -1753,8 +1737,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         dead_store(&mut ops);
         assert!(
@@ -1771,7 +1754,7 @@
             IlOp::Const { imm: 5, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         optimize_at(
             &mut ops,
@@ -1861,8 +1844,7 @@
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -1951,8 +1933,7 @@
             IlOp::Label(Label(54)),
             IlOp::Label(Label(48)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
@@ -1975,8 +1956,7 @@
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
         assert!(ops == before);
@@ -2013,8 +1993,7 @@
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2072,10 +2051,10 @@
                 hint: Default::default(),
             },
             IlOp::Const { imm: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
             IlOp::Label(Label(0)),
             IlOp::Load { slot: 0, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
@@ -2182,8 +2161,7 @@
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
@@ -2211,8 +2189,7 @@
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
         assert!(ops == before);
@@ -2266,8 +2243,7 @@
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2348,8 +2324,7 @@
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2416,8 +2391,7 @@
         ops.push(IlOp::Label(Label(54)));
         ops.push(IlOp::Label(Label(48)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2479,8 +2453,7 @@
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2559,8 +2532,7 @@
             },
             IlOp::Label(Label(0)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
@@ -2597,8 +2569,7 @@
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2662,8 +2633,7 @@
         ops.push(IlOp::Label(Label(54)));
         ops.push(IlOp::Label(Label(48)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2716,8 +2686,7 @@
         });
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
         assert!(ops == before);
@@ -2755,8 +2724,7 @@
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
         let before = ops.clone();
         multi_op_join_convoy(&mut ops);
         assert!(ops == before);
@@ -2810,8 +2778,7 @@
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -2875,8 +2842,7 @@
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
         ops.push(IlOp::Return {
-            loc: common::DebugLoc::unknown(),
-        });
+            loc: common::DebugLoc::unknown(), ret_words: 1,});
 
         multi_op_join_convoy(&mut ops);
 
@@ -3382,7 +3348,7 @@
             hint: Default::default(),
         });
         ops.push(IlOp::Label(Label(0)));
-        ops.push(IlOp::Return { loc });
+        ops.push(IlOp::Return { loc, ret_words: 1});
 
         let before = ops.len();
         multi_op_join_convoy(&mut ops);
@@ -3418,7 +3384,7 @@
         ops.push(IlOp::Label(Label(1)));
         ops.extend(suf);
         ops.push(IlOp::Label(Label(0)));
-        ops.push(IlOp::Return { loc });
+        ops.push(IlOp::Return { loc, ret_words: 1});
 
         multi_op_join_convoy(&mut ops);
         let strings = ops
@@ -3458,8 +3424,7 @@
                 loc: common::DebugLoc::unknown(),
             },
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
             // Glue after the function: another DUP; POP that must survive.
             IlOp::Dup {
                 loc: common::DebugLoc::unknown(),
@@ -3546,8 +3511,7 @@
             },
             IlOp::Label(Label(2)),
             IlOp::Return {
-                loc: common::DebugLoc::unknown(),
-            },
+                loc: common::DebugLoc::unknown(), ret_words: 1,},
         ];
         let info = crate::il::sp::analyze(&ops);
         let lab2 = ops
@@ -3604,7 +3568,7 @@
             IlOp::Const { imm: 0, loc },
             IlOp::Pop { loc },
             IlOp::Load { slot: 1, loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         stack_dce(&mut ops);
         let names = insn_names(&ops);
@@ -3623,7 +3587,7 @@
             IlOp::Pop { loc },
             IlOp::ConstPool { idx: 3, loc },
             IlOp::Pop { loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         stack_dce(&mut ops);
         let names = insn_names(&ops);
@@ -3644,7 +3608,7 @@
             IlOp::Const { imm: 7, loc },
             IlOp::Pop { loc },
             IlOp::Pop { loc },
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         stack_dce(&mut ops);
         let names = insn_names(&ops);
@@ -3673,7 +3637,7 @@
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 5, loc },
             IlOp::Label(Label(2)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         invert_branch_over_jump(&mut ops);
         let jumps: Vec<_> = ops
@@ -3713,7 +3677,7 @@
             IlOp::Label(Label(1)),
             IlOp::Const { imm: 5, loc },
             IlOp::Label(Label(2)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         invert_branch_over_jump(&mut ops);
         let jumps: Vec<_> = ops
@@ -3758,7 +3722,7 @@
             },
             IlOp::Label(Label(1)),
             IlOp::Label(Label(2)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         invert_branch_over_jump(&mut ops);
         assert_eq!(ops.len(), 5, "trailing JMP should drop");
@@ -3793,7 +3757,7 @@
             IlOp::Const { imm: 1, loc },
             IlOp::Label(Label(3)),
             IlOp::Label(Label(2)),
-            IlOp::Return { loc },
+            IlOp::Return { loc, ret_words: 1},
         ];
         let before = ops.len();
         invert_branch_over_jump(&mut ops);

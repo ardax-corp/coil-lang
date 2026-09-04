@@ -123,6 +123,10 @@ impl AstCache {
     pub fn insert(&mut self, file: PathBuf, cached: CachedAst) {
         self.files.insert(file, cached);
     }
+
+    pub fn values(&self) -> impl Iterator<Item = &CachedAst> {
+        self.files.values()
+    }
 }
 
 /// SAFETY: caller pins the source `Box<str>` for longer than `ast`.

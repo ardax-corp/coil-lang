@@ -545,7 +545,7 @@ mod tests {
                 slot: 5,
                 loc: loc(),
             },
-            IlOp::Return { loc: loc() },
+            IlOp::Return { loc: loc(), ret_words: 1},
         ];
         optimize(
             &mut ops,

@@ -84,6 +84,7 @@ impl Checker {
             def_ids_by_node: HashMap::new(),
             frame_local: HashSet::new(),
             frame_local_last_use: HashSet::new(),
+            fn_value_escaped: HashSet::new(),
             in_bounds_index: HashSet::new(),
             pin_array: HashSet::new(),
             pin_params: HashSet::new(),
@@ -1586,6 +1587,7 @@ impl Checker {
         crate::typechecking::local_escape::analyze_local_escape(self, ast);
         crate::typechecking::purity::record_fn_effects(self, ast);
         crate::typechecking::index_facts::analyze_index_facts(self, ast);
+        crate::typechecking::fn_value_escape::analyze_fn_value_escape(self, ast);
 
         // Return the fully-resolved type so callers see e.g. `Foo`
         // rather than `Var(0)` even when the type was inferred
@@ -14845,6 +14847,12 @@ impl Checker {
     pub fn is_scalar_enum(&self, enum_name: &str) -> bool {
         let key = self.registry_enum_key(enum_name);
         self.enum_scalar.contains_key(&key)
+    }
+
+    /// Names that appear as a function *value* in this module
+    /// (see [`crate::typechecking::fn_value_escape`]).
+    pub fn fn_value_escaped_names(&self) -> &HashSet<String> {
+        &self.fn_value_escaped
     }
 
     /// Backing word for a scalar enum variant.

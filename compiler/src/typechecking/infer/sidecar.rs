@@ -47,6 +47,10 @@ pub struct TypedSidecar {
     /// Effect bits per function DefId (empty = pure). Missing DefId is unknown/impure.
     fn_effects: HashMap<DefId, EffectFlags>,
     pure_fn_names: HashSet<String>,
+    /// Names that appear as a function *value* in this module — see
+    /// [`crate::typechecking::fn_value_escape`]. Package-wide proof is the
+    /// pipeline seed; this set is the per-file snapshot.
+    fn_value_escaped: HashSet<String>,
 }
 
 impl TypedSidecar {
@@ -139,6 +143,16 @@ impl TypedSidecar {
         &self.pure_fn_names
     }
 
+    /// True when `name` (bare or qualified) is used as a function value
+    /// in this compile unit — not just as a direct `Call` target.
+    /// A two-word function must stay boxed once this is true (`CallIndirect`
+    /// / `MakeFn` / `MakePolyFn` targets keep the one-word ABI).
+    /// Prefer the pipeline's whole-program seed when present.
+    pub fn is_fn_value_escaped(&self, name: &str) -> bool {
+        let short = name.rsplit("::").next().unwrap_or(name);
+        self.fn_value_escaped.contains(name) || self.fn_value_escaped.contains(short)
+    }
+
     pub fn name_is_pure(&self, name: &str) -> bool {
         let stem = name.split("$mono$").next().unwrap_or(name);
         if self.pure_fn_names.contains(stem) {
@@ -201,6 +215,7 @@ impl Checker {
             for_in_pin_spans: self.for_in_pin_spans.clone(),
             fn_effects: self.fn_effects.clone(),
             pure_fn_names: self.pure_fn_names.clone(),
+            fn_value_escaped: self.fn_value_escaped.clone(),
         }
     }
 }
