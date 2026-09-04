@@ -8045,15 +8045,20 @@ use clock::{mono_nanos, sleep_ms, wall_nanos};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
+fn flag(later: int, earlier: int) -> int {
+    if later > earlier {
+        return 1;
+    }
+    return 0;
+}
+
 fn main() {
     let w0 = wall_nanos();
     let m0 = mono_nanos();
     sleep_ms(15);
     let w1 = wall_nanos();
     let m1 = mono_nanos();
-    let wall_ok = if w1 > w0 { 1 } else { 0 };
-    let mono_ok = if m1 > m0 { 1 } else { 0 };
-    write(stdout(), to_bytes(format("%i%i", wall_ok, mono_ok)));
+    write(stdout(), to_bytes(format("%i%i", flag(w1, w0), flag(m1, m0))));
 }
 "#,
     );
