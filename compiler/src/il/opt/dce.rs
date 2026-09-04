@@ -222,7 +222,6 @@ fn copy_prop_barrier(op: &IlOp) -> bool {
     matches!(
         op,
         IlOp::Label(_) | IlOp::JoinLabel(_)
-            | IlOp::JoinLabel(_)
             | IlOp::Jump { .. }
             | IlOp::Entry { .. }
             | IlOp::HostInvoke { .. }
@@ -395,7 +394,6 @@ fn is_store_barrier(op: &IlOp) -> bool {
             | IlOp::Byte { .. }
             | IlOp::Jump { .. }
             | IlOp::Label(_) | IlOp::JoinLabel(_)
-            | IlOp::JoinLabel(_)
             | IlOp::Return { .. }
             | IlOp::Halt { .. }
             | IlOp::LoadReturnSlot { .. }
@@ -409,7 +407,6 @@ fn is_control_edge_barrier(op: &IlOp) -> bool {
         op,
         IlOp::Jump { .. }
             | IlOp::Label(_) | IlOp::JoinLabel(_)
-            | IlOp::JoinLabel(_)
             | IlOp::Return { .. }
             | IlOp::Halt { .. }
     )
