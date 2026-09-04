@@ -7,6 +7,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Pipeline](pipeline.md) | Parse → typecheck → codegen → archive → execute |
 | [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
+| [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; float-fuse tombstones; residual = payload layout. Extra benches: `examples/perf/gc_churn.hy` ([#286](https://github.com/ardax-corp/coil-lang/pull/286)), Option/Result ObjEnum churn ([#289](https://github.com/ardax-corp/coil-lang/pull/289)) |
 | [Array pins](array-pin.md) | Shipped `ArrayPin` / `IndexPin*` handle (COI-198) |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [SIMD](simd.md) | `coil-simd` — stable `std::arch` kernels for packed LA |

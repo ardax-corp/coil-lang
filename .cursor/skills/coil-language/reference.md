@@ -10,6 +10,7 @@ Read when you need syntax detail beyond SKILL.md. User docs live in [coil-websit
 - Path completeness: concrete non-unit returns need all paths to exit (`E0111`).
 - Casts: `expr as T` — see [casts](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/casts.md) (`/docs/references/casts`).
 - Scalar-backed enums stay a nominal type (`Status`). In expression position they implicitly coerce to the backing (`let n: int = Status.Ok`, `Status.Ok + 1`). Show/String of a scalar case is the backing (`Status.Ok` shows as `200`). No reverse coerce (`int` → `Status`) and no matching a raw `200` against a `Status` scrutinee.
+- Payload enums are not heap-only: heap `Option<T>` / heap-heap `Result<T,E>` are pointer niches; `Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums use two-slot `[payload, tag]` on a *direct* `CALL`/`RETURN`. Nested, `CallIndirect`, and unsure consumers stay boxed `ObjEnum`. Free `fn f<T>(T) -> Option<T>` is still `E0127`.
 
 ## Expression forms
 

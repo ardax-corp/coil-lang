@@ -30,6 +30,8 @@
 - Tiny direct-call inlining; one-level self-`CALL` peel; `TailCall` for eligible recursion.
 - Match: threaded layout, `JumpIfMatch`, nested records use `UnpackAt` (slot-based).
 - Enum fields: `LoadField` (index); typed class fields: `LoadField` / `SetField` with slot operand; dict fields: `GetField`/`SetField` (interned names).
+- **Return layout:** `typechecking::return_layout::two_word_return_enum` classifies two-slot `[payload, tag]` on *direct* `CALL`/`RETURN` (`Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums). `CALL` bit 31 / `RETURN` operand `2`. Niches stay one word. See [limitations.md](docs/internals/limitations.md) COI-92.
+- **HostInvoke enum bits `[17:16]`:** `0` boxed `ObjEnum`, `1` Option pointer-niche / `Result<(), E>` (heap `E`), `2` heap-heap Result. Pack once via `machine::host_enum`.
 
 ## VM / values
 

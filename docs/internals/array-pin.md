@@ -110,12 +110,14 @@ loop body does not tail-call.
 
 ## GC
 
-The heap is **non-moving mark-and-sweep**. `Heap::alloc` leaks a `Box<GcData<T>>`
-onto an intrusive list. A `kind` byte in the `GcHeader` reconstructs `Object`;
-`live` is a `HashSet<u64>` for liveness only (not a typed handle table).
-`sweep` unlinks unmarked cells and drops them; it does not relocate `GcData`.
+The heap is **non-moving mark-and-sweep**. Headers come from a mapped slab
+(size-class free lists). A `kind` byte in the `GcHeader` reconstructs `Object`.
+Liveness is slab membership + `live_count` + sweep **poison** (`kind = 0`);
+there is no `live` HashSet. `sweep` unlinks unmarked cells, poisons the
+header, and returns the slot to the free list; it does not relocate `GcData`.
 Addresses stored in `Value` and `Gc` pointers stay valid for the object's
-lifetime (`machine/src/memory/heap.rs`).
+lifetime (`machine/src/memory/heap.rs`). `AddrHashBuilder` is only for leftover
+integer/address maps (`immortal_enums`, the reused `gc_mark_set`) — [#285](https://github.com/ardax-corp/coil-lang/pull/285).
 
 `collect_vm_root_addrs` walks every `frame_pins` table and pushes `obj.addr()`
 next to the operand stack, statics, and coroutine saved stacks. Automatic GC
@@ -147,11 +149,11 @@ No hole found where GC frees a pinned `Gc` while `IndexPin*` still holds it.
 
 ## What still pays `find_object_by_addr`
 
-`live` is `HashSet<u64, AddrHashBuilder>` plus a header kind byte — an O(1) fmix64
-probe, not a list walk (`machine/src/memory/addr_hash.rs`). Unpinned `Index` still
-pays that probe plus the in-VM range test.
+Unpinned `Index` still pays `find_object_by_addr`: mapped-chunk + slot-origin
+check, then header poison (`kind == 0` → miss). That is not a HashSet probe.
+`AddrHashBuilder` is leftover map hashing only ([#285](https://github.com/ardax-corp/coil-lang/pull/285)).
 
-| Site | Why it still hashes |
+| Site | Why it still looks up |
 |------|---------------------|
 | Unproven / dynamic `Index` / `StoreIndex` | `rewrite_array_pins` requires `index_at_proven` / `store_index_at_proven` (induction index + length-invariant array slot) |
 | `Index` outside a counted loop | No preheader pin |
@@ -162,7 +164,8 @@ pays that probe plus the in-VM range test.
 
 [#192](https://github.com/ardax-corp/coil-lang/pull/192) reported nsieve checked
 `Index` → 0 with dispatch count unchanged and poop wall / cycle deltas within
-noise; leftover on those sites was the address hash. Minor 13 pins those
+noise; leftover on those sites was `find_object_by_addr` (then a HashSet
+probe; now slab + poison). Minor 13 pins those
 sites (`IndexPinUnchecked` / `StoreIndexPinUnchecked` / `ArrayPin` in nsieve
 bytecode). This note does not claim a cycle win for pins beyond that opcode
 swap — re-run `./scripts/poop_baseline.sh` if a number is needed.
@@ -196,7 +199,7 @@ Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
 | Second pin / ArrayPtr opcode | Minor 13 already is that handle |
 | Named-local class SROA / stack instances | [COI-84](https://linear.app/ardax/issue/COI-84); frame pins are array identity, not scalar replacement |
 | JIT | Interpreter compatibility path; see [optimization-roadmap.md](optimization-roadmap.md) |
-| Pinning every `Index` in the VM | Unproven / aliased / host paths stay hashed; fail closed |
+| Pinning every `Index` in the VM | Unproven / aliased / host paths stay on `find_object_by_addr` (slab + poison); fail closed |
 | Interior pointers into `elements` | `ArrayPush` reallocates the `Vec`; pin holds `Gc`, not a slice |
 | Moving GC / nursery | Not the collector |
 
@@ -205,5 +208,5 @@ Fail closed: that loop keeps checked `Index` and does not get `ArrayPin` /
 **Shipped.** Pins are the product. [COI-198](https://linear.app/ardax/issue/COI-198)
 is Done. Do not file a Feature for ArrayPtr.
 
-Leave unpinned hashing as an ordinary leftover under the existing bounds
-refusals. Yield is a barrier, not a new handle type.
+Leave unpinned `find_object_by_addr` (slab + poison) as an ordinary leftover
+under the existing bounds refusals. Yield is a barrier, not a new handle type.

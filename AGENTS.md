@@ -49,4 +49,4 @@ Pre-installed: `poop`, `valgrind`, `heaptrack`, `hyperfine`, `lua` (`.cursor/Doc
 
 ## Learned Workspace Facts
 
-- Regularity target: one Option/Result ABI, one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. Fuse opcodes are debt — rewrite existing ops rather than growing bench-shaped fuses.
+- Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape (COI-92), not one heap ABI. Fuse opcodes are debt — rewrite existing ops rather than growing bench-shaped fuses.

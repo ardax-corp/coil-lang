@@ -59,20 +59,27 @@ The repository also has Coil-only `numeric`, `operators_loop`, and `match_sum`
 benchmarks. Their current results are retained by the matrix, but they have no
 Lua or Node ports.
 
-## Recently landed (float AOT)
+## Historical (tombstoned float fuses)
 
-Source-ordered float work on the interpreter path (no FMA / reassociation):
+Mandelbrot-shaped float superinstructions are **not** current AOT:
+
+- `FloatChainStore` and `BinSlotSlotConstJmpf` are tombstones (not emitted;
+  handlers panic on archive major 4). Do not treat them as recently landed.
+- General peepholes that stayed: `BinSlotSlot`, `CmpJmpf`/`*Jmpt`, `IndexPin*`.
+
+Still on the interpreter path (no FMA / reassociation):
 
 - LICM: full invariant float expression chains (past intermediate height-1).
-- `FloatChainStore`: up to three stages; `BinSlotSlot` stage0; const-pool operands.
-- `BinSlotSlotConstJmpf`: float mag arith + pool compare + `JMPF`.
 - `NEGF` unary float negate.
 - Algebraic: exact `+0.0` / `+1.0` float identities; const-pool float binop fold.
 - Codegen: `new Class(args).field` scalar replacement (no temp instance).
 - Operand-order canon (`il::canon` + `CanonStats`): const-to-RHS / load-load slot order; int `ConstPool` demote into inline `CONST` when safe; bounds accepts post-canon `GT` headers.
 
 Next AOT priorities below remain the main gap vs Lua on `mandelbrot` /
-`tak` / `nsieve` / `binary_trees`.
+`tak` / `nsieve` / `binary_trees`. Extra benches on `main`:
+`examples/perf/gc_churn.hy` ([#286](https://github.com/ardax-corp/coil-lang/pull/286)),
+integer-payload Option/Result ObjEnum churn
+([#289](https://github.com/ardax-corp/coil-lang/pull/289)).
 
 ## Landed since register-win harvest (ceiling contract)
 
@@ -126,8 +133,8 @@ Copy propagation in `opt/dce.rs` stays straight-line and tell-safe only.
 
 - store-destination coalescing and peel-param raise (`opt/slot_promote.rs`);
 - copy-only latch elision when live-out / unique in-loop def allow;
-- Phase 4 fuse-feed audit: FCS / `BinSlotSlotConstJmpf` / packed peels held;
-  residual near-misses tallied in `perf_metrics` for the ledger.
+- Phase 4 fuse-feed audit: packed peels held; FCS / `BinSlotSlotConstJmpf`
+  later tombstoned (historical). Residual near-misses tallied in `perf_metrics`.
 
 **Harvested without opcodes (shape inventory):**
 
@@ -205,8 +212,8 @@ growing-array, alias-push, and impure helper-call loops stay checked. Pure user
 helpers on `b[i]` no longer block the proof
 ([COI-99](https://linear.app/ardax/issue/COI-99)).
 Pins *are* the ArrayPtr handle ([COI-198](https://linear.app/ardax/issue/COI-198));
-do not add a second opcode. Unpinned `Index` hashing is leftover cost, not a
-new product.
+do not add a second opcode. Unpinned `Index` `find_object_by_addr` (slab +
+poison) is leftover cost, not a new product.
 
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):
@@ -236,16 +243,17 @@ exact-size collect. Same opcodes, layouts, element order and GC rooting. This
 measured **performance-neutral** on `binary_trees` — within `poop` noise — which
 is the useful result: aggregate construction is not copy-bound.
 
-The remaining cost per object was in `Heap::alloc` itself, and it was structural:
+The HashSet-per-object cost is **historical**. **COI-200** landed mapped slab +
+header poison ([heap-identity.md](heap-identity.md)): `find_object_by_addr` is
+chunk + slot-origin + `kind == 0`, and `live_count` is a counter. `Value` is
+still a raw address. Do not append ArrayPtr.
 
-- one `Box::new(GcData::new(..))` per object, on top of the payload vector;
-- one `live` HashSet insert per allocation and one removal per sweep, because
-  `find_object_by_addr` probed a liveness set then read the header kind;
-- `alloc_bytes` versus `gc_next_threshold` as the only collection trigger.
+Residual alloc cost is **payload layout**, not identity hashing:
 
-**COI-200:** mapped slab + header poison ([heap-identity.md](heap-identity.md)).
-`Value` is still a raw address. Payload `Vec`s stay ordinary Rust allocs.
-Do not append ArrayPtr.
+- payload `Vec`s (array elements, interned string bytes) stay ordinary Rust allocs;
+- typed class instances use dense slots ([#287](https://github.com/ardax-corp/coil-lang/pull/287));
+- small `ObjEnum` payloads can inline ([#290](https://github.com/ardax-corp/coil-lang/pull/290));
+- collection trigger is still `alloc_bytes` versus `gc_next_threshold`.
 
 ### 4. Direct-call and closure specialization
 

@@ -31,4 +31,6 @@ User code does not name these directly; the compiler emits them:
 
 - [pipeline](pipeline.md)
 - [array-pin.md](array-pin.md)
+- [limitations.md](limitations.md) — COI-92 niches / two-slot `CALL`/`RETURN`
+- [heap-identity.md](heap-identity.md) — slab + poison for `find_object_by_addr`
 - [debug-info](debug-info.md)
