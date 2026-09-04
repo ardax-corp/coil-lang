@@ -1,11 +1,14 @@
-//! Two-slot CALL/RETURN width for known ≤2-word enum layouts.
+//! Two-slot CALL/RETURN width for known ≤2-word return layouts.
 //!
 //! `Result<int, int>`, `Result<int, heap-object>` (including unit-enum
 //! errors), `Option<int>`, and user payload enums with arity ≤1 fit in
-//! `[payload, tag]` without boxing an `ObjEnum`. Niched heap `Option<T>` /
-//! heap-heap `Result<T, E>` already use a strictly better one-word ABI and
-//! must stay there (never double-classified). Unbounded `T` keeps the boxed
-//! ABI — there is no static layout to move two slots of.
+//! `[payload, tag]` without boxing an `ObjEnum`. A closed arity-2 tuple of
+//! immediates (`(int, int)`, `(int, float)`, …) uses the same CALL/RETURN
+//! width as `[a, b]` (second word on top) without boxing an `ObjTuple`.
+//! Niched heap `Option<T>` / heap-heap `Result<T, E>` already use a
+//! strictly better one-word ABI and must stay there (never
+//! double-classified). Unbounded `T`, mixed heap products, and wider
+//! tuples keep the boxed ABI.
 
 use super::infer::Checker;
 use super::ty::{
@@ -13,13 +16,28 @@ use super::ty::{
     FLOAT, INT,
 };
 
-/// `Some(enum_name)` when direct `CALL`/`RETURN` of a function returning `ty`
-/// can move `[payload, tag]` instead of boxing an `ObjEnum`. The name is the
-/// enum whose variant tags/arities apply when the pair must be boxed at a
+/// Kind string for a two-slot arity-2 immediate product. Not a user enum;
+/// boxing uses `MakeTuple(2)` instead of the enum cascade.
+pub const TWO_WORD_PRODUCT_KIND: &str = "__product2";
+
+pub fn is_two_word_product_kind(kind: &str) -> bool {
+    kind == TWO_WORD_PRODUCT_KIND
+}
+
+/// `Some(kind)` when direct `CALL`/`RETURN` of a function returning `ty`
+/// can move two words instead of boxing. Enum kinds are the enum name
+/// (`[payload, tag]`); [`TWO_WORD_PRODUCT_KIND`] is an arity-2 immediate
+/// tuple (`[a, b]`). The kind is used when the pair must be boxed at a
 /// boundary that still needs one word (`CallIndirect`, FFI, coroutines).
 pub fn two_word_return_enum(checker: &Checker, ty: &Ty) -> Option<String> {
     let ty = strip_readonly(ty);
     if !ty_is_closed(ty) {
+        return None;
+    }
+    if let Ty::Tuple(items) = ty {
+        if items.len() == 2 && items.iter().all(is_immediate) {
+            return Some(TWO_WORD_PRODUCT_KIND.to_string());
+        }
         return None;
     }
     if is_option_ty(ty) {
@@ -230,5 +248,40 @@ fn shape() -> Shape {
 "#;
         let c = checked(src);
         assert_eq!(two_word_return_enum(&c, &Ty::Con("Shape".into())), None);
+    }
+
+    #[test]
+    fn int_int_product_is_two_word() {
+        let c = checker();
+        let ty = Ty::Tuple(vec![Ty::Con(INT.into()), Ty::Con(INT.into())]);
+        assert_eq!(
+            two_word_return_enum(&c, &ty),
+            Some(TWO_WORD_PRODUCT_KIND.to_string())
+        );
+    }
+
+    #[test]
+    fn mixed_immediate_product_is_two_word() {
+        let c = checker();
+        let ty = Ty::Tuple(vec![Ty::Con(INT.into()), Ty::Con(FLOAT.into())]);
+        assert_eq!(
+            two_word_return_enum(&c, &ty),
+            Some(TWO_WORD_PRODUCT_KIND.to_string())
+        );
+    }
+
+    #[test]
+    fn mixed_heap_product_stays_boxed() {
+        let c = checker();
+        let ty = Ty::Tuple(vec![Ty::Con(INT.into()), Ty::Con(STRING.into())]);
+        assert_eq!(two_word_return_enum(&c, &ty), None);
+    }
+
+    #[test]
+    fn arity_three_product_stays_boxed() {
+        let c = checker();
+        let i = Ty::Con(INT.into());
+        let ty = Ty::Tuple(vec![i.clone(), i.clone(), i]);
+        assert_eq!(two_word_return_enum(&c, &ty), None);
     }
 }
