@@ -964,7 +964,14 @@ mod tests {
             names.get(pgo + 4).map(String::as_str),
             Some(CLOCK_MONO_NANOS_NATIVE)
         );
-        assert_eq!(names.last().map(String::as_str), Some(CLOCK_SLEEP_MS_NATIVE));
+        assert_eq!(
+            names.get(pgo + 5).map(String::as_str),
+            Some(CLOCK_SLEEP_MS_NATIVE)
+        );
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::RESULT_UNIT_PROBE_NATIVE)
+        );
     }
 
     /// COI-232: 120/121 are live attach/park, not leftover TLS/crypto stubs.
