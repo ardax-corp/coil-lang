@@ -906,6 +906,7 @@ impl Checker {
                 fun(&[stream, int(), int(), int(), int(), int()], res_stream)
             }
             IoBuiltin::StreamPark => fun(&[stream], res_unit),
+            IoBuiltin::ResultUnitProbe => fun(&[int()], res_unit),
         };
         Scheme::mono(ty)
     }
