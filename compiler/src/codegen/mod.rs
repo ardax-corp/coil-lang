@@ -889,10 +889,10 @@ pub struct Compiler {
     /// in locals / on the stack instead of `MakeEnum`.
     unbox_enum_context: u32,
 
-    /// Enum name when the function whose body is being compiled uses the
-    /// two-slot `[payload, tag]` `CALL`/`RETURN` ABI for a known ≤2-word
-    /// return layout (`None` while boxed `ObjEnum` / niche / unbounded `T`).
-    /// See [`Compiler::two_word_return_kind`].
+    /// Kind when the function whose body is being compiled uses the
+    /// two-slot `CALL`/`RETURN` ABI (`[payload, tag]` or product `[a, b]`).
+    /// `None` while boxed / niche / unbounded `T`. See
+    /// [`Compiler::two_word_return_kind`].
     compiling_two_word_enum: Option<String>,
 
     /// Harness metadata: `(description, bytecode offset)` for each

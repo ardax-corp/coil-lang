@@ -1235,10 +1235,15 @@ impl Compiler {
         let Some(enum_name) = self.two_word_return_kind(name) else {
             return true;
         };
+        let layout = if crate::typechecking::return_layout::is_two_word_product_kind(&enum_name) {
+            "(T, T)".to_string()
+        } else {
+            enum_name
+        };
         let mut message = Message::error(
             ErrorCode::CodegenError,
             format!(
-                "`{name}` returns a known two-word `{enum_name}` layout and cannot be used as a function value"
+                "`{name}` returns a known two-word `{layout}` layout and cannot be used as a function value"
             ),
             range.clone(),
         );
