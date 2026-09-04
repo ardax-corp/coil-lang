@@ -5,7 +5,6 @@
 //! polarity. Labels are unchanged; jumps still name the same ids.
 
 use super::super::op::{IlJumpKind, IlOp, Label};
-use super::branch_opt::BranchProfile;
 
 #[derive(Clone, Debug)]
 pub struct BlockGraph {
@@ -55,9 +54,8 @@ pub fn build_block_graph(ops: &[IlOp]) -> BlockGraph {
 }
 
 /// Entry first, then original order of non-cold blocks, then detached
-/// terminating blocks. `profile` can keep a would-be-cold block in place
-/// when incoming jumps look hot.
-pub fn compute_block_order(graph: &BlockGraph, ops: &[IlOp], profile: Option<&BranchProfile>) -> Vec<usize> {
+/// terminating blocks.
+pub fn compute_block_order(graph: &BlockGraph, ops: &[IlOp]) -> Vec<usize> {
     let n = graph.blocks.len();
     if n == 0 {
         return Vec::new();
@@ -71,7 +69,7 @@ pub fn compute_block_order(graph: &BlockGraph, ops: &[IlOp], profile: Option<&Br
             continue;
         }
         let detached = !falls[i - 1];
-        if detached && is_cold_block(ops, graph.blocks[i], i, graph, profile) {
+        if detached && is_cold_block(ops, graph.blocks[i], i, graph) {
             cold.push(i);
         } else {
             keep.push(i);
@@ -92,9 +90,9 @@ pub fn reorder_ops(ops: &[IlOp], graph: &BlockGraph, order: &[usize]) -> Vec<IlO
 
 /// Relayout `ops`. No-op when the order is already canonical.
 /// Returns how many blocks moved from their original index.
-pub fn reorder_basic_blocks(ops: &mut Vec<IlOp>, profile: Option<&BranchProfile>) -> usize {
+pub fn reorder_basic_blocks(ops: &mut Vec<IlOp>) -> usize {
     let graph = build_block_graph(ops);
-    let order = compute_block_order(&graph, ops, profile);
+    let order = compute_block_order(&graph, ops);
     if order.windows(2).all(|w| w[1] == w[0] + 1) && order.first() == Some(&0) {
         return 0;
     }
@@ -127,7 +125,6 @@ fn is_cold_block(
     range: (usize, usize),
     idx: usize,
     graph: &BlockGraph,
-    profile: Option<&BranchProfile>,
 ) -> bool {
     let (s, e) = range;
     if s >= e {
@@ -142,45 +139,7 @@ fn is_cold_block(
     if targeted_by_uncond(ops, s, e) {
         return false;
     }
-    if profile_says_hot_entry(ops, s, e, profile) {
-        return false;
-    }
     true
-}
-
-fn profile_says_hot_entry(
-    ops: &[IlOp],
-    start: usize,
-    end: usize,
-    profile: Option<&BranchProfile>,
-) -> bool {
-    let Some(p) = profile else {
-        return false;
-    };
-    let labels: Vec<u32> = ops[start..end]
-        .iter()
-        .filter_map(|op| match op {
-            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
-            _ => None,
-        })
-        .collect();
-    if labels.is_empty() {
-        return false;
-    }
-    for (i, op) in ops.iter().enumerate() {
-        let IlOp::Jump { target, .. } = op else {
-            continue;
-        };
-        if !labels.contains(&target.0) {
-            continue;
-        }
-        let taken = p.taken.get(&i).copied().unwrap_or(0);
-        let not_taken = p.not_taken.get(&i).copied().unwrap_or(0);
-        if taken > not_taken && taken > 0 {
-            return true;
-        }
-    }
-    false
 }
 
 fn targeted_by_uncond(ops: &[IlOp], start: usize, end: usize) -> bool {
@@ -317,7 +276,7 @@ mod tests {
     fn linear_code_unchanged() {
         let mut ops = vec![c(1), c(2), ret()];
         let before = ops.clone();
-        reorder_basic_blocks(&mut ops, None);
+        reorder_basic_blocks(&mut ops);
         assert!(ops == before);
     }
 
@@ -334,7 +293,7 @@ mod tests {
             c(3),
             ret(),
         ];
-        reorder_basic_blocks(&mut ops, None);
+        reorder_basic_blocks(&mut ops);
         let labels: Vec<u32> = ops
             .iter()
             .filter_map(|op| match op {
@@ -364,7 +323,7 @@ mod tests {
             .iter()
             .position(|op| matches!(op, IlOp::Label(Label(1))))
             .unwrap();
-        reorder_basic_blocks(&mut ops, None);
+        reorder_basic_blocks(&mut ops);
         let header_after = ops
             .iter()
             .position(|op| matches!(op, IlOp::Label(Label(1))))
@@ -386,7 +345,7 @@ mod tests {
     #[test]
     fn branch_targets_keep_the_same_label_ids() {
         let mut ops = vec![jmpf(1), c(2), jmp(2), label(1), ret(), label(2), ret()];
-        reorder_basic_blocks(&mut ops, None);
+        reorder_basic_blocks(&mut ops);
         let targets: Vec<u32> = ops
             .iter()
             .filter_map(|op| match op {
@@ -395,37 +354,5 @@ mod tests {
             })
             .collect();
         assert!(targets.contains(&1) && targets.contains(&2));
-    }
-
-    #[test]
-    fn hot_profile_keeps_cold_looking_block() {
-        let mut ops = vec![
-            jmpf(1),
-            c(2),
-            jmp(2),
-            label(1),
-            ret(),
-            label(2),
-            ret(),
-        ];
-        let mut profile = BranchProfile::default();
-        profile.taken.insert(0, 99);
-        profile.not_taken.insert(0, 1);
-        let before_labels: Vec<u32> = ops
-            .iter()
-            .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
-                _ => None,
-            })
-            .collect();
-        reorder_basic_blocks(&mut ops, Some(&profile));
-        let after: Vec<u32> = ops
-            .iter()
-            .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(after, before_labels);
     }
 }

@@ -219,7 +219,7 @@ float identities / pool fold.
   (mandelbrot `CONST; LOAD; Cast; …; STORE`).
 - **Output:** Hoists `LOAD; Cast` into a prefix `LOAD; Cast; STORE t` and rewrites
   the body to `LOAD t` so fuse-select can match `LOAD; CONST` / const-under
-  `FloatChainStore`. New temps are fresh high slots. Labels unchanged; extra
+  (FCS is a tombstone; not selected). New temps are fresh high slots. Labels unchanged; extra
   stores raise `tell` on purpose.
 - **Refusals:** No float-chain-store after the cast; jump interrupting the
   window; already-hoisted `Cast; STORE`. Residual `Byte` casts are recognized
@@ -458,7 +458,7 @@ Production runs this on the concatenated buffer **after** multi_op.
 
 **Flag:** `branch_optimization` (default on). **Fn:**
 `branch_opt::optimize_branches_at`. Uses **`sp`**. Last among IL consumers
-except block reorder / seek / tell-promote. Optional `BranchProfile`.
+except block reorder / seek / tell-promote. Heuristic only (no profile).
 
 - **Input:** `JMPF`/`JMPT` whose fall-through is a terminating then-arm
   (no internal jumps/labels) with Known SP at the jump and along the moved arm.
@@ -492,8 +492,8 @@ except block reorder / seek / tell-promote. Optional `BranchProfile`.
 - **Output:** Inserts `Seek` (residual `Byte`) at the latch to the forward-edge
   cursor so the header becomes Known; later `slot_promote_tell` can drop in-loop
   self-stores. `Seek` is `tell::Set` and does not change eval-stack height.
-- **Refusals:** Outer (non-innermost) loops — outer Seek splits
-  `FloatChainStore` (mandelbrot `cr`); no profitable self-store; latch already
+- **Refusals:** Outer (non-innermost) loops — outer Seek used to split
+  tombstoned `FloatChainStore` (mandelbrot `cr`); no profitable self-store; latch already
   has `Seek`. Off on Standard because innermost mandelbrot has no such stores.
 - **Tests:** `opt/slot_promote.rs` `seek_on_back_edge_elides_loop_self_store`,
   `optimize_at_default_does_not_seek_normalize`,
@@ -550,8 +550,8 @@ and encode stay in `lower_optimized`. No post-lower `adjust_target`.
   **cold set** (`FORMAT`, FFI, packed multi-slot LOAD/STORE, unmatched
   `from_plain_byte`) and is **refused** in any multi-op window.
 - **Output:** Superinstructions (const fold, `BinSlotImm`/`BinSlotSlot`,
-  `*Jmpf`/`*Jmpt`, `*Store`, packed LOAD/STORE n≤3, `*Return`,
-  `FloatChainStore` up to 3 stages, `BinSlotSlotConstJmpf`, …) then one PC
+  `*Jmpf`/`*Jmpt`, `*Store`, packed LOAD/STORE n≤3, `*Return`).
+  `FloatChainStore` / `BinSlotSlotConstJmpf` are tombstones (not selected). Then one PC
   assignment. `Vec<Byte>` for the archive. Label ids map to PCs; they do not
   survive as IL.
 - **Refusals:** Window that would pull a **label** or **abs-jump target** onto a

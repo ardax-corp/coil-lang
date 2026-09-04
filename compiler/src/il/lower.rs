@@ -60,19 +60,8 @@ enum Slot {
         b: u8,
         target: Label,
         loc: DebugLoc,
-        if_true: bool,
-    },
-    /// `BinSlotSlot <float-arith>; CONST pool; <float-cmp>; JMPF/JMPT`.
-    BinSlotSlotConstJmpf {
-        bin_op: u8,
-        a: u8,
-        b: u8,
-        cmp_op: u8,
-        float_pool_idx: u16,
-        target: Label,
-        loc: DebugLoc,
-        if_true: bool,
-    },
+            if_true: bool,
+        },
 }
 
 impl Slot {
@@ -86,8 +75,7 @@ impl Slot {
             | Slot::CmpJmpf(_, _, l, _)
             | Slot::LogNotJmpf(_, l, _)
             | Slot::BinSlotImmJmpf { loc: l, .. }
-            | Slot::BinSlotSlotJmpf { loc: l, .. }
-            | Slot::BinSlotSlotConstJmpf { loc: l, .. } => *l,
+            | Slot::BinSlotSlotJmpf { loc: l, .. } => *l,
         }
     }
 }
@@ -521,94 +509,6 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
     None
 }
 
-fn const_pool_index(byte: &Byte) -> Option<u32> {
-    if *byte.bytecode() != Instruction::CONST {
-        return None;
-    }
-    let op = byte.operand_u32();
-    if op & Byte::POOL_FLAG == 0 {
-        return None;
-    }
-    Some(op & !Byte::POOL_FLAG)
-}
-
-/// Float magnitude escape: fuse into `BinSlotSlotConstJmpf`.
-///
-/// Not selected in production fuse-select (mandelbrot-shaped).
-///
-/// Matches either:
-/// - `BinSlotSlot <float-arith>; CONST pool; <float-cmp>; JMPF` (4)
-/// - `LOAD a; LOAD b; <float-arith>; CONST pool; <float-cmp>; JMPF` (6)
-#[allow(dead_code)]
-fn try_fuse_bin_slot_slot_const_jmpf(window: &[Slot]) -> Option<(Slot, usize)> {
-    if let Some(s) = try_fuse_bin_slot_slot_const_jmpf_ready(window) {
-        return Some((s, 4));
-    }
-    try_fuse_load_load_arith_const_jmpf(window).map(|s| (s, 6))
-}
-
-fn try_fuse_bin_slot_slot_const_jmpf_ready(window: &[Slot]) -> Option<Slot> {
-    if window.len() < 4 {
-        return None;
-    }
-    let b0 = slot_as_byte(&window[0])?;
-    let b1 = slot_as_byte(&window[1])?;
-    let b2 = slot_as_byte(&window[2])?;
-    let (if_true, tgt) = cond_jump_fusable(&window[3])?;
-    if *b0.bytecode() != Instruction::BinSlotSlot {
-        return None;
-    }
-    let (bin_op, a, b) = b0.bin_slot_slot_parts();
-    if !is_float_arith_op(Instruction::from(bin_op)) {
-        return None;
-    }
-    let float_pool_idx = u16::try_from(const_pool_index(&b1)?).ok()?;
-    if !is_float_cmp_op(*b2.bytecode()) {
-        return None;
-    }
-    Some(Slot::BinSlotSlotConstJmpf {
-        bin_op,
-        a: a as u8,
-        b: b as u8,
-        cmp_op: *b2.bytecode() as u8,
-        float_pool_idx,
-        target: tgt,
-        loc: window[0].loc(),
-        if_true,
-    })
-}
-
-fn try_fuse_load_load_arith_const_jmpf(window: &[Slot]) -> Option<Slot> {
-    if window.len() < 6 {
-        return None;
-    }
-    let b0 = slot_as_byte(&window[0])?;
-    let b1 = slot_as_byte(&window[1])?;
-    let b2 = slot_as_byte(&window[2])?;
-    let b3 = slot_as_byte(&window[3])?;
-    let b4 = slot_as_byte(&window[4])?;
-    let (if_true, tgt) = cond_jump_fusable(&window[5])?;
-    let a = load_slot(&b0)?;
-    let b = load_slot(&b1)?;
-    if !is_float_arith_op(*b2.bytecode()) {
-        return None;
-    }
-    let float_pool_idx = u16::try_from(const_pool_index(&b3)?).ok()?;
-    if !is_float_cmp_op(*b4.bytecode()) {
-        return None;
-    }
-    Some(Slot::BinSlotSlotConstJmpf {
-        bin_op: *b2.bytecode() as u8,
-        a,
-        b,
-        cmp_op: *b4.bytecode() as u8,
-        float_pool_idx,
-        target: tgt,
-        loc: window[0].loc(),
-        if_true,
-    })
-}
-
 fn try_fuse_load_const_cmp_jmpf_slot(window: &[Slot]) -> Option<Slot> {
     if window.len() < 4 {
         return None;
@@ -849,31 +749,6 @@ fn encode_slot(
             };
             Byte::new(insn).with_bin_slot_slot_jmpf(*op, *a, idx as u16)
         }
-        Slot::BinSlotSlotConstJmpf {
-            bin_op,
-            a,
-            b,
-            cmp_op,
-            float_pool_idx,
-            target,
-            if_true,
-            ..
-        } => {
-            let pc = resolve(labels, *target)?;
-            let idx = pool.len();
-            pool.push(Byte::pack_bin_slot_slot_const_jmpf_desc(
-                *b,
-                *cmp_op,
-                *float_pool_idx,
-                pc,
-            ));
-            let insn = if *if_true {
-                Instruction::BinSlotSlotConstJmpt
-            } else {
-                Instruction::BinSlotSlotConstJmpf
-            };
-            Byte::new(insn).with_bin_slot_slot_const_jmpf(*bin_op, *a, idx as u16)
-        }
     })
 }
 
@@ -972,24 +847,6 @@ fn is_bin_op(i: Instruction) -> bool {
                 | Instruction::GEQF
                 | Instruction::PowF
         )
-}
-
-fn is_float_arith_op(i: Instruction) -> bool {
-    matches!(
-        i,
-        Instruction::ADDF
-            | Instruction::SUBF
-            | Instruction::MULF
-            | Instruction::DIVF
-            | Instruction::MODF
-    )
-}
-
-fn is_float_cmp_op(i: Instruction) -> bool {
-    matches!(
-        i,
-        Instruction::LEF | Instruction::LEQF | Instruction::GTF | Instruction::GEQF
-    )
 }
 
 fn const_inline_value(byte: &Byte) -> Option<i32> {

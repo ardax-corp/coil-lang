@@ -25,7 +25,7 @@ pub fn analyze_fn_body(body: &Output<'_>, lookup: &dyn Fn(&str) -> Option<ConstV
 }
 
 /// True when `expr` never transfers control to a following sibling.
-#[allow(dead_code)] // used by tests / future callers; analyze_fn_body covers production
+#[allow(dead_code)] // unit tests; production uses analyze_fn_body
 pub fn always_exits(expr: &Output<'_>, lookup: &dyn Fn(&str) -> Option<ConstVal>) -> bool {
     walk(expr, lookup, &mut Vec::new(), &mut Vec::new(), false)
 }

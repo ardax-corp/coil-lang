@@ -269,11 +269,11 @@ fn apply_branch_optimization(
     _: &OptimizeOptions,
     ctx: &mut PassCtx<'_>,
 ) -> usize {
-    super::branch_opt::optimize_branches_at(ops, None, ctx.entry_sp, ctx.next_label)
+    super::branch_opt::optimize_branches_at(ops, ctx.entry_sp, ctx.next_label)
 }
 
 fn apply_block_reordering(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::block_order::reorder_basic_blocks(ops, None)
+    super::block_order::reorder_basic_blocks(ops)
 }
 
 fn apply_seek_back_edge(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {

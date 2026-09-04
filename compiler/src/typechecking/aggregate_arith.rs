@@ -137,11 +137,6 @@ pub fn classify_arith(ty: &Ty) -> ArithShape {
     }
 }
 
-#[allow(dead_code)]
-pub fn is_aggregate_shape(shape: &ArithShape) -> bool {
-    !matches!(shape, ArithShape::Scalar(_))
-}
-
 /// Traits that the numeric tower lifts from element to homogeneous aggregate.
 pub fn is_liftable_arith_trait(class: &str) -> bool {
     matches!(class, "Add" | "Sub" | "Mul" | "Div" | "Num")

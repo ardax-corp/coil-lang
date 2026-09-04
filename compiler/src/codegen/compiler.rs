@@ -2986,12 +2986,6 @@ impl Compiler {
     }
 
 
-    /// Entry label for a registered function, if bound.
-    #[allow(dead_code)] // call-site Entry emit / step-5 assert helpers
-    fn fn_entry_label(&self, name: &str) -> Option<IlLabel> {
-        self.fn_entry_labels.get(name).copied()
-    }
-
     /// Bytecode offset WHERE the prologue (CALL+JMP+HALT)
     /// ENDS and user-program code BEGINS. Used by the runtime
     /// pipeline to patch the prologue's JMP operand so that
@@ -7848,7 +7842,6 @@ impl Compiler {
     }
 
     /// Peel `forall` / function arrows to the final return type.
-    #[allow(dead_code)]
     fn peel_fn_return_ty(ty: &crate::typechecking::Ty) -> crate::typechecking::Ty {
         use crate::typechecking::Ty;
         let mut t = ty.clone();
@@ -7862,8 +7855,6 @@ impl Compiler {
     }
 
     /// Look up a function's scheme and peel to its return type.
-    /// Lookup declared return type for diagnostics / tooling.
-    #[allow(dead_code)]
     fn fn_return_ty(&self, name: &str) -> Option<crate::typechecking::Ty> {
         use crate::typechecking::subst::apply_ty_prune;
         let scheme = self
@@ -10613,15 +10604,6 @@ impl Compiler {
             .push(Byte::new(Instruction::StoreStatic).with_operand_u32(slot));
     }
 
-    /// Resolve enum name for field access via the codegen side-table.
-    /// Receiver enum name for field-access codegen (kept for tests / callers).
-    #[allow(dead_code)]
-    fn enum_name_for_receiver(&mut self, receiver: &Output) -> Option<String> {
-        // Cannot use infer cache inside function bodies (ID misalignment) or env (frame popped).
-        let ty = self.receiver_type(receiver)?;
-        extract_enum_name(&ty)
-    }
-
     /// Receiver type for field access / method calls.
     ///
     /// Handles identifiers, chained access, parentheses/`Group` wrappers, and
@@ -10986,29 +10968,6 @@ impl Compiler {
         bytecode.push(Byte::new(Instruction::DUPLICATE));
         bytecode.push_const(1);
         bytecode.push(Byte::new(Instruction::BITAND));
-    }
-
-    /// Boxed `ObjEnum` Result → pointer niche (`Ok` aligned / `Err` `| 1`).
-    fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let ok = bb.fresh_label(bytecode.il_mut());
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        bb.emit_jump_to(
-            ok,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.emit_jump_to(
-            err,
-            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.bind_label(err, bytecode.il_mut());
-        Self::push_result_err_bit(bytecode);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(ok, bytecode.il_mut());
-        bb.bind_label(end, bytecode.il_mut());
     }
 
     /// Option-shaped `Result<(), E>` → boxed `ObjEnum`.

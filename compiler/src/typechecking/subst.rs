@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use super::ty::{Scheme, Ty, TyVarId, ftv_scheme, ftv_ty};
+use super::ty::{Scheme, Ty, TyVarId, ftv_ty};
 
 /// A partial map from `TyVarId` to `Ty`.
 ///
@@ -251,12 +251,6 @@ pub fn union(s1: &Subst, s2: &Subst) -> Subst {
 #[allow(dead_code)]
 pub fn ftv(ty: &Ty) -> HashSet<TyVarId> {
     ftv_ty(ty)
-}
-
-/// Re-export of `ftv_scheme` at the module level for ergonomics.
-#[allow(dead_code)]
-pub fn ftv_sch(s: &Scheme) -> HashSet<TyVarId> {
-    ftv_scheme(s)
 }
 
 #[cfg(test)]
