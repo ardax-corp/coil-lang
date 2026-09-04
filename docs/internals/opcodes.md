@@ -22,8 +22,8 @@ User code does not name these directly; the compiler emits them:
 | `ArrayPin` / `IndexPin*` / `StoreIndexPin*` | Pinned array indexing: `ArrayPin` caches the array in the frame pin table; `IndexPin*` / `StoreIndexPin*` skip per-site `find_object_by_addr`. Layout: [array-pin.md](array-pin.md) |
 | `NEGF` | Float unary negate (IEEE sign-bit flip); replaces `CONST -1; MULF` |
 | `InitTyped` | Allocate a class instance. Operand `[31:16] field_count`, `[15:0] type_id`. Non-zero field count pre-sizes dense slots; `INIT` remains for untyped bags / old archives. Typed field get/set uses `LoadField` / indexed `SetField` (bit 31). |
-| `CALL` (bit 31) | Two-slot return width. Bit 31 set (`Byte::CALL_RET2_BIT`) means the callee leaves `[payload, tag]` (two words) instead of one boxed word; arity moves to `[30:24]` (0..=127) to make room. Clear (old archives, or any `with_call_packed` caller) means one word — no archive bump. See [limitations.md](limitations.md) two-slot direct CALL/RETURN. |
-| `RETURN` (operand) | `0` (default; old archives) is one word. `2` pops/pushes `[payload, tag]` (tag on top) instead of one value. |
+| `CALL` (bit 31) | Two-slot return width. Bit 31 set (`Byte::CALL_RET2_BIT`) means the callee leaves two words instead of one boxed word; arity moves to `[30:24]` (0..=127) to make room. Enums use `[payload, tag]`; arity-2 immediate products use `[a, b]` (second on top). Clear (old archives, or any `with_call_packed` caller) means one word — no archive bump. See [limitations.md](limitations.md) two-slot direct CALL/RETURN. |
+| `RETURN` (operand) | `0` (default; old archives) is one word. `2` pops/pushes two words (second on top) instead of one value. |
 
 ---
 
