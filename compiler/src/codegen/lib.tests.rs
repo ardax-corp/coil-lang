@@ -414,22 +414,20 @@ fn main() {
     #[test]
     fn return_match_keeps_fusion_barrier() {
         use common::Instruction;
-        // `make()` is bound to `r` before the match so the scrutinee is a
-        // plain identifier, not a direct CALL — the two-slot immediate-match
-        // fast path (same lowering as a frame-local match, #278-style) only
-        // fires on a direct `match callee(...) { ... }`, so this keeps the
-        // original boxed `ObjEnum` shape this test asserts on.
+        // Parameter ABI is boxed `ObjEnum`. A two-slot `let r = make()`
+        // would stay a pair and skip JumpIfMatch — this test needs the
+        // boxed cascade so the Some arm's Unpack;RETURN fusion barrier
+        // stays observable.
         let (bc, _pool) = compile_src(
             r#"
-fn make() -> Option<int> {
-    return Option::Some(1);
-}
-fn foo() -> int {
-    let r = make();
+fn foo(Option<int> r) -> int {
     return match r {
         Option::None => 0,
         Option::Some(n) => n,
     };
+}
+fn main() {
+    let _ = foo(Option::Some(1));
 }
 "#,
         );
@@ -437,15 +435,10 @@ fn foo() -> int {
         // payload arm must RETURN locally — never JMP into ConstReturnImm (that
         // would ignore the stacked Unpack value). Scope to the match region so
         // prologue / other fn JMPs do not trip the guard.
-        let make_enum = bc
-            .iter()
-            .position(|b| matches!(*b.bytecode(), Instruction::MakeEnum))
-            .expect("expected MakeEnum for returned Option::Some(1)");
-        let jim = bc[make_enum..]
+        let jim = bc
             .iter()
             .position(|b| matches!(*b.bytecode(), Instruction::JumpIfMatch))
-            .map(|i| make_enum + i)
-            .expect("expected JumpIfMatch after MakeEnum");
+            .expect("expected JumpIfMatch on boxed Option param");
         let region_end = bc[jim..]
             .iter()
             .position(|b| matches!(*b.bytecode(), Instruction::ConstReturnImm))
@@ -1345,16 +1338,15 @@ fn main() {
     #[test]
     fn match_emits_jump_if_match_cascade() {
         use common::Instruction;
-        // `r` decouples the scrutinee from a direct CALL so the two-slot
-        // immediate-match fast path does not fire — see
-        // `return_match_keeps_fusion_barrier`.
+        // Boxed param keeps JumpIfMatch; two-slot `let r = f()` would not.
         let (bc, _pool) = compile_src(
-            "fn make() -> Option<int> { return Option::Some(1); } \
- let r = make(); \
- match r { \
+            "fn consume(Option<int> r) -> int { \
+ return match r { \
  Option::None() => 0, \
  Option::Some(v) => v, \
- };",
+ }; \
+ } \
+ fn main() { let _ = consume(Option::Some(1)); }",
         );
 
         // Two arms, both constructor. Two JUMP_IF_MATCH should
@@ -2461,16 +2453,14 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     #[test]
     fn match_jump_if_match_targets_are_patched_to_arm_offsets() {
         use common::Instruction;
-        // `r` decouples the scrutinee from a direct CALL so the two-slot
-        // immediate-match fast path does not fire — see
-        // `return_match_keeps_fusion_barrier`.
         let (bc, pool) = compile_src(
-            "fn make() -> Option<int> { return Option::Some(1); } \
- let r = make(); \
- match r { \
+            "fn consume(Option<int> r) -> int { \
+ return match r { \
  Option::None() => 0, \
  Option::Some(v) => v, \
- };",
+ }; \
+ } \
+ fn main() { let _ = consume(Option::Some(1)); }",
         );
 
         // Find every JUMP_IF_MATCH. For each, the target
@@ -2593,9 +2583,7 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     fn nested_match_in_loop_emits_expected_opcodes() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
-            "fn make() -> Option<int> { return Option::Some(0); } \
- fn main() { \
- let x = make(); \
+            "fn consume(Option<int> x) -> int { \
  let i = 0; \
  while (i < 3) { \
  return match x { \
@@ -2603,7 +2591,9 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
  Option::Some(v) => v, \
  }; \
  } \
- }",
+ return 0; \
+ } \
+ fn main() { let _ = consume(Option::Some(0)); }",
         );
 
         let exit_branch_count = loop_exit_branch_count(&bc);
@@ -2867,14 +2857,13 @@ fn main() {
         // not UNPACK.
         let (bc, _pool) = compile_src(
             "enum E { Empty, Foo(int) } \
- fn make() -> E { return E::Empty; } \
- fn main() { \
- let e = make(); \
- match e { \
+ fn consume(E e) -> int { \
+ return match e { \
  E::Empty => 0, \
  E::Foo(_) => 1, \
  }; \
- }",
+ } \
+ fn main() { let _ = consume(E::Empty); }",
         );
 
         // Exactly 1 UNPACK (for the Foo arm, which is the
@@ -3046,14 +3035,13 @@ fn main() {
         // that sub-pattern, which is a Binding → no runtime test).
         let (bc, _pool) = compile_src(
             "enum E { A(int), B(int) } \
- fn make() -> E { return E::A(5); } \
- fn main() { \
- let x = make(); \
- let _ = match x { \
+ fn consume(E x) -> int { \
+ return match x { \
  E::A(v) => v, \
  E::B(v) => v, \
  }; \
- }",
+ } \
+ fn main() { let _ = consume(E::A(5)); }",
         );
         let jimp_count = bc
             .iter()
