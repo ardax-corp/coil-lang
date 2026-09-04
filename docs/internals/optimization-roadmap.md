@@ -253,6 +253,7 @@ Residual alloc cost is **payload layout**, not identity hashing:
 - payload `Vec`s (array elements, interned string bytes) stay ordinary Rust allocs;
 - typed class instances use dense slots ([#287](https://github.com/ardax-corp/coil-lang/pull/287));
 - small `ObjEnum` payloads can inline ([#290](https://github.com/ardax-corp/coil-lang/pull/290));
+- typed instances with ≤2 fields inline those slots ([#299](https://github.com/ardax-corp/coil-lang/pull/299));
 - collection trigger is still `alloc_bytes` versus `gc_next_threshold`.
 
 ### 4. Direct-call and closure specialization
