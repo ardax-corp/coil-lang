@@ -65,7 +65,7 @@ There is **no `print` statement** — use `io` + `string::format` / `to_bytes`.
 | Variables | `let x = e;` / `const x = e;`; destructuring `let (a,b) = …`, `let { x } = …` |
 | Control | `if`/`else`, `while`, `for x in iter`, `break`/`continue` |
 | Types | Primitives `int` `float` `string` `bool` `byte`; arrays `[T]` / `[T; N]`; tuples; dicts as anonymous records |
-| Enums | `enum E { A, B(T) }`; constructors are per-enum (`Status.Ok` next to `Result.Ok`). Canonical spelling is `Enum.Case` (`Status.Ok`, `Option.Some(x)`, `Color.Red`). Bare `Some`/`None`/`Ok`/`Err` is sugar only when unambiguous. `match e { … }` with record/nested patterns. `default` is the only whole-arm catch-all; `_` is nested wildcard only (`Result.Err(_)`, `Some(_)`, tuple/record slots). Scalar-backed: `#[repr(int)]` / `float` / `string` / `bool` or inferred when every case is `Case = lit` of one simple type. `#[derive(Show, Eq, Ord, Hash)]` composes with `#[repr]`. Runtime is the unboxed literal; type is still `E`. Show of a scalar case is the backing (`Status.Ok` → `200`). In expression position the value implicitly coerces to the backing (`let n: int = Status.Ok`). No reverse coerce (`int` → `Status`) and no matching raw `200` on a `Status` scrutinee. Payload enums stay boxed. |
+| Enums | `enum E { A, B(T) }`; constructors are per-enum (`Status.Ok` next to `Result.Ok`). Canonical spelling is `Enum.Case` (`Status.Ok`, `Option.Some(x)`, `Color.Red`). Bare `Some`/`None`/`Ok`/`Err` is sugar only when unambiguous. `match e { … }` with record/nested patterns. `default` is the only whole-arm catch-all; `_` is nested wildcard only (`Result.Err(_)`, `Some(_)`, tuple/record slots). Scalar-backed: `#[repr(int)]` / `float` / `string` / `bool` or inferred when every case is `Case = lit` of one simple type. `#[derive(Show, Eq, Ord, Hash)]` composes with `#[repr]`. Runtime is the unboxed literal; type is still `E`. Show of a scalar case is the backing (`Status.Ok` → `200`). In expression position the value implicitly coerces to the backing (`let n: int = Status.Ok`). No reverse coerce (`int` → `Status`) and no matching raw `200` on a `Status` scrutinee. Payload enums are niche, two-slot, or boxed `ObjEnum` by shape (heap Option / heap-heap Result niches; immediate-Ok / arity-≤1 two-slot on direct CALL — [#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); not always boxed. |
 | Errors | Built-in `Option`/`Result`; `raise`, `?`, `??`, `?.` |
 | Classes | `class C { … }`, `impl C { … }`, `new C(…)` — prefer methods for type-tied ops; inherent `fn drop()` is a GC-time finalizer |
 | Modules | `use path::{a, b};`, `mod foo;` (load without binding) |
@@ -92,7 +92,8 @@ userland modules. Prelude is auto-injected.
 | `ffi` | `use ffi::{dload, declare, invoke};` + `use ffi::types::{Int, Ptr};` | Dynamic loading |
 | `thread` | `use thread::{spawn, join, channel, send, recv};` | OS threads, channels, mutex |
 | `env` | `use env::{args, var, exec};` | process environment |
-| `time` | `use time::{…}` via [coil-time](https://github.com/ardax-corp/coil-time) | userland package (`dload`); not a virtual module |
+| `clock` | `use clock::{wall_nanos, mono_nanos, sleep_ms};` | virtual HostInvoke **122–124** (not `dload`) |
+| `time` | `use time::{…}` via [coil-time](https://github.com/ardax-corp/coil-time) | pure Coil calendar/format package; not a virtual module |
 | `gc` | `use gc::{root, weak, collect};` | `Root` / `Weak` pins; class `fn drop()` runs at collect / teardown |
 
 `byte` is 0..=255; integer literals coerce under `byte` / `[byte]` expectations.
@@ -139,7 +140,7 @@ Tutorial path: [getting-started](https://github.com/ardax-corp/coil-website/blob
 4. **FFI** — needs system libffi; `resolve_library` searches entry dir, `coil.toml` paths, system.
 5. **Stale `out.hyc`** — only from `coil compile`; delete before `coil run` if sources changed.
 6. **Type errors** — read diagnostic `E####`; index in [error-codes](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md) (`/docs/references/error-codes`).
-7. **`Option`/`Result`** — always boxed enums (archive 4). Free `fn f<T>(T) -> Option<T>` is still `E0127`; put that return on an inherent method.
+7. **`Option`/`Result`** — layout is by shape, not always boxed: heap `Option<T>` and heap-heap `Result` are pointer niches; `Option<int>` / immediate-Ok `Result` are two-slot on direct `CALL`/`RETURN` ([#293](https://github.com/ardax-corp/coil-lang/pull/293) / [#297](https://github.com/ardax-corp/coil-lang/pull/297)); nested / `CallIndirect` / unsure stay boxed `ObjEnum`. Free `fn f<T>(T) -> Option<T>` is still `E0127`; put that return on an inherent method.
 
 ## Debugging programs
 
