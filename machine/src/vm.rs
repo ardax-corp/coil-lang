@@ -3056,7 +3056,12 @@ impl<const S: usize> Machine<S> {
                                 .get_by_id(fn_id)
                                 .expect("id checked above");
                             let args = &self.stack.top_window(consume)[1..];
-                            match native.invoke(&mut self.heap, args) {
+                            let layout = crate::host_enum::HostEnumLayout::from_operand(
+                                opcode.operand_u32(),
+                            );
+                            match crate::host_enum::with_host_enum_layout(layout, || {
+                                native.invoke(&mut self.heap, args)
+                            }) {
                                 Ok(Some(v)) => {
                                     self.stack.seek(tell - consume);
                                     self.stack.push(v);
