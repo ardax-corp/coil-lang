@@ -1,6 +1,7 @@
 //! Stack VM, managed heap, and FFI runtime for coil bytecode.
 
 pub mod char_ord;
+pub mod clock;
 #[cfg(any(test, feature = "debugger"))]
 pub mod debug;
 pub mod env;
@@ -28,12 +29,14 @@ mod vm;
 
 #[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, StepMode, StopReason};
+pub use clock::CLOCK_WIRING;
 pub use env::ENV_WIRING;
 pub use ffi::*;
 pub use fs::FS_WIRING;
 pub use gc_handles::{GC_COLLECT_NATIVE, GC_REGISTER_FINALIZER_NATIVE, GC_WIRING};
 pub use host_natives::{
-    PGO_HIT_NATIVE, STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE, build_standard_host_natives,
+    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE, PGO_HIT_NATIVE,
+    STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE, build_standard_host_natives,
     wire_standard_host_natives,
 };
 pub use memory::*;

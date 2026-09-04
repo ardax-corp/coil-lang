@@ -10,7 +10,8 @@ use common::Value;
 use crate::math_libm::MATH_LIBM_WIRING;
 use crate::{
     packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
-    FfiError, FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, ENV_WIRING, FS_WIRING, PACKED_DOT,
+    FfiError, FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, CLOCK_WIRING, ENV_WIRING, FS_WIRING,
+    PACKED_DOT,
     PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
 };
 
@@ -80,6 +81,8 @@ pub fn build_standard_host_natives(
     // package-IO hooks (coil-tls uses these via `dload`, not VM TLS natives).
     push_stream_attach(&mut out, &mut register_id);
     push_stream_park(&mut out, &mut register_id);
+    // Append-only after stream_park: process clocks (no Instant HashMap).
+    push_wiring(&mut out, &mut register_id, CLOCK_WIRING, "clock");
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -88,7 +91,10 @@ pub fn build_standard_host_natives(
     out
 }
 
-pub use common::{PGO_HIT_NATIVE, STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE};
+pub use common::{
+    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE, PGO_HIT_NATIVE,
+    STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE,
+};
 
 fn push_pgo_hit(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     let sig =
@@ -924,7 +930,15 @@ mod tests {
             names.get(pgo + 2).map(String::as_str),
             Some(STREAM_PARK_NATIVE)
         );
-        assert_eq!(names.last().map(String::as_str), Some(STREAM_PARK_NATIVE));
+        assert_eq!(
+            names.get(pgo + 3).map(String::as_str),
+            Some(CLOCK_WALL_NANOS_NATIVE)
+        );
+        assert_eq!(
+            names.get(pgo + 4).map(String::as_str),
+            Some(CLOCK_MONO_NANOS_NATIVE)
+        );
+        assert_eq!(names.last().map(String::as_str), Some(CLOCK_SLEEP_MS_NATIVE));
     }
 
     /// COI-232: 120/121 are live attach/park, not leftover TLS/crypto stubs.
@@ -1127,5 +1141,8 @@ mod tests {
         assert_eq!(common::host_native_id(PGO_HIT_NATIVE), Some(119));
         assert_eq!(common::host_native_id(STREAM_ATTACH_NATIVE), Some(120));
         assert_eq!(common::host_native_id(STREAM_PARK_NATIVE), Some(121));
+        assert_eq!(common::host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(122));
+        assert_eq!(common::host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(123));
+        assert_eq!(common::host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(124));
     }
 }
