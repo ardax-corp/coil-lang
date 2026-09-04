@@ -4026,6 +4026,7 @@ fn run() -> int { return add(1, 2); }
         assert!(!Compiler::is_tiny_inline_il(&[
             IlOp::HostInvoke {
                 arity: 1,
+                layout: 0,
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
@@ -7127,6 +7128,21 @@ fn main() {
             "Vec::pop must use HostInvoke; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
+        let hosts: Vec<_> = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .collect();
+        assert!(
+            hosts.iter().any(|b| {
+                common::host_invoke_enum_layout(b.operand_u32())
+                    == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+            }),
+            "heap Vec::pop must ask the host for OptionNiche; operands={:?}",
+            hosts
+                .iter()
+                .map(|b| format!("{:#x}", b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]
@@ -7156,6 +7172,46 @@ fn main() {
                 .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
             "Vec::pop of int should still HostInvoke; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+                .all(|b| {
+                    common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_BOXED
+                }),
+            "int Vec::pop stays boxed at the host edge; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn gc_get_heap_item_sets_option_niche_layout() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+use gc::{get, root};
+fn main() {
+    let r = root("pin");
+    let _ = get(r);
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("gc_root", 1);
+        compiler.register_native_id("gc_get", 2);
+        let bc = compiler.compile("", &mut ast);
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::HostInvoke)
+                    && common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+            }),
+            "gc::get of a heap object must set OptionNiche; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
         );
     }
 

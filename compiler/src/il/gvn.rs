@@ -749,6 +749,7 @@ mod tests {
             IlOp::Const { imm: 3, loc: loc() },
             IlOp::HostInvoke {
                 arity: 0,
+                layout: 0,
                 loc: loc(),
             },
             IlOp::Const { imm: 3, loc: loc() },

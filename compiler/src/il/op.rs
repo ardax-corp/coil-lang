@@ -205,8 +205,12 @@ pub enum IlOp {
         loc: DebugLoc,
     },
     /// Host native call — pop fn id + `arity` args; push result (delta −arity).
+    ///
+    /// `layout` is `common::HOST_ENUM_LAYOUT_*` (boxed / Option niche /
+    /// Result niche) packed into the `HostInvoke` operand high bits.
     HostInvoke {
         arity: u32,
+        layout: u8,
         loc: DebugLoc,
     },
     /// Print TOS string (consume).
@@ -414,7 +418,8 @@ impl IlOp {
                 loc,
             },
             Instruction::HostInvoke => Self::HostInvoke {
-                arity: byte.operand_u32(),
+                arity: common::host_invoke_arity(byte.operand_u32()),
+                layout: common::host_invoke_enum_layout(byte.operand_u32()) as u8,
                 loc,
             },
             Instruction::PRINT => Self::Print { loc },
@@ -508,8 +513,9 @@ impl IlOp {
                 }
                 None => Byte::new(Instruction::SetField),
             },
-            IlOp::HostInvoke { arity, .. } => {
-                Byte::new(Instruction::HostInvoke).with_operand_u32(*arity)
+            IlOp::HostInvoke { arity, layout, .. } => {
+                Byte::new(Instruction::HostInvoke)
+                    .with_operand_u32(common::pack_host_invoke_operand(*arity, *layout as u32))
             }
             IlOp::Print { .. } => Byte::new(Instruction::PRINT),
             IlOp::Return { ret_words, .. } => {
@@ -1179,6 +1185,7 @@ mod tests {
             },
             IlOp::HostInvoke {
                 arity: 2,
+                layout: 0,
                 loc: DebugLoc::unknown(),
             },
             IlOp::Print {

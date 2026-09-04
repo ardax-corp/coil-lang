@@ -702,6 +702,7 @@ mod tests {
         assert_eq!(
             stack_delta(&IlOp::HostInvoke {
                 arity: 3,
+                layout: 0,
                 loc: loc(),
             }),
             Some(-3)

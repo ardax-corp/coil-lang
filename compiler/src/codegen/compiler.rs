@@ -8156,12 +8156,68 @@ impl Compiler {
     }
 
     fn emit_host_option_boundary(&mut self, expr: &Output) {
-        if self.expr_is_niche_option(expr) {
-            Self::emit_boxed_option_to_niche(&mut self.bytecode);
+        let layout = self.host_enum_layout_for_expr(expr);
+        if layout == common::HOST_ENUM_LAYOUT_BOXED {
+            return;
         }
-        if self.expr_is_niche_result(expr) {
+        if self.bytecode.set_last_host_invoke_layout(layout) {
+            return;
+        }
+        if layout == common::HOST_ENUM_LAYOUT_OPTION_NICHE {
+            Self::emit_boxed_option_to_niche(&mut self.bytecode);
+        } else if layout == common::HOST_ENUM_LAYOUT_RESULT_NICHE {
             Self::emit_boxed_result_to_niche(&mut self.bytecode);
         }
+    }
+
+    /// Host-edge Option/Result layout for this expression's type.
+    fn host_enum_layout_for_expr(&self, expr: &Output) -> u32 {
+        if self.expr_is_niche_option(expr) || self.force_niche_option {
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE
+        } else if self.expr_is_niche_result(expr) {
+            common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        } else {
+            common::HOST_ENUM_LAYOUT_BOXED
+        }
+    }
+
+    fn vec_option_host_native(lookup_name: &str) -> Option<&'static str> {
+        let owner = common::BUILTIN_VEC_TYPE;
+        if lookup_name == format!("{owner}::pop") {
+            Some("vec_pop")
+        } else if lookup_name == format!("{owner}::remove") {
+            Some("vec_remove")
+        } else {
+            None
+        }
+    }
+
+    /// Restage `[arg0, …]` already on `bytecode` as `HostInvoke` `[id, arg0, …]`.
+    fn emit_host_invoke_from_call_args(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        native: &str,
+        arity: u32,
+        layout: u32,
+    ) -> bool {
+        let Some(native_id) = self.native_id(native) else {
+            return false;
+        };
+        self.expr_depth += arity;
+        let mut slots = Vec::with_capacity(arity as usize);
+        for _ in 0..arity {
+            let slot = self.alloc_temp_slot();
+            bytecode.push_store_pop(slot);
+            slots.push(slot);
+        }
+        slots.reverse();
+        bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
+        for slot in slots {
+            bytecode.push_load(slot);
+        }
+        bytecode.push_host_invoke_layout(arity, layout);
+        self.expr_depth -= arity;
+        true
     }
 
     /// Emit defers + unit fall-through return when a body does not end in a return.

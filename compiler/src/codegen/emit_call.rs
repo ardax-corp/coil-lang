@@ -530,14 +530,22 @@ impl Compiler {
                         0
                     };
                     let call_arity = 1 + nargs + dict_count as u32;
-                    if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
+                    let vec_host = (!is_generic)
+                        .then(|| Self::vec_option_host_native(&lookup_name))
+                        .flatten();
+                    if let Some(native) = vec_host {
+                        let layout = self.host_enum_layout_for_expr(ast);
+                        if !self.emit_host_invoke_from_call_args(
+                            &mut bytecode,
+                            native,
+                            call_arity,
+                            layout,
+                        ) && !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity)
+                        {
+                            self.missing_call_target(&call_name, span.into_range());
+                        }
+                    } else if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
                         self.missing_call_target(&call_name, span.into_range());
-                    }
-                    if (self.expr_is_niche_option(ast) || self.force_niche_option)
-                        && (lookup_name == format!("{}::pop", common::BUILTIN_VEC_TYPE)
-                            || lookup_name == format!("{}::remove", common::BUILTIN_VEC_TYPE))
-                    {
-                        Self::emit_boxed_option_to_niche(&mut bytecode);
                     }
                     if is_generic && self.generic_return_is_boxed(&lookup_name) {
                         if let Some(call_ty) = self.codegen_expr_ty(ast) {
@@ -983,7 +991,29 @@ impl Compiler {
                     .then(|| pair_kind.clone())
                     .flatten();
                 let ret_words = if two_word.is_some() { 2 } else { 1 };
-                if let Some(off) = mono_offset {
+                let vec_host = (!is_generic)
+                    .then(|| {
+                        Self::vec_option_host_native(&lookup_name)
+                            .or_else(|| Self::vec_option_host_native(&n))
+                    })
+                    .flatten();
+                if let Some(native) = vec_host {
+                    let layout = self.host_enum_layout_for_expr(ast);
+                    if !self.emit_host_invoke_from_call_args(
+                        &mut bytecode,
+                        native,
+                        arity,
+                        layout,
+                    ) && !self.emit_named_entry_ret(
+                        &mut bytecode,
+                        &n,
+                        arity,
+                        entry_kind,
+                        ret_words,
+                    ) {
+                        self.missing_call_target(&n, span.into_range());
+                    }
+                } else if let Some(off) = mono_offset {
                     bytecode.push(Self::packed_entry_byte_ret(
                         entry_kind,
                         arity,
@@ -993,17 +1023,6 @@ impl Compiler {
                 } else if !self.emit_named_entry_ret(&mut bytecode, &n, arity, entry_kind, ret_words)
                 {
                     self.missing_call_target(&n, span.into_range());
-                }
-                let vec_option_call = [
-                    format!("{}::pop", common::BUILTIN_VEC_TYPE),
-                    format!("{}::remove", common::BUILTIN_VEC_TYPE),
-                ]
-                .iter()
-                .any(|name| lookup_name == *name || n == *name);
-                if (self.expr_is_niche_option(ast) || self.force_niche_option)
-                    && vec_option_call
-                {
-                    Self::emit_boxed_option_to_niche(&mut bytecode);
                 }
                 if let Some(enum_name) = two_word {
                     if self.unbox_enum_context == 0 {

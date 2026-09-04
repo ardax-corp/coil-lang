@@ -292,8 +292,13 @@ impl IlBuilder {
     }
 
     pub fn push_host_invoke(&mut self, arity: u32) {
+        self.push_host_invoke_layout(arity, common::HOST_ENUM_LAYOUT_BOXED);
+    }
+
+    pub fn push_host_invoke_layout(&mut self, arity: u32, layout: u32) {
         self.push_op(IlOp::HostInvoke {
             arity,
+            layout: layout as u8,
             loc: DebugLoc::unknown(),
         });
     }
