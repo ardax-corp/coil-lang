@@ -104,6 +104,7 @@ pub(crate) fn remap_label_space(
 }
 
 /// Reorder cold terminating arms off the fall-through of `JMPF`/`JMPT`.
+#[cfg(test)]
 pub fn optimize_branches(ops: &mut Vec<IlOp>) {
     let mut next = next_fresh_label(ops);
     optimize_branches_at(ops, 0, &mut next);

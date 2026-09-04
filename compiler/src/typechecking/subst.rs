@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 
-use super::ty::{Scheme, Ty, TyVarId, ftv_scheme, ftv_ty};
+use super::ty::{Scheme, Ty, TyVarId, ftv_ty};
 
 /// A partial map from `TyVarId` to `Ty`.
 ///

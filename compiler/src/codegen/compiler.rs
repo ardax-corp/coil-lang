@@ -10970,29 +10970,6 @@ impl Compiler {
         bytecode.push(Byte::new(Instruction::BITAND));
     }
 
-    /// Boxed `ObjEnum` Result → pointer niche (`Ok` aligned / `Err` `| 1`).
-    fn emit_boxed_result_to_niche(bytecode: &mut CodeBuf) {
-        let mut bb = BlockBuilder::new();
-        let ok = bb.fresh_label(bytecode.il_mut());
-        let err = bb.fresh_label(bytecode.il_mut());
-        let end = bb.fresh_label(bytecode.il_mut());
-        bb.emit_jump_to(
-            ok,
-            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.emit_jump_to(
-            err,
-            BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
-            bytecode.il_mut(),
-        );
-        bb.bind_label(err, bytecode.il_mut());
-        Self::push_result_err_bit(bytecode);
-        bb.emit_jump_to(end, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(ok, bytecode.il_mut());
-        bb.bind_label(end, bytecode.il_mut());
-    }
-
     /// Option-shaped `Result<(), E>` → boxed `ObjEnum`.
     fn emit_unit_result_niche_to_boxed(bytecode: &mut CodeBuf) {
         let mut bb = BlockBuilder::new();
