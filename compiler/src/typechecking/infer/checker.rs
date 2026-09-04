@@ -1171,6 +1171,9 @@ impl Checker {
             "env_exec" => fun(&[string(), vec_app_ty(string())], res_int_env),
             "env_exit" => fun(&[int()], unit_ty()),
 
+            "clock_wall_nanos" | "clock_mono_nanos" => fun(&[], int()),
+            "clock_sleep_ms" => fun(&[int()], unit_ty()),
+
             _ => {
                 let mut msg = Message::error(
                     ErrorCode::GenericTypeError,

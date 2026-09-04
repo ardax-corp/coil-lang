@@ -8036,6 +8036,30 @@ fn virtual_crypto_module_does_not_resolve() {
     );
 }
 
+/// HostInvoke + virtual `clock`: wall/mono advance across a short sleep.
+#[test]
+fn clock_natives_move_forward_via_host_invoke() {
+    let output = run_example_src(
+        r#"
+use clock::{mono_nanos, sleep_ms, wall_nanos};
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn main() {
+    let w0 = wall_nanos();
+    let m0 = mono_nanos();
+    sleep_ms(15);
+    let w1 = wall_nanos();
+    let m1 = mono_nanos();
+    let wall_ok = if w1 > w0 { 1 } else { 0 };
+    let mono_ok = if m1 > m0 { 1 } else { 0 };
+    write(stdout(), to_bytes(format("%i%i", wall_ok, mono_ok)));
+}
+"#,
+    );
+    assert_eq!(output, "11", "wall and mono must advance, got {output:?}");
+}
+
 /// HostInvoke + virtual `io::fs` wiring: `exists(".")` returns Ok.
 #[test]
 fn fs_exists_dot_ok_via_host_invoke() {

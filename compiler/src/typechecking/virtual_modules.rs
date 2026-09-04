@@ -51,6 +51,9 @@ pub const ENV_MODULE: &str = "env";
 /// Explicit GC pins and weak handles (`root`, `weak`, `Root`, `Weak`, …).
 pub const GC_MODULE: &str = "gc";
 
+/// Process clocks (`wall_nanos`, `mono_nanos`, `sleep_ms`). Not virtual `time`.
+pub const CLOCK_MODULE: &str = "clock";
+
 /// Which userland FFI builtin a virtual export names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FfiBuiltin {
@@ -867,6 +870,15 @@ impl VirtualModules {
         ]));
         modules.insert(ENV_MODULE, env_exports);
 
+        modules.insert(
+            CLOCK_MODULE,
+            host_exports(&[
+                ("wall_nanos", common::CLOCK_WALL_NANOS_NATIVE),
+                ("mono_nanos", common::CLOCK_MONO_NANOS_NATIVE),
+                ("sleep_ms", common::CLOCK_SLEEP_MS_NATIVE),
+            ]),
+        );
+
         Self { modules }
     }
 
@@ -1231,6 +1243,7 @@ mod tests {
         assert!(!vm.resolves_use(&["time".into()], "*"));
         assert!(vm.resolves_use(&["io".into(), "fs".into()], "*"));
         assert!(vm.resolves_use(&["env".into()], "*"));
+        assert!(vm.resolves_use(&["clock".into()], "*"));
         assert!(!vm.resolves_use(&["crypto".into()], "*"));
 
         assert!(vm.resolve_item(&["time".into()], "epoch").is_none());
@@ -1248,6 +1261,27 @@ mod tests {
             Some(BuiltinExport::HostFn {
                 surface: "var",
                 registry: "env_var"
+            })
+        ));
+        assert!(matches!(
+            vm.resolve_item(&["clock".into()], "wall_nanos"),
+            Some(BuiltinExport::HostFn {
+                surface: "wall_nanos",
+                registry: "clock_wall_nanos"
+            })
+        ));
+        assert!(matches!(
+            vm.resolve_item(&["clock".into()], "mono_nanos"),
+            Some(BuiltinExport::HostFn {
+                surface: "mono_nanos",
+                registry: "clock_mono_nanos"
+            })
+        ));
+        assert!(matches!(
+            vm.resolve_item(&["clock".into()], "sleep_ms"),
+            Some(BuiltinExport::HostFn {
+                surface: "sleep_ms",
+                registry: "clock_sleep_ms"
             })
         ));
         assert!(vm.resolve_item(&["crypto".into()], "sha256").is_none());

@@ -7463,15 +7463,16 @@ fn main() {
 
     #[test]
     fn host_fn_scheme_covers_all_wiring_registries() {
-        use machine::{ENV_WIRING, FS_WIRING};
+        use machine::{CLOCK_WIRING, ENV_WIRING, FS_WIRING};
 
         let mut c = Checker::new();
         let names: Vec<&str> = FS_WIRING
             .iter()
             .chain(ENV_WIRING.iter())
+            .chain(CLOCK_WIRING.iter())
             .map(|&(n, _, _)| n)
             .collect();
-        assert_eq!(names.len(), 24);
+        assert_eq!(names.len(), 27);
         for name in names {
             let _ = c.host_fn_scheme(name, 0..0);
         }
