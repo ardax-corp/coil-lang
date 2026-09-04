@@ -69,6 +69,12 @@ fn chained(int a, int b) -> Result<int, int> {
     return q + 1;
 }
 
+fn bind_then_try(int a, int b) -> Result<int, int> {
+    let r = checked_div(a, b);
+    let q = r?;
+    return Result::Ok(q);
+}
+
 test("result int int direct match") {
     assert(match checked_div(10, 2) {
         Result::Ok(q) => q == 5,
@@ -142,8 +148,10 @@ test("bind site keeps two-slot local (match / ? without boxing)") {
         Result::Ok(v) => v == 3,
         Result::Err(_) => false,
     })?;
-    let q = checked_div(8, 2)?;
-    assert(q == 4)?;
+    assert(match bind_then_try(8, 2) {
+        Result::Ok(v) => v == 4,
+        Result::Err(_) => false,
+    })?;
 }
 
 test("two-word Result Try propagates through raise/?") {
