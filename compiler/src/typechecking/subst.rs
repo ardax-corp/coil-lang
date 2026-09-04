@@ -253,12 +253,6 @@ pub fn ftv(ty: &Ty) -> HashSet<TyVarId> {
     ftv_ty(ty)
 }
 
-/// Re-export of `ftv_scheme` at the module level for ergonomics.
-#[allow(dead_code)]
-pub fn ftv_sch(s: &Scheme) -> HashSet<TyVarId> {
-    ftv_scheme(s)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

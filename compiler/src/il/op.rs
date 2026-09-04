@@ -328,11 +328,6 @@ impl IlOp {
         Self::from_plain_byte(byte, DebugLoc::unknown())
     }
 
-    #[allow(dead_code)]
-    pub fn byte_at(byte: Byte, loc: DebugLoc) -> Self {
-        Self::from_plain_byte(byte, loc)
-    }
-
     /// Lift a packed `Byte` into a typed hot-set variant when possible.
     pub fn from_plain_byte(byte: Byte, loc: DebugLoc) -> Self {
         match *byte.bytecode() {

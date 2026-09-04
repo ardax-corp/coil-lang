@@ -14,14 +14,6 @@ use std::collections::HashSet;
 pub struct TyVarId(pub u32);
 
 impl TyVarId {
-    /// Construct a `TyVarId` from a raw integer. Only callable from inside
-    /// the typechecking module — `Checker` is responsible for minting fresh
-    /// IDs.
-    #[allow(dead_code)]
-    pub(crate) fn new(raw: u32) -> Self {
-        Self(raw)
-    }
-
     /// The underlying integer. Used by the pretty-printer.
     pub fn raw(self) -> u32 {
         self.0
@@ -343,7 +335,7 @@ pub const ROOT: &str = "Root";
 /// Name of the `Weak` type constructor (`gc::Weak`).
 pub const WEAK: &str = "Weak";
 /// Name of the `List` type constructor.
-#[allow(dead_code)] // reserved for future list-type support
+#[allow(dead_code)] // name reserved; list types still use Ty::List, not Ty::Con(LIST)
 pub const LIST: &str = "List";
 
 /// Build the `int` type.

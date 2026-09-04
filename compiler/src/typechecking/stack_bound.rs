@@ -77,14 +77,10 @@ enum MeasureStep {
 /// Unified decreasing-measure shape for stack-bound proofs.
 #[derive(Debug, Clone)]
 struct RecMeasureShape {
-    #[allow(dead_code)]
-    measure_param: String,
     measure_index: usize,
     base_bound: Option<i64>,
     /// Minimum positive decrease across all self-calls.
     step: MeasureStep,
-    #[allow(dead_code)]
-    self_calls: usize,
 }
 
 /// Analyze recursion depth bounds; emit errors when `#[max_depth]` is required.
@@ -101,7 +97,7 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
 
     let mut measure_shapes: HashMap<String, RecMeasureShape> = HashMap::new();
     let mut tail_only: HashSet<String> = HashSet::new();
-    let mut fn_meta: HashMap<String, FnMeta<'_>> = HashMap::new();
+    let mut fn_meta: HashMap<String, FnMeta> = HashMap::new();
     collect_fn_meta(ast, &recursive, &mut fn_meta, &mut measure_shapes, &mut tail_only);
 
     // Wrapper / entry const params (interprocedural), then entry sites.
@@ -253,13 +249,11 @@ enum DepthProof {
     Unprovable,
 }
 
-struct FnMeta<'a> {
+struct FnMeta {
     span: std::ops::Range<usize>,
     max_depth: Option<u32>,
     attr_error: Option<Message>,
     self_recursive: bool,
-    #[allow(dead_code)]
-    attrs: &'a [Attribute<'a>],
 }
 
 fn prove_measure_depth(
@@ -359,7 +353,7 @@ fn parse_max_depth_attr(
 fn collect_fn_meta<'a>(
     ast: &'a Output<'a>,
     recursive: &HashSet<String>,
-    out: &mut HashMap<String, FnMeta<'a>>,
+    out: &mut HashMap<String, FnMeta>,
     shapes: &mut HashMap<String, RecMeasureShape>,
     tail_only: &mut HashSet<String>,
 ) {
@@ -391,7 +385,6 @@ fn collect_fn_meta<'a>(
                     max_depth,
                     attr_error,
                     self_recursive,
-                    attrs,
                 },
             );
             if let Some(shape) = detect_measure_shape(name, args, body) {
@@ -475,11 +468,9 @@ fn detect_measure_shape(
         }
         // Accept shape even without base_bound so diagnostics can ask for a base case.
         return Some(RecMeasureShape {
-            measure_param: measure_param.clone(),
             measure_index,
             base_bound,
             step,
-            self_calls: self_calls.len(),
         });
     }
     None
