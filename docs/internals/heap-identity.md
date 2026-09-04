@@ -18,9 +18,11 @@ kind tags (1..=18) are unchanged.
 Allocate `GcData<T>` headers from a **mapped slab** (size-class free lists;
 64KiB anonymous chunks). Sweep **poisons** `GcHeader.kind = 0` and returns
 the slot to the free list; chunks stay mapped. Payload `Vec`s (array
-elements, instance fields, interned string bytes) stay ordinary Rust allocs in
-this cut — tree nodes still pay a field vector unless a later inline-small
-object slice lands.
+elements, interned string bytes) stay ordinary Rust allocs in this cut.
+Typed class instances use dense slots
+([#287](https://github.com/ardax-corp/coil-lang/pull/287)); small `ObjEnum`
+payloads can inline ([#290](https://github.com/ardax-corp/coil-lang/pull/290)).
+Do not treat either as a nursery or a second ArrayPtr.
 
 Traversal stays the intrusive `head` list. Collection trigger stays
 `alloc_bytes` versus `gc_next_threshold`.
@@ -49,9 +51,14 @@ a parallel live-set: two sources of truth.
 - A nursery / generational split in this cut.
 - Wiring the unused `allocator.rs` sketch (`Rc`, not the live VM).
 
-## Success
+## Success (vs `main`)
 
-`binary_trees` malloc count / heaptrack peak versus the COI-200 baseline
-(~137k mallocs, ~1.82 MB), plus `./scripts/poop_baseline.sh` with no
-mandelbrot / tak / nsieve regression. Valgrind memcheck on debug `coil test`
-after the slab lands.
+Slab + header poison is **on `main`**. Re-check `binary_trees` malloc count /
+heaptrack peak versus the COI-200 baseline (~137k mallocs, ~1.82 MB) and
+`./scripts/poop_baseline.sh` with no mandelbrot / tak / nsieve regression.
+Valgrind memcheck on debug `coil test` remains the leak gate.
+
+Payload-layout follow-ups already on `main`: dense typed class slots
+([#287](https://github.com/ardax-corp/coil-lang/pull/287)), inline-small
+`ObjEnum` ([#290](https://github.com/ardax-corp/coil-lang/pull/290)). Residual
+cost is still payload `Vec`s for arrays/strings — not identity hashing.
