@@ -3,8 +3,8 @@
 //! Mandelbrot `cr`/`ci` are typically `CONST; LOAD; Cast; …; STORE`. Inline
 //! `Cast; STORE t; LOAD t` leaves glue between the const and stage0. This peep
 //! hoists every `LOAD; Cast` in the window into a prefix of
-//! `LOAD; Cast; STORE t`, then rewrites the body to `LOAD t` so fuse can match
-//! const-under / `LOAD; CONST` `FloatChainStore` shapes.
+//! `LOAD; Cast; STORE t`, then rewrites the body to `LOAD t` so fuse-select
+//! can match const-under / `LOAD; CONST` (FCS is a tombstone; not selected).
 
 use common::Instruction;
 

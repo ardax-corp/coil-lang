@@ -45,7 +45,7 @@ Names, types, and call meaning live in **DefIds** and the **typed sidecar** (B1�
 
 `None ⊂ Basic ⊂ Standard ⊂ Aggressive` on enable flags. Size and Debug are independent axes.
 
-Branch layout (COI-128) is **on** by default (`branch_optimization`). It inverts a terminating then-arm after `JMPF`/`JMPT` only when operand height is Known at the jump and along the moved arm, and mints a module-wide-unique label for the cold region so later functions cannot bind the same id. A profile that says the fall-through is hot leaves the layout alone.
+Branch layout (COI-128) is **on** by default (`branch_optimization`). It inverts a terminating then-arm after `JMPF`/`JMPT` only when operand height is Known at the jump and along the moved arm, and mints a module-wide-unique label for the cold region so later functions cannot bind the same id. Layout is heuristic only (terminating then-arm is cold); there is no compile-time profile.
 
 Basic-block reordering (COI-129) is **on** by default (`block_reordering`). It only sinks jump-only terminating blocks that are not fall-through successors and are not unconditional-jump joins, so labels and branch polarity stay put.
 

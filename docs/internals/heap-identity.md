@@ -2,9 +2,10 @@
 
 [COI-200](https://linear.app/ardax/issue/COI-200) asked whether `binary_trees`
 is bound by `Heap::alloc` identity work: one `Box<GcData>` per object plus a
-hot-path `live` HashSet probe in `find_object_by_addr`. This note is the
-layout. **Decision: implement slab + header poison** (this crate, no bytecode
-change). It is not a second ArrayPtr, not a handle table, and not a moving GC.
+then-hot-path `live` HashSet probe in `find_object_by_addr`. That HashSet is
+gone. This note is the layout. **Decision: implement slab + header poison**
+(this crate, no bytecode change). It is not a second ArrayPtr, not a handle
+table, and not a moving GC.
 
 Pins remain the product for proven loops ([array-pin.md](array-pin.md),
 [COI-198](https://linear.app/ardax/issue/COI-198)). Unproven `Index` /
