@@ -8045,7 +8045,7 @@ use clock::{mono_nanos, sleep_ms, wall_nanos};
 use io::{stdout, write};
 use string::{format, to_bytes};
 
-fn flag(later: int, earlier: int) -> int {
+fn flag(int later, int earlier) -> int {
     if later > earlier {
         return 1;
     }
