@@ -11,7 +11,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [SIMD](simd.md) | `coil-simd` — stable `std::arch` kernels for packed LA |
 | [Auto-par](auto-par.md) | Purity analysis + capped fork-join for recursive binops |
-| [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **120**/`stream_attach`, **121**/`stream_park` |
+| [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **120**/`stream_attach`, **121**/`stream_park`; clocks **122–124** (`clock_wall_nanos` / `clock_mono_nanos` / `clock_sleep_ms`) |
 | [Stack bounds](stack-bounds.md) | Recursion depth analysis and `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |
