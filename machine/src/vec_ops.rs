@@ -184,7 +184,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn pop_heap_item_under_option_niche_does_not_box() {
         use crate::host_enum::{with_host_enum_layout, HostEnumLayout};
         let mut heap = Heap::default();

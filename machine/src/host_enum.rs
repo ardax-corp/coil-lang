@@ -13,7 +13,7 @@ use std::cell::Cell;
 
 use common::{
     host_invoke_enum_layout, Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
-    HOST_ENUM_LAYOUT_RESULT_NICHE,
+    HOST_ENUM_LAYOUT_RESERVED, HOST_ENUM_LAYOUT_RESULT_NICHE,
 };
 
 use crate::io::{alloc_option_none, alloc_option_some, alloc_result_err, alloc_result_ok};
@@ -40,10 +40,16 @@ impl HostEnumLayout {
         Self::from_u32(host_invoke_enum_layout(operand))
     }
 
+    /// Decode operand bits. `0` is Boxed; `1`/`2` are niches.
+    ///
+    /// Reserved value `3` (and any other code) maps to [`Self::Boxed`] on
+    /// purpose: an unknown layout must not select a niche (immediates would
+    /// panic in pack). It is not a third niche ABI.
     pub fn from_u32(bits: u32) -> Self {
         match bits {
             HOST_ENUM_LAYOUT_OPTION_NICHE => Self::OptionNiche,
             HOST_ENUM_LAYOUT_RESULT_NICHE => Self::ResultNiche,
+            HOST_ENUM_LAYOUT_BOXED => Self::Boxed,
             _ => Self::Boxed,
         }
     }
@@ -405,6 +411,15 @@ mod tests {
         // Niche word at a boxed boundary is not an ObjEnum — fail closed.
         assert!(unpack_result(&heap, HostEnumLayout::Boxed, ok).is_err());
         assert!(pack_option(&mut heap, HostEnumLayout::ResultNiche, None).is_err());
+    }
+
+    #[test]
+    fn reserved_layout_3_decodes_as_boxed() {
+        assert_eq!(
+            HostEnumLayout::from_u32(HOST_ENUM_LAYOUT_RESERVED),
+            HostEnumLayout::Boxed
+        );
+        assert_eq!(HostEnumLayout::from_u32(99), HostEnumLayout::Boxed);
     }
 
     #[test]
