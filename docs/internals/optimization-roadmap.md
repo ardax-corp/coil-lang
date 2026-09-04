@@ -98,12 +98,10 @@ titles can oversell.
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
 | **`seek_back_edge`** | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Default off** on `Standard` (cursor: Seek poisons latch operand-height). **`Aggressive` / `-O3` turns it on**. |
-| **PGO** | `--pgo-instrument` / `--pgo-use-profile` two-phase plumbing | **Measured, demoted.** Compile-time only. Decision opts may prioritize hot loops when a profile is loaded. Keep the plumbing; do **not** advertise as a product win. Tip `e22c970a`, rustc 1.98, `COIL_AUTO_PAR=0`: per-bench `--pgo-instrument --pgo-generate-profile` → sanitize `fn_checksums` → baseline vs `--pgo-use-profile` `.hyc` → hyperfine `coil run`. Layout-changing archives (binary_trees, result_int_churn, option_int_churn, result_try_churn) were **flat** (±5%). Identical-bytecode “wins” (nsieve, field_hot) are noise, not PGO. |
 | **`iterative_optimization`** | Fixpoint re-runs of the IL pipeline | **Default off** (COI-130). |
 | **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
 | **Branch layout / block reorder** | Profile/heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
 
-**PGO (COI-132):** measured and **demoted** — keep plumbing, do not advertise.
 Inlining / predicate peel / direct `new Class(args).field` scalar replacement
 live in **codegen**, not `il/opt` (self-recursive peel refused, COI-86). No JIT
 — Cranelift section below remains a feasibility sketch.
