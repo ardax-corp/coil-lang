@@ -2,6 +2,7 @@
 //!
 //! Ids are the table index. New natives go at the end. Do not reorder or
 //! reuse slots. Frozen: 119 = `pgo_hit`, 120 = `stream_attach`, 121 = `stream_park`.
+//! Append-only after that: 122–124 = `clock_*`.
 
 /// One standard host native: stable name, declared arity, HostInvoke id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -625,6 +626,21 @@ pub const HOST_NATIVES: &[HostNative] = &[
         arity: 1,
         id: 121,
     },
+    HostNative {
+        name: "clock_wall_nanos",
+        arity: 0,
+        id: 122,
+    },
+    HostNative {
+        name: "clock_mono_nanos",
+        arity: 0,
+        id: 123,
+    },
+    HostNative {
+        name: "clock_sleep_ms",
+        arity: 1,
+        id: 124,
+    },
 ];
 
 /// Frozen HostInvoke id for `pgo_hit`.
@@ -633,10 +649,19 @@ pub const PGO_HIT_ID: u16 = 119;
 pub const STREAM_ATTACH_ID: u16 = 120;
 /// Frozen HostInvoke id for `stream_park`.
 pub const STREAM_PARK_ID: u16 = 121;
+/// HostInvoke id for `clock_wall_nanos`.
+pub const CLOCK_WALL_NANOS_ID: u16 = 122;
+/// HostInvoke id for `clock_mono_nanos`.
+pub const CLOCK_MONO_NANOS_ID: u16 = 123;
+/// HostInvoke id for `clock_sleep_ms`.
+pub const CLOCK_SLEEP_MS_ID: u16 = 124;
 
 pub const PGO_HIT_NATIVE: &str = "pgo_hit";
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
+pub const CLOCK_WALL_NANOS_NATIVE: &str = "clock_wall_nanos";
+pub const CLOCK_MONO_NANOS_NATIVE: &str = "clock_mono_nanos";
+pub const CLOCK_SLEEP_MS_NATIVE: &str = "clock_sleep_ms";
 
 /// Low 16 bits of a `HostInvoke` operand are the argument count.
 pub const HOST_INVOKE_ARITY_MASK: u32 = 0xFFFF;
@@ -677,10 +702,13 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 122);
+    assert!(HOST_NATIVES.len() == 125);
     assert!(HOST_NATIVES[119].id == PGO_HIT_ID);
     assert!(HOST_NATIVES[120].id == STREAM_ATTACH_ID);
     assert!(HOST_NATIVES[121].id == STREAM_PARK_ID);
+    assert!(HOST_NATIVES[122].id == CLOCK_WALL_NANOS_ID);
+    assert!(HOST_NATIVES[123].id == CLOCK_MONO_NANOS_ID);
+    assert!(HOST_NATIVES[124].id == CLOCK_SLEEP_MS_ID);
 };
 
 /// HostInvoke id for a standard native name.
@@ -776,6 +804,9 @@ mod tests {
         assert_eq!(host_native_id(PGO_HIT_NATIVE), Some(119));
         assert_eq!(host_native_id(STREAM_ATTACH_NATIVE), Some(120));
         assert_eq!(host_native_id(STREAM_PARK_NATIVE), Some(121));
+        assert_eq!(host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(122));
+        assert_eq!(host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(123));
+        assert_eq!(host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(124));
         assert_eq!(HOST_NATIVES[24].name, "udp_local_port");
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
