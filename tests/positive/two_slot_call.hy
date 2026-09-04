@@ -4,7 +4,8 @@
 // errors), `Option<int>`, and user payload enums of arity ≤1 move
 // `[payload, tag]` on a direct CALL/RETURN instead of boxing an `ObjEnum`.
 // Matching the call directly (`match f(...) { ... }`) uses the same
-// EQ/JMPF lowering as a frame-local match (#278) — no allocation. Niched
+// EQ/JMPF lowering as a frame-local match (#278) — no allocation. `?`
+// and `let r = f()` stay on the pair; box only at escape. Niched
 // heap `Option<T>` / heap-heap `Result<T,E>` stay one word (unaffected).
 
 enum HttpError {
@@ -130,7 +131,7 @@ test("payload enum arity 1 direct match, either variant order") {
     })?;
 }
 
-test("bind site still matches (not the immediate-match fast path)") {
+test("bind site keeps two-slot local (match / ? without boxing)") {
     let x = maybe(2);
     assert(match x {
         Option::Some(v) => v == 2,
@@ -141,6 +142,8 @@ test("bind site still matches (not the immediate-match fast path)") {
         Result::Ok(v) => v == 3,
         Result::Err(_) => false,
     })?;
+    let q = checked_div(8, 2)?;
+    assert(q == 4)?;
 }
 
 test("two-word Result Try propagates through raise/?") {

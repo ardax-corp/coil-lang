@@ -7056,13 +7056,13 @@ fn main() {
         assert!(
             !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
-            "unary Option<int> return must stay boxed; opcodes={:?}",
+            "unary Option<int> must not revive ReturnPair; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "unary Option<int> return must MakeEnum; opcodes={:?}",
+            "unary Option<int> bind of a two-slot CALL must not box; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -7859,7 +7859,7 @@ fn main() {
     }
 
     #[test]
-    fn option_int_still_boxes() {
+    fn option_int_bind_stays_two_slot() {
         let (bc, _) = compile_src(
             r#"
 fn give() -> Option<int> {
@@ -7875,9 +7875,17 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "Option<int> must stay boxed ObjEnum; opcodes={:?}",
+            "Option<int> bind+match must stay two-slot; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::HeapToPair
+            )),
+            "must not revive pair opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7944,7 +7952,7 @@ fn main() {
     }
 
     #[test]
-    fn result_int_payload_still_boxes() {
+    fn result_int_bind_stays_two_slot() {
         let (bc, _) = compile_src(
             r#"
 fn give() -> Result<int, int> {
@@ -7960,9 +7968,17 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "Result<int, int> must stay boxed ObjEnum; opcodes={:?}",
+            "Result<int, int> bind+match must stay two-slot; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::HeapToPair
+            )),
+            "must not revive pair opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7990,6 +8006,110 @@ fn main() {
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
             "Result with an immediate payload must stay boxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn two_slot_try_skips_make_enum() {
+        let (bc, _) = compile_src(
+            r#"
+fn step(int n) -> Result<int, int> {
+    if n == 0 {
+        return Result::Err(-1);
+    }
+    return Result::Ok(n);
+}
+fn pipe(int n) -> Result<int, int> {
+    let a = step(n)?;
+    let b = step(a)?;
+    return Result::Ok(a + b);
+}
+fn main() {
+    let _ = pipe(2);
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "`?` on two-slot Result must not box ObjEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "pipe must CALL step as two-slot; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::JumpIfMatch
+            )),
+            "two-slot `?` uses EQ/JMP, not JumpIfMatch / pair opcodes; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn two_slot_bind_escape_boxes() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Option<int> {
+    return Option::Some(1);
+}
+fn take(Option<int> o) -> int {
+    return match o {
+        Option::Some(n) => n,
+        Option::None => 0,
+    };
+}
+fn main() {
+    let x = give();
+    let _ = take(x);
+}
+"#,
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "escaping two-slot bind must box at the call; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn result_try_churn_does_not_make_enum() {
+        let src = include_str!("../../../examples/perf/result_try_churn.hy");
+        let (bc, _) = compile_src(src);
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "result_try_churn must not allocate ObjEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "result_try_churn must use two-slot CALL; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair
+                    | Instruction::PairToHeap
+                    | Instruction::HeapToPair
+                    | Instruction::PairJumpIfTag
+            )),
+            "result_try_churn must not revive pair opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
