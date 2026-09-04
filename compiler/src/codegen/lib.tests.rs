@@ -7322,10 +7322,30 @@ fn main() {
             .count();
         assert!(
             boxed_hosts >= 2,
-            "from + shared pop thunk + int pop site should stay Boxed; opcodes={:?}",
+            "from + shared pop thunk should stay Boxed; opcodes={:?}",
             bc.iter()
                 .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
                 .collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+                .all(|b| {
+                    common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_BOXED
+                }),
+            "int Vec::pop must not stamp niche bits; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.windows(2).any(|w| {
+                matches!(w[0].bytecode(), Instruction::CALL)
+                    && matches!(w[1].bytecode(), Instruction::JumpIfMatch)
+            }),
+            "int Vec::pop must not unwrap the boxed thunk; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
         assert!(!host_niche_immediately_unwraps(&bc));
     }
