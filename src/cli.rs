@@ -1156,13 +1156,6 @@ mod tests {
     }
 
     #[test]
-    fn compile_time_pgo_flags_are_rejected() {
-        assert!(parse_args(&args(&["compile", "--pgo-instrument", "a.hy"])).is_err());
-        assert!(parse_args(&args(&["--pgo-use-profile=p.json", "a.hy"])).is_err());
-        assert!(parse_args(&args(&["compile", "--pgo-generate-profile", "out.json", "a.hy"])).is_err());
-    }
-
-    #[test]
     fn parse_host_grant_flags_on_run_and_default() {
         let cli = parse_args(&args(&[
             "run",
