@@ -7910,11 +7910,11 @@ impl Compiler {
         self.pair_return_kinds.borrow_mut().clear();
     }
 
-    /// `Some(enum_name)` for a compiled function whose direct CALL/RETURN can
-    /// use the known ≤2-word `[payload, tag]` ABI (see
-    /// `typechecking::return_layout`). Niched heap `Option<T>` / heap-heap
-    /// `Result<T, E>`, unbounded `T`, and coroutines stay `None` (boxed
-    /// `ObjEnum` / one-word ABI); those opcodes remain tombstones.
+    /// `Some(kind)` for a compiled function whose direct CALL/RETURN can
+    /// use the known ≤2-word ABI (see `typechecking::return_layout`).
+    /// Enums are `[payload, tag]`; arity-2 immediate products are `[a, b]`.
+    /// Niched heap `Option<T>` / heap-heap `Result<T, E>`, unbounded `T`,
+    /// mixed-heap / wider products, and coroutines stay `None`.
     fn two_word_return_kind(&self, name: &str) -> Option<String> {
         if let Some(cached) = self.pair_return_kinds.borrow().get(name) {
             return cached.clone();
@@ -8116,13 +8116,67 @@ impl Compiler {
         }
     }
 
+    fn expr_arity2_tuple_items<'a>(expr: &'a Output<'a>) -> Option<(&'a Output<'a>, &'a Output<'a>)> {
+        let mut cur = expr;
+        loop {
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        match cur.1.as_ref() {
+            Expression::Tuple(items) if items.len() == 2 => Some((&items[0], &items[1])),
+            _ => None,
+        }
+    }
+
+    /// Heap tuple on TOS → `[a, b]` via `Index` (no new opcode).
+    fn emit_unbox_product_to_pair(&mut self, bytecode: &mut CodeBuf) {
+        self.expr_depth += 1;
+        let tmp = self.alloc_temp_slot();
+        self.expr_depth -= 1;
+        bytecode.push_store_pop(tmp);
+        bytecode.push_load(tmp);
+        bytecode.push_const(0);
+        bytecode.push_index();
+        bytecode.push_load(tmp);
+        bytecode.push_const(1);
+        bytecode.push_index();
+    }
+
     /// Compile `expr` (the value returned from a two-word `enum_name`
-    /// function) as `[payload, tag]` for a two-slot `RETURN`. Prefers the
-    /// alloc-free paths — a direct `Construct` of `enum_name`, or a
-    /// pass-through direct `CALL` of another two-word function returning the
-    /// same enum — and falls back to ordinary (boxed) compilation plus an
-    /// unbox cascade for anything else (e.g. a variable, a nested match).
+    /// function) as two words for a two-slot `RETURN`. Prefers the
+    /// alloc-free paths — a direct `Construct` of `enum_name`, an arity-2
+    /// tuple literal, or a pass-through direct `CALL` of another two-word
+    /// function returning the same kind — and falls back to ordinary
+    /// (boxed) compilation plus an unbox for anything else.
     fn emit_two_word_return_value(&mut self, bytecode: &mut CodeBuf, expr: &Output, enum_name: &str) {
+        if crate::typechecking::return_layout::is_two_word_product_kind(enum_name) {
+            if let Some((a, b)) = Self::expr_arity2_tuple_items(expr) {
+                // Compile components only — do not raise `unbox_enum_context`.
+                self.skip_emit_ids_to_unwrapped(expr);
+                self.append_with_existential_pack(bytecode, a);
+                self.append_with_existential_pack(bytecode, b);
+                return;
+            }
+            let is_fast_call =
+                self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
+            if is_fast_call {
+                self.unbox_enum_context += 1;
+                self.append_with_existential_pack(bytecode, expr);
+                self.unbox_enum_context -= 1;
+                return;
+            }
+            if let Some((a, b)) = self.expr_unboxed_enum_slots(expr) {
+                bytecode.push_load(a);
+                bytecode.push_load(b);
+                return;
+            }
+            self.append_with_existential_pack(bytecode, expr);
+            self.emit_unbox_product_to_pair(bytecode);
+            return;
+        }
         let is_fast_construct = Self::expr_is_construct_of(expr, enum_name);
         let is_fast_call = !is_fast_construct
             && self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
@@ -8230,6 +8284,12 @@ impl Compiler {
         tag_slot: u32,
         payload_slot: u32,
     ) {
+        if crate::typechecking::return_layout::is_two_word_product_kind(enum_name) {
+            bytecode.push_load(payload_slot);
+            bytecode.push_load(tag_slot);
+            bytecode.push_make_tuple(2);
+            return;
+        }
         let Some(mut variants) = checker.enum_variants(enum_name).filter(|v| !v.is_empty()) else {
             bytecode.push_make_enum(0, 0);
             return;
@@ -9166,6 +9226,83 @@ impl Compiler {
         // Rest params are `Vec<T>` in schemes (`parse_arg_list`); match that
         // shape so `emit_call_site_dicts` can bind constraint vars.
         vec_app_ty(element)
+    }
+
+    /// `let (a, b) = pair()` / `let (a, b) = p` for a two-slot product:
+    /// consume `[a, b]` without boxing an `ObjTuple`. Nested patterns and
+    /// non-product RHS stay on the heap `Index` path.
+    fn try_emit_two_word_product_destructure(
+        &mut self,
+        pattern: &parser::ast::LetPattern<'_>,
+        rhs: &Output<'_>,
+        bytecode: &mut CodeBuf,
+    ) -> bool {
+        use parser::ast::LetPattern;
+        let LetPattern::Tuple(parts) = pattern else {
+            return false;
+        };
+        if parts.len() != 2
+            || parts
+                .iter()
+                .any(|p| matches!(p, LetPattern::Tuple(_) | LetPattern::Record(_)))
+        {
+            return false;
+        }
+        let from_call = self
+            .expr_direct_call_two_word_kind(rhs)
+            .is_some_and(|k| crate::typechecking::return_layout::is_two_word_product_kind(&k));
+        let from_local = self.expr_two_word_pair_kind(rhs).is_some_and(|k| {
+            crate::typechecking::return_layout::is_two_word_product_kind(&k)
+                && self.expr_unboxed_enum_slots(rhs).is_some()
+        });
+        if !from_call && !from_local {
+            return false;
+        }
+        let rhs_is_match = Self::rhs_is_match_expr(rhs);
+        self.unbox_enum_context += 1;
+        if rhs_is_match {
+            self.emit_binding_rhs(rhs);
+        } else {
+            self.append_binding_rhs(bytecode, rhs);
+        }
+        self.unbox_enum_context -= 1;
+        self.expr_depth += 2;
+        let slot_b = self.alloc_temp_slot();
+        let slot_a = self.alloc_temp_slot();
+        self.expr_depth -= 2;
+        if rhs_is_match {
+            self.bytecode.push_store_pop(slot_b);
+            self.bytecode.push_store_pop(slot_a);
+            let mut binds = CodeBuf::new();
+            self.emit_product_part_binds(parts, slot_a, slot_b, &mut binds);
+            self.bytecode.append(&mut binds);
+        } else {
+            bytecode.push_store_pop(slot_b);
+            bytecode.push_store_pop(slot_a);
+            self.emit_product_part_binds(parts, slot_a, slot_b, bytecode);
+        }
+        true
+    }
+
+    fn emit_product_part_binds(
+        &mut self,
+        parts: &[parser::ast::LetPattern<'_>],
+        slot_a: u32,
+        slot_b: u32,
+        bytecode: &mut CodeBuf,
+    ) {
+        use parser::ast::LetPattern;
+        for (slot, part) in [(slot_a, &parts[0]), (slot_b, &parts[1])] {
+            match part {
+                LetPattern::Wildcard => {}
+                LetPattern::Binding { name } => {
+                    bytecode.push_load(slot);
+                    let dest = self.alloc_binding_slot(name);
+                    bytecode.push_store_pop(dest);
+                }
+                LetPattern::Tuple(_) | LetPattern::Record(_) => {}
+            }
+        }
     }
 
     /// Bind names from an irrefutable `let` pattern by reading from
@@ -11630,21 +11767,25 @@ impl Compiler {
             }
             // --- `let (a, b) = expr` / `let { x, y } = expr` ---
             Expression::LetDestructure { pattern, rhs } => {
-                let rhs_is_match = Self::rhs_is_match_expr(rhs);
-                if rhs_is_match {
-                    self.emit_binding_rhs(rhs);
+                if self.try_emit_two_word_product_destructure(pattern, rhs, &mut bytecode) {
+                    // `[a, b]` already bound; no heap tuple.
                 } else {
-                    self.append_binding_rhs(&mut bytecode, rhs);
-                }
-                let tmp = self.alloc_temp_slot();
-                if rhs_is_match {
-                    self.bytecode.push_store_pop(tmp);
-                    let mut binds = CodeBuf::new();
-                    self.emit_let_pattern_binds(pattern, tmp, &mut binds);
-                    self.bytecode.append(&mut binds);
-                } else {
-                    bytecode.push_store_pop(tmp);
-                    self.emit_let_pattern_binds(pattern, tmp, &mut bytecode);
+                    let rhs_is_match = Self::rhs_is_match_expr(rhs);
+                    if rhs_is_match {
+                        self.emit_binding_rhs(rhs);
+                    } else {
+                        self.append_binding_rhs(&mut bytecode, rhs);
+                    }
+                    let tmp = self.alloc_temp_slot();
+                    if rhs_is_match {
+                        self.bytecode.push_store_pop(tmp);
+                        let mut binds = CodeBuf::new();
+                        self.emit_let_pattern_binds(pattern, tmp, &mut binds);
+                        self.bytecode.append(&mut binds);
+                    } else {
+                        bytecode.push_store_pop(tmp);
+                        self.emit_let_pattern_binds(pattern, tmp, &mut bytecode);
+                    }
                 }
             }
 
@@ -12181,6 +12322,15 @@ impl Compiler {
                     && (*idx as usize) < n
                 {
                     bytecode.push_load(base + *idx as u32);
+                } else if let Expression::Identifier(name) = target.1.as_ref()
+                    && let Some((a, b)) = self.unboxed_enum_info(name)
+                    && self
+                        .unboxed_enum_kind(name)
+                        .is_some_and(crate::typechecking::return_layout::is_two_word_product_kind)
+                    && let Expression::Integer(idx) = index.1.as_ref()
+                    && (*idx == 0 || *idx == 1)
+                {
+                    bytecode.push_load(if *idx == 0 { a } else { b });
                 } else {
                     self.emit_index_from_parts(&mut bytecode, ast, target, index);
                 }
