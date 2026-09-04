@@ -30,7 +30,9 @@ Constrained ops (`insert` / `get_or` / …) are **inherent methods** on
 type-tied operations should be methods, not free functions — the compiler
 applies `impl` type-param bounds to method schemes and emits dictionary
 arguments on inherent method `CALL` (same ABI as free generics). Free generic
-functions that return `Option<T>` use the boxed enum ABI (archive major 4).
+functions that return `Option<T>` are still `E0127` (shared body boxes `T`).
+Ground `Option` / `Result` values use niche, two-slot, or boxed `ObjEnum` by
+shape (COI-92) — not a single boxed ABI.
 
 **`Option` field match:** `match` copies the field (GC pointer / immediate). Nested `match` on the same `Option` field is valid and does not empty the field — no write-back. See [COI-77](https://linear.app/ardax/issue/COI-77) and [Enums and Match](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/manual/tutorial/03-enums-and-match.md#match-does-not-consume-the-scrutinee).
 
@@ -39,7 +41,7 @@ functions that return `Option<T>` use the boxed enum ABI (archive major 4).
 | Gap | Impact | Recommended hoist |
 |-----|--------|-------------------|
 | `[Option<T>]` / `[Foo<K,V>]` | Nested generics in array element types parse | Done — write `[Option<int>]` directly |
-| Free `fn f<T>(T) -> Option<T>` | Boxed `Option` ABI (archive major 4); same as inherent methods | — |
+| Free `fn f<T>(T) -> Option<T>` | Still `E0127` (shared body boxes `T`); put that return on an inherent method. Ground `Option`/`Result` elsewhere is niche / two-slot / boxed by shape | — |
 | Functional `List` recursion can panic on stack | Prefer mutable class list for now | VM stack / `max_depth` interaction audit |
 
 ## Future (only if measured)
