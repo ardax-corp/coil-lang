@@ -31,7 +31,7 @@ User-facing docs live in [coil-website](https://github.com/ardax-corp/coil-websi
 
 ## Features
 
-Primitives (`int`, `float`, `string`, `bool`, `byte`), enums and `match`, records and dicts, generics and traits, classes, coroutines, `for x in`, ranges, FFI, non-blocking IO with sync adapters, OS threads, and a userland stdlib (`collections`, `text`, `bytes`, …). HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool.
+Primitives (`int`, `float`, `string`, `bool`, `byte`), scalar-backed enums and `match`, denser `Option`/`Result` ABIs (pointer niches and two-slot direct CALL), records and dicts, generics and traits, classes, coroutines, `for x in`, ranges, FFI, non-blocking IO with sync adapters, OS threads, and a userland stdlib (`collections`, `text`, `bytes`, …). HTTP is [coil-http](https://github.com/ardax-corp/coil-http) via spool.
 
 ## Repository layout
 

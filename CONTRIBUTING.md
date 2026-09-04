@@ -4,7 +4,7 @@
 
 ```bash
 cargo check --workspace          # lint gate
-cargo test --workspace           # full suite (~minutes)
+cargo test --workspace --lib --tests --bins   # required gate (skip Criterion benches)
 cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)  # leak smoke (64MB)
 ```
 
