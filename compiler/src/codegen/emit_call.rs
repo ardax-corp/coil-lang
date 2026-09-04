@@ -54,8 +54,7 @@ impl Compiler {
                     crate::typechecking::StringBuiltin::FromBytes
                     | crate::typechecking::StringBuiltin::ToBytes => {
                         if let Some(native_name) = kind.native_name() {
-                            self.emit_host_native_invoke(native_name, arg_slice);
-                            self.emit_host_option_boundary(ast);
+                            self.emit_host_native_invoke(native_name, arg_slice, Some(ast));
                         }
                     }
                 }
@@ -75,8 +74,7 @@ impl Compiler {
                     crate::typechecking::StringBuiltin::FromBytes
                     | crate::typechecking::StringBuiltin::ToBytes => {
                         if let Some(native_name) = kind.native_name() {
-                            self.emit_host_native_invoke(native_name, arg_slice);
-                            self.emit_host_option_boundary(ast);
+                            self.emit_host_native_invoke(native_name, arg_slice, Some(ast));
                         }
                     }
                 }
@@ -159,29 +157,29 @@ impl Compiler {
         if let Expression::Identifier(fname) = name.1.as_ref()
             && let Some(kind) = self.checker.io_fn_in_scope(fname)
         {
-            self.emit_io_host_invoke(kind, args.as_deref().unwrap_or(&[]));
-            self.emit_host_option_boundary(ast);
+            self.emit_io_host_invoke(kind, args.as_deref().unwrap_or(&[]), Some(ast));
             return bytecode;
         }
         if let Expression::Identifier(fname) = name.1.as_ref()
             && let Some(kind) = self.checker.thread_fn_in_scope(fname)
         {
-            self.emit_thread_host_invoke(kind, args.as_deref().unwrap_or(&[]));
-            self.emit_host_option_boundary(ast);
+            self.emit_thread_host_invoke(kind, args.as_deref().unwrap_or(&[]), Some(ast));
             return bytecode;
         }
         if let Expression::Identifier(fname) = name.1.as_ref()
             && let Some(kind) = self.checker.gc_fn_in_scope(fname)
         {
-            self.emit_host_native_invoke(kind.native_name(), args.as_deref().unwrap_or(&[]));
-            self.emit_host_option_boundary(ast);
+            self.emit_host_native_invoke(
+                kind.native_name(),
+                args.as_deref().unwrap_or(&[]),
+                Some(ast),
+            );
             return bytecode;
         }
         if let Expression::Identifier(fname) = name.1.as_ref()
             && let Some(registry) = self.checker.host_fn_in_scope(fname)
         {
-            self.emit_host_native_invoke(registry, args.as_deref().unwrap_or(&[]));
-            self.emit_host_option_boundary(ast);
+            self.emit_host_native_invoke(registry, args.as_deref().unwrap_or(&[]), Some(ast));
             return bytecode;
         }
 
@@ -530,14 +528,22 @@ impl Compiler {
                         0
                     };
                     let call_arity = 1 + nargs + dict_count as u32;
-                    if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
+                    let niche_vec = Self::vec_option_host_native(&lookup_name).filter(|_| {
+                        self.host_enum_layout_for_expr(ast)
+                            == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                    });
+                    if let Some(native) = niche_vec {
+                        if !self.emit_host_invoke_from_call_args(
+                            &mut bytecode,
+                            native,
+                            call_arity,
+                            common::HOST_ENUM_LAYOUT_OPTION_NICHE,
+                        ) && !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity)
+                        {
+                            self.missing_call_target(&call_name, span.into_range());
+                        }
+                    } else if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
                         self.missing_call_target(&call_name, span.into_range());
-                    }
-                    if (self.expr_is_niche_option(ast) || self.force_niche_option)
-                        && (lookup_name == format!("{}::pop", common::BUILTIN_VEC_TYPE)
-                            || lookup_name == format!("{}::remove", common::BUILTIN_VEC_TYPE))
-                    {
-                        Self::emit_boxed_option_to_niche(&mut bytecode);
                     }
                     if is_generic && self.generic_return_is_boxed(&lookup_name) {
                         if let Some(call_ty) = self.codegen_expr_ty(ast) {
@@ -983,7 +989,37 @@ impl Compiler {
                     .then(|| pair_kind.clone())
                     .flatten();
                 let ret_words = if two_word.is_some() { 2 } else { 1 };
-                if let Some(off) = mono_offset {
+                let niche_vec = Self::vec_option_host_native(&lookup_name)
+                    .or_else(|| Self::vec_option_host_native(&n))
+                    .filter(|_| {
+                        self.host_enum_layout_for_expr(ast)
+                            == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                    });
+                if let Some(native) = niche_vec {
+                    if !self.emit_host_invoke_from_call_args(
+                        &mut bytecode,
+                        native,
+                        arity,
+                        common::HOST_ENUM_LAYOUT_OPTION_NICHE,
+                    ) {
+                        if let Some(off) = mono_offset {
+                            bytecode.push(Self::packed_entry_byte_ret(
+                                entry_kind,
+                                arity,
+                                off as u32,
+                                ret_words,
+                            ));
+                        } else if !self.emit_named_entry_ret(
+                            &mut bytecode,
+                            &n,
+                            arity,
+                            entry_kind,
+                            ret_words,
+                        ) {
+                            self.missing_call_target(&n, span.into_range());
+                        }
+                    }
+                } else if let Some(off) = mono_offset {
                     bytecode.push(Self::packed_entry_byte_ret(
                         entry_kind,
                         arity,
@@ -993,17 +1029,6 @@ impl Compiler {
                 } else if !self.emit_named_entry_ret(&mut bytecode, &n, arity, entry_kind, ret_words)
                 {
                     self.missing_call_target(&n, span.into_range());
-                }
-                let vec_option_call = [
-                    format!("{}::pop", common::BUILTIN_VEC_TYPE),
-                    format!("{}::remove", common::BUILTIN_VEC_TYPE),
-                ]
-                .iter()
-                .any(|name| lookup_name == *name || n == *name);
-                if (self.expr_is_niche_option(ast) || self.force_niche_option)
-                    && vec_option_call
-                {
-                    Self::emit_boxed_option_to_niche(&mut bytecode);
                 }
                 if let Some(enum_name) = two_word {
                     if self.unbox_enum_context == 0 {
@@ -1019,9 +1044,7 @@ impl Compiler {
                     if let Some(call_ty) = self.codegen_expr_ty(ast) {
                         Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                     }
-                    } else if is_generic
-                        && (self.expr_is_niche_option(ast) || self.force_niche_option)
-                    {
+                    } else if is_generic && self.expr_is_niche_option(ast) {
                         Self::emit_boxed_option_to_niche(&mut bytecode);
                     }
             } else if self.fn_entry_labels.contains_key(&n) {

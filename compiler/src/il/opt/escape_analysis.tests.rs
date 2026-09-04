@@ -154,6 +154,7 @@ fn keeps_heap_through_nested_call() {
         },
         IlOp::HostInvoke {
             arity: 1,
+            layout: 0,
             loc: loc(),
         },
         IlOp::Pop { loc: loc() },

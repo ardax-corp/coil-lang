@@ -176,6 +176,11 @@ impl CodeBuf {
         self.il.push_host_invoke(arity);
     }
 
+    pub fn push_host_invoke_layout(&mut self, arity: u32, layout: u32) {
+        self.invalidate_lowered();
+        self.il.push_host_invoke_layout(arity, layout);
+    }
+
     pub fn push_print(&mut self) {
         self.invalidate_lowered();
         self.il.push_print();

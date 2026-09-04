@@ -638,6 +638,35 @@ pub const PGO_HIT_NATIVE: &str = "pgo_hit";
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
 
+/// Low 16 bits of a `HostInvoke` operand are the argument count.
+pub const HOST_INVOKE_ARITY_MASK: u32 = 0xFFFF;
+/// Bits `[17:16]` select the Option/Result host-edge layout (archive minor 2).
+pub const HOST_ENUM_LAYOUT_SHIFT: u32 = 16;
+pub const HOST_ENUM_LAYOUT_MASK: u32 = 0x3;
+/// Boxed `ObjEnum` (default; old archives leave these bits clear).
+pub const HOST_ENUM_LAYOUT_BOXED: u32 = 0;
+/// Pointer-niche `Option` (`None` = `0`, `Some` = object address).
+pub const HOST_ENUM_LAYOUT_OPTION_NICHE: u32 = 1;
+/// Heap-heap `Result` (`Ok` = aligned pointer, `Err` = `pointer | 1`).
+pub const HOST_ENUM_LAYOUT_RESULT_NICHE: u32 = 2;
+/// Reserved operand code. Decoders treat this as boxed (not a niche).
+pub const HOST_ENUM_LAYOUT_RESERVED: u32 = 3;
+
+/// Pack `HostInvoke` arity and host-edge Option/Result layout into one operand.
+pub const fn pack_host_invoke_operand(arity: u32, layout: u32) -> u32 {
+    (arity & HOST_INVOKE_ARITY_MASK) | ((layout & HOST_ENUM_LAYOUT_MASK) << HOST_ENUM_LAYOUT_SHIFT)
+}
+
+/// Argument count from a `HostInvoke` operand.
+pub const fn host_invoke_arity(operand: u32) -> u32 {
+    operand & HOST_INVOKE_ARITY_MASK
+}
+
+/// Host-edge Option/Result layout from a `HostInvoke` operand.
+pub const fn host_invoke_enum_layout(operand: u32) -> u32 {
+    (operand >> HOST_ENUM_LAYOUT_SHIFT) & HOST_ENUM_LAYOUT_MASK
+}
+
 pub const PACKED_DOT: &str = "packed_dot";
 pub const PACKED_MATMUL: &str = "packed_matmul";
 pub const PACKED_MATRIX_ZIP: &str = "packed_matrix_zip";
@@ -766,5 +795,13 @@ mod tests {
         assert!(is_ffi_exec_symbol("execve"));
         assert!(is_ffi_exec_symbol("_wsystem"));
         assert!(!is_ffi_exec_symbol("strlen"));
+    }
+
+    #[test]
+    fn host_invoke_operand_packs_layout_in_high_bits() {
+        let packed = pack_host_invoke_operand(3, HOST_ENUM_LAYOUT_OPTION_NICHE);
+        assert_eq!(host_invoke_arity(packed), 3);
+        assert_eq!(host_invoke_enum_layout(packed), HOST_ENUM_LAYOUT_OPTION_NICHE);
+        assert_eq!(host_invoke_enum_layout(3), HOST_ENUM_LAYOUT_BOXED);
     }
 }

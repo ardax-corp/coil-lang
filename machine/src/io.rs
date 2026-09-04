@@ -148,7 +148,9 @@ impl IoErrorTag {
     }
 }
 
-/// Allocate `Result::Ok(payload)` on the heap.
+/// Allocate boxed `Result::Ok(payload)`. Host natives that cross the
+/// Option/Result edge should use [`crate::host_enum::pack_result`] instead
+/// so niche vs boxed is chosen once.
 pub fn alloc_result_ok(heap: &mut Heap, payload: Value) -> Value {
     let _ = BUILTIN_RESULT_VARIANTS;
     alloc_enum(heap, 0, EnumPayload::one(member_from_value(heap, payload)))
@@ -159,13 +161,13 @@ pub fn alloc_result_err(heap: &mut Heap, payload: Value) -> Value {
     alloc_enum(heap, 1, EnumPayload::one(member_from_value(heap, payload)))
 }
 
-/// Allocate `Option::None`.
+/// Allocate boxed `Option::None`. Prefer [`crate::host_enum::pack_option`].
 pub fn alloc_option_none(heap: &mut Heap) -> Value {
     let _ = BUILTIN_OPTION_VARIANTS;
     alloc_enum(heap, 0, EnumPayload::empty())
 }
 
-/// Allocate `Option::Some(payload)`.
+/// Allocate boxed `Option::Some(payload)`. Prefer [`crate::host_enum::pack_option`].
 pub fn alloc_option_some(heap: &mut Heap, payload: Value) -> Value {
     alloc_enum(heap, 1, EnumPayload::one(member_from_value(heap, payload)))
 }

@@ -6,8 +6,14 @@
 
 use common::Value;
 
-use crate::io::{alloc_option_none, alloc_option_some};
+use crate::host_enum::pack_option_edge;
 use crate::memory::{Heap, ObjArray, Object};
+
+fn pack_vec_option(heap: &mut Heap, value: Option<Value>) -> Value {
+    pack_option_edge(heap, value).unwrap_or_else(|e| {
+        panic!("{e}");
+    })
+}
 
 /// `Vec::with_capacity(n) -> Vec<T>` — empty growable array with reserved capacity.
 pub fn host_vec_with_capacity(heap: &mut Heap, args: &[Value]) -> Value {
@@ -56,10 +62,10 @@ pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
         Some(Object::Array(mut gc)) => match gc.as_mut().elements.pop() {
-            Some(v) => alloc_option_some(heap, v),
-            None => alloc_option_none(heap),
+            Some(v) => pack_vec_option(heap, Some(v)),
+            None => pack_vec_option(heap, None),
         },
-        _ => alloc_option_none(heap),
+        _ => pack_vec_option(heap, None),
     }
 }
 
@@ -92,13 +98,13 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
         Some(Object::Array(mut gc)) => {
             let len = gc.as_ref().elements.len();
             if index < 0 || (index as usize) >= len {
-                alloc_option_none(heap)
+                pack_vec_option(heap, None)
             } else {
                 let v = gc.as_mut().elements.remove(index as usize);
-                alloc_option_some(heap, v)
+                pack_vec_option(heap, Some(v))
             }
         }
-        _ => alloc_option_none(heap),
+        _ => pack_vec_option(heap, None),
     }
 }
 
@@ -175,6 +181,33 @@ mod tests {
         assert!(host_vec_capacity(&mut heap, &[v]).as_int() >= 8);
         host_vec_reserve(&mut heap, &[v, Value::from(64i64)]);
         assert!(host_vec_capacity(&mut heap, &[v]).as_int() >= 64);
+    }
+
+    #[test]
+    fn pop_heap_item_under_option_niche_does_not_box() {
+        use crate::host_enum::{with_host_enum_layout, HostEnumLayout};
+        let mut heap = Heap::default();
+        let s = {
+            let gc = heap.intern("x".to_string());
+            Value::from(gc.as_ptr() as *mut u8 as u64)
+        };
+        let (obj, _) = heap.alloc(
+            ObjArray {
+                elements: vec![s],
+            },
+            Object::Array,
+        );
+        let handle = Value::from(obj.addr());
+        let live = heap.live_object_count();
+        let some = with_host_enum_layout(HostEnumLayout::OptionNiche, || {
+            host_vec_pop(&mut heap, &[handle])
+        });
+        assert_eq!(some.raw() as u64, s.raw() as u64);
+        assert_eq!(heap.live_object_count(), live, "niche pop must not alloc Option");
+        let none = with_host_enum_layout(HostEnumLayout::OptionNiche, || {
+            host_vec_pop(&mut heap, &[handle])
+        });
+        assert_eq!(none.as_int(), 0);
     }
 
     #[test]

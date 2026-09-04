@@ -1155,6 +1155,7 @@ mod tests {
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::HostInvoke {
                 arity: 0,
+                layout: 0,
                 loc: loc(),
             },
             IlOp::Jump {

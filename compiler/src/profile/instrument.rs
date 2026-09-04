@@ -110,7 +110,7 @@ fn hit_ops(native_id: i32, packed: i32, loc: DebugLoc) -> [IlOp; 4] {
             loc,
         },
         IlOp::Const { imm: packed, loc },
-        IlOp::HostInvoke { arity: 1, loc },
+        IlOp::HostInvoke { arity: 1, layout: 0, loc },
         IlOp::Pop { loc },
     ]
 }

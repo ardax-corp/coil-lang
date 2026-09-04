@@ -229,7 +229,7 @@ mod tests {
         assert!(op_blocks_length_proof(&op, Some(&impure)));
         assert!(op_blocks_licm(&op, Some(&impure)));
         assert!(!op_blocks_licm(&op, Some(&pure)));
-        let host = IlOp::HostInvoke { arity: 1, loc: loc() };
+        let host = IlOp::HostInvoke { arity: 1, layout: 0, loc: loc() };
         assert!(op_blocks_licm(&host, Some(&pure)));
     }
 

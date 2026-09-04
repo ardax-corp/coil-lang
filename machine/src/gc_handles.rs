@@ -6,8 +6,14 @@ use std::cell::Cell;
 
 use common::Value;
 
-use crate::io::{alloc_option_none, alloc_option_some};
+use crate::host_enum::pack_option_edge;
 use crate::memory::{Heap, Member, ObjRoot, ObjWeak, Object};
+
+fn pack_gc_option(heap: &mut Heap, value: Option<Value>) -> Value {
+    pack_option_edge(heap, value).unwrap_or_else(|e| {
+        panic!("{e}");
+    })
+}
 
 fn member_from_value(heap: &Heap, value: Value) -> Member {
     if !value.raw().is_null()
@@ -43,10 +49,10 @@ pub fn host_gc_get(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
         Some(Object::Root(gc)) => match &gc.as_ref().payload {
-            Some(m) => alloc_option_some(heap, member_to_value(m)),
-            None => alloc_option_none(heap),
+            Some(m) => pack_gc_option(heap, Some(member_to_value(m))),
+            None => pack_gc_option(heap, None),
         },
-        _ => alloc_option_none(heap),
+        _ => pack_gc_option(heap, None),
     }
 }
 
@@ -55,10 +61,10 @@ pub fn host_gc_unroot(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
         Some(Object::Root(gc)) => match gc.payload_mut().payload.take() {
-            Some(m) => alloc_option_some(heap, member_to_value(&m)),
-            None => alloc_option_none(heap),
+            Some(m) => pack_gc_option(heap, Some(member_to_value(&m))),
+            None => pack_gc_option(heap, None),
         },
-        _ => alloc_option_none(heap),
+        _ => pack_gc_option(heap, None),
     }
 }
 
@@ -90,8 +96,8 @@ pub fn host_gc_upgrade(heap: &mut Heap, args: &[Value]) -> Value {
         _ => None,
     };
     match target {
-        Some(v) => alloc_option_some(heap, v),
-        None => alloc_option_none(heap),
+        Some(v) => pack_gc_option(heap, Some(v)),
+        None => pack_gc_option(heap, None),
     }
 }
 

@@ -4026,6 +4026,7 @@ fn run() -> int { return add(1, 2); }
         assert!(!Compiler::is_tiny_inline_il(&[
             IlOp::HostInvoke {
                 arity: 1,
+                layout: 0,
                 loc: DebugLoc::unknown(),
             },
             IlOp::Return {
@@ -7127,6 +7128,21 @@ fn main() {
             "Vec::pop must use HostInvoke; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
+        let hosts: Vec<_> = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .collect();
+        assert!(
+            hosts.iter().any(|b| {
+                common::host_invoke_enum_layout(b.operand_u32())
+                    == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+            }),
+            "heap Vec::pop must ask the host for OptionNiche; operands={:?}",
+            hosts
+                .iter()
+                .map(|b| format!("{:#x}", b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
     }
 
     #[test]
@@ -7157,6 +7173,181 @@ fn main() {
             "Vec::pop of int should still HostInvoke; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
+        assert!(
+            bc.iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+                .all(|b| {
+                    common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_BOXED
+                }),
+            "int Vec::pop stays boxed at the host edge; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn gc_get_heap_item_sets_option_niche_layout() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+use gc::{get, root};
+fn main() {
+    let r = root("pin");
+    let _ = get(r);
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("gc_root", 1);
+        compiler.register_native_id("gc_get", 2);
+        let bc = compiler.compile("", &mut ast);
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::HostInvoke)
+                    && common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+            }),
+            "gc::get of a heap object must set OptionNiche; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    fn host_niche_immediately_unwraps(bc: &[Byte]) -> bool {
+        bc.windows(2).any(|w| {
+            matches!(w[0].bytecode(), Instruction::HostInvoke)
+                && common::host_invoke_enum_layout(w[0].operand_u32())
+                    == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                && matches!(w[1].bytecode(), Instruction::JumpIfMatch)
+        })
+    }
+
+    #[test]
+    fn nested_boxed_host_option_inside_niche_match_stays_boxed() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+fn to_heap(Option<int> o) -> Option<string> {
+    return Option::Some("ok");
+}
+fn main() {
+    let v = Vec::from([1]);
+    let result = match to_heap(v.pop()) {
+        Option::Some(s) => s,
+        Option::None => "none",
+    };
+    let _keep = result;
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("vec_from_array", 1);
+        compiler.register_native_id("vec_pop", 2);
+        let bc = compiler.compile("", &mut ast);
+        assert!(
+            !bc.is_empty(),
+            "nested boxed pop under niche match must compile",
+        );
+        assert!(
+            bc.iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+                .all(|b| {
+                    common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_BOXED
+                }),
+            "Vec<int>::pop inside a niche match scrutinee must stay Boxed bits; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn niche_vec_pop_host_invoke_has_no_jump_if_match_unwrap() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+fn main() {
+    let v = Vec::from(["a"]);
+    let _ = v.pop();
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("vec_from_array", 1);
+        compiler.register_native_id("vec_pop", 2);
+        let bc = compiler.compile("", &mut ast);
+        assert!(
+            !host_niche_immediately_unwraps(&bc),
+            "niche HostInvoke must not be followed by JumpIfMatch unwrap; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::HostInvoke)
+                    && common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+            }),
+            "expected OptionNiche HostInvoke",
+        );
+    }
+
+    #[test]
+    fn vec_pop_thunk_stays_boxed_host_invoke() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+fn main() {
+    let v = Vec::from([1]);
+    let _ = v.pop();
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("vec_from_array", 1);
+        compiler.register_native_id("vec_pop", 2);
+        let bc = compiler.compile("", &mut ast);
+        let boxed_hosts = bc
+            .iter()
+            .filter(|b| {
+                matches!(b.bytecode(), Instruction::HostInvoke)
+                    && common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_BOXED
+            })
+            .count();
+        assert!(
+            boxed_hosts >= 2,
+            "from + shared pop thunk should stay Boxed; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+                .all(|b| {
+                    common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_BOXED
+                }),
+            "int Vec::pop must not stamp niche bits; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.windows(2).any(|w| {
+                matches!(w[0].bytecode(), Instruction::CALL)
+                    && matches!(w[1].bytecode(), Instruction::JumpIfMatch)
+            }),
+            "int Vec::pop must not unwrap the boxed thunk; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(!host_niche_immediately_unwraps(&bc));
     }
 
     #[test]

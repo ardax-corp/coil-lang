@@ -21,12 +21,13 @@ const CORPUS: &[&str] = &[
 /// address is also taken (`indirect_pair`'s `let function = parse_pair;`),
 /// so the escape sidecar keeps it boxed there — `CallIndirect` stays on the
 /// one-word ABI (task cut) — while `chain_pair` (never escaped) still uses
-/// the two-slot ABI end to end.
+/// the two-slot ABI end to end. Heap `Vec::pop` now HostInvokes with
+/// OptionNiche layout bits (no CALL + boxed-to-niche unwrap).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "e3676a48a2b745f0_522"),
     ("functions.hy", "09d523b5e92dc06e_390"),
     ("loops.hy", "0798a354fd32364d_267"),
-    ("option_pair.hy", "02a183fc747da2d9_399"),
+    ("option_pair.hy", "a4ab50c9156afb62_386"),
     ("user_trait_dispatch.hy", "53fb084fd917f3fe_157"),
 ];
 

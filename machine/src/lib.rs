@@ -8,6 +8,7 @@ mod fused;
 mod ffi;
 pub mod fs;
 pub mod gc_handles;
+pub mod host_enum;
 pub mod host_natives;
 pub mod io;
 mod io_handle;

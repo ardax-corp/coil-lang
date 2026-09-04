@@ -448,6 +448,9 @@ fn format_il_op(op: &IlOp) -> String {
             Some(i) => format!("SetField slot={i}"),
             None => "SetField".to_string(),
         },
+        IlOp::HostInvoke { arity, layout, .. } if *layout != 0 => {
+            format!("HostInvoke arity={arity} layout={layout}")
+        }
         IlOp::HostInvoke { arity, .. } => format!("HostInvoke arity={arity}"),
         IlOp::Print { .. } => "PRINT".to_string(),
         IlOp::Return { .. } => "RETURN".to_string(),

@@ -1473,7 +1473,7 @@
         let mut ops = vec![
             IlOp::Const { imm: 7, loc },
             IlOp::StorePop { slot: 1, loc },
-            IlOp::HostInvoke { arity: 0, loc },
+            IlOp::HostInvoke { arity: 0, layout: 0, loc },
             IlOp::Load { slot: 1, loc },
             IlOp::Return { loc, ret_words: 1},
         ];

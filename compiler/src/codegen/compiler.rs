@@ -6645,16 +6645,22 @@ impl Compiler {
     ///
     /// Always targets [`Self::bytecode`] so nested `format` / `match` (same
     /// buffer) stay contiguous with HostInvoke staging.
-    fn emit_io_host_invoke(&mut self, kind: crate::typechecking::IoBuiltin, args: &[Output]) {
-        self.emit_host_native_invoke(kind.native_name(), args);
+    fn emit_io_host_invoke(
+        &mut self,
+        kind: crate::typechecking::IoBuiltin,
+        args: &[Output],
+        result: Option<&Output>,
+    ) {
+        self.emit_host_native_invoke(kind.native_name(), args, result);
     }
 
     fn emit_thread_host_invoke(
         &mut self,
         kind: crate::typechecking::ThreadBuiltin,
         args: &[Output],
+        result: Option<&Output>,
     ) {
-        self.emit_host_native_invoke(kind.native_name(), args);
+        self.emit_host_native_invoke(kind.native_name(), args, result);
     }
 
     /// Resolve the bare recursive-pure name used in [`par_shapes`].
@@ -7218,7 +7224,12 @@ impl Compiler {
     }
 
     /// Emit `HostInvoke` for a pipeline-registered host native by registry name.
-    fn emit_host_native_invoke(&mut self, native_name: &str, args: &[Output]) {
+    fn emit_host_native_invoke(
+        &mut self,
+        native_name: &str,
+        args: &[Output],
+        result: Option<&Output>,
+    ) {
         let Some(native_id) = self.native_id(native_name) else {
             let range = args.first().map(|a| a.0.into_range()).unwrap_or(0..0);
             let mut message = Message::error(
@@ -7265,13 +7276,23 @@ impl Compiler {
             self.expr_depth += 1;
         }
         let arity = args.len();
-        self.bytecode.push_host_invoke(arity as u32);
+        let layout = result
+            .map(|e| self.host_enum_layout_for_expr(e))
+            .unwrap_or(common::HOST_ENUM_LAYOUT_BOXED);
+        if matches!(
+            layout,
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        ) {
+            self.bytecode.push_host_invoke_layout(arity as u32, layout);
+        } else {
+            self.bytecode.push_host_invoke(arity as u32);
+        }
         // Result stays on the stack for the caller (ExprStatement POPs it).
         self.expr_depth = depth_on_entry;
     }
 
     fn emit_prelude_host_call(&mut self, args: &[Output], native_name: &str) {
-        self.emit_host_native_invoke(native_name, args);
+        self.emit_host_native_invoke(native_name, args, None);
     }
 
     /// Emit bytecode thunks for compiler-provided primitive instances.
@@ -7548,6 +7569,9 @@ impl Compiler {
             for &slot in slots {
                 compiler.bytecode.push_load(slot);
             }
+            // Shared thunk: T is unknown, so HostInvoke stays Boxed.
+            // Heap-niche pop/remove HostInvoke at the call site; int /
+            // boxed Vec keep this CALL + layout-0 body.
             compiler
                 .bytecode
                 .push_host_invoke(slots.len() as u32);
@@ -8155,13 +8179,65 @@ impl Compiler {
             .or_else(|| self.fn_return_ty(name))
     }
 
-    fn emit_host_option_boundary(&mut self, expr: &Output) {
+    /// Host-edge Option/Result layout from this invoke's HM type only.
+    ///
+    /// Do not OR in `force_niche_option`: that flag is an outer match
+    /// scrutinee context and would stamp OptionNiche on a nested boxed
+    /// host Option (e.g. `Vec<int>::pop` inside a niche match).
+    fn host_enum_layout_for_expr(&self, expr: &Output) -> u32 {
         if self.expr_is_niche_option(expr) {
-            Self::emit_boxed_option_to_niche(&mut self.bytecode);
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE
+        } else if self.expr_is_niche_result(expr) {
+            common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        } else {
+            common::HOST_ENUM_LAYOUT_BOXED
         }
-        if self.expr_is_niche_result(expr) {
-            Self::emit_boxed_result_to_niche(&mut self.bytecode);
+    }
+
+    fn vec_option_host_native(lookup_name: &str) -> Option<&'static str> {
+        let owner = common::BUILTIN_VEC_TYPE;
+        if lookup_name == format!("{owner}::pop") {
+            Some("vec_pop")
+        } else if lookup_name == format!("{owner}::remove") {
+            Some("vec_remove")
+        } else {
+            None
         }
+    }
+
+    /// Restage `[arg0, …]` already on `bytecode` as `HostInvoke` `[id, arg0, …]`.
+    fn emit_host_invoke_from_call_args(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        native: &str,
+        arity: u32,
+        layout: u32,
+    ) -> bool {
+        let Some(native_id) = self.native_id(native) else {
+            return false;
+        };
+        self.expr_depth += arity;
+        let mut slots = Vec::with_capacity(arity as usize);
+        for _ in 0..arity {
+            let slot = self.alloc_temp_slot();
+            bytecode.push_store_pop(slot);
+            slots.push(slot);
+        }
+        slots.reverse();
+        bytecode.push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
+        for slot in slots {
+            bytecode.push_load(slot);
+        }
+        if matches!(
+            layout,
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        ) {
+            bytecode.push_host_invoke_layout(arity, layout);
+        } else {
+            bytecode.push_host_invoke(arity);
+        }
+        self.expr_depth -= arity;
+        true
     }
 
     /// Emit defers + unit fall-through return when a body does not end in a return.
@@ -11141,7 +11217,7 @@ impl Compiler {
         // Done → fall through to exit; not done → wait for batched IO then loop.
         bb.emit_jump_to(done_exit, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
         if self.native_id("wait_ready").is_some() {
-            self.emit_host_native_invoke("wait_ready", &[]);
+            self.emit_host_native_invoke("wait_ready", &[], None);
             self.bytecode.push(Byte::new(Instruction::POP));
         }
         bb.emit_jump_to(top, BbJumpKind::Unconditional, self.bytecode.il_mut());
@@ -13962,7 +14038,7 @@ impl Compiler {
                         && matches!(element.as_ref(), Ty::Con(n) if n == "byte")
                 );
                 if string_to_bytes {
-                    self.emit_host_native_invoke("to_bytes", std::slice::from_ref(expr));
+                    self.emit_host_native_invoke("to_bytes", std::slice::from_ref(expr), None);
                     return bytecode;
                 }
 
