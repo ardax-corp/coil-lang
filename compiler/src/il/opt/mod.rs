@@ -32,7 +32,7 @@ pub struct OptimizeOptions {
     pub tos_carry: bool,
     /// Operand-order canon (`Const;Load` → `Load;Const`, load/load slot order).
     pub canon: bool,
-    /// Spill `CastIntToFloat` that blocks FloatChainStore fuse windows.
+    /// Spill `CastIntToFloat` ahead of float-arith → STORE windows.
     pub cast_spill: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
@@ -305,8 +305,6 @@ mod branch_opt;
 mod driver;
 mod opt_level;
 mod stats;
-#[allow(unused_imports)]
-pub use branch_opt::{BranchProfile, optimize_branches};
 pub(crate) use branch_opt::{max_code_label, remap_label_space};
 pub use opt_level::OptLevel;
 pub(crate) use stats::note_function_inlined;
