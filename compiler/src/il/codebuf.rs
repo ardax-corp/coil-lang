@@ -181,18 +181,6 @@ impl CodeBuf {
         self.il.push_host_invoke_layout(arity, layout);
     }
 
-    /// Set the Option/Result host-edge layout on the most recent `HostInvoke`.
-    pub fn set_last_host_invoke_layout(&mut self, layout: u32) -> bool {
-        self.invalidate_lowered();
-        for op in self.il.ops_mut().iter_mut().rev() {
-            if let IlOp::HostInvoke { layout: slot, .. } = op {
-                *slot = layout as u8;
-                return true;
-            }
-        }
-        false
-    }
-
     pub fn push_print(&mut self) {
         self.invalidate_lowered();
         self.il.push_print();
