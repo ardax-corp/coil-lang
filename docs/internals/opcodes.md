@@ -9,7 +9,7 @@ User code does not name these directly; the compiler emits them:
 | `FfiLoad` | `dload` |
 | `DeclareFFI` | `declare` |
 | `FfiInvoke` | `invoke` |
-| `HostInvoke` | Host-registered closure. Operand `[15:0]` is arg count; bits `[17:16]` are the Option/Result host-edge layout (`0` boxed `ObjEnum`, `1` Option pointer-niche, `2` heap-heap Result). Stack is `fn_id, arg0, …, argN-1` (no args tuple). Natives construct that layout once via `machine::host_enum`. Standard table in `machine/src/host_natives.rs`. **120** = `stream_attach`, **121** = `stream_park`. See [io-reactor.md](io-reactor.md). |
+| `HostInvoke` | Host-registered closure. Operand `[15:0]` is arg count; bits `[17:16]` are the Option/Result host-edge layout (`0` boxed `ObjEnum`, `1` Option pointer-niche, `2` heap-heap Result). Stack is `fn_id, arg0, …, argN-1` (no args tuple). Natives construct that layout once via `machine::host_enum`. Standard table in `machine/src/host_natives.rs`. **120** = `stream_attach`, **121** = `stream_park`, **122** = `clock_wall_nanos`, **123** = `clock_mono_nanos`, **124** = `clock_sleep_ms` (`use clock::{…}`; leftover `time_*` slots stay panic stubs). See [io-reactor.md](io-reactor.md). |
 | `HostInvokeNiche` | Tombstone (archive major 4); panics if executed |
 | `OptionNicheToHeap` / `HeapOptionToNiche` | Tombstone (archive major 4); panics if executed |
 | `PairToHeap` / `HeapToPair` | Tombstone (archive major 4); panics if executed |
