@@ -72,9 +72,6 @@ pub(crate) struct CliArgs {
     pub opt_level: OptLevel,
     pub opt_stats: bool,
     pub opt_stats_json: bool,
-    pub pgo_instrument: bool,
-    pub pgo_use_profile: Option<String>,
-    pub pgo_generate_profile: Option<String>,
     pub host_grants: HostGrants,
     /// Extra `--root` directories (default `src` is always included).
     pub module_roots: Vec<PathBuf>,
@@ -99,7 +96,7 @@ struct OptLevelFlags {
     opt_level: Option<OptLevel>,
 }
 
-/// Opt-stat dump and PGO (need a compile, not `run` / `test` / `debug`).
+/// Opt-stat dump (need a compile, not `run` / `test` / `debug`).
 #[derive(Args, Clone, Debug, Default)]
 struct CompileProfileFlags {
     /// Print IL optimization counters after compile (stderr)
@@ -108,15 +105,6 @@ struct CompileProfileFlags {
     /// Print the same counters as one JSON object (stderr)
     #[arg(long)]
     opt_stats_json: bool,
-    /// Insert pgo_hit counters at function/block/branch sites
-    #[arg(long)]
-    pgo_instrument: bool,
-    /// Apply a JSON profile to layout and inlining
-    #[arg(long, value_name = "FILE")]
-    pgo_use_profile: Option<String>,
-    /// Write runtime or current profile JSON
-    #[arg(long, value_name = "FILE")]
-    pgo_generate_profile: Option<String>,
 }
 
 /// Host capabilities. Default deny (same as a missing coil.toml).
@@ -429,9 +417,6 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             opt_level: OptLevel::Standard,
             opt_stats: false,
             opt_stats_json: false,
-            pgo_instrument: false,
-            pgo_use_profile: None,
-            pgo_generate_profile: None,
             host_grants: HostGrants::deny_all(),
             module_roots: Vec::new(),
         });
@@ -485,11 +470,7 @@ impl OptLevelFlags {
 
 impl CompileProfileFlags {
     fn is_set(&self) -> bool {
-        self.opt_stats
-            || self.opt_stats_json
-            || self.pgo_instrument
-            || self.pgo_use_profile.is_some()
-            || self.pgo_generate_profile.is_some()
+        self.opt_stats || self.opt_stats_json
     }
 }
 
@@ -510,9 +491,6 @@ fn cli_from(
         opt_level: opt.opt_level.unwrap_or(OptLevel::Standard),
         opt_stats: profile.opt_stats,
         opt_stats_json: profile.opt_stats_json,
-        pgo_instrument: profile.pgo_instrument,
-        pgo_use_profile: profile.pgo_use_profile,
-        pgo_generate_profile: profile.pgo_generate_profile,
         host_grants: grants.into_grants(),
         module_roots: roots,
     }
@@ -1175,23 +1153,6 @@ mod tests {
         assert!(cli.opt_stats && cli.opt_stats_json);
         assert!(parse_args(&args(&["test", "--opt-stats"])).is_err());
         assert!(parse_args(&args(&["run", "out.hyc", "--opt-stats-json"])).is_err());
-    }
-
-    #[test]
-    fn parse_pgo_flags() {
-        let cli = parse_args(&args(&["compile", "--pgo-instrument", "a.hy"])).unwrap();
-        assert!(cli.pgo_instrument);
-        let cli = parse_args(&args(&["--pgo-use-profile=p.json", "a.hy"])).unwrap();
-        assert_eq!(cli.pgo_use_profile.as_deref(), Some("p.json"));
-        let cli = parse_args(&args(&[
-            "compile",
-            "--pgo-generate-profile",
-            "out.json",
-            "a.hy",
-        ]))
-        .unwrap();
-        assert_eq!(cli.pgo_generate_profile.as_deref(), Some("out.json"));
-        assert!(parse_args(&args(&["test", "--pgo-instrument"])).is_err());
     }
 
     #[test]

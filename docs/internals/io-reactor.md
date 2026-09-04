@@ -99,22 +99,21 @@ is OK (best-effort close_notify).
 
 | Native | HostInvoke id | Language |
 |--------|---------------|----------|
-| `stream_attach` | **120** | `Stream.attach` |
-| `stream_park` | **121** | `Stream.park` |
-| `clock_wall_nanos` | **122** | `clock::wall_nanos` (unix UTC nanos) |
-| `clock_mono_nanos` | **123** | `clock::mono_nanos` (process Instant snapshot) |
-| `clock_sleep_ms` | **124** | `clock::sleep_ms` (real thread sleep) |
+| `stream_attach` | **119** | `Stream.attach` |
+| `stream_park` | **120** | `Stream.park` |
+| `clock_wall_nanos` | **121** | `clock::wall_nanos` (unix UTC nanos) |
+| `clock_mono_nanos` | **122** | `clock::mono_nanos` (process Instant snapshot) |
+| `clock_sleep_ms` | **123** | `clock::sleep_ms` (real thread sleep) |
 
-120/121 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
-122–124 are process clocks (`use clock::{…}`); Instant is a Coil `int` of
+119/120 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
+121–123 are process clocks (`use clock::{…}`); Instant is a Coil `int` of
 `mono_nanos`, not a host HashMap. Leftover TLS (`tls_client_enable` …
 `tls_alpn_protocol`) and virtual crypto slots were **dropped** (archive minor
 14); holes collapsed. Regex slots were dropped earlier (minor 11). Do not treat
 COI-37 / COI-209 / COI-215 stub reservations as live for these ids.
 
-Virtual-time names still occupy panic stubs earlier in the table so later ids,
-including 120/121, stay put. Do not reclaim or reshuffle HostInvoke ids.
-Source of truth: `machine/src/host_natives.rs`.
+Virtual-time names still occupy panic stubs earlier in the table so the time
+block does not slide. Source of truth: `machine/src/host_natives.rs`.
 
 ## Env / knobs
 

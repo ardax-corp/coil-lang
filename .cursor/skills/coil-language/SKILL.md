@@ -92,7 +92,7 @@ userland modules. Prelude is auto-injected.
 | `ffi` | `use ffi::{dload, declare, invoke};` + `use ffi::types::{Int, Ptr};` | Dynamic loading |
 | `thread` | `use thread::{spawn, join, channel, send, recv};` | OS threads, channels, mutex |
 | `env` | `use env::{args, var, exec};` | process environment |
-| `clock` | `use clock::{wall_nanos, mono_nanos, sleep_ms};` | virtual HostInvoke **122–124** (not `dload`) |
+| `clock` | `use clock::{wall_nanos, mono_nanos, sleep_ms};` | virtual HostInvoke **121–123** (not `dload`) |
 | `time` | `use time::{…}` via [coil-time](https://github.com/ardax-corp/coil-time) | pure Coil calendar/format package; not a virtual module |
 | `gc` | `use gc::{root, weak, collect};` | `Root` / `Weak` pins; class `fn drop()` runs at collect / teardown |
 

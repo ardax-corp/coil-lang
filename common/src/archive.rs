@@ -42,12 +42,14 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///     layout (`0` boxed, `1` Option pointer-niche, `2` heap-heap Result).
 ///     Natives construct that shape once; no new opcode.
 /// 3 — append HostInvoke `clock_wall_nanos` / `clock_mono_nanos` /
-///     `clock_sleep_ms` after `stream_park` (ids 122–124). Leftover
-///     virtual-time stubs stay panic slots so 120/121 do not move.
+///     `clock_sleep_ms` after `stream_park`. Leftover virtual-time stubs stay
+///     panic slots so the time block does not slide.
+/// 4 — drop the unused HostInvoke after `vec_from_array`; `stream_attach` /
+///     `stream_park` / `clock_*` / `result_unit_probe` ids collapse by one.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 3;
+pub const ARCHIVE_MINOR: u16 = 4;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -332,9 +334,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 3);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 3));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.3");
+        assert_eq!(ARCHIVE_MINOR, 4);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 4));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.4");
     }
 
     #[test]

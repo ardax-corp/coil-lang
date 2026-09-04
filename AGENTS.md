@@ -27,7 +27,7 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 ## Invariants (do not break)
 
 - **Append-only opcodes** (`common/src/opcode.rs`). New variants at end → bump archive **minor**, `promise!` in `machine/src/vm.rs`, `instruction_from_u8_covers_last_appended_variant`. ABI break → **major** (reset minor).
-- **Virtual-module natives** via `HostInvoke` — host wiring in `machine/`. Leftover TLS/crypto/regex slots were dropped (holes collapse, archive **minor** bump); they are not reserved panic stubs. Virtual-time names stay as panic stubs so later ids do not move. `stream_attach` / `stream_park` own **120** / **121**. Process clocks append after that: `clock_wall_nanos` / `clock_mono_nanos` / `clock_sleep_ms` are **122** / **123** / **124** (`use clock::{…}`).
+- **Virtual-module natives** via `HostInvoke` — host wiring in `machine/`. Leftover TLS/crypto/regex slots were dropped (holes collapse, archive **minor** bump); they are not reserved panic stubs. Virtual-time names stay as panic stubs so later ids do not move. `stream_attach` / `stream_park` own **119** / **120**. Process clocks append after that: `clock_wall_nanos` / `clock_mono_nanos` / `clock_sleep_ms` are **121** / **122** / **123** (`use clock::{…}`).
 - **Feature gates**: debugger `feature = "debugger"`; dissect `feature = "dissect"` on helper binaries, not default `coil`.
 - **Lint gate**: `cargo check --workspace` (not clippy — `Gc::payload_mut` deny).
 - **Fuse-select (D4)**: one named pass on typed `IlOp` after concat (`fuse_select` → PC assign). Residual `Byte` is a cold refuse. No post-lower `adjust_target`, no production per-fn fuse.

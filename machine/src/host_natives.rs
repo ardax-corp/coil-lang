@@ -47,8 +47,8 @@ const TIME_REMOVED: &[(&str, usize)] = &[
 ///
 /// Leftover TLS (`tls_client_enable` … `tls_alpn_protocol`) and virtual crypto
 /// slots were dropped; holes collapsed. Those ids are not reserved stubs.
-/// Virtual time slots are panic stubs so `stream_attach` / `stream_park`
-/// stay HostInvoke 120 / 121. Append-only from this table.
+/// Virtual time slots are panic stubs so later catalog ids do not slide
+/// through the time block. `stream_attach` / `stream_park` are 119 / 120.
 pub fn build_standard_host_natives(
     mut register_id: impl FnMut(&str, usize),
 ) -> Vec<Arc<dyn NativeFn>> {
@@ -76,9 +76,8 @@ pub fn build_standard_host_natives(
     push_math_libm(&mut out, &mut register_id);
     // Append-only after math_libm: Vec helpers.
     push_wiring(&mut out, &mut register_id, VEC_WIRING, "vec");
-    push_pgo_hit(&mut out, &mut register_id);
-    // Append-only after pgo_hit. `stream_attach` / `stream_park` are the
-    // package-IO hooks (coil-tls uses these via `dload`, not VM TLS natives).
+    // `stream_attach` / `stream_park` are the package-IO hooks (coil-tls uses
+    // these via `dload`, not VM TLS natives).
     push_stream_attach(&mut out, &mut register_id);
     push_stream_park(&mut out, &mut register_id);
     // Append-only after stream_park: process clocks (no Instant HashMap).
@@ -94,22 +93,9 @@ pub fn build_standard_host_natives(
 }
 
 pub use common::{
-    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE, PGO_HIT_NATIVE,
+    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE,
     STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE,
 };
-
-fn push_pgo_hit(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    let sig =
-        FfiSignature::from_parts(PGO_HIT_NATIVE.to_string(), vec![FfiType::Int], FfiType::Int)
-            .expect("pgo_hit signature");
-    let id = out.len();
-    register_id(PGO_HIT_NATIVE, id);
-    out.push(Arc::new(HostClosureFn::new(sig, |_heap, args| {
-        let packed = args.first().map(|v| v.as_int()).unwrap_or(0);
-        crate::pgo::hit(packed);
-        Ok(Some(Value::from(0i64)))
-    })));
-}
 
 fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     use crate::io::as_result_value;
@@ -941,48 +927,46 @@ mod tests {
     }
 
     #[test]
-    fn pgo_hit_is_appended_after_vec_helpers() {
+    fn stream_attach_follows_vec_helpers() {
         let mut names = Vec::new();
         build_standard_host_natives(|name, _id| names.push(name.to_string()));
-        let pgo = names
+        let attach = names
             .iter()
-            .position(|n| n == PGO_HIT_NATIVE)
-            .expect("pgo_hit");
+            .position(|n| n == STREAM_ATTACH_NATIVE)
+            .expect("stream_attach");
+        assert_eq!(names.get(attach.wrapping_sub(1)).map(String::as_str), Some("vec_from_array"));
         assert_eq!(
-            names.get(pgo + 1).map(String::as_str),
-            Some(STREAM_ATTACH_NATIVE)
-        );
-        assert_eq!(
-            names.get(pgo + 2).map(String::as_str),
+            names.get(attach + 1).map(String::as_str),
             Some(STREAM_PARK_NATIVE)
         );
         assert_eq!(
-            names.get(pgo + 3).map(String::as_str),
+            names.get(attach + 2).map(String::as_str),
             Some(CLOCK_WALL_NANOS_NATIVE)
         );
         assert_eq!(
-            names.get(pgo + 4).map(String::as_str),
+            names.get(attach + 3).map(String::as_str),
             Some(CLOCK_MONO_NANOS_NATIVE)
         );
         assert_eq!(
-            names.get(pgo + 5).map(String::as_str),
+            names.get(attach + 4).map(String::as_str),
             Some(CLOCK_SLEEP_MS_NATIVE)
         );
         assert_eq!(
             names.last().map(String::as_str),
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
+        assert_eq!(attach, 119);
     }
 
-    /// COI-232: 120/121 are live attach/park, not leftover TLS/crypto stubs.
+    /// COI-232: attach/park are live package-IO natives, not leftover TLS/crypto stubs.
     #[test]
-    fn stream_attach_and_park_own_hostinvoke_120_and_121() {
+    fn stream_attach_and_park_own_hostinvoke_119_and_120() {
         let mut map = std::collections::HashMap::new();
         build_standard_host_natives(|name, id| {
             map.insert(name.to_string(), id);
         });
-        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
-        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(119));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(120));
         assert!(!map.contains_key("tls_client_enable"));
         assert!(!map.contains_key("crypto_sha256"));
     }
@@ -1008,18 +992,16 @@ mod tests {
                 "leftover HostInvoke `{gone}` must be dropped"
             );
         }
-        let pgo = names
+        let attach = names
             .iter()
-            .position(|n| n == PGO_HIT_NATIVE)
-            .expect("pgo_hit");
-        assert_eq!(names[pgo + 1], STREAM_ATTACH_NATIVE);
-        assert_eq!(names[pgo + 2], STREAM_PARK_NATIVE);
-        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(pgo + 1));
-        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(pgo + 2));
-        // Attach/park ids stay put after virtual time became panic stubs.
-        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
-        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
-        assert_eq!(pgo, 119);
+            .position(|n| n == STREAM_ATTACH_NATIVE)
+            .expect("stream_attach");
+        assert_eq!(names[attach + 1], STREAM_PARK_NATIVE);
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(attach));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(attach + 1));
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(119));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(120));
+        assert_eq!(attach, 119);
         // IO block ends at udp_local_port; leftover TLS 25–28 used to follow it.
         let udp = names
             .iter()
@@ -1060,9 +1042,8 @@ mod tests {
             assert_eq!(natives[id].signature().args.len(), arity, "{name}");
             assert_eq!(natives[id].signature().ret, FfiType::Int, "{name}");
         }
-        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(120));
-        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(121));
-        assert_eq!(map.get(PGO_HIT_NATIVE).copied(), Some(119));
+        assert_eq!(map.get(STREAM_ATTACH_NATIVE).copied(), Some(119));
+        assert_eq!(map.get(STREAM_PARK_NATIVE).copied(), Some(120));
     }
 
     /// COI-260: virtual time sources stay gone (no `time.rs`, chrono, TIME_WIRING table).
@@ -1171,15 +1152,14 @@ mod tests {
             assert_eq!(native.name(), entry.name);
             assert_eq!(native.signature().arity(), entry.arity as usize);
         }
-        assert_eq!(common::host_native_id(PGO_HIT_NATIVE), Some(119));
-        assert_eq!(common::host_native_id(STREAM_ATTACH_NATIVE), Some(120));
-        assert_eq!(common::host_native_id(STREAM_PARK_NATIVE), Some(121));
-        assert_eq!(common::host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(122));
-        assert_eq!(common::host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(123));
-        assert_eq!(common::host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(124));
+        assert_eq!(common::host_native_id(STREAM_ATTACH_NATIVE), Some(119));
+        assert_eq!(common::host_native_id(STREAM_PARK_NATIVE), Some(120));
+        assert_eq!(common::host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(121));
+        assert_eq!(common::host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(122));
+        assert_eq!(common::host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(123));
         assert_eq!(
             common::host_native_id(common::RESULT_UNIT_PROBE_NATIVE),
-            Some(125)
+            Some(124)
         );
     }
 }

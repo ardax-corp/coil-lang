@@ -16,7 +16,6 @@ parser = { path = "../parser" }
 reporting = { path = "../reporting" }
 rkyv = "0.8.12"
 serde = { version = "1", features = ["derive"] }
-bincode = "1"
 machine = { path = "../machine", optional = true, default-features = false, features = ["vm_profile"] }
 
 [dev-dependencies]

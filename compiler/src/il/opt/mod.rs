@@ -3,8 +3,8 @@
 //! **Driver (D2).** Production opts run from a static table in [`driver`]
 //! (order matches D1 README). Each [`driver::Pass`] returns a
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
-//! on the table row, not a match in the driver loop). PGO instrumenting still
-//! runs cleanup only. [`super::IlModule::optimize_and_flatten`] still defers
+//! on the table row, not a match in the driver loop).
+//! [`super::IlModule::optimize_and_flatten`] still defers
 //! `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
 //! `slot_promote_tell`, and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
 //! the OptLevel table. Fuse-select stays in `lower_optimized`.
@@ -62,15 +62,13 @@ pub struct OptimizeOptions {
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
     pub loop_unroll_factor: usize,
-    /// When a PGO profile is loaded, unroll hotter loops first (COI-190).
-    pub pgo_prioritize_hot_loops: bool,
     /// Sink or drop loop stores of an invariant value that is not read in the loop.
     pub invariant_store_elim: bool,
     /// SSA-style global CSE of pure binops whose result already lives in a slot.
     pub ssa_gvn: bool,
     /// Scalarize non-escaping `MakeArray` into consecutive frame slots (COI-126).
     pub escape_analysis: bool,
-    /// Heuristic / profile-guided branch layout (COI-128).
+    /// Heuristic branch layout (COI-128).
     /// Default **on**: invert only Known-SP terminating then-arms, and mint
     /// labels from a module-wide watermark so ids cannot collide across funcs.
     pub branch_optimization: bool,
@@ -307,7 +305,6 @@ mod branch_opt;
 mod driver;
 mod opt_level;
 mod stats;
-pub(crate) use block_order::reorder_basic_blocks;
 #[allow(unused_imports)]
 pub use branch_opt::{BranchProfile, optimize_branches};
 pub(crate) use branch_opt::{max_code_label, remap_label_space};

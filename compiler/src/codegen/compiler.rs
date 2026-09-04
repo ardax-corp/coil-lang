@@ -1538,11 +1538,6 @@ impl Compiler {
             return false;
         }
         let lookup = strip_overload_key(fqn).to_string();
-        if crate::profile::current_function_is_cold(&lookup)
-            || crate::profile::current_function_is_cold(fqn)
-        {
-            return false;
-        }
         if self.checker.fn_has_rest(&lookup) {
             return false;
         }
@@ -1556,17 +1551,9 @@ impl Compiler {
             recursive,
             cross_module: self.callee_is_cross_module(fqn),
             visible: self.callee_is_visible_for_inline(&lookup),
-            hot: crate::profile::current_function_is_hot(&lookup)
-                || crate::profile::current_function_is_hot(fqn),
             ..Default::default()
         };
-        let mut cost_opts = self.inline_cost.clone();
-        if site.hot {
-            // PGO: hot callees get the force-inline (relaxed) budget, not the
-            // tighter `hot_call_threshold` used by the cost-policy flag.
-            cost_opts.max_inline_cost = cost_opts.max_inline_cost.max(cost_opts.cold_call_threshold);
-            cost_opts.hot_call_threshold = cost_opts.max_inline_cost;
-        }
+        let cost_opts = self.inline_cost.clone();
         if !super::inline_cost::should_inline_function(cost, &site, &cost_opts) {
             return false;
         }

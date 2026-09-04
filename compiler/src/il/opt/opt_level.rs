@@ -49,8 +49,8 @@ impl OptLevel {
     /// `OptimizeOptions` for this level.
     ///
     /// Pass flags are derived from [`Self::pass_names`] via the driver table
-    /// (`dead_store` sets `mem_fwd`). Driver knobs (`pgo_prioritize_hot_loops`,
-    /// iteration cap, …) are not pass names.
+    /// (`dead_store` sets `mem_fwd`). Driver knobs (iteration cap, …) are not
+    /// pass names.
     pub fn options(self) -> OptimizeOptions {
         use super::driver::PRODUCTION_PASSES;
         let mut o = base_knobs(self);
@@ -138,7 +138,6 @@ fn all_off() -> OptimizeOptions {
         seek_back_edge: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
-        pgo_prioritize_hot_loops: false,
         invariant_store_elim: false,
         ssa_gvn: false,
         escape_analysis: false,
@@ -165,7 +164,7 @@ fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
     spec.floor <= ceiling && !(level == OptLevel::Size && spec.omit_from_size)
 }
 
-/// Knobs that are not pass names. Heat-ordered PGO stays off until a matrix win exists.
+/// Knobs that are not pass names.
 fn base_knobs(_level: OptLevel) -> OptimizeOptions {
     all_off()
 }
