@@ -694,8 +694,8 @@ struct Context {
     /// name → (base_slot, N). Escaping uses → `MakeArray`.
     stack_array_locals: HashMap<String, (u32, usize)>,
 
-    /// Frame-local ObjEnum: name → (payload_slot, tag_slot).
-    unboxed_enum_locals: HashMap<String, (u32, u32)>,
+    /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, enum_name).
+    unboxed_enum_locals: HashMap<String, (u32, u32, String)>,
     /// Frame-local small class: name → (base_slot, nfields).
     unboxed_class_locals: HashMap<String, (u32, usize)>,
 

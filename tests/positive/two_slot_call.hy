@@ -4,7 +4,8 @@
 // errors), `Option<int>`, and user payload enums of arity ≤1 move
 // `[payload, tag]` on a direct CALL/RETURN instead of boxing an `ObjEnum`.
 // Matching the call directly (`match f(...) { ... }`) uses the same
-// EQ/JMPF lowering as a frame-local match (#278) — no allocation. Niched
+// EQ/JMPF lowering as a frame-local match (#278) — no allocation. `?`
+// and `let r = f()` stay on the pair; box only at escape. Niched
 // heap `Option<T>` / heap-heap `Result<T,E>` stay one word (unaffected).
 
 enum HttpError {
@@ -66,6 +67,12 @@ fn cell_rev(int n) -> CellRev {
 fn chained(int a, int b) -> Result<int, int> {
     let q = checked_div(a, b)?;
     return q + 1;
+}
+
+fn bind_then_try(int a, int b) -> Result<int, int> {
+    let r = checked_div(a, b);
+    let q = r?;
+    return Result::Ok(q);
 }
 
 test("result int int direct match") {
@@ -130,7 +137,7 @@ test("payload enum arity 1 direct match, either variant order") {
     })?;
 }
 
-test("bind site still matches (not the immediate-match fast path)") {
+test("bind site keeps two-slot local (match / ? without boxing)") {
     let x = maybe(2);
     assert(match x {
         Option::Some(v) => v == 2,
@@ -139,6 +146,10 @@ test("bind site still matches (not the immediate-match fast path)") {
     let r = checked_div(9, 3);
     assert(match r {
         Result::Ok(v) => v == 3,
+        Result::Err(_) => false,
+    })?;
+    assert(match bind_then_try(8, 2) {
+        Result::Ok(v) => v == 4,
         Result::Err(_) => false,
     })?;
 }

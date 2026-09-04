@@ -414,22 +414,20 @@ fn main() {
     #[test]
     fn return_match_keeps_fusion_barrier() {
         use common::Instruction;
-        // `make()` is bound to `r` before the match so the scrutinee is a
-        // plain identifier, not a direct CALL — the two-slot immediate-match
-        // fast path (same lowering as a frame-local match, #278-style) only
-        // fires on a direct `match callee(...) { ... }`, so this keeps the
-        // original boxed `ObjEnum` shape this test asserts on.
+        // Parameter ABI is boxed `ObjEnum`. A two-slot `let r = make()`
+        // would stay a pair and skip JumpIfMatch — this test needs the
+        // boxed cascade so the Some arm's Unpack;RETURN fusion barrier
+        // stays observable.
         let (bc, _pool) = compile_src(
             r#"
-fn make() -> Option<int> {
-    return Option::Some(1);
-}
-fn foo() -> int {
-    let r = make();
+fn foo(Option<int> r) -> int {
     return match r {
         Option::None => 0,
         Option::Some(n) => n,
     };
+}
+fn main() {
+    let _ = foo(Option::Some(1));
 }
 "#,
         );
@@ -437,15 +435,10 @@ fn foo() -> int {
         // payload arm must RETURN locally — never JMP into ConstReturnImm (that
         // would ignore the stacked Unpack value). Scope to the match region so
         // prologue / other fn JMPs do not trip the guard.
-        let make_enum = bc
-            .iter()
-            .position(|b| matches!(*b.bytecode(), Instruction::MakeEnum))
-            .expect("expected MakeEnum for returned Option::Some(1)");
-        let jim = bc[make_enum..]
+        let jim = bc
             .iter()
             .position(|b| matches!(*b.bytecode(), Instruction::JumpIfMatch))
-            .map(|i| make_enum + i)
-            .expect("expected JumpIfMatch after MakeEnum");
+            .expect("expected JumpIfMatch on boxed Option param");
         let region_end = bc[jim..]
             .iter()
             .position(|b| matches!(*b.bytecode(), Instruction::ConstReturnImm))
@@ -1345,16 +1338,15 @@ fn main() {
     #[test]
     fn match_emits_jump_if_match_cascade() {
         use common::Instruction;
-        // `r` decouples the scrutinee from a direct CALL so the two-slot
-        // immediate-match fast path does not fire — see
-        // `return_match_keeps_fusion_barrier`.
+        // Boxed param keeps JumpIfMatch; two-slot `let r = f()` would not.
         let (bc, _pool) = compile_src(
-            "fn make() -> Option<int> { return Option::Some(1); } \
- let r = make(); \
- match r { \
+            "fn consume(Option<int> r) -> int { \
+ return match r { \
  Option::None() => 0, \
  Option::Some(v) => v, \
- };",
+ }; \
+ } \
+ fn main() { let _ = consume(Option::Some(1)); }",
         );
 
         // Two arms, both constructor. Two JUMP_IF_MATCH should
@@ -2461,16 +2453,14 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     #[test]
     fn match_jump_if_match_targets_are_patched_to_arm_offsets() {
         use common::Instruction;
-        // `r` decouples the scrutinee from a direct CALL so the two-slot
-        // immediate-match fast path does not fire — see
-        // `return_match_keeps_fusion_barrier`.
         let (bc, pool) = compile_src(
-            "fn make() -> Option<int> { return Option::Some(1); } \
- let r = make(); \
- match r { \
+            "fn consume(Option<int> r) -> int { \
+ return match r { \
  Option::None() => 0, \
  Option::Some(v) => v, \
- };",
+ }; \
+ } \
+ fn main() { let _ = consume(Option::Some(1)); }",
         );
 
         // Find every JUMP_IF_MATCH. For each, the target
@@ -2593,9 +2583,7 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     fn nested_match_in_loop_emits_expected_opcodes() {
         use common::Instruction;
         let (bc, _pool) = compile_src(
-            "fn make() -> Option<int> { return Option::Some(0); } \
- fn main() { \
- let x = make(); \
+            "fn consume(Option<int> x) -> int { \
  let i = 0; \
  while (i < 3) { \
  return match x { \
@@ -2603,7 +2591,9 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
  Option::Some(v) => v, \
  }; \
  } \
- }",
+ return 0; \
+ } \
+ fn main() { let _ = consume(Option::Some(0)); }",
         );
 
         let exit_branch_count = loop_exit_branch_count(&bc);
@@ -2867,14 +2857,13 @@ fn main() {
         // not UNPACK.
         let (bc, _pool) = compile_src(
             "enum E { Empty, Foo(int) } \
- fn make() -> E { return E::Empty; } \
- fn main() { \
- let e = make(); \
- match e { \
+ fn consume(E e) -> int { \
+ return match e { \
  E::Empty => 0, \
  E::Foo(_) => 1, \
  }; \
- }",
+ } \
+ fn main() { let _ = consume(E::Empty); }",
         );
 
         // Exactly 1 UNPACK (for the Foo arm, which is the
@@ -3046,14 +3035,13 @@ fn main() {
         // that sub-pattern, which is a Binding → no runtime test).
         let (bc, _pool) = compile_src(
             "enum E { A(int), B(int) } \
- fn make() -> E { return E::A(5); } \
- fn main() { \
- let x = make(); \
- let _ = match x { \
+ fn consume(E x) -> int { \
+ return match x { \
  E::A(v) => v, \
  E::B(v) => v, \
  }; \
- }",
+ } \
+ fn main() { let _ = consume(E::A(5)); }",
         );
         let jimp_count = bc
             .iter()
@@ -7056,13 +7044,13 @@ fn main() {
         assert!(
             !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::ReturnPair)),
-            "unary Option<int> return must stay boxed; opcodes={:?}",
+            "unary Option<int> must not revive ReturnPair; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "unary Option<int> return must MakeEnum; opcodes={:?}",
+            "unary Option<int> bind of a two-slot CALL must not box; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -7859,7 +7847,7 @@ fn main() {
     }
 
     #[test]
-    fn option_int_still_boxes() {
+    fn option_int_bind_stays_two_slot() {
         let (bc, _) = compile_src(
             r#"
 fn give() -> Option<int> {
@@ -7875,9 +7863,17 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "Option<int> must stay boxed ObjEnum; opcodes={:?}",
+            "Option<int> bind+match must stay two-slot; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::HeapToPair
+            )),
+            "must not revive pair opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7944,7 +7940,7 @@ fn main() {
     }
 
     #[test]
-    fn result_int_payload_still_boxes() {
+    fn result_int_bind_stays_two_slot() {
         let (bc, _) = compile_src(
             r#"
 fn give() -> Result<int, int> {
@@ -7960,9 +7956,17 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
+            !bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
-            "Result<int, int> must stay boxed ObjEnum; opcodes={:?}",
+            "Result<int, int> bind+match must stay two-slot; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::HeapToPair
+            )),
+            "must not revive pair opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
@@ -7990,6 +7994,110 @@ fn main() {
             bc.iter()
                 .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
             "Result with an immediate payload must stay boxed; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn two_slot_try_skips_make_enum() {
+        let (bc, _) = compile_src(
+            r#"
+fn step(int n) -> Result<int, int> {
+    if n == 0 {
+        return Result::Err(-1);
+    }
+    return Result::Ok(n);
+}
+fn pipe(int n) -> Result<int, int> {
+    let a = step(n)?;
+    let b = step(a)?;
+    return Result::Ok(a + b);
+}
+fn main() {
+    let _ = pipe(2);
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "`?` on two-slot Result must not box ObjEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "pipe must CALL step as two-slot; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::JumpIfMatch
+            )),
+            "two-slot `?` uses EQ/JMP, not JumpIfMatch / pair opcodes; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn two_slot_bind_escape_boxes() {
+        let (bc, _) = compile_src(
+            r#"
+fn give() -> Option<int> {
+    return Option::Some(1);
+}
+fn take(Option<int> o) -> int {
+    return match o {
+        Option::Some(n) => n,
+        Option::None => 0,
+    };
+}
+fn main() {
+    let x = give();
+    let _ = take(x);
+}
+"#,
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "escaping two-slot bind must box at the call; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn result_try_churn_does_not_make_enum() {
+        let src = include_str!("../../../examples/perf/result_try_churn.hy");
+        let (bc, _) = compile_src(src);
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "result_try_churn must not allocate ObjEnum; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "result_try_churn must use two-slot CALL; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair
+                    | Instruction::PairToHeap
+                    | Instruction::HeapToPair
+                    | Instruction::PairJumpIfTag
+            )),
+            "result_try_churn must not revive pair opcodes; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
