@@ -4061,20 +4061,31 @@ impl Compiler {
     }
 
     fn unboxed_enum_info(&self, name: &str) -> Option<(u32, u32)> {
-        self.context.unboxed_enum_locals.get(name).copied()
+        self.context
+            .unboxed_enum_locals
+            .get(name)
+            .map(|(payload, tag, _)| (*payload, *tag))
+    }
+
+    fn unboxed_enum_kind(&self, name: &str) -> Option<&str> {
+        self.context
+            .unboxed_enum_locals
+            .get(name)
+            .map(|(_, _, kind)| kind.as_str())
     }
 
     fn unboxed_class_info(&self, name: &str) -> Option<(u32, usize)> {
         self.context.unboxed_class_locals.get(name).copied()
     }
 
-    fn alloc_unboxed_enum_slots(&mut self, name: &str) -> (u32, u32) {
+    fn alloc_unboxed_enum_slots(&mut self, name: &str, enum_name: &str) -> (u32, u32) {
         let payload = self.alloc_binding_slot(name);
         let tag_name = format!("__unbox_tag_{name}");
         let tag = self.context.variables.intern(tag_name) as u32;
-        self.context
-            .unboxed_enum_locals
-            .insert(name.to_string(), (payload, tag));
+        self.context.unboxed_enum_locals.insert(
+            name.to_string(),
+            (payload, tag, enum_name.to_string()),
+        );
         (payload, tag)
     }
 
@@ -4100,9 +4111,13 @@ impl Compiler {
         rhs: &Output<'_>,
         rhs_is_match: bool,
     ) -> bool {
-        if !(self.node_is_frame_local(binder)
-            || self.node_is_frame_local(rhs_node)
-            || self.node_is_frame_local(rhs))
+        let two_word_rhs = self
+            .expr_direct_call_two_word_kind(rhs_node)
+            .or_else(|| self.expr_direct_call_two_word_kind(rhs));
+        if two_word_rhs.is_none()
+            && !(self.node_is_frame_local(binder)
+                || self.node_is_frame_local(rhs_node)
+                || self.node_is_frame_local(rhs))
         {
             return false;
         }
@@ -4119,7 +4134,10 @@ impl Compiler {
             })
             .or_else(|| self.ctor_unbox_ty(rhs_node));
         let Some(ty) = ty else {
-            return false;
+            let Some(kind) = two_word_rhs else {
+                return false;
+            };
+            return self.emit_unboxed_enum_bind(bytecode, name, rhs, rhs_is_match, &kind);
         };
         if self.checker.ty_is_class(&ty) {
             let Some(cname) = Checker::class_name_of_ty(&ty) else {
@@ -4160,25 +4178,40 @@ impl Compiler {
             || crate::typechecking::ty::is_result_ty(&ty)
             || self.ty_is_frame_enum(&ty)
         {
-            let _ = self.next_emit_id();
-            self.unbox_enum_context += 1;
-            if rhs_is_match {
-                self.emit_binding_rhs(rhs);
-            } else {
-                self.append_binding_rhs(bytecode, rhs);
-            }
-            self.unbox_enum_context -= 1;
-            let (payload, tag) = self.alloc_unboxed_enum_slots(name);
-            if rhs_is_match {
-                self.bytecode.push_store_pop(tag);
-                self.bytecode.push_store_pop(payload);
-            } else {
-                bytecode.push_store_pop(tag);
-                bytecode.push_store_pop(payload);
-            }
-            return true;
+            let kind = two_word_rhs
+                .or_else(|| extract_enum_name(&ty))
+                .unwrap_or_else(|| "Enum".to_string());
+            return self.emit_unboxed_enum_bind(bytecode, name, rhs, rhs_is_match, &kind);
         }
         false
+    }
+
+    /// Compile `rhs` as `[payload, tag]` and store both into `name`.
+    fn emit_unboxed_enum_bind(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        name: &str,
+        rhs: &Output<'_>,
+        rhs_is_match: bool,
+        enum_name: &str,
+    ) -> bool {
+        let _ = self.next_emit_id();
+        self.unbox_enum_context += 1;
+        if rhs_is_match {
+            self.emit_binding_rhs(rhs);
+        } else {
+            self.append_binding_rhs(bytecode, rhs);
+        }
+        self.unbox_enum_context -= 1;
+        let (payload, tag) = self.alloc_unboxed_enum_slots(name, enum_name);
+        if rhs_is_match {
+            self.bytecode.push_store_pop(tag);
+            self.bytecode.push_store_pop(payload);
+        } else {
+            bytecode.push_store_pop(tag);
+            bytecode.push_store_pop(payload);
+        }
+        true
     }
 
     fn ctor_unbox_ty(&self, rhs_node: &Output<'_>) -> Option<Ty> {
@@ -8004,6 +8037,47 @@ impl Compiler {
         }
     }
 
+    /// `Some(enum_name)` when `expr` is already a `[payload, tag]` producer:
+    /// a two-slot direct `CALL`, or an unboxed local of that enum.
+    fn expr_two_word_pair_kind(&self, expr: &Output) -> Option<String> {
+        if let Some(kind) = self.expr_direct_call_two_word_kind(expr) {
+            return Some(kind);
+        }
+        let mut cur = expr;
+        loop {
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        match cur.1.as_ref() {
+            Expression::Identifier(n) => self
+                .unboxed_enum_kind(n)
+                .map(str::to_string)
+                .or_else(|| {
+                    self.unboxed_enum_info(*n)?;
+                    self.sidecar_ty_of(cur).and_then(|ty| extract_enum_name(&ty))
+                }),
+            _ => None,
+        }
+    }
+
+    fn expr_unboxed_enum_slots(&self, expr: &Output) -> Option<(u32, u32)> {
+        let mut cur = expr;
+        loop {
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        match cur.1.as_ref() {
+            Expression::Identifier(n) => self.unboxed_enum_info(n),
+            _ => None,
+        }
+    }
+
     /// `true` when `expr` is a direct `Construct` of `enum_name` (peeling
     /// `Group`/`Expr`), the fast, alloc-free producer of a `[payload, tag]`
     /// pair for that exact enum. A payload that itself nests a `Construct`/
@@ -8069,6 +8143,11 @@ impl Compiler {
             self.unbox_enum_context += 1;
             self.append_with_existential_pack(bytecode, expr);
             self.unbox_enum_context -= 1;
+            return;
+        }
+        if let Some((payload, tag_slot)) = self.expr_unboxed_enum_slots(expr) {
+            bytecode.push_load(payload);
+            bytecode.push_load(tag_slot);
             return;
         }
         // Result-mode implicit auto-wrap: a bare `return v` that is not
@@ -8141,8 +8220,8 @@ impl Compiler {
     /// Box the `[payload, tag]` pair (tag on top) left by a direct two-word
     /// `CALL` into an `ObjEnum`, using `STORE` / `LOAD` / `EQ` / `JMPF` /
     /// `MakeEnum` — one branch per declared variant besides the last, which
-    /// needs no compare. Called whenever a two-word call's result is not
-    /// immediately matched or forwarded as another pair.
+    /// needs no compare. Called when a two-word result escapes into a boxed
+    /// consumer (`CallIndirect`, unsure, host/FFI).
     fn emit_box_pair_to_enum(
         checker: &Checker,
         bytecode: &mut CodeBuf,
@@ -8150,14 +8229,24 @@ impl Compiler {
         tag_slot: u32,
         payload_slot: u32,
     ) {
+        bytecode.push_store_pop(tag_slot);
+        bytecode.push_store_pop(payload_slot);
+        Self::emit_box_slots_to_enum(checker, bytecode, enum_name, tag_slot, payload_slot);
+    }
+
+    /// Same cascade as [`Self::emit_box_pair_to_enum`] when the pair already
+    /// lives in `payload_slot` / `tag_slot`.
+    fn emit_box_slots_to_enum(
+        checker: &Checker,
+        bytecode: &mut CodeBuf,
+        enum_name: &str,
+        tag_slot: u32,
+        payload_slot: u32,
+    ) {
         let Some(mut variants) = checker.enum_variants(enum_name).filter(|v| !v.is_empty()) else {
-            bytecode.push_pop();
-            bytecode.push_pop();
             bytecode.push_make_enum(0, 0);
             return;
         };
-        bytecode.push_store_pop(tag_slot);
-        bytecode.push_store_pop(payload_slot);
         let last = variants.pop().expect("checked non-empty");
         let mut bb = BlockBuilder::new();
         let end = bb.fresh_label(bytecode.il_mut());
@@ -8202,6 +8291,39 @@ impl Compiler {
         let payload_slot = self.alloc_temp_slot();
         self.expr_depth -= 2;
         Self::emit_box_pair_to_enum(&self.checker, bytecode, enum_name, tag_slot, payload_slot);
+    }
+
+    /// `?` on a `[payload, tag]` pair: keep the payload on success; on
+    /// failure return the pair (same two-slot ABI) or box it if the
+    /// enclosing function is not two-slot.
+    fn emit_try_two_word_pair(&mut self, success_tag: u32, inner_kind: &str) {
+        let mut bb = BlockBuilder::new();
+        let success = bb.fresh_label(self.bytecode.il_mut());
+        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+        self.bytecode.push_const(success_tag as i32);
+        self.bytecode.push(Byte::new(Instruction::EQ));
+        bb.emit_jump_to_hinted(
+            success,
+            BbJumpKind::JumpIfTrue,
+            FuseHint::nofuse_value_under_jmp(),
+            self.bytecode.il_mut(),
+        );
+        if let Some(outer) = self.compiling_two_word_enum.clone() {
+            if outer != inner_kind {
+                let mut boxed = std::mem::take(&mut self.bytecode);
+                self.emit_box_pair_after_call(&mut boxed, inner_kind);
+                Self::emit_unbox_enum_to_pair(&self.checker, &mut boxed, &outer);
+                self.bytecode = boxed;
+            }
+            self.push_return_two_word();
+        } else {
+            let mut boxed = std::mem::take(&mut self.bytecode);
+            self.emit_box_pair_after_call(&mut boxed, inner_kind);
+            self.bytecode = boxed;
+            self.bytecode.push_return();
+        }
+        bb.bind_label(success, self.bytecode.il_mut());
+        self.bytecode.push_pop();
     }
 
     /// Return type of the function whose body is being compiled.
@@ -12645,8 +12767,20 @@ impl Compiler {
                 {
                     bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(static_slot));
                 } else if let Some((payload, tag_slot)) = self.unboxed_enum_info(n) {
-                    bytecode.push_load(payload);
                     if self.unbox_enum_context > 0 {
+                        bytecode.push_load(payload);
+                        bytecode.push_load(tag_slot);
+                    } else if let Some(kind) = self.unboxed_enum_kind(n).map(str::to_string) {
+                        // Escape / unsure consumer: box the pair once here.
+                        Self::emit_box_slots_to_enum(
+                            &self.checker,
+                            &mut bytecode,
+                            &kind,
+                            tag_slot,
+                            payload,
+                        );
+                    } else {
+                        bytecode.push_load(payload);
                         bytecode.push_load(tag_slot);
                     }
                 } else if let Some(slot) = self.lookup_slot(n) {
@@ -14067,11 +14201,24 @@ impl Compiler {
             }
             Expression::Try(inner) => {
                 // `e?` → if Ok/Some, leave payload; else RETURN the failure.
-                // `inner` always compiles to its ordinary (boxed / niche)
-                // representation here — two-word calls auto-box unless
-                // immediately consumed, and `?` never opts into that.
+                // Two-slot CALL / unboxed bind stay `[payload, tag]` — no
+                // intermediate ObjEnum. Niche and boxed operands keep the
+                // existing one-word paths. Unsure / CallIndirect still box.
                 let is_option = self.expr_is_option(inner);
                 let success_tag: u32 = if is_option { 1 } else { 0 }; // Some=1, Ok=0
+
+                if !self.expr_is_niche_option(inner)
+                    && !self.expr_is_unit_result_niche(inner)
+                    && !self.expr_is_niche_result(inner)
+                    && let Some(inner_kind) = self.expr_two_word_pair_kind(inner)
+                {
+                    self.unbox_enum_context += 1;
+                    let mut inner_bc = self.do_compile(inner);
+                    self.unbox_enum_context -= 1;
+                    self.bytecode.append(&mut inner_bc);
+                    self.emit_try_two_word_pair(success_tag, &inner_kind);
+                    return bytecode;
+                }
 
                 let mut inner_bc = self.do_compile(inner);
                 self.bytecode.append(&mut inner_bc);
