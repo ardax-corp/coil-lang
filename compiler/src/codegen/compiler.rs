@@ -10617,7 +10617,24 @@ impl Compiler {
         let ty = strip_readonly(ty);
         match ty {
             Ty::Constructor { owner, .. } => Self::niche_heap_only_ty(owner, checker),
-            Ty::Con(name) => name == "string" || checker.is_class(name),
+            Ty::Con(name) => {
+                if name == "string" || checker.is_class(name) {
+                    true
+                } else if common::is_builtin_option_enum(name)
+                    || common::is_builtin_result_enum(name)
+                    || checker.is_scalar_enum(name)
+                {
+                    false
+                } else {
+                    // Unit / closed user enums are heap `ObjEnum` (IoError, …).
+                    checker.enum_variants(name).is_some_and(|vars| {
+                        !vars.is_empty()
+                            && vars
+                                .iter()
+                                .all(|(_, _, payload)| payload.iter().all(Self::ty_is_closed))
+                    })
+                }
+            }
             Ty::App(head, args) => {
                 let Ty::Con(name) = head.as_ref() else {
                     return false;
