@@ -62,59 +62,6 @@ fn print_opt_stats(text: bool, json: bool) {
     }
 }
 
-fn apply_pgo_use(pipeline: &mut Pipeline, path: Option<&str>) {
-    let Some(path) = path else {
-        return;
-    };
-    match std::fs::read_to_string(path) {
-        Ok(s) => match compiler::ProfileData::from_json(&s) {
-            Ok(p) => pipeline.set_pgo_profile(Some(p)),
-            Err(compiler::LoadError::Version { found, expected }) => {
-                eprintln!(
-                    "warning: PGO profile version {found} != {expected}; using heuristics"
-                );
-                pipeline.set_pgo_profile(None);
-            }
-            Err(compiler::LoadError::Parse(msg)) => {
-                eprintln!("warning: PGO profile parse error ({msg}); using heuristics");
-                pipeline.set_pgo_profile(None);
-            }
-            Err(compiler::LoadError::Io(msg)) => {
-                eprintln!("warning: PGO profile io error ({msg}); using heuristics");
-                pipeline.set_pgo_profile(None);
-            }
-        },
-        Err(_) => {
-            eprintln!("warning: PGO profile `{path}` not found; using heuristics");
-        }
-    }
-}
-
-fn write_pgo_profile(path: Option<&str>, snap: Option<machine::pgo::PgoSnapshot>) {
-    let Some(path) = path else {
-        return;
-    };
-    let snap = snap.unwrap_or_default();
-    let json = if snap.function_keys.is_empty()
-        && snap.block_counts.is_empty()
-        && snap.branch_counts.is_empty()
-    {
-        compiler::current_profile()
-            .unwrap_or_else(compiler::ProfileData::new)
-            .to_json()
-    } else {
-        compiler::profile_from_runtime(
-            &snap.function_keys,
-            snap.block_counts,
-            snap.branch_counts,
-        )
-        .to_json()
-    };
-    if let Err(e) = std::fs::write(path, json) {
-        eprintln!("warning: failed to write PGO profile `{path}`: {e}");
-    }
-}
-
 fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
     // Multi-file entry: discovers `use` / `mod` via bound `--root` / default `src`.
     let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
@@ -306,7 +253,7 @@ pub(crate) fn execute_archive(
     debug: ProgramDebug,
     entry: Option<&Path>,
     operand_stack_slots: u32,
-) -> (bool, machine::pgo::PgoSnapshot) {
+) -> bool {
     let operand_slots = operand_stack_slots
         .max(machine::DEFAULT_OPERAND_STACK_SLOTS as u32) as usize;
     let entry = entry.map(ffi_entry_path);
@@ -314,9 +261,8 @@ pub(crate) fn execute_archive(
     crate::host_wire::wire_pipeline_vm(&pipeline, &mut machine, entry.as_deref());
     crate::host_wire::wire_pipeline_threads(&pipeline, &mut machine, bytecode, constants, strings);
     machine.set_program_debug(debug);
-    machine.pgo_reset();
     machine.run_raw(bytecode, constants, strings, static_slots);
-    (machine.panicked(), machine.pgo_snapshot())
+    machine.panicked()
 }
 
 fn cmd_build_and_run(
@@ -324,7 +270,7 @@ fn cmd_build_and_run(
     filename: &str,
     opt_stats: bool,
     opt_stats_json: bool,
-) -> machine::pgo::PgoSnapshot {
+) {
     let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
         Err(()) => {
@@ -348,7 +294,7 @@ fn cmd_build_and_run(
 
     maybe_warn_stale_default_out(pipeline, filename, &debug);
     let entry = ffi_entry_path(Path::new(filename));
-    let (panicked, snap) = execute_archive(
+    let panicked = execute_archive(
         pipeline,
         &bytecode,
         &constants,
@@ -361,7 +307,6 @@ fn cmd_build_and_run(
     if panicked {
         exit(1);
     }
-    snap
 }
 
 fn cmd_compile(
@@ -618,7 +563,7 @@ fn run_test_suite(
                             )
                         }));
                         let ok = match result {
-                            Ok((panicked, _)) => !panicked,
+                            Ok(panicked) => !panicked,
                             Err(_) => false,
                         };
                         if ok {
@@ -816,24 +761,18 @@ fn main() {
             if cli.opt_stats || cli.opt_stats_json {
                 pipeline.set_collect_opt_stats(true);
             }
-            apply_pgo_use(&mut pipeline, cli.pgo_use_profile.as_deref());
-            if cli.pgo_instrument {
-                machine::pgo::reset();
-                pipeline.set_pgo_instrument(true);
-            }
             match command {
                 Command::BuildAndRun { filename } => {
                     let filename = match resolve_entry_filename(&filename) {
                         Ok(f) => f,
                         Err(msg) => fail_and_exit(&mut pipeline, ErrorCode::MissingInputFile, msg),
                     };
-                    let snap = cmd_build_and_run(
+                    cmd_build_and_run(
                         &mut pipeline,
                         &filename,
                         cli.opt_stats,
                         cli.opt_stats_json,
                     );
-                    write_pgo_profile(cli.pgo_generate_profile.as_deref(), Some(snap));
                 }
                 Command::Compile { filename, output } => {
                     let filename = match resolve_entry_filename(&filename) {
@@ -847,7 +786,6 @@ fn main() {
                         cli.opt_stats,
                         cli.opt_stats_json,
                     );
-                    write_pgo_profile(cli.pgo_generate_profile.as_deref(), None);
                 }
                 Command::Run { archive } => cmd_run(&mut pipeline, &archive),
                 Command::Package {
@@ -866,7 +804,6 @@ fn main() {
                         strip_debug,
                     );
                     print_opt_stats(cli.opt_stats, cli.opt_stats_json);
-                    write_pgo_profile(cli.pgo_generate_profile.as_deref(), None);
                 }
                 Command::Natives { exe, tsv } => {
                     cmd_natives_dump(&mut pipeline, exe.as_deref(), tsv);

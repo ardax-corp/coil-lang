@@ -397,7 +397,6 @@ pub(crate) struct MachineHostState {
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
     dload_gate: crate::ffi::DloadGate,
-    pgo: crate::pgo::PgoCounters,
 }
 
 thread_local! {
@@ -415,7 +414,6 @@ impl HostStateGuard {
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
         let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
         let dload_gate = vm.dload_gate().clone();
-        let pgo = vm.pgo_counters().clone();
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
                 raw: (vm as *mut Machine<N>).cast(),
@@ -424,7 +422,6 @@ impl HostStateGuard {
                 io_reactor,
                 cpu_reactor,
                 dload_gate,
-                pgo,
             });
         });
         Self { prev }
@@ -504,31 +501,6 @@ pub(crate) fn host_io_wait_no_help(
         Some(io) => io.wait_fd(handle, interest, timeout),
         None => IoReactor::new().wait_fd(handle, interest, timeout),
     }
-}
-
-pub(crate) fn host_pgo_hit(packed: i64) {
-    HOST_STATE.with(|c| {
-        if let Some(s) = c.borrow().as_ref() {
-            s.pgo.hit(packed);
-        }
-    });
-}
-
-pub(crate) fn host_pgo_snapshot() -> crate::pgo::PgoSnapshot {
-    HOST_STATE.with(|c| {
-        c.borrow()
-            .as_ref()
-            .map(|s| s.pgo.snapshot())
-            .unwrap_or_default()
-    })
-}
-
-pub(crate) fn host_pgo_reset() {
-    HOST_STATE.with(|c| {
-        if let Some(s) = c.borrow().as_ref() {
-            s.pgo.reset();
-        }
-    });
 }
 
 /// Code pointer must be a symbol in a file the bound gate would hashed-dload.
@@ -1020,7 +992,6 @@ pub struct ThreadSpawnContext {
     pub ffi_search_paths: Vec<PathBuf>,
     /// Fail-closed `dload` integrity (lock hash / trusted / host grants).
     pub dload_gate: crate::ffi::DloadGate,
-    pub pgo: crate::pgo::PgoCounters,
 }
 
 impl Clone for ThreadSpawnContext {
@@ -1036,7 +1007,6 @@ impl Clone for ThreadSpawnContext {
             ffi_base_dir: self.ffi_base_dir.clone(),
             ffi_search_paths: self.ffi_search_paths.clone(),
             dload_gate: self.dload_gate.clone(),
-            pgo: self.pgo.clone(),
         }
     }
 }

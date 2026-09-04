@@ -1,6 +1,5 @@
 //! Loop-invariant code motion for Known-SP natural loops.
 
-use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use common::{DebugLoc, Instruction};
@@ -8,15 +7,6 @@ use common::{DebugLoc, Instruction};
 use super::bounds;
 use super::op::{IlJumpKind, IlOp, Label};
 use super::sp;
-
-thread_local! {
-    static PREFER_HOT: Cell<bool> = const { Cell::new(true) };
-}
-
-/// Prefer hotter loop headers when a PGO profile is loaded (COI-191).
-pub fn set_pgo_prioritize_hot_licm(on: bool) {
-    PREFER_HOT.with(|c| c.set(on));
-}
 
 /// Hoist loop-invariant producers out of Known-SP natural loops: Const/Load,
 /// BinSlot*, tuple/array/dict construction, non-trapping int arith, FORMAT
@@ -703,14 +693,6 @@ pub(super) use super::analysis::{NaturalLoop, find_natural_loops, il_function_st
 
 fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
     let mut loops = find_natural_loops(ops);
-    let prefer = PREFER_HOT.with(|c| c.get());
-    if prefer && crate::profile::current_profile().is_some() {
-        loops.sort_by_key(|l| {
-            let heat = crate::profile::block_heat_current(ops, l.header);
-            (std::cmp::Reverse(heat), std::cmp::Reverse(l.header))
-        });
-        return loops;
-    }
     loops.sort_by_key(|l| std::cmp::Reverse(l.header));
     loops
 }

@@ -8,15 +8,9 @@ mod dissect;
 // against the VM cursor and symbolic-IL tell against bytecode; the rest of
 // the IL stays crate-private.
 pub(crate) mod il;
-pub(crate) mod profile;
 pub use il::opt::{OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
-pub use profile::{
-    InstrumentMap, LoadError, PROFILE_VERSION, ProfileData, current_profile, instrument_for_pgo,
-    instrument_for_pgo_mut, last_instrument_map, optimize_with_profile, profile_from_runtime,
-    set_current_profile, set_pgo_instrument,
-};
 mod host_grants;
 mod lockfile;
 mod manifest;

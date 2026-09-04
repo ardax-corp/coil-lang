@@ -48,15 +48,11 @@ pipeline. No solo “pass” tests.
 | `max_optimization_iterations` | 10 | Cap, clamped to `1..=10`. |
 | `collect_stats` | off | Record per-pass counters into `OptStats`. |
 | `pure_call_ctx` | `None` | Sidecar-proven pure user `fn` names + entries for COI-99 length-proof / LICM barriers (`$mono$` clones match the source bind). |
-| `pgo_prioritize_hot_loops` | on | Heat-order LICM / unroll / escape when a PGO profile is loaded. |
 | `loop_unroll_factor` | 8 | Trip cap for `loop_unroll` (clamped to 8). Parameter of that pass. |
-
-PGO instrument compile (`pgo_instrumenting`) runs **cleanup only** and skips
-decision opts + `cfg_gvn`.
 
 ## Pipeline order
 
-`optimize_once_at` = cleanup (profile-agnostic) then decision (layout/heat).
+`optimize_once_at` = cleanup then decision.
 
 **Cleanup** (`cleanup_once_at`), in order:
 
@@ -234,8 +230,7 @@ float identities / pool fold.
 
 ## `licm`
 
-**Flag:** `licm` (default on). **Fn:** `il::licm::licm`. Uses **`sp`**. Honors
-`pgo_prioritize_hot_loops`.
+**Flag:** `licm` (default on). **Fn:** `il::licm::licm`. Uses **`sp`**.
 
 - **Input:** Natural loops (back-edge JMP to a header label) whose header SP is
   Known. Also runs `bounds::hoist_loop_invariants` first.
@@ -274,8 +269,7 @@ float identities / pool fold.
 ## `loop_unroll`
 
 **Flag:** `loop_unroll` (default on; off at `-Os`). **Fn:**
-`loop_unroll::unroll_loops_pgo`. Honors `loop_unroll_factor` and
-`pgo_prioritize_hot_loops`.
+`loop_unroll::unroll_loops`. Honors `loop_unroll_factor`.
 
 - **Input:** Innermost counted natural loop, induction from 0 step +1, trip
   count ≤ `min(factor, 8)`, header `LE`/`LEQ`/`GT` + `JMPF`.
@@ -326,7 +320,7 @@ from `cfg_gvn_with` when the flag is on.
 ## `escape_analysis`
 
 **Flag:** `escape_analysis` (default on). **Fn:**
-`escape_analysis::escape_analysis_pgo`. Honors `pgo_prioritize_hot_loops`.
+`escape_analysis::escape_analysis`.
 
 - **Input:** `MakeArray { arity: 1..=32 }; StorePop s` whose elements are
   immediates (`Const` / pool / string).
@@ -471,21 +465,20 @@ except block reorder / seek / tell-promote. Optional `BranchProfile`.
 - **Output:** Invert polarity and move the cold arm after a freshly minted
   module-wide-unique label. Semantics identical; layout only.
 - **Refusals:** Unknown SP / empty stack at the cond; then-arm with an internal
-  jump or label; suffix that could fall into the moved region; profile saying
-  the fall-through is hot (`not_taken >= taken`).
+  jump or label; suffix that could fall into the moved region.
 - **Tests:** `opt/branch_opt.rs` `heuristic_moves_return_off_jmpf_fallthrough`,
-  `refuses_when_cond_jump_has_empty_stack`, `profile_hot_fallthrough_keeps_layout`.
+  `refuses_when_cond_jump_has_empty_stack`.
 
 ## `block_reordering`
 
 **Flag:** `block_reordering` (default on). **Fn:**
-`block_order::reorder_basic_blocks`. Optional `BranchProfile`.
+`block_order::reorder_basic_blocks`.
 
 - **Input:** Basic blocks split on labels and terminators.
 - **Output:** Detached jump-only terminating blocks sink to the end. Fall-through
   chains stay adjacent. Label ids and branch polarity **are not rewritten**.
 - **Refusals:** Fall-through successor; block that is not a terminator; back-edge
-  successor; unconditional-jump join target; profile-hot entry.
+  successor; unconditional-jump join target.
 - **Tests:** `opt/block_order.rs` `cold_return_block_moves_past_join`,
   `linear_code_unchanged`, `branch_targets_keep_the_same_label_ids`.
 
@@ -530,8 +523,8 @@ Uses **`tell`**. Runs last after every slot-tracking pass; production runs it
 ## `cfg_gvn` (production, not an `OptimizeOptions` flag)
 
 **Fn:** `il::gvn::cfg_gvn_with(ops, ssa_gvn_flag)`. Always run per body in
-`IlModule::optimize_and_flatten` after per-body opts (skipped while PGO
-instrumenting). Inner `ssa_gvn` follows the `ssa_gvn` flag.
+`IlModule::optimize_and_flatten` after per-body opts. Inner `ssa_gvn` follows
+the `ssa_gvn` flag.
 
 - **Input:** One function body. Intra-block + join-sink CSE of pure producers
   (`Const`/`Load`/`Bin`/`BinSlot*`/`Index`/`LoadField`/`Dup`). Join sink

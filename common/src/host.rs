@@ -1,7 +1,7 @@
 //! Append-only HostInvoke catalog shared by compiler and VM.
 //!
 //! Ids are the table index. New natives go at the end. Do not reorder or
-//! reuse slots. Frozen: 119 = `pgo_hit`, 120 = `stream_attach`, 121 = `stream_park`.
+//! reuse slots. Frozen: 119 unused, 120 = `stream_attach`, 121 = `stream_park`.
 //! Append-only after that: 122–124 = `clock_*`, 125 = `result_unit_probe`.
 
 /// One standard host native: stable name, declared arity, HostInvoke id.
@@ -612,7 +612,7 @@ pub const HOST_NATIVES: &[HostNative] = &[
         id: 118,
     },
     HostNative {
-        name: "pgo_hit",
+        name: "unused_119",
         arity: 1,
         id: 119,
     },
@@ -648,8 +648,8 @@ pub const HOST_NATIVES: &[HostNative] = &[
     },
 ];
 
-/// Frozen HostInvoke id for `pgo_hit`.
-pub const PGO_HIT_ID: u16 = 119;
+/// Unused HostInvoke id (do not reuse; later ids stay put).
+pub const UNUSED_HOST_119_ID: u16 = 119;
 /// Frozen HostInvoke id for `stream_attach`.
 pub const STREAM_ATTACH_ID: u16 = 120;
 /// Frozen HostInvoke id for `stream_park`.
@@ -663,7 +663,7 @@ pub const CLOCK_SLEEP_MS_ID: u16 = 124;
 /// HostInvoke id for `result_unit_probe` (`Result<(), IoError>` pack helper).
 pub const RESULT_UNIT_PROBE_ID: u16 = 125;
 
-pub const PGO_HIT_NATIVE: &str = "pgo_hit";
+pub const UNUSED_HOST_119_NATIVE: &str = "unused_119";
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
 pub const CLOCK_WALL_NANOS_NATIVE: &str = "clock_wall_nanos";
@@ -711,7 +711,7 @@ pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
     assert!(HOST_NATIVES.len() == 126);
-    assert!(HOST_NATIVES[119].id == PGO_HIT_ID);
+    assert!(HOST_NATIVES[119].id == UNUSED_HOST_119_ID);
     assert!(HOST_NATIVES[120].id == STREAM_ATTACH_ID);
     assert!(HOST_NATIVES[121].id == STREAM_PARK_ID);
     assert!(HOST_NATIVES[122].id == CLOCK_WALL_NANOS_ID);
@@ -810,7 +810,7 @@ mod tests {
 
     #[test]
     fn frozen_tail_ids() {
-        assert_eq!(host_native_id(PGO_HIT_NATIVE), Some(119));
+        assert_eq!(host_native_id(UNUSED_HOST_119_NATIVE), Some(119));
         assert_eq!(host_native_id(STREAM_ATTACH_NATIVE), Some(120));
         assert_eq!(host_native_id(STREAM_PARK_NATIVE), Some(121));
         assert_eq!(host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(122));

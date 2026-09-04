@@ -95,7 +95,7 @@ pub fn enabled_pass_names(opts: &OptimizeOptions) -> Vec<&'static str> {
         .collect()
 }
 
-/// One pipeline round: cleanup, then decision unless PGO is instrumenting.
+/// One pipeline round: cleanup, then decision.
 pub fn run_once(
     ops: &mut Vec<IlOp>,
     opts: &OptimizeOptions,
@@ -112,10 +112,6 @@ pub fn run_once(
         next_label,
     };
     run_phase(Phase::Cleanup, ops, opts, &mut ctx);
-    if crate::profile::pgo_instrumenting() {
-        return;
-    }
-    crate::profile::prepare_function_profile(ops);
     run_phase(Phase::Decision, ops, opts, &mut ctx);
 }
 
@@ -184,7 +180,6 @@ fn apply_cast_spill(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_
 }
 
 fn apply_licm(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    crate::il::licm::set_pgo_prioritize_hot_licm(opts.pgo_prioritize_hot_loops);
     crate::il::licm::licm_with(ops, opts.pure_call_ctx.as_ref());
     0
 }
@@ -195,11 +190,7 @@ fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
 }
 
 fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::loop_unroll::unroll_loops_pgo(
-        ops,
-        opts.loop_unroll_factor,
-        opts.pgo_prioritize_hot_loops,
-    )
+    super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
 }
 
 fn apply_invariant_store_elim(
@@ -218,10 +209,10 @@ fn apply_ssa_gvn(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) 
 
 fn apply_escape_analysis(
     ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
+    _: &OptimizeOptions,
     _: &mut PassCtx<'_>,
 ) -> usize {
-    super::escape_analysis::escape_analysis_pgo(ops, opts.pgo_prioritize_hot_loops);
+    super::escape_analysis::escape_analysis(ops);
     0
 }
 
@@ -278,19 +269,11 @@ fn apply_branch_optimization(
     _: &OptimizeOptions,
     ctx: &mut PassCtx<'_>,
 ) -> usize {
-    let profile = crate::profile::current_profile();
-    let bp = profile
-        .as_ref()
-        .map(|p| crate::profile::branch_profile(ops, p));
-    super::branch_opt::optimize_branches_at(ops, bp.as_ref(), ctx.entry_sp, ctx.next_label)
+    super::branch_opt::optimize_branches_at(ops, None, ctx.entry_sp, ctx.next_label)
 }
 
 fn apply_block_reordering(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    let profile = crate::profile::current_profile();
-    let bp = profile
-        .as_ref()
-        .map(|p| crate::profile::branch_profile(ops, p));
-    super::block_order::reorder_basic_blocks(ops, bp.as_ref())
+    super::block_order::reorder_basic_blocks(ops, None)
 }
 
 fn apply_seek_back_edge(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {

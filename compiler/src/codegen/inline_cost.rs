@@ -11,9 +11,9 @@ use common::Instruction;
 /// Thresholds for [`should_inline_function`].
 #[derive(Clone, Debug)]
 pub struct InlineCostOptions {
-    /// Default budget for a call site without profile data.
+    /// Default budget for a call site.
     pub max_inline_cost: usize,
-    /// Tighter budget when [`CallInfo::hot`] (PGO / future).
+    /// Tighter budget when [`CallInfo::hot`].
     pub hot_call_threshold: usize,
     /// Relaxed budget when [`CallInfo::force_inline`].
     pub cold_call_threshold: usize,
