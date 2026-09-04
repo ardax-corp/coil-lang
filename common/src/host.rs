@@ -1,8 +1,8 @@
 //! Append-only HostInvoke catalog shared by compiler and VM.
 //!
 //! Ids are the table index. New natives go at the end. Do not reorder or
-//! reuse slots. Frozen: 119 unused, 120 = `stream_attach`, 121 = `stream_park`.
-//! Append-only after that: 122–124 = `clock_*`, 125 = `result_unit_probe`.
+//! reuse slots. Frozen: 119 = `stream_attach`, 120 = `stream_park`.
+//! Append-only after that: 121–123 = `clock_*`, 124 = `result_unit_probe`.
 
 /// One standard host native: stable name, declared arity, HostInvoke id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -612,58 +612,50 @@ pub const HOST_NATIVES: &[HostNative] = &[
         id: 118,
     },
     HostNative {
-        name: "unused_119",
-        arity: 1,
-        id: 119,
-    },
-    HostNative {
         name: "stream_attach",
         arity: 6,
-        id: 120,
+        id: 119,
     },
     HostNative {
         name: "stream_park",
         arity: 1,
-        id: 121,
+        id: 120,
     },
     HostNative {
         name: "clock_wall_nanos",
         arity: 0,
-        id: 122,
+        id: 121,
     },
     HostNative {
         name: "clock_mono_nanos",
         arity: 0,
-        id: 123,
+        id: 122,
     },
     HostNative {
         name: "clock_sleep_ms",
         arity: 1,
-        id: 124,
+        id: 123,
     },
     HostNative {
         name: "result_unit_probe",
         arity: 1,
-        id: 125,
+        id: 124,
     },
 ];
 
-/// Unused HostInvoke id (do not reuse; later ids stay put).
-pub const UNUSED_HOST_119_ID: u16 = 119;
 /// Frozen HostInvoke id for `stream_attach`.
-pub const STREAM_ATTACH_ID: u16 = 120;
+pub const STREAM_ATTACH_ID: u16 = 119;
 /// Frozen HostInvoke id for `stream_park`.
-pub const STREAM_PARK_ID: u16 = 121;
+pub const STREAM_PARK_ID: u16 = 120;
 /// HostInvoke id for `clock_wall_nanos`.
-pub const CLOCK_WALL_NANOS_ID: u16 = 122;
+pub const CLOCK_WALL_NANOS_ID: u16 = 121;
 /// HostInvoke id for `clock_mono_nanos`.
-pub const CLOCK_MONO_NANOS_ID: u16 = 123;
+pub const CLOCK_MONO_NANOS_ID: u16 = 122;
 /// HostInvoke id for `clock_sleep_ms`.
-pub const CLOCK_SLEEP_MS_ID: u16 = 124;
+pub const CLOCK_SLEEP_MS_ID: u16 = 123;
 /// HostInvoke id for `result_unit_probe` (`Result<(), IoError>` pack helper).
-pub const RESULT_UNIT_PROBE_ID: u16 = 125;
+pub const RESULT_UNIT_PROBE_ID: u16 = 124;
 
-pub const UNUSED_HOST_119_NATIVE: &str = "unused_119";
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
 pub const CLOCK_WALL_NANOS_NATIVE: &str = "clock_wall_nanos";
@@ -710,14 +702,13 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 126);
-    assert!(HOST_NATIVES[119].id == UNUSED_HOST_119_ID);
-    assert!(HOST_NATIVES[120].id == STREAM_ATTACH_ID);
-    assert!(HOST_NATIVES[121].id == STREAM_PARK_ID);
-    assert!(HOST_NATIVES[122].id == CLOCK_WALL_NANOS_ID);
-    assert!(HOST_NATIVES[123].id == CLOCK_MONO_NANOS_ID);
-    assert!(HOST_NATIVES[124].id == CLOCK_SLEEP_MS_ID);
-    assert!(HOST_NATIVES[125].id == RESULT_UNIT_PROBE_ID);
+    assert!(HOST_NATIVES.len() == 125);
+    assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
+    assert!(HOST_NATIVES[120].id == STREAM_PARK_ID);
+    assert!(HOST_NATIVES[121].id == CLOCK_WALL_NANOS_ID);
+    assert!(HOST_NATIVES[122].id == CLOCK_MONO_NANOS_ID);
+    assert!(HOST_NATIVES[123].id == CLOCK_SLEEP_MS_ID);
+    assert!(HOST_NATIVES[124].id == RESULT_UNIT_PROBE_ID);
 };
 
 /// HostInvoke id for a standard native name.
@@ -810,13 +801,12 @@ mod tests {
 
     #[test]
     fn frozen_tail_ids() {
-        assert_eq!(host_native_id(UNUSED_HOST_119_NATIVE), Some(119));
-        assert_eq!(host_native_id(STREAM_ATTACH_NATIVE), Some(120));
-        assert_eq!(host_native_id(STREAM_PARK_NATIVE), Some(121));
-        assert_eq!(host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(122));
-        assert_eq!(host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(123));
-        assert_eq!(host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(124));
-        assert_eq!(host_native_id(RESULT_UNIT_PROBE_NATIVE), Some(125));
+        assert_eq!(host_native_id(STREAM_ATTACH_NATIVE), Some(119));
+        assert_eq!(host_native_id(STREAM_PARK_NATIVE), Some(120));
+        assert_eq!(host_native_id(CLOCK_WALL_NANOS_NATIVE), Some(121));
+        assert_eq!(host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(122));
+        assert_eq!(host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(123));
+        assert_eq!(host_native_id(RESULT_UNIT_PROBE_NATIVE), Some(124));
         assert_eq!(HOST_NATIVES[24].name, "udp_local_port");
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
