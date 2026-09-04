@@ -24,11 +24,11 @@ const CORPUS: &[&str] = &[
 /// the two-slot ABI end to end. Heap `Vec::pop` now HostInvokes with
 /// OptionNiche layout bits (no CALL + boxed-to-niche unwrap).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "e3676a48a2b745f0_522"),
-    ("functions.hy", "09d523b5e92dc06e_390"),
-    ("loops.hy", "0798a354fd32364d_267"),
-    ("option_pair.hy", "a4ab50c9156afb62_386"),
-    ("user_trait_dispatch.hy", "53fb084fd917f3fe_157"),
+    ("arithmetic.hy", "00bc4a9b9aa895cd_522"),
+    ("functions.hy", "b5ff494e17beb778_394"),
+    ("loops.hy", "5d36f89b615505b4_267"),
+    ("option_pair.hy", "93699f281cd17d8e_388"),
+    ("user_trait_dispatch.hy", "6d568096562aa3f9_157"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
