@@ -1247,13 +1247,8 @@ pub fn to_bytes(heap: &mut Heap, s: Value) -> Value {
 
 /// Helper: wrap a fallible stream op that returns a Value into `Result<_, IoError>`.
 pub fn as_result_value(heap: &mut Heap, r: Result<Value, IoErrorTag>) -> Value {
-    match r {
-        Ok(v) => alloc_result_ok(heap, v),
-        Err(tag) => {
-            let err = alloc_io_error(heap, tag);
-            alloc_result_err(heap, err)
-        }
-    }
+    let mapped = r.map_err(|tag| alloc_io_error(heap, tag));
+    crate::host_enum::pack_result_or_panic(heap, mapped)
 }
 
 /// Helper: `Result<Option<int>, IoError>` encoding.
@@ -1287,13 +1282,8 @@ pub fn as_result_int(heap: &mut Heap, r: Result<usize, IoErrorTag>) -> Value {
 
 /// Helper: `Result<(), IoError>` — Ok payload is unit (null/default).
 pub fn as_result_unit(heap: &mut Heap, r: Result<(), IoErrorTag>) -> Value {
-    match r {
-        Ok(()) => alloc_result_ok(heap, Value::default()),
-        Err(tag) => {
-            let err = alloc_io_error(heap, tag);
-            alloc_result_err(heap, err)
-        }
-    }
+    let mapped = r.map_err(|tag| alloc_io_error(heap, tag));
+    crate::host_enum::pack_result_unit_or_panic(heap, mapped)
 }
 
 #[cfg(test)]
