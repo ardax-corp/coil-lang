@@ -4813,6 +4813,40 @@
     }
 
     #[test]
+    fn typed_instance_two_fields_inline() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::InitTyped).with_operand_u32(pack_init_typed(4, 2)),
+            Byte::new(Instruction::HALT),
+        ]);
+        let addr = vm.pop().raw() as u64;
+        match vm.heap().find_object_by_addr(addr) {
+            Some(Object::Instance(gc)) => {
+                assert!(gc.as_ref().slots_are_inline());
+                assert_eq!(gc.as_ref().slot_len(), Some(2));
+            }
+            _ => panic!("expected inline typed instance"),
+        }
+    }
+
+    #[test]
+    fn typed_instance_three_fields_spill() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::InitTyped).with_operand_u32(pack_init_typed(9, 3)),
+            Byte::new(Instruction::HALT),
+        ]);
+        let addr = vm.pop().raw() as u64;
+        match vm.heap().find_object_by_addr(addr) {
+            Some(Object::Instance(gc)) => {
+                assert!(!gc.as_ref().slots_are_inline());
+                assert_eq!(gc.as_ref().slot_len(), Some(3));
+            }
+            _ => panic!("expected spilled typed instance"),
+        }
+    }
+
+    #[test]
     fn finalizer_registry_round_trip() {
         let mut vm = Machine::<8>::default();
         vm.register_finalizer_for_test(3, 99);
