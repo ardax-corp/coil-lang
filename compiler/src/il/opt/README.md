@@ -57,17 +57,17 @@ pipeline. No solo “pass” tests.
 **Cleanup** (`cleanup_once_at`), in order:
 
 1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `mem_fwd` →
-5. `copy_prop` → 6. `dead_store` (same flag as `mem_fwd`) → 7. `canon` →
-8. `algebraic` → 9. `instcombine` → 10. `cast_spill`
+5. `copy_prop` → 6. `dest_prop` → 7. `dead_store` (same flag as `mem_fwd`) →
+8. `canon` → 9. `algebraic` → 10. `instcombine` → 11. `cast_spill`
 
 **Decision** (`decision_once_at`), in order:
 
-11. `licm` → 12. `loop_bounds` → 13. `loop_unroll` → 14. `invariant_store_elim`
-→ 15. `escape_analysis` → 16. `slot_promote` (+ `dead_store`) → 17. `tos_carry`
-→ 18. `clone_shared_return` → 19. `return_convoy` → 20. `bin_join_convoy` →
-21. `multi_op_join_convoy` → 22. `invert_guard_branch` →
-23. `branch_optimization` → 24. `block_reordering` → 25. `seek_back_edge` →
-26. `slot_promote_tell` → 27. `ssa_gvn`
+12. `licm` → 13. `loop_bounds` → 14. `loop_unroll` → 15. `invariant_store_elim`
+→ 16. `escape_analysis` → 17. `slot_promote` (+ `dead_store`) → 18. `tos_carry`
+→ 19. `clone_shared_return` → 20. `return_convoy` → 21. `bin_join_convoy` →
+22. `multi_op_join_convoy` → 23. `invert_guard_branch` →
+24. `branch_optimization` → 25. `block_reordering` → 26. `seek_back_edge` →
+27. `slot_promote_tell` → 28. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
 opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
@@ -175,6 +175,24 @@ Not an `OptimizeOptions` field. Gated by `mem_fwd` in cleanup; run again after
   store that aliases a producer dependency; self-alias `Load s; StorePop s`.
 - **Tests:** `opt/convoy.tests.rs` `copy_prop_replaces_load_and_cursor_safe_dead_store`,
   `copy_prop_refuses_control_flow_boundaries`, `copy_prop_clears_bindings_across_host_invoke`.
+
+## `dest_prop`
+
+**Flag:** `dest_prop` (default on at Basic). **Fn:** `dest_prop::dest_prop`.
+
+- **Input:** `LOAD src; STORE dest` aliases in a straight-line region.
+  `GetField` / `SetField` / `LoadField` / `Make*` / `BoxValue` do **not**
+  clear the map (they do not redefine locals).
+- **Output:** Later `LOAD dest` / `BinSlot*` uses become `src`. Does not
+  drop the copy store (`dead_store` owns the tell/GC floor). Height
+  unchanged (still a `LOAD`).
+- **Refusals:** Labels / jumps / `Entry` / `HostInvoke` / `Print` / calls /
+  returns / residual unknown `Byte`; `STORE` to `src` or `dest` kills that
+  alias. Does **not** clone `Const` / `BinSlot*` producers (shape-sensitive
+  GetField / field-key CSE stay with `copy_prop`).
+- **Tests:** `opt/dest_prop.tests.rs` `dest_prop_forwards_load_across_getfield`,
+  `dest_prop_clears_across_host_invoke`,
+  `dest_prop_does_not_clone_const_before_getfield`.
 
 ## `canon`
 
@@ -602,6 +620,7 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | stack_dce | `convoy.tests.rs` | no |
 | mem_fwd (+ dead_store) | `convoy.tests.rs` | no |
 | copy_prop | `convoy.tests.rs` | no |
+| dest_prop | `dest_prop.tests.rs` | yes |
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | instcombine | `instcombine.rs` | yes |
