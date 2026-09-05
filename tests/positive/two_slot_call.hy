@@ -169,6 +169,32 @@ fn http_chain(int a, int b, int c) -> Result<int, int> {
     return Result::Ok(z + 1);
 }
 
+fn step(int n) -> Result<int, int> {
+    if n < 0 {
+        return Result::Err(n);
+    }
+    return Result::Ok(n);
+}
+
+fn step_mod(int n) -> Result<int, int> {
+    if n % 5 == 0 {
+        return Result::Err(-1);
+    }
+    return Result::Ok((n % 10) + 1);
+}
+
+fn step_chain(int i) -> Result<int, int> {
+    let a = step(i)?;
+    let b = step(i + 3)?;
+    return Result::Ok(a + b);
+}
+
+fn step_mod_chain(int i) -> Result<int, int> {
+    let a = step_mod(i)?;
+    let b = step_mod(i + 3)?;
+    return Result::Ok(a + b);
+}
+
 test("two-word Result Try propagates through raise/?") {
     assert(match chained(9, 3) {
         Result::Ok(v) => v == 4,
@@ -211,6 +237,26 @@ test("HTTP-shaped Result ? chain keeps payloads and err path") {
     assert(match http_chain(10, 2, 0) {
         Result::Ok(_) => false,
         Result::Err(e) => e == -1,
+    })?;
+}
+
+test("step-shaped Result ? chain binds both oks and first err") {
+    assert(match step_chain(4) {
+        Result::Ok(v) => v == 11,
+        Result::Err(_) => false,
+    })?;
+    assert(match step_chain(-2) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -2,
+    })?;
+    // First `?` ok, second `?` err — same shape as result_try_churn.
+    assert(match step_mod_chain(2) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+    assert(match step_mod_chain(1) {
+        Result::Ok(v) => v == 7,
+        Result::Err(_) => false,
     })?;
 }
 
