@@ -216,10 +216,10 @@ float identities / pool fold.
 `opt::instcombine::instcombine`. Cleanup, after `algebraic`.
 
 - **Input:** Adjacent typed IL windows. No cursor analysis.
-- **Output:** Const-cond `JMPF`/`JMPT` → goto or delete; `LogNot`/`NOT` +
-  cond-jump polarity flip; `CONST t; DUP; CONST e; EQ|NEQ` → `CONST t; CONST
-  0|1`; `XOR 1; XOR 1` cancel; two-slot match diamonds that only keep the
-  payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`) → `POP` of the tag.
+- **Output:** Const-cond `JMPF`/`JMPT` → goto or delete; `CONST t; DUP; CONST e;
+  EQ|NEQ` → `CONST t; CONST 0|1`; `XOR 1; XOR 1` cancel; two-slot match
+  diamonds that only keep the payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`)
+  → `POP` of the tag. `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
 - **Refusals:** Non-identity match arms; `JumpIfMatch` (boxed) diamonds;
   unknown tags. No new opcodes.
 - **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,

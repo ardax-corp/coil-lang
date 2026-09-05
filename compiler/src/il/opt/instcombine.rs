@@ -1,8 +1,8 @@
 //! Local InstCombine / peephole on typed stack IL.
 //!
 //! Folds obvious adjacent patterns without new opcodes or ABI changes:
-//! const-cond branches, known-tag `EQ`, `LogNot` polarity, XOR-1 pairs,
-//! and two-slot enum match diamonds that just keep the payload.
+//! const-cond branches, known-tag `EQ`, XOR-1 pairs, and two-slot enum
+//! match diamonds that just keep the payload.
 
 use common::Instruction;
 
@@ -47,7 +47,6 @@ fn instcombine_once(ops: &mut Vec<IlOp>) -> usize {
 
 fn try_peep(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
     try_const_cond_jmp(ops, i)
-        .or_else(|| try_lognot_cond_jmp(ops, i))
         .or_else(|| try_known_tag_dup_eq(ops, i))
         .or_else(|| try_xor1_xor1(ops, i))
         .or_else(|| try_pair_payload_identity_match(ops, i))
@@ -86,36 +85,6 @@ fn try_const_cond_jmp(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
     } else {
         Some((2, Vec::new()))
     }
-}
-
-/// `LogNot`/`NOT`; `JMPF` → `JMPT` (and the inverse).
-fn try_lognot_cond_jmp(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
-    if !is_logical_not(&ops[i]) {
-        return None;
-    }
-    let IlOp::Jump {
-        kind,
-        target,
-        loc,
-        hint,
-    } = ops.get(i + 1)?
-    else {
-        return None;
-    };
-    let flipped = match kind {
-        IlJumpKind::JumpIfFalse => IlJumpKind::JumpIfTrue,
-        IlJumpKind::JumpIfTrue => IlJumpKind::JumpIfFalse,
-        _ => return None,
-    };
-    Some((
-        2,
-        vec![IlOp::Jump {
-            kind: flipped,
-            target: *target,
-            loc: *loc,
-            hint: *hint,
-        }],
-    ))
 }
 
 /// `CONST t; DUP; CONST e; EQ|NEQ` → `CONST t; CONST (t ? e)`.
@@ -267,12 +236,6 @@ fn is_label(op: &IlOp, id: u32) -> bool {
     matches!(op, IlOp::Label(Label(x)) | IlOp::JoinLabel(Label(x)) if *x == id)
 }
 
-fn is_logical_not(op: &IlOp) -> bool {
-    matches!(op, IlOp::LogNot { .. })
-        || matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::NOT)
-        || matches!(op.as_encode_byte(), Some(b) if *b.bytecode() == Instruction::NOT)
-}
-
 fn is_const_n(op: &IlOp, n: i32) -> bool {
     matches!(op, IlOp::Const { imm, .. } if *imm == n)
 }
@@ -328,24 +291,6 @@ mod tests {
         ];
         instcombine(&mut ops);
         assert!(matches!(ops[0], IlOp::Const { imm: 9, .. }));
-    }
-
-    #[test]
-    fn lognot_jmpf_flips_to_jmpt() {
-        let mut ops = vec![
-            IlOp::LogNot { loc: loc() },
-            jmp(IlJumpKind::JumpIfFalse, 4),
-        ];
-        instcombine(&mut ops);
-        assert!(matches!(
-            ops[0],
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfTrue,
-                target: Label(4),
-                ..
-            }
-        ));
-        assert_eq!(ops.len(), 1);
     }
 
     #[test]
