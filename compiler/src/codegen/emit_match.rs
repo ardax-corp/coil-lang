@@ -755,12 +755,13 @@ impl Compiler {
                     let first_arm_idx = group.arm_indices[0];
                     let label = arm_labels[first_arm_idx]
                         .expect("non-last group's first arm must have a Label");
-                    bb.emit_jump_to(
+                    bb.emit_jump_to_hinted(
                         label,
                         BbJumpKind::JumpIfMatch {
                             tag: group.tag,
                             arity: 0,
                         },
+                        match_group_cold_hint(arms, group),
                         self.bytecode.il_mut(),
                     );
                 } else {
@@ -1280,5 +1281,33 @@ impl Compiler {
             // pending jump is bound.
         }
         bytecode
+    }
+}
+
+/// Result::Err / Option::None arms are structural cold (COI-129).
+/// Ok / Some jumps mark the miss (the other variant) as cold.
+fn match_group_cold_hint(arms: &[MatchArm<'_>], group: &TagGroup) -> FuseHint {
+    let Some(&idx) = group.arm_indices.first() else {
+        return FuseHint::default();
+    };
+    match &arms[idx].pattern.1 {
+        Pattern::Constructor {
+            enum_name,
+            variant_name,
+            ..
+        } => {
+            let err = common::is_builtin_result_enum(enum_name) && *variant_name == "Err";
+            let none = common::is_builtin_option_enum(enum_name) && *variant_name == "None";
+            let ok = common::is_builtin_result_enum(enum_name) && *variant_name == "Ok";
+            let some = common::is_builtin_option_enum(enum_name) && *variant_name == "Some";
+            if err || none {
+                FuseHint::cold_target()
+            } else if ok || some {
+                FuseHint::cold_miss()
+            } else {
+                FuseHint::default()
+            }
+        }
+        _ => FuseHint::default(),
     }
 }
