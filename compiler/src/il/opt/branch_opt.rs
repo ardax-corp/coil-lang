@@ -138,11 +138,17 @@ fn invert_one_cold_fallthrough(
     let targets = label_index(ops);
     for i in 0..ops.len() {
         let IlOp::Jump {
-            kind, target, loc, ..
+            kind,
+            target,
+            loc,
+            hint,
         } = ops[i]
         else {
             continue;
         };
+        if hint.blocks_cold_fallthrough_invert() {
+            continue;
+        }
         if !matches!(kind, IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue) {
             continue;
         }
@@ -420,6 +426,23 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn value_under_jmp_try_refuses_cold_invert() {
+        let hinted = IlOp::jump_hinted(
+            IlJumpKind::JumpIfTrue,
+            Label(1),
+            loc(),
+            crate::il::FuseHint::nofuse_value_under_jmp(),
+        );
+        let mut ops = vec![c(0), hinted, c(1), ret(), label(1), c(2), ret()];
+        let before = ops.clone();
+        optimize_branches(&mut ops);
+        assert!(
+            ops == before,
+            "pair-? JMPT must stay on the shared fail"
+        );
     }
 
     #[test]

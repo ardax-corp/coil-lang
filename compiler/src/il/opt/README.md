@@ -483,8 +483,11 @@ except block reorder / seek / tell-promote. Heuristic only (no profile).
 - **Output:** Invert polarity and move the cold arm after a freshly minted
   module-wide-unique label. Semantics identical; layout only.
 - **Refusals:** Unknown SP / empty stack at the cond; then-arm with an internal
-  jump or label; suffix that could fall into the moved region.
+  jump or label; suffix that could fall into the moved region;
+  `ValueUnderJmp` / `nofuse` pair-`?` tag jumps (cold invert would turn the
+  shared fail `RETURN` into a convoy join).
 - **Tests:** `opt/branch_opt.rs` `heuristic_moves_return_off_jmpf_fallthrough`,
+  `value_under_jmp_try_refuses_cold_invert`,
   `refuses_when_cond_jump_has_empty_stack`.
 
 ## `block_reordering`

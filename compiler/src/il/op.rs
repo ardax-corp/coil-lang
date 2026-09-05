@@ -45,6 +45,13 @@ impl FuseHint {
     pub fn is_value_join(self) -> bool {
         matches!(self.join, JoinClass::Value)
     }
+
+    /// Pair `?` tag jumps keep a live payload under the cond. Cold-layout
+    /// invert would make the reconstructed fail `RETURN` a fall-through
+    /// join that convoy can steal later CALL args into.
+    pub fn blocks_cold_fallthrough_invert(self) -> bool {
+        self.nofuse || matches!(self.join, JoinClass::ValueUnderJmp)
+    }
 }
 
 /// Join class on a lowering annotation.
