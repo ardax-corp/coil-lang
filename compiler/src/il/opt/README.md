@@ -62,12 +62,12 @@ pipeline. No solo “pass” tests.
 
 **Decision** (`decision_once_at`), in order:
 
-11. `licm` → 12. `loop_bounds` → 13. `loop_unroll` → 14. `invariant_store_elim`
-→ 15. `escape_analysis` → 16. `slot_promote` (+ `dead_store`) → 17. `tos_carry`
-→ 18. `clone_shared_return` → 19. `return_convoy` → 20. `bin_join_convoy` →
-21. `multi_op_join_convoy` → 22. `invert_guard_branch` →
-23. `branch_optimization` → 24. `block_reordering` → 25. `seek_back_edge` →
-26. `slot_promote_tell` → 27. `ssa_gvn`
+11. `licm` → 12. `loop_bounds` → 13. `dom_check` → 14. `loop_unroll` → 15. `invariant_store_elim`
+→ 16. `escape_analysis` → 17. `slot_promote` (+ `dead_store`) → 18. `tos_carry`
+→ 19. `clone_shared_return` → 20. `return_convoy` → 21. `bin_join_convoy` →
+22. `multi_op_join_convoy` → 23. `invert_guard_branch` →
+24. `branch_optimization` → 25. `block_reordering` → 26. `seek_back_edge` →
+27. `slot_promote_tell` → 28. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
 opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
@@ -283,6 +283,28 @@ float identities / pool fold.
   Sidecar length/index facts (`typechecking/index_facts.rs`) feed codegen
   `IndexUnchecked` / `ArrayPin` for helpers, for-in, and stride; pipeline
   tests in `compiler/src/pipeline.rs`.
+
+## `dom_check`
+
+**Flag:** `dom_check` (default on at Standard). **Fn:**
+`opt::dom_check::dominate_checks_with`. Decision, after `loop_bounds`.
+
+- **Input:** Labeled IL plus facts already proven by sidecar codegen /
+  `loop_bounds` (`IndexUnchecked` sites). Uses CFG preds; back-edge joins
+  stay empty (fail closed).
+- **Output:** A later `Index` / `IndexPin` / `StoreIndex` / `StoreIndexPin`
+  of the same `(arr, idx)` becomes the matching `*Unchecked` form when a
+  dominating successful check or `i < len(a)` (with `i >= 0`) proves it.
+  Known-slot niche / tag `LOAD; DUP; CONST e; EQ` folds to a const (and
+  folds the following `JMPF`/`JMPT`). Height unchanged except deleted
+  compare/jumps.
+- **Refusals:** `STORE` to `arr`/`idx`, impure `CALL` / host / FFI / yield,
+  `ArrayPush` / `MakeArray`, `GetField`/`SetField`, unknown residual `Byte`.
+  No new opcodes or ISA niches. Multi-pred joins intersect; a back edge
+  refuses inherited facts.
+- **Tests:** `opt/dom_check.rs` `second_index_becomes_unchecked`,
+  `store_index_after_index_is_unchecked`, `refuses_across_impure_call`,
+  `lt_len_guard_unchecks_index`, `known_none_tag_folds_eq_jmpf`.
 
 ## `loop_unroll`
 
@@ -614,6 +636,7 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | cast_spill | `cast_spill.rs` | no |
 | licm | `licm.rs` | no |
 | loop_bounds | `bounds.rs` | no |
+| dom_check | `opt/dom_check.rs` | yes |
 | loop_unroll | `loop_unroll.tests.rs` | no |
 | invariant_store_elim | `invariant_store_elim.tests.rs` | no |
 | ssa_gvn | `gvn.tests.rs` | no |
