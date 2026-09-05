@@ -1,8 +1,8 @@
 //! Local InstCombine / peephole on typed stack IL.
 //!
 //! Folds obvious adjacent patterns without new opcodes or ABI changes:
-//! const-cond branches, known-tag `EQ`, XOR-1 pairs, and two-slot enum
-//! match diamonds that just keep the payload.
+//! const-cond branches, known-tag `EQ`, XOR-1 pairs, two-slot `?` tag
+//! flatten, and two-slot enum match diamonds that just keep the payload.
 
 use common::Instruction;
 
@@ -49,6 +49,7 @@ fn try_peep(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
     try_const_cond_jmp(ops, i)
         .or_else(|| try_known_tag_dup_eq(ops, i))
         .or_else(|| try_xor1_xor1(ops, i))
+        .or_else(|| try_pair_try_flatten(ops, i))
         .or_else(|| try_pair_payload_identity_match(ops, i))
 }
 
@@ -147,6 +148,71 @@ enum ArmKind {
     Payload,
     /// `POP; CONST 0` — unit variant dummy payload is ABI 0.
     UnitZero,
+}
+
+/// Two-slot `?`: `DUP; CONST s; EQ; JMPT ok; RETURN 2; ok: POP`.
+///
+/// Result (`s=0`) / Option (`s=1`) only. Branch on the tag; rebuild the
+/// known miss tag so the error path still returns `[payload, tag]`.
+fn try_pair_try_flatten(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
+    if !matches!(ops.get(i)?, IlOp::Dup { .. }) {
+        return None;
+    }
+    let success_tag = match ops.get(i + 1)? {
+        IlOp::Const { imm, .. } if *imm == 0 || *imm == 1 => *imm,
+        _ => return None,
+    };
+    if !matches!(ops.get(i + 2)?, IlOp::Bin { op: Instruction::EQ, .. }) {
+        return None;
+    }
+    let IlOp::Jump {
+        kind: IlJumpKind::JumpIfTrue,
+        target: ok,
+        loc: jloc,
+        hint,
+    } = ops.get(i + 3)?
+    else {
+        return None;
+    };
+    let IlOp::Return {
+        loc: rloc,
+        ret_words: 2,
+    } = ops.get(i + 4)?
+    else {
+        return None;
+    };
+    if !is_label(ops.get(i + 5)?, ok.0) {
+        return None;
+    }
+    if !matches!(ops.get(i + 6)?, IlOp::Pop { .. }) {
+        return None;
+    }
+    let to_ok = if success_tag == 0 {
+        IlJumpKind::JumpIfFalse
+    } else {
+        IlJumpKind::JumpIfTrue
+    };
+    let fail_tag = 1 - success_tag;
+    Some((
+        7,
+        vec![
+            IlOp::Jump {
+                kind: to_ok,
+                target: *ok,
+                loc: *jloc,
+                hint: *hint,
+            },
+            IlOp::Const {
+                imm: fail_tag,
+                loc: *rloc,
+            },
+            IlOp::Return {
+                loc: *rloc,
+                ret_words: 2,
+            },
+            ops[i + 5].clone(),
+        ],
+    ))
 }
 
 /// Two-slot match `DUP; CONST tag; EQ; JMPF miss; POP; arm; JMP end; miss: POP; arm; end:`.
@@ -394,6 +460,94 @@ mod tests {
         instcombine(&mut ops);
         assert!(matches!(ops[0], IlOp::Pop { .. }));
         assert!(!ops.iter().any(|op| matches!(op, IlOp::StorePop { .. })));
+    }
+
+    #[test]
+    fn result_try_dup_eq_flattens_to_tag_jmpf() {
+        let mut ops = vec![
+            IlOp::Dup { loc: loc() },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::EQ,
+                loc: loc(),
+            },
+            jmp(IlJumpKind::JumpIfTrue, 1),
+            IlOp::Return {
+                loc: loc(),
+                ret_words: 2,
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Pop { loc: loc() },
+            IlOp::Return {
+                loc: loc(),
+                ret_words: 1,
+            },
+        ];
+        assert!(instcombine(&mut ops) >= 1);
+        assert!(matches!(
+            ops[0],
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                ..
+            }
+        ));
+        assert!(matches!(ops[1], IlOp::Const { imm: 1, .. }));
+        assert!(matches!(ops[2], IlOp::Return { ret_words: 2, .. }));
+        assert!(!ops.iter().any(|op| matches!(op, IlOp::Dup { .. })));
+        assert!(!ops.iter().any(|op| matches!(op, IlOp::Pop { .. })));
+    }
+
+    #[test]
+    fn option_try_dup_eq_flattens_to_tag_jmpt() {
+        let mut ops = vec![
+            IlOp::Dup { loc: loc() },
+            IlOp::Const { imm: 1, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::EQ,
+                loc: loc(),
+            },
+            jmp(IlJumpKind::JumpIfTrue, 3),
+            IlOp::Return {
+                loc: loc(),
+                ret_words: 2,
+            },
+            IlOp::Label(Label(3)),
+            IlOp::Pop { loc: loc() },
+        ];
+        instcombine(&mut ops);
+        assert!(matches!(
+            ops[0],
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                target: Label(3),
+                ..
+            }
+        ));
+        assert!(matches!(ops[1], IlOp::Const { imm: 0, .. }));
+        assert!(matches!(ops[2], IlOp::Return { ret_words: 2, .. }));
+    }
+
+    #[test]
+    fn try_flatten_refuses_boxed_one_word_return() {
+        let mut ops = vec![
+            IlOp::Dup { loc: loc() },
+            IlOp::Const { imm: 0, loc: loc() },
+            IlOp::Bin {
+                op: Instruction::EQ,
+                loc: loc(),
+            },
+            jmp(IlJumpKind::JumpIfTrue, 1),
+            IlOp::Return {
+                loc: loc(),
+                ret_words: 1,
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Pop { loc: loc() },
+        ];
+        let before = ops.clone();
+        instcombine(&mut ops);
+        assert_eq!(ops, before);
     }
 
     #[test]

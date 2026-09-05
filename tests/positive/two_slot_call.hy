@@ -154,12 +154,61 @@ test("bind site keeps two-slot local (match / ? without boxing)") {
     })?;
 }
 
+fn forward_try(int a, int b) -> Result<int, int> {
+    return checked_div(a, b)?;
+}
+
+fn wrap_try(int a, int b) -> Result<int, int> {
+    return Result::Ok(checked_div(a, b)?);
+}
+
+fn http_chain(int a, int b, int c) -> Result<int, int> {
+    let x = checked_div(a, b)?;
+    let y = checked_div(x, c)?;
+    let z = checked_div(y, 1)?;
+    return Result::Ok(z + 1);
+}
+
 test("two-word Result Try propagates through raise/?") {
     assert(match chained(9, 3) {
         Result::Ok(v) => v == 4,
         Result::Err(_) => false,
     })?;
     assert(match chained(1, 0) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+}
+
+test("return e? / Ok(e?) forwards the same two-slot pair") {
+    assert(match forward_try(8, 2) {
+        Result::Ok(v) => v == 4,
+        Result::Err(_) => false,
+    })?;
+    assert(match forward_try(1, 0) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+    assert(match wrap_try(9, 3) {
+        Result::Ok(v) => v == 3,
+        Result::Err(_) => false,
+    })?;
+    assert(match wrap_try(2, 0) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+}
+
+test("HTTP-shaped Result ? chain keeps payloads and err path") {
+    assert(match http_chain(20, 2, 2) {
+        Result::Ok(v) => v == 6,
+        Result::Err(_) => false,
+    })?;
+    assert(match http_chain(5, 0, 1) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+    assert(match http_chain(10, 2, 0) {
         Result::Ok(_) => false,
         Result::Err(e) => e == -1,
     })?;

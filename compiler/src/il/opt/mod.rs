@@ -36,7 +36,7 @@ pub struct OptimizeOptions {
     pub cast_spill: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
-    /// Local InstCombine / peephole (const-cond branches, pair-match identity).
+    /// Local InstCombine / peephole (const-cond branches, pair `?` flatten, pair-match identity).
     pub instcombine: bool,
     /// Hoist invariant Const/Load out of Known-SP natural loops.
     pub licm: bool,

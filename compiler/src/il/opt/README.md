@@ -217,11 +217,13 @@ float identities / pool fold.
 
 - **Input:** Adjacent typed IL windows. No cursor analysis.
 - **Output:** Const-cond `JMPF`/`JMPT` → goto or delete; `CONST t; DUP; CONST e;
-  EQ|NEQ` → `CONST t; CONST 0|1`; `XOR 1; XOR 1` cancel; two-slot match
-  diamonds that only keep the payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`)
-  → `POP` of the tag. `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
+  EQ|NEQ` → `CONST t; CONST 0|1`; `XOR 1; XOR 1` cancel; two-slot `?`
+  (`DUP; CONST s; EQ; JMPT ok; RETURN 2; ok: POP`) → branch on the tag and
+  rebuild the known miss tag; two-slot match diamonds that only keep the
+  payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`) → `POP` of the tag.
+  `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
 - **Refusals:** Non-identity match arms; `JumpIfMatch` (boxed) diamonds;
-  unknown tags. No new opcodes.
+  unknown tags; `?` err paths that are not a two-slot `RETURN`. No new opcodes.
 - **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
   `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`.
 

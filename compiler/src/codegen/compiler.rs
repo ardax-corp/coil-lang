@@ -8168,6 +8168,16 @@ impl Compiler {
             self.emit_unbox_product_to_pair(bytecode);
             return;
         }
+        // `return e?` / `return Ok(e?)` (or Some) of the same two-slot
+        // kind: forward the pair. The next consumer is only the return.
+        if let Some(inner) = Self::expr_try_return_src(expr)
+            && self.can_flatten_try_pair(inner, enum_name)
+        {
+            self.unbox_enum_context += 1;
+            self.append_with_existential_pack(bytecode, inner);
+            self.unbox_enum_context -= 1;
+            return;
+        }
         let is_fast_construct = Self::expr_is_construct_of(expr, enum_name);
         let is_fast_call = !is_fast_construct
             && self.expr_direct_call_two_word_kind(expr).as_deref() == Some(enum_name);
@@ -8337,6 +8347,26 @@ impl Compiler {
     fn emit_try_two_word_pair(&mut self, success_tag: u32, inner_kind: &str) {
         let mut bb = BlockBuilder::new();
         let success = bb.fresh_label(self.bytecode.il_mut());
+        // Result/Option: branch on the tag word. Reconstruct the known
+        // miss tag so the error path still returns `[payload, tag]`.
+        if Self::can_flatten_try_tag(success_tag, inner_kind) {
+            let fail_tag = 1 - success_tag as i32;
+            let to_success = if success_tag == 0 {
+                BbJumpKind::JumpIfFalse
+            } else {
+                BbJumpKind::JumpIfTrue
+            };
+            bb.emit_jump_to_hinted(
+                success,
+                to_success,
+                FuseHint::nofuse_value_under_jmp(),
+                self.bytecode.il_mut(),
+            );
+            self.bytecode.push_const(fail_tag);
+            self.emit_try_pair_failure(inner_kind);
+            bb.bind_label(success, self.bytecode.il_mut());
+            return;
+        }
         self.bytecode.push(Byte::new(Instruction::DUPLICATE));
         self.bytecode.push_const(success_tag as i32);
         self.bytecode.push(Byte::new(Instruction::EQ));
@@ -8346,6 +8376,60 @@ impl Compiler {
             FuseHint::nofuse_value_under_jmp(),
             self.bytecode.il_mut(),
         );
+        self.emit_try_pair_failure(inner_kind);
+        bb.bind_label(success, self.bytecode.il_mut());
+        self.bytecode.push_pop();
+    }
+
+    fn can_flatten_try_tag(success_tag: u32, inner_kind: &str) -> bool {
+        matches!(success_tag, 0 | 1) && common::is_poly_builtin_enum(inner_kind)
+    }
+
+    fn can_flatten_try_pair(&self, inner: &Output, enum_name: &str) -> bool {
+        if !common::is_poly_builtin_enum(enum_name) {
+            return false;
+        }
+        if self.expr_is_niche_option(inner)
+            || self.expr_is_unit_result_niche(inner)
+            || self.expr_is_niche_result(inner)
+        {
+            return false;
+        }
+        self.expr_two_word_pair_kind(inner).as_deref() == Some(enum_name)
+    }
+
+    /// `e?` or `Ok(e?)` / `Some(e?)` — identity re-bind of a try.
+    fn expr_try_return_src<'a>(expr: &'a Output<'a>) -> Option<&'a Output<'a>> {
+        let node = unwrap_expr_output(expr);
+        match node.1.as_ref() {
+            Expression::Try(inner) => Some(inner),
+            Expression::Construct {
+                enum_name,
+                variant_name,
+                fields,
+            } => {
+                let wrap_ok = common::is_builtin_result_enum(enum_name) && *variant_name == "Ok";
+                let wrap_some = common::is_builtin_option_enum(enum_name) && *variant_name == "Some";
+                if !wrap_ok && !wrap_some {
+                    return None;
+                }
+                let payload = match fields {
+                    parser::ast::EnumConstructPayload::Tuple(args) if args.len() == 1 => &args[0],
+                    parser::ast::EnumConstructPayload::Record(parts) if parts.len() == 1 => {
+                        &parts[0].value
+                    }
+                    _ => return None,
+                };
+                match unwrap_expr_output(payload).1.as_ref() {
+                    Expression::Try(inner) => Some(inner),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn emit_try_pair_failure(&mut self, inner_kind: &str) {
         if let Some(outer) = self.compiling_two_word_enum.clone() {
             if outer != inner_kind {
                 let mut boxed = std::mem::take(&mut self.bytecode);
@@ -8360,8 +8444,6 @@ impl Compiler {
             self.bytecode = boxed;
             self.bytecode.push_return();
         }
-        bb.bind_label(success, self.bytecode.il_mut());
-        self.bytecode.push_pop();
     }
 
     /// Return type of the function whose body is being compiled.
