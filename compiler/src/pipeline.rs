@@ -2129,6 +2129,53 @@ fn main() { add(1, 2); }
     }
 
     #[test]
+    fn compound_assign_store_index_is_dom_unchecked() {
+        use common::Instruction;
+        let src = r#"
+fn main() -> int {
+    let a: Vec<int> = Vec::from([1, 2, 3]);
+    a[1] += 10;
+    return a[1];
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, _) = pipeline
+            .compile_src_retaining_il(src)
+            .expect("compile compound assign");
+        let snap = pipeline.cursor_il.as_ref().expect("retained IL");
+        let unchecked_store = snap
+            .ops
+            .iter()
+            .filter(|op| {
+                op.as_encode_byte()
+                    .is_some_and(|b| *b.bytecode() == Instruction::StoreIndexUnchecked)
+            })
+            .count();
+        let checked_store = snap
+            .ops
+            .iter()
+            .filter(|op| {
+                op.as_encode_byte()
+                    .is_some_and(|b| *b.bytecode() == Instruction::StoreIndex)
+            })
+            .count();
+        assert!(
+            unchecked_store >= 1,
+            "a[i] += must reuse the Index proof for StoreIndexUnchecked; checked={checked_store}"
+        );
+        assert_eq!(
+            checked_store, 0,
+            "dominated StoreIndex should not remain checked"
+        );
+        assert!(
+            bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::StoreIndexUnchecked),
+            "bytecode should keep StoreIndexUnchecked"
+        );
+    }
+
+    #[test]
     fn nsieve_retained_il_and_bytecode_emit_store_index_pin() {
         use common::Instruction;
 
