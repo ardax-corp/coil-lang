@@ -1089,7 +1089,8 @@ mod tests {
         il.push_byte(Byte::new(Instruction::HALT));
 
         let mut pool = Vec::new();
-        let lowered = lower(il.ops(), &mut pool);
+        // Skip IL opts: simplify_cfg deletes fall-through JMP L; Label L.
+        let lowered = lower_optimized(il.ops(), &mut pool);
         assert_eq!(lowered.bytecode.len(), 3);
         assert_eq!(lowered.bytecode[0].operand_u32(), 1);
         assert!(matches!(*lowered.bytecode[2].bytecode(), Instruction::HALT));
@@ -1743,7 +1744,8 @@ mod tests {
         il.push_byte(Byte::new(Instruction::RETURN));
 
         let mut pool = Vec::new();
-        let lowered = lower(il.ops(), &mut pool);
+        // Fuse barrier is the JMP itself; simplify_cfg would drop fall-through JMP.
+        let lowered = lower_optimized(il.ops(), &mut pool);
         assert!(
             lowered
                 .bytecode
