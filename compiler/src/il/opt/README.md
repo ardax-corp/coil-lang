@@ -493,15 +493,20 @@ except block reorder / seek / tell-promote. Heuristic only (no profile).
 ## `block_reordering`
 
 **Flag:** `block_reordering` (default on). **Fn:**
-`block_order::reorder_basic_blocks`.
+`block_order::reorder_basic_blocks_at`.
 
-- **Input:** Basic blocks split on labels and terminators.
-- **Output:** Detached jump-only terminating blocks sink to the end. Fall-through
-  chains stay adjacent. Label ids and branch polarity **are not rewritten**.
-- **Refusals:** Fall-through successor; block that is not a terminator; back-edge
-  successor; unconditional-jump join target.
+- **Input:** Basic blocks split on labels and terminators. Codegen may mark
+  Result/Option `JumpIfMatch` with `FuseHint::cold_miss` / `cold_target`.
+- **Output:** Outline a `JumpIfMatch` miss that is Panic or `cold_miss` (insert
+  `JMP`, park miss at end). Then sink detached terminator / Panic /
+  `cold_target` blocks (those may end in `JMP`). Fall-through chains otherwise
+  stay adjacent. Label ids and branch polarity **are not rewritten**.
+- **Refusals:** `ValueUnderJmp` / `nofuse` pair-`?` jumps; JMPF/JMPT miss
+  without `cold_miss` (COI-128 invert owns those); back-edge successor;
+  uncond-jump join that is not Panic / cold-hinted.
 - **Tests:** `opt/block_order.rs` `cold_return_block_moves_past_join`,
-  `linear_code_unchanged`, `branch_targets_keep_the_same_label_ids`.
+  `jump_if_match_panic_miss_is_outlined`,
+  `value_under_jmp_try_refuses_outline`, `cold_miss_hint_outlines_err_arm`.
 
 ## `seek_back_edge`
 

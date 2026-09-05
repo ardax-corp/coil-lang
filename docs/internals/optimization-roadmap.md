@@ -100,7 +100,7 @@ titles can oversell.
 | **`seek_back_edge`** | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Default off** on `Standard` (cursor: Seek poisons latch operand-height). **`Aggressive` / `-O3` turns it on**. |
 | **`iterative_optimization`** | Fixpoint re-runs of the IL pipeline | **Default off** (COI-130). |
 | **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
-| **Branch layout / block reorder** | Heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
+| **Branch layout / block reorder** | Heuristic invert + structural cold outline (Panic / Err / None hints) | Default **on** (COI-128 / COI-129). Known-SP invert; `ValueUnderJmp` refuse; module-wide label watermark. |
 
 Inlining / predicate peel / direct `new Class(args).field` scalar replacement
 live in **codegen**, not `il/opt` (self-recursive peel refused, COI-86). No JIT

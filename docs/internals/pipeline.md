@@ -47,7 +47,7 @@ Names, types, and call meaning live in **DefIds** and the **typed sidecar** (B1â
 
 Branch layout (COI-128) is **on** by default (`branch_optimization`). It inverts a terminating then-arm after `JMPF`/`JMPT` only when operand height is Known at the jump and along the moved arm, and mints a module-wide-unique label for the cold region so later functions cannot bind the same id. Layout is heuristic only (terminating then-arm is cold); there is no compile-time profile.
 
-Basic-block reordering (COI-129) is **on** by default (`block_reordering`). It only sinks jump-only terminating blocks that are not fall-through successors and are not unconditional-jump joins, so labels and branch polarity stay put.
+Basic-block reordering (COI-129) is **on** by default (`block_reordering`). It sinks detached terminator / Panic / `FuseHint::cold_target` blocks and outlines a `JumpIfMatch` miss that is Panic or `FuseHint::cold_miss` (insert `JMP`, park the miss at the end). Fall-through successors otherwise stay adjacent. Label ids and branch polarity are not rewritten. Pair-`?` `ValueUnderJmp` jumps are refused so two-slot fail epilogues stay convoy-safe.
 
 Iterative optimization (COI-130) is **off** by default (`iterative_optimization`). When enabled, the full IL pass pipeline re-runs until a round is a no-op or `max_optimization_iterations` (default 10, clamped to 1..=10). That lets late rewrites such as `invert_guard_branch` expose DCE for a later round without changing one-shot production behavior.
 
