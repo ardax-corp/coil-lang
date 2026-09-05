@@ -13,6 +13,7 @@ use super::super::op::{EntryKind, IlJumpKind, IlOp, Label};
 use super::super::pure_call::{op_blocks_length_proof, PureCallCtx};
 
 /// Rewrite dominated checks. Returns the number of sites changed.
+#[cfg(test)]
 pub(crate) fn dominate_checks(ops: &mut Vec<IlOp>) -> usize {
     dominate_checks_with(ops, None)
 }
