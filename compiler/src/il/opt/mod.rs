@@ -38,6 +38,8 @@ pub struct OptimizeOptions {
     pub algebraic: bool,
     /// Local InstCombine / peephole (const-cond branches, pair-match identity).
     pub instcombine: bool,
+    /// Dominated bounds / niche / tag checks (Index→Unchecked, known-tag EQ).
+    pub dom_check: bool,
     /// Hoist invariant Const/Load out of Known-SP natural loops.
     pub licm: bool,
     /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
@@ -316,6 +318,7 @@ mod cfg;
 mod convoy;
 mod dce;
 mod instcombine;
+mod dom_check;
 mod escape_analysis;
 mod invariant_store_elim;
 mod loop_unroll;

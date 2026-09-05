@@ -193,6 +193,10 @@ fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
     0
 }
 
+fn apply_dom_check(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+    super::dom_check::dominate_checks_with(ops, opts.pure_call_ctx.as_ref())
+}
+
 fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
 }
@@ -429,6 +433,17 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: apply_loop_bounds,
     },
     PassSpec {
+        name: "dom_check",
+        phase: Phase::Decision,
+        kind: PassKind::Generic,
+        floor: OptFloor::Standard,
+        omit_from_size: false,
+        seed_entry_tell_after: false,
+        gate: |o| o.dom_check,
+        set_flag: |o| o.dom_check = true,
+        apply: apply_dom_check,
+    },
+    PassSpec {
         name: "loop_unroll",
         phase: Phase::Decision,
         kind: PassKind::Unroll,
@@ -610,6 +625,7 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "cast_spill",
     "licm",
     "loop_bounds",
+    "dom_check",
     "loop_unroll",
     "invariant_store_elim",
     "escape_analysis",
@@ -662,6 +678,7 @@ mod tests {
                 "instcombine",
                 "licm",
                 "loop_bounds",
+                "dom_check",
                 "loop_unroll",
                 "invariant_store_elim",
                 "escape_analysis",
