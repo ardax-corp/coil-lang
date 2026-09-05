@@ -74,8 +74,9 @@ pub struct OptimizeOptions {
     /// Default **on**: invert only Known-SP terminating then-arms, and mint
     /// labels from a module-wide watermark so ids cannot collide across funcs.
     pub branch_optimization: bool,
-    /// Sink jump-only terminating blocks to the end (COI-129). Fall-through
-    /// chains stay adjacent; branch labels are not rewritten.
+    /// Sink / outline structural cold blocks (COI-129). Fall-through
+    /// chains stay adjacent except JumpIfMatch miss outlining. Branch
+    /// polarity is not rewritten. Pair-`?` `ValueUnderJmp` is refused.
     pub block_reordering: bool,
     /// Re-run the pass pipeline until a round is a no-op, or
     /// [`Self::max_optimization_iterations`] (COI-130). Default **off**.
