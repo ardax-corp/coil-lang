@@ -24,8 +24,8 @@ fn odd(int n, int acc) -> int {
 fn main() {
     let s = 0;
     let i = 0;
-    while i < 25000 {
-        s = s + even(200, 0);
+    while i < 62500 {
+        s = s + even(80, 0);
         i = i + 1;
     }
     write_all(stdout(), to_bytes(format("%i", s)));

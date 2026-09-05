@@ -39,7 +39,7 @@ declare -A EXPECTED=(
     [pair_int_churn]=200000000
     [iv_mul_sr]=31499989500000
     [licm_nested_chains]=64012000000
-    [tail_sibling]=502500000
+    [tail_sibling]=202500000
 )
 
 if ! command -v poop >/dev/null 2>&1; then
