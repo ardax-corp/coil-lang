@@ -3701,6 +3701,56 @@ fn main() { return bounce(Option::None); }",
         );
     }
 
+    /// `return other(...)` to a known sibling uses TailCall (same opcode as self).
+    #[test]
+    fn sibling_tail_calls_emit_tail_call() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src(
+            "fn even(int n) -> int { \
+if n == 0 { return 1; } \
+return odd(n - 1); \
+} \
+fn odd(int n) -> int { \
+if n == 0 { return 0; } \
+return even(n - 1); \
+} \
+fn main() { return even(4); }",
+        );
+        let tails = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::TailCall))
+            .count();
+        assert!(
+            tails >= 2,
+            "expected TailCall from even→odd and odd→even; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Two-word self/sibling `return f(...)` may TailCall when layouts match.
+    #[test]
+    fn two_word_sibling_tail_call_emits_tail_call() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src(
+            "fn bounce_a(Option<int> o) -> Option<int> { \
+return bounce_b(o); \
+} \
+fn bounce_b(Option<int> o) -> Option<int> { \
+return match o { \
+Option::None => Option::Some(1), \
+Option::Some(x) => bounce_a(Option::None), \
+}; \
+} \
+fn main() { return bounce_a(Option::None); }",
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::TailCall)),
+            "expected TailCall for matching two-word sibling; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
     /// Tiny `add` is inlined at direct call sites (arithmetic in main bytecode).
     #[test]
     fn tiny_add_inlined_at_call_site() {
