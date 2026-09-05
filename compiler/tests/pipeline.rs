@@ -3772,6 +3772,18 @@ fn example_perf_licm_nested_chains_prints_checksum() {
 }
 
 #[test]
+fn example_perf_cse_index_recompute_prints_checksum() {
+    let output = run_example("examples/perf/cse_index_recompute.hy");
+    assert_eq!(output, "504000000");
+}
+
+#[test]
+fn example_perf_cse_cast_recompute_prints_checksum() {
+    let output = run_example("examples/perf/cse_cast_recompute.hy");
+    assert_eq!(output, "1999998000000");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");
