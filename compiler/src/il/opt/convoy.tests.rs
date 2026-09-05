@@ -1772,6 +1772,7 @@
                 instcombine: false,
                 licm: false,
                 loop_bounds: false,
+                strength_reduce: false,
                 return_convoy: false,
                 clone_shared_return: false,
                 bin_join_convoy: false,
