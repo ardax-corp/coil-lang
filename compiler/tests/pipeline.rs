@@ -3784,6 +3784,12 @@ fn example_perf_cse_cast_recompute_prints_checksum() {
 }
 
 #[test]
+fn example_perf_dest_prop_field_alias_prints_checksum() {
+    let output = run_example("examples/perf/dest_prop_field_alias.hy");
+    assert_eq!(output, "40000000");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");

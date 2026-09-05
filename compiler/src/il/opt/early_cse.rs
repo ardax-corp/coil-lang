@@ -508,6 +508,7 @@ mod tests {
         o.stack_dce = false;
         o.mem_fwd = false;
         o.copy_prop = false;
+        o.dest_prop = false;
         o.slot_promote = false;
         o.tos_carry = false;
         o.canon = false;
