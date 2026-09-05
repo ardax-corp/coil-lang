@@ -8034,6 +8034,47 @@ fn main() {
     }
 
     #[test]
+    fn two_slot_try_keeps_second_call_arg_on_success() {
+        let (bc, _) = compile_src(
+            r#"
+fn step(int n) -> Result<int, int> {
+    return Result::Ok(n);
+}
+fn pipe(int i) -> Result<int, int> {
+    let a = step(i)?;
+    let b = step(i + 3)?;
+    return Result::Ok(a + b);
+}
+fn main() {
+    let _ = pipe(2);
+}
+"#,
+        );
+        let has_add_then_call = bc.windows(2).any(|w| {
+            let add_then_call = matches!(
+                w[0].bytecode(),
+                Instruction::ADD | Instruction::BinSlotImm | Instruction::BinSlotSlot
+            ) && matches!(w[1].bytecode(), Instruction::CALL)
+                && w[1].call_ret_words() == 2;
+            if !add_then_call {
+                return false;
+            }
+            if *w[0].bytecode() == Instruction::BinSlotImm {
+                let (_op, _slot, imm) = w[0].bin_slot_imm_parts();
+                return imm == 3;
+            }
+            true
+        });
+        assert!(
+            has_add_then_call,
+            "i+3 must stay on the success path before the second CALL; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
     fn two_slot_return_try_forwards_pair() {
         let (bc, _) = compile_src(
             r#"
