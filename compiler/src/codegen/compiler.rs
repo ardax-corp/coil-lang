@@ -11705,9 +11705,10 @@ impl Compiler {
             // Jump if Result::Err (tag 1) — on match, payload (message) is pushed.
             let fail = bb.fresh_label(self.bytecode.il_mut());
             let done = bb.fresh_label(self.bytecode.il_mut());
-            bb.emit_jump_to(
+            bb.emit_jump_to_hinted(
                 fail,
                 BbJumpKind::JumpIfMatch { tag: 1, arity: 1 },
+                FuseHint::cold_target(),
                 self.bytecode.il_mut(),
             );
             // Ok path: discard whole Result enum.
