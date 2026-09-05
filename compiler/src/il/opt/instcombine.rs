@@ -547,7 +547,7 @@ mod tests {
         ];
         let before = ops.clone();
         instcombine(&mut ops);
-        assert_eq!(ops, before);
+        assert!(ops == before, "boxed one-word ? must stay");
     }
 
     #[test]
