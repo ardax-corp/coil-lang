@@ -26,12 +26,14 @@ const CORPUS: &[&str] = &[
 /// InstCombine retargets `arithmetic.hy` / `loops.hy` (const-cond / local peeps).
 /// Try/Result flatten retargets `assert(...)?` and two-slot `?` (shared fail
 /// epilogue; `branch_opt` leaves `ValueUnderJmp` tag jumps in place).
+/// Cold outlining (COI-129) parks Panic / Err `JumpIfMatch` misses; harness
+/// Panic is a terminator so the fail block sinks (+2 words on this corpus).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "5649c12e619549d8_543"),
-    ("functions.hy", "a4a8a121c9c8634c_405"),
-    ("loops.hy", "ecae1dcfae84aaed_274"),
-    ("option_pair.hy", "b1c448b55112876f_398"),
-    ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
+    ("arithmetic.hy", "5dfa065b2a97970e_545"),
+    ("functions.hy", "ffb8735cd303cb0c_407"),
+    ("loops.hy", "292f413545ca2290_276"),
+    ("option_pair.hy", "0fab9ccb3cd32007_402"),
+    ("user_trait_dispatch.hy", "0fe0ffec3220751c_164"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
