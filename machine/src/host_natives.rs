@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use common::Value;
 
-use crate::math_libm::MATH_LIBM_WIRING;
+use crate::math_libm::{MATH_LIBM_M1_WIRING, MATH_LIBM_WIRING};
 use crate::{
     packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
     FfiError, FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, CLOCK_WIRING, ENV_WIRING, FS_WIRING,
@@ -84,6 +84,8 @@ pub fn build_standard_host_natives(
     push_wiring(&mut out, &mut register_id, CLOCK_WIRING, "clock");
     // Append-only after clocks: `Result<(), IoError>` pack probe (no IO).
     push_result_unit_probe(&mut out, &mut register_id);
+    // Append-only after result_unit_probe: M1 prelude::math expansion.
+    push_math_libm_wiring(&mut out, &mut register_id, MATH_LIBM_M1_WIRING);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -251,7 +253,15 @@ fn push_wiring(
 }
 
 fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    for &(name, arity, host) in MATH_LIBM_WIRING {
+    push_math_libm_wiring(out, register_id, MATH_LIBM_WIRING);
+}
+
+fn push_math_libm_wiring(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+    wiring: &[(&str, usize, fn(&mut crate::Heap, &[Value]) -> Value)],
+) {
+    for &(name, arity, host) in wiring {
         let args = vec![FfiType::Float; arity];
         let sig = FfiSignature::from_parts(name.to_string(), args, FfiType::Float)
             .expect("math libm native signature");
@@ -1161,5 +1171,57 @@ mod tests {
             common::host_native_id(common::RESULT_UNIT_PROBE_NATIVE),
             Some(124)
         );
+        assert_eq!(common::host_native_id("math_atan"), Some(125));
+        assert_eq!(common::host_native_id("math_tanh"), Some(135));
+    }
+
+    #[test]
+    fn math_libm_m1_natives_append_after_result_unit_probe() {
+        let mut registrations = Vec::new();
+        let natives = build_standard_host_natives(|name, id| {
+            registrations.push((name.to_string(), id));
+        });
+
+        let probe = registrations
+            .iter()
+            .position(|(name, _)| name == common::RESULT_UNIT_PROBE_NATIVE)
+            .expect("result_unit_probe");
+        assert_eq!(probe, 124);
+
+        let expected = [
+            "math_atan",
+            "math_atan2",
+            "math_asin",
+            "math_acos",
+            "math_log10",
+            "math_log2",
+            "math_cbrt",
+            "math_rem",
+            "math_sinh",
+            "math_cosh",
+            "math_tanh",
+        ];
+        let start = probe + 1;
+        let end = start + expected.len();
+        assert_eq!(
+            registrations[start..end]
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for (offset, native) in natives[start..end].iter().enumerate() {
+            let signature = native.signature();
+            assert_eq!(signature.ret, FfiType::Float);
+            let expected_arity = if expected[offset] == "math_atan2" || expected[offset] == "math_rem"
+            {
+                2
+            } else {
+                1
+            };
+            assert_eq!(signature.args, vec![FfiType::Float; expected_arity]);
+            assert_eq!(registrations[start + offset].1, start + offset);
+        }
+        assert_eq!(registrations.len(), end);
     }
 }
