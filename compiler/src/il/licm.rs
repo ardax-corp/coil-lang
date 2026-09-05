@@ -38,12 +38,15 @@ pub fn licm_with(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCall
         hoisted = true;
     }
     // Run after casts so invariant float exprs (e.g. mandelbrot `ci`) see
-    // already-hoisted `(y as float)` / `(size as float)` temps.
-    if licm_float_expression_chain(ops, purity) {
-        return;
-    }
-    if licm_invariant_expr_chain(ops, purity) {
-        return;
+    // already-hoisted `(y as float)` / `(size as float)` temps. Iterate so
+    // nested loops can hoist more than one independent chain per call.
+    let chain_bound = find_natural_loops(ops).len().saturating_mul(4).max(4);
+    for _ in 0..chain_bound {
+        if licm_float_expression_chain(ops, purity) || licm_invariant_expr_chain(ops, purity) {
+            hoisted = true;
+            continue;
+        }
+        break;
     }
     if hoisted {
         return;
