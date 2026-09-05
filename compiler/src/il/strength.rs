@@ -1,7 +1,8 @@
 //! Lite induction-variable strength reduction (heuristic — no PGO).
 //!
-//! Rewrites `i * c` and `cast(i)` / affine `a * cast(i) + b` into add
-//! recurrences when the loop has a proven unit or invariant-stride IV.
+//! Rewrites integer `i * c` into an add recurrence when the loop has a
+//! proven unit or invariant-stride IV. Float `cast(i)` affine forms are
+//! refused: a recurrence is not IEEE-exact vs `a * (i as float) + b`.
 //! Fail-closed: stores to the factor, impure calls, host, FFI, yield,
 //! length-changing ops, and quadratic / div-by-IV float forms stay as-is.
 
@@ -65,8 +66,8 @@ fn strength_reduce_once(
             continue;
         };
         let stored = slots_stored_in_loop(ops, &lp);
-        if let Some((start, end, float)) = find_sr_site(ops, &lp, iv.slot, &stored) {
-            return apply_sr(ops, pool, &lp, &iv, start, end, float);
+        if let Some((start, end)) = find_sr_site(ops, &lp, iv.slot, &stored) {
+            return apply_sr(ops, pool, &lp, &iv, start, end);
         }
     }
     false
@@ -243,20 +244,17 @@ fn step_before_store(ops: &[IlOp], store_i: usize, iv: u32, stored: &HashSet<u32
     None
 }
 
-/// `(start, end, is_float)` for one profitable site.
+/// `(start, end)` for one integer `iv * invariant` site.
 fn find_sr_site(
     ops: &[IlOp],
     lp: &NaturalLoop,
     iv: u32,
     stored: &HashSet<u32>,
-) -> Option<(usize, usize, bool)> {
+) -> Option<(usize, usize)> {
     let mut i = lp.body_start();
     while i < lp.latch {
         if let Some(end) = match_int_mul(ops, i, lp.latch, iv, stored) {
-            return Some((i, end, false));
-        }
-        if let Some(end) = match_float_affine(ops, i, lp.latch, iv, stored) {
-            return Some((i, end, true));
+            return Some((i, end));
         }
         i += 1;
     }
@@ -319,168 +317,6 @@ fn is_int_mul(op: &IlOp) -> bool {
             .is_some_and(|b| *b.bytecode() == Instruction::MUL)
 }
 
-fn match_float_affine(
-    ops: &[IlOp],
-    start: usize,
-    latch: usize,
-    iv: u32,
-    stored: &HashSet<u32>,
-) -> Option<usize> {
-    if start + 1 >= latch {
-        return None;
-    }
-    if !matches!(&ops[start], IlOp::Load { slot, .. } if *slot == iv) {
-        return None;
-    }
-    if !is_cast_int_to_float(&ops[start + 1]) {
-        return None;
-    }
-    let mut end = start + 2;
-    let mut height = 1i32;
-    let mut kinds = vec![true];
-    let mut last_good = end;
-    while end < latch {
-        let op = &ops[end];
-        if !float_affine_step(op, iv, stored, &mut height, &mut kinds) {
-            break;
-        }
-        end += 1;
-        if height == 1 && kinds.last() == Some(&true) {
-            last_good = end;
-        }
-    }
-    if last_good > start + 1 {
-        Some(last_good)
-    } else {
-        None
-    }
-}
-
-fn is_cast_int_to_float(op: &IlOp) -> bool {
-    match op {
-        IlOp::Byte { byte, .. } => *byte.bytecode() == Instruction::CastIntToFloat,
-        other => other
-            .as_encode_byte()
-            .is_some_and(|b| *b.bytecode() == Instruction::CastIntToFloat),
-    }
-}
-
-/// `true` on the kind stack means "linear in the IV cast".
-fn float_affine_step(
-    op: &IlOp,
-    iv: u32,
-    stored: &HashSet<u32>,
-    height: &mut i32,
-    kinds: &mut Vec<bool>,
-) -> bool {
-    match op {
-        IlOp::Const { .. } | IlOp::ConstPool { .. } => {
-            kinds.push(false);
-            *height += 1;
-            true
-        }
-        IlOp::Load { slot, .. } => {
-            if *slot == iv || stored.contains(slot) {
-                return false;
-            }
-            kinds.push(false);
-            *height += 1;
-            true
-        }
-        IlOp::Bin { op: insn, .. } if is_float_arith(*insn) => {
-            apply_float_bin(*insn, height, kinds)
-        }
-        IlOp::BinSlotImm { op, slot, .. } => {
-            let insn = Instruction::from(*op);
-            if !is_float_arith(insn) || stored.contains(&(*slot as u32)) || *slot as u32 == iv {
-                return false;
-            }
-            // Slot operand is invariant; TOS is the other operand.
-            kinds.push(false);
-            *height += 1;
-            apply_float_bin(insn, height, kinds)
-        }
-        IlOp::BinSlotSlot { op, a, b, .. } => {
-            let insn = Instruction::from(*op);
-            if !is_float_arith(insn) {
-                return false;
-            }
-            let a = *a as u32;
-            let b = *b as u32;
-            if stored.contains(&a) || stored.contains(&b) || a == iv || b == iv {
-                return false;
-            }
-            kinds.push(false);
-            kinds.push(false);
-            *height += 2;
-            apply_float_bin(insn, height, kinds)
-        }
-        IlOp::Byte { byte, .. } => {
-            let insn = *byte.bytecode();
-            if insn == Instruction::CastIntToFloat {
-                return false;
-            }
-            if is_float_arith(insn) {
-                return apply_float_bin(insn, height, kinds);
-            }
-            if insn == Instruction::NEGF {
-                if kinds.pop().is_none() {
-                    return false;
-                }
-                *height -= 1;
-                kinds.push(true);
-                *height += 1;
-                return *height >= 1;
-            }
-            false
-        }
-        other if other.as_encode_byte().is_some_and(|b| is_float_arith(*b.bytecode())) => {
-            let insn = *other.as_encode_byte().unwrap().bytecode();
-            apply_float_bin(insn, height, kinds)
-        }
-        _ => false,
-    }
-}
-
-fn apply_float_bin(insn: Instruction, height: &mut i32, kinds: &mut Vec<bool>) -> bool {
-    let rhs = kinds.pop();
-    let lhs = kinds.pop();
-    let (Some(lhs), Some(rhs)) = (lhs, rhs) else {
-        return false;
-    };
-    *height -= 2;
-    let out = match insn {
-        Instruction::MULF => {
-            if lhs && rhs {
-                return false;
-            }
-            lhs || rhs
-        }
-        Instruction::DIVF | Instruction::MODF => {
-            if rhs || insn == Instruction::MODF {
-                return false;
-            }
-            lhs
-        }
-        Instruction::ADDF | Instruction::SUBF => lhs || rhs,
-        _ => return false,
-    };
-    kinds.push(out);
-    *height += 1;
-    *height >= 1
-}
-
-fn is_float_arith(insn: Instruction) -> bool {
-    matches!(
-        insn,
-        Instruction::ADDF
-            | Instruction::SUBF
-            | Instruction::MULF
-            | Instruction::DIVF
-            | Instruction::MODF
-    )
-}
-
 fn apply_sr(
     ops: &mut Vec<IlOp>,
     _pool: &mut Vec<u64>,
@@ -488,7 +324,6 @@ fn apply_sr(
     iv: &Induction,
     start: usize,
     end: usize,
-    float: bool,
 ) -> bool {
     let loc = ops[start].loc();
     let mut next = max_slot_used(ops).saturating_add(1);
@@ -502,16 +337,8 @@ fn apply_sr(
     let iv_tmp = next;
 
     let chain: Vec<IlOp> = ops[start..end].to_vec();
-    let add_op = if float {
-        Instruction::ADDF
-    } else {
-        Instruction::ADD
-    };
-    let sub_op = if float {
-        Instruction::SUBF
-    } else {
-        Instruction::SUB
-    };
+    let add_op = Instruction::ADD;
+    let sub_op = Instruction::SUB;
 
     let mut pre = Vec::new();
     pre.extend(chain.iter().cloned());
@@ -789,7 +616,8 @@ mod tests {
     }
 
     #[test]
-    fn reduces_cast_of_iv() {
+    fn refuses_float_cast_of_iv() {
+        // Recurrence of `i as float` is not IEEE-equal to the original cast.
         let mut ops = vec![
             IlOp::Const { imm: 0, loc: loc() },
             IlOp::StorePop { slot: 0, loc: loc() },
@@ -834,34 +662,7 @@ mod tests {
             IlOp::Halt { loc: loc() },
         ];
         let mut pool = Vec::new();
-        assert_eq!(strength_reduce(&mut ops, &mut pool, None), 1);
-        let header = ops
-            .iter()
-            .position(|op| matches!(op, IlOp::Label(Label(0))))
-            .unwrap();
-        let latch = ops
-            .iter()
-            .rposition(|op| {
-                matches!(
-                    op,
-                    IlOp::Jump {
-                        kind: IlJumpKind::Unconditional,
-                        target: Label(0),
-                        ..
-                    }
-                )
-            })
-            .unwrap();
-        let casts_in_body = ops[header..latch]
-            .iter()
-            .filter(|op| is_cast_int_to_float(op))
-            .count();
-        assert_eq!(casts_in_body, 0, "cast(i) must leave the counted body");
-        assert!(
-            ops.iter()
-                .any(|op| matches!(op, IlOp::Bin { op: Instruction::ADDF, .. })),
-            "float recurrence should ADDF the stride"
-        );
+        assert_eq!(strength_reduce(&mut ops, &mut pool, None), 0);
     }
 
     #[test]

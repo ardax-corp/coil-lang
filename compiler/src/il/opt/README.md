@@ -291,12 +291,13 @@ float identities / pool fold.
 
 - **Input:** Known-SP natural loops with a proven additive IV (`i += k` or
   invariant `i += p`) and a header `i < n` / post-canon `n > i`.
-- **Output:** `i * c` and `cast(i)` / affine float of `cast(i)` become an
-  add recurrence (`acc += f(i+step)-f(i)`). Body reloads `acc`.
+- **Output:** integer `i * c` becomes an add recurrence
+  (`acc += f(i+step)-f(i)`). Body reloads `acc`.
 - **Refusals:** Host / FFI / impure call / yield / `ArrayPush` / `MakeArray`;
-  non-additive IV updates; `i * i`; `DIVF` by the IV; unknown SP.
+  non-additive IV updates; `i * i`; float `cast(i)` affine (not IEEE-exact);
+  unknown SP.
 - **Tests:** `il/strength.rs` `reduces_iv_times_invariant`,
-  `refuses_host_invoke`, `refuses_array_push`, `reduces_cast_of_iv`.
+  `refuses_host_invoke`, `refuses_array_push`, `refuses_float_cast_of_iv`.
 
 ## `loop_unroll`
 

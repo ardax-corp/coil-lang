@@ -35,7 +35,7 @@ test("stride iv times const") {
     assert(s == 114)?;
 }
 
-test("cast iv stays exact") {
+test("cast iv is not rewritten") {
     let n = 5;
     let s = 0.0;
     let i = 0;
