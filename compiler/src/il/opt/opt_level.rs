@@ -118,6 +118,7 @@ impl fmt::Display for OptLevel {
 fn all_off() -> OptimizeOptions {
     OptimizeOptions {
         jump_thread: false,
+        simplify_cfg: false,
         dead_block: false,
         stack_dce: false,
         mem_fwd: false,
@@ -180,6 +181,7 @@ impl Default for OptimizeOptions {
 fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
     vec![
         o.jump_thread,
+        o.simplify_cfg,
         o.dead_block,
         o.stack_dce,
         o.mem_fwd,
@@ -259,6 +261,7 @@ mod tests {
         let o = OptLevel::None.options();
         assert!(o.algebraic);
         assert!(!o.jump_thread);
+        assert!(!o.simplify_cfg);
         assert!(!o.dead_block);
         assert!(!o.slot_promote);
         assert!(!o.escape_analysis);
@@ -270,7 +273,7 @@ mod tests {
     #[test]
     fn basic_enables_dce_and_forwarding() {
         let o = OptLevel::Basic.options();
-        assert!(o.algebraic && o.jump_thread && o.dead_block && o.stack_dce);
+        assert!(o.algebraic && o.jump_thread && o.simplify_cfg && o.dead_block && o.stack_dce);
         assert!(o.mem_fwd && o.copy_prop);
         assert!(!o.licm && !o.slot_promote && !o.ssa_gvn && !o.escape_analysis);
     }

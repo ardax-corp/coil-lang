@@ -16,8 +16,10 @@ use super::op::IlOp;
 /// Options for [`optimize`].
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct OptimizeOptions {
-    /// Collapse `JMP L` where `L` begins with `JMP L2` into `JMP L2`.
+    /// Collapse `JMP`/`JMPF`/`JMPT`/`JumpIfMatch` through empty trampoline blocks.
     pub jump_thread: bool,
+    /// Fall-through `JMP`, tautological cond-jumps → `POP`, unused plain labels.
+    pub simplify_cfg: bool,
     /// Remove unreachable ops after unconditional JMP / RETURN until a label.
     pub dead_block: bool,
     /// Drop redundant `DUPLICATE; POP` and `LOAD s; StorePop s`.

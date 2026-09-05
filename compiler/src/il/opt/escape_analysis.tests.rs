@@ -23,6 +23,7 @@ fn make_and_store(arity: u32, slot: u32) -> Vec<IlOp> {
 fn isolated() -> OptimizeOptions {
     OptimizeOptions {
         jump_thread: false,
+        simplify_cfg: false,
         dead_block: false,
         stack_dce: false,
         mem_fwd: false,

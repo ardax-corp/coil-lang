@@ -1881,6 +1881,7 @@ mod tell {
         fn seek_promote_opts(on: bool) -> OptimizeOptions {
             OptimizeOptions {
                 jump_thread: false,
+                simplify_cfg: false,
                 dead_block: false,
                 stack_dce: false,
                 mem_fwd: false,

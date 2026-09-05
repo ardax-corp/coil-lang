@@ -907,6 +907,7 @@ mod tests {
         let (flat, _, _) = m.optimize_and_flatten(
             &OptimizeOptions {
                 jump_thread: false,
+                simplify_cfg: false,
                 dead_block: false,
                 stack_dce: false,
                 mem_fwd: false,
@@ -983,6 +984,7 @@ mod tests {
     fn seek_promote_opts(on: bool) -> OptimizeOptions {
         OptimizeOptions {
             jump_thread: false,
+            simplify_cfg: false,
             dead_block: false,
             stack_dce: false,
             mem_fwd: false,

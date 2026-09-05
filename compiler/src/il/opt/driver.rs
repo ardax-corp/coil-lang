@@ -135,8 +135,11 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
 // Apply wrappers. Extra (unroll / branch / block-order counts) is the usize.
 
 fn apply_jump_thread(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::cfg::jump_thread(ops);
-    0
+    super::cfg::jump_thread(ops)
+}
+
+fn apply_simplify_cfg(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+    super::cfg::simplify_cfg(ops)
 }
 
 fn apply_dead_block(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
@@ -306,6 +309,17 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         gate: |o| o.jump_thread,
         set_flag: |o| o.jump_thread = true,
         apply: apply_jump_thread,
+    },
+    PassSpec {
+        name: "simplify_cfg",
+        phase: Phase::Cleanup,
+        kind: PassKind::Generic,
+        floor: OptFloor::Basic,
+        omit_from_size: false,
+        seed_entry_tell_after: false,
+        gate: |o| o.simplify_cfg,
+        set_flag: |o| o.simplify_cfg = true,
+        apply: apply_simplify_cfg,
     },
     PassSpec {
         name: "dead_block",
@@ -599,6 +613,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
 #[cfg(test)]
 pub const D1_PASS_ORDER: &[&str] = &[
     "jump_thread",
+    "simplify_cfg",
     "dead_block",
     "stack_dce",
     "mem_fwd",
@@ -652,6 +667,7 @@ mod tests {
             enabled,
             [
                 "jump_thread",
+                "simplify_cfg",
                 "dead_block",
                 "stack_dce",
                 "mem_fwd",
