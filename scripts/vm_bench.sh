@@ -44,6 +44,8 @@ declare -A EXPECTED=(
     ["examples/perf/iv_mul_sr.hy"]="31499989500000"
     ["examples/perf/licm_nested_chains.hy"]="64012000000"
     ["examples/perf/tail_sibling.hy"]="202500000"
+    ["examples/perf/cse_index_recompute.hy"]="504000000"
+    ["examples/perf/cse_cast_recompute.hy"]="1999998000000"
 )
 
 # CPU-focused subset for poop / quick timing (no FFI, no modules).
@@ -66,6 +68,8 @@ CPU_BENCH=(
     examples/perf/iv_mul_sr.hy
     examples/perf/licm_nested_chains.hy
     examples/perf/tail_sibling.hy
+    examples/perf/cse_index_recompute.hy
+    examples/perf/cse_cast_recompute.hy
 )
 
 CROSS_LANG=(
