@@ -108,15 +108,16 @@ Invariants every pass must preserve unless its section says otherwise:
 
 - **Input:** Same labeled IL. Static only (no profile / counters).
 - **Output:** Delete `JMP L` when `L` is the next bind; replace tautological
-  `JMPF`/`JMPT L` (both edges land on the next labels) with `POP`; drop unused
-  plain `Label`s so `dead_block` can sweep. Short fixpoint.
+  `JMPF`/`JMPT L` (both edges land on the next labels) with `POP`. Short
+  fixpoint.
 - **Refusals:** `JumpIfMatch` to next (taken vs not-taken stack shapes differ);
-  `JoinLabel` binds stay; does not invert `ValueUnderJmp` / `nofuse` fail
-  paths or steal convoy args onto them.
+  unused labels stay (per-body entry binds are not referenced in the same
+  buffer); `JoinLabel` binds stay; does not invert `ValueUnderJmp` / `nofuse`
+  fail paths or steal convoy args onto them.
 - **Tests:** `opt/cfg.rs` `simplify_drops_jmp_to_next_label`,
   `simplify_const_edge_jmpf_to_next_becomes_pop`,
   `simplify_does_not_pop_jump_if_match_to_next`,
-  `simplify_drops_unused_plain_label_keeps_join`,
+  `simplify_keeps_unreferenced_plain_label`,
   `simplify_refuses_to_steal_hinted_fail_into_fallthrough`.
 
 ## `dead_block`

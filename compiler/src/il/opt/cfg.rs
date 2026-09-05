@@ -103,10 +103,7 @@ pub(super) fn simplify_cfg(ops: &mut Vec<IlOp>) -> usize {
 }
 
 fn simplify_cfg_once(ops: &mut Vec<IlOp>) -> usize {
-    let mut hits = 0usize;
-    hits += fold_fallthrough_jumps(ops);
-    hits += drop_unused_plain_labels(ops);
-    hits
+    fold_fallthrough_jumps(ops)
 }
 
 fn fold_fallthrough_jumps(ops: &mut Vec<IlOp>) -> usize {
@@ -157,29 +154,6 @@ fn binds_soon(ops: &[IlOp], from: usize, target: u32) -> bool {
         }
     }
     false
-}
-
-fn drop_unused_plain_labels(ops: &mut Vec<IlOp>) -> usize {
-    let used = referenced_labels(ops);
-    let before = ops.len();
-    ops.retain(|op| match op {
-        IlOp::Label(Label(id)) => used.contains(id),
-        _ => true,
-    });
-    before - ops.len()
-}
-
-fn referenced_labels(ops: &[IlOp]) -> HashSet<u32> {
-    let mut used = HashSet::new();
-    for op in ops {
-        match op {
-            IlOp::Jump { target, .. } | IlOp::Entry { target, .. } => {
-                used.insert(target.0);
-            }
-            _ => {}
-        }
-    }
-    used
 }
 
 /// `JMPF A; JMP B; A:` → `JMPT B`, dropping the trailing unconditional jump.
@@ -486,18 +460,14 @@ mod tests {
     }
 
     #[test]
-    fn simplify_drops_unused_plain_label_keeps_join() {
-        let mut ops = vec![
-            c(1),
-            label(9),
-            IlOp::JoinLabel(Label(8)),
-            ret(),
-        ];
-        assert!(simplify_cfg(&mut ops) >= 1);
-        assert!(!ops.iter().any(|op| matches!(op, IlOp::Label(Label(9)))));
-        assert!(ops
-            .iter()
-            .any(|op| matches!(op, IlOp::JoinLabel(Label(8)))));
+    fn simplify_keeps_unreferenced_plain_label() {
+        let mut ops = vec![c(1), label(9), IlOp::JoinLabel(Label(8)), ret()];
+        let before = ops.clone();
+        simplify_cfg(&mut ops);
+        assert!(
+            ops == before,
+            "per-body opts must keep entry / unreferenced labels"
+        );
     }
 
     #[test]
