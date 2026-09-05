@@ -1764,6 +1764,7 @@
                 stack_dce: false,
                 mem_fwd: true,
                 copy_prop: true,
+                dest_prop: false,
                 slot_promote: false,
                 tos_carry: false,
                 canon: false,

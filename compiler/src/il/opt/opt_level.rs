@@ -17,7 +17,7 @@ use super::OptimizeOptions;
 pub enum OptLevel {
     /// Algebraic / const-fold peeps only.
     None,
-    /// DCE, jump threading, copy/mem forwarding. Tiny-inline stays modest.
+    /// DCE, jump threading, copy/mem/dest forwarding. Tiny-inline stays modest.
     Basic,
     /// All currently-on production passes. Backward-compatible default.
     #[default]
@@ -122,6 +122,7 @@ fn all_off() -> OptimizeOptions {
         stack_dce: false,
         mem_fwd: false,
         copy_prop: false,
+        dest_prop: false,
         slot_promote: false,
         tos_carry: false,
         canon: false,
@@ -186,6 +187,7 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.stack_dce,
         o.mem_fwd,
         o.copy_prop,
+        o.dest_prop,
         o.slot_promote,
         o.tos_carry,
         o.canon,
@@ -275,7 +277,7 @@ mod tests {
     fn basic_enables_dce_and_forwarding() {
         let o = OptLevel::Basic.options();
         assert!(o.algebraic && o.jump_thread && o.dead_block && o.stack_dce);
-        assert!(o.mem_fwd && o.copy_prop);
+        assert!(o.mem_fwd && o.copy_prop && o.dest_prop);
         assert!(!o.licm && !o.slot_promote && !o.ssa_gvn && !o.escape_analysis);
     }
 
