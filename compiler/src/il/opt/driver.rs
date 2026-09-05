@@ -193,6 +193,10 @@ fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
     0
 }
 
+fn apply_strength_reduce(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
+    crate::il::strength::strength_reduce(ops, ctx.pool, opts.pure_call_ctx.as_ref())
+}
+
 fn apply_loop_unroll(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::loop_unroll::unroll_loops(ops, opts.loop_unroll_factor)
 }
@@ -429,6 +433,17 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: apply_loop_bounds,
     },
     PassSpec {
+        name: "strength_reduce",
+        phase: Phase::Decision,
+        kind: PassKind::Generic,
+        floor: OptFloor::Standard,
+        omit_from_size: false,
+        seed_entry_tell_after: false,
+        gate: |o| o.strength_reduce,
+        set_flag: |o| o.strength_reduce = true,
+        apply: apply_strength_reduce,
+    },
+    PassSpec {
         name: "loop_unroll",
         phase: Phase::Decision,
         kind: PassKind::Unroll,
@@ -610,6 +625,7 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "cast_spill",
     "licm",
     "loop_bounds",
+    "strength_reduce",
     "loop_unroll",
     "invariant_store_elim",
     "escape_analysis",
@@ -662,6 +678,7 @@ mod tests {
                 "instcombine",
                 "licm",
                 "loop_bounds",
+                "strength_reduce",
                 "loop_unroll",
                 "invariant_store_elim",
                 "escape_analysis",

@@ -18,6 +18,7 @@ mod func;
 mod gvn;
 mod gvn_ssa;
 mod licm;
+mod strength;
 mod lower;
 mod module;
 mod op;
