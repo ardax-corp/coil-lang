@@ -24,12 +24,14 @@ const CORPUS: &[&str] = &[
 /// the two-slot ABI end to end. Heap `Vec::pop` now HostInvokes with
 /// OptionNiche layout bits (no CALL + boxed-to-niche unwrap).
 /// InstCombine retargets `arithmetic.hy` / `loops.hy` (const-cond / local peeps).
+/// Try/Result flatten retargets `assert(...)?` and two-slot `?` (shared fail
+/// epilogue; `branch_opt` leaves `ValueUnderJmp` tag jumps in place).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "ac91bfd0421c7e63_522"),
-    ("functions.hy", "b5ff494e17beb778_394"),
-    ("loops.hy", "ade600452af4d997_266"),
-    ("option_pair.hy", "93699f281cd17d8e_388"),
-    ("user_trait_dispatch.hy", "6d568096562aa3f9_157"),
+    ("arithmetic.hy", "5649c12e619549d8_543"),
+    ("functions.hy", "a4a8a121c9c8634c_405"),
+    ("loops.hy", "ecae1dcfae84aaed_274"),
+    ("option_pair.hy", "b1c448b55112876f_398"),
+    ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {

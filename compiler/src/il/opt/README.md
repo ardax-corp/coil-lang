@@ -219,7 +219,10 @@ float identities / pool fold.
 - **Output:** Const-cond `JMPF`/`JMPT` → goto or delete; `CONST t; DUP; CONST e;
   EQ|NEQ` → `CONST t; CONST 0|1`; `XOR 1; XOR 1` cancel; two-slot match
   diamonds that only keep the payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`)
-  → `POP` of the tag. `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
+  → `POP` of the tag. Two-slot Result/Option `?` flatten is codegen
+  (`emit_try_two_word_pair`), not this peep — a mid-body `RETURN` rewrite
+  invites invert/convoy to sink later args onto the fail path.
+  `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
 - **Refusals:** Non-identity match arms; `JumpIfMatch` (boxed) diamonds;
   unknown tags. No new opcodes.
 - **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
@@ -480,8 +483,11 @@ except block reorder / seek / tell-promote. Heuristic only (no profile).
 - **Output:** Invert polarity and move the cold arm after a freshly minted
   module-wide-unique label. Semantics identical; layout only.
 - **Refusals:** Unknown SP / empty stack at the cond; then-arm with an internal
-  jump or label; suffix that could fall into the moved region.
+  jump or label; suffix that could fall into the moved region;
+  `ValueUnderJmp` / `nofuse` pair-`?` tag jumps (cold invert would turn the
+  shared fail `RETURN` into a convoy join).
 - **Tests:** `opt/branch_opt.rs` `heuristic_moves_return_off_jmpf_fallthrough`,
+  `value_under_jmp_try_refuses_cold_invert`,
   `refuses_when_cond_jump_has_empty_stack`.
 
 ## `block_reordering`

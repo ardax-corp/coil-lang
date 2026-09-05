@@ -154,6 +154,47 @@ test("bind site keeps two-slot local (match / ? without boxing)") {
     })?;
 }
 
+fn forward_try(int a, int b) -> Result<int, int> {
+    return checked_div(a, b)?;
+}
+
+fn wrap_try(int a, int b) -> Result<int, int> {
+    return Result::Ok(checked_div(a, b)?);
+}
+
+fn http_chain(int a, int b, int c) -> Result<int, int> {
+    let x = checked_div(a, b)?;
+    let y = checked_div(x, c)?;
+    let z = checked_div(y, 1)?;
+    return Result::Ok(z + 1);
+}
+
+fn step(int n) -> Result<int, int> {
+    if n < 0 {
+        return Result::Err(n);
+    }
+    return Result::Ok(n);
+}
+
+fn step_mod(int n) -> Result<int, int> {
+    if n % 5 == 0 {
+        return Result::Err(-1);
+    }
+    return Result::Ok((n % 10) + 1);
+}
+
+fn step_chain(int i) -> Result<int, int> {
+    let a = step(i)?;
+    let b = step(i + 3)?;
+    return Result::Ok(a + b);
+}
+
+fn step_mod_chain(int i) -> Result<int, int> {
+    let a = step_mod(i)?;
+    let b = step_mod(i + 3)?;
+    return Result::Ok(a + b);
+}
+
 test("two-word Result Try propagates through raise/?") {
     assert(match chained(9, 3) {
         Result::Ok(v) => v == 4,
@@ -162,6 +203,60 @@ test("two-word Result Try propagates through raise/?") {
     assert(match chained(1, 0) {
         Result::Ok(_) => false,
         Result::Err(e) => e == -1,
+    })?;
+}
+
+test("return e? / Ok(e?) forwards the same two-slot pair") {
+    assert(match forward_try(8, 2) {
+        Result::Ok(v) => v == 4,
+        Result::Err(_) => false,
+    })?;
+    assert(match forward_try(1, 0) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+    assert(match wrap_try(9, 3) {
+        Result::Ok(v) => v == 3,
+        Result::Err(_) => false,
+    })?;
+    assert(match wrap_try(2, 0) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+}
+
+test("HTTP-shaped Result ? chain keeps payloads and err path") {
+    assert(match http_chain(20, 2, 2) {
+        Result::Ok(v) => v == 6,
+        Result::Err(_) => false,
+    })?;
+    assert(match http_chain(5, 0, 1) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+    assert(match http_chain(10, 2, 0) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+}
+
+test("step-shaped Result ? chain binds both oks and first err") {
+    assert(match step_chain(4) {
+        Result::Ok(v) => v == 11,
+        Result::Err(_) => false,
+    })?;
+    assert(match step_chain(-2) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -2,
+    })?;
+    // First `?` ok, second `?` err — same shape as result_try_churn.
+    assert(match step_mod_chain(2) {
+        Result::Ok(_) => false,
+        Result::Err(e) => e == -1,
+    })?;
+    assert(match step_mod_chain(1) {
+        Result::Ok(v) => v == 7,
+        Result::Err(_) => false,
     })?;
 }
 
