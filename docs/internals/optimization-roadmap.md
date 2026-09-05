@@ -254,6 +254,14 @@ Residual alloc cost is **payload layout**, not identity hashing:
 - typed instances with ≤2 fields inline those slots ([#299](https://github.com/ardax-corp/coil-lang/pull/299));
 - collection trigger is still `alloc_bytes` versus `gc_next_threshold`.
 
+**Opt8 skipped — root ops not first-class.** Mark-and-sweep roots live in
+the VM (`collect_vm_root_addrs`: operand stack, statics, coroutines,
+`frame_pins`, `userland_libraries`). There is no retain / release / root
+`IlOp` or `Instruction`. User `gc::root` / `unroot` / `get` / `Weak` are
+`HostInvoke` heap objects (`gc_handles.rs`), not ISA traffic. `ArrayPin`
+is a `find_object_by_addr` cache, not RC. Do not invent retain/release
+opcodes to enable a coalesce.
+
 ### 4. Direct-call and closure specialization
 
 Priority: medium. **Status: partial (B4 landed).** The caller-side predicate
