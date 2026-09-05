@@ -122,7 +122,18 @@ impl Compiler {
                 | crate::typechecking::PreludeFn::Ceil
                 | crate::typechecking::PreludeFn::Exp
                 | crate::typechecking::PreludeFn::Ln
-                | crate::typechecking::PreludeFn::Pow => {
+                | crate::typechecking::PreludeFn::Pow
+                | crate::typechecking::PreludeFn::Atan
+                | crate::typechecking::PreludeFn::Atan2
+                | crate::typechecking::PreludeFn::Asin
+                | crate::typechecking::PreludeFn::Acos
+                | crate::typechecking::PreludeFn::Log10
+                | crate::typechecking::PreludeFn::Log2
+                | crate::typechecking::PreludeFn::Cbrt
+                | crate::typechecking::PreludeFn::Rem
+                | crate::typechecking::PreludeFn::Sinh
+                | crate::typechecking::PreludeFn::Cosh
+                | crate::typechecking::PreludeFn::Tanh => {
                     self.emit_prelude_host_call(
                         arg_slice,
                         kind.math_native_name().expect("scalar math native"),

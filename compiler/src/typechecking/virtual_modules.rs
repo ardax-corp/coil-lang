@@ -105,6 +105,18 @@ pub enum PreludeFn {
     Exp,
     Ln,
     Pow,
+    Atan,
+    Atan2,
+    Asin,
+    Acos,
+    Log10,
+    Log2,
+    Cbrt,
+    /// Float remainder (`f64::rem` / C `fmod`); not IEEE `remainder`.
+    Rem,
+    Sinh,
+    Cosh,
+    Tanh,
 }
 
 impl PreludeFn {
@@ -127,6 +139,17 @@ impl PreludeFn {
             Self::Exp => "exp",
             Self::Ln => "ln",
             Self::Pow => "pow",
+            Self::Atan => "atan",
+            Self::Atan2 => "atan2",
+            Self::Asin => "asin",
+            Self::Acos => "acos",
+            Self::Log10 => "log10",
+            Self::Log2 => "log2",
+            Self::Cbrt => "cbrt",
+            Self::Rem => "rem",
+            Self::Sinh => "sinh",
+            Self::Cosh => "cosh",
+            Self::Tanh => "tanh",
         }
     }
 
@@ -149,6 +172,17 @@ impl PreludeFn {
             "exp" => Some(Self::Exp),
             "ln" => Some(Self::Ln),
             "pow" => Some(Self::Pow),
+            "atan" => Some(Self::Atan),
+            "atan2" => Some(Self::Atan2),
+            "asin" => Some(Self::Asin),
+            "acos" => Some(Self::Acos),
+            "log10" => Some(Self::Log10),
+            "log2" => Some(Self::Log2),
+            "cbrt" => Some(Self::Cbrt),
+            "rem" => Some(Self::Rem),
+            "sinh" => Some(Self::Sinh),
+            "cosh" => Some(Self::Cosh),
+            "tanh" => Some(Self::Tanh),
             _ => None,
         }
     }
@@ -164,6 +198,26 @@ impl PreludeFn {
             Self::Exp => Some("math_exp"),
             Self::Ln => Some("math_ln"),
             Self::Pow => Some("math_pow"),
+            Self::Atan => Some("math_atan"),
+            Self::Atan2 => Some("math_atan2"),
+            Self::Asin => Some("math_asin"),
+            Self::Acos => Some("math_acos"),
+            Self::Log10 => Some("math_log10"),
+            Self::Log2 => Some("math_log2"),
+            Self::Cbrt => Some("math_cbrt"),
+            Self::Rem => Some("math_rem"),
+            Self::Sinh => Some("math_sinh"),
+            Self::Cosh => Some("math_cosh"),
+            Self::Tanh => Some("math_tanh"),
+            _ => None,
+        }
+    }
+
+    /// Binary `float, float -> float` scalar math (`pow`, `atan2`, `rem`).
+    pub fn math_arity(self) -> Option<usize> {
+        match self {
+            Self::Pow | Self::Atan2 | Self::Rem => Some(2),
+            kind if kind.math_native_name().is_some() => Some(1),
             _ => None,
         }
     }
@@ -767,6 +821,39 @@ impl VirtualModules {
                 BuiltinExport::Fn {
                     kind: PreludeFn::Pow,
                 },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Atan,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Atan2,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Asin,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Acos,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Log10,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Log2,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Cbrt,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Rem,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Sinh,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Cosh,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Tanh,
+                },
                 BuiltinExport::OpaqueType {
                     name: common::BUILTIN_MATRIX_TYPE,
                 },
@@ -1041,6 +1128,17 @@ mod tests {
             PreludeFn::Ceil,
             PreludeFn::Exp,
             PreludeFn::Ln,
+            PreludeFn::Atan,
+            PreludeFn::Atan2,
+            PreludeFn::Asin,
+            PreludeFn::Acos,
+            PreludeFn::Log10,
+            PreludeFn::Log2,
+            PreludeFn::Cbrt,
+            PreludeFn::Rem,
+            PreludeFn::Sinh,
+            PreludeFn::Cosh,
+            PreludeFn::Tanh,
         ] {
             assert!(
                 exports
