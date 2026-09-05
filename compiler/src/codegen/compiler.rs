@@ -824,15 +824,18 @@ impl Compiler {
         true
     }
 
-    /// Whether `body` is a tail self-call eligible for TCO.
+    /// Whether `body` is a tail self- or sibling call eligible for TCO.
     fn expr_is_tail_self_call(&self, expr: &Output<'_>) -> bool {
-        if self.fn_defers.is_empty() {
-            // defer check only
-        } else {
-            return false;
+        self.resolve_tail_callee_key(expr).is_some()
+    }
+
+    /// Known direct callee for a tail `return f(...)` / match-arm `f(...)`.
+    fn resolve_tail_callee_key(&self, expr: &Output<'_>) -> Option<String> {
+        if !self.fn_defers.is_empty() {
+            return None;
         }
-        let Some(cur) = self.current_function_table_key.as_ref() else {
-            return false;
+        let Some(cur) = self.current_function_table_key.clone() else {
+            return None;
         };
         let call_expr = match expr.1.as_ref() {
             Expression::Call { .. } => expr,
@@ -840,40 +843,104 @@ impl Compiler {
                 if matches!(inner.1.as_ref(), Expression::Call { .. }) {
                     inner
                 } else {
-                    return false;
+                    return None;
                 }
             }
-            _ => return false,
+            _ => return None,
         };
         let Expression::Call { name, .. } = call_expr.1.as_ref() else {
-            return false;
+            return None;
         };
-        let Expression::Identifier(fname) = name.1.as_ref() else {
-            return false;
+        let mut call_key = match name.1.as_ref() {
+            Expression::Identifier(fname) => self.resolve_free_fn(fname),
+            Expression::QualifiedAccess { owner, member } => format!("{owner}::{member}"),
+            _ => return None,
         };
-        let mut call_key = self.resolve_free_fn(fname);
-        if let Some((fa, is_rest, id)) = self.sidecar_overload(
-            None,
-            call_expr.0.start,
-            call_expr.0.end,
-        )
+        if let Some((fa, is_rest, id)) = self.sidecar_overload(None, call_expr.0.start, call_expr.0.end)
         {
             let keyed = overload_fn_key(&call_key, fa, is_rest, id);
-            if self.functions.contains_key(&keyed) {
+            if self.functions.contains_key(&keyed) || self.fn_entry_labels.contains_key(&keyed) {
                 call_key = keyed;
+            } else {
+                let simple = call_key
+                    .rsplit("::")
+                    .next()
+                    .unwrap_or(&call_key)
+                    .to_string();
+                let keyed_simple = overload_fn_key(&simple, fa, is_rest, id);
+                if self.functions.contains_key(&keyed_simple)
+                    || self.fn_entry_labels.contains_key(&keyed_simple)
+                {
+                    call_key = keyed_simple;
+                }
             }
-        } else if !self.functions.contains_key(&call_key) {
+        } else if !self.functions.contains_key(&call_key)
+            && !self.fn_entry_labels.contains_key(&call_key)
+        {
             if let Some(q) = self.current_function_qualified.as_ref() {
-                if call_key == *q || call_key == strip_overload_key(cur) {
+                if call_key == *q || call_key == strip_overload_key(&cur) {
                     call_key = cur.clone();
                 }
             }
         }
-        if &call_key != cur {
-            return false;
+        if !self.functions.contains_key(&call_key) && !self.fn_entry_labels.contains_key(&call_key) {
+            return None;
         }
         let qualified = self.current_function_qualified.as_deref().unwrap_or("");
-        !self.coroutine_fns.contains(qualified) && !self.coroutine_fns.contains(&call_key)
+        if self.coroutine_fns.contains(qualified) || self.coroutine_fns.contains(&call_key) {
+            return None;
+        }
+        // Sibling TCO is for recursive peers (even/odd), not `return helper()`.
+        if !self.same_fn_key(&call_key, &cur) && !self.both_in_rec_cycle(&cur, &call_key) {
+            return None;
+        }
+        let lookup = strip_overload_key(&call_key);
+        if self.checker.is_generic_fn(&call_key) || self.checker.is_generic_fn(lookup) {
+            return None;
+        }
+        if !self.tail_call_abi_matches(&call_key) {
+            return None;
+        }
+        Some(call_key)
+    }
+
+    fn fn_key_leaf(key: &str) -> &str {
+        let stripped = strip_overload_key(key);
+        stripped.rsplit("::").next().unwrap_or(stripped)
+    }
+
+    fn same_fn_key(&self, a: &str, b: &str) -> bool {
+        a == b || strip_overload_key(a) == strip_overload_key(b)
+    }
+
+    /// Both names sit on a self/mutual cycle — the only sibling TCO we emit.
+    fn both_in_rec_cycle(&self, caller: &str, callee: &str) -> bool {
+        self.name_in_rec_cycle(caller) && self.name_in_rec_cycle(callee)
+    }
+
+    fn name_in_rec_cycle(&self, key: &str) -> bool {
+        let leaf = Self::fn_key_leaf(key);
+        self.recursive_fns.contains(leaf)
+            || self.recursive_fns.contains(key)
+            || self.recursive_fns.contains(strip_overload_key(key))
+    }
+
+    /// Caller and callee must share the same one-word or two-word return layout.
+    ///
+    /// Result-mode Ok-wrap after a one-word call is a real CALL+wrap+RETURN, not
+    /// a tail jump. Two-word Result/Option already is the return ABI.
+    fn tail_call_abi_matches(&self, callee_key: &str) -> bool {
+        let callee_two = self
+            .two_word_return_kind(callee_key)
+            .or_else(|| self.two_word_return_kind(strip_overload_key(callee_key)));
+        if self.compiling_two_word_enum != callee_two {
+            return false;
+        }
+        let would_wrap = self.compiling_two_word_enum.is_none()
+            && self.compiling_result_mode
+            && !self.return_is_niche_result()
+            && !self.return_is_unit_result_niche();
+        !would_wrap
     }
 
     fn return_is_tail_match(&self, expr: &Output<'_>) -> bool {
@@ -927,76 +994,32 @@ impl Compiler {
         }
     }
 
-    /// `return self(...)` tail-call when eligible.
+    /// `return f(...)` tail- or sibling-call when the callee is a known entry.
+    ///
+    /// Emits existing `TailCall` (frame reuse + jump). Same-function and
+    /// other known callees share this path — no new VM call opcode.
     fn try_emit_tail_call_expr(&mut self, expr: &Output<'_>, bytecode: &mut CodeBuf) -> bool {
-        if !self.fn_defers.is_empty() {
-            return false;
-        }
-        let Some(cur) = self.current_function_table_key.clone() else {
+        let Some(call_key) = self.resolve_tail_callee_key(expr) else {
             return false;
         };
         let call_expr = match expr.1.as_ref() {
             Expression::Call { .. } => expr,
-            Expression::Expr(inner) | Expression::Group(inner) => {
-                if matches!(inner.1.as_ref(), Expression::Call { .. }) {
-                    inner
-                } else {
-                    return false;
-                }
-            }
+            Expression::Expr(inner) | Expression::Group(inner) => inner,
             _ => return false,
         };
-        let Expression::Call { name, args } = call_expr.1.as_ref() else {
+        let Expression::Call { args, .. } = call_expr.1.as_ref() else {
             return false;
         };
-        let Expression::Identifier(fname) = name.1.as_ref() else {
-            return false;
-        };
-        let mut call_key = self.resolve_free_fn(fname);
-        if let Some((fa, is_rest, id)) = self.sidecar_overload(
-            None,
-            call_expr.0.start,
-            call_expr.0.end,
-        )
-        {
-            let keyed = overload_fn_key(&call_key, fa, is_rest, id);
-            if self.functions.contains_key(&keyed) {
-                call_key = keyed;
-            } else {
-                let simple = call_key
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&call_key)
-                    .to_string();
-                let keyed_simple = overload_fn_key(&simple, fa, is_rest, id);
-                if self.functions.contains_key(&keyed_simple) {
-                    call_key = keyed_simple;
-                }
-            }
-        } else if !self.functions.contains_key(&call_key) {
-            if let Some(q) = self.current_function_qualified.as_ref() {
-                if call_key == *q || call_key == strip_overload_key(&cur) {
-                    call_key = cur.clone();
-                }
-            }
-        }
-        if call_key != cur {
-            return false;
-        }
-        let qualified = self.current_function_qualified.as_deref().unwrap_or("");
-        if self.coroutine_fns.contains(qualified) || self.coroutine_fns.contains(&call_key) {
-            return false;
-        }
         let arg_slice = args.as_deref().unwrap_or(&[]);
-        let lookup = strip_overload_key(&cur).to_string();
+        let lookup = strip_overload_key(&call_key).to_string();
         let arity = self.emit_call_args_with_rest(&lookup, arg_slice, bytecode, false);
-        let Some(&target) = self.functions.get(&cur) else {
-            return false;
-        };
-        // Packed abs PC; CodeBuf::push rewrites to IlOp::Entry via entry_at_offset.
-        bytecode
-            .push(Byte::new(Instruction::TailCall).with_call_packed(arity as u32, target as u32));
-        true
+        self.emit_named_entry_ret(
+            bytecode,
+            &call_key,
+            arity as u32,
+            crate::il::EntryKind::TailCall,
+            1,
+        )
     }
 
     /// Max emitting ops for a compare+branch tiny-inline diamond.
@@ -12441,19 +12464,9 @@ impl Compiler {
             Expression::Invoke(args) => self.emit_ffi_invoke(*span, args),
             Expression::Return(expr) | Expression::ImplicitReturn(expr) => {
                 let tail_match = self.return_is_tail_match(expr);
-                if self.compiling_two_word_enum.is_none()
-                    && !tail_match
-                    && self.try_emit_tail_call_expr(expr, &mut bytecode)
-                {
-                    if self.compiling_result_mode {
-                        if !self.skip_result_ok_wrap_for_return(expr) {
-                            if !self.return_is_niche_result()
-                                && !self.return_is_unit_result_niche()
-                            {
-                                Self::emit_ok_or_some_wrap(&mut bytecode, false);
-                            }
-                        }
-                    }
+                if !tail_match && self.try_emit_tail_call_expr(expr, &mut bytecode) {
+                    // TailCall is a terminator: callee RETURN uses this frame's
+                    // caller. Do not Ok-wrap or emit RETURN after it.
                     return bytecode;
                 }
 
@@ -14897,6 +14910,7 @@ impl Compiler {
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
+        self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast);
         self.recursive_pure = if auto_par_enabled() {
             crate::typechecking::analyze_recursive_pure(ast)
         } else {
