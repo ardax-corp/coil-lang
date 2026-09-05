@@ -58,16 +58,16 @@ pipeline. No solo “pass” tests.
 
 1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `mem_fwd` →
 5. `copy_prop` → 6. `dead_store` (same flag as `mem_fwd`) → 7. `canon` →
-8. `algebraic` → 9. `instcombine` → 10. `cast_spill`
+8. `algebraic` → 9. `instcombine` → 10. `local_cse` → 11. `cast_spill`
 
 **Decision** (`decision_once_at`), in order:
 
-11. `licm` → 12. `loop_bounds` → 13. `loop_unroll` → 14. `invariant_store_elim`
-→ 15. `escape_analysis` → 16. `slot_promote` (+ `dead_store`) → 17. `tos_carry`
-→ 18. `clone_shared_return` → 19. `return_convoy` → 20. `bin_join_convoy` →
-21. `multi_op_join_convoy` → 22. `invert_guard_branch` →
-23. `branch_optimization` → 24. `block_reordering` → 25. `seek_back_edge` →
-26. `slot_promote_tell` → 27. `ssa_gvn`
+12. `licm` → 13. `loop_bounds` → 14. `loop_unroll` → 15. `invariant_store_elim`
+→ 16. `escape_analysis` → 17. `slot_promote` (+ `dead_store`) → 18. `tos_carry`
+→ 19. `clone_shared_return` → 20. `return_convoy` → 21. `bin_join_convoy` →
+22. `multi_op_join_convoy` → 23. `invert_guard_branch` →
+24. `branch_optimization` → 25. `block_reordering` → 26. `seek_back_edge` →
+27. `slot_promote_tell` → 28. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
 opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
@@ -224,6 +224,26 @@ float identities / pool fold.
   unknown tags. No new opcodes.
 - **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
   `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`.
+
+## `local_cse`
+
+**Flag:** `local_cse` (default on at Standard). **Fn:**
+`opt::early_cse::early_cse`. Cleanup, after `instcombine`.
+
+- **Input:** One basic block at a time (`gvn_cfg` leaders). Available map of
+  pure expressions whose result was stored (`BinSlot*`, stack `Bin` of loads,
+  `CastIntToFloat`, `ArrayLen`, `Index` / `IndexPin*`, `LoadField`).
+- **Output:** Second identical compute → `Load` of the slot that still holds
+  the first result. Height of each rewrite matches the original window.
+  Cheap `Const`/`Load` TOS-Dup stays in `cfg_gvn` (fuse).
+- **Refusals:** `DIV`/`MOD`/`DIVF`/`MODF`; store to an operand or to the
+  holding slot; `StoreIndex` / `ArrayPush` kill memory exprs; `HostInvoke` /
+  `CALL` / residual effectful `Byte` / jumps clear the map. Does not cross
+  labels. Does not replace cheap `Const`/`Load` with a slot load (fuse).
+- **Tests:** `opt/early_cse.rs` `binslot_store_reused_as_load`,
+  `store_to_operand_kills_expr`, `host_invoke_is_barrier`,
+  `does_not_cross_basic_block`. Isolated flag:
+  `isolated_optimize_flag_runs_pass`.
 
 ## `cast_spill`
 
@@ -605,6 +625,7 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
 | instcombine | `instcombine.rs` | yes |
+| local_cse | `early_cse.rs` | yes |
 | cast_spill | `cast_spill.rs` | no |
 | licm | `licm.rs` | no |
 | loop_bounds | `bounds.rs` | no |
