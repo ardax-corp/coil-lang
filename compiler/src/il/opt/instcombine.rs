@@ -1,12 +1,12 @@
 //! Local InstCombine / peephole on typed stack IL.
 //!
 //! Folds obvious adjacent patterns without new opcodes or ABI changes:
-//! const-cond branches, known-tag `EQ`, XOR-1 pairs, two-slot enum
-//! match diamonds that just keep the payload, and `Call; Return` → `TailCall`.
+//! const-cond branches, known-tag `EQ`, XOR-1 pairs, and two-slot enum
+//! match diamonds that just keep the payload.
 
-use common::{Byte, Instruction};
+use common::Instruction;
 
-use super::super::op::{EntryKind, IlJumpKind, IlOp, Label};
+use super::super::op::{IlJumpKind, IlOp, Label};
 
 /// Cheap local rewrites. Runs to a short fixpoint so const-`EQ` then
 /// const-`JMPF` compose in one pipeline round.
@@ -50,55 +50,6 @@ fn try_peep(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
         .or_else(|| try_known_tag_dup_eq(ops, i))
         .or_else(|| try_xor1_xor1(ops, i))
         .or_else(|| try_pair_payload_identity_match(ops, i))
-        .or_else(|| try_call_return_tail(ops, i))
-}
-
-/// Adjacent `CALL` / `Entry{Call}` + matching `RETURN` → `TailCall`.
-///
-/// Same-function and known-sibling targets already carry a label; this is the
-/// AOT jump rewrite (reuse frame, jump) without a new VM opcode. Refuses a
-/// ret-width mismatch and fused `*Return` / `PairToHeap` (box-after-call).
-fn try_call_return_tail(ops: &[IlOp], i: usize) -> Option<(usize, Vec<IlOp>)> {
-    let ret_words = return_words(ops.get(i + 1)?)?;
-    let tail = match &ops[i] {
-        IlOp::Entry {
-            kind: EntryKind::Call,
-            arity,
-            target,
-            loc,
-            ret_words: call_ret,
-        } if *call_ret == ret_words => IlOp::Entry {
-            kind: EntryKind::TailCall,
-            arity: *arity,
-            target: *target,
-            loc: *loc,
-            ret_words: 1,
-        },
-        IlOp::Byte { byte, loc } if *byte.bytecode() == Instruction::CALL => {
-            let call_ret = byte.call_ret_words().max(1);
-            if call_ret != ret_words {
-                return None;
-            }
-            let (arity, target) = byte.call_parts();
-            IlOp::Byte {
-                byte: Byte::new(Instruction::TailCall)
-                    .with_call_packed(arity as u32, target as u32),
-                loc: *loc,
-            }
-        }
-        _ => return None,
-    };
-    Some((2, vec![tail]))
-}
-
-fn return_words(op: &IlOp) -> Option<u32> {
-    match op {
-        IlOp::Return { ret_words, .. } => Some(*ret_words),
-        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::RETURN => {
-            Some(byte.return_words().max(1))
-        }
-        _ => None,
-    }
 }
 
 /// `CONST c; JMPF L` / `JMPT L` → unconditional jump or delete.
@@ -468,78 +419,5 @@ mod tests {
         let before = ops.clone();
         instcombine(&mut ops);
         assert!(ops == before, "non-identity match must stay");
-    }
-
-    #[test]
-    fn call_then_return_becomes_tail_call() {
-        let mut ops = vec![
-            IlOp::Entry {
-                kind: EntryKind::Call,
-                arity: 2,
-                target: Label(7),
-                loc: loc(),
-                ret_words: 1,
-            },
-            IlOp::Return {
-                loc: loc(),
-                ret_words: 1,
-            },
-        ];
-        assert!(instcombine(&mut ops) >= 1);
-        assert_eq!(ops.len(), 1);
-        assert!(matches!(
-            ops[0],
-            IlOp::Entry {
-                kind: EntryKind::TailCall,
-                arity: 2,
-                target: Label(7),
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn two_word_call_then_two_word_return_becomes_tail_call() {
-        let mut ops = vec![
-            IlOp::Entry {
-                kind: EntryKind::Call,
-                arity: 1,
-                target: Label(3),
-                loc: loc(),
-                ret_words: 2,
-            },
-            IlOp::Return {
-                loc: loc(),
-                ret_words: 2,
-            },
-        ];
-        assert!(instcombine(&mut ops) >= 1);
-        assert!(matches!(
-            ops[0],
-            IlOp::Entry {
-                kind: EntryKind::TailCall,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn call_return_width_mismatch_is_refused() {
-        let mut ops = vec![
-            IlOp::Entry {
-                kind: EntryKind::Call,
-                arity: 1,
-                target: Label(3),
-                loc: loc(),
-                ret_words: 2,
-            },
-            IlOp::Return {
-                loc: loc(),
-                ret_words: 1,
-            },
-        ];
-        let before = ops.clone();
-        instcombine(&mut ops);
-        assert!(ops == before, "width-mismatched Call;Return must stay");
     }
 }
