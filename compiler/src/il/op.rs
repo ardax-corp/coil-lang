@@ -21,6 +21,10 @@ pub struct FuseHint {
     /// Do not fuse this op with neighbors (pair-`?` / pair-match `EQ;JMPF`).
     pub nofuse: bool,
     pub join: JoinClass,
+    /// Target block is a structural cold path (Err / None / throw).
+    pub cold_target: bool,
+    /// Fall-through miss of this cond / `JumpIfMatch` is structural cold.
+    pub cold_miss: bool,
 }
 
 impl FuseHint {
@@ -28,6 +32,8 @@ impl FuseHint {
         Self {
             nofuse: true,
             join: JoinClass::ValueUnderJmp,
+            cold_target: false,
+            cold_miss: false,
         }
     }
 
@@ -35,6 +41,28 @@ impl FuseHint {
         Self {
             nofuse: false,
             join: JoinClass::Value,
+            cold_target: false,
+            cold_miss: false,
+        }
+    }
+
+    /// Jump target is Err / None / throw — sink that block (COI-129).
+    pub const fn cold_target() -> Self {
+        Self {
+            nofuse: false,
+            join: JoinClass::None,
+            cold_target: true,
+            cold_miss: false,
+        }
+    }
+
+    /// Cond / `JumpIfMatch` miss is Err / None / throw — outline it.
+    pub const fn cold_miss() -> Self {
+        Self {
+            nofuse: false,
+            join: JoinClass::None,
+            cold_target: false,
+            cold_miss: true,
         }
     }
 
