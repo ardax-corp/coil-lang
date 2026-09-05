@@ -33,6 +33,7 @@ fn isolated() -> OptimizeOptions {
         cast_spill: false,
         algebraic: false,
         instcombine: false,
+        local_cse: false,
         licm: false,
         loop_bounds: false,
         return_convoy: false,

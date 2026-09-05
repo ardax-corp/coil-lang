@@ -128,6 +128,7 @@ fn all_off() -> OptimizeOptions {
         cast_spill: false,
         algebraic: false,
         instcombine: false,
+        local_cse: false,
         licm: false,
         loop_bounds: false,
         return_convoy: false,
@@ -190,6 +191,7 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.cast_spill,
         o.algebraic,
         o.instcombine,
+        o.local_cse,
         o.licm,
         o.loop_bounds,
         o.return_convoy,
@@ -264,7 +266,7 @@ mod tests {
         assert!(!o.escape_analysis);
         assert!(!o.loop_unroll);
         assert!(!o.seek_back_edge);
-        assert!(!o.instcombine);
+        assert!(!o.instcombine && !o.local_cse);
     }
 
     #[test]

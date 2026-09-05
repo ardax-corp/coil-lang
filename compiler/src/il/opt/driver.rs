@@ -178,6 +178,10 @@ fn apply_instcombine(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'
     super::instcombine::instcombine(ops)
 }
 
+fn apply_local_cse(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+    super::early_cse::early_cse(ops)
+}
+
 fn apply_cast_spill(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     crate::il::cast_spill::spill_cast_before_float_chain(ops);
     0
@@ -396,6 +400,17 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: apply_instcombine,
     },
     PassSpec {
+        name: "local_cse",
+        phase: Phase::Cleanup,
+        kind: PassKind::Generic,
+        floor: OptFloor::Standard,
+        omit_from_size: false,
+        seed_entry_tell_after: false,
+        gate: |o| o.local_cse,
+        set_flag: |o| o.local_cse = true,
+        apply: apply_local_cse,
+    },
+    PassSpec {
         name: "cast_spill",
         phase: Phase::Cleanup,
         kind: PassKind::Generic,
@@ -607,6 +622,7 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "canon",
     "algebraic",
     "instcombine",
+    "local_cse",
     "cast_spill",
     "licm",
     "loop_bounds",
@@ -660,6 +676,7 @@ mod tests {
                 "canon",
                 "algebraic",
                 "instcombine",
+                "local_cse",
                 "licm",
                 "loop_bounds",
                 "loop_unroll",

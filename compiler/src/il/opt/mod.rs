@@ -38,6 +38,8 @@ pub struct OptimizeOptions {
     pub algebraic: bool,
     /// Local InstCombine / peephole (const-cond branches, pair-match identity).
     pub instcombine: bool,
+    /// Intra-block EarlyCSE of pure expressions (stored result → `Load`).
+    pub local_cse: bool,
     /// Hoist invariant Const/Load out of Known-SP natural loops.
     pub licm: bool,
     /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
@@ -316,6 +318,7 @@ mod cfg;
 mod convoy;
 mod dce;
 mod instcombine;
+mod early_cse;
 mod escape_analysis;
 mod invariant_store_elim;
 mod loop_unroll;
