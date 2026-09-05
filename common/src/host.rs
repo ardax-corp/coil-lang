@@ -641,6 +641,61 @@ pub const HOST_NATIVES: &[HostNative] = &[
         arity: 1,
         id: 124,
     },
+    HostNative {
+        name: "math_atan",
+        arity: 1,
+        id: 125,
+    },
+    HostNative {
+        name: "math_atan2",
+        arity: 2,
+        id: 126,
+    },
+    HostNative {
+        name: "math_asin",
+        arity: 1,
+        id: 127,
+    },
+    HostNative {
+        name: "math_acos",
+        arity: 1,
+        id: 128,
+    },
+    HostNative {
+        name: "math_log10",
+        arity: 1,
+        id: 129,
+    },
+    HostNative {
+        name: "math_log2",
+        arity: 1,
+        id: 130,
+    },
+    HostNative {
+        name: "math_cbrt",
+        arity: 1,
+        id: 131,
+    },
+    HostNative {
+        name: "math_rem",
+        arity: 2,
+        id: 132,
+    },
+    HostNative {
+        name: "math_sinh",
+        arity: 1,
+        id: 133,
+    },
+    HostNative {
+        name: "math_cosh",
+        arity: 1,
+        id: 134,
+    },
+    HostNative {
+        name: "math_tanh",
+        arity: 1,
+        id: 135,
+    },
 ];
 
 /// Frozen HostInvoke id for `stream_attach`.
@@ -655,6 +710,10 @@ pub const CLOCK_MONO_NANOS_ID: u16 = 122;
 pub const CLOCK_SLEEP_MS_ID: u16 = 123;
 /// HostInvoke id for `result_unit_probe` (`Result<(), IoError>` pack helper).
 pub const RESULT_UNIT_PROBE_ID: u16 = 124;
+/// First HostInvoke id of the M1 `prelude::math` expansion (`math_atan`).
+pub const MATH_ATAN_ID: u16 = 125;
+/// HostInvoke id for `math_tanh` (last M1 math native).
+pub const MATH_TANH_ID: u16 = 135;
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -702,13 +761,15 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 125);
+    assert!(HOST_NATIVES.len() == 136);
     assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
     assert!(HOST_NATIVES[120].id == STREAM_PARK_ID);
     assert!(HOST_NATIVES[121].id == CLOCK_WALL_NANOS_ID);
     assert!(HOST_NATIVES[122].id == CLOCK_MONO_NANOS_ID);
     assert!(HOST_NATIVES[123].id == CLOCK_SLEEP_MS_ID);
     assert!(HOST_NATIVES[124].id == RESULT_UNIT_PROBE_ID);
+    assert!(HOST_NATIVES[125].id == MATH_ATAN_ID);
+    assert!(HOST_NATIVES[135].id == MATH_TANH_ID);
 };
 
 /// HostInvoke id for a standard native name.
@@ -807,6 +868,8 @@ mod tests {
         assert_eq!(host_native_id(CLOCK_MONO_NANOS_NATIVE), Some(122));
         assert_eq!(host_native_id(CLOCK_SLEEP_MS_NATIVE), Some(123));
         assert_eq!(host_native_id(RESULT_UNIT_PROBE_NATIVE), Some(124));
+        assert_eq!(host_native_id("math_atan"), Some(125));
+        assert_eq!(host_native_id("math_tanh"), Some(135));
         assert_eq!(HOST_NATIVES[24].name, "udp_local_port");
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
