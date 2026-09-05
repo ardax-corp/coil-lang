@@ -4710,7 +4710,18 @@ impl Checker {
                     | PreludeFn::Ceil
                     | PreludeFn::Exp
                     | PreludeFn::Ln
-                    | PreludeFn::Pow => self.infer_math(kind, &reordered, range),
+                    | PreludeFn::Pow
+                    | PreludeFn::Atan
+                    | PreludeFn::Atan2
+                    | PreludeFn::Asin
+                    | PreludeFn::Acos
+                    | PreludeFn::Log10
+                    | PreludeFn::Log2
+                    | PreludeFn::Cbrt
+                    | PreludeFn::Rem
+                    | PreludeFn::Sinh
+                    | PreludeFn::Cosh
+                    | PreludeFn::Tanh => self.infer_math(kind, &reordered, range),
                 };
             }
             let arg_slice = args.as_deref().unwrap_or(&[]);
@@ -4731,7 +4742,18 @@ impl Checker {
                 | PreludeFn::Ceil
                 | PreludeFn::Exp
                 | PreludeFn::Ln
-                | PreludeFn::Pow => self.infer_math(kind, arg_slice, range),
+                | PreludeFn::Pow
+                | PreludeFn::Atan
+                | PreludeFn::Atan2
+                | PreludeFn::Asin
+                | PreludeFn::Acos
+                | PreludeFn::Log10
+                | PreludeFn::Log2
+                | PreludeFn::Cbrt
+                | PreludeFn::Rem
+                | PreludeFn::Sinh
+                | PreludeFn::Cosh
+                | PreludeFn::Tanh => self.infer_math(kind, arg_slice, range),
             };
         }
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
@@ -6791,13 +6813,19 @@ impl Checker {
         result_app_ty(string(), string())
     }
 
-    /// Scalar `prelude::math` natives: unary `float -> float`, or `pow(float, float) -> float`.
+    /// Scalar `prelude::math` natives: unary `float -> float`, or binary `float, float -> float`.
     fn infer_math(&mut self, kind: PreludeFn, args: &[Output], range: Range<usize>) -> Ty {
-        let expected_arity = if kind == PreludeFn::Pow { 2 } else { 1 };
+        let expected_arity = kind.math_arity().unwrap_or(1);
         if args.len() != expected_arity {
             for arg in args {
                 let _ = self.infer(arg);
             }
+            let hint = match kind {
+                PreludeFn::Pow => "base, exponent",
+                PreludeFn::Atan2 => "y, x",
+                PreludeFn::Rem => "x, y",
+                _ => "x",
+            };
             return self.error_with_help(
                 ErrorCode::ConstructorArity,
                 format!(
@@ -6811,7 +6839,7 @@ impl Checker {
                 Some(format!(
                     "use `{}({})` with float arguments",
                     kind.as_str(),
-                    if expected_arity == 1 { "x" } else { "base, exponent" }
+                    hint
                 )),
             );
         }
