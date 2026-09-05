@@ -962,9 +962,10 @@ mod tests {
             Some(CLOCK_SLEEP_MS_NATIVE)
         );
         assert_eq!(
-            names.last().map(String::as_str),
+            names.get(attach + 5).map(String::as_str),
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
+        assert_eq!(names.last().map(String::as_str), Some("math_tanh"));
         assert_eq!(attach, 119);
     }
 
