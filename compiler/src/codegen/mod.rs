@@ -959,6 +959,8 @@ pub struct Compiler {
     /// consumed immediately by `StorePop` / `StoreStatic` (e.g. `let x = match …`).
     suppress_match_fusion_barrier: bool,
 
+    /// User `fn` names that sit on a call-graph cycle (self or mutual).
+    recursive_fns: HashSet<String>,
     /// Self-recursive pure function names eligible for auto fork-join.
     recursive_pure: HashSet<String>,
     /// Side-effect-free user `fn` names (loop bounds / COI-99).
@@ -1069,6 +1071,7 @@ impl Default for Compiler {
             fn_debug_locals: HashMap::new(),
             suppress_match_fusion_barrier: false,
             match_tail_call: false,
+            recursive_fns: HashSet::new(),
             recursive_pure: HashSet::new(),
             pure_fns: HashSet::new(),
             par_shapes: HashMap::new(),

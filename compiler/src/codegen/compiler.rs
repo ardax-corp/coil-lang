@@ -890,17 +890,9 @@ impl Compiler {
         if self.coroutine_fns.contains(qualified) || self.coroutine_fns.contains(&call_key) {
             return None;
         }
-        // `return helper(...)` from `main` is the tiny-inline / peel site.
-        // Sibling TCO is for recursive peers, not for eliding those CALLs.
-        let caller_leaf = qualified.rsplit("::").next().unwrap_or(qualified);
-        let cur_leaf = strip_overload_key(&cur)
-            .rsplit("::")
-            .next()
-            .unwrap_or(strip_overload_key(&cur));
-        if caller_leaf == "main" || cur_leaf == "main" {
-            if call_key != cur && strip_overload_key(&call_key) != strip_overload_key(&cur) {
-                return None;
-            }
+        // Sibling TCO is for recursive peers (even/odd), not `return helper()`.
+        if !self.same_fn_key(&call_key, &cur) && !self.both_in_rec_cycle(&cur, &call_key) {
+            return None;
         }
         let lookup = strip_overload_key(&call_key);
         if self.checker.is_generic_fn(&call_key) || self.checker.is_generic_fn(lookup) {
@@ -910,6 +902,29 @@ impl Compiler {
             return None;
         }
         Some(call_key)
+    }
+
+    fn fn_key_leaf(key: &str) -> &str {
+        let stripped = strip_overload_key(key);
+        stripped.rsplit("::").next().unwrap_or(stripped)
+    }
+
+    fn same_fn_key(&self, a: &str, b: &str) -> bool {
+        a == b || strip_overload_key(a) == strip_overload_key(b)
+    }
+
+    /// Both names sit on a self/mutual cycle — the only sibling TCO we emit.
+    fn both_in_rec_cycle(&self, caller: &str, callee: &str) -> bool {
+        let caller_ok = self.name_in_rec_cycle(caller);
+        let callee_ok = self.name_in_rec_cycle(callee);
+        caller_ok && callee_ok
+    }
+
+    fn name_in_rec_cycle(&self, key: &str) -> bool {
+        let leaf = Self::fn_key_leaf(key);
+        self.recursive_fns.contains(leaf)
+            || self.recursive_fns.contains(key)
+            || self.recursive_fns.contains(strip_overload_key(key))
     }
 
     /// Caller and callee must share the same one-word or two-word return layout.
@@ -14897,6 +14912,8 @@ impl Compiler {
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
+        self.recursive_fns
+            .extend(crate::typechecking::analyze_recursive_fns(ast));
         self.recursive_pure = if auto_par_enabled() {
             crate::typechecking::analyze_recursive_pure(ast)
         } else {
