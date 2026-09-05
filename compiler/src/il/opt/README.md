@@ -219,14 +219,17 @@ float identities / pool fold.
 - **Output:** Const-cond `JMPF`/`JMPT` → goto or delete; `CONST t; DUP; CONST e;
   EQ|NEQ` → `CONST t; CONST 0|1`; `XOR 1; XOR 1` cancel; two-slot match
   diamonds that only keep the payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`)
-  → `POP` of the tag. Two-slot Result/Option `?` flatten is codegen
+  → `POP` of the tag; adjacent `Call` + matching-width `Return` → `TailCall`
+  (AOT frame-reuse jump; same opcode as codegen self/sibling TCO).
+  Two-slot Result/Option `?` flatten is codegen
   (`emit_try_two_word_pair`), not this peep — a mid-body `RETURN` rewrite
   invites invert/convoy to sink later args onto the fail path.
   `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
 - **Refusals:** Non-identity match arms; `JumpIfMatch` (boxed) diamonds;
-  unknown tags. No new opcodes.
+  unknown tags; `Call`/`Return` width mismatch; fused `*Return`. No new opcodes.
 - **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
-  `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`.
+  `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`,
+  `call_then_return_becomes_tail_call`.
 
 ## `cast_spill`
 
