@@ -36,6 +36,8 @@ pub struct OptimizeOptions {
     pub cast_spill: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
+    /// Local InstCombine / peephole (const-cond branches, pair-match identity).
+    pub instcombine: bool,
     /// Hoist invariant Const/Load out of Known-SP natural loops.
     pub licm: bool,
     /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
@@ -313,6 +315,7 @@ pub use stats::{OptStats, begin_opt_stats, last_opt_stats};
 mod cfg;
 mod convoy;
 mod dce;
+mod instcombine;
 mod escape_analysis;
 mod invariant_store_elim;
 mod loop_unroll;
