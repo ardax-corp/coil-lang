@@ -56,18 +56,18 @@ pipeline. No solo “pass” tests.
 
 **Cleanup** (`cleanup_once_at`), in order:
 
-1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `mem_fwd` →
-5. `copy_prop` → 6. `dead_store` (same flag as `mem_fwd`) → 7. `canon` →
-8. `algebraic` → 9. `instcombine` → 10. `cast_spill`
+1. `jump_thread` → 2. `simplify_cfg` → 3. `dead_block` → 4. `stack_dce` →
+5. `mem_fwd` → 6. `copy_prop` → 7. `dead_store` (same flag as `mem_fwd`) →
+8. `canon` → 9. `algebraic` → 10. `instcombine` → 11. `cast_spill`
 
 **Decision** (`decision_once_at`), in order:
 
-11. `licm` → 12. `loop_bounds` → 13. `loop_unroll` → 14. `invariant_store_elim`
-→ 15. `escape_analysis` → 16. `slot_promote` (+ `dead_store`) → 17. `tos_carry`
-→ 18. `clone_shared_return` → 19. `return_convoy` → 20. `bin_join_convoy` →
-21. `multi_op_join_convoy` → 22. `invert_guard_branch` →
-23. `branch_optimization` → 24. `block_reordering` → 25. `seek_back_edge` →
-26. `slot_promote_tell` → 27. `ssa_gvn`
+12. `licm` → 13. `loop_bounds` → 14. `loop_unroll` → 15. `invariant_store_elim`
+→ 16. `escape_analysis` → 17. `slot_promote` (+ `dead_store`) → 18. `tos_carry`
+→ 19. `clone_shared_return` → 20. `return_convoy` → 21. `bin_join_convoy` →
+22. `multi_op_join_convoy` → 23. `invert_guard_branch` →
+24. `branch_optimization` → 25. `block_reordering` → 26. `seek_back_edge` →
+27. `slot_promote_tell` → 28. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
 opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
@@ -91,14 +91,33 @@ Invariants every pass must preserve unless its section says otherwise:
 **Flag:** `jump_thread` (default on). **Fn:** `cfg::jump_thread`.
 
 - **Input:** Symbolic `Jump` / `Label` IL. No cursor analysis.
-- **Output:** Unconditional `JMP L` whose target begins with `JMP L2` (skipping
-  labels) becomes `JMP L2`. One hop per jump per round. Stack height and label
-  ids unchanged.
-- **Refusals:** Conditional jumps, missing label, target that is not an
-  unconditional jump.
-- **Tests:** `opt/convoy.tests.rs` `jump_thread_collapses_goto_goto` (calls the
-  pass directly). Chain convergence: `opt/mod.tests.rs`
-  `jmp_chain_needs_two_rounds_to_thread_to_the_return`.
+- **Output:** Any `JMP` / `JMPF` / `JMPT` / `JumpIfMatch` whose target is an
+  empty trampoline (`Label`; `JMP L2`, skipping plain labels) retargets to `L2`.
+  The whole chain collapses in one pass (cycle-safe). `FuseHint` is preserved.
+- **Refusals:** Missing label; target that is not an unconditional jump;
+  trampoline that begins with / hits a `JoinLabel` (value-join / pair-`?`
+  barrier). Does not clone blocks onto edges or invert polarity.
+- **Tests:** `opt/cfg.rs` `threads_uncond_chain_in_one_pass`,
+  `threads_cond_jump_through_trampoline`, `threads_keeps_value_under_jmp_hint`,
+  `refuses_join_label_trampoline`. `opt/convoy.tests.rs`
+  `jump_thread_collapses_goto_goto`.
+
+## `simplify_cfg`
+
+**Flag:** `simplify_cfg` (default on at Basic+). **Fn:** `cfg::simplify_cfg`.
+
+- **Input:** Same labeled IL. Static only (no profile / counters).
+- **Output:** Delete `JMP L` when `L` is the next bind; replace tautological
+  `JMPF`/`JMPT L` (both edges land on the next labels) with `POP`; drop unused
+  plain `Label`s so `dead_block` can sweep. Short fixpoint.
+- **Refusals:** `JumpIfMatch` to next (taken vs not-taken stack shapes differ);
+  `JoinLabel` binds stay; does not invert `ValueUnderJmp` / `nofuse` fail
+  paths or steal convoy args onto them.
+- **Tests:** `opt/cfg.rs` `simplify_drops_jmp_to_next_label`,
+  `simplify_const_edge_jmpf_to_next_becomes_pop`,
+  `simplify_does_not_pop_jump_if_match_to_next`,
+  `simplify_drops_unused_plain_label_keeps_join`,
+  `simplify_refuses_to_steal_hinted_fail_into_fallthrough`.
 
 ## `dead_block`
 
@@ -603,7 +622,8 @@ calls the pass function directly or runs `optimize` with only that flag true.
 
 | Pass | Solo test already existed | Newly added in D1 |
 |------|---------------------------|-------------------|
-| jump_thread | `convoy.tests.rs` | no |
+| jump_thread | `cfg.rs` / `convoy.tests.rs` | no |
+| simplify_cfg | `cfg.rs` | yes |
 | dead_block | `convoy.tests.rs` | no |
 | stack_dce | `convoy.tests.rs` | no |
 | mem_fwd (+ dead_store) | `convoy.tests.rs` | no |
