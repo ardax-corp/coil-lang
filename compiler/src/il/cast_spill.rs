@@ -553,6 +553,7 @@ mod tests {
                 cast_spill: false,
                 canon: false,
                 algebraic: false,
+                instcombine: false,
                 licm: false,
                 loop_bounds: false,
                 slot_promote: false,

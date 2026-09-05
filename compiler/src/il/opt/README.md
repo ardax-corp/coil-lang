@@ -58,16 +58,16 @@ pipeline. No solo “pass” tests.
 
 1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `mem_fwd` →
 5. `copy_prop` → 6. `dead_store` (same flag as `mem_fwd`) → 7. `canon` →
-8. `algebraic` → 9. `cast_spill`
+8. `algebraic` → 9. `instcombine` → 10. `cast_spill`
 
 **Decision** (`decision_once_at`), in order:
 
-10. `licm` → 11. `loop_bounds` → 12. `loop_unroll` → 13. `invariant_store_elim`
-→ 14. `escape_analysis` → 15. `slot_promote` (+ `dead_store`) → 16. `tos_carry`
-→ 17. `clone_shared_return` → 18. `return_convoy` → 19. `bin_join_convoy` →
-20. `multi_op_join_convoy` → 21. `invert_guard_branch` →
-22. `branch_optimization` → 23. `block_reordering` → 24. `seek_back_edge` →
-25. `slot_promote_tell` → 26. `ssa_gvn`
+11. `licm` → 12. `loop_bounds` → 13. `loop_unroll` → 14. `invariant_store_elim`
+→ 15. `escape_analysis` → 16. `slot_promote` (+ `dead_store`) → 17. `tos_carry`
+→ 18. `clone_shared_return` → 19. `return_convoy` → 20. `bin_join_convoy` →
+21. `multi_op_join_convoy` → 22. `invert_guard_branch` →
+23. `branch_optimization` → 24. `block_reordering` → 25. `seek_back_edge` →
+26. `slot_promote_tell` → 27. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
 opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
@@ -209,6 +209,21 @@ float identities / pool fold.
   NaN / −0.0 identities; host/calls are not folded (they are not these windows).
 - **Tests:** `il/algebraic.rs` `add_zero_folds_to_load`, `refuses_when_sp_unknown`.
   Isolated flag: `float_const_pool_add_via_optimize_pipeline`.
+
+## `instcombine`
+
+**Flag:** `instcombine` (default on at Standard). **Fn:**
+`opt::instcombine::instcombine`. Cleanup, after `algebraic`.
+
+- **Input:** Adjacent typed IL windows. No cursor analysis.
+- **Output:** Const-cond `JMPF`/`JMPT` → goto or delete; `CONST t; DUP; CONST e;
+  EQ|NEQ` → `CONST t; CONST 0|1`; `XOR 1; XOR 1` cancel; two-slot match
+  diamonds that only keep the payload (`Ok(v)|Err(e)` or `Some(x)|None => 0`)
+  → `POP` of the tag. `LogNot;JMPF` is left for fuse-select (`LogNotJmpf`).
+- **Refusals:** Non-identity match arms; `JumpIfMatch` (boxed) diamonds;
+  unknown tags. No new opcodes.
+- **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
+  `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`.
 
 ## `cast_spill`
 
@@ -589,6 +604,7 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | copy_prop | `convoy.tests.rs` | no |
 | canon | `canon.rs` | no |
 | algebraic | `algebraic.rs` | no |
+| instcombine | `instcombine.rs` | yes |
 | cast_spill | `cast_spill.rs` | no |
 | licm | `licm.rs` | no |
 | loop_bounds | `bounds.rs` | no |

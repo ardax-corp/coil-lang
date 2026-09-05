@@ -23,10 +23,11 @@ const CORPUS: &[&str] = &[
 /// one-word ABI (task cut) — while `chain_pair` (never escaped) still uses
 /// the two-slot ABI end to end. Heap `Vec::pop` now HostInvokes with
 /// OptionNiche layout bits (no CALL + boxed-to-niche unwrap).
+/// InstCombine retargets `arithmetic.hy` / `loops.hy` (const-cond / local peeps).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "00bc4a9b9aa895cd_522"),
+    ("arithmetic.hy", "ac91bfd0421c7e63_522"),
     ("functions.hy", "b5ff494e17beb778_394"),
-    ("loops.hy", "5d36f89b615505b4_267"),
+    ("loops.hy", "ade600452af4d997_266"),
     ("option_pair.hy", "93699f281cd17d8e_388"),
     ("user_trait_dispatch.hy", "6d568096562aa3f9_157"),
 ];

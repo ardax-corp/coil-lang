@@ -2054,7 +2054,12 @@ mod tests {
     fn lower_module_runs_gvn_load_join_cse_before_lower() {
         let loc = DebugLoc::unknown();
         let ops = vec![
-            IlOp::Const { imm: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Const { imm: 99, loc },
+            IlOp::Bin {
+                op: Instruction::EQ,
+                loc,
+            },
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfFalse,
                 target: Label(1),

@@ -1200,6 +1200,7 @@ mod tests {
                 canon: false,
                 cast_spill: false,
                 algebraic: true,
+                instcombine: false,
                 licm: false,
                 loop_bounds: false,
                 return_convoy: false,

@@ -174,6 +174,10 @@ fn apply_algebraic(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'
     0
 }
 
+fn apply_instcombine(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+    super::instcombine::instcombine(ops)
+}
+
 fn apply_cast_spill(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     crate::il::cast_spill::spill_cast_before_float_chain(ops);
     0
@@ -379,6 +383,17 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         gate: |o| o.algebraic,
         set_flag: |o| o.algebraic = true,
         apply: apply_algebraic,
+    },
+    PassSpec {
+        name: "instcombine",
+        phase: Phase::Cleanup,
+        kind: PassKind::Generic,
+        floor: OptFloor::Standard,
+        omit_from_size: false,
+        seed_entry_tell_after: false,
+        gate: |o| o.instcombine,
+        set_flag: |o| o.instcombine = true,
+        apply: apply_instcombine,
     },
     PassSpec {
         name: "cast_spill",
@@ -591,6 +606,7 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "dead_store",
     "canon",
     "algebraic",
+    "instcombine",
     "cast_spill",
     "licm",
     "loop_bounds",
@@ -643,6 +659,7 @@ mod tests {
                 "dead_store",
                 "canon",
                 "algebraic",
+                "instcombine",
                 "licm",
                 "loop_bounds",
                 "loop_unroll",
