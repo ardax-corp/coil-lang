@@ -26,9 +26,10 @@ const CORPUS: &[&str] = &[
 /// InstCombine retargets `arithmetic.hy` / `loops.hy` (const-cond / local peeps).
 /// Try/Result flatten retargets `assert(...)?` and two-slot `?` (shared fail
 /// epilogue; `branch_opt` leaves `ValueUnderJmp` tag jumps in place).
+/// JumpThread/SimplifyCFG retargets `functions.hy` (fall-through JMP / trampoline).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "5649c12e619549d8_543"),
-    ("functions.hy", "a4a8a121c9c8634c_405"),
+    ("functions.hy", "4f898e915f0e16e9_403"),
     ("loops.hy", "ecae1dcfae84aaed_274"),
     ("option_pair.hy", "b1c448b55112876f_398"),
     ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
