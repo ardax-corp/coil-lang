@@ -890,6 +890,18 @@ impl Compiler {
         if self.coroutine_fns.contains(qualified) || self.coroutine_fns.contains(&call_key) {
             return None;
         }
+        // `return helper(...)` from `main` is the tiny-inline / peel site.
+        // Sibling TCO is for recursive peers, not for eliding those CALLs.
+        let caller_leaf = qualified.rsplit("::").next().unwrap_or(qualified);
+        let cur_leaf = strip_overload_key(&cur)
+            .rsplit("::")
+            .next()
+            .unwrap_or(strip_overload_key(&cur));
+        if caller_leaf == "main" || cur_leaf == "main" {
+            if call_key != cur && strip_overload_key(&call_key) != strip_overload_key(&cur) {
+                return None;
+            }
+        }
         let lookup = strip_overload_key(&call_key);
         if self.checker.is_generic_fn(&call_key) || self.checker.is_generic_fn(lookup) {
             return None;
@@ -936,7 +948,7 @@ impl Compiler {
         let Expression::Match { arms, .. } = match_expr.1.as_ref() else {
             return false;
         };
-        !arms.is_empty() && arms.iter().any(|arm| self.expr_is_tail_self_call(&arm.body))
+        !arms.is_empty() && arms.iter().all(|arm| self.expr_is_tail_self_call(&arm.body))
     }
 
     /// Whether an explicit `return Result::Ok/Err(…)` should skip the
