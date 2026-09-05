@@ -12,7 +12,7 @@ OUT_DIR="${OUT_DIR:-/tmp/coil_perf_matrix}"
 RUN_MASSIF="${RUN_MASSIF:-0}"
 
 CROSS_LANG=(mandelbrot tak nsieve binary_trees fib)
-AOT_ONLY=(numeric operators_loop match_sum option_result field_hot dict_hot array_mut match_enum_loop nbody dict_count for_in_sum gc_churn option_int_churn result_int_churn result_heap_churn host_result_unit_churn result_try_churn pair_int_churn iv_mul_sr licm_nested_chains)
+AOT_ONLY=(numeric operators_loop match_sum option_result field_hot dict_hot array_mut match_enum_loop nbody dict_count for_in_sum gc_churn option_int_churn result_int_churn result_heap_churn host_result_unit_churn result_try_churn pair_int_churn iv_mul_sr licm_nested_chains tail_sibling)
 declare -A EXPECTED=(
     [mandelbrot]=625885
     [tak]=7
@@ -39,6 +39,7 @@ declare -A EXPECTED=(
     [pair_int_churn]=200000000
     [iv_mul_sr]=31499989500000
     [licm_nested_chains]=64012000000
+    [tail_sibling]=502500000
 )
 
 if ! command -v poop >/dev/null 2>&1; then

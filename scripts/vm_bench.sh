@@ -43,6 +43,7 @@ declare -A EXPECTED=(
     ["examples/perf/pair_int_churn.hy"]="200000000"
     ["examples/perf/iv_mul_sr.hy"]="31499989500000"
     ["examples/perf/licm_nested_chains.hy"]="64012000000"
+    ["examples/perf/tail_sibling.hy"]="502500000"
 )
 
 # CPU-focused subset for poop / quick timing (no FFI, no modules).
@@ -64,6 +65,7 @@ CPU_BENCH=(
     examples/perf/pair_int_churn.hy
     examples/perf/iv_mul_sr.hy
     examples/perf/licm_nested_chains.hy
+    examples/perf/tail_sibling.hy
 )
 
 CROSS_LANG=(
