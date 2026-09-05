@@ -34,5 +34,9 @@ test("sibling tail even/odd") {
 
 test("two-word sibling tail") {
     let r = bounce_a(Option::None);
-    assert(r == Option::Some(1))?;
+    let ok = match r {
+        Option::Some(v) => v == 1,
+        Option::None => false,
+    };
+    assert(ok)?;
 }
