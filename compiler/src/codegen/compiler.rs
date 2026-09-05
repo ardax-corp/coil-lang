@@ -8349,6 +8349,24 @@ impl Compiler {
         let success = bb.fresh_label(self.bytecode.il_mut());
         // Result/Option: branch on the tag word. Reconstruct the known
         // miss tag so the error path still returns `[payload, tag]`.
+        if Self::can_flatten_try_tag(success_tag, inner_kind)
+            && self.compiling_two_word_enum.as_deref() == Some(inner_kind)
+        {
+            let fail_tag = 1 - success_tag as i32;
+            let to_fail = if success_tag == 0 {
+                BbJumpKind::JumpIfTrue
+            } else {
+                BbJumpKind::JumpIfFalse
+            };
+            let fail = self.shared_try_fail_label(fail_tag);
+            bb.emit_jump_to_hinted(
+                fail,
+                to_fail,
+                FuseHint::nofuse_value_under_jmp(),
+                self.bytecode.il_mut(),
+            );
+            return;
+        }
         if Self::can_flatten_try_tag(success_tag, inner_kind) {
             let fail_tag = 1 - success_tag as i32;
             let to_success = if success_tag == 0 {
@@ -8427,6 +8445,27 @@ impl Compiler {
             }
             _ => None,
         }
+    }
+
+    fn shared_try_fail_label(&mut self, fail_tag: i32) -> BbLabel {
+        if let Some((lab, tag)) = self.compiling_try_fail
+            && tag == fail_tag
+        {
+            return lab;
+        }
+        let lab = BlockBuilder::new().fresh_label(self.bytecode.il_mut());
+        self.compiling_try_fail = Some((lab, fail_tag));
+        lab
+    }
+
+    fn emit_shared_try_fail_epilogue(&mut self) {
+        let Some((lab, fail_tag)) = self.compiling_try_fail.take() else {
+            return;
+        };
+        let mut bb = BlockBuilder::new();
+        bb.bind_label(lab, self.bytecode.il_mut());
+        self.bytecode.push_const(fail_tag);
+        self.push_return_two_word();
     }
 
     fn emit_try_pair_failure(&mut self, inner_kind: &str) {
@@ -8641,6 +8680,7 @@ impl Compiler {
         self.compiling_result_mode = self.checker.fn_is_result_mode(name);
         self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
         let prev_two_word_enum = self.compiling_two_word_enum.clone();
+        let prev_try_fail = self.compiling_try_fail.take();
         self.compiling_two_word_enum = if *is_coro {
             self.pin_two_word_return_kind(&qualified, None);
             None
@@ -8669,11 +8709,13 @@ impl Compiler {
         if !self.region_ends_with_return(body_op_start) {
             self.emit_fallthrough_return(name, body.0);
         }
+        self.emit_shared_try_fail_epilogue();
 
         self.fn_defers = prev_fn_defers;
         self.compiling_result_mode = prev_result_mode;
         self.compiling_result_ok_is_result = prev_result_ok_is_result;
         self.compiling_two_word_enum = prev_two_word_enum;
+        self.compiling_try_fail = prev_try_fail;
         self.context.variables = prev_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.context.unboxed_class_locals = prev_unboxed_class;
@@ -12096,6 +12138,7 @@ impl Compiler {
                 self.compiling_result_mode = self.checker.fn_is_result_mode(name);
                 self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(name);
                 let prev_two_word_enum = self.compiling_two_word_enum.clone();
+                let prev_try_fail = self.compiling_try_fail.take();
                 self.compiling_two_word_enum = if *is_coro {
                     self.pin_two_word_return_kind(&table_key, None);
                     None
@@ -12152,11 +12195,13 @@ impl Compiler {
                 if !self.region_ends_with_return(body_op_start) {
                     self.emit_fallthrough_return(name, body.0);
                 }
+                self.emit_shared_try_fail_epilogue();
 
                 self.fn_defers = prev_fn_defers;
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
                 self.compiling_two_word_enum = prev_two_word_enum;
+                self.compiling_try_fail = prev_try_fail;
                 self.pop_const_env();
                 if !self.compiling_method {
                     self.checker.set_current_function(prev_checker_fn);
@@ -14147,6 +14192,7 @@ impl Compiler {
                 self.compiling_result_ok_is_result =
                     self.checker.fn_result_ok_is_result(&fn_name);
                 let prev_two_word_enum = self.compiling_two_word_enum.clone();
+                let prev_try_fail = self.compiling_try_fail.take();
                 self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
 
                 let body_op_start = self.bytecode.ops().len();
@@ -14159,6 +14205,7 @@ impl Compiler {
                     // Test cases are typed as unit / Result<(), string> — zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
+                self.emit_shared_try_fail_epilogue();
 
                 let body_end = self.bytecode.len();
                 // Flatten remaps per IlFunc; unrecorded tests share the epilogue
@@ -14176,6 +14223,7 @@ impl Compiler {
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
                 self.compiling_two_word_enum = prev_two_word_enum;
+                self.compiling_try_fail = prev_try_fail;
                 self.field_key_slots = prev_field_keys;
                 self.context.variables = prev_fn_vars;
                 self.polyfn_vars = prev_fn_polyfn_vars;

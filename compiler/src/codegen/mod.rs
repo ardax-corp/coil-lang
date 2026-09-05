@@ -894,6 +894,9 @@ pub struct Compiler {
     /// `None` while boxed / niche / unbounded `T`. See
     /// [`Compiler::two_word_return_kind`].
     compiling_two_word_enum: Option<String>,
+    /// Shared two-slot `?` miss label + reconstructed fail tag, bound after
+    /// the function body so invert/convoy cannot swallow later call args.
+    compiling_try_fail: Option<(BbLabel, i32)>,
 
     /// Harness metadata: `(description, bytecode offset)` for each
     /// top-level `test("…") { … }` case, in source order.
@@ -1040,6 +1043,7 @@ impl Default for Compiler {
             force_niche_result: false,
             unbox_enum_context: 0,
             compiling_two_word_enum: None,
+            compiling_try_fail: None,
             pair_return_kinds: std::cell::RefCell::new(HashMap::new()),
             fn_value_escaped_program: None,
             test_cases: Vec::new(),
