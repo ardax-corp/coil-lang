@@ -128,6 +128,21 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
         }
 
         let is_self = fn_meta.get(name).map(|m| m.self_recursive).unwrap_or(false);
+        if tail_only.contains(name) {
+            let frames = attr_depth.unwrap_or(1);
+            max_frames_any = max_frames_any.max(frames);
+            report.bounds.push(FnStackBound {
+                fn_name: name.clone(),
+                max_frames: frames,
+                source: if attr_depth.is_some() {
+                    BoundSource::Attribute
+                } else {
+                    BoundSource::TailOnly
+                },
+            });
+            continue;
+        }
+
         if !is_self {
             match attr_depth {
                 Some(d) => {
@@ -147,21 +162,6 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
                     span.clone(),
                 )),
             }
-            continue;
-        }
-
-        if tail_only.contains(name) {
-            let frames = attr_depth.unwrap_or(1);
-            max_frames_any = max_frames_any.max(frames);
-            report.bounds.push(FnStackBound {
-                fn_name: name.clone(),
-                max_frames: frames,
-                source: if attr_depth.is_some() {
-                    BoundSource::Attribute
-                } else {
-                    BoundSource::TailOnly
-                },
-            });
             continue;
         }
 
@@ -390,7 +390,7 @@ fn collect_fn_meta<'a>(
             if let Some(shape) = detect_measure_shape(name, args, body) {
                 shapes.insert((*name).to_string(), shape);
             }
-            if is_tail_only_recursive(body, name) {
+            if is_tail_only_recursive(body, name, recursive) {
                 tail_only.insert((*name).to_string());
             }
             collect_fn_meta(body, recursive, out, shapes, tail_only);
@@ -655,55 +655,80 @@ fn walk_base_bound(ast: &Output<'_>, param: &str, base: &mut Option<i64>) {
     }
 }
 
-fn is_tail_only_recursive(body: &Output<'_>, name: &str) -> bool {
-    let mut self_calls = 0;
+fn is_tail_only_recursive(body: &Output<'_>, name: &str, recursive: &HashSet<String>) -> bool {
+    let mut rec_calls = 0;
     let mut non_tail = false;
-    walk_tail_rec(body, name, true, &mut self_calls, &mut non_tail);
-    self_calls > 0 && !non_tail
+    walk_tail_rec(body, name, recursive, true, &mut rec_calls, &mut non_tail);
+    rec_calls > 0 && !non_tail
+}
+
+fn call_target_is_rec(callee: &Output<'_>, name: &str, recursive: &HashSet<String>) -> bool {
+    match peel(callee).1.as_ref() {
+        Expression::Identifier(n) => *n == name || recursive.contains(*n),
+        Expression::QualifiedAccess { member, .. } => *member == name || recursive.contains(*member),
+        _ => false,
+    }
 }
 
 fn walk_tail_rec(
     ast: &Output<'_>,
     name: &str,
+    recursive: &HashSet<String>,
     tail_ctx: bool,
-    self_calls: &mut i32,
+    rec_calls: &mut i32,
     non_tail: &mut bool,
 ) {
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
             let n = items.len();
             for (i, item) in items.iter().enumerate() {
-                walk_tail_rec(item, name, tail_ctx && i + 1 == n, self_calls, non_tail);
+                walk_tail_rec(
+                    item,
+                    name,
+                    recursive,
+                    tail_ctx && i + 1 == n,
+                    rec_calls,
+                    non_tail,
+                );
             }
         }
         Expression::If(branches) => {
             for b in branches {
-                walk_tail_rec(b, name, tail_ctx, self_calls, non_tail);
+                walk_tail_rec(b, name, recursive, tail_ctx, rec_calls, non_tail);
             }
         }
-        Expression::Branch(_, body) => walk_tail_rec(body, name, tail_ctx, self_calls, non_tail),
+        Expression::Branch(_, body) => {
+            walk_tail_rec(body, name, recursive, tail_ctx, rec_calls, non_tail)
+        }
         Expression::Return(inner) | Expression::ImplicitReturn(inner) => {
-            walk_tail_rec(inner, name, true, self_calls, non_tail);
+            walk_tail_rec(inner, name, recursive, true, rec_calls, non_tail);
         }
         Expression::Statement(inner)
         | Expression::Expr(inner)
         | Expression::ExprStatement(inner)
-        | Expression::Group(inner) => walk_tail_rec(inner, name, tail_ctx, self_calls, non_tail),
+        | Expression::Group(inner) => {
+            walk_tail_rec(inner, name, recursive, tail_ctx, rec_calls, non_tail)
+        }
+        Expression::Match { scrutinee, arms } => {
+            walk_tail_rec(scrutinee, name, recursive, false, rec_calls, non_tail);
+            for arm in arms {
+                walk_tail_rec(&arm.body, name, recursive, tail_ctx, rec_calls, non_tail);
+            }
+        }
         Expression::Call {
             name: callee,
             args,
         } => {
-            let is_self =
-                matches!(peel(callee).1.as_ref(), Expression::Identifier(n) if *n == name);
-            if is_self {
-                *self_calls += 1;
+            let is_rec = call_target_is_rec(callee, name, recursive);
+            if is_rec {
+                *rec_calls += 1;
                 if !tail_ctx {
                     *non_tail = true;
                 }
             }
             if let Some(args) = args {
                 for a in args {
-                    walk_tail_rec(a, name, false, self_calls, non_tail);
+                    walk_tail_rec(a, name, recursive, false, rec_calls, non_tail);
                 }
             }
         }
@@ -716,8 +741,8 @@ fn walk_tail_rec(
         | Expression::BitAnd(a, b)
         | Expression::BitOr(a, b)
         | Expression::Xor(a, b) => {
-            walk_tail_rec(a, name, false, self_calls, non_tail);
-            walk_tail_rec(b, name, false, self_calls, non_tail);
+            walk_tail_rec(a, name, recursive, false, rec_calls, non_tail);
+            walk_tail_rec(b, name, recursive, false, rec_calls, non_tail);
         }
         _ => {}
     }
@@ -1965,6 +1990,62 @@ fn main() {
     }
 
     #[test]
+    fn mutual_tail_sibling_needs_no_attr() {
+        let ast = parse(
+            r#"
+fn even(int n) -> int {
+    if n == 0 { return 1; }
+    return odd(n - 1);
+}
+fn odd(int n) -> int {
+    if n == 0 { return 0; }
+    return even(n - 1);
+}
+fn main() {
+    let x = even(10);
+    return;
+}
+"#,
+        );
+        let report = analyze_stack_bounds(&ast);
+        assert!(report.messages.is_empty(), "{:?}", report.messages);
+        for name in ["even", "odd"] {
+            let b = report.bounds.iter().find(|b| b.fn_name == name).unwrap();
+            assert_eq!(b.source, BoundSource::TailOnly, "{name}");
+            assert_eq!(b.max_frames, 1, "{name}");
+        }
+    }
+
+    #[test]
+    fn mutual_non_tail_sibling_still_needs_attr() {
+        let ast = parse(
+            r#"
+fn even(int n) -> int {
+    if n == 0 { return 1; }
+    return odd(n - 1) + 0;
+}
+fn odd(int n) -> int {
+    if n == 0 { return 0; }
+    return even(n - 1);
+}
+fn main() {
+    let x = even(10);
+    return;
+}
+"#,
+        );
+        let report = analyze_stack_bounds(&ast);
+        assert!(
+            report
+                .messages
+                .iter()
+                .any(|m| m.message().contains("mutual recursion")),
+            "{:?}",
+            report.messages
+        );
+    }
+
+    #[test]
     fn fib_bench_sizes_operand_stack_above_default() {
         let ast = parse(
             r#"
@@ -2046,7 +2127,7 @@ fn main() {
             r#"
 fn ping(int n) -> int {
     if n <= 0 { return 0; }
-    return pong(n - 1);
+    return pong(n - 1) + 0;
 }
 fn pong(int n) -> int {
     if n <= 0 { return 1; }
