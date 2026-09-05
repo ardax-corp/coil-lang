@@ -25,7 +25,9 @@ walks the AST:
      …) do not matter once self-calls are collected. `min_step` is the minimum
      positive `k` across those calls.
    - Depth ≈ `((max_entry - base) / min_step) + 1`.
-   - **Tail-only** self-calls (`return f(...)`) → depth `1` (matches `TailCall`).
+   - **Tail-only** self- or sibling-cycle calls (`return f(...)` / `return g(...)`
+     among an SCC) → depth `1` (matches `TailCall`). Non-tail mutual recursion
+     still needs `#[max_depth(N)]`.
 3. Entry measure values may be:
    - integer literals (`fib(32)`);
    - intra-procedural const bindings via `const_fold::eval_expr`
