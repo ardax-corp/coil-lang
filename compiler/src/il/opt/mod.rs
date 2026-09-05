@@ -42,6 +42,8 @@ pub struct OptimizeOptions {
     pub licm: bool,
     /// Counted-loop ArrayLen hoist + Index/StoreIndex bounds proofs.
     pub loop_bounds: bool,
+    /// Lite IV strength reduction (`i*c` / `cast(i)` → add recurrence).
+    pub strength_reduce: bool,
     /// Sink identical `LOAD`/`CONST` producers into a join `RETURN` and fuse.
     pub return_convoy: bool,
     /// Clone plain `RETURN` onto jump-only preds of mixed return joins.
