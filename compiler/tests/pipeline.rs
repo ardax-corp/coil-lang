@@ -3760,6 +3760,18 @@ fn example_perf_numeric_prints_expected_sum() {
 }
 
 #[test]
+fn example_perf_iv_mul_sr_prints_checksum() {
+    let output = run_example("examples/perf/iv_mul_sr.hy");
+    assert_eq!(output, "31499989500000");
+}
+
+#[test]
+fn example_perf_licm_nested_chains_prints_checksum() {
+    let output = run_example("examples/perf/licm_nested_chains.hy");
+    assert_eq!(output, "64012000000");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");
