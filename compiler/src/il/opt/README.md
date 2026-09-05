@@ -225,7 +225,8 @@ float identities / pool fold.
 - **Refusals:** Non-identity match arms; `JumpIfMatch` (boxed) diamonds;
   unknown tags; `?` err paths that are not a two-slot `RETURN`. No new opcodes.
 - **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
-  `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`.
+  `result_try_dup_eq_flattens_to_tag_jmpf`, `const_zero_jmpf_becomes_goto`,
+  `xor1_twice_is_identity`.
 
 ## `cast_spill`
 
