@@ -27,7 +27,9 @@ pub fn try_specialize_body(
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
-    let func = try_lower_numeric(ops, &hints).ok()?;
+    let mut func = try_lower_numeric(ops, &hints).ok()?;
+    // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
+    crate::mir::cse(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,
