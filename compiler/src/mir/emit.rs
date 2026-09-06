@@ -7,6 +7,7 @@ use crate::il::{IlJumpKind, IlOp, Label};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
+    ValueId,
 };
 use super::lower::LowerError;
 use super::ty::MirTy;
@@ -18,6 +19,7 @@ pub fn emit_dense(
     pool: &mut Vec<u64>,
 ) -> Result<Vec<IlOp>, LowerError> {
     let (regs, scratch) = assign_regs(func)?;
+    let regs = coalesce_safe_latch_phis(func, regs);
     let max_reg = regs.iter().copied().max().unwrap_or(0).max(scratch);
     let loc = DebugLoc::unknown();
     let mut next_label = max_label_hint(entry_label);
@@ -47,6 +49,11 @@ pub fn emit_dense(
         }
         for inst in &block.insts {
             if inst.is_phi() {
+                continue;
+            }
+            if term_cmp_dest(block).is_some_and(|d| {
+                matches!(inst, MirInst::Cmp { dest, .. } if *dest == d)
+            }) {
                 continue;
             }
             emit_inst(&mut out, inst, func, &regs, pool, loc)?;
@@ -90,6 +97,157 @@ fn assign_regs(func: &MirFunc) -> Result<(Vec<u8>, u8), LowerError> {
         next += 1;
     }
     Ok((reg, next as u8))
+}
+
+fn next_emitted(func: &MirFunc, from: BlockId) -> Option<BlockId> {
+    if from == func.entry {
+        return func.blocks.iter().find(|b| b.id != func.entry).map(|b| b.id);
+    }
+    func.blocks
+        .iter()
+        .skip_while(|b| b.id != from)
+        .skip(1)
+        .find(|b| b.id != func.entry)
+        .map(|b| b.id)
+}
+
+fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool {
+    next_emitted(func, from) == Some(to)
+}
+
+/// Alias a header φ dest with its latch incoming when the dest is dead after
+/// that incoming is defined (so `i = i + 1` is a dest-overwrite, not a move).
+fn coalesce_safe_latch_phis(func: &MirFunc, mut regs: Vec<u8>) -> Vec<u8> {
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let MirInst::Phi { dest, args, .. } = inst else {
+                continue;
+            };
+            let Some((pred, latch_val)) = args
+                .iter()
+                .find(|(pred, _)| pred.index() > block.id.index())
+            else {
+                continue;
+            };
+            if !latch_overwrite_ok(func, *pred, *dest, *latch_val) {
+                continue;
+            }
+            regs[dest.index()] = regs[latch_val.index()];
+        }
+    }
+    regs
+}
+
+fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: ValueId) -> bool {
+    let block = func.block(latch);
+    let mut seen_def = false;
+    for inst in &block.insts {
+        if inst.dest() == latch_val {
+            seen_def = true;
+            continue;
+        }
+        if seen_def && inst.operands().contains(&dest) {
+            return false;
+        }
+    }
+    match &block.term {
+        Some(Terminator::Br { cond, .. }) if seen_def && *cond == dest => false,
+        _ => true,
+    }
+}
+
+fn term_cmp_dest(block: &super::func::MirBlock) -> Option<ValueId> {
+    let Terminator::Br { cond, .. } = block.term.as_ref()? else {
+        return None;
+    };
+    block.insts.iter().find_map(|inst| match inst {
+        MirInst::Cmp { dest, .. } if dest == cond => Some(*dest),
+        _ => None,
+    })
+}
+
+fn emit_br_cond(
+    out: &mut Vec<IlOp>,
+    block: &super::func::MirBlock,
+    regs: &[u8],
+    cond: ValueId,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if let Some(MirInst::Cmp {
+        op, ty, lhs, rhs, ..
+    }) = block.insts.iter().find(|inst| {
+        matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
+    }) {
+        out.push(IlOp::Load {
+            slot: u32::from(regs[lhs.index()]),
+            loc,
+        });
+        out.push(IlOp::Load {
+            slot: u32::from(regs[rhs.index()]),
+            loc,
+        });
+        out.push(IlOp::Bin {
+            op: stack_cmp_op(*op, *ty)?,
+            loc,
+        });
+        return Ok(());
+    }
+    out.push(IlOp::Load {
+        slot: u32::from(regs[cond.index()]),
+        loc,
+    });
+    Ok(())
+}
+
+fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
+    Ok(match (op, ty.is_float()) {
+        (MirCmpOp::Lt, false) => Instruction::LE,
+        (MirCmpOp::Le, false) => Instruction::LEQ,
+        (MirCmpOp::Gt, false) => Instruction::GT,
+        (MirCmpOp::Ge, false) => Instruction::GEQ,
+        (MirCmpOp::Eq, false) => Instruction::EQ,
+        (MirCmpOp::Ne, false) => Instruction::NEQ,
+        (MirCmpOp::Lt, true) => Instruction::LEF,
+        (MirCmpOp::Le, true) => Instruction::LEQF,
+        (MirCmpOp::Gt, true) => Instruction::GTF,
+        (MirCmpOp::Ge, true) => Instruction::GEQF,
+        (MirCmpOp::Eq, true) => Instruction::EQ,
+        (MirCmpOp::Ne, true) => Instruction::NEQ,
+    })
+}
+
+fn emit_cond_jumps(
+    out: &mut Vec<IlOp>,
+    func: &MirFunc,
+    from: BlockId,
+    taken: BlockId,
+    not_taken: BlockId,
+    block_lab: &[Label],
+    loc: DebugLoc,
+) {
+    if is_fallthrough(func, from, not_taken) {
+        out.push(IlOp::Jump {
+            kind: IlJumpKind::JumpIfTrue,
+            target: block_lab[taken.index()],
+            loc,
+            hint: Default::default(),
+        });
+        return;
+    }
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::JumpIfFalse,
+        target: block_lab[not_taken.index()],
+        loc,
+        hint: Default::default(),
+    });
+    if !is_fallthrough(func, from, taken) {
+        out.push(IlOp::Jump {
+            kind: IlJumpKind::Unconditional,
+            target: block_lab[taken.index()],
+            loc,
+            hint: Default::default(),
+        });
+    }
 }
 
 fn emit_inst(
@@ -203,51 +361,39 @@ fn emit_term(
             taken,
             not_taken,
         } => {
-            let cond_slot = regs[cond.index()];
             let t_moves = phi_moves(func, block.id, *taken, regs, scratch);
             let f_moves = phi_moves(func, block.id, *not_taken, regs, scratch);
+            emit_br_cond(out, block, regs, *cond, loc)?;
             if t_moves.is_empty() && f_moves.is_empty() {
-                out.push(IlOp::Load {
-                    slot: u32::from(cond_slot),
+                emit_cond_jumps(
+                    out,
+                    func,
+                    block.id,
+                    *taken,
+                    *not_taken,
+                    block_lab,
                     loc,
-                });
-                out.push(IlOp::Jump {
-                    kind: IlJumpKind::JumpIfFalse,
-                    target: block_lab[not_taken.index()],
-                    loc,
-                    hint: Default::default(),
-                });
-                out.push(IlOp::Jump {
-                    kind: IlJumpKind::Unconditional,
-                    target: block_lab[taken.index()],
-                    loc,
-                    hint: Default::default(),
-                });
+                );
             } else {
-                let t_lab = Label(*next_label);
-                *next_label += 1;
                 let f_lab = Label(*next_label);
                 *next_label += 1;
-                out.push(IlOp::Load {
-                    slot: u32::from(cond_slot),
-                    loc,
-                });
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
                     target: f_lab,
                     loc,
                     hint: Default::default(),
                 });
-                out.push(IlOp::Label(t_lab));
                 for (d, s) in t_moves {
                     out.push(move_op(d, s));
                 }
-                out.push(IlOp::Jump {
-                    kind: IlJumpKind::Unconditional,
-                    target: block_lab[taken.index()],
-                    loc,
-                    hint: Default::default(),
-                });
+                if !is_fallthrough(func, block.id, *taken) {
+                    out.push(IlOp::Jump {
+                        kind: IlJumpKind::Unconditional,
+                        target: block_lab[taken.index()],
+                        loc,
+                        hint: Default::default(),
+                    });
+                }
                 out.push(IlOp::Label(f_lab));
                 for (d, s) in f_moves {
                     out.push(move_op(d, s));

@@ -2,7 +2,7 @@
 
 use common::{Value, dense};
 
-#[inline]
+#[inline(always)]
 pub fn eval_bin(kind: u8, a: Value, b: Value) -> Value {
     match kind {
         dense::IADD64 => Value::from(a.as_int().wrapping_add(b.as_int())),
@@ -46,7 +46,7 @@ fn f32_bin(a: Value, b: Value, f: fn(f32, f32) -> f32) -> Value {
     Value::from(u64::from(f(x, y).to_bits()))
 }
 
-#[inline]
+#[inline(always)]
 pub fn eval_cmp(kind: u8, a: Value, b: Value) -> Value {
     let (lane, pred) = dense::unpack_cmp(kind);
     let flag = match lane {
