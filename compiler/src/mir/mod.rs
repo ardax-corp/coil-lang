@@ -5,6 +5,7 @@
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod builder;
+mod cse;
 mod emit;
 mod func;
 mod infer;
@@ -15,6 +16,7 @@ mod text;
 mod ty;
 
 pub use builder::{MirBuilder, MirError};
+pub use cse::cse;
 pub use emit::emit_dense;
 pub use func::{MirBlock, MirFunc};
 pub use inst::{
@@ -191,6 +193,45 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_cse_collapses_repeated_divf() {
+        let src = r#"
+fn hot(float scale, int n) -> int {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = i as float;
+        let a = xf / scale;
+        let b = xf / scale;
+        s = s + a * b;
+        i = i + 1;
+    }
+    return s as int;
+}
+fn main() {
+    let _ = hot(3.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile cse kernel");
+        let fdivs = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FDIV64
+            })
+            .count();
+        assert_eq!(fdivs, 1, "MIR CSE must keep a single DenseBin FDIV64");
+        assert!(
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FMUL64
+            }),
+            "dense mul of the CSE'd quotient"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
     fn pipeline_leaves_int_loop_on_stack_il() {
         let src = r#"
 fn sum(int n) -> int {
