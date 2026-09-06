@@ -140,7 +140,7 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile dense kernel");
+        let (bc, constants) = p.compile_src(src).expect("compile dense kernel");
         assert!(
             bc.iter()
                 .any(|b| *b.bytecode() == Instruction::DenseBin),
@@ -157,6 +157,8 @@ fn main() {
             )),
             "expected fused slot compare-jump at dense kernel edges"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]
