@@ -232,15 +232,6 @@ impl IlModule {
             .saturating_add(1);
 
         for body in &mut self.funcs {
-            if let Some(dense) = crate::mir::try_specialize_body(
-                &body.ops,
-                &body.meta.name,
-                body.meta.entry_sp,
-                pool,
-            ) {
-                body.ops = dense;
-                continue;
-            }
             opt::optimize_at_with_labels(
                 &mut body.ops,
                 &per,
@@ -257,6 +248,15 @@ impl IlModule {
             }
             if run_ssa_gvn {
                 super::gvn::ssa_gvn(&mut body.ops);
+            }
+            // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
+            if let Some(dense) = crate::mir::try_specialize_body(
+                &body.ops,
+                &body.meta.name,
+                body.meta.entry_sp,
+                pool,
+            ) {
+                body.ops = dense;
             }
         }
 
