@@ -97,5 +97,5 @@ test("m1 math IEEE nan and inf edges") {
     assert(cosh(1000.0) > 1000000.0)?;
     assert(approx(tanh(1000.0), 1.0, epsilon()))?;
     assert(approx(tanh(0.0 - 1000.0), 0.0 - 1.0, epsilon()))?;
-    assert(approx(atan(1000000000000.0), 3.141592653589793 / 2.0, 0.000001))?;
+    assert(approx(atan(1000000000000.0), 3.141592653589793 / 2.0, epsilon()))?;
 }

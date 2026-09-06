@@ -9,7 +9,9 @@ test("index reuse matches first load") {
 }
 
 test("index store kills reused slot") {
-    let a = [1, 2, 3];
+    // Heap Vec: StoreIndex is the CSE memory barrier. Stack-array
+    // stores with a variable index are a separate local-slot path.
+    let a = Vec::from([1, 2, 3]);
     let i = 1;
     let x = a[i];
     a[i] = x + 5;
