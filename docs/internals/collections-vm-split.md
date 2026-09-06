@@ -70,3 +70,6 @@ t.insert(2, 20);
 
 Existing `collections::{sort, reverse, collect_ints, …}` stays in
 [coil-stdlib](https://github.com/ardax-corp/coil-stdlib) (`src/collections.hy`).
+For `VecDeque`, `BitSet`, `windows` / `partition` / `sort_by`, see that
+package’s [modules.md](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)
+— do not duplicate the API list here.

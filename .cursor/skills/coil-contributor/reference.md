@@ -27,7 +27,7 @@
 - `BlockBuilder`: thin wrapper over `IlBuilder` labels; no absolute PC patching in emitters.
 - **Method-based APIs** — prefer inherent/`impl` methods over free functions for type-tied ops (stdlib, new language surface). Free generic fns returning enums are codegen-fragile; see `docs/internals/limitations.md`.
 - `ConstEnv`: scalar const folding; constant branch/loop elimination; loop unroll ≤8.
-- Tiny direct-call inlining; one-level self-`CALL` peel; `TailCall` for eligible recursion.
+- Tiny direct-call inlining; one-level self-`CALL` peel; `TailCall` for eligible self- and sibling-cycle recursion ([#316](https://github.com/ardax-corp/coil-lang/pull/316)). Two-slot `?` flatten is codegen (`emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)), not InstCombine.
 - Match: threaded layout, `JumpIfMatch`, nested records use `UnpackAt` (slot-based).
 - Enum fields: `LoadField` (index); typed class fields: `LoadField` / `SetField` with slot operand; dict fields: `GetField`/`SetField` (interned names).
 - **Return layout:** `typechecking::return_layout::two_word_return_enum` classifies two-slot returns on *direct* `CALL`/`RETURN` (`Option<int>` / immediate-Ok `Result` / arity-≤1 user payload enums as `[payload, tag]`; arity-2 immediate products as `[a, b]`). `CALL` bit 31 / `RETURN` operand `2`. Niches stay one word. See [limitations.md](docs/internals/limitations.md) COI-92.
@@ -73,7 +73,9 @@ Prefer over new opcodes / IL opts:
 - Hot-loop tuning in VM
 - `promise!` for release assertions
 
-Soft baseline: `./scripts/poop_baseline.sh` (compile once, then `coil run` archives under `examples/perf/`). See AGENTS.md user preferences.
+Soft baseline: `./scripts/poop_baseline.sh` (compile once, then `coil run` archives under `examples/perf/`). Hit-bench prove rule: [optimization-roadmap.md](../../../docs/internals/optimization-roadmap.md#hit-bench-prove-rule). PGO was removed ([#301](https://github.com/ardax-corp/coil-lang/pull/301)). See AGENTS.md user preferences.
+
+Current archive: **major 4 / minor 5** (`common/src/archive.rs`) — minor 5 is M1 math HostInvoke **125–135**.
 
 | Tree | When to update |
 |------|----------------|
