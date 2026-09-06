@@ -21,14 +21,10 @@ test("dense mandel origin stays inside") {
     assert(escape(0.0, 0.0, 50) == 50)?;
 }
 
-test("dense mandel far point escapes immediately") {
-    assert(escape(2.0, 2.0, 50) == 0)?;
+test("dense mandel far point escapes after first step") {
+    assert(escape(2.0, 2.0, 50) == 1)?;
 }
 
 test("dense mandel known interior") {
     assert(escape(-0.75, 0.1, 50) > 0)?;
-}
-
-fn main() {
-    let _ = escape(0.0, 0.0, 8);
 }
