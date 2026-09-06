@@ -1,0 +1,540 @@
+//! Braun-style SSA builder for the numeric subset.
+//!
+//! Locals are IL slots. Sealing a block completes incomplete φs. This is
+//! construction only — fuse-IL stays the production lowering; dense exec is P1.
+
+use std::collections::HashMap;
+
+use super::func::{MirBlock, MirFunc};
+use super::inst::{
+    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
+    ValueId,
+};
+use super::ty::MirTy;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MirError {
+    Msg(String),
+}
+
+impl std::fmt::Display for MirError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Msg(s) => f.write_str(s),
+        }
+    }
+}
+
+impl std::error::Error for MirError {}
+
+impl MirError {
+    fn msg(s: impl Into<String>) -> Self {
+        Self::Msg(s.into())
+    }
+}
+
+/// Incremental SSA constructor.
+pub struct MirBuilder {
+    func: MirFunc,
+    current: Option<BlockId>,
+    current_def: Vec<HashMap<LocalId, ValueId>>,
+    sealed: Vec<bool>,
+    preds: Vec<Vec<BlockId>>,
+    incomplete_phis: Vec<Vec<(LocalId, ValueId)>>,
+    subst: HashMap<ValueId, ValueId>,
+    finished: bool,
+}
+
+impl MirBuilder {
+    pub fn new(name: impl Into<String>) -> Self {
+        Self {
+            func: MirFunc::new(name),
+            current: Some(BlockId(0)),
+            current_def: vec![HashMap::new()],
+            sealed: vec![false],
+            preds: vec![Vec::new()],
+            incomplete_phis: vec![Vec::new()],
+            subst: HashMap::new(),
+            finished: false,
+        }
+    }
+
+    pub fn func(&self) -> &MirFunc {
+        &self.func
+    }
+
+    pub fn entry(&self) -> BlockId {
+        self.func.entry
+    }
+
+    #[allow(dead_code)]
+    pub fn current_block(&self) -> Option<BlockId> {
+        self.current
+    }
+
+    pub fn set_ret_ty(&mut self, ty: MirTy) {
+        self.func.ret_ty = Some(ty);
+    }
+
+    pub fn add_param(&mut self, ty: MirTy) -> Result<ValueId, MirError> {
+        if !ty.is_specialized() {
+            return Err(MirError::msg("param must be a specialized numeric type"));
+        }
+        let v = self.alloc(ty);
+        self.func.params.push(v);
+        Ok(v)
+    }
+
+    /// Bind a source local to an SSA value in the current block.
+    pub fn def_local(&mut self, local: LocalId, val: ValueId) -> Result<(), MirError> {
+        let b = self.cur()?;
+        self.write_variable(local, b, val);
+        Ok(())
+    }
+
+    /// Read a source local, inserting φs at sealed / incomplete joins.
+    pub fn use_local(&mut self, local: LocalId, ty: MirTy) -> Result<ValueId, MirError> {
+        let b = self.cur()?;
+        Ok(self.read_variable(local, ty, b))
+    }
+
+    pub fn create_block(&mut self) -> BlockId {
+        let id = BlockId(self.func.blocks.len() as u32);
+        self.func.blocks.push(MirBlock::new(id));
+        self.current_def.push(HashMap::new());
+        self.sealed.push(false);
+        self.preds.push(Vec::new());
+        self.incomplete_phis.push(Vec::new());
+        id
+    }
+
+    pub fn switch_to_block(&mut self, b: BlockId) {
+        self.current = Some(b);
+    }
+
+    pub fn seal_block(&mut self, b: BlockId) {
+        if self.sealed[b.index()] {
+            return;
+        }
+        self.sealed[b.index()] = true;
+        let pending = std::mem::take(&mut self.incomplete_phis[b.index()]);
+        for (local, phi) in pending {
+            self.add_phi_operands(local, phi, b);
+        }
+    }
+
+    pub fn seal_all(&mut self) {
+        let n = self.func.blocks.len();
+        for i in 0..n {
+            self.seal_block(BlockId(i as u32));
+        }
+    }
+
+    pub fn ins_const(&mut self, c: MirConst) -> Result<ValueId, MirError> {
+        let dest = self.alloc(c.ty());
+        self.push(MirInst::Const { dest, c })?;
+        Ok(dest)
+    }
+
+    pub fn ins_binop(
+        &mut self,
+        op: MirBinOp,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Result<ValueId, MirError> {
+        let lt = self.resolve_ty(lhs);
+        let rt = self.resolve_ty(rhs);
+        if lt != rt {
+            return Err(MirError::msg(format!("binop operand types {lt} vs {rt}")));
+        }
+        if !lt.is_specialized() || lt == MirTy::Bool {
+            return Err(MirError::msg(format!("binop on {lt}")));
+        }
+        if op.requires_int() && !lt.is_int() {
+            return Err(MirError::msg(format!("bitwise op on {lt}")));
+        }
+        let dest = self.alloc(lt);
+        self.push(MirInst::Bin {
+            dest,
+            op,
+            ty: lt,
+            lhs: self.resolve(lhs),
+            rhs: self.resolve(rhs),
+        })?;
+        Ok(dest)
+    }
+
+    pub fn ins_cmp(
+        &mut self,
+        op: MirCmpOp,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Result<ValueId, MirError> {
+        let lt = self.resolve_ty(lhs);
+        let rt = self.resolve_ty(rhs);
+        if lt != rt || !lt.is_specialized() || lt == MirTy::Bool {
+            return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Cmp {
+            dest,
+            op,
+            ty: lt,
+            lhs: self.resolve(lhs),
+            rhs: self.resolve(rhs),
+        })?;
+        Ok(dest)
+    }
+
+    pub fn ins_neg(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        let t = self.resolve_ty(src);
+        if !t.is_int() && !t.is_float() {
+            return Err(MirError::msg(format!("neg on {t}")));
+        }
+        let dest = self.alloc(t);
+        self.push(MirInst::Unary {
+            dest,
+            op: MirUnaryOp::Neg,
+            src: self.resolve(src),
+        })?;
+        Ok(dest)
+    }
+
+    pub fn ins_not(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        if self.resolve_ty(src) != MirTy::Bool {
+            return Err(MirError::msg("bnot expects bool"));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Unary {
+            dest,
+            op: MirUnaryOp::Not,
+            src: self.resolve(src),
+        })?;
+        Ok(dest)
+    }
+
+    pub fn ins_cast(
+        &mut self,
+        kind: MirCastKind,
+        to: MirTy,
+        src: ValueId,
+    ) -> Result<ValueId, MirError> {
+        let from = self.resolve_ty(src);
+        let ok = match kind {
+            MirCastKind::IntToFloat => from.is_int() && to.is_float(),
+            MirCastKind::Sext => from == MirTy::I32 && to == MirTy::I64,
+        };
+        if !ok {
+            return Err(MirError::msg(format!("illegal cast {from} -> {to}")));
+        }
+        let dest = self.alloc(to);
+        self.push(MirInst::Cast {
+            dest,
+            kind,
+            to,
+            src: self.resolve(src),
+        })?;
+        Ok(dest)
+    }
+
+    pub fn jump(&mut self, dest: BlockId) -> Result<(), MirError> {
+        let src = self.cur()?;
+        self.add_edge(src, dest);
+        self.set_term(Terminator::Jump { dest })
+    }
+
+    pub fn branch(
+        &mut self,
+        cond: ValueId,
+        taken: BlockId,
+        not_taken: BlockId,
+    ) -> Result<(), MirError> {
+        if self.resolve_ty(cond) != MirTy::Bool {
+            return Err(MirError::msg("branch cond must be bool"));
+        }
+        let src = self.cur()?;
+        self.add_edge(src, taken);
+        self.add_edge(src, not_taken);
+        self.set_term(Terminator::Br {
+            cond: self.resolve(cond),
+            taken,
+            not_taken,
+        })
+    }
+
+    pub fn ret(&mut self, value: Option<ValueId>) -> Result<(), MirError> {
+        let value = value.map(|v| self.resolve(v));
+        if let Some(v) = value {
+            self.func.ret_ty = Some(self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(v)));
+        }
+        self.set_term(Terminator::Return { value })
+    }
+
+    #[allow(dead_code)]
+    pub fn unreachable(&mut self) -> Result<(), MirError> {
+        self.set_term(Terminator::Unreachable)
+    }
+
+    pub fn finish(mut self) -> Result<MirFunc, MirError> {
+        self.seal_all();
+        self.rewrite_subst();
+        self.finished = true;
+        self.func.verify().map_err(MirError::msg)?;
+        Ok(self.func)
+    }
+
+    fn cur(&self) -> Result<BlockId, MirError> {
+        self.current
+            .ok_or_else(|| MirError::msg("no current block"))
+    }
+
+    fn alloc(&mut self, ty: MirTy) -> ValueId {
+        let id = ValueId(self.func.types.len() as u32);
+        self.func.types.push(ty);
+        id
+    }
+
+    fn push(&mut self, inst: MirInst) -> Result<(), MirError> {
+        let b = self.cur()?;
+        let block = self.func.block_mut(b);
+        if block.term.is_some() {
+            return Err(MirError::msg(format!("{b} already terminated")));
+        }
+        if inst.is_phi() {
+            let i = block
+                .insts
+                .iter()
+                .position(|x| !x.is_phi())
+                .unwrap_or(block.insts.len());
+            block.insts.insert(i, inst);
+        } else {
+            block.insts.push(inst);
+        }
+        Ok(())
+    }
+
+    fn set_term(&mut self, term: Terminator) -> Result<(), MirError> {
+        let b = self.cur()?;
+        let block = self.func.block_mut(b);
+        if block.term.is_some() {
+            return Err(MirError::msg(format!("{b} already terminated")));
+        }
+        block.term = Some(term);
+        Ok(())
+    }
+
+    fn add_edge(&mut self, src: BlockId, dest: BlockId) {
+        let preds = &mut self.preds[dest.index()];
+        if !preds.contains(&src) {
+            preds.push(src);
+        }
+    }
+
+    fn write_variable(&mut self, local: LocalId, block: BlockId, val: ValueId) {
+        self.current_def[block.index()].insert(local, val);
+    }
+
+    fn read_variable(&mut self, local: LocalId, ty: MirTy, block: BlockId) -> ValueId {
+        if let Some(&v) = self.current_def[block.index()].get(&local) {
+            return self.resolve(v);
+        }
+        self.read_variable_recursive(local, ty, block)
+    }
+
+    fn read_variable_recursive(&mut self, local: LocalId, ty: MirTy, block: BlockId) -> ValueId {
+        if !self.sealed[block.index()] {
+            let phi = self.make_phi(block, ty);
+            self.incomplete_phis[block.index()].push((local, phi));
+            self.write_variable(local, block, phi);
+            return phi;
+        }
+        match self.preds[block.index()].len() {
+            0 => {
+                // Live-in: treat as a parameter of this fragment.
+                let v = self.alloc(ty);
+                if !self.func.params.contains(&v) {
+                    self.func.params.push(v);
+                }
+                self.write_variable(local, block, v);
+                v
+            }
+            1 => {
+                let pred = self.preds[block.index()][0];
+                let v = self.read_variable(local, ty, pred);
+                self.write_variable(local, block, v);
+                v
+            }
+            _ => {
+                let phi = self.make_phi(block, ty);
+                self.write_variable(local, block, phi);
+                self.add_phi_operands(local, phi, block);
+                self.resolve(phi)
+            }
+        }
+    }
+
+    fn make_phi(&mut self, block: BlockId, ty: MirTy) -> ValueId {
+        let dest = self.alloc(ty);
+        let inst = MirInst::Phi {
+            dest,
+            ty,
+            args: Vec::new(),
+        };
+        let b = self.func.block_mut(block);
+        let i = b
+            .insts
+            .iter()
+            .position(|x| !x.is_phi())
+            .unwrap_or(b.insts.len());
+        b.insts.insert(i, inst);
+        dest
+    }
+
+    fn add_phi_operands(&mut self, local: LocalId, phi: ValueId, block: BlockId) {
+        let ty = self.func.ty(phi);
+        let preds = self.preds[block.index()].clone();
+        let mut args = Vec::new();
+        for pred in preds {
+            let v = self.read_variable(local, ty, pred);
+            args.push((pred, self.resolve(v)));
+        }
+        args.sort_by_key(|(b, _)| *b);
+        if let Some(inst) = self
+            .func
+            .block_mut(block)
+            .insts
+            .iter_mut()
+            .find(|i| i.dest() == phi)
+        {
+            if let MirInst::Phi { args: slot, .. } = inst {
+                *slot = args;
+            }
+        }
+        self.try_remove_trivial_phi(phi, block);
+    }
+
+    fn try_remove_trivial_phi(&mut self, phi: ValueId, block: BlockId) {
+        let Some(MirInst::Phi { args, .. }) = self
+            .func
+            .block(block)
+            .insts
+            .iter()
+            .find(|i| i.dest() == phi)
+            .cloned()
+        else {
+            return;
+        };
+        let mut same: Option<ValueId> = None;
+        for (_, v) in args {
+            let v = self.resolve(v);
+            if v == phi {
+                continue;
+            }
+            if let Some(s) = same {
+                if s != v {
+                    return;
+                }
+            } else {
+                same = Some(v);
+            }
+        }
+        let Some(same) = same else {
+            return;
+        };
+        self.subst.insert(phi, same);
+        self.func.block_mut(block).insts.retain(|i| i.dest() != phi);
+    }
+
+    fn resolve(&self, mut v: ValueId) -> ValueId {
+        while let Some(&n) = self.subst.get(&v) {
+            if n == v {
+                break;
+            }
+            v = n;
+        }
+        v
+    }
+
+    fn resolve_ty(&self, v: ValueId) -> MirTy {
+        self.func.ty(self.resolve(v))
+    }
+
+    fn rewrite_subst(&mut self) {
+        if self.subst.is_empty() {
+            return;
+        }
+        let subst = self.subst.clone();
+        let map = |v: ValueId| {
+            let mut cur = v;
+            while let Some(&n) = subst.get(&cur) {
+                if n == cur {
+                    break;
+                }
+                cur = n;
+            }
+            cur
+        };
+        for block in &mut self.func.blocks {
+            for inst in &mut block.insts {
+                inst.rewrite_values(map);
+            }
+            if let Some(term) = &mut block.term {
+                term.rewrite_values(map);
+            }
+        }
+        for p in &mut self.func.params {
+            *p = map(*p);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builder_smoke_diamond() {
+        let mut b = MirBuilder::new("diamond");
+        let x = b.add_param(MirTy::I64).unwrap();
+        b.def_local(LocalId(0), x).unwrap();
+        let entry = b.entry();
+        let then_b = b.create_block();
+        let else_b = b.create_block();
+        let join = b.create_block();
+
+        b.switch_to_block(entry);
+        let zero = b.ins_const(MirConst::I64(0)).unwrap();
+        let c = b.ins_cmp(MirCmpOp::Lt, x, zero).unwrap();
+        b.branch(c, then_b, else_b).unwrap();
+
+        b.switch_to_block(then_b);
+        let one = b.ins_const(MirConst::I64(1)).unwrap();
+        b.def_local(LocalId(0), one).unwrap();
+        b.jump(join).unwrap();
+
+        b.switch_to_block(else_b);
+        let two = b.ins_const(MirConst::I64(2)).unwrap();
+        b.def_local(LocalId(0), two).unwrap();
+        b.jump(join).unwrap();
+
+        b.switch_to_block(join);
+        let y = b.use_local(LocalId(0), MirTy::I64).unwrap();
+        b.ret(Some(y)).unwrap();
+
+        let f = b.finish().unwrap();
+        assert!(
+            f.block(join)
+                .insts
+                .iter()
+                .any(|i| matches!(i, MirInst::Phi { .. })),
+            "join must have a phi: {f:?}"
+        );
+        f.verify().unwrap();
+    }
+
+    #[test]
+    fn refuses_class_shaped_value_param() {
+        let mut b = MirBuilder::new("no_class");
+        assert!(b.add_param(MirTy::Value).is_err());
+    }
+}

@@ -8,6 +8,7 @@ mod dissect;
 // against the VM cursor and symbolic-IL tell against bytecode; the rest of
 // the IL stays crate-private.
 pub(crate) mod il;
+pub(crate) mod mir;
 pub use il::opt::{OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
@@ -30,8 +31,8 @@ pub use dissect::{
 };
 pub use host_grants::HostGrants;
 pub use manifest::{
-    default_module_roots, DependencySpec, FfiNativeDecl, Manifest, ManifestError, PackageInfo,
-    Scripts,
+    DependencySpec, FfiNativeDecl, Manifest, ManifestError, PackageInfo, Scripts,
+    default_module_roots,
 };
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
