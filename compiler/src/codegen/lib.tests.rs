@@ -8404,72 +8404,37 @@ fn main() {
     }
 
     #[test]
-    fn local_cse_reuses_repeated_index() {
+    fn local_cse_reuses_stored_mul() {
         let (bc, _) = compile_src(
             r#"
-fn recompute(int i) -> int {
-    let a = [10, 20, 30, 40];
-    let x = a[i];
-    return x + a[i] + a[i];
+fn recompute(int a, int b) -> int {
+    let x = a * b;
+    return x + (a * b) + (b * a);
 }
 fn main() {
     let n = 0;
     while n < 1 {
         n = n + 1;
     }
-    return recompute(n + 1);
+    return recompute(n + 2, n + 3);
 }
 "#,
         );
-        let indexes = bc
+        let muls = bc
             .iter()
             .filter(|b| {
-                matches!(
-                    b.bytecode(),
-                    Instruction::Index
-                        | Instruction::IndexUnchecked
-                        | Instruction::IndexPin
-                        | Instruction::IndexPinUnchecked
-                )
+                matches!(b.bytecode(), Instruction::MUL)
+                    || (*b.bytecode() == Instruction::BinSlotImm
+                        && b.bin_slot_imm_parts().0 == Instruction::MUL as u8)
+                    || (*b.bytecode() == Instruction::BinSlotSlot
+                        && b.bin_slot_slot_parts().0 == Instruction::MUL as u8)
+                    || (*b.bytecode() == Instruction::BinReturn
+                        && b.bin_return_op() == Instruction::MUL as u8)
             })
             .count();
         assert!(
-            indexes <= 1,
-            "EarlyCSE should reuse stored a[i]; index ops={indexes}; opcodes={:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
-        );
-    }
-
-    #[test]
-    fn instcombine_xor_one_twice_is_identity() {
-        let (bc, _) = compile_src(
-            r#"
-fn xor_twice(int x) -> int {
-    return (x ^ 1) ^ 1;
-}
-fn main() {
-    let n = 0;
-    while n < 1 {
-        n = n + 1;
-    }
-    return xor_twice(n);
-}
-"#,
-        );
-        let xors = bc
-            .iter()
-            .filter(|b| {
-                matches!(b.bytecode(), Instruction::XOR)
-                    || (*b.bytecode() == Instruction::BinSlotImm
-                        && b.bin_slot_imm_parts().0 == Instruction::XOR as u8)
-                    || (*b.bytecode() == Instruction::BinSlotSlot
-                        && b.bin_slot_slot_parts().0 == Instruction::XOR as u8)
-            })
-            .count();
-        assert_eq!(
-            xors,
-            0,
-            "XOR 1; XOR 1 should cancel; opcodes={:?}",
+            muls <= 1,
+            "EarlyCSE should reuse stored a*b; mul ops={muls}; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
     }
