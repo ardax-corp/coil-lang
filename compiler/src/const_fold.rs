@@ -553,6 +553,20 @@ mod tests {
         )
     }
 
+    fn float_expr(n: f64) -> Output<'static> {
+        (SimpleSpan::from(0..1), Box::new(Expression::Float(n)))
+    }
+
+    #[test]
+    fn fold_float_unary_neg() {
+        let env = HashMap::new();
+        let neg = (
+            SimpleSpan::from(0..4),
+            Box::new(Expression::Negate(float_expr(0.55))),
+        );
+        assert_eq!(eval_expr(&neg, &env), Some(ConstValue::Float(-0.55)));
+    }
+
     #[test]
     fn fold_add_and_cmp() {
         let env = HashMap::new();
