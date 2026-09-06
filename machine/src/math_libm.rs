@@ -186,6 +186,49 @@ mod tests {
     }
 
     #[test]
+    fn math_libm_atan2_quadrants_match_f64() {
+        let cases: &[(f64, f64)] = &[
+            (1.0, 1.0),
+            (1.0, -1.0),
+            (-1.0, -1.0),
+            (-1.0, 1.0),
+            (1.0, 0.0),
+            (-1.0, 0.0),
+            (0.0, 1.0),
+            (0.0, -1.0),
+            (f64::INFINITY, f64::INFINITY),
+            (f64::INFINITY, f64::NEG_INFINITY),
+        ];
+        for &(y, x) in cases {
+            let actual = call(math_atan2, &[y, x]);
+            let expected = y.atan2(x);
+            assert_eq!(actual, expected, "atan2({y}, {x})");
+        }
+    }
+
+    #[test]
+    fn math_libm_rem_sign_follows_dividend() {
+        let cases: &[(f64, f64)] = &[
+            (5.5, 2.0),
+            (5.5, -2.0),
+            (-5.5, 2.0),
+            (-5.5, -2.0),
+            (4.0, 2.0),
+            (1.0, 0.0),
+            (f64::INFINITY, 1.0),
+        ];
+        for &(a, b) in cases {
+            let actual = call(math_rem, &[a, b]);
+            let expected = a % b;
+            if expected.is_nan() {
+                assert!(actual.is_nan(), "rem({a}, {b})");
+            } else {
+                assert_eq!(actual, expected, "rem({a}, {b})");
+            }
+        }
+    }
+
+    #[test]
     fn math_libm_preserves_ieee_nan_and_infinity() {
         assert!(call(math_sqrt, &[-1.0]).is_nan());
         assert!(call(math_ln, &[-1.0]).is_nan());
@@ -197,6 +240,13 @@ mod tests {
         assert!(call(math_log10, &[-1.0]).is_nan());
         assert!(call(math_log2, &[-1.0]).is_nan());
         assert!(call(math_rem, &[1.0, 0.0]).is_nan());
+        assert_eq!(call(math_log10, &[0.0]), f64::NEG_INFINITY);
+        assert_eq!(call(math_log2, &[0.0]), f64::NEG_INFINITY);
+        assert_eq!(call(math_cbrt, &[-27.0]), -3.0);
+        assert_eq!(call(math_tanh, &[f64::INFINITY]), 1.0);
+        assert_eq!(call(math_tanh, &[f64::NEG_INFINITY]), -1.0);
+        assert_eq!(call(math_sinh, &[f64::INFINITY]), f64::INFINITY);
+        assert_eq!(call(math_atan, &[f64::INFINITY]), std::f64::consts::FRAC_PI_2);
     }
 
     #[test]
