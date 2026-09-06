@@ -2265,7 +2265,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::StoreIndexPinUnchecked as u8);
+            promise!(*bc as u8 <= Instruction::DenseCast as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3405,6 +3405,54 @@ impl<const S: usize> Machine<S> {
                         );
                     }
                     self.stack.push(value);
+                }
+                Instruction::DenseBin => {
+                    let (kind, dest, lhs, rhs) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + lhs < stack_cap);
+                    promise!(sp + rhs < stack_cap);
+                    let va = self.stack[sp + lhs];
+                    let vb = self.stack[sp + rhs];
+                    self.stack[sp + dest] = crate::dense::eval_bin(kind, va, vb);
+                }
+                Instruction::DenseCmp => {
+                    let (kind, dest, lhs, rhs) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + lhs < stack_cap);
+                    promise!(sp + rhs < stack_cap);
+                    let va = self.stack[sp + lhs];
+                    let vb = self.stack[sp + rhs];
+                    self.stack[sp + dest] = crate::dense::eval_cmp(kind, va, vb);
+                }
+                Instruction::DenseConst => {
+                    let (ty, dest, payload, is_pool) = opcode.dense_const_parts();
+                    promise!(sp + dest < stack_cap);
+                    let raw = if is_pool {
+                        let idx = payload as usize;
+                        promise!(idx < constants.len());
+                        unsafe { *constants.get_unchecked(idx) }
+                    } else {
+                        payload as i16 as i64 as u64
+                    };
+                    self.stack[sp + dest] = crate::dense::eval_const(ty, raw);
+                }
+                Instruction::DenseMove => {
+                    let (dest, src) = opcode.dense_move_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + src < stack_cap);
+                    self.stack[sp + dest] = self.stack[sp + src];
+                }
+                Instruction::DenseUnary => {
+                    let (kind, dest, src) = opcode.dense_unary_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + src < stack_cap);
+                    self.stack[sp + dest] = crate::dense::eval_unary(kind, self.stack[sp + src]);
+                }
+                Instruction::DenseCast => {
+                    let (kind, dest, src) = opcode.dense_unary_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + src < stack_cap);
+                    self.stack[sp + dest] = crate::dense::eval_cast(kind, self.stack[sp + src]);
                 }
                 Instruction::ArrayPush => {
                     // Stack discipline matches `StoreIndex`: codegen emits

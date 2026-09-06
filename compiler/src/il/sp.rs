@@ -171,6 +171,12 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::NOT | Instruction::NEG | Instruction::NEGF => Some(0),
         Instruction::INIT | Instruction::InitTyped => Some(1),
         Instruction::BinSlotImm | Instruction::BinSlotSlot => Some(1),
+        Instruction::DenseBin
+        | Instruction::DenseCmp
+        | Instruction::DenseConst
+        | Instruction::DenseMove
+        | Instruction::DenseUnary
+        | Instruction::DenseCast => Some(0),
         Instruction::BinSlotImmJmpf
         | Instruction::BinSlotImmJmpt
         | Instruction::BinSlotSlotJmpf

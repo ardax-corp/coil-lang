@@ -47,6 +47,8 @@ pub struct LowerHints {
     pub default_float: MirTy,
     pub pool: Vec<u64>,
     pub pool_ty: Vec<Option<MirTy>>,
+    /// CALL-edge arity: slots `0..param_count` are live-in params (Value ABI).
+    pub param_count: u32,
 }
 
 impl Default for LowerHints {
@@ -58,6 +60,7 @@ impl Default for LowerHints {
             default_float: MirTy::F64,
             pool: Vec::new(),
             pool_ty: Vec::new(),
+            param_count: 0,
         }
     }
 }
@@ -108,6 +111,14 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
     let ranges = split_blocks(ops);
     let mut label_block: HashMap<Label, BlockId> = HashMap::new();
     let mut b = MirBuilder::new(hints.name.clone());
+    for i in 0..hints.param_count {
+        let ty = hints.slot(i);
+        if !ty.is_specialized() {
+            return Err(LowerError::Refused(format!("param slot {i} is {ty}")));
+        }
+        let v = b.add_param(ty)?;
+        b.def_local(LocalId(i), v)?;
+    }
     let mut range_blocks: Vec<BlockId> = Vec::with_capacity(ranges.len());
     for (i, (start, _)) in ranges.iter().enumerate() {
         let bid = if i == 0 { b.entry() } else { b.create_block() };
@@ -358,7 +369,7 @@ fn lower_op(
             tos.push(apply_bin(b, inst, lhs, rhs)?);
             Ok(())
         }
-        IlOp::Byte { byte, .. } => lower_byte(b, tos, *byte.bytecode(), hints),
+        IlOp::Byte { byte, .. } => lower_byte(b, tos, byte, hints),
         IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. } => Ok(()),
         IlOp::GetField { .. }
         | IlOp::SetField { .. }
@@ -391,10 +402,32 @@ fn lower_op(
 fn lower_byte(
     b: &mut MirBuilder,
     tos: &mut Vec<ValueId>,
-    inst: Instruction,
+    byte: &common::Byte,
     hints: &LowerHints,
 ) -> Result<(), LowerError> {
-    match inst {
+    match *byte.bytecode() {
+        Instruction::INC | Instruction::DEC => {
+            let (slot, _prefix, is_float) = byte.inc_dec_parts();
+            let ty = if is_float {
+                hints.default_float
+            } else {
+                hints.default_int
+            };
+            let cur = b.use_local(LocalId(slot as u32), ty)?;
+            let one = if is_float {
+                b.ins_const(MirConst::f64(1.0))?
+            } else {
+                b.ins_const(MirConst::I64(1))?
+            };
+            let op = if matches!(*byte.bytecode(), Instruction::DEC) {
+                MirBinOp::Sub
+            } else {
+                MirBinOp::Add
+            };
+            let next = b.ins_binop(op, cur, one)?;
+            b.def_local(LocalId(slot as u32), next)?;
+            Ok(())
+        }
         Instruction::CastIntToFloat => {
             let v = tos
                 .pop()

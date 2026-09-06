@@ -347,6 +347,20 @@ pub enum Instruction {
     StoreIndexPin,
     /// Bounds-proofed [`Self::StoreIndexPin`].
     StoreIndexPinUnchecked,
+
+    /// MIR dense 3-address numeric binop (COI-268). Stack-neutral.
+    /// Operand: `[31:24] kind`, `[23:16] dest`, `[15:8] lhs`, `[7:0] rhs`.
+    DenseBin,
+    /// Dense compare → bool slot. Same packing as [`Self::DenseBin`].
+    DenseCmp,
+    /// Dense typed const. Bit 31 = pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm/idx.
+    DenseConst,
+    /// Dense copy. `[15:8]` dest, `[7:0]` src.
+    DenseMove,
+    /// Dense unary (`neg` / `not`). `[31:24]` kind, `[15:8]` dest, `[7:0]` src.
+    DenseUnary,
+    /// Dense cast. `[31:24]` kind, `[15:8]` dest, `[7:0]` src.
+    DenseCast,
 }
 
 impl From<u8> for Instruction {
@@ -383,6 +397,68 @@ pub const SET_FIELD_SLOT_BIT: u32 = 1 << 31;
 #[must_use]
 pub const fn pack_set_field_slot(index: u32) -> u32 {
     SET_FIELD_SLOT_BIT | (index & 0xFFFF)
+}
+
+/// Dense MIR opcode kinds (COI-268). Packed in `[31:24]` of `Dense*`.
+pub mod dense {
+    pub const IADD64: u8 = 0;
+    pub const ISUB64: u8 = 1;
+    pub const IMUL64: u8 = 2;
+    pub const IDIV64: u8 = 3;
+    pub const IREM64: u8 = 4;
+    pub const IAND64: u8 = 5;
+    pub const IOR64: u8 = 6;
+    pub const IXOR64: u8 = 7;
+    pub const ISHL64: u8 = 8;
+    pub const ISHR64: u8 = 9;
+    pub const FADD64: u8 = 10;
+    pub const FSUB64: u8 = 11;
+    pub const FMUL64: u8 = 12;
+    pub const FDIV64: u8 = 13;
+    pub const FREM64: u8 = 14;
+    pub const IADD32: u8 = 15;
+    pub const ISUB32: u8 = 16;
+    pub const IMUL32: u8 = 17;
+    pub const IDIV32: u8 = 18;
+    pub const IREM32: u8 = 19;
+    pub const FADD32: u8 = 20;
+    pub const FSUB32: u8 = 21;
+    pub const FMUL32: u8 = 22;
+    pub const FDIV32: u8 = 23;
+    pub const FREM32: u8 = 24;
+
+    pub const CMP_I64: u8 = 0;
+    pub const CMP_F64: u8 = 1;
+    pub const CMP_I32: u8 = 2;
+    pub const CMP_F32: u8 = 3;
+    pub const CMP_LT: u8 = 0;
+    pub const CMP_LE: u8 = 1;
+    pub const CMP_GT: u8 = 2;
+    pub const CMP_GE: u8 = 3;
+    pub const CMP_EQ: u8 = 4;
+    pub const CMP_NE: u8 = 5;
+
+    pub const TY_I32: u8 = 0;
+    pub const TY_I64: u8 = 1;
+    pub const TY_F32: u8 = 2;
+    pub const TY_F64: u8 = 3;
+    pub const TY_BOOL: u8 = 4;
+
+    pub const UNARY_NEG: u8 = 0;
+    pub const UNARY_NOT: u8 = 1;
+    pub const UNARY_FNEG: u8 = 2;
+    pub const CAST_I2F: u8 = 0;
+    pub const CAST_SEXT: u8 = 1;
+
+    #[inline]
+    pub const fn pack_cmp(lane: u8, pred: u8) -> u8 {
+        (lane << 4) | (pred & 0x0F)
+    }
+
+    #[inline]
+    pub const fn unpack_cmp(kind: u8) -> (u8, u8) {
+        (kind >> 4, kind & 0x0F)
+    }
 }
 
 /// Slot index when `operand` is an indexed [`Instruction::SetField`].
@@ -540,6 +616,12 @@ impl Instruction {
             Self::IndexPinUnchecked => "IndexPinUnchecked",
             Self::StoreIndexPin => "StoreIndexPin",
             Self::StoreIndexPinUnchecked => "StoreIndexPinUnchecked",
+            Self::DenseBin => "DenseBin",
+            Self::DenseCmp => "DenseCmp",
+            Self::DenseConst => "DenseConst",
+            Self::DenseMove => "DenseMove",
+            Self::DenseUnary => "DenseUnary",
+            Self::DenseCast => "DenseCast",
         }
     }
 }
@@ -899,6 +981,65 @@ impl Byte {
         ((o >> 3) as usize, (o & 0b100) != 0, (o & 0b010) != 0)
     }
 
+    /// Dense 3-address: `[31:24] kind`, `[23:16] dest`, `[15:8] a`, `[7:0] b`.
+    pub fn with_dense_abc(mut self, kind: u8, dest: u8, a: u8, b: u8) -> Self {
+        self.operands =
+            ((kind as u32) << 24) | ((dest as u32) << 16) | ((a as u32) << 8) | (b as u32);
+        self
+    }
+
+    pub fn dense_abc_parts(&self) -> (u8, usize, usize, usize) {
+        let o = self.operands;
+        (
+            (o >> 24) as u8,
+            ((o >> 16) & 0xFF) as usize,
+            ((o >> 8) & 0xFF) as usize,
+            (o & 0xFF) as usize,
+        )
+    }
+
+    /// Dense unary/cast: `[31:24] kind`, `[15:8] dest`, `[7:0] src`.
+    pub fn with_dense_unary(mut self, kind: u8, dest: u8, src: u8) -> Self {
+        self.operands = ((kind as u32) << 24) | ((dest as u32) << 8) | (src as u32);
+        self
+    }
+
+    pub fn dense_unary_parts(&self) -> (u8, usize, usize) {
+        let o = self.operands;
+        ((o >> 24) as u8, ((o >> 8) & 0xFF) as usize, (o & 0xFF) as usize)
+    }
+
+    /// Dense move: `[15:8] dest`, `[7:0] src`.
+    pub fn with_dense_move(mut self, dest: u8, src: u8) -> Self {
+        self.operands = ((dest as u32) << 8) | (src as u32);
+        self
+    }
+
+    pub fn dense_move_parts(&self) -> (usize, usize) {
+        let o = self.operands;
+        (((o >> 8) & 0xFF) as usize, (o & 0xFF) as usize)
+    }
+
+    /// Dense const: bit 31 pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm or pool idx.
+    pub fn with_dense_const(mut self, ty: u8, dest: u8, payload: u16, pool: bool) -> Self {
+        let mut o = ((ty as u32 & 0x7F) << 24) | ((dest as u32) << 16) | (payload as u32);
+        if pool {
+            o |= Self::POOL_FLAG;
+        }
+        self.operands = o;
+        self
+    }
+
+    pub fn dense_const_parts(&self) -> (u8, usize, u16, bool) {
+        let o = self.operands;
+        (
+            ((o >> 24) & 0x7F) as u8,
+            ((o >> 16) & 0xFF) as usize,
+            (o & 0xFFFF) as u16,
+            o & Self::POOL_FLAG != 0,
+        )
+    }
+
     /// Packed LOAD/STORE: `[31:24]=n` (`1..=3`), `[23:16]=s2`, `[15:8]=s1`, `[7:0]=s0`.
     pub fn with_load_store_packed(mut self, n: u8, s0: u8, s1: u8, s2: u8) -> Self {
         debug_assert!((1..=3).contains(&n), "packed LOAD/STORE n must be 1..=3");
@@ -1245,6 +1386,36 @@ impl ArchivedByte {
         ((o >> 3) as usize, (o & 0b100) != 0, (o & 0b010) != 0)
     }
 
+    pub fn dense_abc_parts(&self) -> (u8, usize, usize, usize) {
+        let o: u32 = self.operands.into();
+        (
+            (o >> 24) as u8,
+            ((o >> 16) & 0xFF) as usize,
+            ((o >> 8) & 0xFF) as usize,
+            (o & 0xFF) as usize,
+        )
+    }
+
+    pub fn dense_unary_parts(&self) -> (u8, usize, usize) {
+        let o: u32 = self.operands.into();
+        ((o >> 24) as u8, ((o >> 8) & 0xFF) as usize, (o & 0xFF) as usize)
+    }
+
+    pub fn dense_move_parts(&self) -> (usize, usize) {
+        let o: u32 = self.operands.into();
+        (((o >> 8) & 0xFF) as usize, (o & 0xFF) as usize)
+    }
+
+    pub fn dense_const_parts(&self) -> (u8, usize, u16, bool) {
+        let o: u32 = self.operands.into();
+        (
+            ((o >> 24) & 0x7F) as u8,
+            ((o >> 16) & 0xFF) as usize,
+            (o & 0xFFFF) as u16,
+            o & Byte::POOL_FLAG != 0,
+        )
+    }
+
     pub fn with_inc_dec(mut self, slot: u32, prefix: bool, is_float: bool) -> Self {
         self.operands = ((slot << 3) | ((prefix as u32) << 2) | ((is_float as u32) << 1)).into();
         self
@@ -1448,10 +1619,18 @@ mod tests {
     }
 
     #[test]
+    fn dense_abc_round_trip() {
+        let b = Byte::new(Instruction::DenseBin).with_dense_abc(dense::FMUL64, 3, 1, 2);
+        assert_eq!(b.dense_abc_parts(), (dense::FMUL64, 3, 1, 2));
+        let c = Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_F64, 4, 7, true);
+        assert_eq!(c.dense_const_parts(), (dense::TY_F64, 4, 7, true));
+    }
+
+    #[test]
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::StoreIndexPinUnchecked as u8;
+        let last = Instruction::DenseCast as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
