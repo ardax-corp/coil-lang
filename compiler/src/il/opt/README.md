@@ -9,6 +9,17 @@ This page inventories every **production** step that actually runs from
 post-opt steps that live next to lower / module flatten: **`cfg_gvn`** and
 **fuse-select**. Driver knobs are listed once below and are **not** passes.
 
+**Hit-bench prove:** if a pass is sound but flagship `.hyc` do not change, add
+focused `examples/perf` benches and prove those — do not skip merge because
+`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib` are identical.
+Skip only on hit-bench wash or regress. Flagships stay controls. See
+[optimization-roadmap.md](../../../../docs/internals/optimization-roadmap.md#hit-bench-prove-rule).
+**PGO is gone** ([#301](https://github.com/ardax-corp/coil-lang/pull/301));
+branch layout is heuristic (`BranchProfile` is not a thing).
+
+Codegen (not this pipeline): try flatten ([#307](https://github.com/ardax-corp/coil-lang/pull/307)),
+sibling/self `TailCall` ([#316](https://github.com/ardax-corp/coil-lang/pull/316)).
+
 Solo tests already exist for every production pass. D1 documents them; it does
 not change pass behavior.
 
@@ -189,7 +200,8 @@ Does not use tell for rewrite (alias map only).
   residual `Byte` (map cleared). Store to `src` or `dest` kills that alias.
 - **Tests:** `opt/dest_prop.tests.rs` (forwards across GetField / MakeEnum /
   SetField; refuses host / CALL / CFG; no Const clone; copy_prop leaves
-  GetField-shaped loads).
+  GetField-shaped loads). Hit bench: `examples/perf/dest_prop_field_alias.hy`
+  ([#318](https://github.com/ardax-corp/coil-lang/pull/318)).
 
 ## `canon`
 
@@ -242,6 +254,7 @@ float identities / pool fold.
   unknown tags. No new opcodes.
 - **Tests:** `opt/instcombine.rs` `result_pair_match_both_payloads_pops_tag`,
   `const_zero_jmpf_becomes_goto`, `xor1_twice_is_identity`.
+  Landed [#304](https://github.com/ardax-corp/coil-lang/pull/304).
 
 ## `local_cse`
 
@@ -261,7 +274,8 @@ float identities / pool fold.
 - **Tests:** `opt/early_cse.rs` `binslot_store_reused_as_load`,
   `store_to_operand_kills_expr`, `host_invoke_is_barrier`,
   `does_not_cross_basic_block`. Isolated flag:
-  `isolated_optimize_flag_runs_pass`.
+  `isolated_optimize_flag_runs_pass`. Hit benches: `examples/perf/cse_index_recompute.hy`,
+  `cse_cast_recompute.hy` ([#317](https://github.com/ardax-corp/coil-lang/pull/317)).
 
 ## `cast_spill`
 
@@ -298,6 +312,8 @@ float identities / pool fold.
   effectful / residual `Byte` that is not a recognized hoist form.
 - **Tests:** `il/licm.rs` `hoists_const_out_of_while_shaped_loop`,
   `refuses_when_host_invoke_in_loop`, `refuses_when_jump_if_match_in_loop`.
+  Iterates invariant float/int chains ([#315](https://github.com/ardax-corp/coil-lang/pull/315)).
+  Hit bench: `examples/perf/licm_nested_chains.hy`.
 
 ## `loop_bounds`
 
@@ -333,6 +349,8 @@ float identities / pool fold.
   unknown SP.
 - **Tests:** `il/strength.rs` `reduces_iv_times_invariant`,
   `refuses_host_invoke`, `refuses_array_push`, `refuses_float_cast_of_iv`.
+  Hit bench: `examples/perf/iv_mul_sr.hy` ([#315](https://github.com/ardax-corp/coil-lang/pull/315)).
+  Heuristic only — no PGO.
 
 ## `loop_unroll`
 

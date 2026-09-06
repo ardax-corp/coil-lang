@@ -26,8 +26,11 @@ walks the AST:
      positive `k` across those calls.
    - Depth ≈ `((max_entry - base) / min_step) + 1`.
    - **Tail-only** self- or sibling-cycle calls (`return f(...)` / `return g(...)`
-     among an SCC) → depth `1` (matches `TailCall`). Non-tail mutual recursion
-     still needs `#[max_depth(N)]`.
+     among an SCC) → depth `1` (matches `TailCall`,
+     [#316](https://github.com/ardax-corp/coil-lang/pull/316); hit bench
+     `examples/perf/tail_sibling.hy`). Matching one- or two-word ABI, including
+     arity-2 immediate products. Non-tail mutual recursion still needs
+     `#[max_depth(N)]`.
 3. Entry measure values may be:
    - integer literals (`fib(32)`);
    - intra-procedural const bindings via `const_fold::eval_expr`

@@ -77,7 +77,7 @@ rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 55 (default r
 | Work type | Extra check |
 |-----------|-------------|
 | VM / alloc | valgrind memcheck on debug build |
-| Perf | `./scripts/poop_baseline.sh` (precompiled `coil run` on mandelbrot/tak/nsieve/binary_trees); prefer alloc reduction over new opcodes |
+| Perf | `./scripts/poop_baseline.sh` (precompiled `coil run` on mandelbrot/tak/nsieve/binary_trees). If an opt does not fire on those flagships, add `examples/perf` hit benches and prove those — identical flagship `.hyc` is not a skip. Prefer alloc reduction over new opcodes. **No PGO.** |
 | Debug info | `coil debug`, `coil dissect` |
 | Formatting | `coil fmt` |
 | Packaged apps | `coil package` defaults to `coil-embed` runner |
@@ -99,7 +99,7 @@ Auto: `prelude`, `prelude::ops`, `prelude::test`, `prelude::math`.
 
 Explicit `use`: `ffi`, `io`, `thread`, `env`, `string`, `gc`, `clock`. Time calendar/format: [coil-time](https://github.com/ardax-corp/coil-time). Regex: [coil-regex](https://github.com/ardax-corp/coil-regex). TLS: [coil-tls](https://github.com/ardax-corp/coil-tls). Crypto: [coil-crypto](https://github.com/ardax-corp/coil-crypto).
 
-Cargo default features are `[]`. There is no virtual `time` module; consume [coil-time](https://github.com/ardax-corp/coil-time). Process clocks are virtual `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto).
+Cargo default features are `[]`. There is no virtual `time` module; consume [coil-time](https://github.com/ardax-corp/coil-time). Process clocks are virtual `clock` (`wall_nanos` / `mono_nanos` / `sleep_ms` → HostInvoke `clock_*`). There is no virtual crypto module; hashes/AEAD live in [coil-crypto](https://github.com/ardax-corp/coil-crypto). Archive **major 4 / minor 5** appends M1 `prelude::math` HostInvoke **125–135** (`atan`/`atan2`/`asin`/`acos`, `log10`/`log2`/`cbrt`, `rem`, `sinh`/`cosh`/`tanh`). `PI`/`E`/`TAU` are [coil-stdlib `num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md).
 
 Prefer compiler builtins over userland for core type machinery.
 

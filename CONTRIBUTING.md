@@ -37,6 +37,8 @@ See [AGENTS.md](AGENTS.md). Highlights:
 - **Method-based APIs** — prefer `impl` methods on classes over free functions for type-tied operations (stdlib, new surface). See [limitations.md](docs/internals/limitations.md) for codegen gaps on free generic enum returns.
 
 Known gaps and workarounds: [docs/internals/limitations.md](docs/internals/limitations.md).
+Opt prove rule: [optimization-roadmap.md](docs/internals/optimization-roadmap.md#hit-bench-prove-rule)
+(hit benches, not flagship-identical as a skip). PGO was removed; do not revive it.
 
 ## Documentation
 
