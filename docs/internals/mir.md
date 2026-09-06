@@ -21,11 +21,16 @@ Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`.
 
 ## P1 — dense exec (COI-268)
 
-Eligible **leaf** numeric loops (float `*`/`/` or `i32`, no heap/calls) emit:
+Eligible **leaf, single-header** numeric loops (float `*`/`/` or `i32`, no
+heap/calls, one back-edge) emit:
 
-- `DenseBin` / `DenseCmp` / `DenseConst` / `DenseMove` / `DenseUnary` / `DenseCast`
+- `DenseBin` / `DenseConst` / `DenseMove` / `DenseUnary` / `DenseCast`
 - `Seek` to the typed slot high-water mark
-- Existing `LOAD` + `JMPF` / `RETURN` at control and **Value ABI** edges
+- Fuse-select `LOAD`/`LOAD`/`cmp`/`JMPF` (→ `BinSlotSlotJmpf`) and `RETURN`
+  at control and **Value ABI** edges
+
+Nested loops (flagship `mandelbrot.hy`) stay on fuse-IL. The hit bench
+`examples/perf/mir_dense_float.hy` (`escape`) is the dense kernel.
 
 CALL still places args as `Value` words in slots `0..arity`. Dense ops
 reinterpret those bits as `i64`/`f64`. RETURN loads one word back onto the
@@ -43,6 +48,6 @@ hit benches are unchanged.
 
 ## Acceptance
 
-`mir::mandelbrot_inner_loop` is typed SSA. Production `examples/perf/mandelbrot.hy`
-and `tests/positive/mir_dense_float.hy` execute the inner float kernel via
-`DenseBin` / `DenseCmp`.
+`mir::mandelbrot_inner_loop` is typed SSA. `tests/positive/mir_dense_float.hy`
+and `examples/perf/mir_dense_float.hy` (`escape`) execute via `DenseBin`.
+Flagship `mandelbrot.hy` (three nested loops) remains fuse-IL.
