@@ -26,10 +26,8 @@ struct Cell {
 pub struct Inferred {
     pub slot_ty: HashMap<u32, MirTy>,
     pub pool_ty: Vec<Option<MirTy>>,
-    pub has_float: bool,
     pub has_i32: bool,
     pub has_fmul: bool,
-    pub has_loop: bool,
 }
 
 pub fn infer_numeric(
@@ -209,6 +207,74 @@ pub fn infer_numeric(
         }
     }
 
+    // Second pass: paint pool / unknown stores now that slots have types.
+    let mut stack: Vec<Cell> = Vec::new();
+    for op in ops {
+        match op {
+            IlOp::Load { slot, .. } => stack.push(Cell {
+                origin: Origin::Slot(*slot),
+                ty: slot_ty.get(slot).copied(),
+            }),
+            IlOp::Const { .. } => stack.push(Cell {
+                origin: Origin::Tmp,
+                ty: Some(MirTy::I64),
+            }),
+            IlOp::ConstPool { idx, .. } => stack.push(Cell {
+                origin: Origin::Pool(*idx),
+                ty: pool_ty.get(*idx as usize).copied().flatten(),
+            }),
+            IlOp::Dup { .. } => {
+                if let Some(c) = stack.last().copied() {
+                    stack.push(c);
+                }
+            }
+            IlOp::Pop { .. } | IlOp::LogNot { .. } | IlOp::Bin { .. } => {
+                let _ = stack.pop();
+                if matches!(op, IlOp::Bin { .. }) {
+                    let _ = stack.pop();
+                    stack.push(Cell {
+                        origin: Origin::Tmp,
+                        ty: None,
+                    });
+                } else if matches!(op, IlOp::LogNot { .. }) {
+                    stack.push(Cell {
+                        origin: Origin::Tmp,
+                        ty: Some(MirTy::Bool),
+                    });
+                }
+            }
+            IlOp::StorePop { slot, .. } => {
+                if let Some(c) = stack.pop() {
+                    if let Some(ty) = slot_ty.get(slot).copied() {
+                        let _ = paint(&mut slot_ty, &mut pool_ty, c, ty);
+                    }
+                }
+            }
+            IlOp::BinSlotImm { .. } | IlOp::BinSlotSlot { .. } => {
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                });
+            }
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::CastIntToFloat
+                        | Instruction::NEGF
+                        | Instruction::NEG
+                        | Instruction::NOT
+                ) =>
+            {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                });
+            }
+            _ => {}
+        }
+    }
+
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
@@ -220,10 +286,8 @@ pub fn infer_numeric(
     Ok(Inferred {
         slot_ty,
         pool_ty,
-        has_float,
         has_i32,
         has_fmul,
-        has_loop: true,
     })
 }
 
