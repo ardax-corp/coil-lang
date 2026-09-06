@@ -4,7 +4,7 @@ use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
 
-fn hot(float scale, int n) -> int {
+fn hot(float scale, int n) -> float {
     let i = 0;
     let s = 0.0;
     while i < n {
@@ -14,9 +14,9 @@ fn hot(float scale, int n) -> int {
         s = s + a * b;
         i = i + 1;
     }
-    return s as int;
+    return s;
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot(3.0, 2000000))));
+    write_all(stdout(), to_bytes(format("%i", hot(3.0, 2000000) as int)));
 }

@@ -29,7 +29,7 @@ pub fn try_specialize_body(
     hints.param_count = entry_sp;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
-    super::cse::cse(&mut func);
+    crate::mir::cse(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,

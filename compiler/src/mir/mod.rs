@@ -195,7 +195,7 @@ fn main() {
     #[test]
     fn pipeline_cse_collapses_repeated_divf() {
         let src = r#"
-fn hot(float scale, int n) -> int {
+fn hot(float scale, int n) -> float {
     let i = 0;
     let s = 0.0;
     while i < n {
@@ -205,7 +205,7 @@ fn hot(float scale, int n) -> int {
         s = s + a * b;
         i = i + 1;
     }
-    return s as int;
+    return s;
 }
 fn main() {
     let _ = hot(3.0, 8);
