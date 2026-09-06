@@ -43,12 +43,24 @@ pub fn emit_dense(
         Byte::new(Instruction::Seek).with_operand_u32(u32::from(max_reg) + 1),
     ));
 
+    // Unique SSA regs: materialize every Const once at entry (not in the latch).
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let MirInst::Const { dest, c } = inst {
+                out.push(emit_const(*c, regs[dest.index()], pool, loc)?);
+            }
+        }
+    }
+
     for block in &func.blocks {
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
         for inst in &block.insts {
             if inst.is_phi() {
+                continue;
+            }
+            if matches!(inst, MirInst::Const { .. }) {
                 continue;
             }
             if term_cmp_dest(block).is_some_and(|d| {
@@ -349,12 +361,14 @@ fn emit_term(
     match term {
         Terminator::Jump { dest } => {
             emit_phi_moves(out, func, block.id, *dest, regs, scratch);
-            out.push(IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target: block_lab[dest.index()],
-                loc,
-                hint: Default::default(),
-            });
+            if !is_fallthrough(func, block.id, *dest) {
+                out.push(IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: block_lab[dest.index()],
+                    loc,
+                    hint: Default::default(),
+                });
+            }
         }
         Terminator::Br {
             cond,
