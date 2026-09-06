@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use common::{DebugLoc, Instruction};
+use common::Instruction;
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
@@ -509,6 +509,7 @@ fn map_cmp(inst: Instruction) -> Option<MirCmpOp> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::DebugLoc;
 
     fn loc() -> DebugLoc {
         DebugLoc::unknown()

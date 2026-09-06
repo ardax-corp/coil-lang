@@ -1,4 +1,5 @@
 //! Numeric MIR (COI-267 P0): type lattice + SSA builder.
+#![cfg_attr(not(test), allow(dead_code))]
 //!
 //! Production still emits stack IL and fuse-selects into bytecode. This module
 //! is a typed SSA sidecar for later dense exec (P1) and opt moves (P2). Classes
