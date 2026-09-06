@@ -61,3 +61,27 @@ test("wider and mixed-heap products stay heap-shaped") {
     assert(n == 9)?;
     assert(s == "x")?;
 }
+
+fn indirect_pair() -> int {
+    let f = pair;
+    let (a, b) = f(4);
+    return a + b;
+}
+
+test("record field escape of a two-slot product") {
+    let box = { p: pair(5) };
+    let p = box.p;
+    assert(p[0] + p[1] == 11)?;
+}
+
+test("array escape of a two-slot product") {
+    let xs = [pair(3), pair(8)];
+    let p = xs[0];
+    let q = xs[1];
+    assert(p[0] + p[1] == 7)?;
+    assert(q[0] + q[1] == 17)?;
+}
+
+test("address-taken product call stays correct") {
+    assert(indirect_pair() == 9)?;
+}
