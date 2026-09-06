@@ -535,6 +535,44 @@ fn main() {
         );
     }
 
+    /// Scalar float `-x` must emit `NEGF`. Int `NEG` two's-complements the
+    /// IEEE word (`-0.55` → `-7.6`).
+    #[test]
+    fn float_unary_minus_emits_negf_not_neg() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src("fn n(float x) -> float { return -x; }");
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::NEGF)),
+            "expected NEGF for float unary minus; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::NEG)),
+            "float unary minus must not emit int NEG; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn int_unary_minus_still_emits_neg() {
+        use common::Instruction;
+        let (bc, _pool) = compile_src("fn n(int x) -> int { return -x; }");
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::NEG)),
+            "expected NEG for int unary minus; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::NEGF)),
+            "int unary minus must not emit NEGF; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
     /// Integer arithmetic should pick `ADD`, not `ADDF`. Two literals
     /// (`1 + 2`) now constant-fold to a single `CONST`, so we use two
     /// int parameters — `a + b` compiles to a slot/slot binary op whose

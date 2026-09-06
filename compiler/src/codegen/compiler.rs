@@ -13368,7 +13368,10 @@ impl Compiler {
                 unary!(bytecode, self, lhs, Byte::new(Instruction::LogNot));
             }
             Expression::Negate(lhs) => {
-                if self.try_emit_matrix_op(&mut bytecode, self_id, span.start, span.end, lhs, None)
+                if self.try_emit_folded_expr(ast, &mut bytecode, true) {
+                    // Intentional empty body: the emit/try_emit call in the
+                    // condition already wrote bytecode as a side effect.
+                } else if self.try_emit_matrix_op(&mut bytecode, self_id, span.start, span.end, lhs, None)
                 {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
@@ -13384,7 +13387,22 @@ impl Compiler {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
                 } else {
-                    unary!(bytecode, self, lhs, Byte::new(Instruction::NEG));
+                    // Int `NEG` two's-complements the word (`-0.55` → `-7.6`).
+                    let is_float = self.is_float_ty(lhs)
+                        || matches!(
+                            self.codegen_expr_ty(lhs),
+                            Some(Ty::Con(ref name)) if name == crate::typechecking::ty::FLOAT
+                        );
+                    unary!(
+                        bytecode,
+                        self,
+                        lhs,
+                        Byte::new(if is_float {
+                            Instruction::NEGF
+                        } else {
+                            Instruction::NEG
+                        })
+                    );
                 }
             }
             Expression::Add(lhs, rhs) => {

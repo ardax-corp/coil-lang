@@ -7861,6 +7861,24 @@ fn main() {
 }
 
 #[test]
+fn scalar_float_unary_minus_matches_subf() {
+    // Regression: scalar `-0.55` used int NEG (IEEE bits as i64) → `-7.6`.
+    let output = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn negf(float x) -> float {
+    return -x;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%f,%f", -0.55, negf(0.55))));
+}
+"#,
+    );
+    assert_eq!(output, "-0.55,-0.55");
+}
+
+#[test]
 fn aggregate_float_negate_uses_negf_not_int_neg() {
     // Regression: float aggregate unary `-` must not emit int `NEG`
     // (which bit-twiddles a float as i64). Float path is `NEGF`.

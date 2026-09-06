@@ -23,6 +23,17 @@ test("unary plus minus") {
     assert(-(-3) == 3)?;
 }
 
+// Scalar `-` on floats must use NEGF (int NEG two's-complements IEEE bits:
+// `-0.55` used to evaluate as `-7.6`). Compare against `0.0 - x` (SUBF).
+test("float unary minus") {
+    assert(-0.55 == 0.0 - 0.55)?;
+    assert(-1.5 == 0.0 - 1.5)?;
+    assert(-(-0.55) == 0.55)?;
+    let x = 0.55;
+    assert(-x == 0.0 - x)?;
+    assert(-x + x == 0.0)?;
+}
+
 test("chained int arithmetic") {
     assert(1 + 2 * 3 == 7)?;
     assert((1 + 2) * 3 == 9)?;

@@ -24,13 +24,15 @@ const CORPUS: &[&str] = &[
 /// the two-slot ABI end to end. Heap `Vec::pop` now HostInvokes with
 /// OptionNiche layout bits (no CALL + boxed-to-niche unwrap).
 /// InstCombine retargets `arithmetic.hy` / `loops.hy` (const-cond / local peeps).
+/// Float scalar `-` now folds / emits `NEGF` (`arithmetic.hy` unary cases;
+/// `option_pair.hy` `-1` folds to a pool const).
 /// Try/Result flatten retargets `assert(...)?` and two-slot `?` (shared fail
 /// epilogue; `branch_opt` leaves `ValueUnderJmp` tag jumps in place).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "5649c12e619549d8_543"),
+    ("arithmetic.hy", "259c7f7110e2abd1_622"),
     ("functions.hy", "a4a8a121c9c8634c_405"),
     ("loops.hy", "ecae1dcfae84aaed_274"),
-    ("option_pair.hy", "b1c448b55112876f_398"),
+    ("option_pair.hy", "1abbc7207ee1bcc6_397"),
     ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
 ];
 
