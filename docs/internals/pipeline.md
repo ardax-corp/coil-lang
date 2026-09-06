@@ -25,7 +25,7 @@ The stack IL is **instruction lowering**, not a semantic IR:
 2. **Opt** — passes rewrite that same stream in place (contracts in [`il/opt/README.md`](../../compiler/src/il/opt/README.md)).
 3. **Lower** — one `il::lower`: **fuse-select**, **assign PCs once**, encode `Vec<Byte>`. Production rejects residual absolute JMP; there is no post-lower peephole / `adjust_target` hot path.
 
-Names, types, and call meaning live in **DefIds** and the **typed sidecar** (B1–B3). IL does not grow an HIR/SSA layer to hold that.
+Names, types, and call meaning live in **DefIds** and the **typed sidecar** (B1–B3). Stack IL does not become a semantic IR. An optional numeric SSA sidecar ([`compiler/src/mir/`](../../compiler/src/mir/), [mir.md](mir.md), COI-267) can represent `i32`/`i64`/`f32`/`f64`/`bool` loops; fuse-select still lowers IL to bytecode. Classes / heap stay on the VM `Value` path. Dense MIR exec is P1.
 
 **Optional later** (not this cut): stop storing `Instruction` inside `IlOp::Bin`; drop `JumpIfMatch.arity` from the jump kind if tell/DCE can take stack effect from elsewhere (lower already encodes tag + target only); make `IlOp::Const` encoding-independent (value first, inline vs pool at lower); lift remaining `IlOp::Byte` or keep documenting the **cold set** (`FORMAT`, FFI, packed multi-slot `LOAD`/`STORE`, and anything `from_plain_byte` still leaves as `Byte`).
 
