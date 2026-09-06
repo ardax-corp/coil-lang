@@ -69,17 +69,22 @@ Mandelbrot-shaped float superinstructions are **not** current AOT:
 
 Still on the interpreter path (no FMA / reassociation):
 
-- LICM: full invariant float expression chains (past intermediate height-1).
 - `NEGF` unary float negate.
 - Algebraic: exact `+0.0` / `+1.0` float identities; const-pool float binop fold.
 - Codegen: `new Class(args).field` scalar replacement (no temp instance).
 - Operand-order canon (`il::canon` + `CanonStats`): const-to-RHS / load-load slot order; int `ConstPool` demote into inline `CONST` when safe; bounds accepts post-canon `GT` headers.
 
+LICM now iterates invariant float/int expression chains (nested loops can hoist
+more than one chain per call). Integer `i * c` strength reduction is on after
+`loop_bounds`. Float `cast(i)` affine SR is **refused** (not IEEE-exact).
+
 Next AOT priorities below remain the main gap vs Lua on `mandelbrot` /
 `tak` / `nsieve` / `binary_trees`. Extra benches on `main`:
 `examples/perf/gc_churn.hy` ([#286](https://github.com/ardax-corp/coil-lang/pull/286)),
 integer-payload Option/Result ObjEnum churn
-([#289](https://github.com/ardax-corp/coil-lang/pull/289)).
+([#289](https://github.com/ardax-corp/coil-lang/pull/289)),
+hit benches for the late-August opt revival (`iv_mul_sr`, `licm_nested_chains`,
+`tail_sibling`, `cse_*`, `dest_prop_field_alias`, `result_try_churn`).
 
 ## Landed since register-win harvest (ceiling contract)
 
@@ -93,7 +98,12 @@ titles can oversell.
 | **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, escape, unroll, GVN). |
 | **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. Dup-CSE re-expanded before lower for fuse-select. |
 | **`ssa_gvn`** (`gvn_ssa.rs`) | Virtual `Phi(block,slot)` VNs; redundant pure `Const`/`Load`+`Bin` → `Load` when value already in a slot | **Not rename.** `DIV`/`MOD`/`DIVF`/`MODF` excluded. Also runs inside per-body `cfg_gvn_with` when enabled. |
-| **`local_cse`** (`opt/early_cse.rs`) | Intra-block EarlyCSE after InstCombine: stored pure `BinSlot*` / stack bin / cast / `ArrayLen` / `Index` → `Load` | Effect / call / residual `Byte` barriers. No cross-block, no cheap Const→Load (fuse). |
+| **`instcombine`** (`opt/instcombine.rs`, [#304](https://github.com/ardax-corp/coil-lang/pull/304)) | Local peeps: const-cond branches, known-tag EQ, pair-match payload identity (`POP` tag) | No new opcodes. Mid-body try-flatten peep **removed** (convoy risk). |
+| **try flatten** (codegen `emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
+| **`local_cse`** (`opt/early_cse.rs`, [#317](https://github.com/ardax-corp/coil-lang/pull/317)) | Intra-block EarlyCSE after InstCombine: stored pure `BinSlot*` / stack bin / cast / `ArrayLen` / `Index` → `Load` | Effect / call / residual `Byte` barriers. No cross-block, no cheap Const→Load (fuse). Hit: `cse_index_recompute`, `cse_cast_recompute`. |
+| **`dest_prop`** (`opt/dest_prop.rs`, [#318](https://github.com/ardax-corp/coil-lang/pull/318)) | After `copy_prop`: slot aliases (`LOAD src; STORE dest`) through `GetField` / `SetField` / `Make*` / `BoxValue` | Basic+. Does not clone `Const`/`BinSlot*`. Hit: `dest_prop_field_alias`. |
+| **`licm` + `strength_reduce`** ([#315](https://github.com/ardax-corp/coil-lang/pull/315)) | LICM iterates invariant expr chains; integer `i*c` → add recurrence after `loop_bounds` | Float affine `cast(i)` SR refused. Hit: `licm_nested_chains`, `iv_mul_sr`. |
+| **sibling / self `TailCall`** (codegen, [#316](https://github.com/ardax-corp/coil-lang/pull/316)) | Existing `TailCall` for cycle-only siblings (even/odd) and self-recursion; matching one- or two-word ABI | No InstCombine Call;Return peep. Hit: `tail_sibling`. Tail-only mutual depth is 1. |
 | **`escape_analysis`** | Immediate-only `MakeArray` (arity ≤ 32) → consecutive frame slots | Fail-closed on escape. Computed elements stay heap. **Not** named-local class SROA (COI-84). |
 | **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists; proven counted / stride sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked` (archive minor 12), then `IndexPin*` (minor 13). Sidecar `index_facts` extend Unchecked/pin to helpers, for-in, and `i += k` when `0 <= i < len` is proven | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield (`YieldCoro` / `YieldFromCoro`), growing-array, alias-push, and **impure** helper-call loops stay checked. Pure user helpers on `b[i]` are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)). Pins are not saved across yield or on `ObjCoroutine`. |
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
@@ -104,11 +114,26 @@ titles can oversell.
 | **Branch layout / block reorder** | Heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
 
 Inlining / predicate peel / direct `new Class(args).field` scalar replacement
-live in **codegen**, not `il/opt` (self-recursive peel refused, COI-86). No JIT
-— Cranelift section below remains a feasibility sketch.
+live in **codegen**, not `il/opt` (self-recursive peel refused, COI-86). Try
+flatten and sibling `TailCall` are also codegen. No JIT — Cranelift section
+below remains a feasibility sketch. **PGO is gone**
+([#301](https://github.com/ardax-corp/coil-lang/pull/301)): no flags, ingest,
+instrumentation, heat knobs, or `BranchProfile`. Branch layout / block reorder
+stay heuristic.
 
 Pass headers in `compiler/src/il/**` are the source of truth when this table
 and Linear disagree.
+
+## Hit-bench prove rule
+
+If an opt is sound but does not fire on flagship `.hyc` (`mandelbrot`, `tak`,
+`nsieve`, `binary_trees`, `fib`), add focused `examples/perf` hit benches and
+**prove those**. Do **not** skip merge solely because flagship archives are
+identical; flagships remain controls. Skip only on hit-bench wash or regress.
+
+Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
+`cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,
+`result_try_churn`.
 
 ## AOT priorities
 
@@ -411,10 +436,11 @@ pointer across a helper or allocation call in this tier.
 
 1. **Baseline gate:** `perf_matrix.sh` produces metadata and raw results for
    every comparison; no benchmark is accepted without a correctness checksum.
-2. **AOT gate:** an optimization must improve a target benchmark by at least
-   5% wall time or 10% VM instructions without regressing any benchmark by
-   more than 2%, and must pass the full language and cursor-differential
-   suites.
+2. **AOT gate:** prove the rewrite on a bench it actually changes. Prefer a
+   focused `examples/perf` hit bench when flagships do not fire (see
+   [Hit-bench prove rule](#hit-bench-prove-rule)). A hit bench should move
+   wall time or VM instructions without regressing controls; identical
+   flagship `.hyc` is not a skip. Do not revive PGO to manufacture heat.
 3. **JIT prototype gate:** compile one pure numeric function, call it from the
    VM, and fall back to bytecode for one unsupported operation. Verify identical
    output, no archive/opcode changes, and code-cache cleanup.

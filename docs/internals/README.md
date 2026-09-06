@@ -7,12 +7,12 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Pipeline](pipeline.md) | Parse → typecheck → codegen → archive → execute |
 | [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
-| [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; float-fuse tombstones; residual = payload layout. Extra benches: `examples/perf/gc_churn.hy` ([#286](https://github.com/ardax-corp/coil-lang/pull/286)), Option/Result ObjEnum churn ([#289](https://github.com/ardax-corp/coil-lang/pull/289)) |
+| [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
 | [Array pins](array-pin.md) | Shipped `ArrayPin` / `IndexPin*` handle (COI-198) |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [SIMD](simd.md) | `coil-simd` — stable `std::arch` kernels for packed LA |
 | [Auto-par](auto-par.md) | Purity analysis + capped fork-join for recursive binops |
-| [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123** (`clock_wall_nanos` / `clock_mono_nanos` / `clock_sleep_ms`); M1 math **125–135** |
+| [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
 | [Stack bounds](stack-bounds.md) | Recursion depth analysis and `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |

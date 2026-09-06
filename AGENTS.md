@@ -14,6 +14,7 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 - Tests: `cargo test --workspace --lib --tests --bins` (required gate; covers integration tests, skips Criterion benches). Bare optional stack: `cargo test --workspace --lib --tests --bins --no-default-features`. Tooling: `--features <dissect|debugger>` with full test. Leak smoke: `cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)`. Soft CPU: `./scripts/poop_baseline.sh`.
 - Large tasks: scoped sub-agents on disjoint modules.
 - VM perf: alloc reduction, hot-loop tuning, bounds-check elimination, `promise!` — not benchmark-shaped opcodes unless universal.
+- **Hit-bench prove:** if an opt is sound but flagship `.hyc` (`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`) are identical, add focused `examples/perf` hit benches and prove those. Do not skip merge solely because flagships did not change; skip only on hit-bench wash/regress. Flagships remain controls. Landed: InstCombine (#304), try flatten (#307), LICM+integer SR (#315), TailCall (#316), Local CSE (#317), DestProp (#318).
 - Language features: draft plans; full HM; update coil-website user docs (`src/content/docs/`) and `docs/internals/` here when needed; minimal runnable example.
 - **Method-based APIs** — prefer inherent/`impl` methods over free functions for type-tied operations (stdlib, new language surface, codegen fixes). Free generic fns returning enums are fragile today; see `docs/internals/limitations.md`.
 - Granular conventional commits; stage only related files.
@@ -27,7 +28,8 @@ coil: statically typed `.hy` → stack IL → `.hyc` archive → custom VM.
 ## Invariants (do not break)
 
 - **Append-only opcodes** (`common/src/opcode.rs`). New variants at end → bump archive **minor**, `promise!` in `machine/src/vm.rs`, `instruction_from_u8_covers_last_appended_variant`. ABI break → **major** (reset minor).
-- **Virtual-module natives** via `HostInvoke` — host wiring in `machine/`. Leftover TLS/crypto/regex slots were dropped (holes collapse, archive **minor** bump); they are not reserved panic stubs. Virtual-time names stay as panic stubs so later ids do not move. `stream_attach` / `stream_park` own **119** / **120**. Process clocks append after that: `clock_wall_nanos` / `clock_mono_nanos` / `clock_sleep_ms` are **121** / **122** / **123** (`use clock::{…}`). M1 `prelude::math` expansion appends after `result_unit_probe` (**124**): `math_atan` … `math_tanh` are **125–135**. Frozen `math_sin` … `math_pow` stay **102–110**.
+- **Virtual-module natives** via `HostInvoke` — host wiring in `machine/`. Leftover TLS/crypto/regex slots were dropped (holes collapse); they are not reserved panic stubs. Virtual-time names stay as panic stubs so later ids do not move. `stream_attach` / `stream_park` own **119** / **120**. Process clocks: `clock_wall_nanos` / `clock_mono_nanos` / `clock_sleep_ms` are **121** / **122** / **123** (`use clock::{…}`). Archive is **major 4 / minor 5**. Minor 5 appends M1 `prelude::math` after `result_unit_probe` (**124**): `math_atan` / `atan2` / `asin` / `acos` / `log10` / `log2` / `cbrt` / `rem` / `sinh` / `cosh` / `tanh` are **125–135**. Frozen `math_sin` … `math_pow` stay **102–110**. `PI` / `E` / `TAU` live in coil-stdlib `num`, not here.
+- **No PGO.** Removed (#301). Branch layout is heuristic. Do not revive `--pgo-*`, ingest, heat knobs, or `BranchProfile`.
 - **Feature gates**: debugger `feature = "debugger"`; dissect `feature = "dissect"` on helper binaries, not default `coil`.
 - **Lint gate**: `cargo check --workspace` (not clippy — `Gc::payload_mut` deny).
 - **Fuse-select (D4)**: one named pass on typed `IlOp` after concat (`fuse_select` → PC assign). Residual `Byte` is a cold refuse. No post-lower `adjust_target`, no production per-fn fuse.
@@ -49,4 +51,4 @@ Pre-installed: `poop`, `valgrind`, `heaptrack`, `hyperfine`, `lua` (`.cursor/Doc
 
 ## Learned Workspace Facts
 
-- Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape (COI-92), not one heap ABI. Fuse opcodes are debt — rewrite existing ops rather than growing bench-shaped fuses.
+- Regularity target: one ground-call convention, panic on OOB (not `-1` / no-op); `a[i]` stays type `T`. `Option`/`Result` use niche / two-slot / boxed by shape (COI-92); arity-2 immediate products use two-slot `[a, b]` on direct `CALL`/`RETURN` (#302). Fuse opcodes are debt — rewrite existing ops rather than growing bench-shaped fuses.
