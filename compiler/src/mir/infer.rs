@@ -35,7 +35,31 @@ pub fn infer_numeric(
     pool_len: usize,
     param_count: u32,
 ) -> Result<Inferred, LowerError> {
-    if !has_back_edge(ops) {
+    infer_walk(ops, pool_len, param_count, InferMode::Dense)
+}
+
+/// Slot types for MIR→LIR (two-slot / niche leafs). No loop required.
+pub fn infer_lir(
+    ops: &[IlOp],
+    pool_len: usize,
+    param_count: u32,
+) -> Result<Inferred, LowerError> {
+    infer_walk(ops, pool_len, param_count, InferMode::Lir)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum InferMode {
+    Dense,
+    Lir,
+}
+
+fn infer_walk(
+    ops: &[IlOp],
+    pool_len: usize,
+    param_count: u32,
+    mode: InferMode,
+) -> Result<Inferred, LowerError> {
+    if mode == InferMode::Dense && !has_back_edge(ops) {
         return Err(LowerError::Refused("no loop (dense path is for hot numeric)".into()));
     }
     let mut slot_ty: HashMap<u32, MirTy> = HashMap::new();
@@ -198,6 +222,7 @@ pub fn infer_numeric(
                 }
             },
             IlOp::Jump { .. } | IlOp::Return { ret_words: 1, .. } | IlOp::Halt { .. } => {}
+            IlOp::Return { ret_words, .. } if *ret_words == 2 && mode == InferMode::Lir => {}
             IlOp::Return { ret_words, .. } if *ret_words != 1 => {
                 return Err(LowerError::Refused("multi-word return".into()));
             }
@@ -278,7 +303,7 @@ pub fn infer_numeric(
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
-    if !has_fmul && !has_i32 {
+    if mode == InferMode::Dense && !has_fmul && !has_i32 {
         return Err(LowerError::Refused(
             "need float mul/div or i32 (add-only stays on fuse-IL)".into(),
         ));

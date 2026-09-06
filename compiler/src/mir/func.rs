@@ -1,6 +1,7 @@
 //! MIR function / block containers and SSA verification.
 
 use super::inst::{BlockId, MirInst, Terminator, ValueId};
+use super::layout::MirLayout;
 use super::ty::MirTy;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,6 +26,8 @@ pub struct MirFunc {
     pub name: String,
     pub params: Vec<ValueId>,
     pub ret_ty: Option<MirTy>,
+    pub ret_hi_ty: Option<MirTy>,
+    pub ret_layout: MirLayout,
     pub entry: BlockId,
     pub blocks: Vec<MirBlock>,
     /// Type of each allocated value, indexed by [`ValueId::index`].
@@ -37,6 +40,8 @@ impl MirFunc {
             name: name.into(),
             params: Vec::new(),
             ret_ty: None,
+            ret_hi_ty: None,
+            ret_layout: MirLayout::Word,
             entry: BlockId(0),
             blocks: vec![MirBlock::new(BlockId(0))],
             types: Vec::new(),
@@ -136,10 +141,25 @@ impl MirFunc {
                         return Err(format!("br cond {} is {}", cond, self.ty(*cond)));
                     }
                 }
-                Terminator::Return { value: Some(v) } => {
-                    if let Some(rt) = self.ret_ty {
-                        if !self.ty(*v).le(rt) && self.ty(*v) != rt {
-                            return Err(format!("return {} : {} vs {rt}", v, self.ty(*v)));
+                Terminator::Return { lo, hi } => {
+                    if hi.is_some() && lo.is_none() {
+                        return Err("two-slot return missing payload word".into());
+                    }
+                    if let Some(v) = lo {
+                        if let Some(rt) = self.ret_ty {
+                            if !self.ty(*v).le(rt) && self.ty(*v) != rt {
+                                return Err(format!("return {} : {} vs {rt}", v, self.ty(*v)));
+                            }
+                        }
+                    }
+                    if let Some(v) = hi {
+                        if self.ret_layout != MirLayout::TwoSlot {
+                            return Err("hi return word requires twoslot layout".into());
+                        }
+                        if let Some(rt) = self.ret_hi_ty {
+                            if !self.ty(*v).le(rt) && self.ty(*v) != rt {
+                                return Err(format!("return hi {} : {} vs {rt}", v, self.ty(*v)));
+                            }
                         }
                     }
                 }

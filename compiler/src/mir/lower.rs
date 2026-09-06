@@ -268,6 +268,15 @@ fn emit_term(
                 fallthrough.ok_or_else(|| LowerError::Refused("jmpt fallthrough".into()))?;
             b.branch(cond, taken, not_taken)?;
         }
+        Some(IlOp::Return { ret_words, .. }) if *ret_words >= 2 => {
+            let hi = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("ret2 tag stack".into()))?;
+            let lo = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("ret2 payload stack".into()))?;
+            b.ret_pair(lo, hi)?;
+        }
         Some(IlOp::Return { .. }) | Some(IlOp::Halt { .. }) => {
             b.ret(tos.pop())?;
         }

@@ -263,11 +263,23 @@ impl MirBuilder {
     }
 
     pub fn ret(&mut self, value: Option<ValueId>) -> Result<(), MirError> {
-        let value = value.map(|v| self.resolve(v));
-        if let Some(v) = value {
+        let lo = value.map(|v| self.resolve(v));
+        if let Some(v) = lo {
             self.func.ret_ty = Some(self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(v)));
         }
-        self.set_term(Terminator::Return { value })
+        self.set_term(Terminator::Return { lo, hi: None })
+    }
+
+    pub fn ret_pair(&mut self, lo: ValueId, hi: ValueId) -> Result<(), MirError> {
+        let lo = self.resolve(lo);
+        let hi = self.resolve(hi);
+        self.func.ret_ty = Some(self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(lo)));
+        self.func.ret_hi_ty = Some(self.func.ret_hi_ty.unwrap_or_else(|| self.resolve_ty(hi)));
+        self.func.ret_layout = super::layout::MirLayout::TwoSlot;
+        self.set_term(Terminator::Return {
+            lo: Some(lo),
+            hi: Some(hi),
+        })
     }
 
     #[allow(dead_code)]

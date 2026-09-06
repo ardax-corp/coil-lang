@@ -311,8 +311,11 @@ pub enum Terminator {
         taken: BlockId,
         not_taken: BlockId,
     },
+    /// One-word `Value`/`HeapNiche` (`lo` only) or two-slot (`lo` = payload
+    /// or first product word, `hi` = tag / second word on top).
     Return {
-        value: Option<ValueId>,
+        lo: Option<ValueId>,
+        hi: Option<ValueId>,
     },
     Unreachable,
 }
@@ -331,7 +334,14 @@ impl Terminator {
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
             Self::Br { cond, .. } => *cond = map(*cond),
-            Self::Return { value: Some(v) } => *v = map(*v),
+            Self::Return { lo, hi } => {
+                if let Some(v) = lo {
+                    *v = map(*v);
+                }
+                if let Some(v) = hi {
+                    *v = map(*v);
+                }
+            }
             _ => {}
         }
     }
