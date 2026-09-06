@@ -49,10 +49,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 5 — append HostInvoke `math_atan` … `math_tanh` after `result_unit_probe`
 ///     (inverse trig, log10/log2/cbrt, rem, hyperbolic). Frozen math
 ///     **102–110** is unchanged.
+/// 6 — MIR dense numeric opcodes (`DenseBin` … `DenseCast`). Value ABI at
+///     CALL/RETURN edges; specialized float/i32 loops only.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 5;
+pub const ARCHIVE_MINOR: u16 = 6;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -337,7 +339,7 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 5);
+        assert_eq!(ARCHIVE_MINOR, 6);
         assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 5));
         assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.5");
     }
