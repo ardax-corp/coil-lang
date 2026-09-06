@@ -294,6 +294,25 @@ mod tests {
     }
 
     #[test]
+    fn const_nonzero_jmpt_becomes_goto() {
+        let mut ops = vec![
+            IlOp::Const { imm: 1, loc: loc() },
+            jmp(IlJumpKind::JumpIfTrue, 1),
+            IlOp::Const { imm: 9, loc: loc() },
+            IlOp::Label(Label(1)),
+        ];
+        assert!(instcombine(&mut ops) >= 1);
+        assert!(matches!(
+            ops[0],
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(1),
+                ..
+            }
+        ));
+    }
+
+    #[test]
     fn known_tag_dup_eq_folds_compare() {
         let mut ops = vec![
             IlOp::Const { imm: 0, loc: loc() },

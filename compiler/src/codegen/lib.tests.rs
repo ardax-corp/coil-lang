@@ -8403,3 +8403,190 @@ fn main() {
         );
     }
 
+    #[test]
+    fn local_cse_reuses_repeated_index() {
+        let (bc, _) = compile_src(
+            r#"
+fn recompute(int i) -> int {
+    let a = [10, 20, 30, 40];
+    let x = a[i];
+    return x + a[i] + a[i];
+}
+fn main() {
+    let n = 0;
+    while n < 1 {
+        n = n + 1;
+    }
+    return recompute(n + 1);
+}
+"#,
+        );
+        let indexes = bc
+            .iter()
+            .filter(|b| {
+                matches!(
+                    b.bytecode(),
+                    Instruction::Index
+                        | Instruction::IndexUnchecked
+                        | Instruction::IndexPin
+                        | Instruction::IndexPinUnchecked
+                )
+            })
+            .count();
+        assert!(
+            indexes <= 1,
+            "EarlyCSE should reuse stored a[i]; index ops={indexes}; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn instcombine_xor_one_twice_is_identity() {
+        let (bc, _) = compile_src(
+            r#"
+fn xor_twice(int x) -> int {
+    return (x ^ 1) ^ 1;
+}
+fn main() {
+    let n = 0;
+    while n < 1 {
+        n = n + 1;
+    }
+    return xor_twice(n);
+}
+"#,
+        );
+        let xors = bc
+            .iter()
+            .filter(|b| {
+                matches!(b.bytecode(), Instruction::XOR)
+                    || (*b.bytecode() == Instruction::BinSlotImm
+                        && b.bin_slot_imm_parts().0 == Instruction::XOR as u8)
+                    || (*b.bytecode() == Instruction::BinSlotSlot
+                        && b.bin_slot_slot_parts().0 == Instruction::XOR as u8)
+            })
+            .count();
+        assert_eq!(
+            xors,
+            0,
+            "XOR 1; XOR 1 should cancel; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn option_try_chain_skips_make_enum() {
+        let (bc, _) = compile_src(
+            r#"
+fn maybe(int n) -> Option<int> {
+    if n == 0 {
+        return Option::None;
+    }
+    return Option::Some(n);
+}
+fn pipe(int n) -> Option<int> {
+    let a = maybe(n)?;
+    return maybe(a)?;
+}
+fn main() {
+    let _ = pipe(2);
+}
+"#,
+        );
+        assert!(
+            !bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            "Option<int> `?` chain must stay two-slot; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ReturnPair | Instruction::PairToHeap | Instruction::JumpIfMatch
+            )),
+            "two-slot Option `?` uses tag JMP; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            two_slot_call_followed_by_tag_jump(&bc),
+            "Option `?` should branch on the tag; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn product_then_try_keeps_both_abis() {
+        let (bc, _) = compile_src(
+            r#"
+fn step(int n) -> Result<int, int> {
+    if n < 0 {
+        return Result::Err(n);
+    }
+    return Result::Ok(n);
+}
+fn coords(int n) -> (int, int) {
+    return (n, n + 1);
+}
+fn httpish(int n) -> Result<int, int> {
+    let x = step(n)?;
+    let (a, b) = coords(x);
+    let y = step(a + b)?;
+    return y;
+}
+fn main() {
+    let _ = httpish(4);
+}
+"#,
+        );
+        let two_slot_calls = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2)
+            .count();
+        assert!(
+            two_slot_calls >= 3,
+            "step/coords calls should stay two-slot; got {two_slot_calls}; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::MakeEnum | Instruction::MakeTuple
+            )),
+            "try+product convoy must not box; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
+    fn address_taken_product_uses_call_indirect() {
+        let (bc, _) = compile_src(
+            r#"
+fn pair(int i) -> (int, int) {
+    return (i, i + 1);
+}
+fn main() {
+    let f = pair;
+    let (a, b) = f(4);
+    return a + b;
+}
+"#,
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::CallIndirect)),
+            "address-of pair must CallIndirect; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc.iter().any(|b| {
+                matches!(b.bytecode(), Instruction::CALL) && b.call_ret_words() == 2
+            }),
+            "escaped product must not keep two-slot CALL; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
