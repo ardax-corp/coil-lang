@@ -1,24 +1,28 @@
-//! Numeric MIR (COI-267 P0): type lattice + SSA builder.
-#![cfg_attr(not(test), allow(dead_code))]
+//! Numeric MIR: type lattice + SSA builder (P0) and dense emit (P1 / COI-268).
 //!
-//! Production still emits stack IL and fuse-selects into bytecode. This module
-//! is a typed SSA sidecar for later dense exec (P1) and opt moves (P2). Classes
-//! / heap / GC stay on the existing [`crate::il`] `Value` path.
+//! Specialized numeric loops lower to dense 3-address opcodes. CALL/RETURN
+//! keep the existing `Value` word ABI. Classes / heap stay on [`crate::il`].
+#![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod builder;
+mod emit;
 mod func;
+mod infer;
 mod inst;
 mod lower;
+mod specialize;
 mod text;
 mod ty;
 
 pub use builder::{MirBuilder, MirError};
+pub use emit::emit_dense;
 pub use func::{MirBlock, MirFunc};
 pub use inst::{
     BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
     ValueId,
 };
 pub use lower::{LowerError, LowerHints, try_lower_numeric};
+pub use specialize::try_specialize_body;
 pub use text::{ParseError, parse_func};
 pub use ty::MirTy;
 
@@ -109,6 +113,69 @@ mod tests {
             LowerError,
             ParseError,
         )>();
+    }
+
+    #[test]
+    fn pipeline_specializes_float_mul_loop() {
+        let src = r#"
+fn escape(float cr, float ci, int max_iter) -> int {
+    let zr = 0.0;
+    let zi = 0.0;
+    let iter = 0;
+    while iter < max_iter {
+        let zr2 = zr * zr;
+        let zi2 = zi * zi;
+        if zr2 + zi2 > 4.0 {
+            break;
+        }
+        let tr = zr2 - zi2 + cr;
+        zi = 2.0 * zr * zi + ci;
+        zr = tr;
+        iter = iter + 1;
+    }
+    return iter;
+}
+fn main() {
+    let _ = escape(0.0, 0.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile dense kernel");
+        assert!(
+            bc.iter()
+                .any(|b| *b.bytecode() == Instruction::DenseBin),
+            "expected DenseBin in specialized float kernel"
+        );
+        assert!(
+            bc.iter()
+                .any(|b| *b.bytecode() == Instruction::DenseCmp),
+            "expected DenseCmp in specialized float kernel"
+        );
+    }
+
+    #[test]
+    fn pipeline_leaves_int_loop_on_stack_il() {
+        let src = r#"
+fn sum(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = sum(10);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile int loop");
+        assert!(
+            !bc.iter()
+                .any(|b| *b.bytecode() == Instruction::DenseBin),
+            "int-only loops stay on fuse-IL"
+        );
     }
 
     #[test]
@@ -347,6 +414,15 @@ mod tests {
         hints.pool_ty = vec![Some(MirTy::F64), Some(MirTy::F64)];
         let f = try_lower_numeric(&ops, &hints).expect("lower mandel-like IL");
         f.verify().unwrap();
+        let mut pool = hints.pool.clone();
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool).expect("emit");
+        assert!(
+            dense.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin
+            )),
+            "dense emit must use DenseBin"
+        );
         assert!(f.blocks.iter().any(|bl| {
             bl.insts.iter().any(|i| {
                 matches!(

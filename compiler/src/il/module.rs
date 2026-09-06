@@ -232,6 +232,15 @@ impl IlModule {
             .saturating_add(1);
 
         for body in &mut self.funcs {
+            if let Some(dense) = crate::mir::try_specialize_body(
+                &body.ops,
+                &body.meta.name,
+                body.meta.entry_sp,
+                pool,
+            ) {
+                body.ops = dense;
+                continue;
+            }
             opt::optimize_at_with_labels(
                 &mut body.ops,
                 &per,
