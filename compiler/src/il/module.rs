@@ -257,6 +257,13 @@ impl IlModule {
                 pool,
             ) {
                 body.ops = dense;
+            } else if let Some(lir) = crate::mir::try_lower_abi_body(
+                &body.ops,
+                &body.meta.name,
+                body.meta.entry_sp,
+                pool,
+            ) {
+                body.ops = lir;
             }
         }
 

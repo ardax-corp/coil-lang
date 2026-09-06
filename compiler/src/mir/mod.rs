@@ -1,15 +1,19 @@
-//! Numeric MIR: type lattice + SSA builder (P0) and dense emit (P1 / COI-268).
+//! Numeric MIR: type lattice + SSA builder (P0), dense emit (P1), CSE (P2),
+//! and Result/Option MIR→LIR (P3 / COI-270).
 //!
-//! Specialized numeric loops lower to dense 3-address opcodes. CALL/RETURN
-//! keep the existing `Value` word ABI. Classes / heap stay on [`crate::il`].
+//! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
+//! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
+//! keep the shipped Value / two-slot ABI. Classes / heap stay on [`crate::il`].
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod builder;
 mod cse;
 mod emit;
+mod emit_lir;
 mod func;
 mod infer;
 mod inst;
+mod layout;
 mod lower;
 mod specialize;
 mod text;
@@ -18,13 +22,15 @@ mod ty;
 pub use builder::{MirBuilder, MirError};
 pub use cse::cse;
 pub use emit::emit_dense;
+pub use emit_lir::emit_lir;
 pub use func::{MirBlock, MirFunc};
 pub use inst::{
     BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
     ValueId,
 };
+pub use layout::MirLayout;
 pub use lower::{LowerError, LowerHints, try_lower_numeric};
-pub use specialize::try_specialize_body;
+pub use specialize::{try_lower_abi_body, try_specialize_body};
 pub use text::{ParseError, parse_func};
 pub use ty::MirTy;
 
@@ -513,5 +519,170 @@ fn main() {
                 )
             })
         }));
+    }
+
+    fn two_slot_il(loc: DebugLoc) -> Vec<IlOp> {
+        vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load {
+                slot: 1,
+                loc,
+            },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Bin {
+                op: Instruction::EQ,
+                loc,
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Const { imm: -1, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Return {
+                loc,
+                ret_words: 2,
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Load {
+                slot: 0,
+                loc,
+            },
+            IlOp::Load {
+                slot: 1,
+                loc,
+            },
+            IlOp::Bin {
+                op: Instruction::DIV,
+                loc,
+            },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return {
+                loc,
+                ret_words: 2,
+            },
+        ]
+    }
+
+    #[test]
+    fn two_slot_result_lowers_to_lir() {
+        let loc = loc();
+        let ops = two_slot_il(loc);
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "checked_div", 2, &mut pool).expect("abi leaf");
+        assert!(
+            lir.iter().any(|op| matches!(op, IlOp::Return { ret_words: 2, .. })),
+            "LIR must keep two-slot RETURN"
+        );
+        assert!(
+            !lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if matches!(
+                    *byte.bytecode(),
+                    Instruction::DenseBin | Instruction::MakeEnum
+                )
+            )),
+            "P3 must not emit dense or MakeEnum"
+        );
+        let mut hints = LowerHints::new("checked_div");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.slot_ty.insert(1, MirTy::I64);
+        hints.param_count = 2;
+        let f = try_lower_numeric(&ops, &hints).expect("lower ret2");
+        f.verify().unwrap();
+        assert_eq!(f.ret_layout, MirLayout::TwoSlot);
+        assert!(
+            f.blocks.iter().any(|b| matches!(
+                b.term,
+                Some(Terminator::Return {
+                    lo: Some(_),
+                    hi: Some(_),
+                })
+            )),
+            "SSA return is a pair"
+        );
+        let text = f.to_string();
+        assert!(text.contains("return "), "{text}");
+        let g = parse_func(&text).expect(&text);
+        g.verify().unwrap();
+        assert_eq!(g.ret_layout, MirLayout::TwoSlot);
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+    }
+
+    #[test]
+    fn niche_word_is_one_value_lir() {
+        // Err = ptr | 1; one-word heap-heap Result (no pair opcode).
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::BITOR,
+                loc,
+            },
+            IlOp::Return {
+                loc,
+                ret_words: 1,
+            },
+        ];
+        let mut hints = LowerHints::new("niche_err");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        let f = try_lower_numeric(&ops, &hints).expect("lower niche word");
+        f.verify().unwrap();
+        assert_eq!(f.ret_layout, MirLayout::Word);
+        let mut pool = Vec::new();
+        let lir = emit_lir(&f, Some(Label(0)), &mut pool).expect("emit niche");
+        assert!(lir.iter().any(|op| matches!(op, IlOp::Return { ret_words: 1, .. })));
+        assert!(lir.iter().any(|op| matches!(
+            op,
+            IlOp::BinSlotSlot { op, .. } if common::Instruction::from(*op) == Instruction::BITOR
+        )));
+    }
+
+    #[test]
+    fn pipeline_result_int_stays_two_slot() {
+        let src = r#"
+fn checked_div(int a, int b) -> Result<int, int> {
+    if b == 0 {
+        return Result::Err(-1);
+    }
+    return Result::Ok(a / b);
+}
+fn main() {
+    let ok = match checked_div(6, 3) {
+        Result::Ok(q) => q,
+        Result::Err(e) => e,
+    };
+    let err = match checked_div(1, 0) {
+        Result::Ok(q) => q,
+        Result::Err(e) => e,
+    };
+    let _ = ok + err;
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile result helper");
+        assert!(
+            !bc.iter()
+                .any(|b| *b.bytecode() == Instruction::MakeEnum),
+            "two-slot Result must not box; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::CALL
+                && b.call_ret_words() >= 2),
+            "direct CALL must stay two-slot"
+        );
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::RETURN
+                && b.operand_u32() == 2),
+            "RETURN width 2"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 }
