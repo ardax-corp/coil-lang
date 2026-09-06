@@ -10,10 +10,16 @@ This is not [COI-99](https://linear.app/ardax/issue/COI-99) (which helpers may
 appear in a length-invariant loop). Named-local class SROA stays a non-goal
 ([COI-84](https://linear.app/ardax/issue/COI-84)). No JIT.
 
-## Already on main (archive minor 13)
+## Already on main (pin opcodes)
 
-`ARCHIVE_MINOR` is 14 (leftover TLS and virtual crypto HostInvoke slots dropped). Minor 13 added `ArrayPin` / `IndexPin*` / `StoreIndexPin*`. Minor 12 added `IndexUnchecked` / `StoreIndexUnchecked`.
-Minor 13 appended, at the end of `Instruction`:
+Current archive is **major 4 / minor 5** (minor 5 = M1 `prelude::math`
+HostInvoke **125–135**). Pin opcodes shipped before the major-4 reset
+(historical minors 12–13) and remain in the opcode enum. Do not read
+`ARCHIVE_MINOR` as 14 — that number was the pre-reset TLS/crypto hole collapse.
+Minor 13 added `ArrayPin` / `IndexPin*` / `StoreIndexPin*`. Minor 12 added
+`IndexUnchecked` / `StoreIndexUnchecked`.
+
+Pin opcodes, at the end of `Instruction` when they landed:
 
 | Opcode | Stack | Operand |
 |--------|-------|---------|

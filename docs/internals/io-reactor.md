@@ -95,7 +95,7 @@ handshake on a blocking `.so` thread. Stream close and GC send shutdown when
 the fd is still usable, then Drop frees. If the fd is already gone, free-only
 is OK (best-effort close_notify).
 
-## HostInvoke ids (attach / park / clock)
+## HostInvoke ids (attach / park / clock / math)
 
 | Native | HostInvoke id | Language |
 |--------|---------------|----------|
@@ -104,13 +104,23 @@ is OK (best-effort close_notify).
 | `clock_wall_nanos` | **121** | `clock::wall_nanos` (unix UTC nanos) |
 | `clock_mono_nanos` | **122** | `clock::mono_nanos` (process Instant snapshot) |
 | `clock_sleep_ms` | **123** | `clock::sleep_ms` (real thread sleep) |
+| `result_unit_probe` | **124** | host `Result<(), E>` probe |
+| `math_atan` … `math_tanh` | **125–135** | M1 `prelude::math` (see below) |
 
 119/120 are live package-IO natives, not reserved TLS/crypto/regex panic stubs.
 121–123 are process clocks (`use clock::{…}`); Instant is a Coil `int` of
-`mono_nanos`, not a host HashMap. Leftover TLS (`tls_client_enable` …
-`tls_alpn_protocol`) and virtual crypto slots were **dropped** (archive minor
-14); holes collapsed. Regex slots were dropped earlier (minor 11). Do not treat
+`mono_nanos`, not a host HashMap. Current archive is **major 4 / minor 5**
+(minor 5 = M1 math append). TLS (`tls_client_enable` … `tls_alpn_protocol`)
+and virtual crypto slots were dropped before the major-4 reset (historical
+minor 14); holes collapsed. Regex slots dropped earlier. Do not treat
 COI-37 / COI-209 / COI-215 stub reservations as live for these ids.
+
+M1 math (**125–135**, archive minor 5): `atan`, `atan2`, `asin`, `acos`,
+`log10`, `log2`, `cbrt`, `rem`, `sinh`, `cosh`, `tanh`. Frozen `sin` … `pow`
+stay **102–110**. Named `PI` / `E` / `TAU` live on coil-stdlib
+[`num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md)
+(`static const`, not HostInvoke). Package process/WebSocket/collections APIs
+belong in those package READMEs — this page only names host ids the VM owns.
 
 Virtual-time names still occupy panic stubs earlier in the table so the time
 block does not slide. Source of truth: `machine/src/host_natives.rs`.
