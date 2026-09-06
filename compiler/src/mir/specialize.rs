@@ -13,6 +13,11 @@ pub fn try_specialize_body(
     entry_sp: u32,
     pool: &mut Vec<u64>,
 ) -> Option<Vec<IlOp>> {
+    // Nested loops stay on fuse-IL (flagship mandelbrot). One back-edge
+    // header is the dense kernel (hit-bench `escape`).
+    if loop_header_count(ops) != 1 {
+        return None;
+    }
     let inferred = infer_numeric(ops, pool.len(), entry_sp).ok()?;
     if !inferred.has_fmul && !inferred.has_i32 {
         return None;
@@ -28,4 +33,27 @@ pub fn try_specialize_body(
         _ => None,
     });
     emit_dense(&func, entry, pool).ok()
+}
+
+fn loop_header_count(ops: &[IlOp]) -> usize {
+    use std::collections::{HashMap, HashSet};
+    use crate::il::Label;
+    let mut seen = HashMap::new();
+    let mut headers = HashSet::new();
+    for (i, op) in ops.iter().enumerate() {
+        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
+            seen.entry(*id).or_insert(i);
+        }
+        if let IlOp::Jump {
+            target: Label(id), ..
+        } = op
+        {
+            if let Some(&at) = seen.get(id) {
+                if at < i {
+                    headers.insert(*id);
+                }
+            }
+        }
+    }
+    headers.len()
 }

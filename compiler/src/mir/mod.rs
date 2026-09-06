@@ -147,9 +147,44 @@ fn main() {
             "expected DenseBin in specialized float kernel"
         );
         assert!(
-            bc.iter()
-                .any(|b| *b.bytecode() == Instruction::DenseCmp),
-            "expected DenseCmp in specialized float kernel"
+            bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::DenseCmp
+                    | Instruction::BinSlotSlotJmpf
+                    | Instruction::BinSlotSlotJmpt
+                    | Instruction::BinSlotImmJmpf
+                    | Instruction::BinSlotImmJmpt
+            )),
+            "expected fused slot compare-jump at dense kernel edges"
+        );
+    }
+
+    #[test]
+    fn pipeline_leaves_nested_loops_on_stack_il() {
+        let src = r#"
+fn nest(int n) -> float {
+    let s = 0.0;
+    let i = 0;
+    while i < n {
+        let j = 0;
+        while j < n {
+            s = s + (i as float) * (j as float);
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = nest(3);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile nested");
+        assert!(
+            !bc.iter()
+                .any(|b| *b.bytecode() == Instruction::DenseBin),
+            "nested loops stay on fuse-IL"
         );
     }
 
