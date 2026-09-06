@@ -5,6 +5,7 @@ pub mod clock;
 #[cfg(any(test, feature = "debugger"))]
 pub mod debug;
 pub mod env;
+mod dense;
 mod fused;
 mod ffi;
 pub mod fs;
