@@ -25,7 +25,7 @@ The stack IL is **instruction lowering**, not a semantic IR:
 2. **Opt** — passes rewrite that same stream in place (contracts in [`il/opt/README.md`](../../compiler/src/il/opt/README.md)).
 3. **Lower** — one `il::lower`: **fuse-select**, **assign PCs once**, encode `Vec<Byte>`. Production rejects residual absolute JMP; there is no post-lower peephole / `adjust_target` hot path.
 
-Names, types, and call meaning live in **DefIds** and the **typed sidecar** (B1–B3). Stack IL does not become a semantic IR. An optional numeric SSA sidecar ([`compiler/src/mir/`](../../compiler/src/mir/), [mir.md](mir.md), COI-267) can represent `i32`/`i64`/`f32`/`f64`/`bool` loops; fuse-select still lowers IL to bytecode. Classes / heap stay on the VM `Value` path. Dense MIR exec is P1.
+Names, types, and call meaning live in **DefIds** and the **typed sidecar** (B1–B3). Stack IL does not become a semantic IR. An optional numeric SSA sidecar ([`compiler/src/mir/`](../../compiler/src/mir/), [mir.md](mir.md), COI-267/268) can represent `i32`/`i64`/`f32`/`f64`/`bool` loops. Eligible leaf float-mul / i32 loops emit dense 3-address opcodes (`DenseBin` … `DenseCast`) with the `Value` word ABI only at CALL/RETURN; other functions still fuse-select stack IL. Classes / heap stay on the VM `Value` path.
 
 **Optional later** (not this cut): stop storing `Instruction` inside `IlOp::Bin`; drop `JumpIfMatch.arity` from the jump kind if tell/DCE can take stack effect from elsewhere (lower already encodes tag + target only); make `IlOp::Const` encoding-independent (value first, inline vs pool at lower); lift remaining `IlOp::Byte` or keep documenting the **cold set** (`FORMAT`, FFI, packed multi-slot `LOAD`/`STORE`, and anything `from_plain_byte` still leaves as `Byte`).
 
@@ -53,7 +53,7 @@ Iterative optimization (COI-130) is **off** by default (`iterative_optimization`
 
 Optimization statistics (COI-131) are **off** by default (`collect_stats` / CLI `--opt-stats` and `--opt-stats-json`). When enabled, each named IL pass records ops added/removed, load/store eliminations, unrolls, branch layouts, and block moves; tiny-inline sites increment `functions_inlined`. Human text or a single JSON object is printed to stderr after a source compile. Collection clones the op buffer only while the flag is on.
 
-The IL is **compile-time only**. Current archive is **major 4 / minor 5**: minor 5 appends HostInvoke `math_atan` … `math_tanh` (**125–135**) after `result_unit_probe` (**124**). Frozen `math_sin` … `math_pow` stay **102–110**. Named float constants `PI` / `E` / `TAU` are userland [`num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md) in coil-stdlib, not HostInvoke. If an IL opt is sound but flagship `.hyc` do not change, prove it on focused `examples/perf` hit benches ([roadmap](optimization-roadmap.md#hit-bench-prove-rule)).
+The IL is **compile-time only**. Current archive is **major 4 / minor 6**: minor 6 appends MIR dense numeric opcodes; minor 5 appends HostInvoke `math_atan` … `math_tanh` (**125–135**) after `result_unit_probe` (**124**). Frozen `math_sin` … `math_pow` stay **102–110**. Named float constants `PI` / `E` / `TAU` are userland [`num`](https://github.com/ardax-corp/coil-stdlib/blob/main/docs/modules.md) in coil-stdlib, not HostInvoke. If an IL opt is sound but flagship `.hyc` do not change, prove it on focused `examples/perf` hit benches ([roadmap](optimization-roadmap.md#hit-bench-prove-rule)).
 
 ## Archives (`out.hyc`)
 

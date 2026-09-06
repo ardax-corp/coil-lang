@@ -75,7 +75,7 @@ Prefer over new opcodes / IL opts:
 
 Soft baseline: `./scripts/poop_baseline.sh` (compile once, then `coil run` archives under `examples/perf/`). Hit-bench prove rule: [optimization-roadmap.md](../../../docs/internals/optimization-roadmap.md#hit-bench-prove-rule). PGO was removed ([#301](https://github.com/ardax-corp/coil-lang/pull/301)). See AGENTS.md user preferences.
 
-Current archive: **major 4 / minor 5** (`common/src/archive.rs`) — minor 5 is M1 math HostInvoke **125–135**.
+Current archive: **major 4 / minor 6** (`common/src/archive.rs`) — minor 6 is MIR dense numeric opcodes; minor 5 is M1 math HostInvoke **125–135**.
 
 | Tree | When to update |
 |------|----------------|

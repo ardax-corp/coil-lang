@@ -24,6 +24,10 @@ User code does not name these directly; the compiler emits them:
 | `InitTyped` | Allocate a class instance. Operand `[31:16] field_count`, `[15:0] type_id`. Non-zero field count pre-sizes dense slots; `INIT` remains for untyped bags / old archives. Typed field get/set uses `LoadField` / indexed `SetField` (bit 31). |
 | `CALL` (bit 31) | Two-slot return width. Bit 31 set (`Byte::CALL_RET2_BIT`) means the callee leaves two words instead of one boxed word; arity moves to `[30:24]` (0..=127) to make room. Enums use `[payload, tag]`; arity-2 immediate products use `[a, b]` (second on top). Clear (old archives, or any `with_call_packed` caller) means one word — no archive bump. See [limitations.md](limitations.md) two-slot direct CALL/RETURN. |
 | `RETURN` (operand) | `0` (default; old archives) is one word. `2` pops/pushes two words (second on top) instead of one value. |
+| `DenseBin` / `DenseCmp` | MIR 3-address numeric op / compare. Operand `[31:24] kind`, `[23:16] dest`, `[15:8] lhs`, `[7:0] rhs`. Stack-neutral; writes a typed frame slot. Archive **minor 6**. |
+| `DenseConst` | Typed slot const. Bit 31 = pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm or pool index. |
+| `DenseMove` | Copy slot to slot (`[15:8]` dest, `[7:0]` src). Used for φ edge copies. |
+| `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). |
 
 ---
 
