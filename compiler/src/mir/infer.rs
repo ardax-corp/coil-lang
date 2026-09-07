@@ -27,7 +27,8 @@ pub struct Inferred {
     pub slot_ty: HashMap<u32, MirTy>,
     pub pool_ty: Vec<Option<MirTy>>,
     pub has_i32: bool,
-    pub has_fmul: bool,
+    /// Float `+` / `-` / `*` / `/` (or float `INC`/`DEC`). Compare-only is false.
+    pub has_float_arith: bool,
 }
 
 pub fn infer_numeric(
@@ -65,9 +66,8 @@ fn infer_walk(
     let mut slot_ty: HashMap<u32, MirTy> = HashMap::new();
     let mut pool_ty = vec![None; pool_len];
     let mut stack: Vec<Cell> = Vec::new();
-    let mut has_float = false;
     let mut has_i32 = false;
-    let mut has_fmul = false;
+    let mut has_float_arith = false;
 
     for op in ops {
         match op {
@@ -121,22 +121,18 @@ fn infer_walk(
                     &mut slot_ty,
                     &mut pool_ty,
                     *inst,
-                    &mut has_float,
                     &mut has_i32,
-                    &mut has_fmul,
+                    &mut has_float_arith,
                 )?;
             }
             IlOp::BinSlotImm { op, slot, .. } => {
                 let inst = Instruction::from(*op);
                 let ty = operand_ty(inst);
-                if ty.is_float() {
-                    has_float = true;
-                }
                 if ty == MirTy::I32 {
                     has_i32 = true;
                 }
-                if matches!(inst, Instruction::MULF | Instruction::DIVF) {
-                    has_fmul = true;
+                if is_float_arith(inst) {
+                    has_float_arith = true;
                 }
                 set_slot(&mut slot_ty, u32::from(*slot), ty)?;
                 stack.push(Cell {
@@ -147,14 +143,11 @@ fn infer_walk(
             IlOp::BinSlotSlot { op, a, b, .. } => {
                 let inst = Instruction::from(*op);
                 let ty = operand_ty(inst);
-                if ty.is_float() {
-                    has_float = true;
-                }
                 if ty == MirTy::I32 {
                     has_i32 = true;
                 }
-                if matches!(inst, Instruction::MULF | Instruction::DIVF) {
-                    has_fmul = true;
+                if is_float_arith(inst) {
+                    has_float_arith = true;
                 }
                 set_slot(&mut slot_ty, u32::from(*a), ty)?;
                 set_slot(&mut slot_ty, u32::from(*b), ty)?;
@@ -173,7 +166,6 @@ fn infer_walk(
                         origin: Origin::Tmp,
                         ty: Some(MirTy::F64),
                     });
-                    has_float = true;
                 }
                 Instruction::NEGF => {
                     let c = stack
@@ -184,7 +176,6 @@ fn infer_walk(
                         origin: Origin::Tmp,
                         ty: Some(MirTy::F64),
                     });
-                    has_float = true;
                 }
                 Instruction::NEG => {
                     let c = stack
@@ -210,7 +201,7 @@ fn infer_walk(
                     let (slot, _, is_float) = byte.inc_dec_parts();
                     let ty = if is_float { MirTy::F64 } else { MirTy::I64 };
                     if is_float {
-                        has_float = true;
+                        has_float_arith = true;
                     }
                     set_slot(&mut slot_ty, slot as u32, ty)?;
                 }
@@ -227,7 +218,10 @@ fn infer_walk(
                 return Err(LowerError::Refused("multi-word return".into()));
             }
             _ => {
-                return Err(LowerError::Refused("non-numeric IL".into()));
+                return Err(LowerError::Refused(format!(
+                    "non-numeric IL ({})",
+                    refuse_il_kind(op)
+                )));
             }
         }
     }
@@ -303,16 +297,16 @@ fn infer_walk(
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
-    if mode == InferMode::Dense && !has_fmul && !has_i32 {
+    if mode == InferMode::Dense && !has_float_arith && !has_i32 {
         return Err(LowerError::Refused(
-            "need float mul/div or i32 (add-only stays on fuse-IL)".into(),
+            "need float + - * / or i32 (i64-only stays on fuse-IL)".into(),
         ));
     }
     Ok(Inferred {
         slot_ty,
         pool_ty,
         has_i32,
-        has_fmul,
+        has_float_arith,
     })
 }
 
@@ -358,6 +352,40 @@ fn is_float_inst(inst: Instruction) -> bool {
     )
 }
 
+fn is_float_arith(inst: Instruction) -> bool {
+    matches!(
+        inst,
+        Instruction::ADDF | Instruction::SUBF | Instruction::MULF | Instruction::DIVF
+    )
+}
+
+/// Coarse first-op kind for the infer catch-all (W0 inventory).
+fn refuse_il_kind(op: &IlOp) -> &'static str {
+    match op {
+        IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => "CALL",
+        IlOp::HostInvoke { .. } => "HostInvoke",
+        IlOp::Index { .. }
+        | IlOp::IndexUnchecked { .. }
+        | IlOp::IndexPin { .. }
+        | IlOp::IndexPinUnchecked { .. }
+        | IlOp::StoreIndexPin { .. }
+        | IlOp::StoreIndexPinUnchecked { .. }
+        | IlOp::ArrayPin { .. } => "heap/index",
+        IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => "class/field",
+        IlOp::MakeEnum { .. } | IlOp::MakeTuple { .. } | IlOp::MakeArray { .. } => "heap/aggregate",
+        IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => "box",
+        IlOp::String { .. } | IlOp::Print { .. } => "string/io",
+        IlOp::LoadReturnSlot { .. } | IlOp::ConstReturnImm { .. } | IlOp::BinReturn { .. } => {
+            "fused-return"
+        }
+        IlOp::Jump {
+            kind: crate::il::IlJumpKind::JumpIfMatch { .. },
+            ..
+        } => "match",
+        _ => "other",
+    }
+}
+
 fn is_cmp(inst: Instruction) -> bool {
     matches!(
         inst,
@@ -379,9 +407,8 @@ fn apply_bin(
     slot_ty: &mut HashMap<u32, MirTy>,
     pool_ty: &mut [Option<MirTy>],
     inst: Instruction,
-    has_float: &mut bool,
     has_i32: &mut bool,
-    has_fmul: &mut bool,
+    has_float_arith: &mut bool,
 ) -> Result<(), LowerError> {
     let rhs = stack
         .pop()
@@ -394,14 +421,11 @@ fn apply_bin(
         return Err(LowerError::Refused(format!("binop {}", inst.mnemonic())));
     }
     let ty = operand_ty(inst);
-    if ty.is_float() {
-        *has_float = true;
-    }
     if ty == MirTy::I32 {
         *has_i32 = true;
     }
-    if matches!(inst, Instruction::MULF | Instruction::DIVF) {
-        *has_fmul = true;
+    if is_float_arith(inst) {
+        *has_float_arith = true;
     }
     paint(slot_ty, pool_ty, lhs, ty)?;
     paint(slot_ty, pool_ty, rhs, ty)?;
