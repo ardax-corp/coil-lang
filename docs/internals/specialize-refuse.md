@@ -7,21 +7,25 @@
 There is no in-repo stdlib hot path (collections / HTTP live in other repos).
 This table is `examples/perf/` plus a few numeric demos.
 
-## Gates (after W1)
+## Gates (after W2)
 
 | # | Refuse | Typical IL | Next cut |
 |---|--------|------------|----------|
 | 1 | No back-edge | straight-line kernel (`eval_a`) | W3 (optional, cost-gated) |
-| 2 | Need float `+`/`-`/`*`/`/` or `i32` | i64-only counted loops; float compare-only | W2 (i64 counted) |
+| 2 | Need float or i64 arith (or `i32`) | float compare-only | stay fuse-IL |
 | 3 | Non-numeric IL | `CALL` / `HostInvoke` / heap index / class field / match / string | W4 (limited inward edges) |
 | 4 | Multi-word `RETURN` | two-slot Option/Result | P3 LIR (already on) |
 | 5 | Residual `Byte` / `Pow` / `AND`/`OR` | `operators_loop` | stay fuse-IL |
 
-`has_i32` is effectively unused: language `int` is `i64`, and infer paints
-integer bins as `I64`. Integer loops therefore hit gate 2 today (W2).
+**W2 safety (counted i64):** infer already requires a back-edge. The body must
+be numeric IL (no `CALL` / heap index / class / match / string / multi-word
+`RETURN` / residual `Byte` / `Pow` / `AND`/`OR`). Qualifying arith is i64
+`+`/`-`/`*`/`/`/`%` or int `INC`/`DEC` — compare-only still refuses. Nested /
+multi-header loops are eligible, same as float. `has_i32` stays in the gate
+but language `int` is `i64`, so infer still paints integer bins as `I64`.
 
-`DIVF` already set the old `has_fmul` flag; W1 widens that flag to `ADDF` /
-`SUBF` / `MULF` / `DIVF` (and float `INC`/`DEC`).
+W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
+`MULF` / `DIVF` (and float `INC`/`DEC`).
 
 ## `examples/perf` bodies
 
@@ -38,9 +42,10 @@ integer bins as `I64`. Integer loops therefore hit gate 2 today (W2).
 | `hot` | `mir_iv_sr.hy` | dense | `*` — P9 |
 | `hot` | `mir_float_pipeline.hy` | dense | `*` `/` — P11 |
 | `pack` | `mir_simd_axpy.hy` | HostInvoke 136 | P12 (eligible, then pack) |
-| `main` | `numeric.hy` | fuse-IL | i64 add — **W2** |
-| `iv_mul` | `iv_mul_sr.hy` | fuse-IL | i64 mul — **W2** |
-| `nested` | `licm_nested_chains.hy` | fuse-IL | i64 add — **W2** |
+| `hot` | `mir_dense_i64.hy` | dense | i64 +/− counted — **W2** |
+| `main` | `numeric.hy` | dense | i64 add — **W2** (side effect) |
+| `iv_mul` | `iv_mul_sr.hy` | dense | i64 mul — **W2** (side effect) |
+| `nested` | `licm_nested_chains.hy` | dense | i64 add — **W2** (side effect) |
 | `eval_a` | `nbody.hy` | fuse-IL | no back-edge — W3 |
 | `times_a` / `times_at` | `nbody.hy` | fuse-IL | `CALL` + heap/index — W4 |
 | `sum` | `indexed_sum.hy` | fuse-IL | heap/index |
@@ -54,13 +59,12 @@ integer bins as `I64`. Integer loops therefore hit gate 2 today (W2).
 | `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | heap / match / two-slot — P3 |
 | `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host |
 
-Intentional fuse-IL hit benches (`numeric`, `iv_mul_sr`, `licm_nested_chains`,
-stack-IL `cse_*`, `dest_prop_field_alias`) stay off dense: they are i64 or
-heap, not float add-only. W1 does not flip them.
+Stack-IL `cse_*` / `dest_prop_field_alias` stay fuse-IL (heap / field). W2
+does not rewrite those sources; `numeric` / `iv_mul_sr` / `licm_nested_chains`
+now meet the counted-i64 gate and emit dense. The prove bench is
+`mir_dense_i64.hy`.
 
-## W2 / W3 / W4 (not this PR)
+## W3 / W4 (not this PR)
 
-- **W2** — drop the i32 quirk so safe i64 counted loops specialize (`numeric`,
-  `iv_mul_sr`, `licm_nested_chains`). Separate kick.
 - **W3** — cost-gated straight-line numeric (`eval_a`). Only if demand.
 - **W4** — inward `CALL` to known numeric leafs (`times_a` → `eval_a`). Later.

@@ -1,4 +1,10 @@
 //! Infer specialized slot types from pre-fuse IL (refuse heap / Value).
+//!
+//! Dense eligibility (W2): a back-edge plus float `+/−/×/÷`, i64 `+/−/×/÷/%`
+//! (or int `INC`/`DEC`), or unused `has_i32`. Infer already refuses CALL /
+//! HostInvoke / heap index / class field / match / string / multi-word
+//! `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. Compare-only and
+//! straight-line kernels stay fuse-IL (W3).
 
 use std::collections::HashMap;
 
@@ -29,6 +35,8 @@ pub struct Inferred {
     pub has_i32: bool,
     /// Float `+` / `-` / `*` / `/` (or float `INC`/`DEC`). Compare-only is false.
     pub has_float_arith: bool,
+    /// Integer `+` / `-` / `*` / `/` / `%` (or int `INC`/`DEC`). Compare-only is false.
+    pub has_i64_arith: bool,
 }
 
 pub fn infer_numeric(
@@ -68,6 +76,7 @@ fn infer_walk(
     let mut stack: Vec<Cell> = Vec::new();
     let mut has_i32 = false;
     let mut has_float_arith = false;
+    let mut has_i64_arith = false;
 
     for op in ops {
         match op {
@@ -123,6 +132,7 @@ fn infer_walk(
                     *inst,
                     &mut has_i32,
                     &mut has_float_arith,
+                    &mut has_i64_arith,
                 )?;
             }
             IlOp::BinSlotImm { op, slot, .. } => {
@@ -133,6 +143,9 @@ fn infer_walk(
                 }
                 if is_float_arith(inst) {
                     has_float_arith = true;
+                }
+                if is_int_arith(inst) {
+                    has_i64_arith = true;
                 }
                 set_slot(&mut slot_ty, u32::from(*slot), ty)?;
                 stack.push(Cell {
@@ -148,6 +161,9 @@ fn infer_walk(
                 }
                 if is_float_arith(inst) {
                     has_float_arith = true;
+                }
+                if is_int_arith(inst) {
+                    has_i64_arith = true;
                 }
                 set_slot(&mut slot_ty, u32::from(*a), ty)?;
                 set_slot(&mut slot_ty, u32::from(*b), ty)?;
@@ -202,6 +218,8 @@ fn infer_walk(
                     let ty = if is_float { MirTy::F64 } else { MirTy::I64 };
                     if is_float {
                         has_float_arith = true;
+                    } else {
+                        has_i64_arith = true;
                     }
                     set_slot(&mut slot_ty, slot as u32, ty)?;
                 }
@@ -297,9 +315,9 @@ fn infer_walk(
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
-    if mode == InferMode::Dense && !has_float_arith && !has_i32 {
+    if mode == InferMode::Dense && !has_float_arith && !has_i32 && !has_i64_arith {
         return Err(LowerError::Refused(
-            "need float + - * / or i32 (i64-only stays on fuse-IL)".into(),
+            "need float + - * / , i64 + - * / % , or i32 (compare-only stays on fuse-IL)".into(),
         ));
     }
     Ok(Inferred {
@@ -307,6 +325,7 @@ fn infer_walk(
         pool_ty,
         has_i32,
         has_float_arith,
+        has_i64_arith,
     })
 }
 
@@ -356,6 +375,17 @@ fn is_float_arith(inst: Instruction) -> bool {
     matches!(
         inst,
         Instruction::ADDF | Instruction::SUBF | Instruction::MULF | Instruction::DIVF
+    )
+}
+
+fn is_int_arith(inst: Instruction) -> bool {
+    matches!(
+        inst,
+        Instruction::ADD
+            | Instruction::SUB
+            | Instruction::MUL
+            | Instruction::DIV
+            | Instruction::MOD
     )
 }
 
@@ -409,6 +439,7 @@ fn apply_bin(
     inst: Instruction,
     has_i32: &mut bool,
     has_float_arith: &mut bool,
+    has_i64_arith: &mut bool,
 ) -> Result<(), LowerError> {
     let rhs = stack
         .pop()
@@ -426,6 +457,9 @@ fn apply_bin(
     }
     if is_float_arith(inst) {
         *has_float_arith = true;
+    }
+    if is_int_arith(inst) {
+        *has_i64_arith = true;
     }
     paint(slot_ty, pool_ty, lhs, ty)?;
     paint(slot_ty, pool_ty, rhs, ty)?;

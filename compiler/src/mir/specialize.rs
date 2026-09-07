@@ -19,9 +19,10 @@ pub fn try_specialize_body(
     pool: &mut Vec<u64>,
 ) -> Option<Vec<IlOp>> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
-    // Infer still requires a back-edge plus float +/−/×/÷ or i32.
+    // Infer requires a back-edge plus float +/−/×/÷, counted i64 +/−/×/÷/%,
+    // or i32. Heap / CALL / multi-word RETURN stay refuse (see specialize-refuse).
     let inferred = infer_numeric(ops, pool.len(), entry_sp).ok()?;
-    if !inferred.has_float_arith && !inferred.has_i32 {
+    if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
         return None;
     }
     let mut hints = LowerHints::new(name);

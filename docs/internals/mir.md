@@ -30,8 +30,8 @@ Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`.
 
 ## P1 — dense exec (COI-268)
 
-Eligible numeric loops (float `+`/`-`/`*`/`/` or `i32`, no heap/calls, one or more
-back-edges) emit:
+Eligible numeric loops (float `+`/`-`/`*`/`/`, counted i64 `+`/`-`/`*`/`/`/`%`,
+or `i32`; no heap/calls; one or more back-edges) emit:
 
 - `DenseBin` / `DenseConst` / `DenseMove` / `DenseUnary` / `DenseCast`
 - `Seek` to the typed slot high-water mark
@@ -46,10 +46,10 @@ CALL still places args as `Value` words in slots `0..arity`. Dense ops
 reinterpret those bits as `i64`/`f64`. RETURN loads one word back onto the
 stack. Dense emit **refuses** two-word returns.
 
-Int-only (language `i64`) loops stay on fuse-select so existing CSE/LICM
-hit benches (`numeric`, `iv_mul_sr`, …) are unchanged. Float `+`/`-`/`/`
-loops specialize (COI-287 W1; hit `mir_dense_addf.hy` is `+`/`-` only — `DIVF`
-already qualified); refuse inventory: [specialize-refuse.md](specialize-refuse.md).
+Float `+`/`-`/`/` loops specialize (COI-287 W1; hit `mir_dense_addf.hy` is
+`+`/`-` only — `DIVF` already qualified). Counted i64 loops specialize
+(COI-288 W2; hit `mir_dense_i64.hy`). Refuse inventory:
+[specialize-refuse.md](specialize-refuse.md).
 
 ## P2 — MIR CSE (COI-269)
 
@@ -67,16 +67,23 @@ float div / cmp / unary / cast into a preheader. Integer `Div`/`Rem` stay
 in the loop so a skipped trip cannot trap. A second CSE run merges
 hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
 
-Specialize no longer refuses multi-header bodies: nested float-mul loops
+Specialize no longer refuses multi-header bodies: nested numeric loops
 (including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
-succeed. Int-only loops still stay on fuse-IL.
+succeed. Straight-line i64 stays fuse-IL (W3).
 
 ## W1 — float arith without requiring `*` (COI-287)
 
 Infer’s dense gate is `has_float_arith` (`ADDF`/`SUBF`/`MULF`/`DIVF`, plus
 float `INC`/`DEC`), not `MULF`/`DIVF` only. Add-only and sub-only float
 loops emit `DenseBin`. `DIVF` already qualified before W1. Hit bench:
-`examples/perf/mir_dense_addf.hy`. i64 counted loops remain W2.
+`examples/perf/mir_dense_addf.hy`.
+
+## W2 — counted i64 (COI-288)
+
+Infer’s dense gate also accepts i64 `+`/`-`/`*`/`/`/`%` (and int `INC`/`DEC`)
+on a back-edge body that is otherwise numeric (no heap / `CALL` / multi-word
+`RETURN`). Compare-only and straight-line stay fuse-IL. Hit bench:
+`examples/perf/mir_dense_i64.hy`.
 
 ## P7 — MIR InstCombine (COI-281)
 
