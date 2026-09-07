@@ -1,7 +1,8 @@
 //! Numeric MIR: type lattice + SSA builder (P0), dense emit (P1), CSE (P2),
 //! Result/Option MIR→LIR (P3 / COI-270), LICM (P6 / COI-280),
 //! InstCombine (P7 / COI-281), DestProp (P8 / COI-282),
-//! IV strength reduction (P9 / COI-283), and cross-block GVN/PRE (P10 / COI-284).
+//! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
+//! and conservative float peeps (P11 / COI-285).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
@@ -417,6 +418,55 @@ fn main() {
             .count();
         assert_eq!(fmuls, 2, "scale and square; t*2.0 must become add");
         assert!(fadds >= 2, "t+t and s+…; fadds={fadds}");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_float_exact_recip_and_finite_sub() {
+        let src = r#"
+fn hot(float scale, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = i as float;
+        let t = xf * scale;
+        s = s + t / 8.0;
+        s = s + (xf - xf);
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(1.5, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile float pipeline kernel");
+        let fdivs = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FDIV64
+            })
+            .count();
+        let fsubs = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FSUB64
+            })
+            .count();
+        let fmuls = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FMUL64
+            })
+            .count();
+        assert_eq!(fdivs, 0, "t/8.0 must become mul by exact recip");
+        assert_eq!(fsubs, 0, "cast(i)-cast(i) is known-finite +0");
+        assert_eq!(fmuls, 2, "xf*scale and t*0.125; fmuls={fmuls}");
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }

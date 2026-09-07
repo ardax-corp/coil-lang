@@ -1,9 +1,14 @@
-//! InstCombine on numeric MIR (COI-281).
+//! InstCombine on numeric MIR (COI-281 / COI-285).
 //!
 //! Fuse-IL `algebraic` only matches Load/Const/ConstPool windows. After SSA
-//! lower, identities apply to any `ValueId` (binop results included). Small
-//! proving set: const-fold, algebraic identities, `* 2` → `+`, const-cond
-//! branches. No FMA / reciprocal (P11).
+//! lower, identities apply to any `ValueId` (binop results included).
+//!
+//! **Flag policy:** no fast-math / contract / reassoc flag. Default is IEEE-safe
+//! only. FMA is not formed (`a*b+c` stays two roundings; a fused op would
+//! change mandelbrot checksums and needs a Dense FMA kind that does not exist).
+//! Reciprocal is `x / 2^k` → `x * 2^{-k}` when the reciprocal is exact.
+//! Known-finite folds apply only to values proven finite (finite const,
+//! `int→float`, `fneg` of those, φ of those).
 
 use std::collections::{HashMap, HashSet};
 
@@ -50,6 +55,11 @@ fn instcombine_once(func: &mut MirFunc) -> usize {
             }
         }
     }
+    rewrite_exact_recip_consts(func, &mut consts);
+
+    let finite = known_finite(func, &consts);
+    let nonzero = known_nonzero(&consts);
+    let neg_of = neg_sources(func);
 
     for block in &mut func.blocks {
         for inst in &mut block.insts {
@@ -61,7 +71,7 @@ fn instcombine_once(func: &mut MirFunc) -> usize {
                 consts.insert(dest, c);
                 continue;
             }
-            match fold_inst(inst, &consts) {
+            match fold_inst(inst, &consts, &finite, &nonzero, &neg_of) {
                 Fold::Subst(keep) => {
                     let dest = inst.dest();
                     subst.insert(dest, keep);
@@ -135,7 +145,13 @@ enum Fold {
     Rewrite,
 }
 
-fn fold_inst(inst: &mut MirInst, consts: &HashMap<ValueId, MirConst>) -> Fold {
+fn fold_inst(
+    inst: &mut MirInst,
+    consts: &HashMap<ValueId, MirConst>,
+    finite: &HashSet<ValueId>,
+    nonzero: &HashSet<ValueId>,
+    neg_of: &HashMap<ValueId, ValueId>,
+) -> Fold {
     match inst {
         MirInst::Bin {
             op,
@@ -143,7 +159,9 @@ fn fold_inst(inst: &mut MirInst, consts: &HashMap<ValueId, MirConst>) -> Fold {
             lhs,
             rhs,
             dest: _,
-        } => fold_bin(*op, *ty, *lhs, *rhs, consts, inst),
+        } => fold_bin(
+            *op, *ty, *lhs, *rhs, consts, finite, nonzero, neg_of, inst,
+        ),
         MirInst::Cmp {
             op,
             ty,
@@ -159,13 +177,20 @@ fn fold_inst(inst: &mut MirInst, consts: &HashMap<ValueId, MirConst>) -> Fold {
                 None => Fold::None,
             }
         }
-        MirInst::Unary { op, src, dest: _ } => match (*op, consts.get(src).copied()) {
-            (MirUnaryOp::Neg, Some(c)) => match eval_neg(c) {
-                Some(n) => Fold::ToConst(n),
-                None => Fold::None,
+        MirInst::Unary { op, src, dest: _ } => match *op {
+            MirUnaryOp::Neg => {
+                if let Some(&inner) = neg_of.get(src) {
+                    return Fold::Subst(inner);
+                }
+                match consts.get(src).copied().and_then(eval_neg) {
+                    Some(n) => Fold::ToConst(n),
+                    None => Fold::None,
+                }
+            }
+            MirUnaryOp::Not => match consts.get(src).copied() {
+                Some(MirConst::Bool(b)) => Fold::ToConst(MirConst::Bool(!b)),
+                _ => Fold::None,
             },
-            (MirUnaryOp::Not, Some(MirConst::Bool(b))) => Fold::ToConst(MirConst::Bool(!b)),
-            _ => Fold::None,
         },
         MirInst::Cast {
             kind,
@@ -191,6 +216,9 @@ fn fold_bin(
     lhs: ValueId,
     rhs: ValueId,
     consts: &HashMap<ValueId, MirConst>,
+    finite: &HashSet<ValueId>,
+    nonzero: &HashSet<ValueId>,
+    neg_of: &HashMap<ValueId, ValueId>,
     inst: &mut MirInst,
 ) -> Fold {
     let lc = consts.get(&lhs).copied();
@@ -206,10 +234,292 @@ fn fold_bin(
     if let Some(zero) = zeroing(op, ty, lhs, rhs, lc, rc) {
         return Fold::ToConst(zero);
     }
+    if let Some(c) = finite_fold(op, ty, lhs, rhs, finite, nonzero, neg_of) {
+        return Fold::ToConst(c);
+    }
     if strength_mul2(op, ty, lhs, rhs, lc, rc, inst) {
         return Fold::Rewrite;
     }
+    if strength_mul_neg1(op, ty, lhs, rhs, lc, rc, inst) {
+        return Fold::Rewrite;
+    }
+    if strength_exact_recip(op, ty, rc, inst) {
+        return Fold::Rewrite;
+    }
     Fold::None
+}
+
+/// `x-x` / `x+(-x)` → `+0`, `x/x` → `+1` when x is proven finite (and nonzero for div).
+fn finite_fold(
+    op: MirBinOp,
+    ty: MirTy,
+    lhs: ValueId,
+    rhs: ValueId,
+    finite: &HashSet<ValueId>,
+    nonzero: &HashSet<ValueId>,
+    neg_of: &HashMap<ValueId, ValueId>,
+) -> Option<MirConst> {
+    if !ty.is_float() {
+        return None;
+    }
+    let plus_zero = match ty {
+        MirTy::F64 => MirConst::F64(F64_PLUS_ZERO),
+        MirTy::F32 => MirConst::F32(F32_PLUS_ZERO),
+        _ => return None,
+    };
+    let plus_one = match ty {
+        MirTy::F64 => MirConst::F64(F64_PLUS_ONE),
+        MirTy::F32 => MirConst::F32(F32_PLUS_ONE),
+        _ => return None,
+    };
+    match op {
+        MirBinOp::Sub if lhs == rhs && finite.contains(&lhs) => Some(plus_zero),
+        MirBinOp::Add
+            if finite.contains(&lhs) && neg_of.get(&rhs) == Some(&lhs)
+                || finite.contains(&rhs) && neg_of.get(&lhs) == Some(&rhs) =>
+        {
+            Some(plus_zero)
+        }
+        MirBinOp::Div
+            if lhs == rhs && finite.contains(&lhs) && nonzero.contains(&lhs) =>
+        {
+            Some(plus_one)
+        }
+        _ => None,
+    }
+}
+
+fn strength_mul_neg1(
+    op: MirBinOp,
+    ty: MirTy,
+    lhs: ValueId,
+    rhs: ValueId,
+    lc: Option<MirConst>,
+    rc: Option<MirConst>,
+    inst: &mut MirInst,
+) -> bool {
+    if op != MirBinOp::Mul || !ty.is_float() {
+        return false;
+    }
+    let src = if is_minus_one(ty, rc) {
+        lhs
+    } else if is_minus_one(ty, lc) {
+        rhs
+    } else {
+        return false;
+    };
+    let dest = inst.dest();
+    *inst = MirInst::Unary {
+        dest,
+        op: MirUnaryOp::Neg,
+        src,
+    };
+    true
+}
+
+fn strength_exact_recip(
+    op: MirBinOp,
+    ty: MirTy,
+    rc: Option<MirConst>,
+    inst: &mut MirInst,
+) -> bool {
+    if op != MirBinOp::Div || !ty.is_float() {
+        return false;
+    }
+    let Some(c) = rc else {
+        return false;
+    };
+    if exact_recip(c).is_none() {
+        return false;
+    }
+    if let MirInst::Bin { op, .. } = inst {
+        *op = MirBinOp::Mul;
+        return true;
+    }
+    false
+}
+
+fn is_minus_one(ty: MirTy, c: Option<MirConst>) -> bool {
+    match (ty, c) {
+        (MirTy::F64, Some(MirConst::F64(b))) => b == (-1.0_f64).to_bits(),
+        (MirTy::F32, Some(MirConst::F32(b))) => b == (-1.0_f32).to_bits(),
+        _ => false,
+    }
+}
+
+/// Exact `1/c` when `c` is a normal power of two (mantissa 0), including sign.
+fn exact_recip(c: MirConst) -> Option<MirConst> {
+    match c {
+        MirConst::F64(bits) => {
+            let x = f64::from_bits(bits);
+            if !x.is_finite() || x == 0.0 {
+                return None;
+            }
+            if bits & ((1u64 << 52) - 1) != 0 {
+                return None;
+            }
+            let r = 1.0 / x;
+            if !r.is_finite() {
+                return None;
+            }
+            Some(MirConst::F64(r.to_bits()))
+        }
+        MirConst::F32(bits) => {
+            let x = f32::from_bits(bits);
+            if !x.is_finite() || x == 0.0 {
+                return None;
+            }
+            if bits & ((1u32 << 23) - 1) != 0 {
+                return None;
+            }
+            let r = 1.0 / x;
+            if !r.is_finite() {
+                return None;
+            }
+            Some(MirConst::F32(r.to_bits()))
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite a power-of-two divisor const to its exact reciprocal when every
+/// use is `fdiv x, c`. The same `ValueId` then becomes the `fmul` factor.
+fn rewrite_exact_recip_consts(
+    func: &mut MirFunc,
+    consts: &mut HashMap<ValueId, MirConst>,
+) {
+    let mut uses: HashMap<ValueId, (usize, bool)> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            for (i, o) in inst.operands().into_iter().enumerate() {
+                if !consts.contains_key(&o) {
+                    continue;
+                }
+                let e = uses.entry(o).or_insert((0, true));
+                e.0 += 1;
+                let div_rhs = matches!(
+                    inst,
+                    MirInst::Bin {
+                        op: MirBinOp::Div,
+                        ty,
+                        rhs,
+                        ..
+                    } if ty.is_float() && *rhs == o && i == 1
+                );
+                if !div_rhs {
+                    e.1 = false;
+                }
+            }
+        }
+    }
+    let mut rewrite = HashSet::new();
+    for (&v, &(n, only_div_rhs)) in &uses {
+        if n == 0 || !only_div_rhs {
+            continue;
+        }
+        let Some(c) = consts.get(&v).copied() else {
+            continue;
+        };
+        if exact_recip(c).is_some() {
+            rewrite.insert(v);
+        }
+    }
+    if rewrite.is_empty() {
+        return;
+    }
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            if let MirInst::Const { dest, c } = inst {
+                if rewrite.contains(dest) {
+                    if let Some(r) = exact_recip(*c) {
+                        *c = r;
+                        consts.insert(*dest, r);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn known_finite(func: &MirFunc, consts: &HashMap<ValueId, MirConst>) -> HashSet<ValueId> {
+    let mut finite = HashSet::new();
+    for (&v, &c) in consts {
+        match c {
+            MirConst::F64(b) if f64::from_bits(b).is_finite() => {
+                finite.insert(v);
+            }
+            MirConst::F32(b) if f32::from_bits(b).is_finite() => {
+                finite.insert(v);
+            }
+            _ => {}
+        }
+    }
+    for _ in 0..8 {
+        let n = finite.len();
+        for block in &func.blocks {
+            for inst in &block.insts {
+                match inst {
+                    MirInst::Cast {
+                        kind: MirCastKind::IntToFloat,
+                        dest,
+                        ..
+                    } => {
+                        finite.insert(*dest);
+                    }
+                    MirInst::Unary {
+                        op: MirUnaryOp::Neg,
+                        src,
+                        dest,
+                    } if finite.contains(src) => {
+                        finite.insert(*dest);
+                    }
+                    MirInst::Phi { dest, args, ty, .. } if ty.is_float() => {
+                        if args.iter().all(|(_, v)| finite.contains(v)) {
+                            finite.insert(*dest);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if finite.len() == n {
+            break;
+        }
+    }
+    finite
+}
+
+fn known_nonzero(consts: &HashMap<ValueId, MirConst>) -> HashSet<ValueId> {
+    let mut out = HashSet::new();
+    for (&v, &c) in consts {
+        match c {
+            MirConst::F64(b) if f64::from_bits(b) != 0.0 => {
+                out.insert(v);
+            }
+            MirConst::F32(b) if f32::from_bits(b) != 0.0 => {
+                out.insert(v);
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+fn neg_sources(func: &MirFunc) -> HashMap<ValueId, ValueId> {
+    let mut m = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if let MirInst::Unary {
+                op: MirUnaryOp::Neg,
+                src,
+                dest,
+            } = *inst
+            {
+                m.insert(dest, src);
+            }
+        }
+    }
+    m
 }
 
 fn identity(
@@ -507,7 +817,7 @@ fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
 mod tests {
     use super::*;
     use crate::mir::builder::MirBuilder;
-    use crate::mir::{MirBinOp, MirCmpOp, MirConst, MirTy};
+    use crate::mir::{MirBinOp, MirCastKind, MirCmpOp, MirConst, MirTy, MirUnaryOp};
 
     fn count_bin(func: &MirFunc, op: MirBinOp) -> usize {
         func.blocks
@@ -649,5 +959,98 @@ mod tests {
         assert_eq!(instcombine(&mut f), 0);
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 1);
+    }
+
+    #[test]
+    fn exact_recip_pow2_is_mul() {
+        let mut b = MirBuilder::new("rcp");
+        let x = b.add_param(MirTy::F64).unwrap();
+        let eight = b.ins_const(MirConst::f64(8.0)).unwrap();
+        let q = b.ins_binop(MirBinOp::Div, x, eight).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(q)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert!(instcombine(&mut f) >= 1);
+        f.verify().unwrap();
+        assert_eq!(count_bin(&f, MirBinOp::Div), 0);
+        assert_eq!(count_bin(&f, MirBinOp::Mul), 1);
+    }
+
+    #[test]
+    fn refuses_inexact_recip() {
+        let mut b = MirBuilder::new("rcp3");
+        let x = b.add_param(MirTy::F64).unwrap();
+        let three = b.ins_const(MirConst::f64(3.0)).unwrap();
+        let q = b.ins_binop(MirBinOp::Div, x, three).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(q)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert_eq!(instcombine(&mut f), 0);
+        f.verify().unwrap();
+        assert_eq!(count_bin(&f, MirBinOp::Div), 1);
+    }
+
+    #[test]
+    fn cast_minus_self_is_plus_zero() {
+        let mut b = MirBuilder::new("xx");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let xf = b.ins_cast(MirCastKind::IntToFloat, MirTy::F64, i).unwrap();
+        let z = b.ins_binop(MirBinOp::Sub, xf, xf).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(z)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert!(instcombine(&mut f) >= 1);
+        f.verify().unwrap();
+        assert_eq!(count_bin(&f, MirBinOp::Sub), 0);
+        assert!(f.blocks.iter().any(|bl| {
+            bl.insts.iter().any(|inst| {
+                matches!(inst, MirInst::Const { c: MirConst::F64(bits), .. } if *bits == 0.0_f64.to_bits())
+            })
+        }));
+    }
+
+    #[test]
+    fn refuses_param_minus_self() {
+        let mut b = MirBuilder::new("nan");
+        let x = b.add_param(MirTy::F64).unwrap();
+        let z = b.ins_binop(MirBinOp::Sub, x, x).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(z)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert_eq!(instcombine(&mut f), 0);
+        f.verify().unwrap();
+        assert_eq!(count_bin(&f, MirBinOp::Sub), 1);
+    }
+
+    #[test]
+    fn finite_const_div_self_is_one() {
+        let mut b = MirBuilder::new("divx");
+        let two = b.ins_const(MirConst::f64(2.0)).unwrap();
+        let q = b.ins_binop(MirBinOp::Div, two, two).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(q)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert!(instcombine(&mut f) >= 1);
+        f.verify().unwrap();
+        assert_eq!(count_bin(&f, MirBinOp::Div), 0);
+    }
+
+    #[test]
+    fn mul_minus_one_is_neg() {
+        let mut b = MirBuilder::new("neg1");
+        let x = b.add_param(MirTy::F64).unwrap();
+        let m = b.ins_const(MirConst::f64(-1.0)).unwrap();
+        let p = b.ins_binop(MirBinOp::Mul, x, m).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(p)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert!(instcombine(&mut f) >= 1);
+        f.verify().unwrap();
+        assert_eq!(count_bin(&f, MirBinOp::Mul), 0);
+        assert!(f.blocks.iter().any(|bl| {
+            bl.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::Unary { op: MirUnaryOp::Neg, .. }))
+        }));
     }
 }
