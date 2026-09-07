@@ -80,6 +80,9 @@ binding barriers so field-key CSE and aggregate shapes stay intact. Later
 jumps, labels, and stores to `src`/`dest` clear or kill the map. Same
 straight-line ceiling as `copy_prop` (no CFG / φ). Hit bench:
 `examples/perf/dest_prop_field_alias.hy` ([#318](https://github.com/ardax-corp/coil-lang/pull/318)).
+Numeric MIR has its own DestProp (COI-282): trivial SSA φ forwarding after
+InstCombine. Disagreeing φs stay; no IL slot rewrite. Hit:
+`examples/perf/mir_destprop.hy`.
 
 This is not general CFG copy propagation: joins, loops, unknown cursor states, calls, residual bytecode, and aliasing-sensitive operations remain fail-closed. **`il::sp` is not a cursor model** (COI-81, decided keep split — see below). A broader pass would need relative cursor/liveness analysis rather than slot-index use counts.
 

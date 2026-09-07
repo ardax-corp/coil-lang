@@ -1,6 +1,6 @@
 //! Numeric MIR: type lattice + SSA builder (P0), dense emit (P1), CSE (P2),
-//! Result/Option MIR→LIR (P3 / COI-270), LICM (P6 / COI-280), and
-//! InstCombine (P7 / COI-281).
+//! Result/Option MIR→LIR (P3 / COI-270), LICM (P6 / COI-280),
+//! InstCombine (P7 / COI-281), and DestProp (P8 / COI-282).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
@@ -9,6 +9,7 @@
 
 mod builder;
 mod cse;
+mod destprop;
 mod emit;
 mod emit_lir;
 mod func;
@@ -24,6 +25,7 @@ mod ty;
 
 pub use builder::{MirBuilder, MirError};
 pub use cse::cse;
+pub use destprop::destprop;
 pub use emit::emit_dense;
 pub use instcombine::instcombine;
 pub use licm::licm;
@@ -379,6 +381,54 @@ fn main() {
             .count();
         assert_eq!(fmuls, 2, "scale and square; t*2.0 must become add");
         assert!(fadds >= 2, "t+t and s+…; fadds={fadds}");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_destprop_same_value_join_cse() {
+        let src = r#"
+fn hot(float a, float b, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = (i as float) * b;
+        let t = 0.0;
+        if xf > a {
+            t = a + 0.0;
+        } else {
+            t = a * 1.0;
+        }
+        s = s + a * xf + t * xf + t * t;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(1.0, 2.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile destprop kernel");
+        let fmuls = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FMUL64
+            })
+            .count();
+        assert_eq!(
+            fmuls, 3,
+            "xf*b, CSE a*xf, and t*t→a*a; fmuls={fmuls}"
+        );
+        let moves = bc
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::DenseMove)
+            .count();
+        assert!(
+            moves <= 2,
+            "alias join must not emit per-arm DenseMove; moves={moves}"
+        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }

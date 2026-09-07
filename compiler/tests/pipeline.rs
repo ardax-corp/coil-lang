@@ -3790,6 +3790,12 @@ fn example_perf_dest_prop_field_alias_prints_checksum() {
 }
 
 #[test]
+fn example_perf_mir_destprop_prints_checksum() {
+    let output = run_example("examples/perf/mir_destprop.hy");
+    assert_eq!(output, "1200000300000");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");

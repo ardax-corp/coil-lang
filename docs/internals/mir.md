@@ -19,7 +19,7 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + MIR InstCombine + dense emit for float-mul / i32 loops |
+| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + MIR InstCombine + DestProp + dense emit for float-mul / i32 loops |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
@@ -83,6 +83,15 @@ Proving set (no FMA / reciprocal — P11):
 - const-cond `br` → `jump`
 
 Hit bench: `examples/perf/mir_instcombine.hy`.
+
+## P8 — MIR DestProp / copy-forward (COI-282)
+
+After InstCombine, **trivial φ forwarding** runs on typed SSA. Braun already
+drops `phi(x, x)` at construction; InstCombine can make both arms the same
+`ValueId` (`a + 0` / `a * 1` → `a`). Uses see the source. Disagreeing φs,
+type mismatch, and self-only φs stay. No dead-block rewrite (dense emit
+fallthrough) and no new opcodes. A following CSE can share the forwarded
+uses. Hit bench: `examples/perf/mir_destprop.hy`.
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
