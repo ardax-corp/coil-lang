@@ -133,7 +133,8 @@ identical; flagships remain controls. Skip only on hit-bench wash or regress.
 
 Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,
-`result_try_churn`, `mir_cse_divf`, `mir_licm_divf`, `mir_instcombine`.
+`result_try_churn`, `mir_cse_divf`, `mir_licm_divf`, `mir_instcombine`,
+`mir_destprop`.
 
 ## AOT priorities
 
