@@ -257,10 +257,27 @@ impl IlModule {
                 pool,
             ) {
                 body.ops = dense;
+            } else if let Some(lir) = crate::mir::try_lower_abi_body(
+                &body.ops,
+                &body.meta.name,
+                body.meta.entry_sp,
+                pool,
+            ) {
+                // Re-run stack-IL opts so dest_prop / return_convoy / fuse
+                // shapes recover if SSA reconstruct still spilled a local.
+                let orig_cost = lir_emit_cost(&body.ops);
+                let mut lir_ops = lir;
+                opt::optimize_at_with_labels(
+                    &mut lir_ops,
+                    &per,
+                    body.meta.entry_sp as i32,
+                    pool,
+                    &mut next_label,
+                );
+                if lir_emit_cost(&lir_ops) <= orig_cost {
+                    body.ops = lir_ops;
+                }
             }
-            // P3 MIR→LIR is documented + tested (`try_lower_abi_body`) but not
-            // swapped in here: naive slot reconstruct lost fuse-IL quality on
-            // result_int_churn / result_try_churn / pair_int_churn.
         }
 
         let (mut flat, remap, func_maps) = self.to_flat();
@@ -272,6 +289,26 @@ impl IlModule {
         }
         (flat, remap, func_maps)
     }
+}
+
+/// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
+/// the body (naive slot spill). Labels are free.
+fn lir_emit_cost(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .map(|op| match op {
+            IlOp::StorePop { .. } => 2,
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    common::Instruction::Seek
+                ) =>
+            {
+                2
+            }
+            _ => 1,
+        })
+        .sum()
 }
 
 fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
