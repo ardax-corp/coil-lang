@@ -173,9 +173,7 @@ impl EmitPlan {
                     if inst.is_phi() || fused[inst.dest().index()] {
                         continue;
                     }
-                    if !tree[inst.dest().index()] {
-                        continue;
-                    }
+                    // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
                     for v in inst.operands() {
                         changed |= mark_tree(
                             v, block.id, &mut tree, &uses, &phi_in, &def_block, &func.params, &fused,
@@ -274,6 +272,61 @@ fn assign_needed(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), Lower
     Ok((reg, next as u8))
 }
 
+fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
+    if !plan.tree[v.index()] {
+        return None;
+    }
+    let (bid, idx) = plan.def[v.index()]?;
+    let MirInst::Const { c, .. } = &func.block(bid).insts[idx] else {
+        return None;
+    };
+    let n = match *c {
+        MirConst::I64(x) => x,
+        MirConst::I32(x) => i64::from(x),
+        MirConst::Bool(x) => i64::from(x),
+        _ => return None,
+    };
+    i16::try_from(n).ok()
+}
+
+/// Prefer `BinSlotImm` / `BinSlotSlot` so pre-fuse cost matches opted fuse-IL.
+fn emit_bin(
+    out: &mut Vec<IlOp>,
+    op: Instruction,
+    lhs: ValueId,
+    rhs: ValueId,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if plan.need_slot[lhs.index()]
+        && let Some(imm) = tree_i16(func, plan, rhs)
+    {
+        out.push(IlOp::BinSlotImm {
+            op: op as u8,
+            slot: regs[lhs.index()],
+            imm,
+            loc,
+        });
+        return Ok(());
+    }
+    if plan.need_slot[lhs.index()] && plan.need_slot[rhs.index()] {
+        out.push(IlOp::BinSlotSlot {
+            op: op as u8,
+            a: regs[lhs.index()],
+            b: regs[rhs.index()],
+            loc,
+        });
+        return Ok(());
+    }
+    emit_stack(out, lhs, func, plan, regs, pool, loc)?;
+    emit_stack(out, rhs, func, plan, regs, pool, loc)?;
+    out.push(IlOp::Bin { op, loc });
+    Ok(())
+}
+
 fn emit_stored(
     out: &mut Vec<IlOp>,
     inst: &MirInst,
@@ -298,21 +351,17 @@ fn emit_stored(
             lhs,
             rhs,
         } => {
-            if plan.need_slot[lhs.index()] && plan.need_slot[rhs.index()] {
-                out.push(IlOp::BinSlotSlot {
-                    op: stack_bin(*op, *ty)? as u8,
-                    a: regs[lhs.index()],
-                    b: regs[rhs.index()],
-                    loc,
-                });
-            } else {
-                emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
-                emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
-                out.push(IlOp::Bin {
-                    op: stack_bin(*op, *ty)?,
-                    loc,
-                });
-            }
+            emit_bin(
+                out,
+                stack_bin(*op, *ty)?,
+                *lhs,
+                *rhs,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            )?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -412,26 +461,30 @@ fn emit_stack(
         MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
         MirInst::Bin {
             op, ty, lhs, rhs, ..
-        } => {
-            emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
-            emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
-            out.push(IlOp::Bin {
-                op: stack_bin(*op, *ty)?,
-                loc,
-            });
-            Ok(())
-        }
+        } => emit_bin(
+            out,
+            stack_bin(*op, *ty)?,
+            *lhs,
+            *rhs,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        ),
         MirInst::Cmp {
             op, ty, lhs, rhs, ..
-        } => {
-            emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
-            emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
-            out.push(IlOp::Bin {
-                op: stack_cmp(*op, *ty)?,
-                loc,
-            });
-            Ok(())
-        }
+        } => emit_bin(
+            out,
+            stack_cmp(*op, *ty)?,
+            *lhs,
+            *rhs,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        ),
         MirInst::Unary { op, src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             push_unary(out, *op, func.ty(*src), loc);
@@ -585,13 +638,17 @@ fn emit_br_cond(
     }) = block.insts.iter().find(|inst| {
         matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
     }) {
-        emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
-        emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
-        out.push(IlOp::Bin {
-            op: stack_cmp(*op, *ty)?,
+        return emit_bin(
+            out,
+            stack_cmp(*op, *ty)?,
+            *lhs,
+            *rhs,
+            func,
+            plan,
+            regs,
+            pool,
             loc,
-        });
-        return Ok(());
+        );
     }
     emit_stack(out, cond, func, plan, regs, pool, loc)
 }

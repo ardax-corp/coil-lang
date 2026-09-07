@@ -652,10 +652,22 @@ fn main() {
             .iter()
             .filter(|op| {
                 matches!(op, IlOp::Bin { op, .. } if *op == Instruction::MOD)
-                    || matches!(op, IlOp::BinSlotSlot { op, .. } if common::Instruction::from(*op) == Instruction::MOD)
+                    || matches!(
+                        op,
+                        IlOp::BinSlotSlot { op, .. } | IlOp::BinSlotImm { op, .. }
+                            if common::Instruction::from(*op) == Instruction::MOD
+                    )
             })
             .count();
         assert_eq!(mods, 1, "shared k = i % 10 must be stored, not rematerialized");
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::BinSlotImm { op, imm: 10, .. }
+                    if common::Instruction::from(*op) == Instruction::MOD
+            )),
+            "i % 10 should be BinSlotImm so replace cost matches opted IL"
+        );
         assert!(
             lir.iter().any(|op| matches!(op, IlOp::StorePop { .. })),
             "shared rem needs a slot"
@@ -695,7 +707,8 @@ fn main() {
         assert!(
             lir.iter().any(|op| matches!(
                 op,
-                IlOp::BinSlotSlot { op, .. } if common::Instruction::from(*op) == Instruction::BITOR
+                IlOp::BinSlotSlot { op, .. } | IlOp::BinSlotImm { op, .. }
+                    if common::Instruction::from(*op) == Instruction::BITOR
             ) || matches!(op, IlOp::Bin { op, .. } if *op == Instruction::BITOR)),
             "niche LIR must emit BITOR"
         );
