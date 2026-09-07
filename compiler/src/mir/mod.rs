@@ -666,6 +666,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn niche_word_is_one_value_lir() {
         // Err = ptr | 1; one-word heap-heap Result (no pair opcode).
         let loc = loc();
