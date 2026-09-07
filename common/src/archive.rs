@@ -51,10 +51,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///     **102–110** is unchanged.
 /// 6 — MIR dense numeric opcodes (`DenseBin` … `DenseCast`). Value ABI at
 ///     CALL/RETURN edges; specialized float/i32 loops only.
+/// 7 — HostInvoke `simd_axpy_reduce` (**136**) for MIR saxpy-reduce packs
+///     (COI-286). Workspace `coil-simd` kernels; no new opcodes.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 6;
+pub const ARCHIVE_MINOR: u16 = 7;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -339,9 +341,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 6);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 6));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.6");
+        assert_eq!(ARCHIVE_MINOR, 7);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 7));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.7");
     }
 
     #[test]

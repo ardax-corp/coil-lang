@@ -93,7 +93,10 @@ pub unsafe fn zip_neg_i64(a: &[i64], out: &mut [i64]) {
     let zero = _mm_setzero_si128();
     while i + 2 <= n {
         let va = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
-        _mm_storeu_si128(out.as_mut_ptr().add(i) as *mut __m128i, _mm_sub_epi64(zero, va));
+        _mm_storeu_si128(
+            out.as_mut_ptr().add(i) as *mut __m128i,
+            _mm_sub_epi64(zero, va),
+        );
         i += 2;
     }
     while i < n {
@@ -126,8 +129,9 @@ pub unsafe fn matmul_i64(a: &[i64], b: &[i64], c: &mut [i64], m: usize, k: usize
             let b_row = b.get_unchecked(t * n..t * n + n);
             let c_row = c.get_unchecked_mut(i * n..i * n + n);
             for j in 0..n {
-                *c_row.get_unchecked_mut(j) =
-                    c_row.get_unchecked(j).wrapping_add(a_it.wrapping_mul(*b_row.get_unchecked(j)));
+                *c_row.get_unchecked_mut(j) = c_row
+                    .get_unchecked(j)
+                    .wrapping_add(a_it.wrapping_mul(*b_row.get_unchecked(j)));
             }
         }
     }
@@ -202,4 +206,32 @@ unsafe fn hsum_pd(v: __m128d) -> f64 {
     let hi = _mm_unpackhi_pd(v, v);
     let sum = _mm_add_sd(v, hi);
     _mm_cvtsd_f64(sum)
+}
+
+/// 2-wide `a*x` then left-fold `(s + ax) + y`.
+#[target_feature(enable = "sse2")]
+pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
+    let mut s = 0.0;
+    let mut i = 0;
+    let va = _mm_set1_pd(a);
+    while i + 2 <= n {
+        let x0 = x;
+        let x1 = x0 + dx;
+        let vx = _mm_set_pd(x1, x0);
+        let mut ax = [0.0; 2];
+        _mm_storeu_pd(ax.as_mut_ptr(), _mm_mul_pd(va, vx));
+        s = s + ax[0];
+        s = s + y;
+        s = s + ax[1];
+        s = s + y;
+        x = x1 + dx;
+        i += 2;
+    }
+    while i < n {
+        s = s + a * x;
+        s = s + y;
+        x = x + dx;
+        i += 1;
+    }
+    s
 }

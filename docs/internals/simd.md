@@ -21,6 +21,7 @@ safe API:
 | `matmul_f64` / `matmul_i64` | Row-major GEMM (`C = A·B`) |
 | `zip_{add,sub,mul,neg}_{f64,i64}` | Element-wise zip / negate (`zip_div_f64` too) |
 | `scale_f64` / `scale_i64` | Broadcast multiply (`out[i] = a[i] * s`) |
+| `axpy_reduce_f64` | Counted `s = (s + a*x) + y; x += dx` (P12 HostInvoke) |
 | `bytes::eq` / `bytes::xor` | Byte equality and XOR |
 
 ## Dispatch
@@ -61,6 +62,8 @@ beat Rust/`memcmp` slice equality.
 - `machine::packed_la` — `packed_dot` / `packed_matmul` / `packed_matrix_zip` /
   `packed_matrix_neg` / **`packed_vec_arith`** (1-D aggregate `+ - * /` zip,
   broadcast, and unary `-` when static length ≥ 8; smaller shapes still unroll)
+- MIR P12 — `simd_axpy_reduce` HostInvoke (**136**) from specialized counted
+  saxpy-reduce loops (`compiler/src/mir/pack.rs`). Compiler rewrite only.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 

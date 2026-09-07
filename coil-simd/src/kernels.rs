@@ -1,6 +1,6 @@
 //! Portable numeric kernels with runtime SIMD dispatch.
 
-use crate::level::{SimdLevel, detect};
+use crate::level::{detect, SimdLevel};
 use crate::scalar;
 
 /// Dot product of equal-prefix slices (`min(len)`).
@@ -113,6 +113,28 @@ pub fn zip_mul_i64(a: &[i64], b: &[i64], out: &mut [i64]) {
         #[cfg(target_arch = "x86_64")]
         SimdLevel::Avx512 => unsafe { crate::x86_64::avx512::zip_mul_i64(a, b, out) },
         _ => scalar::zip_mul_i64(a, b, out),
+    }
+}
+
+/// Counted saxpy-style reduction: `n` trips of `s = (s + a*x) + y; x += dx`.
+///
+/// Terms are independent; SIMD packs generate `x, x+dx, …` then left-fold
+/// into `s` so the sum association matches [`crate::scalar::axpy_reduce_f64`].
+#[inline]
+pub fn axpy_reduce_f64(n: usize, a: f64, x0: f64, dx: f64, y: f64) -> f64 {
+    if n < 8 {
+        return scalar::axpy_reduce_f64(n, a, x0, dx, y);
+    }
+    match detect() {
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx512 => unsafe { crate::x86_64::avx512::axpy_reduce_f64(n, a, x0, dx, y) },
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx2 => unsafe { crate::x86_64::avx2::axpy_reduce_f64(n, a, x0, dx, y) },
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Sse2 => unsafe { crate::x86_64::sse2::axpy_reduce_f64(n, a, x0, dx, y) },
+        #[cfg(target_arch = "aarch64")]
+        SimdLevel::Neon => unsafe { crate::aarch64::axpy_reduce_f64(n, a, x0, dx, y) },
+        _ => scalar::axpy_reduce_f64(n, a, x0, dx, y),
     }
 }
 
@@ -385,6 +407,16 @@ mod tests {
             assert_eq!(neg[i], a[i].wrapping_neg());
             assert_eq!(mul[i], a[i].wrapping_mul(b[i]));
         }
+    }
+
+    #[test]
+    fn axpy_reduce_matches_scalar() {
+        let n = 64usize;
+        let got = axpy_reduce_f64(n, 1.5, 0.25, 0.5, 0.125);
+        let expect = scalar::axpy_reduce_f64(n, 1.5, 0.25, 0.5, 0.125);
+        assert_eq!(got, expect);
+        assert_eq!(axpy_reduce_f64(3, 2.0, 1.0, 1.0, 0.0), 2.0 + 4.0 + 6.0);
+        assert_eq!(axpy_reduce_f64(0, 9.0, 1.0, 1.0, 1.0), 0.0);
     }
 
     #[test]

@@ -92,6 +92,19 @@ pub fn zip_div_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     }
 }
 
+/// Sequential `s = (s + a*x) + y; x = x + dx` for `n` trips. Matches Coil
+/// `s = s + a * x + y` (left-assoc, mul then add, no FMA).
+#[inline]
+pub fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
+    let mut s = 0.0;
+    for _ in 0..n {
+        s = s + a * x;
+        s = s + y;
+        x = x + dx;
+    }
+    s
+}
+
 /// `out[i] = a[i] * scalar` (broadcast multiply).
 #[inline]
 pub fn scale_f64(a: &[f64], scalar: f64, out: &mut [f64]) {

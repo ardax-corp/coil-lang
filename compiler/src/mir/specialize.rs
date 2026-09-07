@@ -10,7 +10,8 @@ use super::lower::{LowerHints, try_lower_numeric};
 
 /// If `ops` is a specialized numeric loop, return dense IL (Value ABI at edges).
 ///
-/// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE, then dense emit.
+/// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
+/// then saxpy-reduce HostInvoke (P12) or dense emit.
 pub fn try_specialize_body(
     ops: &[IlOp],
     name: &str,
@@ -42,6 +43,9 @@ pub fn try_specialize_body(
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,
     });
+    if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
+        return Some(packed);
+    }
     emit_dense(&func, entry, pool).ok()
 }
 
