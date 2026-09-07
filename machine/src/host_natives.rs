@@ -1264,6 +1264,10 @@ mod tests {
             assert_eq!(signature.args, vec![FfiType::Float; expected_arity]);
             assert_eq!(registrations[start + offset].1, start + offset);
         }
-        assert_eq!(registrations.len(), end);
+        assert_eq!(
+            registrations.get(end).map(|(n, _)| n.as_str()),
+            Some(common::SIMD_AXPY_REDUCE_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 1);
     }
 }
