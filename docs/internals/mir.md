@@ -19,7 +19,7 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine + DestProp + IV SR + dense emit for float-mul / i32 loops |
+| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + dense emit for float-mul / i32 loops |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
@@ -75,14 +75,14 @@ After LICM + a second CSE, **typed peeps** run on dense SSA (`f64` / `i32` /
 `i64`). Fuse-IL `algebraic` only matches Load/Const/ConstPool windows; this
 pass folds binop results too.
 
-Proving set (no FMA / reciprocal — P11):
+Proving set (P11 float peeps live in the same pass):
 
 - const-fold of bin / cmp / unary / cast (refuse int/float ÷0 and `MIN / -1`)
 - identities: `x±0`, `x*1`, `x/1`, int `x&-1` / `|0` / `^0` / `<<0`, int `x-x`
-  / `x*0` / `x%1` (float `+0.0` / `*1.0` exact bits only; refuse `x*0.0` and
-  float `x-x`)
+  / `x*0` / `x%1` (float `+0.0` / `*1.0` exact bits only; refuse `x*0.0`)
 - strength: `x * 2` → `x + x` (int and IEEE `+2.0`; flagship `2.0 * zr` hits)
 - const-cond `br` → `jump`
+- P11 float peeps (same pass): see below
 
 Hit bench: `examples/perf/mir_instcombine.hy`.
 
@@ -114,6 +114,28 @@ computes it and the operands already dominate the fork. Integer
 `Div`/`Rem` stay in their arms (zero-trip / untaken-path trap). No
 join-φ PRE, no speculative one-arm hoist, no new opcodes. Hit bench:
 `examples/perf/mir_gvn_divf.hy`.
+
+## P11 — MIR float pipeline (COI-285)
+
+InstCombine’s typed peeps add **IEEE-safe** float rewrites only. There is
+**no** fast-math / contract / reassoc flag — default is the only policy.
+
+- **No FMA.** `a * b + c` stays mul-then-add (two roundings). A fused
+  `mul_add` would change flagship `mandelbrot` checksums and needs a
+  Dense FMA kind that does not exist. Do not append one for this ticket.
+- **Exact reciprocal:** `x / 2^k` → `x * 2^{-k}` when the divisor is a
+  normal power of two (mantissa 0) and `1/c` is finite. `/ 3.0` stays.
+- **Known-finite:** `x - x` and `x + (-x)` → `+0.0`, `x / x` → `+1.0`
+  only when `x` is a finite const, `int→float`, `fneg` of those, or a φ
+  of those. `x / x` also needs a nonzero const. Params / mul results stay
+  unfolded (`inf - inf` / `0 / 0` are NaN).
+- **`x * -1.0` → `fneg`.** Bit-identical for finite / zero / inf.
+- **No sqrt / rsqrt.** Numeric MIR has no sqrt op; HostInvoke is out of
+  the dense subset.
+
+FMA / recip do **not** fire on mandelbrot (`2.0 * zr * zi + ci` stays
+two ops after `*2` → `+`; `2/size` is not a power-of-two after the
+outer `2.0 *`). Hit bench: `examples/perf/mir_float_pipeline.hy`.
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 

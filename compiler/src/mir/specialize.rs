@@ -10,7 +10,7 @@ use super::lower::{LowerHints, try_lower_numeric};
 
 /// If `ops` is a specialized numeric loop, return dense IL (Value ABI at edges).
 ///
-/// CSE → LICM → CSE → InstCombine → DestProp → SR → CSE → GVN/PRE, then dense emit.
+/// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE, then dense emit.
 pub fn try_specialize_body(
     ops: &[IlOp],
     name: &str,

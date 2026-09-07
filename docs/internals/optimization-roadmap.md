@@ -67,7 +67,8 @@ Mandelbrot-shaped float superinstructions are **not** current AOT:
   handlers panic on archive major 4). Do not treat them as recently landed.
 - General peepholes that stayed: `BinSlotSlot`, `CmpJmpf`/`*Jmpt`, `IndexPin*`.
 
-Still on the interpreter path (no FMA / reassociation):
+Still on the interpreter path (no FMA / reassociation; P11 is exact recip +
+known-finite only — see [mir.md](mir.md#p11--mir-float-pipeline-coi-285)):
 
 - `NEGF` unary float negate.
 - Algebraic: exact `+0.0` / `+1.0` float identities; const-pool float binop fold.
@@ -134,7 +135,7 @@ identical; flagships remain controls. Skip only on hit-bench wash or regress.
 Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,
 `result_try_churn`, `mir_cse_divf`, `mir_licm_divf`, `mir_instcombine`,
-`mir_destprop`, `mir_iv_sr`, `mir_gvn_divf`.
+`mir_destprop`, `mir_iv_sr`, `mir_gvn_divf`, `mir_float_pipeline`.
 
 ## AOT priorities
 
