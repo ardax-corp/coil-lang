@@ -609,6 +609,17 @@ fn main() {
         g.verify().unwrap();
         assert_eq!(g.ret_layout, MirLayout::TwoSlot);
         assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(
+            !lir.iter().any(|op| matches!(op, IlOp::StorePop { .. })),
+            "return/cmp immediates must stay on the stack"
+        );
+        assert!(
+            !lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek
+            )),
+            "leaf using only param slots must not Seek"
+        );
     }
 
     #[test]
@@ -637,10 +648,13 @@ fn main() {
         let mut pool = Vec::new();
         let lir = emit_lir(&f, Some(Label(0)), &mut pool).expect("emit niche");
         assert!(lir.iter().any(|op| matches!(op, IlOp::Return { ret_words: 1, .. })));
-        assert!(lir.iter().any(|op| matches!(
-            op,
-            IlOp::BinSlotSlot { op, .. } if common::Instruction::from(*op) == Instruction::BITOR
-        )));
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::BinSlotSlot { op, .. } if common::Instruction::from(*op) == Instruction::BITOR
+            ) || matches!(op, IlOp::Bin { op, .. } if *op == Instruction::BITOR)),
+            "niche LIR must emit BITOR"
+        );
     }
 
     #[test]
