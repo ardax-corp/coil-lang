@@ -263,19 +263,10 @@ impl IlModule {
                 body.meta.entry_sp,
                 pool,
             ) {
-                // Re-run stack-IL opts so dest_prop / return_convoy / fuse
-                // shapes recover if SSA reconstruct still spilled a local.
-                let orig_cost = lir_emit_cost(&body.ops);
-                let mut lir_ops = lir;
-                opt::optimize_at_with_labels(
-                    &mut lir_ops,
-                    &per,
-                    body.meta.entry_sp as i32,
-                    pool,
-                    &mut next_label,
-                );
-                if lir_emit_cost(&lir_ops) <= orig_cost {
-                    body.ops = lir_ops;
+                // Do not re-run stack-IL opts: `local_cse` refuses MOD and
+                // rematerializes a stored remainder (pair_int_churn +12%).
+                if lir_emit_cost(&lir) <= lir_emit_cost(&body.ops) {
+                    body.ops = lir;
                 }
             }
         }

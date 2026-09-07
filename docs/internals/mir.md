@@ -100,9 +100,10 @@ stack). Dense `infer_numeric` still refuses that shape.
 `try_lower_abi_body` + `emit_lir` implement that mapping (leaf two-slot IL →
 SSA → fuse-IL, `RETURN` width 2). Production replace is **ON** after
 stack-IL opts: `emit_lir` keeps single-use return/cmp values on the stack
-(no `STORE`+`LOAD` of `RETURN` words), then re-runs the per-body opt set.
-A body is kept only when emitting cost does not grow (naive slot
-reconstruct is refused). Callers (`match f()`, `?`, I/O) stay on fuse-IL.
+and `DUP`s a TOS that is also the first word of `k, k+1`. A body is kept
+only when emitting cost does not grow. Stack-IL opts are **not** re-run
+on the reconstruct (`local_cse` refuses `MOD` and rematerialized
+`pair_int_churn`). Callers (`match f()`, `?`, I/O) stay on fuse-IL.
 Hit bench: `examples/perf/result_int_churn.hy`.
 
 Host Option / `Result<(),E>` / heap-heap Result still pack once at

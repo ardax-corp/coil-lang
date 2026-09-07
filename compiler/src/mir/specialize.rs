@@ -43,8 +43,9 @@ pub fn try_specialize_body(
 ///
 /// Dense stays off (`infer_numeric` still refuses `ret_words == 2`).
 /// Production `IlModule` replace uses this after stack-IL opts; `emit_lir`
-/// keeps single-use return/cmp values on the stack. Callers that `CALL` /
-/// host / box stay on fuse-IL.
+/// keeps single-use return/cmp values on the stack. Do not re-opt the
+/// reconstruct (`MOD` rematerializes). Callers that `CALL` / host / box
+/// stay on fuse-IL.
 pub fn try_lower_abi_body(
     ops: &[IlOp],
     name: &str,

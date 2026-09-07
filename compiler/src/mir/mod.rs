@@ -623,6 +623,49 @@ fn main() {
     }
 
     #[test]
+    fn pair_lir_keeps_shared_rem_in_a_slot() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 10, loc },
+            IlOp::Bin {
+                op: Instruction::MOD,
+                loc,
+            },
+            IlOp::StorePop { slot: 1, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Dup { loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return {
+                loc,
+                ret_words: 2,
+            },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "pair", 1, &mut pool).expect("pair leaf");
+        let mods = lir
+            .iter()
+            .filter(|op| {
+                matches!(op, IlOp::Bin { op, .. } if *op == Instruction::MOD)
+                    || matches!(op, IlOp::BinSlotSlot { op, .. } if common::Instruction::from(*op) == Instruction::MOD)
+            })
+            .count();
+        assert_eq!(mods, 1, "shared k = i % 10 must be stored, not rematerialized");
+        assert!(
+            lir.iter().any(|op| matches!(op, IlOp::StorePop { .. })),
+            "shared rem needs a slot"
+        );
+        assert!(
+            lir.iter().any(|op| matches!(op, IlOp::Dup { .. })),
+            "return (k, k+1) should DUP TOS"
+        );
+    }
+
     fn niche_word_is_one_value_lir() {
         // Err = ptr | 1; one-word heap-heap Result (no pair opcode).
         let loc = loc();

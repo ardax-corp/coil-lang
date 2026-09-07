@@ -362,6 +362,33 @@ fn emit_stored(
     Ok(())
 }
 
+/// `return k, k + 1` after `k` is already TOS: `DUP; CONST 1; ADD`.
+fn emit_hi_after_lo(
+    out: &mut Vec<IlOp>,
+    lo: ValueId,
+    hi: ValueId,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if plan.tree[hi.index()]
+        && let Some((bid, idx)) = plan.def[hi.index()]
+        && let MirInst::Bin { op, ty, lhs, rhs, .. } = &func.block(bid).insts[idx]
+        && *lhs == lo
+    {
+        out.push(IlOp::Dup { loc });
+        emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
+        out.push(IlOp::Bin {
+            op: stack_bin(*op, *ty)?,
+            loc,
+        });
+        return Ok(());
+    }
+    emit_stack(out, hi, func, plan, regs, pool, loc)
+}
+
 fn emit_stack(
     out: &mut Vec<IlOp>,
     v: ValueId,
@@ -528,7 +555,11 @@ fn emit_term(
                 return Err(LowerError::Refused("empty pair return".into()));
             }
             if let Some(v) = hi {
-                emit_stack(out, *v, func, plan, regs, pool, loc)?;
+                if let Some(lo_v) = *lo {
+                    emit_hi_after_lo(out, lo_v, *v, func, plan, regs, pool, loc)?;
+                } else {
+                    emit_stack(out, *v, func, plan, regs, pool, loc)?;
+                }
             }
             out.push(IlOp::Return { loc, ret_words });
         }
