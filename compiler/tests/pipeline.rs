@@ -3802,6 +3802,12 @@ fn example_perf_mir_gvn_divf_prints_checksum() {
 }
 
 #[test]
+fn example_perf_mir_float_pipeline_prints_checksum() {
+    let output = run_example("examples/perf/mir_float_pipeline.hy");
+    assert_eq!(output, "374999812500");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");
