@@ -10,7 +10,7 @@ use super::lower::{LowerHints, try_lower_numeric};
 
 /// If `ops` is a specialized numeric loop, return dense IL (Value ABI at edges).
 ///
-/// CSE → LICM → CSE → InstCombine → DestProp → CSE, then dense emit.
+/// CSE → LICM → CSE → InstCombine → DestProp → SR → CSE, then dense emit.
 pub fn try_specialize_body(
     ops: &[IlOp],
     name: &str,
@@ -35,6 +35,7 @@ pub fn try_specialize_body(
     crate::mir::cse(&mut func);
     crate::mir::instcombine(&mut func);
     crate::mir::destprop(&mut func);
+    crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),

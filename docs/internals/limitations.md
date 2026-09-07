@@ -83,6 +83,9 @@ straight-line ceiling as `copy_prop` (no CFG / φ). Hit bench:
 Numeric MIR has its own DestProp (COI-282): trivial SSA φ forwarding after
 InstCombine. Disagreeing φs stay; no IL slot rewrite. Hit:
 `examples/perf/mir_destprop.hy`.
+Numeric MIR IV strength reduction (COI-283) turns integer `iv * invariant`
+and `cast(i) * C` (integer-valued const `C`) into add induction. Non-const
+float factors and `i*i` stay. Hit: `examples/perf/mir_iv_sr.hy`.
 
 This is not general CFG copy propagation: joins, loops, unknown cursor states, calls, residual bytecode, and aliasing-sensitive operations remain fail-closed. **`il::sp` is not a cursor model** (COI-81, decided keep split — see below). A broader pass would need relative cursor/liveness analysis rather than slot-index use counts.
 

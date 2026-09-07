@@ -19,7 +19,7 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + MIR InstCombine + DestProp + dense emit for float-mul / i32 loops |
+| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + MIR InstCombine + DestProp + IV SR + dense emit for float-mul / i32 loops |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
@@ -92,6 +92,17 @@ drops `phi(x, x)` at construction; InstCombine can make both arms the same
 type mismatch, and self-only φs stay. No dead-block rewrite (dense emit
 fallthrough) and no new opcodes. A following CSE can share the forwarded
 uses. Hit bench: `examples/perf/mir_destprop.hy`.
+
+## P9 — MIR IV strength reduction (COI-283)
+
+After DestProp, a **lite LSR** rewrites `iv * invariant` to an add
+induction (new header φ, latch `+ step*factor`). Integer `i32`/`i64` is
+wrapping-exact. Float `cast(i) * C` only when `C` is a finite
+integer-valued const (IEEE-exact while the product stays in the
+mantissa). Non-const float factors stay, so mandelbrot
+`(x as float) * (2/size)` is unchanged. Quadratic `i*i` and IL-style
+host barriers do not apply (dense numeric subset only). A following CSE
+cleans unused casts. Hit bench: `examples/perf/mir_iv_sr.hy`.
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 

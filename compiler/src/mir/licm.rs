@@ -39,12 +39,12 @@ pub fn licm(func: &mut MirFunc) -> usize {
     total
 }
 
-struct LoopInfo {
-    header: BlockId,
-    blocks: HashSet<BlockId>,
+pub(super) struct LoopInfo {
+    pub header: BlockId,
+    pub blocks: HashSet<BlockId>,
 }
 
-fn natural_loops(func: &MirFunc) -> Vec<LoopInfo> {
+pub(super) fn natural_loops(func: &MirFunc) -> Vec<LoopInfo> {
     let n = func.blocks.len();
     if n == 0 {
         return Vec::new();
@@ -234,7 +234,7 @@ fn values_defined_in(func: &MirFunc, blocks: &HashSet<BlockId>) -> HashSet<Value
     out
 }
 
-fn ensure_preheader(func: &mut MirFunc, lp: &LoopInfo) -> BlockId {
+pub(super) fn ensure_preheader(func: &mut MirFunc, lp: &LoopInfo) -> BlockId {
     let preds = func.preds();
     let header = lp.header;
     let external: Vec<BlockId> = preds[header.index()]
