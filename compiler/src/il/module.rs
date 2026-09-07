@@ -257,14 +257,10 @@ impl IlModule {
                 pool,
             ) {
                 body.ops = dense;
-            } else if let Some(lir) = crate::mir::try_lower_abi_body(
-                &body.ops,
-                &body.meta.name,
-                body.meta.entry_sp,
-                pool,
-            ) {
-                body.ops = lir;
             }
+            // P3 MIR→LIR is documented + tested (`try_lower_abi_body`) but not
+            // swapped in here: naive slot reconstruct lost fuse-IL quality on
+            // result_int_churn / result_try_churn / pair_int_churn.
         }
 
         let (mut flat, remap, func_maps) = self.to_flat();

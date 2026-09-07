@@ -39,11 +39,11 @@ pub fn try_specialize_body(
     emit_dense(&func, entry, pool).ok()
 }
 
-/// Leaf two-slot / heap-niche helper: SSA then fuse-IL (shipped ABI).
+/// Leaf two-slot helper: SSA then fuse-IL (shipped ABI).
 ///
-/// Dense stays off (`infer_numeric` still refuses `ret_words == 2`). Callers
-/// that `CALL` / host / box stay on fuse-IL so Value-path match/`?` is
-/// unchanged.
+/// Dense stays off (`infer_numeric` still refuses `ret_words == 2`). Not
+/// wired into `IlModule` production replace — emit quality lost hit benches.
+/// Callers that `CALL` / host / box stay on fuse-IL.
 pub fn try_lower_abi_body(
     ops: &[IlOp],
     name: &str,

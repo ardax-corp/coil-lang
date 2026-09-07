@@ -95,11 +95,12 @@ stack). Dense `infer_numeric` still refuses that shape.
 - niche bits as existing `BITAND` / `BITOR` / `CONST 0` / `LogNot`
 - no `MakeEnum`, no `ReturnPair` / `PairToHeap` / niche ISA tombstones
 
-`try_lower_abi_body` runs **after** stack-IL opts, only for **leaf** helpers
-that already return two words and have no `CALL` / host / `MakeEnum` /
-`JumpIfMatch`. Callers (`match f()`, `?`, I/O) stay on fuse-IL so the Value
-path and pair-match InstCombine do not regress. Hit bench:
-`examples/perf/result_int_churn.hy` (`checked_div`).
+`try_lower_abi_body` + `emit_lir` implement that mapping (leaf two-slot IL →
+SSA → fuse-IL, `RETURN` width 2). Production **does not** replace bodies
+with that emit: reconstructing slots after stack-IL opts lost fuse-IL
+quality on `result_int_churn` / `result_try_churn` / `pair_int_churn`. The
+sidecar stays for tests and later emit-quality work. Callers (`match f()`,
+`?`, I/O) stay on fuse-IL. Hit bench: `examples/perf/result_int_churn.hy`.
 
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.
