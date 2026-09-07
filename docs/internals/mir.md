@@ -19,7 +19,7 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + dense emit for float-mul / i32 loops |
+| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
@@ -137,6 +137,24 @@ FMA / recip do **not** fire on mandelbrot (`2.0 * zr * zi + ci` stays
 two ops after `*2` → `+`; `2/size` is not a power-of-two after the
 outer `2.0 *`). Hit bench: `examples/perf/mir_float_pipeline.hy`.
 
+## P12 — MIR → coil-simd HostInvoke (COI-286)
+
+After GVN/PRE, a **single counted saxpy-reduce** may replace the whole
+body with HostInvoke `simd_axpy_reduce` (**136**) instead of dense
+bytecode. Pattern (no new Coil syntax):
+
+`s = 0; x = x0; i = 0; while i < n { s = s + a * x + y; x = x + dx; i = i + 1 }`
+
+or the affine form `x = (i as float) * dx + x0`. The kernel lives in the
+workspace `coil-simd` crate (AVX2/SSE2/AVX-512/NEON + scalar). Terms use
+mul-then-add, no FMA; the sum left-folds `(s + a*x) + y`. Nested /
+data-dependent loops (flagship mandelbrot, `mir_dense_float` escape)
+stay on `DenseBin`. Const trip count `< 8` refuses. Hit bench:
+`examples/perf/mir_simd_axpy.hy`.
+
+`ardax-corp/coil-simd` is not a separate GitHub package; kernels stay
+in-tree (same crate already used by `packed_la`).
+
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
 LIR here is the existing **fuse-IL / stack IL**, not a new ISA. Review Board
@@ -196,7 +214,6 @@ Host Option / `Result<(),E>` / heap-heap Result still pack once at
 
 ## Out of scope (later tickets)
 
-- P4 — native SIMD package
 - P5 — optional Cranelift
 
 ## Acceptance
