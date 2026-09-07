@@ -11,9 +11,9 @@
 //! scalar fallback. Callers never need `RUSTFLAGS` target-cpu flags for
 //! correctness; wider ISAs are used only when present at runtime.
 
+pub mod bytes;
 mod kernels;
 mod level;
-pub mod bytes;
 pub mod scalar;
 
 #[cfg(target_arch = "x86_64")]
@@ -23,7 +23,8 @@ mod x86_64;
 mod aarch64;
 
 pub use kernels::{
-    dot_f64, dot_i64, matmul_f64, matmul_i64, scale_f64, scale_i64, zip_add_f64, zip_add_i64,
-    zip_div_f64, zip_mul_f64, zip_mul_i64, zip_neg_f64, zip_neg_i64, zip_sub_f64, zip_sub_i64,
+    axpy_reduce_f64, dot_f64, dot_i64, matmul_f64, matmul_i64, scale_f64, scale_i64, zip_add_f64,
+    zip_add_i64, zip_div_f64, zip_mul_f64, zip_mul_i64, zip_neg_f64, zip_neg_i64, zip_sub_f64,
+    zip_sub_i64,
 };
-pub use level::{SimdLevel, detect};
+pub use level::{detect, SimdLevel};

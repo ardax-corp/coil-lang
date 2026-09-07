@@ -161,8 +161,9 @@ pub unsafe fn matmul_i64(a: &[i64], b: &[i64], c: &mut [i64], m: usize, k: usize
             let b_row = b.get_unchecked(t * n..t * n + n);
             let c_row = c.get_unchecked_mut(i * n..i * n + n);
             for j in 0..n {
-                *c_row.get_unchecked_mut(j) =
-                    c_row.get_unchecked(j).wrapping_add(a_it.wrapping_mul(*b_row.get_unchecked(j)));
+                *c_row.get_unchecked_mut(j) = c_row
+                    .get_unchecked(j)
+                    .wrapping_add(a_it.wrapping_mul(*b_row.get_unchecked(j)));
             }
         }
     }
@@ -193,7 +194,10 @@ unsafe fn saxpy_f64(alpha: f64, x: &[f64], y: &mut [f64]) {
     while i + 4 <= n {
         let vx = _mm256_loadu_pd(x.as_ptr().add(i));
         let vy = _mm256_loadu_pd(y.as_ptr().add(i));
-        _mm256_storeu_pd(y.as_mut_ptr().add(i), _mm256_add_pd(vy, _mm256_mul_pd(va, vx)));
+        _mm256_storeu_pd(
+            y.as_mut_ptr().add(i),
+            _mm256_add_pd(vy, _mm256_mul_pd(va, vx)),
+        );
         i += 4;
     }
     while i < n {
@@ -256,4 +260,40 @@ unsafe fn hsum_pd(v: __m256d) -> f64 {
     let sum2 = _mm_add_pd(lo, hi);
     let hi64 = _mm_unpackhi_pd(sum2, sum2);
     _mm_cvtsd_f64(_mm_add_sd(sum2, hi64))
+}
+
+/// 4-wide `a*x` then left-fold `(s + ax) + y` (no FMA).
+#[target_feature(enable = "avx2")]
+pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
+    let mut s = 0.0;
+    let mut i = 0;
+    let va = _mm256_set1_pd(a);
+    while i + 4 <= n {
+        let x0 = x;
+        let x1 = x0 + dx;
+        let x2 = x1 + dx;
+        let x3 = x2 + dx;
+        let vx = _mm256_set_pd(x3, x2, x1, x0);
+        let mut ax = [0.0; 4];
+        _mm256_storeu_pd(ax.as_mut_ptr(), _mm256_mul_pd(va, vx));
+        // set_pd is high-to-low: ax[0]=a*x0 … after storeu matches memory order of set_pd
+        // `_mm256_set_pd(e3,e2,e1,e0)` → memory [e0,e1,e2,e3]
+        s = s + ax[0];
+        s = s + y;
+        s = s + ax[1];
+        s = s + y;
+        s = s + ax[2];
+        s = s + y;
+        s = s + ax[3];
+        s = s + y;
+        x = x3 + dx;
+        i += 4;
+    }
+    while i < n {
+        s = s + a * x;
+        s = s + y;
+        x = x + dx;
+        i += 1;
+    }
+    s
 }

@@ -123,8 +123,9 @@ pub unsafe fn matmul_i64(a: &[i64], b: &[i64], c: &mut [i64], m: usize, k: usize
             let b_row = b.get_unchecked(t * n..t * n + n);
             let c_row = c.get_unchecked_mut(i * n..i * n + n);
             for j in 0..n {
-                *c_row.get_unchecked_mut(j) =
-                    c_row.get_unchecked(j).wrapping_add(a_it.wrapping_mul(*b_row.get_unchecked(j)));
+                *c_row.get_unchecked_mut(j) = c_row
+                    .get_unchecked(j)
+                    .wrapping_add(a_it.wrapping_mul(*b_row.get_unchecked(j)));
             }
         }
     }
@@ -191,4 +192,33 @@ unsafe fn zip_binop_i64(
         *out.get_unchecked_mut(i) = scalar(*a.get_unchecked(i), *b.get_unchecked(i));
         i += 1;
     }
+}
+
+/// 2-wide NEON `a*x` then left-fold `(s + ax) + y`.
+#[target_feature(enable = "neon")]
+pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
+    let mut s = 0.0;
+    let mut i = 0;
+    let va = vdupq_n_f64(a);
+    while i + 2 <= n {
+        let x0 = x;
+        let x1 = x0 + dx;
+        let xs = [x0, x1];
+        let vx = vld1q_f64(xs.as_ptr());
+        let mut ax = [0.0; 2];
+        vst1q_f64(ax.as_mut_ptr(), vmulq_f64(va, vx));
+        s = s + ax[0];
+        s = s + y;
+        s = s + ax[1];
+        s = s + y;
+        x = x1 + dx;
+        i += 2;
+    }
+    while i < n {
+        s = s + a * x;
+        s = s + y;
+        x = x + dx;
+        i += 1;
+    }
+    s
 }

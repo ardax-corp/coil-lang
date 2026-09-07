@@ -109,7 +109,13 @@ pub unsafe fn zip_sub_i64(a: &[i64], b: &[i64], out: &mut [i64]) {
 
 #[target_feature(enable = "avx512f", enable = "avx512dq")]
 pub unsafe fn zip_mul_i64(a: &[i64], b: &[i64], out: &mut [i64]) {
-    zip_binop_i64(a, b, out, |x, y| _mm512_mullo_epi64(x, y), i64::wrapping_mul);
+    zip_binop_i64(
+        a,
+        b,
+        out,
+        |x, y| _mm512_mullo_epi64(x, y),
+        i64::wrapping_mul,
+    );
 }
 
 #[target_feature(enable = "avx512f", enable = "avx512dq")]
@@ -202,12 +208,16 @@ unsafe fn saxpy_i64(alpha: i64, x: &[i64], y: &mut [i64]) {
         let vx = _mm512_loadu_si512(x.as_ptr().add(i) as *const __m512i);
         let vy = _mm512_loadu_si512(y.as_ptr().add(i) as *const __m512i);
         let prod = _mm512_mullo_epi64(va, vx);
-        _mm512_storeu_si512(y.as_mut_ptr().add(i) as *mut __m512i, _mm512_add_epi64(vy, prod));
+        _mm512_storeu_si512(
+            y.as_mut_ptr().add(i) as *mut __m512i,
+            _mm512_add_epi64(vy, prod),
+        );
         i += 8;
     }
     while i < n {
-        *y.get_unchecked_mut(i) =
-            y.get_unchecked(i).wrapping_add(alpha.wrapping_mul(*x.get_unchecked(i)));
+        *y.get_unchecked_mut(i) = y
+            .get_unchecked(i)
+            .wrapping_add(alpha.wrapping_mul(*x.get_unchecked(i)));
         i += 1;
     }
 }
@@ -256,4 +266,35 @@ unsafe fn zip_binop_i64(
         *out.get_unchecked_mut(i) = scalar(*a.get_unchecked(i), *b.get_unchecked(i));
         i += 1;
     }
+}
+
+/// 8-wide `a*x` then left-fold `(s + ax) + y` (no FMA).
+#[target_feature(enable = "avx512f")]
+pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
+    let mut s = 0.0;
+    let mut i = 0;
+    let va = _mm512_set1_pd(a);
+    while i + 8 <= n {
+        let mut xs = [0.0; 8];
+        xs[0] = x;
+        for k in 1..8 {
+            xs[k] = xs[k - 1] + dx;
+        }
+        let vx = _mm512_loadu_pd(xs.as_ptr());
+        let mut ax = [0.0; 8];
+        _mm512_storeu_pd(ax.as_mut_ptr(), _mm512_mul_pd(va, vx));
+        for k in 0..8 {
+            s = s + ax[k];
+            s = s + y;
+        }
+        x = xs[7] + dx;
+        i += 8;
+    }
+    while i < n {
+        s = s + a * x;
+        s = s + y;
+        x = x + dx;
+        i += 1;
+    }
+    s
 }
