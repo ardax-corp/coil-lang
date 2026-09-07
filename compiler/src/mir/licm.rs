@@ -409,7 +409,9 @@ mod tests {
         b.switch_to_block(body);
         let one_f = b.ins_const(MirConst::f64(1.0)).unwrap();
         let inv = b.ins_binop(MirBinOp::Div, one_f, scale).unwrap();
-        let xf = b.ins_cast(crate::mir::MirCastKind::IntToFloat, MirTy::F64, i).unwrap();
+        let xf = b
+            .ins_cast(crate::mir::MirCastKind::IntToFloat, MirTy::F64, i)
+            .unwrap();
         let term = b.ins_binop(MirBinOp::Mul, inv, xf).unwrap();
         let s = b.use_local(S, MirTy::F64).unwrap();
         let s1 = b.ins_binop(MirBinOp::Add, s, term).unwrap();
