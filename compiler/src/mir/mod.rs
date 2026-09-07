@@ -1,5 +1,6 @@
 //! Numeric MIR: type lattice + SSA builder (P0), dense emit (P1), CSE (P2),
-//! Result/Option MIR→LIR (P3 / COI-270), and LICM (P6 / COI-280).
+//! Result/Option MIR→LIR (P3 / COI-270), LICM (P6 / COI-280), and
+//! InstCombine (P7 / COI-281).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
@@ -13,6 +14,7 @@ mod emit_lir;
 mod func;
 mod infer;
 mod inst;
+mod instcombine;
 mod layout;
 mod licm;
 mod lower;
@@ -23,6 +25,7 @@ mod ty;
 pub use builder::{MirBuilder, MirError};
 pub use cse::cse;
 pub use emit::emit_dense;
+pub use instcombine::instcombine;
 pub use licm::licm;
 pub use emit_lir::emit_lir;
 pub use func::{MirBlock, MirFunc};
@@ -336,6 +339,46 @@ fn main() {
             }),
             "dense mul of the CSE'd quotient"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_instcombine_mul2_is_add() {
+        let src = r#"
+fn hot(float scale, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = (i as float) * scale;
+        let t = xf * xf;
+        s = ((s + t * 2.0) * 1.0) + 0.0;
+        i = (i + 1) + 0;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(2.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile instcombine kernel");
+        let fmuls = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FMUL64
+            })
+            .count();
+        let fadds = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FADD64
+            })
+            .count();
+        assert_eq!(fmuls, 2, "scale and square; t*2.0 must become add");
+        assert!(fadds >= 2, "t+t and s+…; fadds={fadds}");
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
