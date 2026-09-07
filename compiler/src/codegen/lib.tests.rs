@@ -2121,8 +2121,10 @@ fn main() {
     #[test]
     fn for_with_break_and_continue_emits_patched_jumps() {
         use common::Instruction;
+        // CALL keeps this on fuse-IL so COI-87 invert+fuse stays observable (W2).
         let (bc, _pool) = compile_src(
-            "fn main() { \
+            "fn keep(int x) -> int { return x; }
+fn main() { \
 let sum = 0; \
 let i = 0; \
 while i < 10 { \
@@ -2131,6 +2133,7 @@ if i == 7 { break; } \
 sum = sum + i; \
 i = i + 1; \
 } \
+let _ = keep(sum); \
 }",
         );
 
@@ -2195,7 +2198,8 @@ i = i + 1; \
     fn two_local_compare_break_emits_bin_slot_slot_jmpt() {
         use common::Instruction;
         let (bc, _) = compile_src(
-            "fn main() { \
+            "fn keep(int x) -> int { return x; }
+fn main() { \
 let a = 1; \
 let b = 2; \
 let i = 0; \
@@ -2203,6 +2207,7 @@ while (i < 5) { \
 if a < b { break; } \
 i = i + 1; \
 } \
+let _ = keep(i); \
 }",
         );
         assert!(
@@ -2221,7 +2226,10 @@ i = i + 1; \
     #[test]
     fn while_header_stays_fused_jmpf_not_jmpt() {
         use common::Instruction;
-        let (bc, _) = compile_src("fn main() { let i = 0; while (i < 10) { i = i + 1; } }");
+        let (bc, _) = compile_src(
+            "fn keep(int x) -> int { return x; }
+fn main() { let i = 0; while (i < 10) { i = i + 1; } let _ = keep(i); }",
+        );
         let jmpt = bc
             .iter()
             .filter(|b| {
