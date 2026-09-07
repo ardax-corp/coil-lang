@@ -48,7 +48,8 @@ stack. Dense emit **refuses** two-word returns.
 
 Int-only (language `i64`) loops stay on fuse-select so existing CSE/LICM
 hit benches (`numeric`, `iv_mul_sr`, …) are unchanged. Float `+`/`-`/`/`
-loops specialize (COI-287 W1); refuse inventory: [specialize-refuse.md](specialize-refuse.md).
+loops specialize (COI-287 W1; hit `mir_dense_addf.hy` is `+`/`-` only — `DIVF`
+already qualified); refuse inventory: [specialize-refuse.md](specialize-refuse.md).
 
 ## P2 — MIR CSE (COI-269)
 

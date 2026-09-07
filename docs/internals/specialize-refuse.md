@@ -29,7 +29,7 @@ integer bins as `I64`. Integer loops therefore hit gate 2 today (W2).
 |------|------|---------|----------------|
 | `mandelbrot` | `mandelbrot.hy` | dense | nested `*` — P6 |
 | `escape` | `mir_dense_float.hy` | dense | `*` kernel — P1 |
-| `hot` | `mir_dense_addf.hy` | dense | `+`/`-`/`/` no `*` — **W1** |
+| `hot` | `mir_dense_addf.hy` | dense | `+`/`-` no `*`/`/` — **W1** |
 | `hot` | `mir_cse_divf.hy` | dense | `DIVF` — P2 |
 | `hot` | `mir_gvn_divf.hy` | dense | `DIVF` — P10 |
 | `hot` | `mir_licm_divf.hy` | dense | `DIVF` — P6 |
