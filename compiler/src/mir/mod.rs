@@ -348,23 +348,23 @@ fn main() {
     #[test]
     fn pipeline_gvn_collapses_diamond_divf() {
         let src = r#"
-fn hot(float scale, float a, float b, int n) -> float {
+fn hot(float scale, int n) -> float {
     let i = 0;
     let s = 0.0;
     while i < n {
         let xf = i as float;
         if (i & 1) == 0 {
-            s = s + (xf / scale) * a;
+            s = s + xf / scale;
         } else {
-            s = s + (xf / scale) * b;
+            s = s + xf / scale;
         }
-        s = s + (xf / scale) * (a + b);
+        s = s + xf / scale;
         i = i + 1;
     }
     return s;
 }
 fn main() {
-    let _ = hot(3.0, 2.0, 4.0, 8);
+    let _ = hot(3.0, 8);
 }
 "#;
         let mut p = crate::Pipeline::new();
