@@ -182,6 +182,54 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_specializes_float_add_sub_div_without_mul() {
+        let src = r#"
+fn hot(float a, float b, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = i as float;
+        s = s + xf / a - b;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(2.0, 1.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile add/div kernel");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "float +/−/÷ loops must emit DenseBin without *"
+        );
+        assert!(
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FADD64
+            }),
+            "expected DenseBin FADD64"
+        );
+        assert!(
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FDIV64
+            }),
+            "expected DenseBin FDIV64"
+        );
+        assert!(
+            !bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FMUL64
+            }),
+            "hit kernel must stay mul-free"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
     fn pipeline_specializes_nested_float_loops() {
         let src = r#"
 fn nest(int n) -> float {
@@ -596,6 +644,7 @@ fn main() {
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
+    #[test]
     fn pipeline_leaves_int_loop_on_stack_il() {
         let src = r#"
 fn sum(int n) -> int {
