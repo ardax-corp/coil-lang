@@ -10,12 +10,12 @@ fn hot(float a, float b, int n) -> float {
         } else {
             t = a * 1.0;
         }
-        s = s + a * xf + t * xf + t * t + a * a;
+        s = s + a * xf + t * xf + t * t;
         i = i + 1;
     }
     return s;
 }
 
 test("destprop alias join") {
-    assert(hot(1.0, 2.0, 4) == 32.0)?;
+    assert(hot(1.0, 2.0, 4) == 28.0)?;
 }

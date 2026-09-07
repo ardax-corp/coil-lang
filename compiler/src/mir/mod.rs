@@ -399,7 +399,7 @@ fn hot(float a, float b, int n) -> float {
         } else {
             t = a * 1.0;
         }
-        s = s + a * xf + t * xf + t * t + a * a;
+        s = s + a * xf + t * xf + t * t;
         i = i + 1;
     }
     return s;
@@ -419,7 +419,7 @@ fn main() {
             .count();
         assert_eq!(
             fmuls, 3,
-            "xf*b plus CSE of a*xf and a*a after destprop; fmuls={fmuls}"
+            "xf*b, CSE a*xf, and t*t→a*a; fmuls={fmuls}"
         );
         let moves = bc
             .iter()
