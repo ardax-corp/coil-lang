@@ -21,7 +21,8 @@ the stack).
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
 | `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine + DestProp + IV SR + dense emit for float-mul / i32 loops |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
-| `mir::cse` | Dominator GVN + fully-anticipated fork PRE (includes `DIVF`/`DIV` that stack-IL CSE refuses) |
+| `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
+| `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
 | text form | Print / parse for round-trip tests |
 

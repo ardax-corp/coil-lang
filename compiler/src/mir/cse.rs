@@ -15,17 +15,46 @@ use super::inst::{
 use super::licm::dominators;
 use super::ty::MirTy;
 
-/// Dominator GVN plus fully-anticipated fork PRE.
-/// Returns how many instructions were removed (PRE inserts are not counted).
+/// Same-block value numbering. Returns how many instructions were removed.
 pub fn cse(func: &mut MirFunc) -> usize {
+    let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
+    for block in &mut func.blocks {
+        let mut avail: HashMap<ExprKey, ValueId> = HashMap::new();
+        for inst in &mut block.insts {
+            inst.rewrite_values(|v| resolve(&subst, v));
+            if inst.is_phi() {
+                continue;
+            }
+            let dest = inst.dest();
+            if let Some(key) = expr_key(inst) {
+                if let Some(&prev) = avail.get(&key) {
+                    subst.insert(dest, prev);
+                } else {
+                    avail.insert(key, dest);
+                }
+            }
+        }
+        if let Some(term) = &mut block.term {
+            term.rewrite_values(|v| resolve(&subst, v));
+        }
+    }
+    if subst.is_empty() {
+        return 0;
+    }
+    apply_subst(func, &subst)
+}
+
+/// Dominator GVN plus fully-anticipated fork PRE (COI-284).
+/// Cheap `Const` stays same-block so MIR→LIR can keep immediates on the stack.
+pub fn gvn(func: &mut MirFunc) -> usize {
     let mut removed = 0;
     for _ in 0..4 {
-        removed += gvn(func);
+        removed += gvn_dom(func);
         if pre_fully_anticipated(func) == 0 {
             break;
         }
     }
-    removed += gvn(func);
+    removed += gvn_dom(func);
     removed
 }
 
@@ -39,7 +68,7 @@ fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
     v
 }
 
-fn gvn(func: &mut MirFunc) -> usize {
+fn gvn_dom(func: &mut MirFunc) -> usize {
     let n = func.blocks.len();
     if n == 0 {
         return 0;
@@ -48,6 +77,7 @@ fn gvn(func: &mut MirFunc) -> usize {
     let dom = dominators(func, &preds);
     let idom = immediate_dominators(&dom, func.entry);
     let order = rpo(func);
+    let defined_in = def_blocks(func);
 
     let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
     let mut avail_out: Vec<HashMap<ExprKey, ValueId>> = vec![HashMap::new(); n];
@@ -66,7 +96,12 @@ fn gvn(func: &mut MirFunc) -> usize {
             let dest = inst.dest();
             if let Some(key) = expr_key(inst) {
                 if let Some(&prev) = avail.get(&key) {
-                    subst.insert(dest, prev);
+                    let local = defined_in.get(prev.index()).copied().flatten() == Some(bid);
+                    if matches!(key, ExprKey::Const(_)) && !local {
+                        avail.insert(key, dest);
+                    } else {
+                        subst.insert(dest, prev);
+                    }
                 } else {
                     avail.insert(key, dest);
                 }
@@ -532,7 +567,7 @@ mod tests {
         b.ret(Some(q)).unwrap();
         let mut f = b.finish().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 2);
-        assert!(cse(&mut f) >= 1);
+        assert!(gvn(&mut f) >= 1);
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 1);
     }
@@ -556,7 +591,7 @@ mod tests {
         b.ret(Some(q2)).unwrap();
         let mut f = b.finish().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 2);
-        assert!(cse(&mut f) >= 1);
+        assert!(gvn(&mut f) >= 1);
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 1);
         let fork_divs = f.blocks[0]
@@ -593,7 +628,7 @@ mod tests {
         let q2 = b.ins_binop(MirBinOp::Div, x, y).unwrap();
         b.ret(Some(q2)).unwrap();
         let mut f = b.finish().unwrap();
-        assert_eq!(cse(&mut f), 0);
+        assert_eq!(gvn(&mut f), 0);
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 2);
     }
@@ -615,7 +650,7 @@ mod tests {
         b.switch_to_block(e);
         b.ret(Some(x)).unwrap();
         let mut f = b.finish().unwrap();
-        assert_eq!(cse(&mut f), 0);
+        assert_eq!(gvn(&mut f), 0);
         f.verify().unwrap();
         assert_eq!(count_bin(&f, MirBinOp::Div), 1);
     }

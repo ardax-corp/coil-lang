@@ -26,7 +26,7 @@ mod text;
 mod ty;
 
 pub use builder::{MirBuilder, MirError};
-pub use cse::cse;
+pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
