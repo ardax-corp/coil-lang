@@ -18,5 +18,5 @@ fn hot(float scale, int n) -> float {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot(1.5, 2500000) as int)));
+    write_all(stdout(), to_bytes(format("%i", hot(1.5, 1200000) as int)));
 }
