@@ -19,25 +19,27 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE + dense emit for float-mul / i32 loops |
+| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + dense emit for float-mul / i32 loops |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses) |
+| `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
 | text form | Print / parse for round-trip tests |
 
 Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`.
 
 ## P1 — dense exec (COI-268)
 
-Eligible **leaf, single-header** numeric loops (float `*`/`/` or `i32`, no
-heap/calls, one back-edge) emit:
+Eligible numeric loops (float `*`/`/` or `i32`, no heap/calls, one or more
+back-edges) emit:
 
 - `DenseBin` / `DenseConst` / `DenseMove` / `DenseUnary` / `DenseCast`
 - `Seek` to the typed slot high-water mark
 - Fuse-select `LOAD`/`LOAD`/`cmp`/`JMPF` (→ `BinSlotSlotJmpf`) and `RETURN`
   at control and **Value ABI** edges
 
-Nested loops (flagship `mandelbrot.hy`) stay on fuse-IL. The hit bench
-`examples/perf/mir_dense_float.hy` (`escape`) is the dense kernel.
+Nested / multi-header float-mul loops (flagship `mandelbrot.hy`) are in
+scope for dense. The hit bench `examples/perf/mir_dense_float.hy`
+(`escape`) remains the single-header kernel.
 
 CALL still places args as `Value` words in slots `0..arity`. Dense ops
 reinterpret those bits as `i64`/`f64`. RETURN loads one word back onto the
@@ -53,6 +55,17 @@ After SSA lower, **local GVN** runs on the numeric function before dense emit
 `DIV`/`MOD`/`DIVF`/`MODF`; those ops are numbered here. Fuse-IL InstCombine /
 CSE / LICM are unchanged for non-MIR bodies. Hit bench:
 `examples/perf/mir_cse_divf.hy`.
+
+## P6 — MIR LICM + widen specialize (COI-280)
+
+After CSE, **natural-loop LICM** hoists invariant Const / add/sub/mul /
+float div / cmp / unary / cast into a preheader. Integer `Div`/`Rem` stay
+in the loop so a skipped trip cannot trap. A second CSE run merges
+hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
+
+Specialize no longer refuses multi-header bodies: nested float-mul loops
+(including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
+succeed. Int-only and add-only float loops still stay on fuse-IL.
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
@@ -120,6 +133,6 @@ Host Option / `Result<(),E>` / heap-heap Result still pack once at
 
 `mir::mandelbrot_inner_loop` is typed SSA. `tests/positive/mir_dense_float.hy`
 and `examples/perf/mir_dense_float.hy` (`escape`) execute via `DenseBin`.
-Flagship `mandelbrot.hy` (three nested loops) remains fuse-IL.
+Flagship `mandelbrot.hy` (three nested loops) is eligible for dense.
 `Result<int,int>` / `Option<int>` leafs lower through MIR→LIR with the
 shipped two-slot ABI (`tests/positive/mir_result_int.hy`).
