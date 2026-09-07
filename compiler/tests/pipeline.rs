@@ -3796,6 +3796,12 @@ fn example_perf_mir_destprop_prints_checksum() {
 }
 
 #[test]
+fn example_perf_mir_gvn_divf_prints_checksum() {
+    let output = run_example("examples/perf/mir_gvn_divf.hy");
+    assert_eq!(output, "21333330666666");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");

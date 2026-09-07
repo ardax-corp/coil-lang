@@ -19,9 +19,10 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + MIR InstCombine + DestProp + IV SR + dense emit for float-mul / i32 loops |
+| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine + DestProp + IV SR + dense emit for float-mul / i32 loops |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
-| `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses) |
+| `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
+| `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
 | text form | Print / parse for round-trip tests |
 
@@ -50,11 +51,12 @@ hit benches are unchanged.
 
 ## P2 — MIR CSE (COI-269)
 
-After SSA lower, **local GVN** runs on the numeric function before dense emit
-(and before P3 LIR emit). Stack-IL `local_cse` / `ssa_gvn` still refuse
-`DIV`/`MOD`/`DIVF`/`MODF`; those ops are numbered here. Fuse-IL InstCombine /
-CSE / LICM are unchanged for non-MIR bodies. Hit bench:
-`examples/perf/mir_cse_divf.hy`.
+After SSA lower, **GVN** runs on the numeric function before dense emit
+(and before P3 LIR emit). P2 numbered same-block; P10 walks the dominator
+tree and adds fully-anticipated fork PRE. Stack-IL `local_cse` / `ssa_gvn`
+still refuse `DIV`/`MOD`/`DIVF`/`MODF`; those ops are numbered here.
+Fuse-IL InstCombine / CSE / LICM are unchanged for non-MIR bodies. Hit
+benches: `examples/perf/mir_cse_divf.hy`, `mir_gvn_divf.hy`.
 
 ## P6 — MIR LICM + widen specialize (COI-280)
 
@@ -103,6 +105,15 @@ mantissa). Non-const float factors stay, so mandelbrot
 `(x as float) * (2/size)` is unchanged. Quadratic `i*i` and IL-style
 host barriers do not apply (dense numeric subset only). A following CSE
 cleans unused casts. Hit bench: `examples/perf/mir_iv_sr.hy`.
+
+## P10 — MIR cross-block GVN / PRE (COI-284)
+
+`mir::cse` numbers expressions along the dominator tree (not only
+same-block) and hoists a pure expr onto a fork when **every** successor
+computes it and the operands already dominate the fork. Integer
+`Div`/`Rem` stay in their arms (zero-trip / untaken-path trap). No
+join-φ PRE, no speculative one-arm hoist, no new opcodes. Hit bench:
+`examples/perf/mir_gvn_divf.hy`.
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
