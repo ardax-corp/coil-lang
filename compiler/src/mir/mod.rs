@@ -358,6 +358,7 @@ fn hot(float scale, float a, float b, int n) -> float {
         } else {
             s = s + (xf / scale) * b;
         }
+        s = s + (xf / scale) * (a + b);
         i = i + 1;
     }
     return s;
