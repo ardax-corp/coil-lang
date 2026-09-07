@@ -3808,6 +3808,12 @@ fn example_perf_mir_float_pipeline_prints_checksum() {
 }
 
 #[test]
+fn example_perf_mir_dense_i64_prints_checksum() {
+    let output = run_example("examples/perf/mir_dense_i64.hy");
+    assert_eq!(output, "2000001000000");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");

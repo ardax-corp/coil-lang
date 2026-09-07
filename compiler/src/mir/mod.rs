@@ -648,7 +648,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_leaves_int_loop_on_stack_il() {
+    fn pipeline_specializes_counted_i64_loop() {
         let src = r#"
 fn sum(int n) -> int {
     let i = 0;
@@ -664,10 +664,87 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile int loop");
+        let (bc, constants) = p.compile_src(src).expect("compile i64 loop");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "counted i64 loops must emit DenseBin"
+        );
+        assert!(
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::IADD64
+            }),
+            "expected DenseBin IADD64"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_specializes_i64_add_sub_without_mul_or_div() {
+        let src = r#"
+fn hot(int a, int b, int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        s = s + i + a - b;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(2, 1, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile i64 add/sub");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "counted i64 +/− loops must emit DenseBin"
+        );
+        assert!(
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::IADD64
+            }),
+            "expected DenseBin IADD64"
+        );
+        assert!(
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::ISUB64
+            }),
+            "expected DenseBin ISUB64"
+        );
+        assert!(
+            !bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && matches!(
+                        b.dense_abc_parts().0,
+                        common::dense::IMUL64 | common::dense::IDIV64
+                    )
+            }),
+            "W2 hit kernel must stay mul/div-free"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_refuses_i64_without_back_edge() {
+        let src = r#"
+fn eval_a(int i, int j) -> int {
+    return i + j * 2;
+}
+fn main() {
+    let _ = eval_a(1, 2);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile straight-line i64");
         assert!(
             !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "int-only loops stay on fuse-IL"
+            "straight-line i64 stays fuse-IL (W3)"
         );
     }
 
