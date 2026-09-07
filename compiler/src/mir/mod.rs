@@ -2,7 +2,8 @@
 //! Result/Option MIR→LIR (P3 / COI-270), LICM (P6 / COI-280),
 //! InstCombine (P7 / COI-281), DestProp (P8 / COI-282),
 //! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
-//! and conservative float peeps (P11 / COI-285).
+//! conservative float peeps (P11 / COI-285), and saxpy-reduce HostInvoke
+//! packs (P12 / COI-286).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
@@ -21,6 +22,7 @@ mod instcombine;
 mod layout;
 mod licm;
 mod lower;
+mod pack;
 mod specialize;
 mod strength;
 mod text;
@@ -555,6 +557,42 @@ fn main() {
         );
         assert!(fadds >= 2, "induction add + acc; fadds={fadds}");
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_axpy_reduce_emits_hostinvoke() {
+        let src = r#"
+fn pack(float a, float x0, float dx, float y, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    let x = x0;
+    while i < n {
+        s = s + a * x + y;
+        x = x + dx;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = pack(1.0, 0.0, 1.0, 0.0, 16);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile axpy pack");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::HostInvoke),
+            "axpy-reduce must emit HostInvoke; opcodes={:?}",
+            bc.iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "packed axpy must not keep DenseBin"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
