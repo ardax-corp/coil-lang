@@ -39,7 +39,6 @@ struct Candidate {
 
 #[derive(Clone)]
 struct Induction {
-    dest: ValueId,
     ty: MirTy,
     args: Vec<(BlockId, ValueId)>,
     step: ValueId,
@@ -192,7 +191,6 @@ fn find_inductions(
                 out.insert(
                     *dest,
                     Induction {
-                        dest: *dest,
                         ty: *ty,
                         args: args.clone(),
                         step,
@@ -330,6 +328,15 @@ fn materialize_product(
             return Some(insert_const(func, pre, c));
         }
     }
+    if is_one_const(func, a) {
+        return Some(b);
+    }
+    if is_one_const(func, b) {
+        return Some(a);
+    }
+    if is_zero_const(func, a) || is_zero_const(func, b) {
+        return Some(insert_const(func, pre, zero_const(ty)));
+    }
     let dest = alloc(func, ty);
     insert_before_term(
         func,
@@ -347,6 +354,11 @@ fn materialize_product(
 
 fn coerce_to(func: &mut MirFunc, pre: BlockId, v: ValueId, ty: MirTy) -> Option<ValueId> {
     let from = func.ty(v);
+    if let Some(c) = const_of(func, v) {
+        if let Some(folded) = cast_const(c, ty) {
+            return Some(insert_const(func, pre, folded));
+        }
+    }
     if from == ty {
         return Some(v);
     }
@@ -389,6 +401,18 @@ fn insert_const(func: &mut MirFunc, pre: BlockId, c: MirConst) -> ValueId {
 
 fn insert_before_term(func: &mut MirFunc, bid: BlockId, inst: MirInst) {
     func.block_mut(bid).insts.push(inst);
+}
+
+fn cast_const(c: MirConst, to: MirTy) -> Option<MirConst> {
+    match (c, to) {
+        (MirConst::I32(v), MirTy::F64) => Some(MirConst::f64(f64::from(v))),
+        (MirConst::I64(v), MirTy::F64) => Some(MirConst::f64(v as f64)),
+        (MirConst::I32(v), MirTy::F32) => Some(MirConst::f32(v as f32)),
+        (MirConst::I64(v), MirTy::F32) => Some(MirConst::f32(v as f32)),
+        (MirConst::I32(v), MirTy::I64) => Some(MirConst::I64(i64::from(v))),
+        (c, t) if c.ty() == t => Some(c),
+        _ => None,
+    }
 }
 
 fn alloc(func: &mut MirFunc, ty: MirTy) -> ValueId {
@@ -447,6 +471,34 @@ fn is_integer_valued(c: MirConst) -> bool {
             f.is_finite() && f.fract() == 0.0
         }
         MirConst::Bool(_) => false,
+    }
+}
+
+fn is_one_const(func: &MirFunc, v: ValueId) -> bool {
+    match const_of(func, v) {
+        Some(MirConst::I64(1) | MirConst::I32(1)) => true,
+        Some(MirConst::F64(b)) => b == 1.0f64.to_bits(),
+        Some(MirConst::F32(b)) => b == 1.0f32.to_bits(),
+        _ => false,
+    }
+}
+
+fn is_zero_const(func: &MirFunc, v: ValueId) -> bool {
+    match const_of(func, v) {
+        Some(MirConst::I64(0) | MirConst::I32(0)) => true,
+        Some(MirConst::F64(b)) => b == 0.0f64.to_bits(),
+        Some(MirConst::F32(b)) => b == 0.0f32.to_bits(),
+        _ => false,
+    }
+}
+
+fn zero_const(ty: MirTy) -> MirConst {
+    match ty {
+        MirTy::I32 => MirConst::I32(0),
+        MirTy::I64 => MirConst::I64(0),
+        MirTy::F32 => MirConst::f32(0.0),
+        MirTy::F64 => MirConst::f64(0.0),
+        _ => MirConst::I64(0),
     }
 }
 
@@ -595,7 +647,7 @@ bb1:
     v4 = icmp.slt v3, v1
     brif v4, bb2, bb3
 bb2:
-    v5 = sitofp.f64 v3
+    v5 = fcvt.f64.i64 v3
     v7 = fmul v5, v0
     v8 = iconst.i64 1
     v6 = iadd v3, v8
