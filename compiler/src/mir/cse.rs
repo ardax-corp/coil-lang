@@ -71,8 +71,13 @@ fn dce(func: &mut MirFunc) {
                 super::inst::Terminator::Br { cond, .. } => {
                     live.insert(*cond);
                 }
-                super::inst::Terminator::Return { value: Some(v) } => {
-                    live.insert(*v);
+                super::inst::Terminator::Return { lo, hi } => {
+                    if let Some(v) = lo {
+                        live.insert(*v);
+                    }
+                    if let Some(v) = hi {
+                        live.insert(*v);
+                    }
                 }
                 _ => {}
             }

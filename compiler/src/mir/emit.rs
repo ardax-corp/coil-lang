@@ -72,11 +72,11 @@ pub fn emit_dense(
     Ok(out)
 }
 
-fn max_label_hint(entry: Option<Label>) -> u32 {
+pub(super) fn max_label_hint(entry: Option<Label>) -> u32 {
     entry.map(|Label(id)| id.saturating_add(1)).unwrap_or(1)
 }
 
-fn assign_regs(func: &MirFunc) -> Result<(Vec<u8>, u8), LowerError> {
+pub(super) fn assign_regs(func: &MirFunc) -> Result<(Vec<u8>, u8), LowerError> {
     let n = func.types.len();
     let mut reg = vec![0u8; n];
     for (i, &p) in func.params.iter().enumerate() {
@@ -99,7 +99,7 @@ fn assign_regs(func: &MirFunc) -> Result<(Vec<u8>, u8), LowerError> {
     Ok((reg, next as u8))
 }
 
-fn next_emitted(func: &MirFunc, from: BlockId) -> Option<BlockId> {
+pub(super) fn next_emitted(func: &MirFunc, from: BlockId) -> Option<BlockId> {
     if from == func.entry {
         return func.blocks.iter().find(|b| b.id != func.entry).map(|b| b.id);
     }
@@ -111,13 +111,13 @@ fn next_emitted(func: &MirFunc, from: BlockId) -> Option<BlockId> {
         .map(|b| b.id)
 }
 
-fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool {
+pub(super) fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool {
     next_emitted(func, from) == Some(to)
 }
 
 /// Alias a header φ dest with its latch incoming when the dest is dead after
 /// that incoming is defined (so `i = i + 1` is a dest-overwrite, not a move).
-fn coalesce_safe_latch_phis(func: &MirFunc, mut regs: Vec<u8>) -> Vec<u8> {
+pub(super) fn coalesce_safe_latch_phis(func: &MirFunc, mut regs: Vec<u8>) -> Vec<u8> {
     for block in &func.blocks {
         for inst in &block.insts {
             let MirInst::Phi { dest, args, .. } = inst else {
@@ -156,7 +156,7 @@ fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: 
     }
 }
 
-fn term_cmp_dest(block: &super::func::MirBlock) -> Option<ValueId> {
+pub(super) fn term_cmp_dest(block: &super::func::MirBlock) -> Option<ValueId> {
     let Terminator::Br { cond, .. } = block.term.as_ref()? else {
         return None;
     };
@@ -166,7 +166,7 @@ fn term_cmp_dest(block: &super::func::MirBlock) -> Option<ValueId> {
     })
 }
 
-fn emit_br_cond(
+pub(super) fn emit_br_cond(
     out: &mut Vec<IlOp>,
     block: &super::func::MirBlock,
     regs: &[u8],
@@ -216,7 +216,7 @@ fn stack_cmp_op(op: MirCmpOp, ty: MirTy) -> Result<Instruction, LowerError> {
     })
 }
 
-fn emit_cond_jumps(
+pub(super) fn emit_cond_jumps(
     out: &mut Vec<IlOp>,
     func: &MirFunc,
     from: BlockId,
@@ -408,8 +408,13 @@ fn emit_term(
                 });
             }
         }
-        Terminator::Return { value } => {
-            if let Some(v) = value {
+        Terminator::Return { lo, hi } => {
+            if hi.is_some() {
+                return Err(LowerError::Refused(
+                    "dense emit is one-word Value ABI (P3 uses LIR)".into(),
+                ));
+            }
+            if let Some(v) = lo {
                 out.push(IlOp::Load {
                     slot: u32::from(regs[v.index()]),
                     loc,

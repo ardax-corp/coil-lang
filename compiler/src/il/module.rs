@@ -258,6 +258,9 @@ impl IlModule {
             ) {
                 body.ops = dense;
             }
+            // P3 MIR→LIR is documented + tested (`try_lower_abi_body`) but not
+            // swapped in here: naive slot reconstruct lost fuse-IL quality on
+            // result_int_churn / result_try_churn / pair_int_churn.
         }
 
         let (mut flat, remap, func_maps) = self.to_flat();

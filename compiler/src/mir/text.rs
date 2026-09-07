@@ -19,6 +19,9 @@ impl std::fmt::Display for MirFunc {
         write!(f, ")")?;
         if let Some(rt) = self.ret_ty {
             write!(f, " -> {rt}")?;
+            if let Some(hi) = self.ret_hi_ty {
+                write!(f, ", {hi}")?;
+            }
         }
         writeln!(f, " {{")?;
         for block in &self.blocks {
@@ -47,8 +50,15 @@ fn write_block(
             taken,
             not_taken,
         }) => writeln!(f, "brif {cond}, {taken}, {not_taken}")?,
-        Some(Terminator::Return { value: Some(v) }) => writeln!(f, "return {v}")?,
-        Some(Terminator::Return { value: None }) => writeln!(f, "return")?,
+        Some(Terminator::Return {
+            lo: Some(v),
+            hi: Some(h),
+        }) => writeln!(f, "return {v}, {h}")?,
+        Some(Terminator::Return {
+            lo: Some(v),
+            hi: None,
+        }) => writeln!(f, "return {v}")?,
+        Some(Terminator::Return { lo: None, .. }) => writeln!(f, "return")?,
         Some(Terminator::Unreachable) => writeln!(f, "unreachable")?,
         None => writeln!(f, "unreachable")?,
     }
@@ -150,6 +160,8 @@ impl<'a> Parser<'a> {
             name,
             params: Vec::new(),
             ret_ty: None,
+            ret_hi_ty: None,
+            ret_layout: super::layout::MirLayout::Word,
             entry: BlockId(0),
             blocks: Vec::new(),
             types: Vec::new(),
@@ -170,6 +182,10 @@ impl<'a> Parser<'a> {
         }
         if self.eat_str("->") {
             func.ret_ty = Some(self.ty()?);
+            if self.eat(',') {
+                func.ret_hi_ty = Some(self.ty()?);
+                func.ret_layout = super::layout::MirLayout::TwoSlot;
+            }
         }
         self.expect('{')?;
         while !self.eat('}') {
@@ -373,11 +389,18 @@ impl<'a> Parser<'a> {
             }
             "return" => {
                 if self.peek('v') {
+                    let lo = self.value()?;
+                    let hi = if self.eat(',') {
+                        Some(self.value()?)
+                    } else {
+                        None
+                    };
                     Ok(Terminator::Return {
-                        value: Some(self.value()?),
+                        lo: Some(lo),
+                        hi,
                     })
                 } else {
-                    Ok(Terminator::Return { value: None })
+                    Ok(Terminator::Return { lo: None, hi: None })
                 }
             }
             "unreachable" => Ok(Terminator::Unreachable),

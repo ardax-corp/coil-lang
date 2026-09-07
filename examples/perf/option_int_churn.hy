@@ -1,7 +1,7 @@
-// Integer-payload Option allocation: helper RETURNS Option<int>.
-// No int niche exists yet; each call heap-allocates ObjEnum.
-// Explicit return poisons #278 frame-local unboxing (local_escape.rs).
-// Heap-payload counterpart: examples/perf/gc_churn.hy.
+// Integer-payload Option: helper RETURNS two-slot Option<int>
+// (`CALL` bit 31 / `RETURN` 2). No ObjEnum; no int-niche ISA.
+// MIR→LIR (COI-270) re-emits the same ABI for the leaf. Heap-payload
+// counterpart: examples/perf/gc_churn.hy.
 // ITERS=20000000 (period-10 checksum 42 * 2e6); release VM-only ~1-3s.
 use io::{stdout};
 use io::sync::{write_all};
