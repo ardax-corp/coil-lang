@@ -9,7 +9,9 @@ shipped Result/Option layouts (P3).
 `compiler/src/mir/` — not inside `il/`. Fuse-IL stays the production lowerer
 for non-specialized functions. Dense emit replaces a whole function body
 before stack-IL opts when the body qualifies. Two-slot leaf helpers replace
-the body with stack IL (`emit_lir`) after the same opts.
+the body with stack IL (`emit_lir`) after the same opts when the reconstruct
+is no larger than the opted fuse-IL (single-use return/cmp values stay on
+the stack).
 
 | Piece | Role |
 |-------|------|
@@ -96,11 +98,15 @@ stack). Dense `infer_numeric` still refuses that shape.
 - no `MakeEnum`, no `ReturnPair` / `PairToHeap` / niche ISA tombstones
 
 `try_lower_abi_body` + `emit_lir` implement that mapping (leaf two-slot IL →
-SSA → fuse-IL, `RETURN` width 2). Production **does not** replace bodies
-with that emit: reconstructing slots after stack-IL opts lost fuse-IL
-quality on `result_int_churn` / `result_try_churn` / `pair_int_churn`. The
-sidecar stays for tests and later emit-quality work. Callers (`match f()`,
-`?`, I/O) stay on fuse-IL. Hit bench: `examples/perf/result_int_churn.hy`.
+SSA → fuse-IL, `RETURN` width 2). Production replace is **ON** after
+stack-IL opts: `emit_lir` keeps single-use return/cmp values on the stack
+and `DUP`s a TOS that is also the first word of `k, k+1`. Int
+`slot ⊕ imm` bins emit `BinSlotImm` so pre-fuse cost matches opted
+fuse-IL. A body is kept only when emitting cost does not grow.
+Stack-IL opts are **not** re-run on the reconstruct (`local_cse`
+refuses `MOD` and rematerialized `pair_int_churn`). Callers
+(`match f()`, `?`, I/O) stay on fuse-IL.
+Hit bench: `examples/perf/result_int_churn.hy`.
 
 Host Option / `Result<(),E>` / heap-heap Result still pack once at
 `HostInvoke` (`host_enum`). MIR does not add a second pack.

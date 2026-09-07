@@ -2,18 +2,22 @@
 //!
 //! Dense opcodes stay on the numeric path. This emit uses `LOAD`/`STORE`/`Bin`
 //! and `RETURN` width 1 or 2 — no new pair opcodes.
+//!
+//! Single-use values (return words, cmp immediates) stay on the stack instead
+//! of `STORE`+`LOAD`. That is the quality gap vs naive SSA slot reconstruct.
 
 use common::{Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
-    assign_regs, coalesce_safe_latch_phis, emit_br_cond, emit_cond_jumps, is_fallthrough,
-    max_label_hint, term_cmp_dest,
+    coalesce_safe_latch_phis, emit_cond_jumps, is_fallthrough, max_label_hint,
+    term_cmp_dest,
 };
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
+    ValueId,
 };
 use super::layout::MirLayout;
 use super::lower::LowerError;
@@ -25,9 +29,17 @@ pub fn emit_lir(
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
 ) -> Result<Vec<IlOp>, LowerError> {
-    let (regs, scratch) = assign_regs(func)?;
+    let plan = EmitPlan::new(func);
+    let (regs, scratch) = assign_needed(func, &plan)?;
     let regs = coalesce_safe_latch_phis(func, regs);
-    let max_reg = regs.iter().copied().max().unwrap_or(0).max(scratch);
+    let max_reg = plan
+        .need_slot
+        .iter()
+        .enumerate()
+        .filter(|(_, n)| **n)
+        .map(|(i, _)| regs[i])
+        .max()
+        .unwrap_or(0);
     let loc = DebugLoc::unknown();
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
@@ -46,9 +58,12 @@ pub fn emit_lir(
 
     let mut out = Vec::new();
     out.push(IlOp::Label(block_lab[func.entry.index()]));
-    out.push(IlOp::byte(
-        Byte::new(Instruction::Seek).with_operand_u32(u32::from(max_reg) + 1),
-    ));
+    let frame = u32::from(max_reg) + 1;
+    if frame > func.params.len() as u32 {
+        out.push(IlOp::byte(
+            Byte::new(Instruction::Seek).with_operand_u32(frame),
+        ));
+    }
 
     for block in &func.blocks {
         if block.id != func.entry {
@@ -58,31 +73,265 @@ pub fn emit_lir(
             if inst.is_phi() {
                 continue;
             }
-            if term_cmp_dest(block).is_some_and(|d| {
-                matches!(inst, MirInst::Cmp { dest, .. } if *dest == d)
-            }) {
+            let dest = inst.dest();
+            if plan.tree[dest.index()] {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, pool, loc)?;
+            if term_cmp_dest(block).is_some_and(|d| dest == d) {
+                continue;
+            }
+            emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
         }
         emit_term(
             &mut out,
             block,
             func,
+            &plan,
             &regs,
             scratch,
             &block_lab,
             &mut next_label,
+            pool,
             loc,
         )?;
     }
     Ok(out)
 }
 
-fn emit_inst(
+struct EmitPlan {
+    tree: Vec<bool>,
+    need_slot: Vec<bool>,
+    def: Vec<Option<(BlockId, usize)>>,
+}
+
+impl EmitPlan {
+    fn new(func: &MirFunc) -> Self {
+        let n = func.types.len();
+        let mut uses = vec![0u32; n];
+        let mut phi_in = vec![false; n];
+        let mut def = vec![None; n];
+        let mut def_block = vec![None; n];
+
+        for (i, p) in func.params.iter().enumerate() {
+            def_block[p.index()] = Some(func.entry);
+            let _ = i;
+        }
+        for block in &func.blocks {
+            for (i, inst) in block.insts.iter().enumerate() {
+                def[inst.dest().index()] = Some((block.id, i));
+                def_block[inst.dest().index()] = Some(block.id);
+                if inst.is_phi() {
+                    for v in inst.operands() {
+                        phi_in[v.index()] = true;
+                    }
+                }
+                for v in inst.operands() {
+                    uses[v.index()] += 1;
+                }
+            }
+            if let Some(term) = &block.term {
+                for v in term_values(term) {
+                    uses[v.index()] += 1;
+                }
+            }
+        }
+
+        let fused = fused_cmp_dests(func);
+        let mut tree = vec![false; n];
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for block in &func.blocks {
+                if let Some(Terminator::Return { lo, hi }) = &block.term {
+                    for v in [*lo, *hi].into_iter().flatten() {
+                        changed |= mark_tree(
+                            v, block.id, &mut tree, &uses, &phi_in, &def_block, &func.params, &fused,
+                        );
+                    }
+                }
+                if let Some(d) = term_cmp_dest(block) {
+                    if let Some(MirInst::Cmp { lhs, rhs, .. }) =
+                        def[d.index()].and_then(|(b, i)| {
+                            (b == block.id).then_some(&func.block(b).insts[i])
+                        })
+                    {
+                        for v in [*lhs, *rhs] {
+                            changed |= mark_tree(
+                                v,
+                                block.id,
+                                &mut tree,
+                                &uses,
+                                &phi_in,
+                                &def_block,
+                                &func.params,
+                                &fused,
+                            );
+                        }
+                    }
+                }
+                for inst in &block.insts {
+                    if inst.is_phi() || fused[inst.dest().index()] {
+                        continue;
+                    }
+                    // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
+                    for v in inst.operands() {
+                        changed |= mark_tree(
+                            v, block.id, &mut tree, &uses, &phi_in, &def_block, &func.params, &fused,
+                        );
+                    }
+                }
+            }
+        }
+
+        let mut need_slot = vec![false; n];
+        for p in &func.params {
+            need_slot[p.index()] = true;
+        }
+        for i in 0..n {
+            if fused[i] || tree[i] {
+                continue;
+            }
+            if def[i].is_some() || def_block[i].is_some() {
+                need_slot[i] = true;
+            }
+        }
+
+        Self {
+            tree,
+            need_slot,
+            def,
+        }
+    }
+}
+
+fn mark_tree(
+    v: ValueId,
+    use_block: BlockId,
+    tree: &mut [bool],
+    uses: &[u32],
+    phi_in: &[bool],
+    def_block: &[Option<BlockId>],
+    params: &[ValueId],
+    fused: &[bool],
+) -> bool {
+    let i = v.index();
+    if tree[i] || fused[i] || phi_in[i] || uses[i] != 1 {
+        return false;
+    }
+    if params.iter().any(|p| p.index() == i) {
+        return false;
+    }
+    if def_block[i] != Some(use_block) {
+        return false;
+    }
+    tree[i] = true;
+    true
+}
+
+fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
+    let mut fused = vec![false; func.types.len()];
+    for block in &func.blocks {
+        if let Some(d) = term_cmp_dest(block) {
+            fused[d.index()] = true;
+        }
+    }
+    fused
+}
+
+fn term_values(term: &Terminator) -> Vec<ValueId> {
+    match term {
+        Terminator::Br { cond, .. } => vec![*cond],
+        Terminator::Return { lo, hi } => lo.iter().chain(hi.iter()).copied().collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn assign_needed(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
+    let n = func.types.len();
+    let mut reg = vec![0u8; n];
+    for (i, &p) in func.params.iter().enumerate() {
+        if i > 254 {
+            return Err(LowerError::Refused("too many params".into()));
+        }
+        reg[p.index()] = i as u8;
+    }
+    let mut next = func.params.len();
+    for i in 0..n {
+        if !plan.need_slot[i] {
+            continue;
+        }
+        if func.params.iter().any(|p| p.index() == i) {
+            continue;
+        }
+        if next > 254 {
+            return Err(LowerError::Refused("too many lir slots".into()));
+        }
+        reg[i] = next as u8;
+        next += 1;
+    }
+    Ok((reg, next as u8))
+}
+
+fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
+    if !plan.tree[v.index()] {
+        return None;
+    }
+    let (bid, idx) = plan.def[v.index()]?;
+    let MirInst::Const { c, .. } = &func.block(bid).insts[idx] else {
+        return None;
+    };
+    let n = match *c {
+        MirConst::I64(x) => x,
+        MirConst::I32(x) => i64::from(x),
+        MirConst::Bool(x) => i64::from(x),
+        _ => return None,
+    };
+    i16::try_from(n).ok()
+}
+
+/// Prefer `BinSlotImm` / `BinSlotSlot` so pre-fuse cost matches opted fuse-IL.
+fn emit_bin(
+    out: &mut Vec<IlOp>,
+    op: Instruction,
+    lhs: ValueId,
+    rhs: ValueId,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if plan.need_slot[lhs.index()]
+        && let Some(imm) = tree_i16(func, plan, rhs)
+    {
+        out.push(IlOp::BinSlotImm {
+            op: op as u8,
+            slot: regs[lhs.index()],
+            imm,
+            loc,
+        });
+        return Ok(());
+    }
+    if plan.need_slot[lhs.index()] && plan.need_slot[rhs.index()] {
+        out.push(IlOp::BinSlotSlot {
+            op: op as u8,
+            a: regs[lhs.index()],
+            b: regs[rhs.index()],
+            loc,
+        });
+        return Ok(());
+    }
+    emit_stack(out, lhs, func, plan, regs, pool, loc)?;
+    emit_stack(out, rhs, func, plan, regs, pool, loc)?;
+    out.push(IlOp::Bin { op, loc });
+    Ok(())
+}
+
+fn emit_stored(
     out: &mut Vec<IlOp>,
     inst: &MirInst,
     func: &MirFunc,
+    plan: &EmitPlan,
     regs: &[u8],
     pool: &mut Vec<u64>,
     loc: DebugLoc,
@@ -102,13 +351,17 @@ fn emit_inst(
             lhs,
             rhs,
         } => {
-            let inst = stack_bin(*op, *ty)?;
-            out.push(IlOp::BinSlotSlot {
-                op: inst as u8,
-                a: regs[lhs.index()],
-                b: regs[rhs.index()],
+            emit_bin(
+                out,
+                stack_bin(*op, *ty)?,
+                *lhs,
+                *rhs,
+                func,
+                plan,
+                regs,
+                pool,
                 loc,
-            });
+            )?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -121,14 +374,8 @@ fn emit_inst(
             lhs,
             rhs,
         } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[lhs.index()]),
-                loc,
-            });
-            out.push(IlOp::Load {
-                slot: u32::from(regs[rhs.index()]),
-                loc,
-            });
+            emit_stack(out, *lhs, func, plan, regs, pool, loc)?;
+            emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
             out.push(IlOp::Bin {
                 op: stack_cmp(*op, *ty)?,
                 loc,
@@ -139,17 +386,8 @@ fn emit_inst(
             });
         }
         MirInst::Unary { dest, op, src } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[src.index()]),
-                loc,
-            });
-            match (*op, func.ty(*src)) {
-                (MirUnaryOp::Not, _) => out.push(IlOp::LogNot { loc }),
-                (MirUnaryOp::Neg, t) if t.is_float() => {
-                    out.push(IlOp::byte(Byte::new(Instruction::NEGF)));
-                }
-                (MirUnaryOp::Neg, _) => out.push(IlOp::byte(Byte::new(Instruction::NEG))),
-            }
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            push_unary(out, *op, func.ty(*src), loc);
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -161,18 +399,8 @@ fn emit_inst(
             src,
             ..
         } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[src.index()]),
-                loc,
-            });
-            match kind {
-                MirCastKind::IntToFloat => {
-                    out.push(IlOp::byte(Byte::new(Instruction::CastIntToFloat)));
-                }
-                MirCastKind::Sext => {
-                    return Err(LowerError::Refused("lir sext".into()));
-                }
-            }
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            push_cast(out, *kind)?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -183,14 +411,127 @@ fn emit_inst(
     Ok(())
 }
 
+/// `return k, k + 1` after `k` is already TOS: `DUP; CONST 1; ADD`.
+fn emit_hi_after_lo(
+    out: &mut Vec<IlOp>,
+    lo: ValueId,
+    hi: ValueId,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if plan.tree[hi.index()]
+        && let Some((bid, idx)) = plan.def[hi.index()]
+        && let MirInst::Bin { op, ty, lhs, rhs, .. } = &func.block(bid).insts[idx]
+        && *lhs == lo
+    {
+        out.push(IlOp::Dup { loc });
+        emit_stack(out, *rhs, func, plan, regs, pool, loc)?;
+        out.push(IlOp::Bin {
+            op: stack_bin(*op, *ty)?,
+            loc,
+        });
+        return Ok(());
+    }
+    emit_stack(out, hi, func, plan, regs, pool, loc)
+}
+
+fn emit_stack(
+    out: &mut Vec<IlOp>,
+    v: ValueId,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if !plan.tree[v.index()] {
+        out.push(IlOp::Load {
+            slot: u32::from(regs[v.index()]),
+            loc,
+        });
+        return Ok(());
+    }
+    let Some((bid, idx)) = plan.def[v.index()] else {
+        return Err(LowerError::Refused("tree value has no def".into()));
+    };
+    match &func.block(bid).insts[idx] {
+        MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
+        MirInst::Bin {
+            op, ty, lhs, rhs, ..
+        } => emit_bin(
+            out,
+            stack_bin(*op, *ty)?,
+            *lhs,
+            *rhs,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        ),
+        MirInst::Cmp {
+            op, ty, lhs, rhs, ..
+        } => emit_bin(
+            out,
+            stack_cmp(*op, *ty)?,
+            *lhs,
+            *rhs,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        ),
+        MirInst::Unary { op, src, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            push_unary(out, *op, func.ty(*src), loc);
+            Ok(())
+        }
+        MirInst::Cast { kind, src, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            push_cast(out, *kind)
+        }
+        MirInst::Phi { dest, .. } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+            Ok(())
+        }
+    }
+}
+
+fn push_unary(out: &mut Vec<IlOp>, op: MirUnaryOp, ty: MirTy, loc: DebugLoc) {
+    match (op, ty.is_float()) {
+        (MirUnaryOp::Not, _) => out.push(IlOp::LogNot { loc }),
+        (MirUnaryOp::Neg, true) => out.push(IlOp::byte(Byte::new(Instruction::NEGF))),
+        (MirUnaryOp::Neg, false) => out.push(IlOp::byte(Byte::new(Instruction::NEG))),
+    }
+}
+
+fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind) -> Result<(), LowerError> {
+    match kind {
+        MirCastKind::IntToFloat => {
+            out.push(IlOp::byte(Byte::new(Instruction::CastIntToFloat)));
+            Ok(())
+        }
+        MirCastKind::Sext => Err(LowerError::Refused("lir sext".into())),
+    }
+}
+
 fn emit_term(
     out: &mut Vec<IlOp>,
     block: &super::func::MirBlock,
     func: &MirFunc,
+    plan: &EmitPlan,
     regs: &[u8],
     scratch: u8,
     block_lab: &[Label],
     next_label: &mut u32,
+    pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     let Some(term) = &block.term else {
@@ -215,7 +556,7 @@ fn emit_term(
         } => {
             let t_moves = phi_moves(func, block.id, *taken, regs, scratch);
             let f_moves = phi_moves(func, block.id, *not_taken, regs, scratch);
-            emit_br_cond(out, block, regs, *cond, loc)?;
+            emit_br_cond(out, block, func, plan, regs, *cond, pool, loc)?;
             if t_moves.is_empty() && f_moves.is_empty() {
                 emit_cond_jumps(out, func, block.id, *taken, *not_taken, block_lab, loc);
             } else {
@@ -260,20 +601,18 @@ fn emit_term(
                 1
             };
             if let Some(v) = lo {
-                out.push(IlOp::Load {
-                    slot: u32::from(regs[v.index()]),
-                    loc,
-                });
+                emit_stack(out, *v, func, plan, regs, pool, loc)?;
             } else if ret_words == 1 {
                 out.push(IlOp::Const { imm: 0, loc });
             } else {
                 return Err(LowerError::Refused("empty pair return".into()));
             }
             if let Some(v) = hi {
-                out.push(IlOp::Load {
-                    slot: u32::from(regs[v.index()]),
-                    loc,
-                });
+                if let Some(lo_v) = *lo {
+                    emit_hi_after_lo(out, lo_v, *v, func, plan, regs, pool, loc)?;
+                } else {
+                    emit_stack(out, *v, func, plan, regs, pool, loc)?;
+                }
             }
             out.push(IlOp::Return { loc, ret_words });
         }
@@ -282,6 +621,36 @@ fn emit_term(
         }
     }
     Ok(())
+}
+
+fn emit_br_cond(
+    out: &mut Vec<IlOp>,
+    block: &super::func::MirBlock,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    cond: ValueId,
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if let Some(MirInst::Cmp {
+        op, ty, lhs, rhs, ..
+    }) = block.insts.iter().find(|inst| {
+        matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
+    }) {
+        return emit_bin(
+            out,
+            stack_cmp(*op, *ty)?,
+            *lhs,
+            *rhs,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        );
+    }
+    emit_stack(out, cond, func, plan, regs, pool, loc)
 }
 
 fn emit_phi_moves(

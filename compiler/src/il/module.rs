@@ -257,10 +257,18 @@ impl IlModule {
                 pool,
             ) {
                 body.ops = dense;
+            } else if let Some(lir) = crate::mir::try_lower_abi_body(
+                &body.ops,
+                &body.meta.name,
+                body.meta.entry_sp,
+                pool,
+            ) {
+                // Do not re-run stack-IL opts: `local_cse` refuses MOD and
+                // rematerializes a stored remainder (pair_int_churn +12%).
+                if lir_emit_cost(&lir) <= lir_emit_cost(&body.ops) {
+                    body.ops = lir;
+                }
             }
-            // P3 MIR→LIR is documented + tested (`try_lower_abi_body`) but not
-            // swapped in here: naive slot reconstruct lost fuse-IL quality on
-            // result_int_churn / result_try_churn / pair_int_churn.
         }
 
         let (mut flat, remap, func_maps) = self.to_flat();
@@ -272,6 +280,26 @@ impl IlModule {
         }
         (flat, remap, func_maps)
     }
+}
+
+/// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
+/// the body (naive slot spill). Labels are free.
+fn lir_emit_cost(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .map(|op| match op {
+            IlOp::StorePop { .. } => 2,
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    common::Instruction::Seek
+                ) =>
+            {
+                2
+            }
+            _ => 1,
+        })
+        .sum()
 }
 
 fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {

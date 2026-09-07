@@ -41,9 +41,11 @@ pub fn try_specialize_body(
 
 /// Leaf two-slot helper: SSA then fuse-IL (shipped ABI).
 ///
-/// Dense stays off (`infer_numeric` still refuses `ret_words == 2`). Not
-/// wired into `IlModule` production replace — emit quality lost hit benches.
-/// Callers that `CALL` / host / box stay on fuse-IL.
+/// Dense stays off (`infer_numeric` still refuses `ret_words == 2`).
+/// Production `IlModule` replace uses this after stack-IL opts; `emit_lir`
+/// keeps single-use return/cmp values on the stack. Do not re-opt the
+/// reconstruct (`MOD` rematerializes). Callers that `CALL` / host / box
+/// stay on fuse-IL.
 pub fn try_lower_abi_body(
     ops: &[IlOp],
     name: &str,

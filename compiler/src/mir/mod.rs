@@ -609,6 +609,73 @@ fn main() {
         g.verify().unwrap();
         assert_eq!(g.ret_layout, MirLayout::TwoSlot);
         assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(
+            !lir.iter().any(|op| matches!(op, IlOp::StorePop { .. })),
+            "return/cmp immediates must stay on the stack"
+        );
+        assert!(
+            !lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek
+            )),
+            "leaf using only param slots must not Seek"
+        );
+    }
+
+    #[test]
+    fn pair_lir_keeps_shared_rem_in_a_slot() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 10, loc },
+            IlOp::Bin {
+                op: Instruction::MOD,
+                loc,
+            },
+            IlOp::StorePop { slot: 1, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Dup { loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return {
+                loc,
+                ret_words: 2,
+            },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "pair", 1, &mut pool).expect("pair leaf");
+        let mods = lir
+            .iter()
+            .filter(|op| {
+                matches!(op, IlOp::Bin { op, .. } if *op == Instruction::MOD)
+                    || matches!(
+                        op,
+                        IlOp::BinSlotSlot { op, .. } | IlOp::BinSlotImm { op, .. }
+                            if common::Instruction::from(*op) == Instruction::MOD
+                    )
+            })
+            .count();
+        assert_eq!(mods, 1, "shared k = i % 10 must be stored, not rematerialized");
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::BinSlotImm { op, imm: 10, .. }
+                    if common::Instruction::from(*op) == Instruction::MOD
+            )),
+            "i % 10 should be BinSlotImm so replace cost matches opted IL"
+        );
+        assert!(
+            lir.iter().any(|op| matches!(op, IlOp::StorePop { .. })),
+            "shared rem needs a slot"
+        );
+        assert!(
+            lir.iter().any(|op| matches!(op, IlOp::Dup { .. })),
+            "return (k, k+1) should DUP TOS"
+        );
     }
 
     #[test]
@@ -637,10 +704,14 @@ fn main() {
         let mut pool = Vec::new();
         let lir = emit_lir(&f, Some(Label(0)), &mut pool).expect("emit niche");
         assert!(lir.iter().any(|op| matches!(op, IlOp::Return { ret_words: 1, .. })));
-        assert!(lir.iter().any(|op| matches!(
-            op,
-            IlOp::BinSlotSlot { op, .. } if common::Instruction::from(*op) == Instruction::BITOR
-        )));
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::BinSlotSlot { op, .. } | IlOp::BinSlotImm { op, .. }
+                    if common::Instruction::from(*op) == Instruction::BITOR
+            ) || matches!(op, IlOp::Bin { op, .. } if *op == Instruction::BITOR)),
+            "niche LIR must emit BITOR"
+        );
     }
 
     #[test]
