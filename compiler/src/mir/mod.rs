@@ -1,5 +1,5 @@
 //! Numeric MIR: type lattice + SSA builder (P0), dense emit (P1), CSE (P2),
-//! and Result/Option MIR→LIR (P3 / COI-270).
+//! Result/Option MIR→LIR (P3 / COI-270), and LICM (P6 / COI-280).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
@@ -14,6 +14,7 @@ mod func;
 mod infer;
 mod inst;
 mod layout;
+mod licm;
 mod lower;
 mod specialize;
 mod text;
@@ -22,6 +23,7 @@ mod ty;
 pub use builder::{MirBuilder, MirError};
 pub use cse::cse;
 pub use emit::emit_dense;
+pub use licm::licm;
 pub use emit_lir::emit_lir;
 pub use func::{MirBlock, MirFunc};
 pub use inst::{
@@ -170,7 +172,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_leaves_nested_loops_on_stack_il() {
+    fn pipeline_specializes_nested_float_loops() {
         let src = r#"
 fn nest(int n) -> float {
     let s = 0.0;
@@ -190,12 +192,112 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile nested");
+        let (bc, constants) = p.compile_src(src).expect("compile nested");
         assert!(
-            !bc.iter()
+            bc.iter()
                 .any(|b| *b.bytecode() == Instruction::DenseBin),
-            "nested loops stay on fuse-IL"
+            "nested float-mul loops emit dense"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_licm_hoists_invariant_divf() {
+        let src = r#"
+fn hot(float a, float b, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = i as float;
+        let q = a / b;
+        s = s + q * xf;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(3.0, 2.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile licm kernel");
+        let fdivs = bc
+            .iter()
+            .filter(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FDIV64
+            })
+            .count();
+        assert_eq!(fdivs, 1, "one DenseBin FDIV64 after MIR LICM");
+        assert!(
+            bc.iter().any(|b| {
+                *b.bytecode() == Instruction::DenseBin
+                    && b.dense_abc_parts().0 == common::dense::FMUL64
+            }),
+            "dense mul of the hoisted quotient"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_specializes_mandelbrot_nested() {
+        let src = r#"
+fn mandelbrot(int size, int max_iter) -> int {
+    let sum = 0;
+    let y = 0;
+    while y < size {
+        let x = 0;
+        while x < size {
+            let cr = (2.0 * (x as float) / (size as float)) - 1.5;
+            let ci = (2.0 * (y as float) / (size as float)) - 1.0;
+            let zr = 0.0;
+            let zi = 0.0;
+            let iter = 0;
+            while iter < max_iter {
+                let zr2 = zr * zr;
+                let zi2 = zi * zi;
+                if zr2 + zi2 > 4.0 {
+                    break;
+                }
+                let tr = zr2 - zi2 + cr;
+                zi = 2.0 * zr * zi + ci;
+                zr = tr;
+                iter = iter + 1;
+            }
+            sum = sum + iter;
+            x = x + 1;
+        }
+        y = y + 1;
+    }
+    return sum;
+}
+fn main() {
+    let _ = mandelbrot(8, 10);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile mandelbrot");
+        assert!(
+            bc.iter()
+                .any(|b| *b.bytecode() == Instruction::DenseBin),
+            "flagship-shaped nested mandelbrot must emit DenseBin"
+        );
+        let seek = bc
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Seek)
+            .map(|b| b.operand_u32())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            seek <= p.operand_stack_slots(),
+            "dense Seek {seek} exceeds operand stack {}",
+            p.operand_stack_slots()
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]

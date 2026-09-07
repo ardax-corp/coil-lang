@@ -63,7 +63,7 @@ fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
     v
 }
 
-fn dce(func: &mut MirFunc) {
+pub(super) fn dce(func: &mut MirFunc) {
     let mut live: HashSet<ValueId> = HashSet::new();
     for block in &func.blocks {
         if let Some(term) = &block.term {
