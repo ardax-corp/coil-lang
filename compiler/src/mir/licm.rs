@@ -87,7 +87,7 @@ pub(super) fn natural_loops(func: &MirFunc) -> Vec<LoopInfo> {
         .collect()
 }
 
-fn dominators(func: &MirFunc, preds: &[Vec<BlockId>]) -> Vec<HashSet<BlockId>> {
+pub(super) fn dominators(func: &MirFunc, preds: &[Vec<BlockId>]) -> Vec<HashSet<BlockId>> {
     let n = func.blocks.len();
     let all: HashSet<BlockId> = (0..n).map(|i| BlockId(i as u32)).collect();
     let mut dom = vec![all; n];
