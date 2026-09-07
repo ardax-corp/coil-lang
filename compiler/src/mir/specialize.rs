@@ -15,11 +15,8 @@ pub fn try_specialize_body(
     entry_sp: u32,
     pool: &mut Vec<u64>,
 ) -> Option<Vec<IlOp>> {
-    // Nested loops stay on fuse-IL (flagship mandelbrot). One back-edge
-    // header is the dense kernel (hit-bench `escape`).
-    if loop_header_count(ops) != 1 {
-        return None;
-    }
+    // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
+    // Infer still requires a back-edge plus float mul/div or i32.
     let inferred = infer_numeric(ops, pool.len(), entry_sp).ok()?;
     if !inferred.has_fmul && !inferred.has_i32 {
         return None;
@@ -31,6 +28,8 @@ pub fn try_specialize_body(
     hints.param_count = entry_sp;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
+    crate::mir::cse(&mut func);
+    crate::mir::licm(&mut func);
     crate::mir::cse(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
@@ -97,25 +96,3 @@ fn abi_leaf(ops: &[IlOp]) -> bool {
     ret2
 }
 
-fn loop_header_count(ops: &[IlOp]) -> usize {
-    use std::collections::{HashMap, HashSet};
-    use crate::il::Label;
-    let mut seen = HashMap::new();
-    let mut headers = HashSet::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-            seen.entry(*id).or_insert(i);
-        }
-        if let IlOp::Jump {
-            target: Label(id), ..
-        } = op
-        {
-            if let Some(&at) = seen.get(id) {
-                if at < i {
-                    headers.insert(*id);
-                }
-            }
-        }
-    }
-    headers.len()
-}
