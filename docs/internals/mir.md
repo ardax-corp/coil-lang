@@ -19,7 +19,7 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + dense emit for float-mul / i32 loops |
+| `try_specialize_body` | Infer + SSA + MIR CSE + MIR LICM + MIR InstCombine + dense emit for float-mul / i32 loops |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
@@ -66,6 +66,23 @@ hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
 Specialize no longer refuses multi-header bodies: nested float-mul loops
 (including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
 succeed. Int-only and add-only float loops still stay on fuse-IL.
+
+## P7 — MIR InstCombine (COI-281)
+
+After LICM + a second CSE, **typed peeps** run on dense SSA (`f64` / `i32` /
+`i64`). Fuse-IL `algebraic` only matches Load/Const/ConstPool windows; this
+pass folds binop results too.
+
+Proving set (no FMA / reciprocal — P11):
+
+- const-fold of bin / cmp / unary / cast (refuse int/float ÷0 and `MIN / -1`)
+- identities: `x±0`, `x*1`, `x/1`, int `x&-1` / `|0` / `^0` / `<<0`, int `x-x`
+  / `x*0` / `x%1` (float `+0.0` / `*1.0` exact bits only; refuse `x*0.0` and
+  float `x-x`)
+- strength: `x * 2` → `x + x` (int and IEEE `+2.0`; flagship `2.0 * zr` hits)
+- const-cond `br` → `jump`
+
+Hit bench: `examples/perf/mir_instcombine.hy`.
 
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
