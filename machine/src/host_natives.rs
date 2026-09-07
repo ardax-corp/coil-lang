@@ -9,14 +9,13 @@ use common::Value;
 
 use crate::math_libm::{MATH_LIBM_M1_WIRING, MATH_LIBM_WIRING};
 use crate::{
-    packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
-    FfiError, FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, CLOCK_WIRING, ENV_WIRING, FS_WIRING,
-    PACKED_DOT,
-    PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
+    packed_dot, packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith, FfiError,
+    FfiSignature, FfiType, HostClosureFn, HostOp, NativeFn, CLOCK_WIRING, ENV_WIRING, FS_WIRING,
+    PACKED_DOT, PACKED_MATMUL, PACKED_MATRIX_NEG, PACKED_MATRIX_ZIP, PACKED_VEC_ARITH,
 };
 
-use crate::GC_WIRING;
 use crate::vec_ops::VEC_WIRING;
+use crate::GC_WIRING;
 
 /// Removed virtual-time HostInvoke names/arities (COI-257). Same 16 slots as
 /// the old `TIME_WIRING` table, after FS and before ENV, so later ids stay put.
@@ -86,6 +85,8 @@ pub fn build_standard_host_natives(
     push_result_unit_probe(&mut out, &mut register_id);
     // Append-only after result_unit_probe: M1 prelude::math expansion.
     push_math_libm_wiring(&mut out, &mut register_id, MATH_LIBM_M1_WIRING);
+    // Append-only after math: MIR saxpy-reduce pack (compiler rewrite only).
+    push_simd_axpy_reduce(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -95,8 +96,8 @@ pub fn build_standard_host_natives(
 }
 
 pub use common::{
-    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE,
-    STREAM_ATTACH_NATIVE, STREAM_PARK_NATIVE,
+    CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE, STREAM_ATTACH_NATIVE,
+    STREAM_PARK_NATIVE,
 };
 
 fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
@@ -148,6 +149,42 @@ fn push_result_unit_probe(
     })));
 }
 
+fn push_simd_axpy_reduce(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    let sig = FfiSignature::from_parts(
+        common::SIMD_AXPY_REDUCE_NATIVE.to_string(),
+        vec![
+            FfiType::Int,
+            FfiType::Float,
+            FfiType::Float,
+            FfiType::Float,
+            FfiType::Float,
+        ],
+        FfiType::Float,
+    )
+    .expect("simd_axpy_reduce signature");
+    let id = out.len();
+    register_id(common::SIMD_AXPY_REDUCE_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |_heap, args| {
+        if args.len() < 5 {
+            return Ok(Some(Value::from(0.0)));
+        }
+        let n = args[0].as_int();
+        if n <= 0 {
+            return Ok(Some(Value::from(0.0)));
+        }
+        Ok(Some(Value::from(coil_simd::axpy_reduce_f64(
+            n as usize,
+            args[1].as_float(),
+            args[2].as_float(),
+            args[3].as_float(),
+            args[4].as_float(),
+        ))))
+    })));
+}
+
 fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
     use crate::io::as_result_unit;
     let sig = FfiSignature::from_parts(
@@ -187,16 +224,10 @@ fn push_removed_time_stubs(
     }
 }
 
-fn push_gc_host_ops(
-    out: &mut Vec<Arc<dyn NativeFn>>,
-    register_id: &mut impl FnMut(&str, usize),
-) {
-    let collect_sig = FfiSignature::from_parts(
-        crate::GC_COLLECT_NATIVE.to_string(),
-        vec![],
-        FfiType::Int,
-    )
-    .expect("gc_collect signature");
+fn push_gc_host_ops(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    let collect_sig =
+        FfiSignature::from_parts(crate::GC_COLLECT_NATIVE.to_string(), vec![], FfiType::Int)
+            .expect("gc_collect signature");
     let collect_id = out.len();
     register_id(crate::GC_COLLECT_NATIVE, collect_id);
     out.push(Arc::new(
@@ -944,7 +975,10 @@ mod tests {
             .iter()
             .position(|n| n == STREAM_ATTACH_NATIVE)
             .expect("stream_attach");
-        assert_eq!(names.get(attach.wrapping_sub(1)).map(String::as_str), Some("vec_from_array"));
+        assert_eq!(
+            names.get(attach.wrapping_sub(1)).map(String::as_str),
+            Some("vec_from_array")
+        );
         assert_eq!(
             names.get(attach + 1).map(String::as_str),
             Some(STREAM_PARK_NATIVE)
@@ -965,7 +999,10 @@ mod tests {
             names.get(attach + 5).map(String::as_str),
             Some(common::RESULT_UNIT_PROBE_NATIVE)
         );
-        assert_eq!(names.last().map(String::as_str), Some("math_tanh"));
+        assert_eq!(
+            names.last().map(String::as_str),
+            Some(common::SIMD_AXPY_REDUCE_NATIVE)
+        );
         assert_eq!(attach, 119);
     }
 
@@ -1174,6 +1211,10 @@ mod tests {
         );
         assert_eq!(common::host_native_id("math_atan"), Some(125));
         assert_eq!(common::host_native_id("math_tanh"), Some(135));
+        assert_eq!(
+            common::host_native_id(common::SIMD_AXPY_REDUCE_NATIVE),
+            Some(136)
+        );
     }
 
     #[test]
@@ -1214,12 +1255,12 @@ mod tests {
         for (offset, native) in natives[start..end].iter().enumerate() {
             let signature = native.signature();
             assert_eq!(signature.ret, FfiType::Float);
-            let expected_arity = if expected[offset] == "math_atan2" || expected[offset] == "math_rem"
-            {
-                2
-            } else {
-                1
-            };
+            let expected_arity =
+                if expected[offset] == "math_atan2" || expected[offset] == "math_rem" {
+                    2
+                } else {
+                    1
+                };
             assert_eq!(signature.args, vec![FfiType::Float; expected_arity]);
             assert_eq!(registrations[start + offset].1, start + offset);
         }

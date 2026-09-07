@@ -696,6 +696,11 @@ pub const HOST_NATIVES: &[HostNative] = &[
         arity: 1,
         id: 135,
     },
+    HostNative {
+        name: "simd_axpy_reduce",
+        arity: 5,
+        id: 136,
+    },
 ];
 
 /// Frozen HostInvoke id for `stream_attach`.
@@ -714,6 +719,9 @@ pub const RESULT_UNIT_PROBE_ID: u16 = 124;
 pub const MATH_ATAN_ID: u16 = 125;
 /// HostInvoke id for `math_tanh` (last M1 math native).
 pub const MATH_TANH_ID: u16 = 135;
+/// Compiler-only HostInvoke id for MIR saxpy-reduce packs (COI-286).
+pub const SIMD_AXPY_REDUCE_ID: u16 = 136;
+pub const SIMD_AXPY_REDUCE_NATIVE: &str = "simd_axpy_reduce";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -761,7 +769,7 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 136);
+    assert!(HOST_NATIVES.len() == 137);
     assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
     assert!(HOST_NATIVES[120].id == STREAM_PARK_ID);
     assert!(HOST_NATIVES[121].id == CLOCK_WALL_NANOS_ID);
@@ -770,6 +778,7 @@ const _: () = {
     assert!(HOST_NATIVES[124].id == RESULT_UNIT_PROBE_ID);
     assert!(HOST_NATIVES[125].id == MATH_ATAN_ID);
     assert!(HOST_NATIVES[135].id == MATH_TANH_ID);
+    assert!(HOST_NATIVES[136].id == SIMD_AXPY_REDUCE_ID);
 };
 
 /// HostInvoke id for a standard native name.
@@ -870,6 +879,7 @@ mod tests {
         assert_eq!(host_native_id(RESULT_UNIT_PROBE_NATIVE), Some(124));
         assert_eq!(host_native_id("math_atan"), Some(125));
         assert_eq!(host_native_id("math_tanh"), Some(135));
+        assert_eq!(host_native_id(SIMD_AXPY_REDUCE_NATIVE), Some(136));
         assert_eq!(HOST_NATIVES[24].name, "udp_local_port");
         for (i, e) in HOST_NATIVES.iter().enumerate() {
             assert_eq!(e.id as usize, i, "{} id drifted", e.name);
@@ -895,7 +905,10 @@ mod tests {
     fn host_invoke_operand_packs_layout_in_high_bits() {
         let packed = pack_host_invoke_operand(3, HOST_ENUM_LAYOUT_OPTION_NICHE);
         assert_eq!(host_invoke_arity(packed), 3);
-        assert_eq!(host_invoke_enum_layout(packed), HOST_ENUM_LAYOUT_OPTION_NICHE);
+        assert_eq!(
+            host_invoke_enum_layout(packed),
+            HOST_ENUM_LAYOUT_OPTION_NICHE
+        );
         assert_eq!(host_invoke_enum_layout(3), HOST_ENUM_LAYOUT_BOXED);
     }
 }
