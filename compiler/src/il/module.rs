@@ -249,15 +249,44 @@ impl IlModule {
             if run_ssa_gvn {
                 super::gvn::ssa_gvn(&mut body.ops);
             }
-            // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
-            if let Some(dense) = crate::mir::try_specialize_body(
-                &body.ops,
-                &body.meta.name,
-                body.meta.entry_sp,
-                pool,
-            ) {
-                body.ops = dense;
-            } else if let Some(lir) = crate::mir::try_lower_abi_body(
+        }
+
+        // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
+        // Leaf-first: a caller may take dense once every callee it CALLs is dense.
+        let mut dense_calls = crate::mir::DenseCallMap::new();
+        let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
+        while !pending.is_empty() {
+            let mut next = Vec::new();
+            let mut progressed = false;
+            for i in pending.iter().copied() {
+                let body = &mut self.funcs[i];
+                if let Some((dense, abi)) = crate::mir::try_specialize_body(
+                    &body.ops,
+                    &body.meta.name,
+                    body.meta.entry_sp,
+                    pool,
+                    &dense_calls,
+                ) {
+                    if let Some(crate::il::Label(id)) = body.meta.entry {
+                        dense_calls.insert(id, abi.clone());
+                    }
+                    if let Some(id) = first_label_id(&dense) {
+                        dense_calls.insert(id, abi);
+                    }
+                    body.ops = dense;
+                    progressed = true;
+                } else {
+                    next.push(i);
+                }
+            }
+            if !progressed {
+                break;
+            }
+            pending = next;
+        }
+        for i in pending {
+            let body = &mut self.funcs[i];
+            if let Some(lir) = crate::mir::try_lower_abi_body(
                 &body.ops,
                 &body.meta.name,
                 body.meta.entry_sp,

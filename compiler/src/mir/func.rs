@@ -265,6 +265,16 @@ impl MirFunc {
                     return Err(format!("{dest} host dest type"));
                 }
             }
+            MirInst::Call { dest, args, .. } => {
+                if !self.ty(*dest).is_specialized() {
+                    return Err(format!("{dest} call dest is not specialized"));
+                }
+                for (i, a) in args.iter().enumerate() {
+                    if !self.ty(*a).is_specialized() {
+                        return Err(format!("{dest} call arg {i} type"));
+                    }
+                }
+            }
             MirInst::Phi { dest, ty, args } => {
                 if self.ty(*dest) != *ty {
                     return Err(format!("{dest} phi type"));

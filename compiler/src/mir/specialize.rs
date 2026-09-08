@@ -3,28 +3,31 @@
 
 use crate::il::IlOp;
 
+use super::abi::{DenseAbi, DenseCallMap};
 use super::emit::emit_dense;
 use super::emit_lir::emit_lir;
-use super::infer::{infer_lir, infer_numeric};
+use super::infer::{infer_lir, infer_numeric_with};
 use super::lower::{LowerHints, try_lower_numeric};
 
-/// If `ops` is a specialized numeric body, return dense IL (Value ABI at edges).
+/// If `ops` is a specialized numeric body, return dense IL plus its ABI.
 ///
 /// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
 /// then saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted
-/// HostInvoke edges box → call → unbox).
+/// HostInvoke edges box → call → unbox; COI-291 dense→dense `CALL` when
+/// `calls` lists the callee).
 pub fn try_specialize_body(
     ops: &[IlOp],
     name: &str,
     entry_sp: u32,
     pool: &mut Vec<u64>,
-) -> Option<Vec<IlOp>> {
+    calls: &DenseCallMap,
+) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
-    // Heap / user CALL / multi-word RETURN stay refuse (see specialize-refuse).
+    // Heap / CALL to a non-dense callee / multi-word RETURN stay refuse.
     // Allowlisted HostInvoke (math / packed LA / simd_axpy_reduce) is W4.
-    let inferred = infer_numeric(ops, pool.len(), entry_sp).ok()?;
+    let inferred = infer_numeric_with(ops, pool.len(), entry_sp, calls).ok()?;
     if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
         return None;
     }
@@ -32,7 +35,13 @@ pub fn try_specialize_body(
     hints.slot_ty = inferred.slot_ty;
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
-    hints.param_count = entry_sp;
+    hints.calls = calls.clone();
+    let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
+    hints.param_count = live_params
+        .as_ref()
+        .map(|p| p.len() as u32)
+        .unwrap_or(entry_sp)
+        .max(entry_sp);
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
     crate::mir::cse(&mut func);
@@ -43,14 +52,15 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
+    let abi = DenseAbi::from_func_and_live_ins(&func, ops, &hints.slot_ty)?;
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,
     });
     if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
-        return Some(packed);
+        return Some((packed, abi));
     }
-    emit_dense(&func, entry, pool).ok()
+    Some((emit_dense(&func, entry, pool).ok()?, abi))
 }
 
 /// Leaf two-slot helper: SSA then fuse-IL (shipped ABI).
@@ -59,7 +69,7 @@ pub fn try_specialize_body(
 /// Production `IlModule` replace uses this after stack-IL opts; `emit_lir`
 /// keeps single-use return/cmp values on the stack. Do not re-opt the
 /// reconstruct (`MOD` rematerializes). Callers that `CALL` / host / box
-/// stay on fuse-IL.
+/// stay on fuse-IL unless the callee is dense (COI-291).
 pub fn try_lower_abi_body(
     ops: &[IlOp],
     name: &str,

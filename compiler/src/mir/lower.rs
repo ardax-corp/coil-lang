@@ -1,15 +1,16 @@
 //! Lower pre-fuse stack IL into numeric SSA.
 //!
 //! Fuse-select remains the production bytecode lowerer. This path is an
-//! optional sidecar: classes, heap, user calls, and residual `Byte` (except a
+//! optional sidecar: classes, heap, non-dense user calls, and residual `Byte` (except a
 //! small numeric set) refuse so the existing `Value` interpreter is unchanged.
 
 use std::collections::{BTreeSet, HashMap};
 
 use common::Instruction;
 
-use crate::il::{IlJumpKind, IlOp, Label};
+use crate::il::{EntryKind, IlJumpKind, IlOp, Label};
 
+use super::abi::DenseCallMap;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
 use super::inst::{
@@ -51,6 +52,8 @@ pub struct LowerHints {
     pub pool_ty: Vec<Option<MirTy>>,
     /// CALL-edge arity: slots `0..param_count` are live-in params (Value ABI).
     pub param_count: u32,
+    /// Leaf-first dense callees (COI-291). Empty → user `CALL` still refuses.
+    pub calls: DenseCallMap,
 }
 
 impl Default for LowerHints {
@@ -63,6 +66,7 @@ impl Default for LowerHints {
             pool: Vec::new(),
             pool_ty: Vec::new(),
             param_count: 0,
+            calls: DenseCallMap::new(),
         }
     }
 }
@@ -209,17 +213,21 @@ fn split_blocks(ops: &[IlOp]) -> Vec<(usize, usize)> {
 }
 
 fn is_term(op: &IlOp) -> bool {
-    matches!(
-        op,
+    match op {
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            ..
+        } => false,
         IlOp::Jump { .. }
-            | IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::Entry { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. }
-            | IlOp::PrologueJmp { .. }
-    )
+        | IlOp::Return { .. }
+        | IlOp::Halt { .. }
+        | IlOp::Entry { .. }
+        | IlOp::LoadReturnSlot { .. }
+        | IlOp::ConstReturnImm { .. }
+        | IlOp::BinReturn { .. }
+        | IlOp::PrologueJmp { .. } => true,
+        _ => false,
+    }
 }
 
 fn emit_term(
@@ -399,6 +407,35 @@ fn lower_op(
             let id = const_native_id(b, fn_v)
                 .ok_or_else(|| LowerError::Refused("HostInvoke".into()))?;
             tos.push(b.ins_host_invoke(id, args)?);
+            Ok(())
+        }
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            arity,
+            target,
+            ret_words,
+            ..
+        } => {
+            if *ret_words != 1 {
+                return Err(LowerError::Refused("dense CALL is one-word".into()));
+            }
+            let abi = hints
+                .calls
+                .get(&target.0)
+                .ok_or_else(|| LowerError::Refused("CALL".into()))?;
+            let n = *arity as usize;
+            if abi.params.len() != n {
+                return Err(LowerError::Refused("CALL arity".into()));
+            }
+            if tos.len() < n {
+                return Err(LowerError::Refused("CALL stack".into()));
+            }
+            let mut args = Vec::with_capacity(n);
+            for _ in 0..n {
+                args.push(tos.pop().expect("arity checked"));
+            }
+            args.reverse();
+            tos.push(b.ins_call(*target, args, abi)?);
             Ok(())
         }
         IlOp::GetField { .. }

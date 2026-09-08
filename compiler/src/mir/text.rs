@@ -130,6 +130,21 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::Call {
+            dest,
+            target,
+            args,
+        } => {
+            write!(f, "{dest} = call.{} {}", func.ty(*dest), target.0)?;
+            for (i, a) in args.iter().enumerate() {
+                if i == 0 {
+                    write!(f, " {a}")?;
+                } else {
+                    write!(f, ", {a}")?;
+                }
+            }
+            Ok(())
+        }
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -401,6 +416,23 @@ impl<'a> Parser<'a> {
             return Ok(MirInst::HostInvoke {
                 dest,
                 native_id: spec.id,
+                args,
+            });
+        }
+        if let Some(ty_s) = op.strip_prefix("call.") {
+            let ty = MirTy::parse(ty_s).ok_or_else(|| ParseError(op.clone()))?;
+            let target = crate::il::Label(self.uint()? as u32);
+            let mut args = Vec::new();
+            if self.peek('v') {
+                args.push(self.value()?);
+                while self.eat(',') {
+                    args.push(self.value()?);
+                }
+            }
+            ensure_ty(types, dest, ty);
+            return Ok(MirInst::Call {
+                dest,
+                target,
                 args,
             });
         }

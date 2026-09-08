@@ -448,7 +448,9 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         }
         MirInst::Unary { op, src, .. } => ExprKey::Unary { op, src },
         MirInst::Cast { kind, to, src, .. } => ExprKey::Cast { kind, to, src },
-        MirInst::Phi { .. } | MirInst::HostInvoke { .. } => return None,
+        MirInst::Phi { .. } | MirInst::HostInvoke { .. } | MirInst::Call { .. } => {
+            return None
+        }
     })
 }
 

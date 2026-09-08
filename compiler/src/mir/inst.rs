@@ -262,6 +262,13 @@ pub enum MirInst {
         native_id: u16,
         args: Vec<ValueId>,
     },
+    /// Dense→dense `CALL` (COI-291). Args are typed SSA; emit `LOAD`s +
+    /// one-word `Entry` + `STORE` (same bits as the callee's slots `0..n`).
+    Call {
+        dest: ValueId,
+        target: crate::il::Label,
+        args: Vec<ValueId>,
+    },
 }
 
 impl MirInst {
@@ -273,7 +280,8 @@ impl MirInst {
             | Self::Unary { dest, .. }
             | Self::Cast { dest, .. }
             | Self::Phi { dest, .. }
-            | Self::HostInvoke { dest, .. } => dest,
+            | Self::HostInvoke { dest, .. }
+            | Self::Call { dest, .. } => dest,
         }
     }
 
@@ -287,7 +295,7 @@ impl MirInst {
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
-            Self::HostInvoke { args, .. } => args.clone(),
+            Self::HostInvoke { args, .. } | Self::Call { args, .. } => args.clone(),
         }
     }
 
@@ -304,7 +312,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::HostInvoke { args, .. } => {
+            Self::HostInvoke { args, .. } | Self::Call { args, .. } => {
                 for v in args.iter_mut() {
                     *v = map(*v);
                 }
