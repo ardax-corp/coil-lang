@@ -13,9 +13,8 @@ use crate::il::{EntryKind, IlJumpKind, IlOp, Label};
 use super::abi::DenseCallMap;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
-use super::inst::{
-    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, ValueId,
-};
+use super::inst::{BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, ValueId};
+use super::string_barrier::{is_format_inst, refuse_reason};
 use super::ty::MirTy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -177,9 +176,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         let mut tos = merge_incoming(&mut b, incoming.remove(&bid).unwrap_or_default())?;
         if let Some(prev) = started.get(&bid) {
             if prev != &tos {
-                return Err(LowerError::Refused(
-                    "back-edge stack mismatch (I2)".into(),
-                ));
+                return Err(LowerError::Refused("back-edge stack mismatch (I2)".into()));
             }
         } else {
             started.insert(bid, tos.clone());
@@ -218,9 +215,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
             continue;
         };
         if stacks.iter().any(|(_, s)| s != used) {
-            return Err(LowerError::Refused(
-                "back-edge stack mismatch (I2)".into(),
-            ));
+            return Err(LowerError::Refused("back-edge stack mismatch (I2)".into()));
         }
     }
     b.finish().map_err(LowerError::from)
@@ -536,8 +531,8 @@ fn lower_op(
             }
             args.reverse();
             let fn_v = tos.pop().expect("fn id");
-            let id = const_native_id(b, fn_v)
-                .ok_or_else(|| LowerError::Refused("HostInvoke".into()))?;
+            let id =
+                const_native_id(b, fn_v).ok_or_else(|| LowerError::Refused("HostInvoke".into()))?;
             tos.push(b.ins_host_invoke(id, args)?);
             Ok(())
         }
@@ -586,14 +581,16 @@ fn lower_op(
         | IlOp::StoreIndexPin { .. }
         | IlOp::StoreIndexPinUnchecked { .. }
         | IlOp::Entry { .. }
-        | IlOp::String { .. }
-        | IlOp::Print { .. }
         | IlOp::LoadReturnSlot { .. }
         | IlOp::ConstReturnImm { .. }
         | IlOp::BinReturn { .. }
         | IlOp::PrologueJmp { .. } => Err(LowerError::Refused(
             "non-numeric IL (classes/heap/calls stay on Value)".into(),
         )),
+        IlOp::String { .. } | IlOp::Print { .. } => Err(LowerError::Refused(format!(
+            "I4 {} barrier",
+            refuse_reason(op).expect("string/print")
+        ))),
     }
 }
 
@@ -649,6 +646,7 @@ fn lower_byte(
             Ok(())
         }
         Instruction::Seek if hints.allow_match => Ok(()),
+        inst if is_format_inst(inst) => Err(LowerError::Refused("format".into())),
         Instruction::Unpack if hints.allow_match => {
             let arity = byte.operand_u32();
             if arity > 1 {
@@ -854,5 +852,22 @@ mod tests {
         let ops = vec![IlOp::GetField { loc: loc() }];
         let err = try_lower_numeric(&ops, &LowerHints::new("cls")).unwrap_err();
         assert!(matches!(err, LowerError::Refused(_)));
+    }
+
+    #[test]
+    fn lowering_refuses_format_and_string() {
+        let loc = loc();
+        let err =
+            try_lower_numeric(&[IlOp::String { idx: 0, loc }], &LowerHints::new("s")).unwrap_err();
+        assert!(matches!(err, LowerError::Refused(ref m) if m.contains("I4")));
+        let err = try_lower_numeric(
+            &[IlOp::Byte {
+                byte: common::Byte::new(Instruction::FORMAT).with_operand_u32(1),
+                loc,
+            }],
+            &LowerHints::new("fmt"),
+        )
+        .unwrap_err();
+        assert!(matches!(err, LowerError::Refused(ref m) if m.contains("format")));
     }
 }

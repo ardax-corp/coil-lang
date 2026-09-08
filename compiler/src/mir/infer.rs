@@ -18,6 +18,7 @@ use crate::il::{EntryKind, IlOp, Label};
 use super::abi::DenseCallMap;
 use super::host_allow::host_spec;
 use super::lower::LowerError;
+use super::string_barrier::{is_format_inst, refuse_reason};
 use super::ty::MirTy;
 
 /// Minimum numeric work ops for a no-back-edge body to take dense specialize.
@@ -87,11 +88,7 @@ pub fn infer_numeric_with(
 }
 
 /// Slot types for MIR→LIR (two-slot / niche leafs). No loop required.
-pub fn infer_lir(
-    ops: &[IlOp],
-    pool_len: usize,
-    param_count: u32,
-) -> Result<Inferred, LowerError> {
+pub fn infer_lir(ops: &[IlOp], pool_len: usize, param_count: u32) -> Result<Inferred, LowerError> {
     infer_lir_with_seed(ops, pool_len, param_count, &HashMap::new())
 }
 
@@ -319,6 +316,9 @@ fn infer_walk(
                     }
                     set_slot(&mut slot_ty, slot as u32, ty)?;
                 }
+                other if is_format_inst(other) => {
+                    return Err(LowerError::Refused("format".into()));
+                }
                 other => {
                     return Err(LowerError::Refused(format!(
                         "residual byte {}",
@@ -519,7 +519,10 @@ fn has_back_edge(ops: &[IlOp]) -> bool {
         if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
             seen.entry(*id).or_insert(i);
         }
-        if let IlOp::Jump { target: Label(id), .. } = op {
+        if let IlOp::Jump {
+            target: Label(id), ..
+        } = op
+        {
             if let Some(&at) = seen.get(id) {
                 if at < i {
                     return true;
@@ -575,6 +578,9 @@ fn is_int_arith(inst: Instruction) -> bool {
 
 /// Coarse first-op kind for the infer catch-all (W0 inventory).
 fn refuse_il_kind(op: &IlOp) -> &'static str {
+    if let Some(reason) = refuse_reason(op) {
+        return reason;
+    }
     match op {
         IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => "CALL",
         IlOp::HostInvoke { .. } => "HostInvoke",
@@ -588,7 +594,6 @@ fn refuse_il_kind(op: &IlOp) -> &'static str {
         IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => "class/field",
         IlOp::MakeEnum { .. } | IlOp::MakeTuple { .. } | IlOp::MakeArray { .. } => "heap/aggregate",
         IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => "box",
-        IlOp::String { .. } | IlOp::Print { .. } => "string/io",
         IlOp::LoadReturnSlot { .. } | IlOp::ConstReturnImm { .. } | IlOp::BinReturn { .. } => {
             "fused-return"
         }
@@ -631,8 +636,10 @@ fn apply_bin(
     let lhs = stack
         .pop()
         .ok_or_else(|| LowerError::Refused("bin stack".into()))?;
-    if matches!(inst, Instruction::Pow | Instruction::PowF | Instruction::AND | Instruction::OR)
-    {
+    if matches!(
+        inst,
+        Instruction::Pow | Instruction::PowF | Instruction::AND | Instruction::OR
+    ) {
         return Err(LowerError::Refused(format!("binop {}", inst.mnemonic())));
     }
     if matches!(

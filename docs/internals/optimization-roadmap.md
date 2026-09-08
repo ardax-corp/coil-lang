@@ -135,7 +135,7 @@ identical; flagships remain controls. Skip only on hit-bench wash or regress.
 **MIR language islands** ([mir-islands.md](mir-islands.md)) use a stricter
 rule: prove on real language surface + embed A/B; do **not** invent a
 synthetic hit bench whose only job is a score. Identical flagship archives
-are the expected I1 outcome.
+are the expected I1 / I4 (barrier-only) outcome.
 
 Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,

@@ -5,13 +5,15 @@
 //! conservative float peeps (P11 / COI-285), saxpy-reduce HostInvoke
 //! packs (P12 / COI-286), I1 heap/niche `MirTy` names (COI-293), and
 //! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294), and
-//! I3 field load/store on non-escaping unboxed class locals (COI-295).
+//! I3 field load/store on non-escaping unboxed class locals (COI-295), and
+//! I4 hard refuse of `FORMAT` / general string ops (COI-296).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
 //! `CALL` uses the one-word typed ABI ([`abi`]; COI-291). Allowlisted
 //! HostInvoke (W4) still boxes at the host edge. Escaping / heap-backed
-//! named class locals stay on [`crate::il`].
+//! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
+//! `STRINGIFY` / `PRINT` stay fuse-IL (I4).
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
@@ -31,6 +33,7 @@ mod lower;
 mod pack;
 mod specialize;
 mod strength;
+mod string_barrier;
 mod text;
 mod ty;
 
@@ -124,7 +127,7 @@ pub fn mandelbrot_inner_loop() -> Result<MirFunc, MirError> {
 mod tests {
     use super::*;
     use crate::il::{IlJumpKind, IlOp, Label};
-    use common::{DebugLoc, Instruction};
+    use common::{Byte, DebugLoc, Instruction};
 
     fn loc() -> DebugLoc {
         DebugLoc::unknown()
@@ -1649,6 +1652,85 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+    }
+
+    #[test]
+    fn i4_format_and_string_stay_refused() {
+        let loc = loc();
+        let format_ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::String { idx: 0, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::FORMAT).with_operand_u32(1),
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        assert!(
+            try_lower_abi_body(&format_ops, "fmt", 1, &mut pool).is_none(),
+            "FORMAT must not enter MIR→LIR"
+        );
+        assert!(
+            super::infer::infer_numeric(&format_ops, 0, 1).is_err(),
+            "FORMAT must not enter dense infer"
+        );
+        let string_ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::String { idx: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert!(
+            try_lower_abi_body(&string_ops, "s", 0, &mut pool).is_none(),
+            "STRING must not enter MIR→LIR"
+        );
+    }
+
+    #[test]
+    fn pipeline_format_loop_stays_fuse_il() {
+        let src = r#"
+use string::{format};
+fn hot(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        let _ = format("%i", i);
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(4);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile format loop");
+        let symbols = p.program_debug().fn_symbols;
+        let hot = symbols
+            .iter()
+            .position(|s| s.name == "hot")
+            .expect("hot symbol");
+        let start = symbols[hot].entry_pc as usize;
+        let end = symbols
+            .get(hot + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let hot_bc = &bc[start..end];
+        assert!(
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::FORMAT),
+            "I4 keeps FORMAT on fuse-IL; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            hot_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "I4 must not dense-specialize a FORMAT loop"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]

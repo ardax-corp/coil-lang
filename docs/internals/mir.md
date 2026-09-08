@@ -45,6 +45,11 @@ local_escape sidecar already unboxed into consecutive slots
 (`FieldLoad` / `FieldStore`). Escaping / heap-backed named locals
 (`InitTyped` / `GetField` / `LoadField`) stay fuse-IL. Dense emit
 refuses the new field ops.
+I4 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse))
+keeps `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` on fuse-IL. Infer,
+lower, and ABI-leaf refuse them. There is no string SSA subset and no
+W4 HostInvoke for `from_bytes` / `to_bytes`. Unicode / regex are out of
+MIR.
 
 ## P1 — dense exec (COI-268)
 
