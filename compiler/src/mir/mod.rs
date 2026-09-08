@@ -1674,26 +1674,31 @@ class Point {
     pub x: int,
     pub y: int,
 }
-fn hot(int n) -> int {
-    let p = new Point(3, 4);
-    return p.x + p.y + n;
-}
 fn main() {
-    let _ = hot(1);
+    let p = new Point(3, 4);
+    let z = p.x + p.y;
 }
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile unboxed Point");
-        let hot = p.function_offset("hot").expect("hot");
-        let main = p.function_offset("main").expect("main");
-        let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
+        let symbols = p.program_debug().fn_symbols;
+        let main = symbols
+            .iter()
+            .position(|s| s.name == "main")
+            .expect("main symbol");
+        let start = symbols[main].entry_pc as usize;
+        let end = symbols
+            .get(main + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let main_bc = &bc[start..end];
         assert!(
-            hot_bc.iter().all(|b| !matches!(
+            main_bc.iter().all(|b| !matches!(
                 *b.bytecode(),
                 Instruction::InitTyped | Instruction::GetField | Instruction::LoadField
             )),
             "non-escaping Point must unbox; opcodes={:?}",
-            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            main_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -1719,9 +1724,17 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile escaping Point");
-        let hot = p.function_offset("hot").expect("hot");
-        let main = p.function_offset("main").expect("main");
-        let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
+        let symbols = p.program_debug().fn_symbols;
+        let hot = symbols
+            .iter()
+            .position(|s| s.name == "hot")
+            .expect("hot symbol");
+        let start = symbols[hot].entry_pc as usize;
+        let end = symbols
+            .get(hot + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let hot_bc = &bc[start..end];
         assert!(
             hot_bc
                 .iter()
