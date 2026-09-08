@@ -213,17 +213,21 @@ fn split_blocks(ops: &[IlOp]) -> Vec<(usize, usize)> {
 }
 
 fn is_term(op: &IlOp) -> bool {
-    matches!(
-        op,
+    match op {
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            ..
+        } => false,
         IlOp::Jump { .. }
-            | IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::Entry { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. }
-            | IlOp::PrologueJmp { .. }
-    )
+        | IlOp::Return { .. }
+        | IlOp::Halt { .. }
+        | IlOp::Entry { .. }
+        | IlOp::LoadReturnSlot { .. }
+        | IlOp::ConstReturnImm { .. }
+        | IlOp::BinReturn { .. }
+        | IlOp::PrologueJmp { .. } => true,
+        _ => false,
+    }
 }
 
 fn emit_term(

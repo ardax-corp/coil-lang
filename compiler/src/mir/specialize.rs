@@ -35,8 +35,13 @@ pub fn try_specialize_body(
     hints.slot_ty = inferred.slot_ty;
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
-    hints.param_count = entry_sp;
     hints.calls = calls.clone();
+    let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
+    hints.param_count = live_params
+        .as_ref()
+        .map(|p| p.len() as u32)
+        .unwrap_or(entry_sp)
+        .max(entry_sp);
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     // Stack-IL CSE refuses DIVF; number it on SSA before dense emit.
     crate::mir::cse(&mut func);
@@ -47,7 +52,7 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
-    let abi = DenseAbi::from_func(&func)?;
+    let abi = DenseAbi::from_func_and_live_ins(&func, ops, &hints.slot_ty)?;
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,
