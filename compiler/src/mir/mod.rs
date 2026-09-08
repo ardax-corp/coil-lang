@@ -829,7 +829,7 @@ fn kernel(float x, int k) -> float {
     let i = 0;
     let t = x;
     while i < k {
-        t = t * t + x;
+        t = t * 0.5 + x;
         i = i + 1;
     }
     return t;
@@ -867,6 +867,7 @@ fn main() {
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
+    #[test]
     fn pipeline_refuses_call_to_non_dense_helper() {
         let src = r#"
 fn mid(float x) -> float {
@@ -904,6 +905,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn pipeline_refuses_user_call_inside_numeric_loop() {
         let src = r#"
 fn helper(float x, int k) -> float {

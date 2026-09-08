@@ -3,7 +3,7 @@ fn kernel(float x, int k) -> float {
     let i = 0;
     let t = x;
     while i < k {
-        t = t * t + x;
+        t = t * 0.5 + x;
         i = i + 1;
     }
     return t;
