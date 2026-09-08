@@ -38,7 +38,9 @@ fields, I1 niche `BITAND`/`BITOR`, or an inferable leftover (plain
 `if`/compare diamonds, store-only loops, tiny lets). Hard refuse: I4
 strings, I5 alloc, I6 `CALL` / HostInvoke, heap index / escaping fields,
 I2 multi-payload `Unpack`, I7 debugger-attached / `-Og`. No dual AST walker.
-Cost gate: replace when LIR emit ≤ opted fuse-IL (`Seek` is free).
+Cost gate: replace when LIR emit ≤ opted fuse-IL, with +3 slack for I2
+match / two-slot construct (runtime-neutral `Seek`). Leftover lets stay
+strict so ConstReturnImm fuse is not undone.
 
 ## Island ladder
 

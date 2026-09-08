@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use super::func::IlFunc;
-use super::op::{IlOp, Label};
+use super::op::{IlJumpKind, IlOp, Label};
 use super::opt::{self, OptimizeOptions};
 
 /// One function's owned IL ops (labels inclusive at span edges).
@@ -299,7 +299,8 @@ impl IlModule {
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
-                if lir_emit_cost(&lir) <= lir_emit_cost(&body.ops) {
+                let fuse = lir_emit_cost(&body.ops);
+                if lir_emit_cost(&lir) <= fuse.saturating_add(lir_cost_slack(&body.ops)) {
                     body.ops = lir;
                 }
             }
@@ -317,20 +318,41 @@ impl IlModule {
 }
 
 /// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
-/// the body (naive slot spill). Labels are free. `Seek` is frame setup
-/// (runtime-neutral vs fuse-IL overlap). `StorePop` counts as one emit.
+/// the body (naive slot spill). Labels are free. `Seek` / `StorePop` are
+/// expensive so leftover lets keep fuse-IL (ConstReturnImm).
 fn lir_emit_cost(ops: &[IlOp]) -> usize {
     ops.iter()
         .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
         .map(|op| match op {
+            IlOp::StorePop { .. } => 2,
             IlOp::Byte { byte, .. }
                 if matches!(*byte.bytecode(), common::Instruction::Seek) =>
             {
-                0
+                2
             }
             _ => 1,
         })
         .sum()
+}
+
+/// Runtime-neutral slack for I2 match / two-slot construct reconstructs
+/// that add a frame `Seek` the opted fuse-IL never emitted.
+fn lir_cost_slack(ops: &[IlOp]) -> usize {
+    let mut slack = 0usize;
+    for op in ops {
+        match op {
+            IlOp::Return { ret_words, .. } if *ret_words >= 2 => slack = slack.max(3),
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { .. },
+                ..
+            } => slack = slack.max(3),
+            IlOp::Byte { byte, .. } if *byte.bytecode() == common::Instruction::Unpack => {
+                slack = slack.max(3);
+            }
+            _ => {}
+        }
+    }
+    slack
 }
 
 fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
