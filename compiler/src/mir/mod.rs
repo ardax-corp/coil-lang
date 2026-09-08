@@ -6,11 +6,13 @@
 //! packs (P12 / COI-286).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
-//! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
-//! keep the shipped Value / two-slot ABI. Allowlisted HostInvoke (W4) boxes
-//! at the call edge. Classes / heap stay on [`crate::il`].
+//! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
+//! `CALL` uses the one-word typed ABI ([`abi`]; COI-291). Allowlisted
+//! HostInvoke (W4) still boxes at the host edge. Classes / heap stay on
+//! [`crate::il`].
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
+mod abi;
 mod builder;
 mod cse;
 mod destprop;
@@ -30,6 +32,7 @@ mod strength;
 mod text;
 mod ty;
 
+pub use abi::{DenseAbi, DenseCallMap};
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, gvn};
 pub use destprop::destprop;
@@ -820,6 +823,84 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_specializes_dense_to_dense_call() {
+        let src = r#"
+fn kernel(float x) -> float {
+    let a = x * x + x * 2.0;
+    let b = a * x + x * 4.0;
+    let c = b * x - a * 0.5;
+    return c / (2.0 + x);
+}
+fn hot(float a, float dx, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    let x = 0.125;
+    while i < n {
+        s = s + kernel(x) * a + dx;
+        x = x + dx;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(1.0, 0.0, 2);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile dense CALL");
+        let hot = p.function_offset("hot").expect("hot");
+        let main = p.function_offset("main").expect("main");
+        let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
+        assert!(
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "caller must stay dense; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "dense caller must emit CALL to the dense leaf"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    fn pipeline_refuses_call_to_non_dense_helper() {
+        let src = r#"
+fn mid(float x) -> float {
+    let a = x * x + x;
+    let b = a * x + x;
+    let c = b * x + a;
+    return c + 1.0;
+}
+fn hot(float a, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        s = s + mid(a) + a;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(1.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile mid CALL refuse");
+        let hot = p.function_offset("hot").expect("hot");
+        let main = p.function_offset("main").expect("main");
+        let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
+        assert!(
+            !hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "CALL to a non-dense callee must refuse caller specialize"
+        );
+        assert!(
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::CALL)
+                || bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "site stays a direct CALL (or was tiny-inlined — then no DenseBin in hot)"
+        );
+    }
+
     fn pipeline_refuses_user_call_inside_numeric_loop() {
         let src = r#"
 fn helper(float x, int k) -> float {

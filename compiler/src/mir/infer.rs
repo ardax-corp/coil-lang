@@ -2,7 +2,8 @@
 //!
 //! Dense eligibility: float `+/−/×/÷`, i64 `+/−/×/÷/%` (or int `INC`/`DEC`),
 //! or unused `has_i32`, plus either a back-edge **or** a straight-line body
-//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer refuses user `CALL` /
+//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer refuses user `CALL`
+//! unless the target is already in the dense ABI map (COI-291), plus
 //! non-allowlisted HostInvoke / heap index / class field / match / string /
 //! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. W4 accepts
 //! allowlisted math / packed LA / `simd_axpy_reduce` HostInvokes. Compare-only
@@ -12,8 +13,9 @@ use std::collections::HashMap;
 
 use common::Instruction;
 
-use crate::il::{IlOp, Label};
+use crate::il::{EntryKind, IlOp, Label};
 
+use super::abi::DenseCallMap;
 use super::host_allow::host_spec;
 use super::lower::LowerError;
 use super::ty::MirTy;
@@ -64,7 +66,17 @@ pub fn infer_numeric(
     pool_len: usize,
     param_count: u32,
 ) -> Result<Inferred, LowerError> {
-    infer_walk(ops, pool_len, param_count, InferMode::Dense)
+    infer_numeric_with(ops, pool_len, param_count, &DenseCallMap::new())
+}
+
+/// Like [`infer_numeric`], but one-word `CALL` to a mapped dense callee is ok.
+pub fn infer_numeric_with(
+    ops: &[IlOp],
+    pool_len: usize,
+    param_count: u32,
+    calls: &DenseCallMap,
+) -> Result<Inferred, LowerError> {
+    infer_walk(ops, pool_len, param_count, InferMode::Dense, calls)
 }
 
 /// Slot types for MIR→LIR (two-slot / niche leafs). No loop required.
@@ -73,7 +85,7 @@ pub fn infer_lir(
     pool_len: usize,
     param_count: u32,
 ) -> Result<Inferred, LowerError> {
-    infer_walk(ops, pool_len, param_count, InferMode::Lir)
+    infer_walk(ops, pool_len, param_count, InferMode::Lir, &DenseCallMap::new())
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -87,6 +99,7 @@ fn infer_walk(
     pool_len: usize,
     param_count: u32,
     mode: InferMode,
+    calls: &DenseCallMap,
 ) -> Result<Inferred, LowerError> {
     if mode == InferMode::Dense && !has_back_edge(ops) {
         let work = numeric_work_ops(ops);
@@ -279,6 +292,23 @@ fn infer_walk(
             IlOp::HostInvoke { arity, layout, .. } => {
                 apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
             }
+            IlOp::Entry {
+                kind: EntryKind::Call,
+                arity,
+                target,
+                ret_words,
+                ..
+            } if mode == InferMode::Dense => {
+                apply_call(
+                    &mut stack,
+                    &mut slot_ty,
+                    &mut pool_ty,
+                    *arity,
+                    *ret_words,
+                    target.0,
+                    calls,
+                )?;
+            }
             _ => {
                 return Err(LowerError::Refused(format!(
                     "non-numeric IL ({})",
@@ -345,6 +375,20 @@ fn infer_walk(
             }
             IlOp::HostInvoke { arity, .. } => {
                 for _ in 0..(*arity as usize + 1) {
+                    let _ = stack.pop();
+                }
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::Entry {
+                kind: EntryKind::Call,
+                arity,
+                ..
+            } => {
+                for _ in 0..*arity {
                     let _ = stack.pop();
                 }
                 stack.push(Cell {
@@ -542,6 +586,44 @@ fn apply_bin(
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_call(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    arity: u32,
+    ret_words: u32,
+    target: u32,
+    calls: &DenseCallMap,
+) -> Result<(), LowerError> {
+    if ret_words != 1 {
+        return Err(LowerError::Refused("dense CALL is one-word".into()));
+    }
+    let Some(abi) = calls.get(&target) else {
+        return Err(LowerError::Refused("CALL".into()));
+    };
+    let n = arity as usize;
+    if abi.params.len() != n {
+        return Err(LowerError::Refused("CALL arity".into()));
+    }
+    if stack.len() < n {
+        return Err(LowerError::Refused("CALL stack".into()));
+    }
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(stack.pop().expect("arity checked"));
+    }
+    args.reverse();
+    for (cell, ty) in args.iter().zip(abi.params.iter()) {
+        paint(slot_ty, pool_ty, *cell, *ty)?;
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(abi.ret),
         imm: None,
     });
     Ok(())

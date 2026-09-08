@@ -1,8 +1,9 @@
 //! W4 allowlist: HostInvoke ids that may appear inside dense specialize.
 //!
-//! Only pure math, packed LA, and `coil-simd` `simd_axpy_reduce`. User
-//! `CALL` / other natives still refuse. At an allowlisted edge, dense emit
-//! boxes typed slots onto the Value stack, `HostInvoke`s, then unboxes.
+//! Only pure math, packed LA, and `coil-simd` `simd_axpy_reduce`. Other
+//! natives still refuse. User `CALL` is a separate path (COI-291) when the
+//! callee is already dense. At an allowlisted host edge, dense emit boxes
+//! typed slots onto the Value stack, `HostInvoke`s, then unboxes.
 
 use common::{
     HOST_NATIVES, MATH_ATAN_ID, MATH_POW_ID, MATH_SIN_ID, MATH_TANH_ID, PACKED_DOT_ID,

@@ -271,6 +271,37 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    pub fn ins_call(
+        &mut self,
+        target: crate::il::Label,
+        args: Vec<ValueId>,
+        abi: &super::abi::DenseAbi,
+    ) -> Result<ValueId, MirError> {
+        if abi.params.len() != args.len() {
+            return Err(MirError::msg(format!(
+                "call arity {} vs {}",
+                abi.params.len(),
+                args.len()
+            )));
+        }
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, (&a, &ty)) in args.iter().zip(abi.params.iter()).enumerate() {
+            if self.resolve_ty(a) != ty {
+                return Err(MirError::msg(format!(
+                    "call arg {i} is {} vs {ty}",
+                    self.resolve_ty(a)
+                )));
+            }
+        }
+        let dest = self.alloc(abi.ret);
+        self.push(MirInst::Call {
+            dest,
+            target,
+            args,
+        })?;
+        Ok(dest)
+    }
+
     pub fn jump(&mut self, dest: BlockId) -> Result<(), MirError> {
         let src = self.cur()?;
         self.add_edge(src, dest);

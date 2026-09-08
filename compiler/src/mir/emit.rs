@@ -355,6 +355,25 @@ fn emit_inst(
                 loc,
             });
         }
+        MirInst::Call { dest, target, args } => {
+            for a in args {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[a.index()]),
+                    loc,
+                });
+            }
+            out.push(IlOp::Entry {
+                kind: crate::il::EntryKind::Call,
+                arity: args.len() as u32,
+                target: *target,
+                loc,
+                ret_words: 1,
+            });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
     }
     Ok(())
 }
