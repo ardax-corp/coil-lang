@@ -1744,7 +1744,7 @@ fn main() {
     #[test]
     fn pipeline_makearray_and_new_stay_fuse_il() {
         let src = r#"
-fn take(int[] xs) -> int {
+fn take([int] xs) -> int {
     return xs[0];
 }
 fn hot(int n) -> int {

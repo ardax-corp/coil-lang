@@ -901,7 +901,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn lowering_alloc_array_is_visible() {
         let loc = loc();
         let ops = vec![
@@ -931,6 +930,7 @@ mod tests {
         assert_eq!(f.ret_ty, Some(MirTy::HeapRef));
     }
 
+    #[test]
     fn lowering_refuses_getfield() {
         let ops = vec![IlOp::GetField { loc: loc() }];
         let err = try_lower_numeric(&ops, &LowerHints::new("cls")).unwrap_err();
