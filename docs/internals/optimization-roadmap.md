@@ -132,6 +132,11 @@ If an opt is sound but does not fire on flagship `.hyc` (`mandelbrot`, `tak`,
 **prove those**. Do **not** skip merge solely because flagship archives are
 identical; flagships remain controls. Skip only on hit-bench wash or regress.
 
+**MIR language islands** ([mir-islands.md](mir-islands.md)) use a stricter
+rule: prove on real language surface + embed A/B; do **not** invent a
+synthetic hit bench whose only job is a score. Identical flagship archives
+are the expected I1 outcome.
+
 Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,
 `result_try_churn`, `mir_cse_divf`, `mir_licm_divf`, `mir_instcombine`,
