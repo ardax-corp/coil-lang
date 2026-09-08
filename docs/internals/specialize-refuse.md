@@ -101,3 +101,25 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). User `CALL` to a
 non-dense callee (`times_a` → heap/`eval_a`, `tak` / `fib` recursion,
 `helper` in the negative test) still refuses.
+
+## Language refuse → island (COI-292 I0)
+
+Dense gates above are the numeric inventory. This table is the **language**
+refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
+
+| Feature | Today | Island |
+|---------|-------|--------|
+| Heap-ref / niche Option/Result *types* in SSA | layout exists (`HeapNiche`); SSA paints `i64`/`value` | **I1** — name + carry; no alloc specialize |
+| `match` / `JumpIfMatch` on niche or two-slot | fuse-IL | **I2** |
+| Non-escaping class fields (local-escape sidecar) | fuse-IL / codegen unbox | **I3** |
+| `FORMAT` / string ops | fuse-IL | **I4** (narrow ops or keep as barrier) |
+| `MakeArray` / alloc / GC safepoints | fuse-IL | **I5** |
+| HostInvoke outside W4; purity-driven barriers | fuse-IL | **I6** |
+| Debugger / deopt edges | VM on bytecode | **I7** |
+| Broader MIR emit entry | numeric + P3 LIR leafs only | **I8** after I1–I3 |
+| Escaping classes, boxed nested enums, recursion | fuse-IL | stay refuse unless a later island says otherwise |
+| Cranelift | parked (P5) | not an island |
+
+A/B: prefer `coil-embed`; flagships flat (±5%) or identical archives; no
+vanity microbenches. Identical flagship `.hyc` is expected while an island
+does not fire on those bodies.

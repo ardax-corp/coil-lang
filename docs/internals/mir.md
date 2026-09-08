@@ -4,6 +4,11 @@ Typed SSA sidecar for a **numeric subset**, **dense bytecode** for
 specialized float/i32 loops (P1), MIR CSE (P2), and **MIR→LIR** for
 shipped Result/Option layouts (P3).
 
+**Language islands (I0+)** expand this sidecar beyond pure numeric — they
+are not a full-MIR rewrite. Doctrine, I1–I8 ladder, refuse map, and A/B
+rules: [mir-islands.md](mir-islands.md) (COI-292). IL stays lowering +
+fuse-select ([pipeline.md](pipeline.md)).
+
 ## Where it lives
 
 `compiler/src/mir/` — not inside `il/`. Fuse-IL stays the production lowerer
@@ -15,7 +20,7 @@ the stack).
 
 | Piece | Role |
 |-------|------|
-| `MirTy` | Lattice: `bottom ⊑ {i32⊑i64, f32⊑f64, bool} ⊑ value` |
+| `MirTy` | Lattice: `bottom ⊑ {i32⊑i64, f32⊑f64, bool, heap-ref, niche Option/Result} ⊑ value`. I1 names heap/niche words; dense still uses numeric lanes only ([mir-islands.md](mir-islands.md)). |
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
