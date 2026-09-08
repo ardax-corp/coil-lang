@@ -245,10 +245,24 @@ fn effect_closure(facts: &HashMap<String, FnFacts>) -> HashMap<String, EffectFla
 
 /// Host / virtual-module names that are not user `fn`s.
 fn classify_unknown_callee(name: &str) -> EffectFlags {
+    classify_host_name(name)
+}
+
+/// Effect bits for a host / virtual-module callee (I6).
+///
+/// Prelude math and packed LA are empty (pure). Clocks, IO, FFI, GC,
+/// threads, and attach/park are impure. Unknown names fail closed
+/// (`UNKNOWN | HOST`) so they are never treated as hoistable.
+pub fn classify_host_name(name: &str) -> EffectFlags {
     let short = name.rsplit("::").next().unwrap_or(name);
     let mut flags = EffectFlags::empty();
+    if is_pure_host_name(short) {
+        return flags;
+    }
     match short {
-        "attach" | "park" => flags.insert(EffectFlags::ATTACH_PARK),
+        "attach" | "park" | "stream_attach" | "stream_park" => {
+            flags.insert(EffectFlags::ATTACH_PARK)
+        }
         "spawn" | "join" | "detach" | "channel" | "send" | "recv" | "try_send" | "try_recv"
         | "close" | "mutex" | "with_lock" | "lock" | "try_lock" | "unlock" | "rwlock"
         | "with_read" | "with_write" | "try_read" | "try_write" => {
@@ -262,9 +276,69 @@ fn classify_unknown_callee(name: &str) -> EffectFlags {
         | "to_bytes" | "connect" | "connect_timeout" | "listen" | "accept" | "peer_addr"
         | "local_addr" | "set_nodelay" | "shutdown" | "bind" | "send_to" | "recv_from"
         | "local_port" | "format" => flags.insert(EffectFlags::IO),
-        _ => flags.insert(EffectFlags::UNKNOWN | EffectFlags::HOST),
+        "wall_nanos" | "mono_nanos" | "sleep_ms" => flags.insert(EffectFlags::HOST),
+        _ => match host_name_prefix(short) {
+            Some(bits) => flags.insert(bits),
+            None => flags.insert(EffectFlags::UNKNOWN | EffectFlags::HOST),
+        },
     }
     flags
+}
+
+fn is_pure_host_name(short: &str) -> bool {
+    if short.starts_with("math_") || short.starts_with("packed_") {
+        return true;
+    }
+    matches!(
+        short,
+        "sin"
+            | "cos"
+            | "tan"
+            | "asin"
+            | "acos"
+            | "atan"
+            | "atan2"
+            | "sinh"
+            | "cosh"
+            | "tanh"
+            | "sqrt"
+            | "floor"
+            | "ceil"
+            | "exp"
+            | "ln"
+            | "log"
+            | "log10"
+            | "log2"
+            | "cbrt"
+            | "pow"
+            | "rem"
+            | "simd_axpy_reduce"
+    )
+}
+
+fn host_name_prefix(short: &str) -> Option<u16> {
+    if short.starts_with("gc_") {
+        return Some(EffectFlags::GC);
+    }
+    if short.starts_with("clock_") {
+        return Some(EffectFlags::HOST);
+    }
+    if short.starts_with("thread_") {
+        return Some(EffectFlags::THREAD);
+    }
+    if short.starts_with("tcp_") || short.starts_with("udp_") || short.starts_with("fs_") {
+        return Some(EffectFlags::IO);
+    }
+    if short.starts_with("ffi_") {
+        return Some(EffectFlags::FFI);
+    }
+    if short.starts_with("stream_") {
+        return Some(EffectFlags::ATTACH_PARK);
+    }
+    if short.starts_with("vec_") {
+        return Some(EffectFlags::HEAP_MUT);
+    }
+    None
 }
 
 fn collect_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
@@ -940,6 +1014,36 @@ fn main() { return; }
             !set.contains("pack"),
             "record ctor payloads must not hide impurity: {set:?}"
         );
+    }
+
+    #[test]
+    fn classify_host_name_math_is_pure_clocks_and_io_are_not() {
+        assert!(classify_host_name("sin").is_pure());
+        assert!(classify_host_name("math_sin").is_pure());
+        assert!(classify_host_name("math::pow").is_pure());
+        assert!(classify_host_name("packed_dot").is_pure());
+        assert!(classify_host_name("simd_axpy_reduce").is_pure());
+        assert!(classify_host_name("mono_nanos").contains(EffectFlags::HOST));
+        assert!(classify_host_name("clock_sleep_ms").contains(EffectFlags::HOST));
+        assert!(classify_host_name("write").contains(EffectFlags::IO));
+        assert!(classify_host_name("gc_collect").contains(EffectFlags::GC));
+        assert!(classify_host_name("invoke").contains(EffectFlags::FFI));
+        assert!(!classify_host_name("mystery").is_pure());
+    }
+
+    #[test]
+    fn math_helper_is_pure_clock_helper_is_not() {
+        let ast = parse_ast(
+            r#"
+use clock::{mono_nanos};
+fn wave(float x) -> float { return sin(x); }
+fn tick() -> int { return mono_nanos(); }
+fn main() { return; }
+"#,
+        );
+        let set = analyze_pure_fns(&ast);
+        assert!(set.contains("wave"), "prelude math must not poison purity: {set:?}");
+        assert!(!set.contains("tick"), "clocks are observational: {set:?}");
     }
 
     #[test]
