@@ -292,6 +292,23 @@ fn infer_walk(
                         imm: None,
                     });
                 }
+                Instruction::Seek if mode == InferMode::Lir => {}
+                Instruction::Unpack if mode == InferMode::Lir => {
+                    let arity = byte.operand_u32();
+                    if arity > 1 {
+                        return Err(LowerError::Refused("Unpack arity > 1 (I2)".into()));
+                    }
+                    let _ = stack
+                        .pop()
+                        .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
+                    if arity == 1 {
+                        stack.push(Cell {
+                            origin: Origin::Tmp,
+                            ty: Some(MirTy::I64),
+                            imm: None,
+                        });
+                    }
+                }
                 Instruction::INC | Instruction::DEC => {
                     let (slot, _, is_float) = byte.inc_dec_parts();
                     let ty = if is_float { MirTy::F64 } else { MirTy::I64 };
@@ -309,6 +326,23 @@ fn infer_walk(
                     )));
                 }
             },
+            IlOp::Jump {
+                kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
+                ..
+            } => {
+                if mode != InferMode::Lir {
+                    return Err(LowerError::Refused("match".into()));
+                }
+                if *tag > 1 || *arity > 1 {
+                    return Err(LowerError::Refused(
+                        "JumpIfMatch full enum (I2 is niche/two-slot)".into(),
+                    ));
+                }
+                if stack.is_empty() {
+                    return Err(LowerError::Refused("JumpIfMatch stack".into()));
+                }
+                // Peek: miss fallthrough is the linear walk.
+            }
             IlOp::Jump { .. } | IlOp::Return { ret_words: 1, .. } | IlOp::Halt { .. } => {}
             IlOp::Return { ret_words, .. } if *ret_words == 2 && mode == InferMode::Lir => {}
             IlOp::Return { ret_words, .. } if *ret_words != 1 => {

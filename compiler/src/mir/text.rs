@@ -50,6 +50,19 @@ fn write_block(
             taken,
             not_taken,
         }) => writeln!(f, "brif {cond}, {taken}, {not_taken}")?,
+        Some(Terminator::JumpIfMatch {
+            scrutinee,
+            tag,
+            payloads,
+            taken,
+            not_taken,
+        }) => {
+            write!(f, "jumpifmatch {scrutinee}, {tag}")?;
+            for p in payloads {
+                write!(f, ", {p}")?;
+            }
+            writeln!(f, ", {taken}, {not_taken}")?;
+        }
         Some(Terminator::Return {
             lo: Some(v),
             hi: Some(h),
@@ -95,7 +108,8 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             let name = match (op, func.ty(*src).is_float()) {
                 (MirUnaryOp::Neg, false) => "ineg",
                 (MirUnaryOp::Neg, true) => "fneg",
-                (MirUnaryOp::Not, _) => "bnot",
+                (MirUnaryOp::Not, _) if func.ty(*src) == MirTy::Bool => "bnot",
+                (MirUnaryOp::Not, _) => "lnot",
             };
             write!(f, "{dest} = {name} {src}")
         }
@@ -145,6 +159,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::MatchPayload {
+            dest,
+            scrutinee,
+            index,
+        } => write!(f, "{dest} = matchpayload {scrutinee}, {index}"),
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -331,6 +350,26 @@ impl<'a> Parser<'a> {
                 rhs,
             });
         }
+        if op == "lnot" || op == "matchpayload" {
+            if op == "lnot" {
+                let src = self.value()?;
+                ensure_ty(types, dest, MirTy::Bool);
+                return Ok(MirInst::Unary {
+                    dest,
+                    op: MirUnaryOp::Not,
+                    src,
+                });
+            }
+            let scrutinee = self.value()?;
+            self.expect(',')?;
+            let index = self.uint()? as u32;
+            ensure_ty(types, dest, peek_ty(types, scrutinee));
+            return Ok(MirInst::MatchPayload {
+                dest,
+                scrutinee,
+                index,
+            });
+        }
         if op == "ineg" || op == "fneg" || op == "bnot" {
             let src = self.value()?;
             let ty = if op == "bnot" {
@@ -457,6 +496,36 @@ impl<'a> Parser<'a> {
                     not_taken,
                 })
             }
+            "jumpifmatch" => {
+                let scrutinee = self.value()?;
+                self.expect(',')?;
+                let tag = self.uint()? as u32;
+                let mut payloads = Vec::new();
+                self.expect(',')?;
+                // payloads then taken, not_taken — last two are blocks.
+                loop {
+                    self.skip();
+                    let start = self.i;
+                    if self.peek('v') {
+                        payloads.push(self.value()?);
+                        if !self.eat(',') {
+                            return Err(ParseError("jumpifmatch needs dest blocks".into()));
+                        }
+                        continue;
+                    }
+                    self.i = start;
+                    let taken = self.block()?;
+                    self.expect(',')?;
+                    let not_taken = self.block()?;
+                    return Ok(Terminator::JumpIfMatch {
+                        scrutinee,
+                        tag,
+                        payloads,
+                        taken,
+                        not_taken,
+                    });
+                }
+            }
             "return" => {
                 if self.peek('v') {
                     let lo = self.value()?;
@@ -481,7 +550,8 @@ impl<'a> Parser<'a> {
     fn peek_term(&mut self) -> bool {
         let save = self.i;
         self.skip();
-        let ok = self.starts("jump")
+        let ok = self.starts("jumpifmatch")
+            || self.starts("jump")
             || self.starts("brif")
             || self.starts("return")
             || self.starts("unreachable");

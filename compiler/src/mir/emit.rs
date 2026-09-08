@@ -379,6 +379,11 @@ fn emit_inst(
                 loc,
             });
         }
+        MirInst::MatchPayload { .. } => {
+            return Err(LowerError::Refused(
+                "dense emit refuses MatchPayload (I2 is MIR→LIR)".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -479,6 +484,11 @@ fn emit_term(
         }
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
+        }
+        Terminator::JumpIfMatch { .. } => {
+            return Err(LowerError::Refused(
+                "dense emit refuses JumpIfMatch (I2 is MIR→LIR)".into(),
+            ));
         }
     }
     Ok(())

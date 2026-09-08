@@ -144,20 +144,48 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         let lt = self.resolve_ty(lhs);
         let rt = self.resolve_ty(rhs);
-        if lt != rt {
-            return Err(MirError::msg(format!("binop operand types {lt} vs {rt}")));
+        let heap_bit = op.requires_int() && (lt.is_heap_word() || rt.is_heap_word());
+        if heap_bit {
+            if !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr | MirBinOp::Xor) {
+                return Err(MirError::msg(format!("binop {op:?} on heap word")));
+            }
+            if !lt.is_heap_word() && lt != MirTy::I64 {
+                return Err(MirError::msg(format!("binop operand types {lt} vs {rt}")));
+            }
+            if !rt.is_heap_word() && rt != MirTy::I64 {
+                return Err(MirError::msg(format!("binop operand types {lt} vs {rt}")));
+            }
+        } else {
+            if lt != rt {
+                return Err(MirError::msg(format!("binop operand types {lt} vs {rt}")));
+            }
+            if !lt.is_numeric() || lt == MirTy::Bool {
+                return Err(MirError::msg(format!("binop on {lt}")));
+            }
+            if op.requires_int() && !lt.is_int() {
+                return Err(MirError::msg(format!("bitwise op on {lt}")));
+            }
         }
-        if !lt.is_numeric() || lt == MirTy::Bool {
-            return Err(MirError::msg(format!("binop on {lt}")));
-        }
-        if op.requires_int() && !lt.is_int() {
-            return Err(MirError::msg(format!("bitwise op on {lt}")));
-        }
-        let dest = self.alloc(lt);
+        let dest_ty = if heap_bit {
+            match op {
+                MirBinOp::BitOr => MirTy::NicheRes,
+                MirBinOp::BitAnd => MirTy::HeapRef,
+                _ => {
+                    if lt.is_heap_word() {
+                        lt
+                    } else {
+                        rt
+                    }
+                }
+            }
+        } else {
+            lt
+        };
+        let dest = self.alloc(dest_ty);
         self.push(MirInst::Bin {
             dest,
             op,
-            ty: lt,
+            ty: dest_ty,
             lhs: self.resolve(lhs),
             rhs: self.resolve(rhs),
         })?;
@@ -172,14 +200,30 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         let lt = self.resolve_ty(lhs);
         let rt = self.resolve_ty(rhs);
-        if lt != rt || !lt.is_numeric() || lt == MirTy::Bool {
+        let heap_cmp = (lt.is_heap_word() || rt.is_heap_word())
+            && matches!(op, MirCmpOp::Eq | MirCmpOp::Ne);
+        if heap_cmp {
+            let ok = |t: MirTy| t.is_heap_word() || t == MirTy::I64;
+            if !ok(lt) || !ok(rt) {
+                return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
+            }
+        } else if lt != rt || !lt.is_numeric() || lt == MirTy::Bool {
             return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
         }
+        let cmp_ty = if heap_cmp {
+            if lt.is_heap_word() {
+                lt
+            } else {
+                rt
+            }
+        } else {
+            lt
+        };
         let dest = self.alloc(MirTy::Bool);
         self.push(MirInst::Cmp {
             dest,
             op,
-            ty: lt,
+            ty: cmp_ty,
             lhs: self.resolve(lhs),
             rhs: self.resolve(rhs),
         })?;
@@ -201,8 +245,10 @@ impl MirBuilder {
     }
 
     pub fn ins_not(&mut self, src: ValueId) -> Result<ValueId, MirError> {
-        if self.resolve_ty(src) != MirTy::Bool {
-            return Err(MirError::msg("bnot expects bool"));
+        let t = self.resolve_ty(src);
+        // VM `LogNot` is truthiness: bool, i64, or a niche/heap word (`0` / ptr).
+        if t != MirTy::Bool && !t.is_int() && !t.is_heap_word() {
+            return Err(MirError::msg(format!("lnot on {t}")));
         }
         let dest = self.alloc(MirTy::Bool);
         self.push(MirInst::Unary {
@@ -302,10 +348,80 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
+    pub fn ins_stack_phi(
+        &mut self,
+        args: Vec<(BlockId, ValueId)>,
+    ) -> Result<ValueId, MirError> {
+        if args.is_empty() {
+            return Err(MirError::msg("empty stack phi"));
+        }
+        let ty = self.resolve_ty(args[0].1);
+        let dest = self.alloc(ty);
+        let mut args: Vec<(BlockId, ValueId)> = args
+            .into_iter()
+            .map(|(b, v)| (b, self.resolve(v)))
+            .collect();
+        args.sort_by_key(|(b, _)| *b);
+        self.push(MirInst::Phi { dest, ty, args })?;
+        Ok(dest)
+    }
+
     pub fn jump(&mut self, dest: BlockId) -> Result<(), MirError> {
         let src = self.cur()?;
         self.add_edge(src, dest);
         self.set_term(Terminator::Jump { dest })
+    }
+
+    pub fn jump_if_match(
+        &mut self,
+        scrutinee: ValueId,
+        tag: u32,
+        payloads: Vec<ValueId>,
+        taken: BlockId,
+        not_taken: BlockId,
+    ) -> Result<(), MirError> {
+        if tag > 1 {
+            return Err(MirError::msg("I2 JumpIfMatch is Option/Result tags only"));
+        }
+        if payloads.len() > 1 {
+            return Err(MirError::msg("I2 JumpIfMatch arity > 1"));
+        }
+        let st = self.resolve_ty(scrutinee);
+        if !st.is_specialized() {
+            return Err(MirError::msg(format!("JumpIfMatch scrutinee is {st}")));
+        }
+        let src = self.cur()?;
+        self.add_edge(src, taken);
+        self.add_edge(src, not_taken);
+        self.set_term(Terminator::JumpIfMatch {
+            scrutinee: self.resolve(scrutinee),
+            tag,
+            payloads: payloads.into_iter().map(|v| self.resolve(v)).collect(),
+            taken,
+            not_taken,
+        })
+    }
+
+    pub fn ins_match_payload(
+        &mut self,
+        scrutinee: ValueId,
+        index: u32,
+        ty: MirTy,
+    ) -> Result<ValueId, MirError> {
+        if index > 0 {
+            return Err(MirError::msg("I2 MatchPayload index > 0"));
+        }
+        if !ty.is_specialized() {
+            return Err(MirError::msg(format!("MatchPayload type {ty}")));
+        }
+        let dest = self.alloc(ty);
+        self.push(MirInst::MatchPayload {
+            dest,
+            scrutinee: self.resolve(scrutinee),
+            index,
+        })?;
+        Ok(dest)
     }
 
     pub fn branch(

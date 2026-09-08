@@ -69,8 +69,9 @@ pub fn emit_lir(
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
+        consume_match_tos(&mut out, func, block.id, &plan, &regs, loc);
         for inst in &block.insts {
-            if inst.is_phi() {
+            if inst.is_phi() || matches!(inst, MirInst::MatchPayload { .. }) {
                 continue;
             }
             let dest = inst.dest();
@@ -241,8 +242,50 @@ fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
 fn term_values(term: &Terminator) -> Vec<ValueId> {
     match term {
         Terminator::Br { cond, .. } => vec![*cond],
+        Terminator::JumpIfMatch {
+            scrutinee,
+            payloads,
+            ..
+        } => {
+            let mut v = vec![*scrutinee];
+            v.extend(payloads.iter().copied());
+            v
+        }
         Terminator::Return { lo, hi } => lo.iter().chain(hi.iter()).copied().collect(),
         _ => Vec::new(),
+    }
+}
+
+/// `JumpIfMatch` leaves the scrutinee (miss) or payloads (taken) on the
+/// stack. Store live payload slots; miss keeps TOS for the next match.
+fn consume_match_tos(
+    out: &mut Vec<IlOp>,
+    func: &MirFunc,
+    block: BlockId,
+    plan: &EmitPlan,
+    regs: &[u8],
+    loc: DebugLoc,
+) {
+    for pred in &func.preds()[block.index()] {
+        let Some(Terminator::JumpIfMatch {
+            taken,
+            payloads,
+            ..
+        }) = &func.block(*pred).term
+        else {
+            continue;
+        };
+        if *taken != block {
+            continue;
+        }
+        for dest in payloads.iter().rev() {
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
     }
 }
 
@@ -406,7 +449,7 @@ fn emit_stored(
                 loc,
             });
         }
-        MirInst::Phi { .. } => {}
+        MirInst::Phi { .. } | MirInst::MatchPayload { .. } => {}
         MirInst::HostInvoke { .. } | MirInst::Call { .. } => {
             return Err(LowerError::Refused(
                 "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
@@ -509,6 +552,15 @@ fn emit_stack(
         MirInst::HostInvoke { .. } | MirInst::Call { .. } => Err(LowerError::Refused(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
+        MirInst::MatchPayload { dest, .. } => {
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
     }
 }
 
@@ -626,6 +678,52 @@ fn emit_term(
         }
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
+        }
+        Terminator::JumpIfMatch {
+            scrutinee,
+            tag,
+            taken,
+            not_taken,
+            ..
+        } => {
+            if *tag > 1 {
+                return Err(LowerError::Refused("JumpIfMatch tag (I2)".into()));
+            }
+            if !phi_moves(func, block.id, *taken, regs, scratch).is_empty()
+                || !phi_moves(func, block.id, *not_taken, regs, scratch).is_empty()
+            {
+                return Err(LowerError::Refused(
+                    "JumpIfMatch + phi moves (keep fuse-IL)".into(),
+                ));
+            }
+            emit_stack(out, *scrutinee, func, plan, regs, pool, loc)?;
+            out.push(IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch {
+                    tag: *tag,
+                    arity: func
+                        .block(block.id)
+                        .term
+                        .as_ref()
+                        .and_then(|t| match t {
+                            Terminator::JumpIfMatch { payloads, .. } => {
+                                Some(payloads.len() as u32)
+                            }
+                            _ => None,
+                        })
+                        .unwrap_or(0),
+                },
+                target: block_lab[taken.index()],
+                loc,
+                hint: Default::default(),
+            });
+            if !is_fallthrough(func, block.id, *not_taken) {
+                out.push(IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: block_lab[not_taken.index()],
+                    loc,
+                    hint: Default::default(),
+                });
+            }
         }
     }
     Ok(())

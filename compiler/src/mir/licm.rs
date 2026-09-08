@@ -220,7 +220,7 @@ fn hoistable(inst: &MirInst) -> bool {
         | MirInst::Cast { .. } => true,
         MirInst::HostInvoke { native_id, .. } => super::host_allow::host_spec(*native_id)
             .is_some_and(|s| s.hoistable),
-        MirInst::Call { .. } => false,
+        MirInst::Call { .. } | MirInst::MatchPayload { .. } => false,
     }
 }
 
@@ -288,6 +288,9 @@ fn retarget(term: &mut Terminator, from: BlockId, to: BlockId) {
     match term {
         Terminator::Jump { dest } if *dest == from => *dest = to,
         Terminator::Br {
+            taken, not_taken, ..
+        }
+        | Terminator::JumpIfMatch {
             taken, not_taken, ..
         } => {
             if *taken == from {

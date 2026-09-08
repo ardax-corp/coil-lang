@@ -54,6 +54,8 @@ pub struct LowerHints {
     pub param_count: u32,
     /// Leaf-first dense callees (COI-291). Empty → user `CALL` still refuses.
     pub calls: DenseCallMap,
+    /// I2: `JumpIfMatch` / `Unpack` / `Seek` and stack-carrying CFG edges.
+    pub allow_match: bool,
 }
 
 impl Default for LowerHints {
@@ -67,6 +69,7 @@ impl Default for LowerHints {
             pool_ty: Vec::new(),
             param_count: 0,
             calls: DenseCallMap::new(),
+            allow_match: false,
         }
     }
 }
@@ -147,11 +150,21 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         }
     }
 
-    let mut stack: Vec<(BlockId, Vec<ValueId>)> = Vec::new();
+    let mut incoming: HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = HashMap::new();
+    let mut started: HashMap<BlockId, Vec<ValueId>> = HashMap::new();
     for (i, &(start, end)) in ranges.iter().enumerate() {
         let bid = range_blocks[i];
         b.switch_to_block(bid);
-        let mut tos: Vec<ValueId> = Vec::new();
+        let mut tos = merge_incoming(&mut b, incoming.remove(&bid).unwrap_or_default())?;
+        if let Some(prev) = started.get(&bid) {
+            if prev != &tos {
+                return Err(LowerError::Refused(
+                    "back-edge stack mismatch (I2)".into(),
+                ));
+            }
+        } else {
+            started.insert(bid, tos.clone());
+        }
         for op in &ops[start..end] {
             lower_op(&mut b, &mut tos, op, hints)?;
         }
@@ -163,9 +176,13 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
                 last,
                 &label_block,
                 ranges.get(i + 1).map(|_| range_blocks[i + 1]),
+                hints,
+                bid,
+                &mut incoming,
             )?;
         }
         if !tos.is_empty()
+            && !hints.allow_match
             && b.func()
                 .block(bid)
                 .term
@@ -176,10 +193,51 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
                 "non-empty operand stack at CFG edge (P0)".into(),
             ));
         }
-        stack.push((bid, tos));
     }
-    let _ = stack;
+    for (succ, stacks) in incoming {
+        let Some(used) = started.get(&succ) else {
+            continue;
+        };
+        if stacks.iter().any(|(_, s)| s != used) {
+            return Err(LowerError::Refused(
+                "back-edge stack mismatch (I2)".into(),
+            ));
+        }
+    }
     b.finish().map_err(LowerError::from)
+}
+
+fn merge_incoming(
+    b: &mut MirBuilder,
+    preds: Vec<(BlockId, Vec<ValueId>)>,
+) -> Result<Vec<ValueId>, LowerError> {
+    if preds.is_empty() {
+        return Ok(Vec::new());
+    }
+    let h = preds[0].1.len();
+    if preds.iter().any(|(_, s)| s.len() != h) {
+        return Err(LowerError::Refused("edge stack height mismatch".into()));
+    }
+    let mut tos = Vec::with_capacity(h);
+    for i in 0..h {
+        let v0 = preds[0].1[i];
+        if preds.iter().all(|(_, s)| s[i] == v0) {
+            tos.push(v0);
+            continue;
+        }
+        let args: Vec<(BlockId, ValueId)> = preds.iter().map(|(p, s)| (*p, s[i])).collect();
+        tos.push(b.ins_stack_phi(args)?);
+    }
+    Ok(tos)
+}
+
+fn record_edge(
+    incoming: &mut HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>>,
+    pred: BlockId,
+    succ: BlockId,
+    stack: Vec<ValueId>,
+) {
+    incoming.entry(succ).or_default().push((pred, stack));
 }
 
 fn label_at(op: &IlOp) -> Option<Label> {
@@ -236,6 +294,9 @@ fn emit_term(
     last: Option<&IlOp>,
     labels: &HashMap<Label, BlockId>,
     fallthrough: Option<BlockId>,
+    hints: &LowerHints,
+    pred: BlockId,
+    incoming: &mut HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>>,
 ) -> Result<(), LowerError> {
     match last {
         Some(IlOp::Jump {
@@ -246,6 +307,7 @@ fn emit_term(
             let dest = *labels
                 .get(target)
                 .ok_or_else(|| LowerError::Refused(format!("unbound {target:?}")))?;
+            record_edge(incoming, pred, dest, tos.clone());
             b.jump(dest)?;
         }
         Some(IlOp::Jump {
@@ -261,6 +323,8 @@ fn emit_term(
                 .ok_or_else(|| LowerError::Refused(format!("unbound {target:?}")))?;
             let taken =
                 fallthrough.ok_or_else(|| LowerError::Refused("jmpf fallthrough".into()))?;
+            record_edge(incoming, pred, taken, tos.clone());
+            record_edge(incoming, pred, not_taken, tos.clone());
             b.branch(cond, taken, not_taken)?;
         }
         Some(IlOp::Jump {
@@ -276,6 +340,8 @@ fn emit_term(
                 .ok_or_else(|| LowerError::Refused(format!("unbound {target:?}")))?;
             let not_taken =
                 fallthrough.ok_or_else(|| LowerError::Refused("jmpt fallthrough".into()))?;
+            record_edge(incoming, pred, taken, tos.clone());
+            record_edge(incoming, pred, not_taken, tos.clone());
             b.branch(cond, taken, not_taken)?;
         }
         Some(IlOp::Return { ret_words, .. }) if *ret_words >= 2 => {
@@ -291,16 +357,49 @@ fn emit_term(
             b.ret(tos.pop())?;
         }
         Some(IlOp::Jump {
-            kind: IlJumpKind::JumpIfMatch { .. },
+            kind: IlJumpKind::JumpIfMatch { tag, arity },
+            target,
             ..
         }) => {
-            return Err(LowerError::Refused("JumpIfMatch / classes".into()));
+            if !hints.allow_match {
+                return Err(LowerError::Refused("JumpIfMatch / classes".into()));
+            }
+            if *tag > 1 || *arity > 1 {
+                return Err(LowerError::Refused(
+                    "JumpIfMatch full enum (I2 is niche/two-slot)".into(),
+                ));
+            }
+            let scrutinee = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("JumpIfMatch stack".into()))?;
+            let taken = *labels
+                .get(target)
+                .ok_or_else(|| LowerError::Refused(format!("unbound {target:?}")))?;
+            let not_taken =
+                fallthrough.ok_or_else(|| LowerError::Refused("JumpIfMatch fallthrough".into()))?;
+            let mut payloads = Vec::new();
+            if *arity == 1 {
+                let ty = match b.func().ty(scrutinee) {
+                    MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef => MirTy::HeapRef,
+                    other => other,
+                };
+                payloads.push(b.ins_match_payload(scrutinee, 0, ty)?);
+            }
+            let mut taken_stack = tos.clone();
+            taken_stack.extend(payloads.iter().copied());
+            let mut miss_stack = tos.clone();
+            miss_stack.push(scrutinee);
+            record_edge(incoming, pred, taken, taken_stack);
+            record_edge(incoming, pred, not_taken, miss_stack);
+            b.jump_if_match(scrutinee, *tag, payloads, taken, not_taken)?;
+            tos.clear();
         }
         Some(other) if is_term(other) => {
             return Err(LowerError::Refused("unsupported IL terminator".into()));
         }
         _ => {
             if let Some(ft) = fallthrough {
+                record_edge(incoming, pred, ft, tos.clone());
                 b.jump(ft)?;
             } else {
                 b.ret(tos.pop())?;
@@ -359,6 +458,12 @@ fn lower_op(
             let v = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("not stack".into()))?;
+            let t = b.func().ty(v);
+            // Dense keeps bool-only `LogNot` so `if !flag` loops stay fuse-IL
+            // (`LogNotJmpt`). I2 LIR allows i64 / niche truthiness.
+            if !hints.allow_match && t != MirTy::Bool {
+                return Err(LowerError::Refused(format!("lnot on {t}")));
+            }
             tos.push(b.ins_not(v)?);
             Ok(())
         }
@@ -514,6 +619,24 @@ fn lower_byte(
                 .pop()
                 .ok_or_else(|| LowerError::Refused("not stack".into()))?;
             tos.push(b.ins_not(v)?);
+            Ok(())
+        }
+        Instruction::Seek if hints.allow_match => Ok(()),
+        Instruction::Unpack if hints.allow_match => {
+            let arity = byte.operand_u32();
+            if arity > 1 {
+                return Err(LowerError::Refused("Unpack arity > 1 (I2)".into()));
+            }
+            let src = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
+            if arity == 1 {
+                let ty = match b.func().ty(src) {
+                    MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef => MirTy::HeapRef,
+                    other => other,
+                };
+                tos.push(b.ins_match_payload(src, 0, ty)?);
+            }
             Ok(())
         }
         other => Err(LowerError::Refused(format!(

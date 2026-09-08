@@ -269,6 +269,12 @@ pub enum MirInst {
         target: crate::il::Label,
         args: Vec<ValueId>,
     },
+    /// Taken-edge payload of [`Terminator::JumpIfMatch`] (I2). Arity ≤ 1.
+    MatchPayload {
+        dest: ValueId,
+        scrutinee: ValueId,
+        index: u32,
+    },
 }
 
 impl MirInst {
@@ -281,7 +287,8 @@ impl MirInst {
             | Self::Cast { dest, .. }
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
-            | Self::Call { dest, .. } => dest,
+            | Self::Call { dest, .. }
+            | Self::MatchPayload { dest, .. } => dest,
         }
     }
 
@@ -296,6 +303,7 @@ impl MirInst {
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
             Self::HostInvoke { args, .. } | Self::Call { args, .. } => args.clone(),
+            Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
         }
     }
 
@@ -317,6 +325,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
+            Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
         }
     }
 }
@@ -329,6 +338,17 @@ pub enum Terminator {
     /// `cond` is `bool`. `taken` when true.
     Br {
         cond: ValueId,
+        taken: BlockId,
+        not_taken: BlockId,
+    },
+    /// Peek-match on a niche / two-slot-shaped enum word (I2).
+    ///
+    /// Taken pops the scrutinee and binds `payloads` (arity ≤ 1). Miss
+    /// leaves the scrutinee on the stack (same as bytecode `JumpIfMatch`).
+    JumpIfMatch {
+        scrutinee: ValueId,
+        tag: u32,
+        payloads: Vec<ValueId>,
         taken: BlockId,
         not_taken: BlockId,
     },
@@ -347,6 +367,9 @@ impl Terminator {
             Self::Jump { dest } => vec![dest],
             Self::Br {
                 taken, not_taken, ..
+            }
+            | Self::JumpIfMatch {
+                taken, not_taken, ..
             } => vec![taken, not_taken],
             Self::Return { .. } | Self::Unreachable => Vec::new(),
         }
@@ -355,6 +378,16 @@ impl Terminator {
     pub fn rewrite_values(&mut self, mut map: impl FnMut(ValueId) -> ValueId) {
         match self {
             Self::Br { cond, .. } => *cond = map(*cond),
+            Self::JumpIfMatch {
+                scrutinee,
+                payloads,
+                ..
+            } => {
+                *scrutinee = map(*scrutinee);
+                for v in payloads {
+                    *v = map(*v);
+                }
+            }
             Self::Return { lo, hi } => {
                 if let Some(v) = lo {
                     *v = map(*v);

@@ -1,6 +1,8 @@
 //! Try to replace a numeric IL body with dense MIR bytecode, or a
 //! two-slot / niche leaf with MIR→LIR.
 
+use common::Instruction;
+
 use crate::il::IlOp;
 
 use super::abi::{DenseAbi, DenseCallMap};
@@ -85,6 +87,7 @@ pub fn try_lower_abi_body(
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
+    hints.allow_match = true;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     crate::mir::cse(&mut func);
     let entry = ops.iter().find_map(|op| match op {
@@ -96,6 +99,8 @@ pub fn try_lower_abi_body(
 
 fn abi_leaf(ops: &[IlOp]) -> bool {
     let mut ret2 = false;
+    let mut match_shaped = false;
+    let mut jim = false;
     for op in ops {
         match op {
             IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
@@ -110,13 +115,95 @@ fn abi_leaf(ops: &[IlOp]) -> bool {
             | IlOp::UnboxValue { .. }
             | IlOp::Index { .. }
             | IlOp::String { .. }
-            | IlOp::Print { .. }
-            | IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfMatch { .. },
+            | IlOp::Print { .. } => return false,
+            IlOp::Jump {
+                kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
                 ..
-            } => return false,
+            } => {
+                // Arity 0 is boxed overlap (`JumpIfMatch` writes slots; tell
+                // is peek-only). Reconstruct would drop the payload.
+                if *tag > 1 || *arity != 1 {
+                    return false;
+                }
+                jim = true;
+                match_shaped = true;
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
+                if byte.operand_u32() > 1 {
+                    return false;
+                }
+                match_shaped = true;
+            }
             _ => {}
         }
     }
-    ret2
+    ret2 || jim || match_shaped || adjacent_match_probe(ops)
+}
+
+/// Niche `DUP; LogNot; JMPx` or two-slot `DUP; CONST 0|1; EQ; JMPx`.
+/// Whole-body `LogNot` + `DUP` is too wide (`if !flag { break }`).
+fn adjacent_match_probe(ops: &[IlOp]) -> bool {
+    let solid: Vec<&IlOp> = ops
+        .iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .collect();
+    for w in solid.windows(3) {
+        if matches!(w[0], IlOp::Dup { .. })
+            && matches!(w[1], IlOp::LogNot { .. })
+            && is_cond_jump(w[2])
+        {
+            return true;
+        }
+    }
+    for w in solid.windows(4) {
+        if matches!(w[0], IlOp::Dup { .. })
+            && is_tag_imm(w[1])
+            && is_eq_bin(w[2])
+            && is_cond_jump(w[3])
+        {
+            return true;
+        }
+        if matches!(w[0], IlOp::Dup { .. })
+            && is_tag_imm(w[1])
+            && is_bitand(w[2])
+            && is_cond_jump(w[3])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_cond_jump(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Jump {
+            kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
+            ..
+        }
+    )
+}
+
+fn is_tag_imm(op: &IlOp) -> bool {
+    matches!(op, IlOp::Const { imm: 0 | 1, .. })
+}
+
+fn is_bitand(op: &IlOp) -> bool {
+    match op {
+        IlOp::Bin { op, .. } => *op == Instruction::BITAND,
+        IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
+            Instruction::from(*op) == Instruction::BITAND
+        }
+        _ => false,
+    }
+}
+
+fn is_eq_bin(op: &IlOp) -> bool {
+    match op {
+        IlOp::Bin { op, .. } => matches!(*op, Instruction::EQ | Instruction::NEQ),
+        IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
+            matches!(Instruction::from(*op), Instruction::EQ | Instruction::NEQ)
+        }
+        _ => false,
+    }
 }

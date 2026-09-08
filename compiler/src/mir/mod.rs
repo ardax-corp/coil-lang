@@ -3,7 +3,8 @@
 //! InstCombine (P7 / COI-281), DestProp (P8 / COI-282),
 //! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
 //! conservative float peeps (P11 / COI-285), saxpy-reduce HostInvoke
-//! packs (P12 / COI-286), and I1 heap/niche `MirTy` names (COI-293).
+//! packs (P12 / COI-286), I1 heap/niche `MirTy` names (COI-293), and
+//! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
@@ -1446,6 +1447,140 @@ fn main() {
                     if common::Instruction::from(*op) == Instruction::BITOR
             ) || matches!(op, IlOp::Bin { op, .. } if *op == Instruction::BITOR)),
             "niche LIR must emit BITOR"
+        );
+    }
+
+    #[test]
+    fn i2_niche_option_match_enters_lir() {
+        let loc = loc();
+        // match opt { Some(x) => x, None => 0 } on a pointer-niche word.
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Dup { loc },
+            IlOp::LogNot { loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(1)),
+            IlOp::Pop { loc },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "niche_match", 1, &mut pool).expect("I2 niche leaf");
+        assert!(
+            lir.iter()
+                .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
+        );
+        assert!(
+            !lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if matches!(
+                    *byte.bytecode(),
+                    Instruction::DenseBin | Instruction::MakeEnum
+                )
+            )),
+            "I2 must stay MIR→LIR"
+        );
+        let mut hints = LowerHints::new("niche_match");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        hints.allow_match = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower niche match");
+        f.verify().unwrap();
+        assert!(
+            f.blocks.iter().any(|b| matches!(b.term, Some(Terminator::Br { .. }))),
+            "niche sentinel is Br (LogNot)"
+        );
+    }
+
+    #[test]
+    fn i2_jump_if_match_lowers_and_emits() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Pop { loc },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(1)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "jim", 1, &mut pool).expect("I2 JumpIfMatch leaf");
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 1 },
+                    ..
+                }
+            )),
+            "LIR must emit JumpIfMatch"
+        );
+        let mut hints = LowerHints::new("jim");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        hints.allow_match = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower jim");
+        f.verify().unwrap();
+        assert!(
+            f.blocks.iter().any(|b| matches!(
+                b.term,
+                Some(Terminator::JumpIfMatch { tag: 1, .. })
+            )),
+            "SSA terminator is JumpIfMatch"
+        );
+        let text = f.to_string();
+        assert!(text.contains("jumpifmatch"), "{text}");
+        let g = parse_func(&text).expect(&text);
+        g.verify().unwrap();
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+    }
+
+    #[test]
+    fn i2_pair_match_one_word_return_enters_lir() {
+        let loc = loc();
+        // Two-slot [payload, tag] match: Ok(x) => x, Err(e) => e
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Dup { loc },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Bin {
+                op: Instruction::EQ,
+                loc,
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Pop { loc },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(1)),
+            IlOp::Pop { loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "pair_match", 2, &mut pool)
+            .expect("I2 two-slot match leaf");
+        assert!(
+            lir.iter()
+                .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
         );
     }
 
