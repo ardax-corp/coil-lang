@@ -486,9 +486,10 @@ pub enum Terminator {
         taken: BlockId,
         not_taken: BlockId,
     },
-    /// Peek-match on a niche / two-slot-shaped enum word (I2).
+    /// Peek-match on a boxed / niche / two-slot enum word (I2).
     ///
-    /// Taken pops the scrutinee and binds `payloads` (arity ≤ 1). Miss
+    /// Taken pops the scrutinee and binds `payloads` (arity ≤ 1), including
+    /// boxed-overlap `JumpIfMatch` arity 0 with a unary payload. Miss
     /// leaves the scrutinee on the stack (same as bytecode `JumpIfMatch`).
     JumpIfMatch {
         scrutinee: ValueId,

@@ -187,10 +187,16 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
 
     let mut incoming: HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>> = HashMap::new();
     let mut started: HashMap<BlockId, Vec<ValueId>> = HashMap::new();
+    let mut overlap_defs: HashMap<BlockId, Vec<(LocalId, ValueId)>> = HashMap::new();
     for (i, &(start, end)) in ranges.iter().enumerate() {
         let bid = range_blocks[i];
         b.switch_to_block(bid);
         let mut tos = merge_incoming(&mut b, incoming.remove(&bid).unwrap_or_default())?;
+        if let Some(defs) = overlap_defs.remove(&bid) {
+            for (local, v) in defs {
+                b.def_local(local, v)?;
+            }
+        }
         if let Some(prev) = started.get(&bid) {
             if prev != &tos {
                 return Err(LowerError::Refused("back-edge stack mismatch (I2)".into()));
@@ -208,11 +214,13 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
                 &mut b,
                 &mut tos,
                 last,
+                ops,
                 &label_block,
                 ranges.get(i + 1).map(|_| range_blocks[i + 1]),
                 hints,
                 bid,
                 &mut incoming,
+                &mut overlap_defs,
             )?;
         }
         if !tos.is_empty()
@@ -279,6 +287,29 @@ fn label_at(op: &IlOp) -> Option<Label> {
     }
 }
 
+/// First emitting op after `taken` (boxed-overlap `JumpIfMatch` arity 0).
+fn first_emitting_at(ops: &[IlOp], taken: Label) -> Option<&IlOp> {
+    let i = ops.iter().position(|op| match op {
+        IlOp::Label(l) | IlOp::JoinLabel(l) => *l == taken,
+        _ => false,
+    })?;
+    ops[i + 1..]
+        .iter()
+        .find(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+}
+
+/// Boxed match codegen emits `JumpIfMatch` arity 0; VM still pushes a
+/// unary payload when the taken arm is identity-return or a slot `LOAD`.
+fn jim_taken_payloads(arity: u32, first: Option<&IlOp>) -> u32 {
+    if arity >= 1 {
+        return arity.min(1);
+    }
+    match first {
+        Some(IlOp::Return { .. }) | Some(IlOp::Load { .. }) => 1,
+        _ => 0,
+    }
+}
+
 fn split_blocks(ops: &[IlOp]) -> Vec<(usize, usize)> {
     let n = ops.len();
     let mut leaders = BTreeSet::new();
@@ -324,11 +355,13 @@ fn emit_term(
     b: &mut MirBuilder,
     tos: &mut Vec<ValueId>,
     last: Option<&IlOp>,
+    ops: &[IlOp],
     labels: &HashMap<Label, BlockId>,
     fallthrough: Option<BlockId>,
     hints: &LowerHints,
     pred: BlockId,
     incoming: &mut HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>>,
+    overlap_defs: &mut HashMap<BlockId, Vec<(LocalId, ValueId)>>,
 ) -> Result<(), LowerError> {
     if hints.allow_deopt {
         if let Some(op) = last {
@@ -408,9 +441,9 @@ fn emit_term(
             if !hints.allow_match {
                 return Err(LowerError::Refused("JumpIfMatch / classes".into()));
             }
-            if *tag > 1 || *arity > 1 {
+            if *arity > 1 {
                 return Err(LowerError::Refused(
-                    "JumpIfMatch full enum (I2 is niche/two-slot)".into(),
+                    "JumpIfMatch arity > 1 (keep fuse-IL)".into(),
                 ));
             }
             let scrutinee = tos
@@ -421,8 +454,10 @@ fn emit_term(
                 .ok_or_else(|| LowerError::Refused(format!("unbound {target:?}")))?;
             let not_taken =
                 fallthrough.ok_or_else(|| LowerError::Refused("JumpIfMatch fallthrough".into()))?;
+            let first = first_emitting_at(ops, *target);
+            let n_payloads = jim_taken_payloads(*arity, first);
             let mut payloads = Vec::new();
-            if *arity == 1 {
+            if n_payloads == 1 {
                 let ty = match b.func().ty(scrutinee) {
                     MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef => MirTy::HeapRef,
                     other => other,
@@ -430,7 +465,18 @@ fn emit_term(
                 payloads.push(b.ins_match_payload(scrutinee, 0, ty)?);
             }
             let mut taken_stack = tos.clone();
-            taken_stack.extend(payloads.iter().copied());
+            // Boxed overlap: payload lands in a reserved slot (`LOAD` first).
+            // Identity `Case(x) => x` leaves it on the operand stack.
+            if n_payloads == 1 && matches!(first, Some(IlOp::Load { .. })) {
+                if let (Some(IlOp::Load { slot, .. }), Some(&p)) = (first, payloads.first()) {
+                    overlap_defs
+                        .entry(taken)
+                        .or_default()
+                        .push((LocalId(*slot), p));
+                }
+            } else {
+                taken_stack.extend(payloads.iter().copied());
+            }
             let mut miss_stack = tos.clone();
             miss_stack.push(scrutinee);
             record_edge(incoming, pred, taken, taken_stack);

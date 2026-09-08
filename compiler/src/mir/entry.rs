@@ -32,7 +32,7 @@ pub enum LirRefuse {
     HeapField,
     /// `BoxValue` / `UnboxValue`.
     Box,
-    /// `JumpIfMatch` outside I2 (tag > 1 or arity ≠ 1).
+    /// `JumpIfMatch` / `Unpack` the reconstruct cannot model.
     Match,
     /// `Unpack` arity > 1.
     Unpack,
@@ -47,7 +47,8 @@ pub enum LirRefuse {
 /// `BITAND`/`BITOR`, or an inferable leftover (plain `if`/compare
 /// diamonds, store-only loops, tiny lets). Hard refuse stays I4
 /// string/FORMAT, I5 alloc, impure HostInvoke/`CALL`, heap index /
-/// escaping fields, boxed overlap, I2-out-of-range match.
+/// escaping fields. Boxed `JumpIfMatch` (arity 0 overlap, any tag)
+/// is I2 when reconstruct can model the taken payload.
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
     lir_refuse(ops, unboxed_fields).is_none()
@@ -83,16 +84,15 @@ fn hard_refuse(ops: &[IlOp]) -> Option<LirRefuse> {
             op if refuses_string_or_format(op) => return Some(LirRefuse::String),
             op if refuses_alloc(op) => return Some(LirRefuse::Alloc),
             IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
+                kind: crate::il::IlJumpKind::JumpIfMatch { arity, .. },
                 ..
             } => {
-                // Arity 0 is boxed overlap (`JumpIfMatch` writes slots; tell
-                // is peek-only). Reconstruct would drop the payload.
-                if *tag > 1 || *arity != 1 {
+                if *arity > 1 {
                     return Some(LirRefuse::Match);
                 }
             }
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
+                // Multi-payload Unpack still needs per-index MatchPayload maps.
                 if byte.operand_u32() > 1 {
                     return Some(LirRefuse::Unpack);
                 }
@@ -252,7 +252,7 @@ fn is_eq_or_bitand(op: &IlOp) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::il::{IlJumpKind, Label};
+    use crate::il::{IlJumpKind, IlOp, Label};
     use common::DebugLoc;
 
     fn loc() -> DebugLoc {
@@ -334,6 +334,23 @@ mod tests {
             IlOp::Const { imm: 42, loc },
             IlOp::StorePop { slot: 0, loc },
             IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
+    }
+
+    #[test]
+    fn i2_boxed_overlap_arity0_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Load { slot: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 2, arity: 0 },
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
             IlOp::Return { loc, ret_words: 1 },
         ];
         assert_eq!(lir_refuse(&ops, &[]), None);

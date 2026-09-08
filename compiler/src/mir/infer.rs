@@ -336,11 +336,12 @@ fn infer_walk(
                 if mode != InferMode::Lir {
                     return Err(LowerError::Refused("match".into()));
                 }
-                if *tag > 1 || *arity > 1 {
+                if *arity > 1 {
                     return Err(LowerError::Refused(
-                        "JumpIfMatch full enum (I2 is niche/two-slot)".into(),
+                        "JumpIfMatch arity > 1 (keep fuse-IL)".into(),
                     ));
                 }
+                let _ = tag;
                 if stack.is_empty() {
                     return Err(LowerError::Refused("JumpIfMatch stack".into()));
                 }

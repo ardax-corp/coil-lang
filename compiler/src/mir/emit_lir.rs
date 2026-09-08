@@ -744,9 +744,7 @@ fn emit_term(
             not_taken,
             ..
         } => {
-            if *tag > 1 {
-                return Err(LowerError::Refused("JumpIfMatch tag (I2)".into()));
-            }
+            let _ = tag;
             if !phi_moves(func, block.id, *taken, regs, scratch).is_empty()
                 || !phi_moves(func, block.id, *not_taken, regs, scratch).is_empty()
             {
