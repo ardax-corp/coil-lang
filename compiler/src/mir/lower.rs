@@ -458,6 +458,12 @@ fn lower_op(
             let v = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("not stack".into()))?;
+            let t = b.func().ty(v);
+            // Dense keeps bool-only `LogNot` so `if !flag` loops stay fuse-IL
+            // (`LogNotJmpt`). I2 LIR allows i64 / niche truthiness.
+            if !hints.allow_match && t != MirTy::Bool {
+                return Err(LowerError::Refused(format!("lnot on {t}")));
+            }
             tos.push(b.ins_not(v)?);
             Ok(())
         }

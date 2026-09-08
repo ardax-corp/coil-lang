@@ -101,11 +101,6 @@ fn abi_leaf(ops: &[IlOp]) -> bool {
     let mut ret2 = false;
     let mut match_shaped = false;
     let mut jim = false;
-    let mut saw_dup = false;
-    let mut saw_eq = false;
-    let mut saw_jmp = false;
-    let mut saw_lognot = false;
-    let mut saw_bit = false;
     for op in ops {
         match op {
             IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
@@ -131,44 +126,82 @@ fn abi_leaf(ops: &[IlOp]) -> bool {
                 jim = true;
                 match_shaped = true;
             }
-            IlOp::Byte { byte, .. }
-                if *byte.bytecode() == Instruction::Unpack
-                    || *byte.bytecode() == Instruction::Seek =>
-            {
-                if *byte.bytecode() == Instruction::Unpack && byte.operand_u32() > 1 {
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
+                if byte.operand_u32() > 1 {
                     return false;
                 }
-                if *byte.bytecode() == Instruction::Unpack {
-                    match_shaped = true;
-                }
+                match_shaped = true;
             }
-            IlOp::Dup { .. } => saw_dup = true,
-            IlOp::LogNot { .. } => saw_lognot = true,
-            IlOp::Bin { op, .. } => note_match_bin(&mut saw_eq, &mut saw_bit, *op),
-            IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
-                note_match_bin(&mut saw_eq, &mut saw_bit, Instruction::from(*op));
-            }
-            IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
-                ..
-            } => saw_jmp = true,
             _ => {}
         }
     }
-    if saw_jmp && (saw_dup && (saw_eq || saw_lognot) || saw_bit && saw_eq) {
-        match_shaped = true;
-    }
-    ret2 || jim || match_shaped
+    ret2 || jim || match_shaped || adjacent_match_probe(ops)
 }
 
-fn note_match_bin(saw_eq: &mut bool, saw_bit: &mut bool, inst: Instruction) {
-    if matches!(inst, Instruction::EQ | Instruction::NEQ) {
-        *saw_eq = true;
+/// Niche `DUP; LogNot; JMPx` or two-slot `DUP; CONST 0|1; EQ; JMPx`.
+/// Whole-body `LogNot` + `DUP` is too wide (`if !flag { break }`).
+fn adjacent_match_probe(ops: &[IlOp]) -> bool {
+    let solid: Vec<&IlOp> = ops
+        .iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .collect();
+    for w in solid.windows(3) {
+        if matches!(w[0], IlOp::Dup { .. })
+            && matches!(w[1], IlOp::LogNot { .. })
+            && is_cond_jump(w[2])
+        {
+            return true;
+        }
     }
-    if matches!(
-        inst,
-        Instruction::BITAND | Instruction::BITOR | Instruction::XOR
-    ) {
-        *saw_bit = true;
+    for w in solid.windows(4) {
+        if matches!(w[0], IlOp::Dup { .. })
+            && is_tag_imm(w[1])
+            && is_eq_bin(w[2])
+            && is_cond_jump(w[3])
+        {
+            return true;
+        }
+        if matches!(w[0], IlOp::Dup { .. })
+            && is_tag_imm(w[1])
+            && is_bitand(w[2])
+            && is_cond_jump(w[3])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_cond_jump(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Jump {
+            kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
+            ..
+        }
+    )
+}
+
+fn is_tag_imm(op: &IlOp) -> bool {
+    matches!(op, IlOp::Const { imm: 0 | 1, .. })
+}
+
+fn is_bitand(op: &IlOp) -> bool {
+    match op {
+        IlOp::Bin { op, .. } => *op == Instruction::BITAND,
+        IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
+            Instruction::from(*op) == Instruction::BITAND
+        }
+        _ => false,
+    }
+}
+
+fn is_eq_bin(op: &IlOp) -> bool {
+    match op {
+        IlOp::Bin { op, .. } => matches!(*op, Instruction::EQ | Instruction::NEQ),
+        IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
+            matches!(Instruction::from(*op), Instruction::EQ | Instruction::NEQ)
+        }
+        _ => false,
     }
 }
