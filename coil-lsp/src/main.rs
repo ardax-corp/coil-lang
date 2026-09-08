@@ -1,10 +1,14 @@
 //! Coil language server. The transport is standard LSP JSON-RPC over stdio.
 #![allow(deprecated)]
 
-use std::{collections::HashMap, ops::Range, path::PathBuf};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use compiler::{
-    BuiltinExport, Checker, Pipeline, ProjectIndex, SymbolIndex, SymbolKind, VirtualModules,
+    BuiltinExport, Checker, ProjectIndex, SymbolIndex, SymbolKind, VirtualModules,
     format_ty_for_diag,
 };
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
@@ -49,6 +53,7 @@ struct ServerState {
     documents: HashMap<Uri, Document>,
     project_index: Option<ProjectIndex>,
     workspace_root: Option<PathBuf>,
+    last_typecheck: Vec<(PathBuf, Vec<CoilMessage>)>,
 }
 
 fn main() {
@@ -133,7 +138,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         });
     if let Some(root_uri) = workspace_root {
         state.workspace_root = Some(root_uri.clone());
-        let index = ProjectIndex::new(root_uri);
+        let index = ProjectIndex::with_roots(root_uri.clone(), lsp_module_roots(&root_uri));
         state.project_index = Some(index);
     }
     for message in &connection.receiver {
@@ -198,18 +203,10 @@ fn handle_request(
             let Some(document) = state.documents.get(&params.text_document.uri) else {
                 return Ok(Some(serde_json::to_value(Vec::<TextEdit>::new())?));
             };
-            let Some(formatted) = parser::format_range(&document.text, 0..document.text.len()).ok()
-            else {
+            let Some(byte_span) = lsp_range_to_byte_range(&document.text, params.range) else {
                 return Ok(Some(serde_json::to_value(Vec::<TextEdit>::new())?));
             };
-            let edits = if formatted == document.text {
-                Vec::new()
-            } else {
-                vec![TextEdit {
-                    range: full_range(&document.text),
-                    new_text: formatted,
-                }]
-            };
+            let edits = format_requested_range(&document.text, byte_span).unwrap_or_default();
             Some(serde_json::to_value(edits)?)
         }
         "textDocument/documentSymbol" => {
@@ -223,50 +220,7 @@ fn handle_request(
         }
         "workspace/symbol" => {
             let params: WorkspaceSymbolParams = serde_json::from_value(request.params.clone())?;
-            let query = params.query.to_lowercase();
-            let symbols = state
-                .documents
-                .iter()
-                .flat_map(|(uri, document)| {
-                    SymbolIndex::from_source(uri_path(uri).unwrap_or_default(), &document.text)
-                        .all_definitions()
-                        .filter_map(|definition| {
-                            if !query.is_empty() && !definition.name.to_lowercase().contains(&query)
-                            {
-                                return None;
-                            }
-                            Some(SymbolInformation {
-                                name: definition.name.clone(),
-                                kind: match definition.kind {
-                                    compiler::SymbolKind::Function => {
-                                        lsp_types::SymbolKind::FUNCTION
-                                    }
-                                    compiler::SymbolKind::Class => lsp_types::SymbolKind::CLASS,
-                                    compiler::SymbolKind::Enum => lsp_types::SymbolKind::ENUM,
-                                    compiler::SymbolKind::TypeAlias => {
-                                        lsp_types::SymbolKind::TYPE_PARAMETER
-                                    }
-                                    compiler::SymbolKind::Variable => {
-                                        lsp_types::SymbolKind::VARIABLE
-                                    }
-                                    compiler::SymbolKind::Namespace => {
-                                        lsp_types::SymbolKind::NAMESPACE
-                                    }
-                                    compiler::SymbolKind::Method => lsp_types::SymbolKind::METHOD,
-                                },
-                                tags: None,
-                                deprecated: None,
-                                location: Location {
-                                    uri: uri.clone(),
-                                    range: byte_range(&document.text, &definition.name_range),
-                                },
-                                container_name: None,
-                            })
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .collect::<Vec<_>>();
-            Some(serde_json::to_value(symbols)?)
+            Some(serde_json::to_value(workspace_symbols(state, &params.query))?)
         }
         "textDocument/foldingRange" => {
             let params: FoldingRangeParams = serde_json::from_value(request.params.clone())?;
@@ -298,16 +252,7 @@ fn handle_request(
             let ranges = state
                 .documents
                 .get(&params.text_document.uri)
-                .map(|document| {
-                    params
-                        .positions
-                        .into_iter()
-                        .map(|_| SelectionRange {
-                            range: full_range(&document.text),
-                            parent: None,
-                        })
-                        .collect::<Vec<_>>()
-                })
+                .map(|document| selection_ranges(&document.text, &params.positions))
                 .unwrap_or_default();
             Some(serde_json::to_value(ranges)?)
         }
@@ -339,117 +284,36 @@ fn handle_request(
                 .documents
                 .get(&params.text_document_position_params.text_document.uri)
                 .and_then(|document| {
-                    signature_help(
-                        &document.text,
-                        params.text_document_position_params.position,
-                    )
+                    signature_help(document, params.text_document_position_params.position)
                 });
             Some(serde_json::to_value(signature)?)
         }
         "textDocument/documentHighlight" => {
             let params: DocumentHighlightParams = serde_json::from_value(request.params.clone())?;
-            let highlights = state
-                .documents
-                .get(&params.text_document_position_params.text_document.uri)
-                .and_then(|document| {
-                    let offset = position_to_byte(
-                        &document.text,
-                        params.text_document_position_params.position,
-                    )?;
-                    let range = word_range(&document.text, offset)?;
-                    let word = document.text[range].to_owned();
-                    Some(
-                        occurrences(&document.text, &word)
-                            .into_iter()
-                            .map(|range| DocumentHighlight {
-                                range: byte_range(&document.text, &range),
-                                kind: None,
-                            })
-                            .collect::<Vec<_>>(),
-                    )
-                })
-                .unwrap_or_default();
+            let highlights = identifier_highlights(
+                state,
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            );
             Some(serde_json::to_value(highlights)?)
         }
         "textDocument/references" => {
             let params: ReferenceParams = serde_json::from_value(request.params.clone())?;
-            let locations = state
-                .documents
-                .get(&params.text_document_position.text_document.uri)
-                .and_then(|document| {
-                    let offset =
-                        position_to_byte(&document.text, params.text_document_position.position)?;
-                    let range = word_range(&document.text, offset)?;
-                    let word = document.text[range].to_owned();
-                    let mut locations = Vec::new();
-                    for (document_uri, open_document) in &state.documents {
-                        let index = SymbolIndex::from_source(
-                            uri_path(document_uri).unwrap_or_default(),
-                            &open_document.text,
-                        );
-                        for reference in index.references(&word) {
-                            locations.push(Location {
-                                uri: document_uri.clone(),
-                                range: byte_range(&open_document.text, &reference.range),
-                            });
-                        }
-                    }
-                    Some(locations)
-                })
-                .unwrap_or_default();
+            let locations = identifier_locations(
+                state,
+                &params.text_document_position.text_document.uri,
+                params.text_document_position.position,
+                params.context.include_declaration,
+            );
             Some(serde_json::to_value(locations)?)
         }
         "textDocument/definition" | "textDocument/typeDefinition" => {
             let params: GotoDefinitionParams = serde_json::from_value(request.params.clone())?;
-            let locations = state
-                .documents
-                .get(&params.text_document_position_params.text_document.uri)
-                .and_then(|document| {
-                    let offset = position_to_byte(
-                        &document.text,
-                        params.text_document_position_params.position,
-                    )?;
-                    let range = word_range(&document.text, offset)?;
-                    let name = document.text[range.clone()].to_owned();
-                    let file_path = uri_path(
-                        &params.text_document_position_params.text_document.uri,
-                    )?;
-                    let ref_range = range;
-
-                    if let Some(index) = &state.project_index {
-                        let defs = index.resolve_definition(&file_path, ref_range, &name);
-                        if !defs.is_empty() {
-                            return Some(
-                                defs.into_iter()
-                                    .filter_map(|(path, name_range)| {
-                                        state.documents.iter().find(|(uri, _)| {
-                                            uri_path(uri).as_deref() == Some(path.as_path())
-                                        }).map(|(uri, doc)| Location {
-                                            uri: uri.clone(),
-                                            range: byte_range(&doc.text, &name_range),
-                                        })
-                                    })
-                                    .collect(),
-                            );
-                        }
-                    }
-
-                    let mut locations = Vec::new();
-                    for (document_uri, open_document) in &state.documents {
-                        let index = SymbolIndex::from_source(
-                            uri_path(document_uri).unwrap_or_default(),
-                            &open_document.text,
-                        );
-                        for definition in index.definitions(&name) {
-                            locations.push(Location {
-                                uri: document_uri.clone(),
-                                range: byte_range(&open_document.text, &definition.name_range),
-                            });
-                        }
-                    }
-                    Some(locations)
-                })
-                .unwrap_or_default();
+            let locations = goto_definitions(
+                state,
+                &params.text_document_position_params.text_document.uri,
+                params.text_document_position_params.position,
+            );
             Some(serde_json::to_value(locations)?)
         }
         "textDocument/semanticTokens/full" => {
@@ -488,34 +352,12 @@ fn handle_request(
         }
         "textDocument/rename" => {
             let params: lsp_types::RenameParams = serde_json::from_value(request.params.clone())?;
-            let edits = state
-                .documents
-                .get(&params.text_document_position.text_document.uri)
-                .and_then(|document| {
-                    let offset =
-                        position_to_byte(&document.text, params.text_document_position.position)?;
-                    let range = word_range(&document.text, offset)?;
-                    let old_name = document.text[range].to_owned();
-                    let mut changes = HashMap::new();
-                    for (document_uri, open_document) in &state.documents {
-                        let replacements = occurrences(&open_document.text, &old_name)
-                            .into_iter()
-                            .map(|range| TextEdit {
-                                range: byte_range(&open_document.text, &range),
-                                new_text: params.new_name.clone(),
-                            })
-                            .collect::<Vec<_>>();
-                        if !replacements.is_empty() {
-                            changes.insert(document_uri.clone(), replacements);
-                        }
-                    }
-                    Some(lsp_types::WorkspaceEdit {
-                        changes: Some(changes),
-                        document_changes: None,
-                        change_annotations: None,
-                    })
-                })
-                .unwrap_or_default();
+            let edits = rename_identifier(
+                state,
+                &params.text_document_position.text_document.uri,
+                params.text_document_position.position,
+                &params.new_name,
+            );
             Some(serde_json::to_value(edits)?)
         }
         _ => None,
@@ -547,6 +389,9 @@ fn handle_notification(
                     last_good,
                 },
             );
+            if let Some(path) = uri_path(&params.text_document.uri) {
+                refresh_project(state, &path);
+            }
             publish_diagnostics(connection, state, &params.text_document.uri)?;
         }
         "textDocument/didChange" => {
@@ -563,6 +408,9 @@ fn handle_notification(
                         document.last_good = Some(good);
                     }
                 }
+                if let Some(path) = uri_path(&params.text_document.uri) {
+                    refresh_project(state, &path);
+                }
                 publish_diagnostics(connection, state, &params.text_document.uri)?;
             }
         }
@@ -574,6 +422,11 @@ fn handle_notification(
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(notification.params.clone())?;
+            if let Some(path) = uri_path(&params.text_document.uri) {
+                if let Some(index) = state.project_index.as_mut() {
+                    index.pipeline_mut().clear_file_text(&path);
+                }
+            }
             state.documents.remove(&params.text_document.uri);
             let params = PublishDiagnosticsParams {
                 uri: params.text_document.uri,
@@ -624,6 +477,41 @@ fn analyze(source: &str) -> Vec<CoilMessage> {
     checker.take_messages()
 }
 
+fn lsp_module_roots(workspace: &Path) -> Vec<PathBuf> {
+    let mut roots = compiler::default_module_roots();
+    let dot = PathBuf::from(".");
+    if !roots.contains(&dot) {
+        roots.push(dot);
+    }
+    let deps = workspace.join(".deps");
+    if let Ok(entries) = std::fs::read_dir(deps) {
+        for entry in entries.flatten() {
+            let src = entry.path().join("src");
+            if !src.is_dir() {
+                continue;
+            }
+            if let Ok(rel) = src.strip_prefix(workspace) {
+                roots.push(rel.to_path_buf());
+            } else {
+                roots.push(src);
+            }
+        }
+    }
+    roots
+}
+
+fn refresh_project(state: &mut ServerState, entry: &Path) {
+    let Some(index) = state.project_index.as_mut() else {
+        return;
+    };
+    for (uri, document) in &state.documents {
+        if let Some(path) = uri_path(uri) {
+            index.apply_open_file(path, document.text.clone());
+        }
+    }
+    state.last_typecheck = index.typecheck_entry(entry);
+}
+
 fn project_diagnostics(state: &ServerState, uri: &Uri, document: &Document) -> Vec<Diagnostic> {
     let path = uri_path(uri);
     let Some(path) = path else {
@@ -632,31 +520,20 @@ fn project_diagnostics(state: &ServerState, uri: &Uri, document: &Document) -> V
             .map(|message| diagnostic(uri, &document.text, message))
             .collect();
     };
-    let mut pipeline = Pipeline::new();
-    if let Some(root) = &state.workspace_root {
-        pipeline.bind_project_root(root.clone(), compiler::default_module_roots());
-    }
-    for (open_uri, open_document) in &state.documents {
-        if let Some(open_path) = uri_path(open_uri) {
-            pipeline.set_file_text(open_path, open_document.text.clone());
-        }
-    }
-    let results = pipeline.typecheck_project(&path);
-    let source = state
-        .documents
-        .get(uri)
-        .map(|document| document.text.as_str())
-        .unwrap_or(document.text.as_str());
-    results
-        .into_iter()
+    if let Some((_, messages)) = state
+        .last_typecheck
+        .iter()
         .find(|(file, _)| file == &path)
-        .map(|(_, messages)| {
-            messages
-                .iter()
-                .map(|message| diagnostic(uri, source, message))
-                .collect()
-        })
-        .unwrap_or_default()
+    {
+        return messages
+            .iter()
+            .map(|message| diagnostic(uri, &document.text, message))
+            .collect();
+    }
+    analyze(&document.text)
+        .iter()
+        .map(|message| diagnostic(uri, &document.text, message))
+        .collect()
 }
 
 fn diagnostic(uri: &Uri, source: &str, message: &CoilMessage) -> Diagnostic {
@@ -689,14 +566,401 @@ fn diagnostic(uri: &Uri, source: &str, message: &CoilMessage) -> Diagnostic {
     }
 }
 
-fn uri_path(uri: &Uri) -> Option<std::path::PathBuf> {
+fn uri_path(uri: &Uri) -> Option<PathBuf> {
     let raw = uri.to_string();
-    raw.strip_prefix("file://")
-        .map(std::path::PathBuf::from)
+    let path = raw
+        .strip_prefix("file://")
+        .map(percent_decode)
+        .map(PathBuf::from)
         .or_else(|| {
             raw.starts_with('/')
-                .then_some(std::path::PathBuf::from(raw))
+                .then_some(PathBuf::from(percent_decode(&raw)))
+        })?;
+    Some(path)
+}
+
+fn percent_decode(input: &str) -> String {
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'%' && index + 2 < bytes.len() {
+            if let Ok(value) = u8::from_str_radix(
+                std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
+                16,
+            ) {
+                out.push(value);
+                index += 3;
+                continue;
+            }
+        }
+        out.push(bytes[index]);
+        index += 1;
+    }
+    String::from_utf8(out).unwrap_or_else(|_| input.to_owned())
+}
+
+fn path_to_uri(path: &Path) -> Option<Uri> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().ok()?.join(path)
+    };
+    let mut encoded = String::from("file://");
+    for (index, part) in abs.to_string_lossy().split('/').enumerate() {
+        if index > 0 {
+            encoded.push('/');
+        }
+        for byte in part.bytes() {
+            match byte {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(byte as char);
+                }
+                _ => encoded.push_str(&format!("%{byte:02X}")),
+            }
+        }
+    }
+    encoded.parse().ok()
+}
+
+fn location_for_file(state: &ServerState, path: &Path, name_range: &Range<usize>) -> Option<Location> {
+    if let Some((uri, document)) = state.documents.iter().find(|(uri, _)| {
+        uri_path(uri).as_deref() == Some(path)
+    }) {
+        return Some(Location {
+            uri: uri.clone(),
+            range: byte_range(&document.text, name_range),
+        });
+    }
+    let source = state
+        .project_index
+        .as_ref()
+        .and_then(|index| index.source_for(path))
+        .map(str::to_owned)
+        .or_else(|| std::fs::read_to_string(path).ok())?;
+    Some(Location {
+        uri: path_to_uri(path)?,
+        range: byte_range(&source, name_range),
+    })
+}
+
+fn goto_definitions(state: &ServerState, uri: &Uri, position: Position) -> Vec<Location> {
+    let Some(document) = state.documents.get(uri) else {
+        return Vec::new();
+    };
+    let Some(offset) = position_to_byte(&document.text, position) else {
+        return Vec::new();
+    };
+    let Some(range) = word_range(&document.text, offset) else {
+        return Vec::new();
+    };
+    let name = document.text[range.clone()].to_owned();
+    let Some(file_path) = uri_path(uri) else {
+        return local_definitions(state, &name);
+    };
+
+    if let Some(index) = &state.project_index {
+        let defs = index.resolve_definition(&file_path, range.clone(), &name);
+        let resolved: Vec<_> = defs
+            .into_iter()
+            .filter_map(|(path, name_range)| location_for_file(state, &path, &name_range))
+            .collect();
+        if !resolved.is_empty() {
+            return resolved;
+        }
+    }
+    local_definitions(state, &name)
+}
+
+fn local_definitions(state: &ServerState, name: &str) -> Vec<Location> {
+    let mut locations = Vec::new();
+    for (document_uri, open_document) in &state.documents {
+        let index = SymbolIndex::from_source(
+            uri_path(document_uri).unwrap_or_default(),
+            &open_document.text,
+        );
+        for definition in index.definitions(name) {
+            locations.push(Location {
+                uri: document_uri.clone(),
+                range: byte_range(&open_document.text, &definition.name_range),
+            });
+        }
+    }
+    locations
+}
+
+fn identifier_name(document: &Document, position: Position) -> Option<String> {
+    let offset = position_to_byte(&document.text, position)?;
+    let range = word_range(&document.text, offset)?;
+    Some(document.text[range].to_owned())
+}
+
+fn identifier_locations(
+    state: &ServerState,
+    uri: &Uri,
+    position: Position,
+    include_declaration: bool,
+) -> Vec<Location> {
+    let Some(document) = state.documents.get(uri) else {
+        return Vec::new();
+    };
+    let Some(name) = identifier_name(document, position) else {
+        return Vec::new();
+    };
+    let mut locations = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push = |location: Location| {
+        let key = (
+            location.uri.to_string(),
+            location.range.start.line,
+            location.range.start.character,
+            location.range.end.line,
+            location.range.end.character,
+        );
+        if seen.insert(key) {
+            locations.push(location);
+        }
+    };
+
+    let mut visit_index = |path: &Path, source: &str, index: &SymbolIndex| {
+        if include_declaration {
+            for definition in index.definitions(&name) {
+                if let Some(location) = location_for_file(state, path, &definition.name_range)
+                    .or_else(|| {
+                        path_to_uri(path).map(|uri| Location {
+                            uri,
+                            range: byte_range(source, &definition.name_range),
+                        })
+                    })
+                {
+                    push(location);
+                }
+            }
+        }
+        for site in index.references(&name) {
+            if let Some(location) = location_for_file(state, path, &site.range) {
+                push(location);
+            }
+        }
+    };
+
+    if let Some(project) = &state.project_index {
+        for path in project.indexed_paths() {
+            if let Some(source) = project.source_for(path) {
+                if let Some(index) = project.symbols_for(path) {
+                    visit_index(path, source, index);
+                }
+            }
+        }
+    }
+
+    for (document_uri, open_document) in &state.documents {
+        let path = uri_path(document_uri).unwrap_or_default();
+        if state
+            .project_index
+            .as_ref()
+            .is_some_and(|index| index.source_for(&path).is_some())
+        {
+            continue;
+        }
+        let index = SymbolIndex::from_source(path.clone(), &open_document.text);
+        visit_index(&path, &open_document.text, &index);
+    }
+    locations
+}
+
+fn identifier_highlights(
+    state: &ServerState,
+    uri: &Uri,
+    position: Position,
+) -> Vec<DocumentHighlight> {
+    identifier_locations(state, uri, position, true)
+        .into_iter()
+        .filter(|location| &location.uri == uri)
+        .map(|location| DocumentHighlight {
+            range: location.range,
+            kind: None,
         })
+        .collect()
+}
+
+fn rename_identifier(
+    state: &ServerState,
+    uri: &Uri,
+    position: Position,
+    new_name: &str,
+) -> lsp_types::WorkspaceEdit {
+    let locations = identifier_locations(state, uri, position, true);
+    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    for location in locations {
+        changes
+            .entry(location.uri)
+            .or_default()
+            .push(TextEdit {
+                range: location.range,
+                new_text: new_name.to_owned(),
+            });
+    }
+    lsp_types::WorkspaceEdit {
+        changes: Some(changes),
+        document_changes: None,
+        change_annotations: None,
+    }
+}
+
+fn workspace_symbols(state: &ServerState, query: &str) -> Vec<SymbolInformation> {
+    let query = query.to_lowercase();
+    let mut symbols = Vec::new();
+    let mut seen = HashSet::new();
+
+    let mut push_def = |name: &str, kind: compiler::SymbolKind, path: &Path, range: &Range<usize>| {
+        if !query.is_empty() && !name.to_lowercase().contains(&query) {
+            return;
+        }
+        let Some(location) = location_for_file(state, path, range) else {
+            return;
+        };
+        let key = (location.uri.to_string(), name.to_owned(), location.range.start.line);
+        if !seen.insert(key) {
+            return;
+        }
+        symbols.push(SymbolInformation {
+            name: name.to_owned(),
+            kind: match kind {
+                compiler::SymbolKind::Function => lsp_types::SymbolKind::FUNCTION,
+                compiler::SymbolKind::Class => lsp_types::SymbolKind::CLASS,
+                compiler::SymbolKind::Enum => lsp_types::SymbolKind::ENUM,
+                compiler::SymbolKind::TypeAlias => lsp_types::SymbolKind::TYPE_PARAMETER,
+                compiler::SymbolKind::Variable => lsp_types::SymbolKind::VARIABLE,
+                compiler::SymbolKind::Namespace => lsp_types::SymbolKind::NAMESPACE,
+                compiler::SymbolKind::Method => lsp_types::SymbolKind::METHOD,
+            },
+            tags: None,
+            deprecated: None,
+            location,
+            container_name: None,
+        });
+    };
+
+    if let Some(project) = &state.project_index {
+        for path in project.indexed_paths() {
+            if let Some(index) = project.symbols_for(path) {
+                for definition in index.all_definitions() {
+                    push_def(
+                        &definition.name,
+                        definition.kind,
+                        path,
+                        &definition.name_range,
+                    );
+                }
+            }
+        }
+    }
+
+    for (uri, document) in &state.documents {
+        let path = uri_path(uri).unwrap_or_default();
+        if state
+            .project_index
+            .as_ref()
+            .is_some_and(|index| index.source_for(&path).is_some())
+        {
+            continue;
+        }
+        let index = SymbolIndex::from_source(path.clone(), &document.text);
+        for definition in index.all_definitions() {
+            push_def(
+                &definition.name,
+                definition.kind,
+                &path,
+                &definition.name_range,
+            );
+        }
+    }
+    symbols
+}
+
+fn format_requested_range(source: &str, range: Range<usize>) -> Option<Vec<TextEdit>> {
+    let formatted = parser::format_source(source).ok()?;
+    if formatted == source {
+        return Some(Vec::new());
+    }
+    let Ok((_, original_root)) = Pratt::default().parse(source) else {
+        return Some(vec![TextEdit {
+            range: full_range(source),
+            new_text: formatted,
+        }]);
+    };
+    let Ok((_, formatted_root)) = Pratt::default().parse(&formatted) else {
+        return Some(vec![TextEdit {
+            range: full_range(source),
+            new_text: formatted,
+        }]);
+    };
+    let Expression::Program(original_items) = original_root.as_ref() else {
+        return Some(vec![TextEdit {
+            range: full_range(source),
+            new_text: formatted,
+        }]);
+    };
+    let Expression::Program(formatted_items) = formatted_root.as_ref() else {
+        return Some(vec![TextEdit {
+            range: full_range(source),
+            new_text: formatted,
+        }]);
+    };
+    if original_items.len() != formatted_items.len() {
+        return Some(vec![TextEdit {
+            range: full_range(source),
+            new_text: formatted,
+        }]);
+    }
+    let mut edits = Vec::new();
+    for (original, formatted_item) in original_items.iter().zip(formatted_items.iter()) {
+        let original_span = original.0.start..original.0.end;
+        if !ranges_overlap(&original_span, &range) && !range.contains(&original_span.start) {
+            continue;
+        }
+        let new_text = formatted[formatted_item.0.start..formatted_item.0.end].to_owned();
+        if source.get(original_span.clone()) != Some(new_text.as_str()) {
+            edits.push(TextEdit {
+                range: byte_range(source, &original_span),
+                new_text,
+            });
+        }
+    }
+    if edits.is_empty() && range == (0..source.len()) {
+        edits.push(TextEdit {
+            range: full_range(source),
+            new_text: formatted,
+        });
+    }
+    Some(edits)
+}
+
+fn selection_ranges(source: &str, positions: &[Position]) -> Vec<SelectionRange> {
+    positions
+        .iter()
+        .filter_map(|position| {
+            let offset = position_to_byte(source, *position)?;
+            let mut spans = if let Ok(ast) = Pratt::default().parse(source) {
+                spans_containing(&ast, offset)
+            } else {
+                Vec::new()
+            };
+            if spans.is_empty() {
+                spans.push(0..source.len());
+            }
+            let mut parent = None;
+            for span in spans.iter().rev() {
+                parent = Some(SelectionRange {
+                    range: byte_range(source, span),
+                    parent: parent.map(Box::new),
+                });
+            }
+            parent
+        })
+        .collect()
 }
 
 fn document_symbols(source: &str) -> Vec<DocumentSymbol> {
@@ -831,6 +1095,8 @@ fn completions(document: &Document, position: Position) -> Vec<CompletionItem> {
         .map(|range| document.text[range.start..range.end.min(document.text.len())].to_owned())
         .unwrap_or_default();
 
+    let qualifier = offset.and_then(|offset| qualifier_before(&document.text, offset));
+
     let mut by_label: HashMap<String, CompletionCandidate> = HashMap::new();
     for keyword in coil_keywords() {
         by_label.insert(
@@ -857,12 +1123,43 @@ fn completions(document: &Document, position: Position) -> Vec<CompletionItem> {
         }
     }
 
+    if let Some((module, "::")) = qualifier.as_ref().map(|(name, sep)| (name.as_str(), *sep)) {
+        let modules = VirtualModules::new();
+        if let Some(exports) = modules.resolve_glob(&[module.to_owned()]) {
+            for export in exports {
+                let docs = builtin_documentation(&[module.to_owned()], export.short_name(), export);
+                by_label.entry(export.short_name().to_owned()).or_insert(
+                    CompletionCandidate {
+                        label: export.short_name().to_owned(),
+                        kind: virtual_completion_kind(export),
+                        detail: export.host_registry().map(|reg| format!("HostInvoke `{reg}`")),
+                        documentation: Some(docs),
+                        parameter_names: Vec::new(),
+                    },
+                );
+            }
+        }
+    }
+
     let mut items: Vec<CompletionItem> = by_label
         .into_values()
         .filter(|candidate| {
+            if let Some((qual, sep)) = &qualifier {
+                return completion_matches_qualifier(candidate, qual, sep);
+            }
             prefix.is_empty() || candidate.label.to_lowercase().starts_with(&prefix.to_lowercase())
         })
         .map(|candidate| {
+            let insert_label = qualifier
+                .as_ref()
+                .and_then(|(qual, sep)| {
+                    candidate
+                        .label
+                        .strip_prefix(&format!("{qual}{sep}"))
+                        .or_else(|| candidate.label.strip_prefix(&format!("{qual}.")))
+                        .map(str::to_owned)
+                })
+                .unwrap_or_else(|| candidate.label.clone());
             let is_function = candidate.kind == CompletionItemKind::FUNCTION;
             CompletionItem {
                 label: candidate.label.clone(),
@@ -875,9 +1172,9 @@ fn completions(document: &Document, position: Position) -> Vec<CompletionItem> {
                     })
                 }),
                 insert_text: Some(if is_function {
-                    function_snippet(&candidate.label, &candidate.parameter_names)
+                    function_snippet(&insert_label, &candidate.parameter_names)
                 } else {
-                    candidate.label.clone()
+                    insert_label
                 }),
                 insert_text_format: is_function.then_some(InsertTextFormat::SNIPPET),
                 command: is_function.then(|| Command {
@@ -898,17 +1195,25 @@ fn completions(document: &Document, position: Position) -> Vec<CompletionItem> {
 /// Expr-statements require a trailing `;`, so a bare replacement like `_` still
 /// fails; try both value and statement forms.
 fn sanitize_variants(source: &str, offset: usize) -> Vec<String> {
+    let mut variants = Vec::new();
+    if qualifier_before(source, offset).is_some() {
+        let at = offset.min(source.len());
+        variants.push(format!("{}x;{}", &source[..at], &source[at..]));
+        variants.push(format!("{}x{}", &source[..at], &source[at..]));
+        variants.push(format!("{}Red;{}", &source[..at], &source[at..]));
+    }
     let Some(range) = incomplete_ident_near(source, offset) else {
-        return Vec::new();
+        return variants;
     };
     let before = &source[..range.start];
     let after = &source[range.end..];
-    vec![
+    variants.extend([
         format!("{before}0;{after}"),
         format!("{before}0{after}"),
         format!("{before}true;{after}"),
         format!("{before}{after}"),
-    ]
+    ]);
+    variants
 }
 
 /// Identifier touching `offset`, or the nearest preceding identifier when the
@@ -924,7 +1229,7 @@ fn incomplete_ident_near(source: &str, offset: usize) -> Option<Range<usize>> {
         if byte.is_ascii_whitespace()
             || matches!(
                 byte,
-                b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b';' | b':'
+                b'{' | b'}' | b'(' | b')' | b'[' | b']' | b',' | b';' | b':' | b'.'
             )
         {
             cursor -= 1;
@@ -985,8 +1290,24 @@ fn collect_decl_candidates(expression: &Expression<'_>, out: &mut HashMap<String
                 collect_decl_candidates(field, out);
             }
         }
-        Expression::EnumDecl { name, docs, .. } => {
+        Expression::EnumDecl { name, docs, variants, .. } => {
             insert_decl_candidate(out, name, CompletionItemKind::ENUM, docs);
+            for (_, variant) in variants {
+                let Expression::EnumVariant {
+                    name: variant_name,
+                    docs: variant_docs,
+                    ..
+                } = variant.as_ref()
+                else {
+                    continue;
+                };
+                insert_decl_candidate(
+                    out,
+                    &format!("{name}.{variant_name}"),
+                    CompletionItemKind::ENUM_MEMBER,
+                    variant_docs,
+                );
+            }
         }
         Expression::TypeAlias { name, docs, .. } => {
             insert_decl_candidate(out, name, CompletionItemKind::TYPE_PARAMETER, docs);
@@ -1126,6 +1447,57 @@ fn collect_virtual_candidates(
     }
 }
 
+fn qualifier_before(source: &str, offset: usize) -> Option<(String, &'static str)> {
+    let bytes = source.as_bytes();
+    let mut cursor = offset.min(bytes.len());
+    while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+        cursor -= 1;
+    }
+    if cursor >= 2 && bytes[cursor - 1] == b':' && bytes[cursor - 2] == b':' {
+        let range = word_range(source, cursor - 2)?;
+        return Some((source[range].to_owned(), "::"));
+    }
+    if cursor >= 1 && bytes[cursor - 1] == b'.' {
+        let range = word_range(source, cursor - 1)?;
+        return Some((source[range].to_owned(), "."));
+    }
+    None
+}
+
+fn completion_matches_qualifier(
+    candidate: &CompletionCandidate,
+    qual: &str,
+    sep: &str,
+) -> bool {
+    if candidate.label.starts_with(&format!("{qual}{sep}"))
+        || candidate.label.starts_with(&format!("{qual}."))
+    {
+        return true;
+    }
+    if sep == "::" {
+        return VirtualModules::new()
+            .resolve_item(&[qual.to_owned()], &candidate.label)
+            .is_some();
+    }
+    false
+}
+
+fn virtual_completion_kind(export: &BuiltinExport) -> CompletionItemKind {
+    match export {
+        BuiltinExport::Enum { .. } => CompletionItemKind::ENUM,
+        BuiltinExport::TypeClass { .. } => CompletionItemKind::INTERFACE,
+        BuiltinExport::FfiTag { .. } => CompletionItemKind::ENUM_MEMBER,
+        BuiltinExport::OpaqueType { .. } => CompletionItemKind::CLASS,
+        BuiltinExport::FfiFn { .. }
+        | BuiltinExport::Fn { .. }
+        | BuiltinExport::IoFn { .. }
+        | BuiltinExport::StringFn { .. }
+        | BuiltinExport::ThreadFn { .. }
+        | BuiltinExport::GcFn { .. }
+        | BuiltinExport::HostFn { .. } => CompletionItemKind::FUNCTION,
+    }
+}
+
 fn insert_virtual_candidate(
     out: &mut HashMap<String, (CompletionItemKind, String)>,
     name: String,
@@ -1163,7 +1535,7 @@ fn builtin_documentation(path: &[String], name: &str, export: &BuiltinExport) ->
         "io::fs" => "references/io-fs.md",
         "string" => "references/string.md",
         "thread" => "manual/tutorial/11-threads.md",
-        "time" => "references/time.md",
+        "clock" => "references/modules.md",
         "env" => "references/env.md",
         "gc" => "references/gc.md",
         "ffi" | "ffi::types" => "references/ffi.md",
@@ -1233,6 +1605,16 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("prelude::math", "sinh") => "Hyperbolic sine of a float.".into(),
         ("prelude::math", "cosh") => "Hyperbolic cosine of a float.".into(),
         ("prelude::math", "tanh") => "Hyperbolic tangent of a float.".into(),
+        ("clock", "wall_nanos") => {
+            "Wall-clock nanoseconds since the Unix epoch (HostInvoke `clock_wall_nanos`)."
+                .into()
+        }
+        ("clock", "mono_nanos") => {
+            "Monotonic clock reading in nanoseconds (HostInvoke `clock_mono_nanos`).".into()
+        }
+        ("clock", "sleep_ms") => {
+            "Sleeps the current thread for milliseconds (HostInvoke `clock_sleep_ms`).".into()
+        }
         ("ffi", "dload") => "Loads a dynamic library and returns a handle.".into(),
         ("ffi", "declare") => "Declares an FFI function signature for later invocation.".into(),
         ("ffi", "invoke") => "Invokes a previously declared FFI function.".into(),
@@ -1265,14 +1647,6 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
         ("thread", "with_write") => "Runs a callback with a write lock.".into(),
         ("thread", "try_read") => "Attempts to acquire a read lock without waiting.".into(),
         ("thread", "try_write") => "Attempts to acquire a write lock without waiting.".into(),
-        ("time", "timestamp") => "Returns the current UTC timestamp.".into(),
-        ("time", "sleep_ms") => "Suspends the current thread for milliseconds.".into(),
-        ("time", "instant_now") => "Captures a monotonic clock instant.".into(),
-        ("time", "elapsed_nanos") => "Returns elapsed nanoseconds since an instant.".into(),
-        ("time", "elapsed_millis") => "Returns elapsed milliseconds since an instant.".into(),
-        ("time", "period") => "Constructs a calendar period.".into(),
-        ("time", "format") => "Formats a timestamp or period using a format string.".into(),
-        ("time", "parse") => "Parses a time value from a formatted string.".into(),
         ("gc", "root") => "Pins a value so the GC keeps it alive (`Root<T>`).".into(),
         ("gc", "unroot") => "Takes the pinned value and clears the `Root`.".into(),
         ("gc", "get") => "Reads the value inside a `Root` without releasing the pin.".into(),
@@ -1294,6 +1668,9 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
             }
             BuiltinExport::FfiTag { .. } => {
                 format!("Provides the `{name}` tag used to describe an FFI argument.")
+            }
+            BuiltinExport::HostFn { registry, .. } => {
+                format!("HostInvoke `{registry}` (`{module}::{name}`).")
             }
             _ => format!(
                 "Provides the `{name}` operation; see the reference for its signature and behavior."
@@ -1572,6 +1949,17 @@ fn walk_children(expression: &Expression<'_>, offset: usize, out: &mut Vec<Range
                 collect_spans_containing(method, offset, out);
             }
         }
+        Expression::EnumDecl { variants, .. } => {
+            for variant in variants {
+                collect_spans_containing(variant, offset, out);
+            }
+        }
+        Expression::Match { scrutinee, arms } => {
+            collect_spans_containing(scrutinee, offset, out);
+            for arm in arms {
+                collect_spans_containing(&arm.body, offset, out);
+            }
+        }
         _ => {}
     }
 }
@@ -1671,7 +2059,8 @@ fn find_param_docs_for_name(expression: &Expression<'_>, name: &str) -> Option<S
     }
 }
 
-fn signature_help(source: &str, position: Position) -> Option<SignatureHelp> {
+fn signature_help(document: &Document, position: Position) -> Option<SignatureHelp> {
+    let source = &document.text;
     let offset = position_to_byte(source, position)?;
     let prefix = &source[..offset.min(source.len())];
     let open = prefix.rfind('(')?;
@@ -1681,6 +2070,9 @@ fn signature_help(source: &str, position: Position) -> Option<SignatureHelp> {
         .map(|index| index + 1)
         .unwrap_or(0);
     let name = &prefix[name_start..name_end];
+    if source.find(&format!("fn {name}")).is_none() {
+        return signature_help_from_index(document, name, prefix, open);
+    }
     let declaration = source.find(&format!("fn {name}"))?;
     let params_start = source[declaration..].find('(')? + declaration + 1;
     let params_end = source[params_start..].find(')')? + params_start;
@@ -1729,6 +2121,108 @@ fn signature_help(source: &str, position: Position) -> Option<SignatureHelp> {
         active_signature: Some(0),
         active_parameter: Some(active_parameter),
     })
+}
+
+fn signature_help_from_index(
+    document: &Document,
+    name: &str,
+    prefix: &str,
+    open: usize,
+) -> Option<SignatureHelp> {
+    let semantic = analyze_for_completions_at(&document.text, Some(document.text.len().saturating_sub(1)))
+        .or_else(|| analyze_for_completions(&format!("{});", document.text)))
+        .or_else(|| document.last_good.clone())
+        .or_else(|| virtual_signature_candidate(name))?;
+    let candidate = semantic.candidates.get(name)?;
+    let parameters: Vec<ParameterInformation> = if candidate.parameter_names.is_empty() {
+        candidate
+            .detail
+            .as_deref()
+            .map(|detail| {
+                vec![ParameterInformation {
+                    label: lsp_types::ParameterLabel::Simple(detail.to_owned()),
+                    documentation: candidate.documentation.as_ref().map(|docs| {
+                        Documentation::MarkupContent(MarkupContent {
+                            kind: MarkupKind::Markdown,
+                            value: docs.clone(),
+                        })
+                    }),
+                }]
+            })
+            .unwrap_or_default()
+    } else {
+        candidate
+            .parameter_names
+            .iter()
+            .map(|parameter| ParameterInformation {
+                label: lsp_types::ParameterLabel::Simple(parameter.clone()),
+                documentation: None,
+            })
+            .collect()
+    };
+    let active_parameter = prefix[open + 1..]
+        .matches(',')
+        .count()
+        .min(parameters.len().saturating_sub(1)) as u32;
+    Some(SignatureHelp {
+        signatures: vec![SignatureInformation {
+            label: candidate
+                .detail
+                .clone()
+                .unwrap_or_else(|| format!("{name}(...)")),
+            documentation: candidate.documentation.as_ref().map(|docs| {
+                Documentation::MarkupContent(MarkupContent {
+                    kind: MarkupKind::Markdown,
+                    value: docs.clone(),
+                })
+            }),
+            parameters: Some(parameters),
+            active_parameter: Some(active_parameter),
+        }],
+        active_signature: Some(0),
+        active_parameter: Some(active_parameter),
+    })
+}
+
+fn virtual_signature_candidate(name: &str) -> Option<GoodAnalysis> {
+    let modules = VirtualModules::new();
+    for module in [
+        "prelude",
+        "prelude::ops",
+        "prelude::test",
+        "prelude::math",
+        "io",
+        "io::fs",
+        "string",
+        "thread",
+        "env",
+        "gc",
+        "ffi",
+        "clock",
+    ] {
+        let path = module
+            .split("::")
+            .map(str::to_owned)
+            .collect::<Vec<_>>();
+        if let Some(export) = modules.resolve_item(&path, name) {
+            let mut candidates = HashMap::new();
+            candidates.insert(
+                name.to_owned(),
+                CompletionCandidate {
+                    label: name.to_owned(),
+                    kind: virtual_completion_kind(&export),
+                    detail: export
+                        .host_registry()
+                        .map(|reg| format!("HostInvoke `{reg}`"))
+                        .or_else(|| Some(format!("{module}::{name}"))),
+                    documentation: Some(builtin_documentation(&path, name, &export)),
+                    parameter_names: Vec::new(),
+                },
+            );
+            return Some(GoodAnalysis { candidates });
+        }
+    }
+    None
 }
 
 fn find_parameter_type_for_name(expression: &Expression<'_>, name: &str) -> Option<String> {
@@ -2226,7 +2720,7 @@ fn scan_operator(source: &str, index: usize) -> Option<(Range<usize>, u32)> {
 }
 
 fn is_type_like_ident(word: &str) -> bool {
-    matches!(word, "int" | "float" | "string" | "bool" | "void" | "unit")
+    matches!(word, "int" | "float" | "string" | "bool" | "byte" | "void" | "unit")
         || word.chars().next().is_some_and(|character| character.is_uppercase())
 }
 
@@ -2589,7 +3083,11 @@ fn main() {
 }
 ";
         let help = signature_help(
-            source,
+            &Document {
+                text: source.into(),
+                version: 1,
+                last_good: None,
+            },
             Position {
                 line: 2,
                 character: 11,
@@ -2844,5 +3342,269 @@ fn main() { return f(1); }
         assert!(types.contains(&TOKEN_STRING));
         assert!(types.contains(&TOKEN_NUMBER));
         assert!(types.contains(&TOKEN_OPERATOR));
+    }
+
+    fn write_hy_project(dir: &Path, files: &[(&str, &str)]) {
+        std::fs::create_dir_all(dir).unwrap();
+        for (name, src) in files {
+            std::fs::write(dir.join(name), src).unwrap();
+        }
+    }
+
+    fn open_state(dir: &Path, open: &[(&str, Option<&str>)]) -> (ServerState, HashMap<String, Uri>) {
+        let mut state = ServerState {
+            workspace_root: Some(dir.to_path_buf()),
+            project_index: Some(ProjectIndex::with_roots(
+                dir.to_path_buf(),
+                vec![PathBuf::from(".")],
+            )),
+            ..ServerState::default()
+        };
+        let mut uris = HashMap::new();
+        for (name, overlay) in open {
+            let path = dir.join(name);
+            let text = overlay
+                .map(str::to_owned)
+                .unwrap_or_else(|| std::fs::read_to_string(&path).unwrap());
+            let uri = path_to_uri(&path).expect("uri");
+            state.documents.insert(
+                uri.clone(),
+                Document {
+                    text,
+                    version: 1,
+                    last_good: None,
+                },
+            );
+            uris.insert((*name).to_owned(), uri);
+        }
+        if let Some((name, _)) = open.first() {
+            refresh_project(&mut state, &dir.join(name));
+        }
+        (state, uris)
+    }
+
+    #[test]
+    fn goto_definition_reaches_unopened_import() {
+        let dir = std::env::temp_dir().join(format!(
+            "coil-lsp-goto-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(
+            &dir,
+            &[
+                ("lib.hy", "fn helper() -> int { return 1; }\n"),
+                (
+                    "main.hy",
+                    "use lib::helper;\nfn main() { let x = helper(); return; }\n",
+                ),
+            ],
+        );
+        let (state, uris) = open_state(&dir, &[("main.hy", None)]);
+        let main = std::fs::read_to_string(dir.join("main.hy")).unwrap();
+        let offset = main.find("helper()").expect("call");
+        let position = byte_position(&main, offset);
+        let locations = goto_definitions(&state, &uris["main.hy"], position);
+        assert_eq!(locations.len(), 1, "{locations:?}");
+        assert!(
+            locations[0].uri.to_string().contains("lib.hy"),
+            "expected unopened lib.hy, got {:?}",
+            locations[0].uri
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn overlay_diagnostics_see_unsaved_type_error() {
+        let dir = std::env::temp_dir().join(format!(
+            "coil-lsp-overlay-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        write_hy_project(
+            &dir,
+            &[
+                ("lib.hy", "fn helper() -> int { return 1; }\n"),
+                (
+                    "main.hy",
+                    "use lib::helper;\nfn main() { let x: int = helper(); return; }\n",
+                ),
+            ],
+        );
+        let overlay = "use lib::helper;\nfn main() { let x: bool = helper(); return; }\n";
+        let (state, uris) = open_state(&dir, &[("main.hy", Some(overlay))]);
+        let diagnostics = project_diagnostics(&state, &uris["main.hy"], &state.documents[&uris["main.hy"]]);
+        assert!(
+            diagnostics.iter().any(|d| d.message.contains("bool") || d.message.contains("int")),
+            "expected unsaved type error, got {diagnostics:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rename_skips_comments_and_strings() {
+        let source = "// helper leftover\nfn helper() { return; }\nfn main() { let s = \"helper\"; helper(); return; }\n";
+        let mut state = ServerState::default();
+        let uri: Uri = "file:///tmp/rename.hy".parse().unwrap();
+        state.documents.insert(
+            uri.clone(),
+            Document {
+                text: source.into(),
+                version: 1,
+                last_good: None,
+            },
+        );
+        let offset = source.rfind("helper()").expect("call");
+        let edits = rename_identifier(
+            &state,
+            &uri,
+            byte_position(source, offset),
+            "other",
+        );
+        let file_edits = edits.changes.unwrap().remove(&uri).expect("edits");
+        let replaced: Vec<_> = file_edits
+            .iter()
+            .map(|edit| {
+                let range = lsp_range_to_byte_range(source, edit.range).unwrap();
+                source[range].to_owned()
+            })
+            .collect();
+        assert!(replaced.iter().all(|word| word == "helper"));
+        assert_eq!(replaced.len(), 2, "decl + call, not comment/string: {replaced:?}");
+    }
+
+    #[test]
+    fn range_format_rewrites_only_overlapping_item() {
+        let source = "fn a(){return;}\nfn b(){return;}\n";
+        let a_end = source.find('\n').unwrap();
+        let edits = format_requested_range(source, 0..a_end).expect("edits");
+        assert_eq!(edits.len(), 1);
+        assert!(edits[0].new_text.contains("fn a"));
+        assert!(!edits[0].new_text.contains("fn b"));
+    }
+
+    #[test]
+    fn selection_range_nests_inside_function() {
+        let source = "fn main() { return 1; }\n";
+        let offset = source.find('1').unwrap();
+        let ranges = selection_ranges(source, &[byte_position(source, offset)]);
+        assert_eq!(ranges.len(), 1);
+        assert!(ranges[0].parent.is_some(), "expected nested parent spans");
+        assert!(ranges[0].range.end.character > ranges[0].range.start.character
+            || ranges[0].range.end.line >= ranges[0].range.start.line);
+    }
+
+    #[test]
+    fn clock_path_completion_and_hover() {
+        let source = "use clock::wall_nanos;\nfn main() { wall_nanos(); return; }\n";
+        let document = Document {
+            text: source.into(),
+            version: 1,
+            last_good: None,
+        };
+        let items = completions(
+            &document,
+            Position {
+                line: 0,
+                character: 11,
+            },
+        );
+        assert!(
+            items.iter().any(|item| item.label == "wall_nanos"),
+            "expected clock:: members, got {:?}",
+            items.iter().map(|i| i.label.clone()).collect::<Vec<_>>()
+        );
+        let hover = hover(
+            &document,
+            Position {
+                line: 0,
+                character: 14,
+            },
+        )
+        .expect("clock hover");
+        let HoverContents::Markup(MarkupContent { value, .. }) = hover.contents else {
+            panic!("markup");
+        };
+        assert!(
+            value.contains("HostInvoke") || value.contains("wall"),
+            "clock hover was {value}"
+        );
+        assert!(!value.contains("references/time.md"));
+    }
+
+    #[test]
+    fn enum_variant_completion_after_dot() {
+        let source = "enum Color { Red, Green }\nfn main() { let c = Color.; return; }\n";
+        let document = Document {
+            text: source.into(),
+            version: 1,
+            last_good: None,
+        };
+        let items = completions(
+            &document,
+            byte_position(source, source.find("Color.").expect("dot") + "Color.".len()),
+        );
+        let red = items
+            .iter()
+            .find(|item| item.label == "Color.Red" || item.insert_text.as_deref() == Some("Red"))
+            .expect("Color.Red");
+        assert_eq!(red.kind, Some(CompletionItemKind::ENUM_MEMBER));
+        assert_eq!(red.insert_text.as_deref(), Some("Red"));
+    }
+
+    #[test]
+    fn signature_help_virtual_import() {
+        let source = "use io::stdout;\nfn main() { stdout( }\n";
+        let help = signature_help(
+            &Document {
+                text: source.into(),
+                version: 1,
+                last_good: None,
+            },
+            Position {
+                line: 1,
+                character: 20,
+            },
+        )
+        .expect("virtual signature");
+        assert!(
+            help.signatures[0].label.contains("stdout")
+                || help.signatures[0]
+                    .documentation
+                    .as_ref()
+                    .is_some(),
+            "{help:?}"
+        );
+    }
+
+    #[test]
+    fn match_hover_walks_scrutinee() {
+        let source = "\
+fn main() {
+    let value = Option.Some(1);
+    match value {
+        Option.Some(n) => { return n; }
+        Option.None => { return 0; }
+    }
+}
+";
+        let document = Document {
+            text: source.into(),
+            version: 1,
+            last_good: None,
+        };
+        let offset = source.find("match value").expect("scrutinee") + "match ".len();
+        let hover = hover(&document, byte_position(source, offset)).expect("hover");
+        let HoverContents::Markup(MarkupContent { value, .. }) = hover.contents else {
+            panic!("markup");
+        };
+        assert!(value.contains("value"), "match hover was {value}");
+    }
+
+    #[test]
+    fn uri_percent_decodes_spaces() {
+        let uri: Uri = "file:///tmp/my%20pkg/src/lib.hy".parse().unwrap();
+        let path = uri_path(&uri).expect("path");
+        assert!(path.ends_with("my pkg/src/lib.hy"), "{path:?}");
     }
 }
