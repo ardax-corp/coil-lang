@@ -7,21 +7,38 @@
 There is no in-repo stdlib hot path (collections / HTTP live in other repos).
 This table is `examples/perf/` plus a few numeric demos.
 
-## Gates (after W3)
+## Gates (after W4)
 
 | # | Refuse | Typical IL | Next cut |
 |---|--------|------------|----------|
 | 1 | Straight-line below cost gate | `i + j * 2` (2 work ops) | stay fuse-IL |
 | 2 | Need float or i64 arith (or `i32`) | float compare-only | stay fuse-IL |
-| 3 | Non-numeric IL | `CALL` / `HostInvoke` / heap index / class field / match / string | W4 (limited inward edges) |
+| 3 | Non-numeric IL | user `CALL` / non-allowlisted HostInvoke / heap index / class field / match / string | later (heap / match) |
 | 4 | Multi-word `RETURN` | two-slot Option/Result | P3 LIR (already on) |
 | 5 | Residual `Byte` / `Pow` / `AND`/`OR` | `operators_loop` | stay fuse-IL |
 
-**W3 cost gate (no back-edge):** infer still requires numeric IL (no `CALL` /
-heap index / class / match / string / multi-word `RETURN` / residual `Byte` /
-`Pow` / `AND`/`OR`) and float `+`/`-`/`*`/`/` or i64 `+`/`-`/`*`/`/`/`%` (or
-int/`float` `INC`/`DEC`). Compare-only still refuses. A body **without** a
-back-edge also needs `numeric_work_ops >= STRAIGHT_LINE_MIN_WORK_OPS` (**8**).
+**W4 allowlisted HostInvoke (inside dense):** infer accepts only these
+HostInvoke ids (layout must be boxed `0`; native id must be an inline
+`CONST`). User `CALL` still refuses.
+
+| Ids | Names |
+|-----|--------|
+| **87–91** | `packed_dot`, `packed_matmul`, `packed_matrix_zip`, `packed_matrix_neg`, `packed_vec_arith` |
+| **102–110** | `math_sin` … `math_pow` (frozen prelude math) |
+| **125–135** | `math_atan` … `math_tanh` (M1 prelude math) |
+| **136** | `simd_axpy_reduce` (`coil-simd`; also P12 whole-body pack) |
+
+At those edges, dense emit **boxes** typed slots onto the Value stack,
+`HostInvoke`s, **unboxes** the result into a typed slot, and continues
+dense. Packed LA args stay `i64` Value words (heap pointers); math / axpy
+are scalar `f64` (axpy `n` is `i64`). No open-ended user methods.
+
+**W3 cost gate (no back-edge):** infer still requires numeric IL (no user
+`CALL` / non-allowlisted HostInvoke / heap index / class / match / string /
+multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`) and float
+`+`/`-`/`*`/`/` or i64 `+`/`-`/`*`/`/`/`%` (or int/`float` `INC`/`DEC`).
+Compare-only still refuses. A body **without** a back-edge also needs
+`numeric_work_ops >= STRAIGHT_LINE_MIN_WORK_OPS` (**8**).
 
 Work ops are `Bin` / `BinSlotImm` / `BinSlotSlot` plus residual
 `INC`/`DEC`/`NEG`/`NEGF`/`CastIntToFloat`. Load / Store / Const / control
@@ -56,11 +73,12 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `pack` | `mir_simd_axpy.hy` | HostInvoke 136 | P12 (eligible, then pack) |
 | `hot` | `mir_dense_i64.hy` | dense | i64 +/− counted — **W2** |
 | `hot` | `mir_dense_straight.hy` | dense | no back-edge, ≥8 work ops — **W3** |
+| `hot` | `mir_dense_host.hy` | dense + HostInvoke | allowlisted `math_sin` in loop — **W4** |
 | `main` | `numeric.hy` | dense | i64 add — **W2** (side effect) |
 | `iv_mul` | `iv_mul_sr.hy` | dense | i64 mul — **W2** (side effect) |
 | `nested` | `licm_nested_chains.hy` | dense | i64 add — **W2** (side effect) |
 | `eval_a` | `nbody.hy` | dense | no back-edge, ≥8 work ops — **W3** |
-| `times_a` / `times_at` | `nbody.hy` | fuse-IL | `CALL` + heap/index — W4 |
+| `times_a` / `times_at` | `nbody.hy` | fuse-IL | user `CALL` + heap/index |
 | `sum` | `indexed_sum.hy` | fuse-IL | heap/index |
 | `fill` / `scan` | `vec_scan.hy` | fuse-IL | heap/index |
 | `main` | `for_in_sum.hy` | fuse-IL | heap + `for` iterator |
@@ -75,8 +93,6 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 Stack-IL `cse_*` / `dest_prop_field_alias` stay fuse-IL (heap / field). W2
 does not rewrite those sources; `numeric` / `iv_mul_sr` / `licm_nested_chains`
 now meet the counted-i64 gate and emit dense. The W3 prove bench is
-`mir_dense_straight.hy`.
-
-## W4 (not this PR)
-
-- **W4** — inward `CALL` to known numeric leafs (`times_a` → `eval_a`). Later.
+`mir_dense_straight.hy`. The W4 prove bench is `mir_dense_host.hy`
+(`sin` inside an otherwise dense loop). User `CALL` (`times_a` → `eval_a`,
+`tak` / `fib`, `helper` in the negative test) still refuses.

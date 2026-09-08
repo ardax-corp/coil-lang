@@ -19,7 +19,7 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit |
+| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted HostInvoke box/unbox) |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
@@ -95,6 +95,24 @@ plus residual `INC`/`DEC`/`NEG`/`NEGF`/`CastIntToFloat`. Dense `Seek` + Value
 ABI is a per-CALL tax that loops amortize; tiny helpers stay fuse-IL.
 Hit bench: `examples/perf/mir_dense_straight.hy`.
 
+## W4 — allowlisted HostInvoke inside dense (COI-290)
+
+Specialize no longer refuses a numeric body solely because it contains
+HostInvoke. The set is **closed** (see
+[specialize-refuse.md](specialize-refuse.md)):
+
+- packed LA **87–91** (`packed_dot` … `packed_vec_arith`)
+- frozen math **102–110** (`math_sin` … `math_pow`)
+- M1 math **125–135** (`math_atan` … `math_tanh`)
+- `simd_axpy_reduce` **136** (P12 may still replace a *whole* saxpy body)
+
+User `CALL`, clocks, IO, GC, and other natives still refuse. Dense emit
+keeps `DenseBin` for the numeric region and at each allowlisted edge:
+`LOAD` args (Value words) → `CONST` id → `HostInvoke` → `STORE` dest, then
+more dense ops. P12 whole-body saxpy pack still runs first when the
+pattern matches (no inner host). Hit bench:
+`examples/perf/mir_dense_host.hy`.
+
 ## P7 — MIR InstCombine (COI-281)
 
 After LICM + a second CSE, **typed peeps** run on dense SSA (`f64` / `i32` /
@@ -156,8 +174,8 @@ InstCombine’s typed peeps add **IEEE-safe** float rewrites only. There is
   of those. `x / x` also needs a nonzero const. Params / mul results stay
   unfolded (`inf - inf` / `0 / 0` are NaN).
 - **`x * -1.0` → `fneg`.** Bit-identical for finite / zero / inf.
-- **No sqrt / rsqrt.** Numeric MIR has no sqrt op; HostInvoke is out of
-  the dense subset.
+- **No sqrt / rsqrt opcode.** Numeric MIR has no sqrt op. W4 may call
+  allowlisted `math_sqrt` (HostInvoke **105**) at a box/unbox edge.
 
 FMA / recip do **not** fire on mandelbrot (`2.0 * zr * zi + ci` stays
 two ops after `*2` → `+`; `2/size` is not a power-of-two after the
