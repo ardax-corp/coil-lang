@@ -237,6 +237,40 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    pub fn ins_host_invoke(
+        &mut self,
+        native_id: u16,
+        args: Vec<ValueId>,
+    ) -> Result<ValueId, MirError> {
+        let spec = super::host_allow::host_spec(native_id)
+            .ok_or_else(|| MirError::msg(format!("host {native_id} is not dense-allowlisted")))?;
+        if spec.args.len() != args.len() {
+            return Err(MirError::msg(format!(
+                "host {} arity {} vs {}",
+                spec.name,
+                spec.args.len(),
+                args.len()
+            )));
+        }
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, (&a, &ty)) in args.iter().zip(spec.args).enumerate() {
+            if self.resolve_ty(a) != ty {
+                return Err(MirError::msg(format!(
+                    "host {} arg {i} is {} vs {ty}",
+                    spec.name,
+                    self.resolve_ty(a)
+                )));
+            }
+        }
+        let dest = self.alloc(spec.ret);
+        self.push(MirInst::HostInvoke {
+            dest,
+            native_id,
+            args,
+        })?;
+        Ok(dest)
+    }
+
     pub fn jump(&mut self, dest: BlockId) -> Result<(), MirError> {
         let src = self.cur()?;
         self.add_edge(src, dest);

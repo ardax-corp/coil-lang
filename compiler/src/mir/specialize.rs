@@ -11,7 +11,8 @@ use super::lower::{LowerHints, try_lower_numeric};
 /// If `ops` is a specialized numeric body, return dense IL (Value ABI at edges).
 ///
 /// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
-/// then saxpy-reduce HostInvoke (P12) or dense emit.
+/// then saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted
+/// HostInvoke edges box → call → unbox).
 pub fn try_specialize_body(
     ops: &[IlOp],
     name: &str,
@@ -21,7 +22,8 @@ pub fn try_specialize_body(
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
-    // Heap / CALL / multi-word RETURN stay refuse (see specialize-refuse).
+    // Heap / user CALL / multi-word RETURN stay refuse (see specialize-refuse).
+    // Allowlisted HostInvoke (math / packed LA / simd_axpy_reduce) is W4.
     let inferred = infer_numeric(ops, pool.len(), entry_sp).ok()?;
     if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
         return None;

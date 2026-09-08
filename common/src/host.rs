@@ -703,6 +703,17 @@ pub const HOST_NATIVES: &[HostNative] = &[
     },
 ];
 
+/// First packed-LA HostInvoke (`packed_dot`).
+pub const PACKED_DOT_ID: u16 = 87;
+pub const PACKED_MATMUL_ID: u16 = 88;
+pub const PACKED_MATRIX_ZIP_ID: u16 = 89;
+pub const PACKED_MATRIX_NEG_ID: u16 = 90;
+/// Last packed-LA HostInvoke (`packed_vec_arith`).
+pub const PACKED_VEC_ARITH_ID: u16 = 91;
+/// Frozen HostInvoke id for `math_sin` (first frozen prelude math).
+pub const MATH_SIN_ID: u16 = 102;
+/// Frozen HostInvoke id for `math_pow` (last frozen prelude math).
+pub const MATH_POW_ID: u16 = 110;
 /// Frozen HostInvoke id for `stream_attach`.
 pub const STREAM_ATTACH_ID: u16 = 119;
 /// Frozen HostInvoke id for `stream_park`.

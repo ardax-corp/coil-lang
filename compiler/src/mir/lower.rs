@@ -1,7 +1,7 @@
 //! Lower pre-fuse stack IL into numeric SSA.
 //!
 //! Fuse-select remains the production bytecode lowerer. This path is an
-//! optional sidecar: classes, heap, calls, and residual `Byte` (except a
+//! optional sidecar: classes, heap, user calls, and residual `Byte` (except a
 //! small numeric set) refuse so the existing `Value` interpreter is unchanged.
 
 use std::collections::{BTreeSet, HashMap};
@@ -12,7 +12,9 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
-use super::inst::{BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, ValueId};
+use super::inst::{
+    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, ValueId,
+};
 use super::ty::MirTy;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,6 +382,25 @@ fn lower_op(
         }
         IlOp::Byte { byte, .. } => lower_byte(b, tos, byte, hints),
         IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. } => Ok(()),
+        IlOp::HostInvoke { arity, layout, .. } => {
+            if *layout != 0 {
+                return Err(LowerError::Refused("HostInvoke layout".into()));
+            }
+            let n = *arity as usize;
+            if tos.len() < n + 1 {
+                return Err(LowerError::Refused("HostInvoke stack".into()));
+            }
+            let mut args = Vec::with_capacity(n);
+            for _ in 0..n {
+                args.push(tos.pop().expect("arity checked"));
+            }
+            args.reverse();
+            let fn_v = tos.pop().expect("fn id");
+            let id = const_native_id(b, fn_v)
+                .ok_or_else(|| LowerError::Refused("HostInvoke".into()))?;
+            tos.push(b.ins_host_invoke(id, args)?);
+            Ok(())
+        }
         IlOp::GetField { .. }
         | IlOp::SetField { .. }
         | IlOp::LoadField { .. }
@@ -395,7 +416,6 @@ fn lower_op(
         | IlOp::IndexPinUnchecked { .. }
         | IlOp::StoreIndexPin { .. }
         | IlOp::StoreIndexPinUnchecked { .. }
-        | IlOp::HostInvoke { .. }
         | IlOp::Entry { .. }
         | IlOp::String { .. }
         | IlOp::Print { .. }
@@ -479,6 +499,23 @@ fn bin_stack(
         .ok_or_else(|| LowerError::Refused("bin stack".into()))?;
     tos.push(apply_bin(b, inst, lhs, rhs)?);
     Ok(())
+}
+
+fn const_native_id(b: &MirBuilder, v: ValueId) -> Option<u16> {
+    for block in &b.func().blocks {
+        for inst in &block.insts {
+            if let MirInst::Const { dest, c } = inst {
+                if *dest == v {
+                    return match *c {
+                        MirConst::I64(n) => u16::try_from(n).ok(),
+                        MirConst::I32(n) => u16::try_from(n).ok(),
+                        _ => None,
+                    };
+                }
+            }
+        }
+    }
+    None
 }
 
 fn bin_operand_ty(inst: Instruction, hints: &LowerHints) -> MirTy {

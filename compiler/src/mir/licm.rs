@@ -218,6 +218,8 @@ fn hoistable(inst: &MirInst) -> bool {
         | MirInst::Cmp { .. }
         | MirInst::Unary { .. }
         | MirInst::Cast { .. } => true,
+        MirInst::HostInvoke { native_id, .. } => super::host_allow::host_spec(*native_id)
+            .is_some_and(|s| s.hoistable),
     }
 }
 

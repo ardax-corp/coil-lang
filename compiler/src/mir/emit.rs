@@ -329,6 +329,32 @@ fn emit_inst(
             ));
         }
         MirInst::Phi { .. } => {}
+        MirInst::HostInvoke {
+            dest,
+            native_id,
+            args,
+        } => {
+            // Box typed slots → Value stack, HostInvoke, unbox into dest.
+            out.push(IlOp::Const {
+                imm: i32::from(*native_id),
+                loc,
+            });
+            for a in args {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[a.index()]),
+                    loc,
+                });
+            }
+            out.push(IlOp::HostInvoke {
+                arity: args.len() as u32,
+                layout: 0,
+                loc,
+            });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
     }
     Ok(())
 }

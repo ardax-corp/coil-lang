@@ -2,9 +2,11 @@
 //!
 //! Dense eligibility: float `+/−/×/÷`, i64 `+/−/×/÷/%` (or int `INC`/`DEC`),
 //! or unused `has_i32`, plus either a back-edge **or** a straight-line body
-//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer already refuses CALL /
-//! HostInvoke / heap index / class field / match / string / multi-word
-//! `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. Compare-only stays fuse-IL.
+//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer refuses user `CALL` /
+//! non-allowlisted HostInvoke / heap index / class field / match / string /
+//! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. W4 accepts
+//! allowlisted math / packed LA / `simd_axpy_reduce` HostInvokes. Compare-only
+//! stays fuse-IL.
 
 use std::collections::HashMap;
 
@@ -12,6 +14,7 @@ use common::Instruction;
 
 use crate::il::{IlOp, Label};
 
+use super::host_allow::host_spec;
 use super::lower::LowerError;
 use super::ty::MirTy;
 
@@ -41,6 +44,8 @@ enum Origin {
 struct Cell {
     origin: Origin,
     ty: Option<MirTy>,
+    /// Inline `CONST` bits — used to read HostInvoke native ids.
+    imm: Option<i64>,
 }
 
 /// Result of a successful numeric type walk.
@@ -97,6 +102,7 @@ fn infer_walk(
     let mut has_i32 = false;
     let mut has_float_arith = false;
     let mut has_i64_arith = false;
+    let mut slot_imm: HashMap<u32, i64> = HashMap::new();
 
     for op in ops {
         match op {
@@ -105,24 +111,32 @@ fn infer_walk(
                 stack.push(Cell {
                     origin: Origin::Slot(*slot),
                     ty: slot_ty.get(slot).copied(),
+                    imm: slot_imm.get(slot).copied(),
                 });
             }
             IlOp::StorePop { slot, .. } => {
                 let c = stack
                     .pop()
                     .ok_or_else(|| LowerError::Refused("store stack".into()))?;
+                if let Some(imm) = c.imm {
+                    slot_imm.insert(*slot, imm);
+                } else {
+                    slot_imm.remove(slot);
+                }
                 if let Some(ty) = c.ty {
                     set_slot(&mut slot_ty, *slot, ty)?;
                     paint(&mut slot_ty, &mut pool_ty, c, ty)?;
                 }
             }
-            IlOp::Const { .. } => stack.push(Cell {
+            IlOp::Const { imm, .. } => stack.push(Cell {
                 origin: Origin::Tmp,
                 ty: Some(MirTy::I64),
+                imm: Some(i64::from(*imm)),
             }),
             IlOp::ConstPool { idx, .. } => stack.push(Cell {
                 origin: Origin::Pool(*idx),
                 ty: pool_ty.get(*idx as usize).copied().flatten(),
+                imm: None,
             }),
             IlOp::Dup { .. } => {
                 let c = *stack
@@ -142,6 +156,7 @@ fn infer_walk(
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(MirTy::Bool),
+                    imm: None,
                 });
             }
             IlOp::Bin { op: inst, .. } => {
@@ -171,6 +186,7 @@ fn infer_walk(
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
+                    imm: None,
                 });
             }
             IlOp::BinSlotSlot { op, a, b, .. } => {
@@ -190,6 +206,7 @@ fn infer_walk(
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
+                    imm: None,
                 });
             }
             IlOp::Byte { byte, .. } => match *byte.bytecode() {
@@ -201,6 +218,7 @@ fn infer_walk(
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::F64),
+                        imm: None,
                     });
                 }
                 Instruction::NEGF => {
@@ -211,6 +229,7 @@ fn infer_walk(
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::F64),
+                        imm: None,
                     });
                 }
                 Instruction::NEG => {
@@ -222,6 +241,7 @@ fn infer_walk(
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(ty),
+                        imm: None,
                     });
                 }
                 Instruction::NOT => {
@@ -231,6 +251,7 @@ fn infer_walk(
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::Bool),
+                        imm: None,
                     });
                 }
                 Instruction::INC | Instruction::DEC => {
@@ -255,6 +276,9 @@ fn infer_walk(
             IlOp::Return { ret_words, .. } if *ret_words != 1 => {
                 return Err(LowerError::Refused("multi-word return".into()));
             }
+            IlOp::HostInvoke { arity, layout, .. } => {
+                apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
+            }
             _ => {
                 return Err(LowerError::Refused(format!(
                     "non-numeric IL ({})",
@@ -271,14 +295,17 @@ fn infer_walk(
             IlOp::Load { slot, .. } => stack.push(Cell {
                 origin: Origin::Slot(*slot),
                 ty: slot_ty.get(slot).copied(),
+                imm: None,
             }),
             IlOp::Const { .. } => stack.push(Cell {
                 origin: Origin::Tmp,
                 ty: Some(MirTy::I64),
+                imm: None,
             }),
             IlOp::ConstPool { idx, .. } => stack.push(Cell {
                 origin: Origin::Pool(*idx),
                 ty: pool_ty.get(*idx as usize).copied().flatten(),
+                imm: None,
             }),
             IlOp::Dup { .. } => {
                 if let Some(c) = stack.last().copied() {
@@ -292,11 +319,13 @@ fn infer_walk(
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: None,
+                        imm: None,
                     });
                 } else if matches!(op, IlOp::LogNot { .. }) {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::Bool),
+                        imm: None,
                     });
                 }
             }
@@ -311,6 +340,17 @@ fn infer_walk(
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::HostInvoke { arity, .. } => {
+                for _ in 0..(*arity as usize + 1) {
+                    let _ = stack.pop();
+                }
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
                 });
             }
             IlOp::Byte { byte, .. }
@@ -326,6 +366,7 @@ fn infer_walk(
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: None,
+                    imm: None,
                 });
             }
             _ => {}
@@ -501,6 +542,51 @@ fn apply_bin(
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_host(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    arity: u32,
+    layout: u8,
+) -> Result<(), LowerError> {
+    if layout != 0 {
+        return Err(LowerError::Refused("HostInvoke".into()));
+    }
+    let n = arity as usize;
+    if stack.len() < n + 1 {
+        return Err(LowerError::Refused("HostInvoke stack".into()));
+    }
+    let fn_cell = stack[stack.len() - n - 1];
+    let Some(id) = fn_cell.imm.and_then(|v| u16::try_from(v).ok()) else {
+        return Err(LowerError::Refused("HostInvoke".into()));
+    };
+    let Some(spec) = host_spec(id) else {
+        return Err(LowerError::Refused("HostInvoke".into()));
+    };
+    if spec.args.len() != n {
+        return Err(LowerError::Refused(format!(
+            "HostInvoke {} arity",
+            spec.name
+        )));
+    }
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        args.push(stack.pop().expect("arity checked"));
+    }
+    args.reverse();
+    let _fn = stack.pop().expect("fn id checked");
+    for (cell, ty) in args.iter().zip(spec.args.iter()) {
+        paint(slot_ty, pool_ty, *cell, *ty)?;
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(spec.ret),
+        imm: None,
     });
     Ok(())
 }

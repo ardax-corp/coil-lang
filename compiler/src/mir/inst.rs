@@ -256,6 +256,12 @@ pub enum MirInst {
         ty: MirTy,
         args: Vec<(BlockId, ValueId)>,
     },
+    /// Allowlisted HostInvoke (W4). Args are typed SSA; emit boxes at the edge.
+    HostInvoke {
+        dest: ValueId,
+        native_id: u16,
+        args: Vec<ValueId>,
+    },
 }
 
 impl MirInst {
@@ -266,7 +272,8 @@ impl MirInst {
             | Self::Cmp { dest, .. }
             | Self::Unary { dest, .. }
             | Self::Cast { dest, .. }
-            | Self::Phi { dest, .. } => dest,
+            | Self::Phi { dest, .. }
+            | Self::HostInvoke { dest, .. } => dest,
         }
     }
 
@@ -280,6 +287,7 @@ impl MirInst {
             Self::Bin { lhs, rhs, .. } | Self::Cmp { lhs, rhs, .. } => vec![*lhs, *rhs],
             Self::Unary { src, .. } | Self::Cast { src, .. } => vec![*src],
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
+            Self::HostInvoke { args, .. } => args.clone(),
         }
     }
 
@@ -293,6 +301,11 @@ impl MirInst {
             Self::Unary { src, .. } | Self::Cast { src, .. } => *src = map(*src),
             Self::Phi { args, .. } => {
                 for (_, v) in args.iter_mut() {
+                    *v = map(*v);
+                }
+            }
+            Self::HostInvoke { args, .. } => {
+                for v in args.iter_mut() {
                     *v = map(*v);
                 }
             }

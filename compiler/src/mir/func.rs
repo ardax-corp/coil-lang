@@ -245,6 +245,26 @@ impl MirFunc {
                     return Err(format!("{dest} illegal cast {from} -> {to}"));
                 }
             }
+            MirInst::HostInvoke {
+                dest,
+                native_id,
+                args,
+            } => {
+                let Some(spec) = super::host_allow::host_spec(*native_id) else {
+                    return Err(format!("{dest} host {native_id} not allowlisted"));
+                };
+                if spec.args.len() != args.len() {
+                    return Err(format!("{dest} host arity"));
+                }
+                for (i, (a, ty)) in args.iter().zip(spec.args.iter()).enumerate() {
+                    if self.ty(*a) != *ty {
+                        return Err(format!("{dest} host arg {i} type"));
+                    }
+                }
+                if self.ty(*dest) != spec.ret {
+                    return Err(format!("{dest} host dest type"));
+                }
+            }
             MirInst::Phi { dest, ty, args } => {
                 if self.ty(*dest) != *ty {
                     return Err(format!("{dest} phi type"));

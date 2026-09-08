@@ -7,13 +7,15 @@
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). CALL/RETURN
-//! keep the shipped Value / two-slot ABI. Classes / heap stay on [`crate::il`].
+//! keep the shipped Value / two-slot ABI. Allowlisted HostInvoke (W4) boxes
+//! at the call edge. Classes / heap stay on [`crate::il`].
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod builder;
 mod cse;
 mod destprop;
 mod emit;
+mod host_allow;
 mod emit_lir;
 mod func;
 mod infer;
@@ -783,6 +785,72 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_specializes_allowlisted_math_host_inside_dense() {
+        let src = r#"
+fn hot(float a, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = i as float;
+        s = s + sin(xf) * a;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(2.0, 4);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile W4 math host");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "allowlisted math HostInvoke must stay on dense; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::HostInvoke),
+            "W4 edge must emit HostInvoke inside the dense body"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_refuses_user_call_inside_numeric_loop() {
+        let src = r#"
+fn helper(float x, int k) -> float {
+    if k <= 0 {
+        return x * 2.0;
+    }
+    return helper(x, k - 1);
+}
+fn hot(float a, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        s = s + helper(a, i) + a;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(1.0, 8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile user CALL refuse");
+        assert!(
+            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "user CALL must refuse dense specialize"
+        );
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "negative W4 case keeps a direct CALL"
+        );
     }
 
     #[test]

@@ -112,6 +112,24 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             };
             write!(f, "{dest} = {name} {src}")
         }
+        MirInst::HostInvoke {
+            dest,
+            native_id,
+            args,
+        } => {
+            let name = super::host_allow::host_spec(*native_id)
+                .map(|s| s.name)
+                .unwrap_or("unknown");
+            write!(f, "{dest} = host.{name}")?;
+            for (i, a) in args.iter().enumerate() {
+                if i == 0 {
+                    write!(f, " {a}")?;
+                } else {
+                    write!(f, ", {a}")?;
+                }
+            }
+            Ok(())
+        }
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -365,6 +383,26 @@ impl<'a> Parser<'a> {
             }
             ensure_ty(types, dest, ty);
             return Ok(MirInst::Phi { dest, ty, args });
+        }
+        if let Some(name) = op.strip_prefix("host.") {
+            let spec = super::host_allow::host_spec_by_name(name)
+                .ok_or_else(|| ParseError(format!("unknown host {name}")))?;
+            let mut args = Vec::new();
+            if spec.args.is_empty() {
+                // no operands
+            } else {
+                args.push(self.value()?);
+                for _ in 1..spec.args.len() {
+                    self.expect(',')?;
+                    args.push(self.value()?);
+                }
+            }
+            ensure_ty(types, dest, spec.ret);
+            return Ok(MirInst::HostInvoke {
+                dest,
+                native_id: spec.id,
+                args,
+            });
         }
         Err(ParseError(format!("unknown op {op}")))
     }

@@ -407,6 +407,11 @@ fn emit_stored(
             });
         }
         MirInst::Phi { .. } => {}
+        MirInst::HostInvoke { .. } => {
+            return Err(LowerError::Refused(
+                "MIR→LIR leafs do not emit HostInvoke (dense W4)".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -501,6 +506,9 @@ fn emit_stack(
             });
             Ok(())
         }
+        MirInst::HostInvoke { .. } => Err(LowerError::Refused(
+            "MIR→LIR leafs do not emit HostInvoke (dense W4)".into(),
+        )),
     }
 }
 
