@@ -317,19 +317,16 @@ impl IlModule {
 }
 
 /// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
-/// the body (naive slot spill). Labels are free.
+/// the body (naive slot spill). Labels are free. `Seek` is frame setup
+/// (runtime-neutral vs fuse-IL overlap). `StorePop` counts as one emit.
 fn lir_emit_cost(ops: &[IlOp]) -> usize {
     ops.iter()
         .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
         .map(|op| match op {
-            IlOp::StorePop { .. } => 2,
             IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    common::Instruction::Seek
-                ) =>
+                if matches!(*byte.bytecode(), common::Instruction::Seek) =>
             {
-                2
+                0
             }
             _ => 1,
         })
