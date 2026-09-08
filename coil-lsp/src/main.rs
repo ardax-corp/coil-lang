@@ -2368,6 +2368,7 @@ fn is_ident(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || byte == b'_'
 }
 
+#[cfg(test)]
 fn occurrences(source: &str, word: &str) -> Vec<Range<usize>> {
     source
         .match_indices(word)
