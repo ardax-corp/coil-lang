@@ -91,8 +91,8 @@ Dense refuse rows that stay current: [specialize-refuse.md](specialize-refuse.md
    a body the island claims to touch, or a flagship miss outside ±5% when
    archives differ.
 
-I0 is docs-only. I1 must still publish the embed A/B table vs parent
-`30cf992f` (COI-291 / #339).
+I0 is docs-only (on main as #340 / `347ec5a`). I1 must still publish the
+embed A/B table vs that parent (not the earlier COI-291 tip `30cf992f`).
 
 ## Non-goals
 
