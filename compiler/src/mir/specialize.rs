@@ -78,7 +78,19 @@ pub fn try_lower_abi_body(
     entry_sp: u32,
     pool: &mut Vec<u64>,
 ) -> Option<Vec<IlOp>> {
-    if !abi_leaf(ops) {
+    try_lower_abi_body_with(ops, name, entry_sp, pool, &[])
+}
+
+/// Like [`try_lower_abi_body`], with unboxed class field ranges from
+/// codegen (`local_escape` → consecutive slots).
+pub fn try_lower_abi_body_with(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &mut Vec<u64>,
+    unboxed_fields: &[(u32, u32)],
+) -> Option<Vec<IlOp>> {
+    if !abi_leaf(ops, unboxed_fields) {
         return None;
     }
     let inferred = infer_lir(ops, pool.len(), entry_sp).ok()?;
@@ -88,6 +100,8 @@ pub fn try_lower_abi_body(
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
     hints.allow_match = true;
+    hints.unboxed_fields = unboxed_fields.to_vec();
+    hints.allow_fields = !unboxed_fields.is_empty();
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     crate::mir::cse(&mut func);
     let entry = ops.iter().find_map(|op| match op {
@@ -97,10 +111,11 @@ pub fn try_lower_abi_body(
     emit_lir(&func, entry, pool).ok()
 }
 
-fn abi_leaf(ops: &[IlOp]) -> bool {
+fn abi_leaf(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
     let mut ret2 = false;
     let mut match_shaped = false;
     let mut jim = false;
+    let mut field_use = false;
     for op in ops {
         match op {
             IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
@@ -134,10 +149,21 @@ fn abi_leaf(ops: &[IlOp]) -> bool {
                 }
                 match_shaped = true;
             }
+            IlOp::Load { slot, .. } | IlOp::StorePop { slot, .. }
+                if slot_in_unboxed_fields(*slot, unboxed_fields) =>
+            {
+                field_use = true;
+            }
             _ => {}
         }
     }
-    ret2 || jim || match_shaped || adjacent_match_probe(ops)
+    ret2 || jim || match_shaped || field_use || adjacent_match_probe(ops)
+}
+
+fn slot_in_unboxed_fields(slot: u32, fields: &[(u32, u32)]) -> bool {
+    fields
+        .iter()
+        .any(|&(base, n)| slot >= base && slot < base + n)
 }
 
 /// Niche `DUP; LogNot; JMPx` or two-slot `DUP; CONST 0|1; EQ; JMPx`.

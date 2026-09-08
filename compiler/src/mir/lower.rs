@@ -56,6 +56,10 @@ pub struct LowerHints {
     pub calls: DenseCallMap,
     /// I2: `JumpIfMatch` / `Unpack` / `Seek` and stack-carrying CFG edges.
     pub allow_match: bool,
+    /// I3: unboxed class field ranges `(base, n)` from local_escape codegen.
+    pub unboxed_fields: Vec<(u32, u32)>,
+    /// I3: Load/Store of those slots become FieldLoad/FieldStore.
+    pub allow_fields: bool,
 }
 
 impl Default for LowerHints {
@@ -70,6 +74,8 @@ impl Default for LowerHints {
             param_count: 0,
             calls: DenseCallMap::new(),
             allow_match: false,
+            unboxed_fields: Vec::new(),
+            allow_fields: false,
         }
     }
 }
@@ -107,6 +113,19 @@ impl LowerHints {
                 return Err(LowerError::Refused(format!(
                     "const pool {idx} has type {other}"
                 )));
+            }
+        })
+    }
+
+    fn field_of(&self, slot: u32) -> Option<(u32, u32)> {
+        if !self.allow_fields {
+            return None;
+        }
+        self.unboxed_fields.iter().find_map(|&(base, n)| {
+            if slot >= base && slot < base + n {
+                Some((base, slot - base))
+            } else {
+                None
             }
         })
     }
@@ -420,14 +439,22 @@ fn lower_op(
         IlOp::Load { slot, .. } => {
             let ty = hints.slot(*slot);
             let v = b.use_local(LocalId(*slot), ty)?;
-            tos.push(v);
+            if let Some((base, index)) = hints.field_of(*slot) {
+                tos.push(b.ins_field_load(v, base, index)?);
+            } else {
+                tos.push(v);
+            }
             Ok(())
         }
         IlOp::StorePop { slot, .. } => {
             let v = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("store stack".into()))?;
-            b.def_local(LocalId(*slot), v)?;
+            if let Some((base, index)) = hints.field_of(*slot) {
+                let _ = b.ins_field_store(v, base, index)?;
+            } else {
+                b.def_local(LocalId(*slot), v)?;
+            }
             Ok(())
         }
         IlOp::Const { imm, .. } => {

@@ -4082,6 +4082,20 @@ impl Compiler {
         self.context.unboxed_class_locals.get(name).copied()
     }
 
+    /// Snapshot local_escape unbox ranges onto the last recorded `IlFunc` (I3).
+    fn record_unboxed_class_fields(&mut self) {
+        if self.context.unboxed_class_locals.is_empty() {
+            return;
+        }
+        let fields: Vec<(u32, u32)> = self
+            .context
+            .unboxed_class_locals
+            .values()
+            .map(|(base, n)| (*base, *n as u32))
+            .collect();
+        self.bytecode.set_last_func_unboxed_fields(fields);
+    }
+
     fn alloc_unboxed_enum_slots(&mut self, name: &str, enum_name: &str) -> (u32, u32) {
         let payload = self.alloc_binding_slot(name);
         let tag_name = format!("__unbox_tag_{name}");
@@ -6943,6 +6957,7 @@ impl Compiler {
         let entry = self.fn_entry_labels.get(&spec_name).copied();
         self.bytecode
             .record_func_with_sp(spec_name, entry, body_start, body_end, entry_sp);
+        self.record_unboxed_class_fields();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_fn_vars;
     }
@@ -11777,6 +11792,7 @@ impl Compiler {
         let entry = self.fn_entry_labels.get("main").copied();
         self.bytecode
             .record_func_with_sp("main".to_string(), entry, body_start, body_end, 0);
+        self.record_unboxed_class_fields();
         self.context.variables = prev_vars;
     }
 
@@ -12237,6 +12253,7 @@ impl Compiler {
                 let entry = self.fn_entry_labels.get(&table_key).copied();
                 self.bytecode
                     .record_func_with_sp(table_key.clone(), entry, body_start, body_end, entry_sp);
+                self.record_unboxed_class_fields();
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
                 self.context.unboxed_enum_locals = prev_unboxed_enum;
@@ -14250,6 +14267,7 @@ impl Compiler {
                     body_end,
                     0,
                 );
+                self.record_unboxed_class_fields();
 
                 self.compiling_result_mode = prev_result_mode;
                 self.compiling_result_ok_is_result = prev_result_ok_is_result;
