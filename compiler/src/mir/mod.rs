@@ -7,7 +7,8 @@
 //! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294), and
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
 //! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
-//! I5 alloc / GC-barrier placeholders (COI-300).
+//! I5 alloc / GC-barrier placeholders (COI-300), and
+//! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
@@ -16,12 +17,15 @@
 //! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
 //! `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies may lower
 //! to `Alloc` + `GcBarrier` SSA; dense / LIR emit still refuse (I5).
+//! Impure HostInvoke / CALL are SSA barriers (I6); W4 dense allowlist stays
+//! closed.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
 mod builder;
 mod cse;
 mod destprop;
+mod effects;
 mod emit;
 mod gc;
 mod host_allow;
@@ -1783,6 +1787,89 @@ fn main() {
                 .iter()
                 .all(|b| *b.bytecode() != Instruction::DenseBin),
             "I5 must not dense-specialize an allocating loop"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn i6_clock_edge_visible_and_dense_refuses() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Const {
+                imm: i32::from(common::CLOCK_MONO_NANOS_ID),
+                loc,
+            },
+            IlOp::HostInvoke {
+                arity: 0,
+                layout: 0,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        assert!(
+            super::infer::infer_numeric(&ops, 0, 0).is_err(),
+            "I6 dense infer still refuses non-W4 HostInvoke"
+        );
+        assert!(try_specialize_body(&ops, "clk", 0, &mut pool, &DenseCallMap::new()).is_none());
+        let mut hints = LowerHints::new("clk");
+        hints.allow_effects = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower clock");
+        f.verify().unwrap();
+        assert!(f.has_impure_host());
+        let text = f.to_string();
+        assert!(text.contains("host.clock_mono_nanos"), "{text}");
+        let g = parse_func(&text).expect(&text);
+        g.verify().unwrap();
+        assert!(g.has_impure_host());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_lir(&f, Some(Label(0)), &mut pool).is_err());
+    }
+
+    #[test]
+    fn pipeline_clock_loop_stays_fuse_il() {
+        let src = r#"
+use clock::{mono_nanos};
+fn hot(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        s = s + mono_nanos() + i;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(3);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile clock loop");
+        let symbols = p.program_debug().fn_symbols;
+        let hot = symbols
+            .iter()
+            .position(|s| s.name == "hot")
+            .expect("hot symbol");
+        let start = symbols[hot].entry_pc as usize;
+        let end = symbols
+            .get(hot + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let hot_bc = &bc[start..end];
+        assert!(
+            hot_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::HostInvoke),
+            "clock stays a HostInvoke edge; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            hot_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "I6 must not dense-specialize an impure clock loop"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

@@ -1,13 +1,12 @@
 //! Lower verified numeric MIR to dense bytecode (`IlOp` residuals + labels).
 
-use common::{Byte, DebugLoc, Instruction, dense};
+use common::{dense, Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::func::MirFunc;
 use super::inst::{
-    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
-    ValueId,
+    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
 };
 use super::lower::LowerError;
 use super::ty::MirTy;
@@ -21,6 +20,23 @@ pub fn emit_dense(
     if func.has_gc_edge() {
         return Err(LowerError::Refused(
             "dense emit refuses Alloc/GcBarrier (I5: no stack maps)".into(),
+        ));
+    }
+    if func.has_impure_host() {
+        return Err(LowerError::Refused(
+            "dense emit refuses impure HostInvoke (I6: W4 allowlist stays closed)".into(),
+        ));
+    }
+    if func.blocks.iter().any(|b| {
+        b.insts.iter().any(|i| match i {
+            MirInst::HostInvoke { native_id, .. } => {
+                super::host_allow::host_spec(*native_id).is_none()
+            }
+            _ => false,
+        })
+    }) {
+        return Err(LowerError::Refused(
+            "dense emit refuses non-W4 HostInvoke (I6)".into(),
         ));
     }
     if func.types.iter().any(|t| t.is_heap_word()) {

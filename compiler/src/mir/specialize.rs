@@ -32,7 +32,8 @@ pub fn try_specialize_body(
     // Heap / CALL to a non-dense callee / multi-word RETURN stay refuse.
     // FORMAT / string ops stay fuse-IL (I4). Alloc / InitTyped stay fuse-IL
     // (I5: no stack maps). Allowlisted HostInvoke (math / packed LA /
-    // simd_axpy_reduce) is W4.
+    // simd_axpy_reduce) is W4. Impure HostInvoke / CALL stay barriers (I6);
+    // the W4 set is not grown for clocks / IO / FFI.
     let inferred = infer_numeric_with(ops, pool.len(), entry_sp, calls).ok()?;
     if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
         return None;

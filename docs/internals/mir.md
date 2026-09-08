@@ -135,7 +135,14 @@ HostInvoke. The set is **closed** (see
 - M1 math **125–135** (`math_atan` … `math_tanh`)
 - `simd_axpy_reduce` **136** (P12 may still replace a *whole* saxpy body)
 
-Clocks, IO, GC, and other natives still refuse. User `CALL` is COI-291
+Clocks, IO, GC, and other natives still refuse dense infer. I6
+([COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges))
+types those natives as SSA `HostInvoke` edges when `allow_effects` is
+set: the purity sidecar (`classify_host_name` / `host_effects`) marks
+math / packed / axpy **pure** (LICM may hoist W4 scalar math) and
+clocks / IO / GC / FFI **impure** (never hoist, never CSE). Dense emit
+still refuses anything outside this closed W4 set — no clock/IO
+allowlist growth. User `CALL` is COI-291
 (below). Dense emit keeps `DenseBin` for the numeric region and at each
 allowlisted edge: `LOAD` args (Value words) → `CONST` id → `HostInvoke` →
 `STORE` dest, then more dense ops. P12 whole-body saxpy pack still runs

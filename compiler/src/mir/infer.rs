@@ -7,8 +7,9 @@
 //! non-allowlisted HostInvoke / heap index / class field / match / string /
 //! alloc (`MakeArray` / `InitTyped`) /
 //! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. W4 accepts
-//! allowlisted math / packed LA / `simd_axpy_reduce` HostInvokes. Compare-only
-//! stays fuse-IL.
+//! allowlisted math / packed LA / `simd_axpy_reduce` HostInvokes. I6 types
+//! other hosts as SSA edges under `allow_effects`; dense infer stays W4.
+//! Compare-only stays fuse-IL.
 
 use std::collections::HashMap;
 

@@ -218,8 +218,7 @@ fn hoistable(inst: &MirInst) -> bool {
         | MirInst::Cmp { .. }
         | MirInst::Unary { .. }
         | MirInst::Cast { .. } => true,
-        MirInst::HostInvoke { native_id, .. } => super::host_allow::host_spec(*native_id)
-            .is_some_and(|s| s.hoistable),
+        MirInst::HostInvoke { native_id, .. } => super::effects::host_may_hoist(*native_id),
         MirInst::Call { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
@@ -488,5 +487,108 @@ mod tests {
         f.verify().unwrap();
         let lp = loop_blocks(&f);
         assert_eq!(count_bin_in(&f, &lp, MirBinOp::Mul), 1);
+    }
+
+    fn count_host_in(func: &MirFunc, blocks: &HashSet<BlockId>, id: u16) -> usize {
+        func.blocks
+            .iter()
+            .filter(|b| blocks.contains(&b.id))
+            .flat_map(|b| b.insts.iter())
+            .filter(|i| matches!(i, MirInst::HostInvoke { native_id, .. } if *native_id == id))
+            .count()
+    }
+
+    #[test]
+    fn hoists_invariant_math_host() {
+        let mut b = MirBuilder::new("math");
+        let n = b.add_param(MirTy::I64).unwrap();
+        const I: crate::mir::inst::LocalId = crate::mir::inst::LocalId(0);
+        const S: crate::mir::inst::LocalId = crate::mir::inst::LocalId(1);
+        let i0 = b.ins_const(MirConst::I64(0)).unwrap();
+        let s0 = b.ins_const(MirConst::f64(0.0)).unwrap();
+        b.def_local(I, i0).unwrap();
+        b.def_local(S, s0).unwrap();
+        let header = b.create_block();
+        let body = b.create_block();
+        let exit = b.create_block();
+        b.jump(header).unwrap();
+        b.switch_to_block(header);
+        let i = b.use_local(I, MirTy::I64).unwrap();
+        let cond = b.ins_cmp(MirCmpOp::Lt, i, n).unwrap();
+        b.branch(cond, body, exit).unwrap();
+        b.switch_to_block(body);
+        let x = b.ins_const(MirConst::f64(1.0)).unwrap();
+        let s_host = b.ins_host_invoke(common::MATH_SIN_ID, vec![x]).unwrap();
+        let s = b.use_local(S, MirTy::F64).unwrap();
+        let s1 = b.ins_binop(MirBinOp::Add, s, s_host).unwrap();
+        let one = b.ins_const(MirConst::I64(1)).unwrap();
+        let i1 = b.ins_binop(MirBinOp::Add, i, one).unwrap();
+        b.def_local(S, s1).unwrap();
+        b.def_local(I, i1).unwrap();
+        b.jump(header).unwrap();
+        b.switch_to_block(exit);
+        let s_out = b.use_local(S, MirTy::F64).unwrap();
+        b.set_ret_ty(MirTy::F64);
+        b.ret(Some(s_out)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert!(licm(&mut f) >= 1);
+        f.verify().unwrap();
+        let after = loop_blocks(&f);
+        assert_eq!(
+            count_host_in(&f, &after, common::MATH_SIN_ID),
+            0,
+            "pure math HostInvoke may hoist"
+        );
+    }
+
+    #[test]
+    fn does_not_hoist_impure_clock_host() {
+        let mut b = MirBuilder::new("clk");
+        b.allow_effects = true;
+        let n = b.add_param(MirTy::I64).unwrap();
+        const I: crate::mir::inst::LocalId = crate::mir::inst::LocalId(0);
+        const S: crate::mir::inst::LocalId = crate::mir::inst::LocalId(1);
+        let i0 = b.ins_const(MirConst::I64(0)).unwrap();
+        let s0 = b.ins_const(MirConst::I64(0)).unwrap();
+        b.def_local(I, i0).unwrap();
+        b.def_local(S, s0).unwrap();
+        let header = b.create_block();
+        let body = b.create_block();
+        let exit = b.create_block();
+        b.jump(header).unwrap();
+        b.switch_to_block(header);
+        let i = b.use_local(I, MirTy::I64).unwrap();
+        let cond = b.ins_cmp(MirCmpOp::Lt, i, n).unwrap();
+        b.branch(cond, body, exit).unwrap();
+        b.switch_to_block(body);
+        let t = b
+            .ins_host_invoke(common::CLOCK_MONO_NANOS_ID, vec![])
+            .unwrap();
+        let s = b.use_local(S, MirTy::I64).unwrap();
+        let s1 = b.ins_binop(MirBinOp::Add, s, t).unwrap();
+        let one = b.ins_const(MirConst::I64(1)).unwrap();
+        let i1 = b.ins_binop(MirBinOp::Add, i, one).unwrap();
+        b.def_local(S, s1).unwrap();
+        b.def_local(I, i1).unwrap();
+        b.jump(header).unwrap();
+        b.switch_to_block(exit);
+        let s_out = b.use_local(S, MirTy::I64).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(s_out)).unwrap();
+        let mut f = b.finish().unwrap();
+        assert!(f.has_impure_host());
+        assert!(f
+            .blocks
+            .iter()
+            .flat_map(|bl| bl.insts.iter())
+            .any(MirInst::is_effect_barrier));
+        licm(&mut f);
+        f.verify().unwrap();
+        let after = loop_blocks(&f);
+        assert_eq!(
+            count_host_in(&f, &after, common::CLOCK_MONO_NANOS_ID),
+            1,
+            "impure clock HostInvoke must stay in the loop"
+        );
     }
 }

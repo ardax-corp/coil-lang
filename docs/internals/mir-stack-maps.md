@@ -31,8 +31,9 @@ relocatable across a safepoint in a specialized or native body.
 4. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 
-Write barriers (`GcBarrier` kind `write`) are named so I6 / later field
-stores can mark them. They are not implemented.
+Write barriers (`GcBarrier` kind `write`) are named so later field
+stores can mark them. They are not implemented. I6 marks impure
+HostInvoke / CALL as effect barriers instead of growing GC maps.
 
 See [mir-islands.md](mir-islands.md) (I5) and
 [specialize-refuse.md](specialize-refuse.md).
