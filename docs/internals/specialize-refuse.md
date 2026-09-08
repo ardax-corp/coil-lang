@@ -110,7 +110,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | Feature | Today | Island |
 |---------|-------|--------|
 | Heap-ref / niche Option/Result *types* in SSA | layout exists (`HeapNiche`); SSA paints `i64`/`value` | **I1** — name + carry; no alloc specialize |
-| `match` / `JumpIfMatch` on niche or two-slot (tag 0/1, arity ≤ 1) | MIR→LIR (I2); dense still refuse | **I2** |
+| `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); dense still refuse | **I2** |
 | Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
 | `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier` optional; dense / LIR refuse (no maps) | **I5** |

@@ -388,9 +388,6 @@ impl MirBuilder {
         taken: BlockId,
         not_taken: BlockId,
     ) -> Result<(), MirError> {
-        if tag > 1 {
-            return Err(MirError::msg("I2 JumpIfMatch is Option/Result tags only"));
-        }
         if payloads.len() > 1 {
             return Err(MirError::msg("I2 JumpIfMatch arity > 1"));
         }

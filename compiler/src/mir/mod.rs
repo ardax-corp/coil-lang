@@ -4,7 +4,8 @@
 //! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
 //! conservative float peeps (P11 / COI-285), saxpy-reduce HostInvoke
 //! packs (P12 / COI-286), I1 heap/niche `MirTy` names (COI-293), and
-//! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294), and
+//! I2 match / `JumpIfMatch` on niche, two-slot, and boxed-overlap payloads
+//! (COI-294 / COI-302), and
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
 //! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
 //! I5 alloc / GC-barrier placeholders (COI-300),
@@ -2271,5 +2272,228 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn i2_boxed_overlap_arity0_enters_lir() {
+        let loc = loc();
+        // Boxed `match o { Some(v) => v, None => 0 }` — codegen emits
+        // JumpIfMatch arity 0 (payload via stack/local overlap).
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::Unpack).with_operand_u32(0),
+                loc,
+            },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(2),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Label(Label(1)),
+            IlOp::Label(Label(2)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "score_opt", 1, &mut pool)
+            .expect("I2 boxed-overlap JumpIfMatch");
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfMatch { tag: 1, .. },
+                    ..
+                }
+            )),
+            "LIR must keep JumpIfMatch"
+        );
+    }
+
+    #[test]
+    fn i2_match_enum_loop_helpers_enter_lir() {
+        let src = r#"
+enum Phase {
+    Low(int),
+    Mid(int),
+    High(int),
+}
+fn wrap_opt(int x) -> Option<int> {
+    if x % 3 == 0 {
+        return Option::None;
+    }
+    return Option::Some(x);
+}
+fn wrap_res(int x) -> Result<int, string> {
+    if x % 5 == 0 {
+        return Result::Err("miss");
+    }
+    return Result::Ok(x % 7);
+}
+fn wrap_phase(int x) -> Phase {
+    let k = x % 3;
+    if k == 0 {
+        return Phase::Low(x);
+    }
+    if k == 1 {
+        return Phase::Mid(x);
+    }
+    return Phase::High(x);
+}
+fn score_opt(Option<int> o) -> int {
+    return match o {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+}
+fn score_res(Result<int, string> r) -> int {
+    return match r {
+        Result::Ok(v) => v,
+        Result::Err(_) => -1,
+    };
+}
+fn score_phase(Phase p) -> int {
+    return match p {
+        Phase::Low(v) => v,
+        Phase::Mid(x) => x + 1,
+        Phase::High(y) => y + 2,
+    };
+}
+fn main() {
+    let acc = score_opt(wrap_opt(1)) + score_res(wrap_res(1)) + score_phase(wrap_phase(1));
+    let _ = acc;
+}
+"#;
+        let dir = std::env::temp_dir();
+        let path = dir.join("coi302_match_enum_loop.hy");
+        std::fs::write(&path, src).expect("write src");
+        let mut p = crate::Pipeline::new();
+        let arts = p
+            .compile_dissect(path.to_str().unwrap(), true)
+            .expect("compile match helpers");
+        let snap = arts.il.as_ref().expect("il snapshot");
+        let mut module = crate::il::IlModule::from_flat(snap.ops(), snap.funcs());
+        let opts = crate::il::opt::OptimizeOptions::default();
+        let mut pool = arts.constants.clone();
+        let mut per = opts.clone();
+        per.multi_op_join_convoy = false;
+        per.invert_guard_branch = false;
+        per.slot_promote_tell = false;
+        per.seek_back_edge = false;
+        per.ssa_gvn = false;
+        let mut next_label = 1u32;
+        let mut entered = Vec::new();
+        for body in &mut module.funcs {
+            crate::il::opt::optimize_at_with_labels(
+                &mut body.ops,
+                &per,
+                body.meta.entry_sp as i32,
+                &mut pool,
+                &mut next_label,
+            );
+            let refuse = lir_refuse(&body.ops, &body.meta.unboxed_fields);
+            let lir = try_lower_abi_body_with(
+                &body.ops,
+                &body.meta.name,
+                body.meta.entry_sp,
+                &mut pool,
+                &body.meta.unboxed_fields,
+            );
+            match body.meta.name.as_str() {
+                "wrap_opt" | "wrap_phase" | "score_opt" | "score_res" | "score_phase" => {
+                    assert_eq!(refuse, None, "{} should be I2/I8 eligible", body.meta.name);
+                    assert!(
+                        lir.is_some(),
+                        "{} must lower to LIR",
+                        body.meta.name
+                    );
+                    entered.push(body.meta.name.clone());
+                }
+                "wrap_res" => assert_eq!(refuse, Some(LirRefuse::String)),
+                "main" => assert_eq!(refuse, Some(LirRefuse::Call)),
+                _ => {}
+            }
+        }
+        assert_eq!(
+            entered.len(),
+            5,
+            "construct+match helpers must enter MIR: {entered:?}"
+        );
+
+        let mut p2 = crate::Pipeline::new();
+        let (bc, constants) = p2.compile_src(src).expect("compile helpers");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p2.strings(), p2.static_slot_count());
+        assert!(!vm.panicked(), "match helpers must run");
+    }
+
+    #[test]
+    fn i2_last_arm_unpack_overlap_uses_payload() {
+        // Fuse shape of `score_phase`: two arity-0 JIMs then last-arm
+        // `Unpack` + overlap `LOAD` + `y + 2`.
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
+                target: Label(2),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::Unpack).with_operand_u32(1),
+                loc,
+            },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Const { imm: 2, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(1)),
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(2)),
+            IlOp::Load { slot: 1, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "score_phase", 1, &mut pool)
+            .expect("last-arm Unpack overlap");
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack
+            )),
+            "last arm must emit Unpack (miss TOS is still the scrutinee)"
+        );
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::Bin { .. } | IlOp::BinSlotImm { .. }
+            )),
+            "last arm must keep y + 2"
+        );
     }
 }

@@ -171,9 +171,7 @@ impl MirFunc {
                     payloads,
                     ..
                 } => {
-                    if *tag > 1 {
-                        return Err("JumpIfMatch tag must be 0 or 1 (I2)".into());
-                    }
+                    let _ = tag;
                     if payloads.len() > 1 {
                         return Err("JumpIfMatch arity > 1 (I2)".into());
                     }

@@ -30,6 +30,14 @@ impl IlSnapshot {
     pub(crate) fn new(ops: Vec<IlOp>, funcs: Vec<IlFunc>) -> Self {
         Self { ops, funcs }
     }
+
+    pub(crate) fn ops(&self) -> &[IlOp] {
+        &self.ops
+    }
+
+    pub(crate) fn funcs(&self) -> &[IlFunc] {
+        &self.funcs
+    }
 }
 
 /// Artifacts from an in-memory dissect compile.
@@ -391,7 +399,7 @@ pub fn format_bytecode(artifacts: &DissectArtifacts, pat: Option<&str>) -> Resul
     Ok(out)
 }
 
-fn format_il_op(op: &IlOp) -> String {
+pub(crate) fn format_il_op(op: &IlOp) -> String {
     match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => format!("Label L{}", l.0),
         IlOp::Jump { kind, target, .. } => {
