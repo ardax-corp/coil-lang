@@ -36,7 +36,7 @@ block islands on P5. Do not revive PGO.
 | # | Island | Issue | Outcome | Status |
 |---|--------|-------|---------|--------|
 | I0 | Doctrine + refuse map | [COI-292](https://linear.app/ardax/issue/COI-292/i0-mir-islands-doctrine-refuse-inventory) | This note; feature → path → target island | this PR |
-| I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | next |
+| I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | stacked PR |
 | I2 | Match on niche / two-slot | [COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir) | JumpIfMatch-shaped control in MIR → LIR or dense-adjacent emit | after I1 |
 | I3 | Non-escaping class fields | [COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir) | Field load/store using the existing local-escape sidecar; escaping named locals stay fuse-IL | after I1 |
 | I4 | String / format subset | (project ladder) | Narrow string ops **or** keep `FORMAT` as a MIR barrier — decide here, do not invent a vanity string bench | after I1–I3 |

@@ -89,7 +89,7 @@ impl MirFunc {
                 return Err(format!("param {p} has no type"));
             }
             if !self.ty(p).is_specialized() {
-                return Err(format!("param {p} is not a specialized numeric type"));
+                return Err(format!("param {p} is not a specialized SSA type"));
             }
             defined[p.index()] = true;
         }
@@ -188,7 +188,7 @@ impl MirFunc {
                 lhs,
                 rhs,
             } => {
-                if !ty.is_specialized() || *ty == MirTy::Bool {
+                if !ty.is_numeric() || *ty == MirTy::Bool {
                     return Err(format!("{dest} binop on {ty}"));
                 }
                 if op.requires_int() && !ty.is_int() {
@@ -204,7 +204,7 @@ impl MirFunc {
             MirInst::Cmp {
                 dest, ty, lhs, rhs, ..
             } => {
-                if !ty.is_specialized() || *ty == MirTy::Bool {
+                if !ty.is_numeric() || *ty == MirTy::Bool {
                     return Err(format!("{dest} cmp on {ty}"));
                 }
                 if self.ty(*lhs) != *ty || self.ty(*rhs) != *ty {
@@ -266,11 +266,11 @@ impl MirFunc {
                 }
             }
             MirInst::Call { dest, args, .. } => {
-                if !self.ty(*dest).is_specialized() {
-                    return Err(format!("{dest} call dest is not specialized"));
+                if !self.ty(*dest).is_numeric() {
+                    return Err(format!("{dest} call dest is not numeric"));
                 }
                 for (i, a) in args.iter().enumerate() {
-                    if !self.ty(*a).is_specialized() {
+                    if !self.ty(*a).is_numeric() {
                         return Err(format!("{dest} call arg {i} type"));
                     }
                 }

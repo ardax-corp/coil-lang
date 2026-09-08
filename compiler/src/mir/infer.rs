@@ -76,7 +76,14 @@ pub fn infer_numeric_with(
     param_count: u32,
     calls: &DenseCallMap,
 ) -> Result<Inferred, LowerError> {
-    infer_walk(ops, pool_len, param_count, InferMode::Dense, calls)
+    infer_walk(
+        ops,
+        pool_len,
+        param_count,
+        InferMode::Dense,
+        calls,
+        &HashMap::new(),
+    )
 }
 
 /// Slot types for MIR→LIR (two-slot / niche leafs). No loop required.
@@ -85,7 +92,24 @@ pub fn infer_lir(
     pool_len: usize,
     param_count: u32,
 ) -> Result<Inferred, LowerError> {
-    infer_walk(ops, pool_len, param_count, InferMode::Lir, &DenseCallMap::new())
+    infer_lir_with_seed(ops, pool_len, param_count, &HashMap::new())
+}
+
+/// Like [`infer_lir`], with known heap/niche (or numeric) slot seeds (I1).
+pub fn infer_lir_with_seed(
+    ops: &[IlOp],
+    pool_len: usize,
+    param_count: u32,
+    seed: &HashMap<u32, MirTy>,
+) -> Result<Inferred, LowerError> {
+    infer_walk(
+        ops,
+        pool_len,
+        param_count,
+        InferMode::Lir,
+        &DenseCallMap::new(),
+        seed,
+    )
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -100,6 +124,7 @@ fn infer_walk(
     param_count: u32,
     mode: InferMode,
     calls: &DenseCallMap,
+    seed: &HashMap<u32, MirTy>,
 ) -> Result<Inferred, LowerError> {
     if mode == InferMode::Dense && !has_back_edge(ops) {
         let work = numeric_work_ops(ops);
@@ -109,7 +134,7 @@ fn infer_walk(
             )));
         }
     }
-    let mut slot_ty: HashMap<u32, MirTy> = HashMap::new();
+    let mut slot_ty: HashMap<u32, MirTy> = seed.clone();
     let mut pool_ty = vec![None; pool_len];
     let mut stack: Vec<Cell> = Vec::new();
     let mut has_i32 = false;
@@ -420,6 +445,11 @@ fn infer_walk(
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
+    if mode == InferMode::Dense && slot_ty.values().any(|t| t.is_heap_word()) {
+        return Err(LowerError::Refused(
+            "dense infer refuses heap/niche slots (I1 carry is LIR/SSA only)".into(),
+        ));
+    }
     if mode == InferMode::Dense && !has_float_arith && !has_i32 && !has_i64_arith {
         return Err(LowerError::Refused(
             "need float + - * / , i64 + - * / % , or i32 (compare-only stays on fuse-IL)".into(),
@@ -571,6 +601,21 @@ fn apply_bin(
     {
         return Err(LowerError::Refused(format!("binop {}", inst.mnemonic())));
     }
+    if matches!(
+        inst,
+        Instruction::BITAND | Instruction::BITOR | Instruction::XOR
+    ) {
+        if let Some(result) = bitwise_heap_result(inst, lhs.ty, rhs.ty) {
+            paint_keep_heap(slot_ty, pool_ty, lhs, result)?;
+            paint_keep_heap(slot_ty, pool_ty, rhs, result)?;
+            stack.push(Cell {
+                origin: Origin::Tmp,
+                ty: Some(result),
+                imm: None,
+            });
+            return Ok(());
+        }
+    }
     let ty = operand_ty(inst);
     if ty == MirTy::I32 {
         *has_i32 = true;
@@ -588,6 +633,37 @@ fn apply_bin(
         ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
         imm: None,
     });
+    Ok(())
+}
+
+fn bitwise_heap_result(inst: Instruction, lhs: Option<MirTy>, rhs: Option<MirTy>) -> Option<MirTy> {
+    let heap = [lhs, rhs]
+        .into_iter()
+        .flatten()
+        .find(|t| t.is_heap_word())?;
+    Some(match inst {
+        Instruction::BITOR => MirTy::NicheRes,
+        Instruction::BITAND => MirTy::HeapRef,
+        Instruction::XOR => heap,
+        _ => heap,
+    })
+}
+
+fn paint_keep_heap(
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    cell: Cell,
+    result: MirTy,
+) -> Result<(), LowerError> {
+    if cell.ty.is_some_and(|t| t.is_heap_word()) {
+        if let Some(ty) = cell.ty {
+            return paint(slot_ty, pool_ty, cell, ty);
+        }
+    }
+    if cell.ty.is_some_and(MirTy::is_numeric) {
+        return paint(slot_ty, pool_ty, cell, cell.ty.unwrap());
+    }
+    let _ = result;
     Ok(())
 }
 
