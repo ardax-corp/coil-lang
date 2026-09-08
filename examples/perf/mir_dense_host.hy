@@ -1,7 +1,6 @@
 // Hit bench for COI-290 W4: allowlisted HostInvoke inside a dense body.
 // Parent (W3) refuses HostInvoke and stays fuse-IL. `hot` loops sin + mul/add.
-use io::{stdout};
-use io::sync::{write_all};
+use io::{stdout, write};
 use string::{format, to_bytes};
 
 fn hot(float a, float dx, int n) -> float {
@@ -17,5 +16,5 @@ fn hot(float a, float dx, int n) -> float {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", hot(1.5, 2.0 / 1000000.0, 400000) as int)));
+    write(stdout(), to_bytes(format("%i", hot(1.5, 2.0 / 1000000.0, 2000000) as int)));
 }
