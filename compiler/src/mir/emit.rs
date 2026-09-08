@@ -18,6 +18,11 @@ pub fn emit_dense(
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
 ) -> Result<Vec<IlOp>, LowerError> {
+    if func.types.iter().any(|t| t.is_heap_word()) {
+        return Err(LowerError::Refused(
+            "dense emit refuses heap/niche SSA (I1 does not specialize those bodies)".into(),
+        ));
+    }
     let (regs, scratch) = assign_regs(func)?;
     let regs = coalesce_safe_latch_phis(func, regs);
     let max_reg = regs.iter().copied().max().unwrap_or(0).max(scratch);

@@ -1,24 +1,27 @@
-//! Numeric MIR type lattice (COI-267 P0).
+//! MIR type lattice (COI-267 P0 numeric; COI-293 I1 heap / niche words).
 //!
-//! Ptr / GC refs are later. [`MirTy::Value`] is the boxed VM word — the
-//! existing interpreter path — and the lattice top.
+//! [`MirTy::Value`] is the boxed VM word — the interpreter path — and the
+//! lattice top. I1 names shipped one-word heap/niche ABIs so later islands
+//! can SSA them. Dense specialize still requires [`MirTy::is_numeric`].
 
-use crate::typechecking::{Ty, ty as coil_ty};
+use crate::typechecking::{Ty, ty as coil_ty, ty::is_option_ty};
 
-/// Specialized numeric types plus lattice bounds.
+use super::layout::MirLayout;
+
+/// Specialized numeric + heap/niche types plus lattice bounds.
 ///
 /// ```text
-///                    Value (⊤)
-///               /    |     |    \
-///             I64   F64   Bool   …
-///              |     |
-///             I32   F32
-///                  |
-///               Bottom (⊥)
+///                         Value (⊤)
+///          /        /       |        \         \
+///        I64      F64     Bool    HeapRef   NicheOpt / NicheRes
+///         |        |
+///        I32      F32
+///                    \
+///                  Bottom (⊥)
 /// ```
 ///
-/// Language `int` / `float` map to [`MirTy::I64`] / [`MirTy::F64`]. `i32` and
-/// `f32` exist for later dense / SIMD cuts; they are not language spellings.
+/// Language `int` / `float` / `bool` map to [`MirTy::I64`] / [`MirTy::F64`].
+/// Heap/niche variants are one `Value` word (COI-92), not two-slot.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum MirTy {
     Bottom,
@@ -27,6 +30,12 @@ pub enum MirTy {
     F32,
     F64,
     Bool,
+    /// Aligned GC heap pointer (class / `string` / tuple / list / boxed enum).
+    HeapRef,
+    /// Heap `Option<T>` word: `None` = `0`, `Some` = aligned pointer.
+    NicheOpt,
+    /// Heap-heap `Result<T,E>` word: `Ok` = aligned pointer, `Err` = `ptr | 1`.
+    NicheRes,
     /// Boxed VM `Value`. Not specialized; P1+ keeps this ABI at edges.
     Value,
 }
@@ -42,8 +51,27 @@ impl MirTy {
         matches!(self, Self::F32 | Self::F64)
     }
 
+    /// Dense / numeric SSA lane (`i32`/`i64`/`f32`/`f64`/`bool`).
+    pub fn is_numeric(self) -> bool {
+        matches!(self, Self::I32 | Self::I64 | Self::F32 | Self::F64 | Self::Bool)
+    }
+
+    /// One-word heap pointer or shipped niche Option/Result (COI-92).
+    pub fn is_heap_word(self) -> bool {
+        matches!(self, Self::HeapRef | Self::NicheOpt | Self::NicheRes)
+    }
+
+    /// Named SSA type (numeric or heap/niche). Not [`Self::Value`] / [`Self::Bottom`].
     pub fn is_specialized(self) -> bool {
         !matches!(self, Self::Bottom | Self::Value)
+    }
+
+    /// Call-edge layout for a single SSA word. Two-slot is not a `MirTy`.
+    pub fn layout(self) -> MirLayout {
+        match self {
+            Self::NicheOpt | Self::NicheRes => MirLayout::HeapNiche,
+            _ => MirLayout::Word,
+        }
     }
 
     /// Least upper bound.
@@ -61,6 +89,9 @@ impl MirTy {
         match (self, other) {
             (I32, I64) | (I64, I32) => I64,
             (F32, F64) | (F64, F32) => F64,
+            (HeapRef, HeapRef) => HeapRef,
+            (NicheOpt, NicheOpt) => NicheOpt,
+            (NicheRes, NicheRes) => NicheRes,
             _ => Value,
         }
     }
@@ -100,6 +131,9 @@ impl MirTy {
             Self::F32 => "f32",
             Self::F64 => "f64",
             Self::Bool => "bool",
+            Self::HeapRef => "heapref",
+            Self::NicheOpt => "niche_opt",
+            Self::NicheRes => "niche_res",
             Self::Value => "value",
         }
     }
@@ -112,6 +146,9 @@ impl MirTy {
             "f32" => Self::F32,
             "f64" => Self::F64,
             "bool" => Self::Bool,
+            "heapref" => Self::HeapRef,
+            "niche_opt" => Self::NicheOpt,
+            "niche_res" => Self::NicheRes,
             "value" => Self::Value,
             "int" => Self::I64,
             "float" => Self::F64,
@@ -119,15 +156,35 @@ impl MirTy {
         })
     }
 
-    /// Map a coil HM monotype onto the lattice. Classes / heap stay [`MirTy::Value`].
+    /// Map a coil HM monotype onto the lattice.
+    ///
+    /// Immediate `int`/`float`/`bool`/`byte` are numeric lanes. Ground heap
+    /// objects are [`Self::HeapRef`]. Shipped niche Option/Result words are
+    /// [`Self::NicheOpt`] / [`Self::NicheRes`]. Two-slot pairs and boxed /
+    /// unsure shapes stay [`Self::Value`] (not one SSA word).
     pub fn from_coil_ty(ty: &Ty) -> Self {
         match ty {
-            Ty::Readonly(inner) => Self::from_coil_ty(inner),
-            Ty::Con(n) if n == coil_ty::INT => Self::I64,
-            Ty::Con(n) if n == coil_ty::FLOAT => Self::F64,
-            Ty::Con(n) if n == coil_ty::BOOL => Self::Bool,
-            Ty::Con(n) => Self::parse(n).unwrap_or(Self::Value),
-            _ => Self::Value,
+            Ty::Readonly(inner) => return Self::from_coil_ty(inner),
+            Ty::Con(n) if n == coil_ty::INT || n == coil_ty::BYTE => return Self::I64,
+            Ty::Con(n) if n == coil_ty::FLOAT => return Self::F64,
+            Ty::Con(n) if n == coil_ty::BOOL => return Self::Bool,
+            Ty::Con(n) if n == coil_ty::UNIT => return Self::Value,
+            _ => {}
+        }
+        match MirLayout::from_coil_ty(ty) {
+            MirLayout::HeapNiche if is_option_ty(ty) => Self::NicheOpt,
+            MirLayout::HeapNiche => Self::NicheRes,
+            MirLayout::TwoSlot => Self::Value,
+            MirLayout::Word => {
+                if super::layout::is_ground_heap(ty) {
+                    Self::HeapRef
+                } else {
+                    match ty {
+                        Ty::Con(n) => Self::parse(n).unwrap_or(Self::Value),
+                        _ => Self::Value,
+                    }
+                }
+            }
         }
     }
 }
@@ -172,6 +229,48 @@ mod tests {
         assert_eq!(MirTy::from_coil_ty(&coil_ty::int()), MirTy::I64);
         assert_eq!(MirTy::from_coil_ty(&coil_ty::float()), MirTy::F64);
         assert_eq!(MirTy::from_coil_ty(&coil_ty::boolean()), MirTy::Bool);
-        assert_eq!(MirTy::from_coil_ty(&Ty::Con("string".into())), MirTy::Value);
+        assert_eq!(MirTy::from_coil_ty(&Ty::Con("string".into())), MirTy::HeapRef);
+        assert_eq!(MirTy::from_coil_ty(&coil_ty::byte()), MirTy::I64);
+    }
+
+    #[test]
+    fn heap_and_niche_are_ssa_not_numeric() {
+        assert!(MirTy::HeapRef.is_specialized());
+        assert!(MirTy::NicheOpt.is_heap_word());
+        assert!(MirTy::NicheRes.is_heap_word());
+        assert!(!MirTy::HeapRef.is_numeric());
+        assert!(!MirTy::NicheOpt.is_numeric());
+        assert!(MirTy::I64.is_numeric());
+        assert_eq!(MirTy::HeapRef.join(MirTy::NicheOpt), MirTy::Value);
+        assert_eq!(MirTy::HeapRef.meet(MirTy::NicheRes), MirTy::Bottom);
+        assert!(MirTy::HeapRef.le(MirTy::Value));
+        assert_eq!(MirTy::HeapRef.layout(), MirLayout::Word);
+        assert_eq!(MirTy::NicheOpt.layout(), MirLayout::HeapNiche);
+        assert_eq!(MirTy::NicheRes.layout(), MirLayout::HeapNiche);
+    }
+
+    #[test]
+    fn shipped_option_result_map_to_niche_words() {
+        use crate::typechecking::ty::{option_ty, result_ty, string};
+        assert_eq!(
+            MirTy::from_coil_ty(&option_ty(string())),
+            MirTy::NicheOpt
+        );
+        assert_eq!(
+            MirTy::from_coil_ty(&result_ty(string(), string())),
+            MirTy::NicheRes
+        );
+        assert_eq!(
+            MirTy::from_coil_ty(&option_ty(coil_ty::int())),
+            MirTy::Value
+        );
+        assert_eq!(
+            MirTy::from_coil_ty(&option_ty(option_ty(coil_ty::int()))),
+            MirTy::Value
+        );
+        assert_eq!(
+            MirTy::from_coil_ty(&result_ty(string(), coil_ty::int())),
+            MirTy::Value
+        );
     }
 }

@@ -43,11 +43,11 @@ impl DenseAbi {
             return None;
         }
         let ret = func.ret_ty?;
-        if !ret.is_specialized() {
+        if !ret.is_numeric() {
             return None;
         }
         let params: Vec<MirTy> = func.params.iter().map(|p| func.ty(*p)).collect();
-        if params.iter().any(|t| !t.is_specialized()) {
+        if params.iter().any(|t| !t.is_numeric()) {
             return None;
         }
         Some(Self { params, ret })
@@ -123,7 +123,7 @@ pub fn live_in_params(ops: &[IlOp], slot_ty: &HashMap<u32, MirTy>) -> Option<Vec
     let mut params = Vec::with_capacity(max as usize + 1);
     for i in 0..=max {
         let ty = *slot_ty.get(&i)?;
-        if !ty.is_specialized() {
+        if !ty.is_numeric() {
             return None;
         }
         params.push(ty);
@@ -181,6 +181,17 @@ mod tests {
         );
     }
 
+    #[test]
+    fn from_func_refuses_heap_word() {
+        let mut b = MirBuilder::new("href");
+        let p = b.add_param(MirTy::HeapRef).unwrap();
+        b.set_ret_ty(MirTy::HeapRef);
+        b.ret(Some(p)).unwrap();
+        let f = b.finish().unwrap();
+        assert!(DenseAbi::from_func(&f).is_none());
+    }
+
+    #[test]
     fn from_func_refuses_two_slot() {
         let mut b = MirBuilder::new("pair");
         let lo = b.add_param(MirTy::I64).unwrap();

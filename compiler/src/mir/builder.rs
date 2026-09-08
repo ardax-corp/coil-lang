@@ -78,7 +78,7 @@ impl MirBuilder {
 
     pub fn add_param(&mut self, ty: MirTy) -> Result<ValueId, MirError> {
         if !ty.is_specialized() {
-            return Err(MirError::msg("param must be a specialized numeric type"));
+            return Err(MirError::msg("param must be a specialized SSA type"));
         }
         let v = self.alloc(ty);
         self.func.params.push(v);
@@ -147,7 +147,7 @@ impl MirBuilder {
         if lt != rt {
             return Err(MirError::msg(format!("binop operand types {lt} vs {rt}")));
         }
-        if !lt.is_specialized() || lt == MirTy::Bool {
+        if !lt.is_numeric() || lt == MirTy::Bool {
             return Err(MirError::msg(format!("binop on {lt}")));
         }
         if op.requires_int() && !lt.is_int() {
@@ -172,7 +172,7 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         let lt = self.resolve_ty(lhs);
         let rt = self.resolve_ty(rhs);
-        if lt != rt || !lt.is_specialized() || lt == MirTy::Bool {
+        if lt != rt || !lt.is_numeric() || lt == MirTy::Bool {
             return Err(MirError::msg(format!("cmp types {lt} vs {rt}")));
         }
         let dest = self.alloc(MirTy::Bool);
@@ -330,7 +330,11 @@ impl MirBuilder {
     pub fn ret(&mut self, value: Option<ValueId>) -> Result<(), MirError> {
         let lo = value.map(|v| self.resolve(v));
         if let Some(v) = lo {
-            self.func.ret_ty = Some(self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(v)));
+            let ty = self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(v));
+            self.func.ret_ty = Some(ty);
+            if ty.is_heap_word() {
+                self.func.ret_layout = ty.layout();
+            }
         }
         self.set_term(Terminator::Return { lo, hi: None })
     }
@@ -613,5 +617,18 @@ mod tests {
     fn refuses_class_shaped_value_param() {
         let mut b = MirBuilder::new("no_class");
         assert!(b.add_param(MirTy::Value).is_err());
+    }
+
+    #[test]
+    fn accepts_heapref_and_niche_params() {
+        for ty in [MirTy::HeapRef, MirTy::NicheOpt, MirTy::NicheRes] {
+            let mut b = MirBuilder::new("href");
+            let p = b.add_param(ty).unwrap();
+            b.ret(Some(p)).unwrap();
+            let f = b.finish().unwrap();
+            assert_eq!(f.ty(p), ty);
+            assert_eq!(f.ret_ty, Some(ty));
+            assert_eq!(f.ret_layout, ty.layout());
+        }
     }
 }
