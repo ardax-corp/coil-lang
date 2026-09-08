@@ -91,6 +91,8 @@ pub struct Pipeline {
     host_grants: HostGrants,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
+    /// I7: debugger-attached compiles refuse dense / MIR→LIR shortcuts.
+    debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
     /// Built on first use. `coil run` never compiles, and `Compiler::default`
@@ -238,6 +240,7 @@ impl Pipeline {
             }
             c.set_opt_level(self.opt_level);
             c.set_collect_opt_stats(self.collect_opt_stats);
+            c.set_debugger_attached(self.debugger_attached);
             c
         })
     }
@@ -604,6 +607,7 @@ impl Pipeline {
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
             opt_level: crate::OptLevel::Standard,
+            debugger_attached: false,
             collect_opt_stats: false,
             compiler: std::cell::OnceCell::new(),
             pending_native_ids: Vec::new(),
@@ -1533,9 +1537,27 @@ impl Pipeline {
         self.opt_level = level;
         if self.compiler.get().is_some() {
             let collect = self.collect_opt_stats;
+            let dbg = self.debugger_attached;
             self.compiler_lazy_mut().set_opt_level(level);
             self.compiler_lazy_mut().set_collect_opt_stats(collect);
+            self.compiler_lazy_mut().set_debugger_attached(dbg);
         }
+    }
+
+    /// Refuse dense specialize and MIR→LIR replace (I7). `coil debug` sets this.
+    pub fn set_debugger_attached(&mut self, on: bool) {
+        self.debugger_attached = on;
+        if self.compiler.get().is_some() {
+            let collect = self.collect_opt_stats;
+            let level = self.opt_level;
+            self.compiler_lazy_mut().set_opt_level(level);
+            self.compiler_lazy_mut().set_collect_opt_stats(collect);
+            self.compiler_lazy_mut().set_debugger_attached(on);
+        }
+    }
+
+    pub fn debugger_attached(&self) -> bool {
+        self.debugger_attached
     }
 
     /// Collect IL optimization counters (COI-131). Off by default.

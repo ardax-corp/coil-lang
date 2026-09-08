@@ -160,6 +160,7 @@ impl DebugSession {
         extra_roots: Vec<PathBuf>,
     ) -> Result<Self, ()> {
         let mut pipeline = Pipeline::with_reporter(config, reporter);
+        pipeline.set_debugger_attached(true);
         pipeline.set_host_grants(grants);
         let dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         pipeline.bind_project_roots_with_default(dir, extra_roots);

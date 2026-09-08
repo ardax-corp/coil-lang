@@ -224,7 +224,8 @@ fn hoistable(inst: &MirInst) -> bool {
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
         | MirInst::Alloc { .. }
-        | MirInst::GcBarrier { .. } => false,
+        | MirInst::GcBarrier { .. }
+        | MirInst::Deopt { .. } => false,
     }
 }
 

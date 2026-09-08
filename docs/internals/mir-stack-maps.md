@@ -24,7 +24,7 @@ relocatable across a safepoint in a specialized or native body.
    (and eventually IL slots) are live heap words. Still compile to fuse-IL
    until a consumer exists.
 2. **Slot / frame maps** — encode those roots for the interpreter or a
-   deopt edge (I7) so a collect can update slots. Archive bump only if the
+   deopt edge ([mir-deopt.md](mir-deopt.md), I7) so a collect can update slots. Archive bump only if the
    map is required at load.
 3. **Specialize across GC** — only after (2), and only for a body that
    actually emits the map. Default remains refuse.

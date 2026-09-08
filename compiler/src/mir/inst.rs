@@ -308,6 +308,14 @@ pub enum MirInst {
         kind: MirGcKind,
         roots: Vec<ValueId>,
     },
+    /// Debugger stop / deopt boundary (I7). Dest is a `bool` token.
+    /// VM debugger on fuse-IL stays the v1 stop engine; this names the
+    /// edge a later native tier must leave or pause at.
+    Deopt {
+        dest: ValueId,
+        kind: MirDeoptKind,
+        loc: common::DebugLoc,
+    },
 }
 
 /// Heap object constructed by [`MirInst::Alloc`].
@@ -355,6 +363,32 @@ impl MirGcKind {
     }
 }
 
+/// Stop / leave-specialized edge (I7). Not a bytecode opcode.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MirDeoptKind {
+    /// Interpreter may pause here (line / `stepi` boundary).
+    Stop,
+    /// Leave specialized or native code; resume fuse-IL at this edge.
+    Deopt,
+}
+
+impl MirDeoptKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Deopt => "deopt",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "stop" => Self::Stop,
+            "deopt" => Self::Deopt,
+            _ => return None,
+        })
+    }
+}
+
 impl MirInst {
     pub fn dest(&self) -> ValueId {
         match *self {
@@ -370,13 +404,19 @@ impl MirInst {
             | Self::FieldLoad { dest, .. }
             | Self::FieldStore { dest, .. }
             | Self::Alloc { dest, .. }
-            | Self::GcBarrier { dest, .. } => dest,
+            | Self::GcBarrier { dest, .. }
+            | Self::Deopt { dest, .. } => dest,
         }
     }
 
     /// Allocation or GC placeholder — specialize / native must not cross.
     pub fn is_gc_edge(&self) -> bool {
         matches!(self, Self::Alloc { .. } | Self::GcBarrier { .. })
+    }
+
+    /// Explicit I7 stop / deopt inst.
+    pub fn is_deopt_edge(&self) -> bool {
+        matches!(self, Self::Deopt { .. })
     }
 
     pub fn is_phi(&self) -> bool {
@@ -395,6 +435,7 @@ impl MirInst {
             Self::FieldStore { src, .. } => vec![*src],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
+            Self::Deopt { .. } => Vec::new(),
         }
     }
 
@@ -429,6 +470,7 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
+            Self::Deopt { .. } => {}
         }
     }
 }
