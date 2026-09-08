@@ -15,12 +15,5 @@ test("dense host sin n1") {
 }
 
 test("dense host sin n2") {
-    let got = hot(1.0, 2);
-    let want = sin(1.0);
-    let d = got - want;
-    if d < 0.0 {
-        assert((0.0 - d) < 0.0000001)?;
-    } else {
-        assert(d < 0.0000001)?;
-    }
+    assert(hot(1.0, 2) == sin(1.0))?;
 }

@@ -3820,6 +3820,12 @@ fn example_perf_mir_dense_straight_prints_checksum() {
 }
 
 #[test]
+fn example_perf_mir_dense_host_prints_checksum() {
+    let output = run_example("examples/perf/mir_dense_host.hy");
+    assert_eq!(output, "1159795");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");
