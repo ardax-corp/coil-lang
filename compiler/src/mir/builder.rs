@@ -43,6 +43,8 @@ pub struct MirBuilder {
     incomplete_phis: Vec<Vec<(LocalId, ValueId)>>,
     subst: HashMap<ValueId, ValueId>,
     finished: bool,
+    /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
+    pub allow_effects: bool,
 }
 
 impl MirBuilder {
@@ -56,6 +58,7 @@ impl MirBuilder {
             incomplete_phis: vec![Vec::new()],
             subst: HashMap::new(),
             finished: false,
+            allow_effects: false,
         }
     }
 
@@ -288,8 +291,12 @@ impl MirBuilder {
         native_id: u16,
         args: Vec<ValueId>,
     ) -> Result<ValueId, MirError> {
-        let spec = super::host_allow::host_spec(native_id)
-            .ok_or_else(|| MirError::msg(format!("host {native_id} is not dense-allowlisted")))?;
+        let spec = if self.allow_effects {
+            super::host_allow::host_edge_spec(native_id)
+        } else {
+            super::host_allow::host_spec(native_id)
+        }
+        .ok_or_else(|| MirError::msg(format!("host {native_id} is not a typed MIR edge")))?;
         if spec.args.len() != args.len() {
             return Err(MirError::msg(format!(
                 "host {} arity {} vs {}",

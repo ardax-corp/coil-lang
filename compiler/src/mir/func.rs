@@ -52,6 +52,18 @@ impl MirFunc {
         self.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
     }
 
+    /// True when any HostInvoke is impure (I6).
+    pub fn has_impure_host(&self) -> bool {
+        self.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| match i {
+                MirInst::HostInvoke { native_id, .. } => {
+                    !super::effects::host_is_pure(*native_id)
+                }
+                _ => false,
+            })
+        })
+    }
+
     /// True when any inst is an alloc or GC placeholder (I5).
     pub fn has_gc_edge(&self) -> bool {
         self.blocks
@@ -306,8 +318,8 @@ impl MirFunc {
                 native_id,
                 args,
             } => {
-                let Some(spec) = super::host_allow::host_spec(*native_id) else {
-                    return Err(format!("{dest} host {native_id} not allowlisted"));
+                let Some(spec) = super::host_allow::host_edge_spec(*native_id) else {
+                    return Err(format!("{dest} host {native_id} not a typed edge"));
                 };
                 if spec.args.len() != args.len() {
                     return Err(format!("{dest} host arity"));

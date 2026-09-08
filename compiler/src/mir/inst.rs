@@ -256,7 +256,8 @@ pub enum MirInst {
         ty: MirTy,
         args: Vec<(BlockId, ValueId)>,
     },
-    /// Allowlisted HostInvoke (W4). Args are typed SSA; emit boxes at the edge.
+    /// HostInvoke edge. W4 math/packed/axpy may emit dense (box at the
+    /// edge). I6 types other natives as barriers; impure never hoists.
     HostInvoke {
         dest: ValueId,
         native_id: u16,

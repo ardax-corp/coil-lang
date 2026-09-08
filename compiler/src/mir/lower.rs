@@ -66,6 +66,9 @@ pub struct LowerHints {
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` → Alloc +
     /// GcBarrier. Dense / LIR emit still refuse.
     pub allow_alloc: bool,
+    /// I6: type non-W4 HostInvoke (clocks / IO / GC / FFI names) as SSA
+    /// edges. Dense emit still refuses anything outside W4.
+    pub allow_effects: bool,
 }
 
 impl Default for LowerHints {
@@ -83,6 +86,7 @@ impl Default for LowerHints {
             unboxed_fields: Vec::new(),
             allow_fields: false,
             allow_alloc: false,
+            allow_effects: false,
         }
     }
 }
@@ -146,6 +150,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
     let ranges = split_blocks(ops);
     let mut label_block: HashMap<Label, BlockId> = HashMap::new();
     let mut b = MirBuilder::new(hints.name.clone());
+    b.allow_effects = hints.allow_effects;
     for i in 0..hints.param_count {
         let ty = hints.slot(i);
         if !ty.is_specialized() {
@@ -928,6 +933,44 @@ mod tests {
                 .any(|i| matches!(i, MirInst::GcBarrier { kind: MirGcKind::Safepoint, .. }))
         }));
         assert_eq!(f.ret_ty, Some(MirTy::HeapRef));
+    }
+
+    #[test]
+    fn lowering_clock_host_needs_allow_effects() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Const {
+                imm: i32::from(common::CLOCK_MONO_NANOS_ID),
+                loc,
+            },
+            IlOp::HostInvoke {
+                arity: 0,
+                layout: 0,
+                loc,
+            },
+            IlOp::Return {
+                loc,
+                ret_words: 1,
+            },
+        ];
+        assert!(try_lower_numeric(&ops, &LowerHints::new("clk")).is_err());
+        let mut hints = LowerHints::new("clk");
+        hints.allow_effects = true;
+        let f = try_lower_numeric(&ops, &hints).expect("I6 clock edge");
+        f.verify().unwrap();
+        assert!(f.has_impure_host());
+        assert!(f.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    MirInst::HostInvoke {
+                        native_id: common::CLOCK_MONO_NANOS_ID,
+                        ..
+                    }
+                )
+            })
+        }));
     }
 
     #[test]

@@ -132,7 +132,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             native_id,
             args,
         } => {
-            let name = super::host_allow::host_spec(*native_id)
+            let name = super::host_allow::host_edge_spec(*native_id)
                 .map(|s| s.name)
                 .unwrap_or("unknown");
             write!(f, "{dest} = host.{name}")?;
@@ -503,7 +503,7 @@ impl<'a> Parser<'a> {
             return Ok(MirInst::Phi { dest, ty, args });
         }
         if let Some(name) = op.strip_prefix("host.") {
-            let spec = super::host_allow::host_spec_by_name(name)
+            let spec = super::host_allow::host_edge_spec_by_name(name)
                 .ok_or_else(|| ParseError(format!("unknown host {name}")))?;
             let mut args = Vec::new();
             if spec.args.is_empty() {
