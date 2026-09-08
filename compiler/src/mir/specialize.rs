@@ -10,6 +10,7 @@ use super::emit::emit_dense;
 use super::emit_lir::emit_lir;
 use super::infer::{infer_lir, infer_numeric_with};
 use super::lower::{try_lower_numeric, LowerHints};
+use super::gc::refuses_alloc;
 use super::string_barrier::refuses_string_or_format;
 
 /// If `ops` is a specialized numeric body, return dense IL plus its ABI.
@@ -29,8 +30,9 @@ pub fn try_specialize_body(
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
     // Heap / CALL to a non-dense callee / multi-word RETURN stay refuse.
-    // FORMAT / string ops stay fuse-IL (I4). Allowlisted HostInvoke
-    // (math / packed LA / simd_axpy_reduce) is W4.
+    // FORMAT / string ops stay fuse-IL (I4). Alloc / InitTyped stay fuse-IL
+    // (I5: no stack maps). Allowlisted HostInvoke (math / packed LA /
+    // simd_axpy_reduce) is W4.
     let inferred = infer_numeric_with(ops, pool.len(), entry_sp, calls).ok()?;
     if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
         return None;
@@ -123,15 +125,13 @@ fn abi_leaf(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
             IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
             IlOp::Entry { .. }
             | IlOp::HostInvoke { .. }
-            | IlOp::MakeEnum { .. }
-            | IlOp::MakeTuple { .. }
             | IlOp::GetField { .. }
             | IlOp::SetField { .. }
             | IlOp::LoadField { .. }
             | IlOp::BoxValue { .. }
             | IlOp::UnboxValue { .. }
             | IlOp::Index { .. } => return false,
-            op if refuses_string_or_format(op) => return false,
+            op if refuses_string_or_format(op) || refuses_alloc(op) => return false,
             IlOp::Jump {
                 kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
                 ..

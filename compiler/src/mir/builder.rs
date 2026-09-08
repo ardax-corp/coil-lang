@@ -469,6 +469,48 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Heap alloc (I5). Dest is `heapref`. Does not emit a barrier; call
+    /// [`Self::ins_gc_barrier`] so the safepoint edge is visible.
+    pub fn ins_alloc(
+        &mut self,
+        kind: super::inst::MirAllocKind,
+        elems: Vec<ValueId>,
+    ) -> Result<ValueId, MirError> {
+        let elems: Vec<ValueId> = elems.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &e) in elems.iter().enumerate() {
+            if !self.resolve_ty(e).is_specialized() {
+                return Err(MirError::msg(format!(
+                    "Alloc elem {i} is {}",
+                    self.resolve_ty(e)
+                )));
+            }
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::Alloc { dest, kind, elems })?;
+        Ok(dest)
+    }
+
+    /// GC placeholder (I5). Dest is `heapref`: first root if present, else
+    /// a dummy token. Roots are not a stack map.
+    pub fn ins_gc_barrier(
+        &mut self,
+        kind: super::inst::MirGcKind,
+        roots: Vec<ValueId>,
+    ) -> Result<ValueId, MirError> {
+        let roots: Vec<ValueId> = roots.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &r) in roots.iter().enumerate() {
+            if !self.resolve_ty(r).is_specialized() {
+                return Err(MirError::msg(format!(
+                    "GcBarrier root {i} is {}",
+                    self.resolve_ty(r)
+                )));
+            }
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::GcBarrier { dest, kind, roots })?;
+        Ok(dest)
+    }
+
     pub fn branch(
         &mut self,
         cond: ValueId,
@@ -791,5 +833,24 @@ mod tests {
             assert_eq!(f.ret_ty, Some(ty));
             assert_eq!(f.ret_layout, ty.layout());
         }
+    }
+
+    #[test]
+    fn alloc_then_safepoint_is_heapref() {
+        use crate::mir::inst::{MirAllocKind, MirGcKind};
+        let mut b = MirBuilder::new("mk");
+        let n = b.ins_const(MirConst::I64(1)).unwrap();
+        let a = b.ins_alloc(MirAllocKind::Array, vec![n]).unwrap();
+        let g = b.ins_gc_barrier(MirGcKind::Safepoint, vec![a]).unwrap();
+        b.ret(Some(g)).unwrap();
+        let f = b.finish().unwrap();
+        assert_eq!(f.ty(a), MirTy::HeapRef);
+        assert_eq!(f.ty(g), MirTy::HeapRef);
+        assert!(f.blocks.iter().any(|bl| {
+            bl.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::Alloc { .. }) && i.is_gc_edge())
+        }));
+        assert!(f.has_gc_edge());
     }
 }

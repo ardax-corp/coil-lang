@@ -223,7 +223,9 @@ fn hoistable(inst: &MirInst) -> bool {
         MirInst::Call { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
-        | MirInst::FieldStore { .. } => false,
+        | MirInst::FieldStore { .. }
+        | MirInst::Alloc { .. }
+        | MirInst::GcBarrier { .. } => false,
     }
 }
 

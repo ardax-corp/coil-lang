@@ -18,6 +18,11 @@ pub fn emit_dense(
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
 ) -> Result<Vec<IlOp>, LowerError> {
+    if func.has_gc_edge() {
+        return Err(LowerError::Refused(
+            "dense emit refuses Alloc/GcBarrier (I5: no stack maps)".into(),
+        ));
+    }
     if func.types.iter().any(|t| t.is_heap_word()) {
         return Err(LowerError::Refused(
             "dense emit refuses heap/niche SSA (I1 does not specialize those bodies)".into(),
@@ -387,6 +392,11 @@ fn emit_inst(
         MirInst::FieldLoad { .. } | MirInst::FieldStore { .. } => {
             return Err(LowerError::Refused(
                 "dense emit refuses FieldLoad/FieldStore (I3 is MIR→LIR)".into(),
+            ));
+        }
+        MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
+            return Err(LowerError::Refused(
+                "dense emit refuses Alloc/GcBarrier (I5: no stack maps)".into(),
             ));
         }
     }

@@ -52,6 +52,13 @@ impl MirFunc {
         self.types.get(v.index()).copied().unwrap_or(MirTy::Bottom)
     }
 
+    /// True when any inst is an alloc or GC placeholder (I5).
+    pub fn has_gc_edge(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|b| b.insts.iter().any(MirInst::is_gc_edge))
+    }
+
     pub fn block(&self, id: BlockId) -> &MirBlock {
         &self.blocks[id.index()]
     }
@@ -369,6 +376,26 @@ impl MirFunc {
                 }
                 if *index > 32 {
                     return Err(format!("{dest} FieldStore index"));
+                }
+            }
+            MirInst::Alloc { dest, elems, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} Alloc dest is not heapref"));
+                }
+                for (i, e) in elems.iter().enumerate() {
+                    if !self.ty(*e).is_specialized() {
+                        return Err(format!("{dest} Alloc elem {i} type"));
+                    }
+                }
+            }
+            MirInst::GcBarrier { dest, roots, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} GcBarrier dest is not heapref"));
+                }
+                for (i, r) in roots.iter().enumerate() {
+                    if !self.ty(*r).is_specialized() {
+                        return Err(format!("{dest} GcBarrier root {i} type"));
+                    }
                 }
             }
             MirInst::Phi { dest, ty, args } => {

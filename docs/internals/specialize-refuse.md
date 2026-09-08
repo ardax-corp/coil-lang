@@ -113,7 +113,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | `match` / `JumpIfMatch` on niche or two-slot (tag 0/1, arity ≤ 1) | MIR→LIR (I2); dense still refuse | **I2** |
 | Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
-| `MakeArray` / alloc / GC safepoints | fuse-IL | **I5** |
+| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier` optional; dense / LIR refuse (no maps) | **I5** |
 | HostInvoke outside W4; purity-driven barriers | fuse-IL | **I6** |
 | Debugger / deopt edges | VM on bytecode | **I7** |
 | Broader MIR emit entry | numeric + P3 LIR leafs only | **I8** after I1–I3 |

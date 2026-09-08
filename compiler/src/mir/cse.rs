@@ -463,7 +463,9 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Call { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
-        | MirInst::FieldStore { .. } => {
+        | MirInst::FieldStore { .. }
+        | MirInst::Alloc { .. }
+        | MirInst::GcBarrier { .. } => {
             return None
         }
     })
