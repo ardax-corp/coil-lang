@@ -1520,7 +1520,7 @@ fn main() {
     }
 
     #[test]
-    fn i8_plain_if_diamond_stays_fuse_il() {
+    fn i8_plain_if_diamond_enters_lir() {
         let loc = loc();
         let ops = vec![
             IlOp::Label(Label(0)),
@@ -1542,9 +1542,10 @@ fn main() {
             IlOp::Load { slot: 1, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert!(!lir_eligible(&ops, &[]));
+        assert!(lir_eligible(&ops, &[]));
         let mut pool = Vec::new();
-        assert!(try_lower_abi_body(&ops, "min", 2, &mut pool).is_none());
+        let lir = try_lower_abi_body(&ops, "min", 2, &mut pool).expect("plain if diamond is LIR");
+        assert!(lir.iter().any(|op| matches!(op, IlOp::Return { .. })));
     }
 
     #[test]

@@ -43,8 +43,11 @@ pub enum LirRefuse {
 /// Production LIR entry after dense specialize misses.
 ///
 /// Eligible when there is no hard refuse **and** a named reason:
-/// two-slot `RETURN`, I2 match, I3 unboxed fields, or I1 niche
-/// `BITAND`/`BITOR`. Plain `if` diamonds stay fuse-IL (stack-IL GVN).
+/// two-slot `RETURN`, I2 match, I3 unboxed fields, I1 niche
+/// `BITAND`/`BITOR`, or an inferable leftover (plain `if`/compare
+/// diamonds, store-only loops, tiny lets). Hard refuse stays I4
+/// string/FORMAT, I5 alloc, impure HostInvoke/`CALL`, heap index /
+/// escaping fields, boxed overlap, I2-out-of-range match.
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
     lir_refuse(ops, unboxed_fields).is_none()
@@ -100,13 +103,14 @@ fn hard_refuse(ops: &[IlOp]) -> Option<LirRefuse> {
     None
 }
 
-/// I8 reasons — broader than pre-I8 `abi_leaf` (two-slot / match / fields
-/// only), still not “every inferable leftover”.
+/// I8 reasons — I1–I3 / two-slot plus inferable leftovers (compare/`if`,
+/// store-only, tiny lets). Hard refuse still wins.
 fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
     let mut ret2 = false;
     let mut match_shaped = false;
     let mut field_use = false;
     let mut niche_word = false;
+    let mut leftover = false;
     for op in ops {
         match op {
             IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
@@ -114,14 +118,24 @@ fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
                 kind: crate::il::IlJumpKind::JumpIfMatch { .. },
                 ..
             } => match_shaped = true,
+            IlOp::Jump {
+                kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
+                ..
+            } => leftover = true,
+            IlOp::StorePop { slot, .. } => {
+                leftover = true;
+                if slot_in_unboxed_fields(*slot, unboxed_fields) {
+                    field_use = true;
+                }
+            }
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
                 match_shaped = true;
             }
-            IlOp::Load { slot, .. } | IlOp::StorePop { slot, .. }
-                if slot_in_unboxed_fields(*slot, unboxed_fields) =>
-            {
+            IlOp::Load { slot, .. } if slot_in_unboxed_fields(*slot, unboxed_fields) => {
                 field_use = true;
             }
+            IlOp::Const { .. } => leftover = true,
+            IlOp::Bin { op, .. } if is_compare(*op) => leftover = true,
             IlOp::Bin { op, .. } if matches!(*op, Instruction::BITAND | Instruction::BITOR) => {
                 // I1 heap-niche bits: `ptr | 1` / `ptr & 1` (tag 0/1).
                 if body_has_tag_imm(ops) {
@@ -136,6 +150,7 @@ fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
             {
                 niche_word = true;
             }
+            IlOp::BinSlotImm { op, .. } if is_compare(Instruction::from(*op)) => leftover = true,
             IlOp::BinSlotSlot { op, .. }
                 if matches!(
                     Instruction::from(*op),
@@ -144,14 +159,32 @@ fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
             {
                 niche_word = true;
             }
+            IlOp::BinSlotSlot { op, .. } if is_compare(Instruction::from(*op)) => leftover = true,
             _ => {}
         }
     }
-    ret2 || match_shaped || field_use || niche_word || adjacent_match_probe(ops)
+    ret2 || match_shaped || field_use || niche_word || leftover || adjacent_match_probe(ops)
+}
+
+fn is_compare(op: Instruction) -> bool {
+    matches!(
+        op,
+        Instruction::EQ
+            | Instruction::NEQ
+            | Instruction::LE
+            | Instruction::LEQ
+            | Instruction::LEF
+            | Instruction::LEQF
+            | Instruction::GT
+            | Instruction::GEQ
+            | Instruction::GTF
+            | Instruction::GEQF
+    )
 }
 
 fn body_has_tag_imm(ops: &[IlOp]) -> bool {
-    ops.iter().any(|op| matches!(op, IlOp::Const { imm: 0 | 1, .. }))
+    ops.iter()
+        .any(|op| matches!(op, IlOp::Const { imm: 0 | 1, .. }))
 }
 
 fn slot_in_unboxed_fields(slot: u32, fields: &[(u32, u32)]) -> bool {
@@ -244,7 +277,7 @@ mod tests {
     }
 
     #[test]
-    fn i8_plain_if_diamond_has_no_reason() {
+    fn i8_plain_if_diamond_is_lir_eligible() {
         let loc = loc();
         let ops = [
             IlOp::Label(Label(0)),
@@ -266,11 +299,12 @@ mod tests {
             IlOp::Load { slot: 1, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::NoReason));
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
     }
 
     #[test]
-    fn i8_store_loop_has_no_reason() {
+    fn i8_store_loop_is_lir_eligible() {
         let loc = loc();
         let ops = [
             IlOp::Jump {
@@ -289,7 +323,21 @@ mod tests {
                 hint: Default::default(),
             },
         ];
-        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::NoReason));
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
+    }
+
+    #[test]
+    fn i8_tiny_let_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Const { imm: 42, loc },
+            IlOp::StorePop { slot: 0, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
     }
 
     #[test]

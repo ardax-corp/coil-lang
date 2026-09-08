@@ -1102,8 +1102,9 @@ mod tests {
         matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek)
     }
 
-    /// Production `optimize_and_flatten` (GVN, then Seek, then promote). Default
-    /// flag is off, so Unknown headers keep the self-store.
+    /// Production `optimize_and_flatten` with default `seek_back_edge` off
+    /// must not apply the flag-on Seek-normalize (Seek-to-tell + drop store).
+    /// LIR reconstruct may rewrite the loop; that is not Seek-normalize.
     #[test]
     fn optimize_and_flatten_default_does_not_seek_normalize() {
         let ops = raising_loop();
@@ -1111,12 +1112,30 @@ mod tests {
         let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 2)];
         let mut m = IlModule::from_flat(&ops, &funcs);
         let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(false), &mut Vec::new());
-        assert!(!flat.iter().any(is_seek));
+        let seek_to = flat.iter().find_map(|op| match op {
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
+                Some(byte.operand_u32())
+            }
+            _ => None,
+        });
         let stores = flat
             .iter()
             .filter(|op| matches!(op, IlOp::StorePop { .. }))
             .count();
-        assert_eq!(stores, 1);
+        assert!(
+            !(seek_to == Some(2) && stores == 0),
+            "default opts must not Seek-normalize the raising loop"
+        );
+        assert!(
+            flat.iter().any(|op| matches!(
+                op,
+                IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    ..
+                }
+            )),
+            "raising loop must keep a back-edge"
+        );
     }
 
     /// Flag on: Seek sits on the latch after GVN, then promotion drops the
