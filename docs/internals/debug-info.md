@@ -46,4 +46,8 @@ If the location is unknown or the file cannot be read, only
 - Many codegen sites still emit **unknown** locations; coverage grows
   incrementally (`panic`, `raise`, formatting/stdout calls, and padded slots elsewhere).
 - Fused super-instructions keep the **first** slot’s span only.
+- **Debugger usefulness:** line breakpoints need a known loc at that line.
+  Unmapped lines stay unverified. `coil debug` `list` may snap to a nearby
+  known loc in the same function; `bt` / DAP stack frames stay exact
+  (no path / line 0).
 - No call-stack walk on panic yet (planned follow-up).
