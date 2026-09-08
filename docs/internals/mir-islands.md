@@ -36,8 +36,8 @@ block islands on P5. Do not revive PGO.
 | # | Island | Issue | Outcome | Status |
 |---|--------|-------|---------|--------|
 | I0 | Doctrine + refuse map | [COI-292](https://linear.app/ardax/issue/COI-292/i0-mir-islands-doctrine-refuse-inventory) | This note; feature → path → target island | on main (#340) |
-| I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | this PR |
-| I2 | Match on niche / two-slot | [COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir) | JumpIfMatch-shaped control in MIR → LIR or dense-adjacent emit | after I1 |
+| I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | on main (#342) |
+| I2 | Match on niche / two-slot | [COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir) | JumpIfMatch-shaped control in MIR → LIR; niche `LogNot` / two-slot tag `Br`; dense still refuses | this PR |
 | I3 | Non-escaping class fields | [COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir) | Field load/store using the existing local-escape sidecar; escaping named locals stay fuse-IL | after I1 |
 | I4 | String / format subset | (project ladder) | Narrow string ops **or** keep `FORMAT` as a MIR barrier — decide here, do not invent a vanity string bench | after I1–I3 |
 | I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) | MakeArray / alloc edges; safepoint / root placeholders; refuse specialize across GC until maps exist | after I1 |
@@ -59,7 +59,8 @@ not implement it.
 | `Option<int>` / immediate-Ok `Result` / arity-2 immediate product leafs | P3 MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | I2 for match; I1 names the layout only |
 | Heap `Option<T>` / heap-heap `Result<T,E>` (COI-92 niche words) | fuse-IL (`CONST 0` / `BITAND` / `BITOR`); layout already `HeapNiche` | I1 SSA types; I2 match; not dense |
 | Nested / mixed / `CallIndirect` Option/Result | boxed `ObjEnum` + fuse-IL | stay refuse until a later island says otherwise |
-| `match` / `JumpIfMatch` | fuse-IL | I2 (niche / two-slot only) |
+| `match` / `JumpIfMatch` on niche / two-slot (tags 0/1, arity ≤ 1) | MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | **I2** |
+| `match` / `JumpIfMatch` on boxed multi-payload / user polymorphism | fuse-IL | stay refuse (not I2) |
 | Class fields (escaping / heap-backed) | fuse-IL | stay until I3; I3 is **non-escaping** only |
 | Non-escaping named class locals (sidecar) | fuse-IL unbox in codegen | I3 |
 | Heap index / `MakeArray` / alloc | fuse-IL (`IndexPin*` when proven) | I5 |
