@@ -22,6 +22,11 @@ pub fn emit_dense(
             "dense emit refuses Alloc/GcBarrier (I5: no stack maps)".into(),
         ));
     }
+    if func.has_deopt_edge() {
+        return Err(LowerError::Refused(
+            "dense emit refuses Deopt (I7: VM debugger stays on fuse-IL)".into(),
+        ));
+    }
     if func.has_impure_host() {
         return Err(LowerError::Refused(
             "dense emit refuses impure HostInvoke (I6: W4 allowlist stays closed)".into(),
@@ -413,6 +418,11 @@ fn emit_inst(
         MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
             return Err(LowerError::Refused(
                 "dense emit refuses Alloc/GcBarrier (I5: no stack maps)".into(),
+            ));
+        }
+        MirInst::Deopt { .. } => {
+            return Err(LowerError::Refused(
+                "dense emit refuses Deopt (I7: VM debugger stays on fuse-IL)".into(),
             ));
         }
     }

@@ -465,7 +465,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
         | MirInst::Alloc { .. }
-        | MirInst::GcBarrier { .. } => {
+        | MirInst::GcBarrier { .. }
+        | MirInst::Deopt { .. } => {
             return None
         }
     })

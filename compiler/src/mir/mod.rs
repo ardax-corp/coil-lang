@@ -7,8 +7,9 @@
 //! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294), and
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
 //! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
-//! I5 alloc / GC-barrier placeholders (COI-300), and
-//! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297).
+//! I5 alloc / GC-barrier placeholders (COI-300),
+//! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297), and
+//! I7 debugger / deopt boundaries on MIR edges (COI-299).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
@@ -18,13 +19,14 @@
 //! `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies may lower
 //! to `Alloc` + `GcBarrier` SSA; dense / LIR emit still refuse (I5).
 //! Impure HostInvoke / CALL are SSA barriers (I6); W4 dense allowlist stays
-//! closed.
+//! closed. Debugger-attached compiles refuse dense / MIR→LIR (I7).
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
 mod builder;
 mod cse;
 mod destprop;
+mod deopt;
 mod effects;
 mod emit;
 mod gc;
@@ -52,8 +54,8 @@ pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
 pub use func::{MirBlock, MirFunc};
 pub use inst::{
-    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst,
-    MirUnaryOp, Terminator, ValueId,
+    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
+    MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
 };
 pub use infer::{STRAIGHT_LINE_MIN_WORK_OPS, infer_lir_with_seed, numeric_work_ops};
 pub use instcombine::instcombine;
@@ -1790,6 +1792,99 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn i7_deopt_edges_visible_and_emit_refuses() {
+        let loc = DebugLoc {
+            file: 0,
+            start_byte: 0,
+            end_byte: 4,
+        };
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("dbg");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        hints.allow_deopt = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower deopt");
+        f.verify().unwrap();
+        assert!(f.has_deopt_edge());
+        assert!(
+            f.blocks.iter().any(|b| {
+                b.insts.iter().any(|i| {
+                    matches!(
+                        i,
+                        MirInst::Deopt {
+                            kind: MirDeoptKind::Stop,
+                            ..
+                        }
+                    )
+                })
+            }),
+            "Return is a stop edge"
+        );
+        let text = f.to_string();
+        assert!(text.contains("deopt.stop"), "{text}");
+        let g = parse_func(&text).expect(&text);
+        g.verify().unwrap();
+        assert!(g.has_deopt_edge());
+        let mut pool = Vec::new();
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_lir(&f, Some(Label(0)), &mut pool).is_err());
+        let mut no = LowerHints::new("plain");
+        no.slot_ty.insert(0, MirTy::I64);
+        no.param_count = 1;
+        let plain = try_lower_numeric(&ops, &no).expect("plain");
+        assert!(!plain.has_deopt_edge());
+    }
+
+    #[test]
+    fn pipeline_debugger_attached_refuses_dense() {
+        let src = r#"
+fn hot(float a, float b, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = i as float;
+        s = s + xf + a - b;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(2.0, 1.0, 8);
+}
+"#;
+        let mut attached = crate::Pipeline::new();
+        attached.set_debugger_attached(true);
+        let (bc, constants) = attached
+            .compile_src(src)
+            .expect("compile debugger-attached");
+        assert!(
+            attached.debugger_attached(),
+            "flag must stick"
+        );
+        assert!(
+            bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
+            "I7 debugger-attached must refuse dense; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, attached.strings(), attached.static_slot_count());
+
+        let mut og = crate::Pipeline::new();
+        og.set_opt_level(crate::OptLevel::Debug);
+        let (bc_og, _) = og.compile_src(src).expect("compile -Og");
+        assert!(
+            bc_og
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "-Og must refuse dense specialize"
+        );
     }
 
     #[test]

@@ -69,6 +69,9 @@ pub struct LowerHints {
     /// I6: type non-W4 HostInvoke (clocks / IO / GC / FFI names) as SSA
     /// edges. Dense emit still refuses anything outside W4.
     pub allow_effects: bool,
+    /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
+    /// Production specialize leaves this off; emit still refuses.
+    pub allow_deopt: bool,
 }
 
 impl Default for LowerHints {
@@ -87,6 +90,7 @@ impl Default for LowerHints {
             allow_fields: false,
             allow_alloc: false,
             allow_effects: false,
+            allow_deopt: false,
         }
     }
 }
@@ -196,6 +200,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         }
         for op in &ops[start..end] {
             lower_op(&mut b, &mut tos, op, hints)?;
+            maybe_ins_deopt(&mut b, op, hints)?;
         }
         if b.func().block(bid).term.is_none() {
             let last = ops.get(end.saturating_sub(1));
@@ -325,6 +330,18 @@ fn emit_term(
     pred: BlockId,
     incoming: &mut HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>>,
 ) -> Result<(), LowerError> {
+    if hints.allow_deopt {
+        if let Some(op) = last {
+            if matches!(
+                op,
+                IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. }
+            ) {
+                if let Some(kind) = super::deopt::boundary_for_op(op) {
+                    b.ins_deopt(kind, op.loc())?;
+                }
+            }
+        }
+    }
     match last {
         Some(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
@@ -619,6 +636,22 @@ fn lower_op(
             refuse_reason(op).expect("string/print")
         ))),
     }
+}
+
+fn maybe_ins_deopt(b: &mut MirBuilder, op: &IlOp, hints: &LowerHints) -> Result<(), LowerError> {
+    if !hints.allow_deopt {
+        return Ok(());
+    }
+    if matches!(
+        op,
+        IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. }
+    ) {
+        return Ok(());
+    }
+    if let Some(kind) = super::deopt::boundary_for_op(op) {
+        b.ins_deopt(kind, op.loc())?;
+    }
+    Ok(())
 }
 
 fn lower_byte(
@@ -971,6 +1004,27 @@ mod tests {
                 )
             })
         }));
+    }
+
+    #[test]
+    fn lowering_deopt_stop_on_return() {
+        let loc = common::DebugLoc {
+            file: 0,
+            start_byte: 0,
+            end_byte: 3,
+        };
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("ret");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        hints.allow_deopt = true;
+        let f = try_lower_numeric(&ops, &hints).expect("deopt return");
+        f.verify().unwrap();
+        assert!(f.has_deopt_edge());
     }
 
     #[test]

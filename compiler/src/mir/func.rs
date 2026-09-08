@@ -69,6 +69,13 @@ impl MirFunc {
             .any(|b| b.insts.iter().any(MirInst::is_gc_edge))
     }
 
+    /// True when any inst is an explicit I7 deopt / stop edge.
+    pub fn has_deopt_edge(&self) -> bool {
+        self.blocks
+            .iter()
+            .any(|b| b.insts.iter().any(MirInst::is_deopt_edge))
+    }
+
     pub fn block(&self, id: BlockId) -> &MirBlock {
         &self.blocks[id.index()]
     }
@@ -406,6 +413,11 @@ impl MirFunc {
                     if !self.ty(*r).is_specialized() {
                         return Err(format!("{dest} GcBarrier root {i} type"));
                     }
+                }
+            }
+            MirInst::Deopt { dest, .. } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} Deopt dest is not bool"));
                 }
             }
             MirInst::Phi { dest, ty, args } => {

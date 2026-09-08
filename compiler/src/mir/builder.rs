@@ -518,6 +518,17 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Debugger stop / deopt placeholder (I7). Dest is a `bool` token.
+    pub fn ins_deopt(
+        &mut self,
+        kind: super::inst::MirDeoptKind,
+        loc: common::DebugLoc,
+    ) -> Result<ValueId, MirError> {
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Deopt { dest, kind, loc })?;
+        Ok(dest)
+    }
+
     pub fn branch(
         &mut self,
         cond: ValueId,

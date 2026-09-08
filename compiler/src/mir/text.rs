@@ -2,7 +2,8 @@
 
 use super::func::{MirBlock, MirFunc};
 use super::inst::{
-    BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst,
+    BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind, MirGcKind,
+    MirInst,
     MirUnaryOp, Terminator, ValueId,
 };
 use super::ty::MirTy;
@@ -206,6 +207,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
+        MirInst::Deopt { dest, kind, .. } => write!(f, "{dest} = deopt.{}", kind.as_str()),
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -576,6 +578,16 @@ impl<'a> Parser<'a> {
             }
             ensure_ty(types, dest, MirTy::HeapRef);
             return Ok(MirInst::GcBarrier { dest, kind, roots });
+        }
+        if let Some(kind_s) = op.strip_prefix("deopt.") {
+            let kind = MirDeoptKind::parse(kind_s)
+                .ok_or_else(|| ParseError(format!("unknown deopt {kind_s}")))?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::Deopt {
+                dest,
+                kind,
+                loc: common::DebugLoc::unknown(),
+            });
         }
         Err(ParseError(format!("unknown op {op}")))
     }
