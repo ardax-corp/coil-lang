@@ -424,6 +424,51 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Identity copy of an unboxed field slot (I3). `object` is the current
+    /// SSA value of `base + index`.
+    pub fn ins_field_load(
+        &mut self,
+        object: ValueId,
+        base: u32,
+        index: u32,
+    ) -> Result<ValueId, MirError> {
+        let ty = self.resolve_ty(object);
+        if !ty.is_specialized() {
+            return Err(MirError::msg(format!("FieldLoad type {ty}")));
+        }
+        let dest = self.alloc(ty);
+        self.push(MirInst::FieldLoad {
+            dest,
+            object: self.resolve(object),
+            base,
+            index,
+        })?;
+        Ok(dest)
+    }
+
+    /// Write `src` into unboxed field slot `base + index` (I3 ctor / rebind).
+    pub fn ins_field_store(
+        &mut self,
+        src: ValueId,
+        base: u32,
+        index: u32,
+    ) -> Result<ValueId, MirError> {
+        let ty = self.resolve_ty(src);
+        if !ty.is_specialized() {
+            return Err(MirError::msg(format!("FieldStore type {ty}")));
+        }
+        let dest = self.alloc(ty);
+        let src = self.resolve(src);
+        self.def_local(LocalId(base + index), src)?;
+        self.push(MirInst::FieldStore {
+            dest,
+            src,
+            base,
+            index,
+        })?;
+        Ok(dest)
+    }
+
     pub fn branch(
         &mut self,
         cond: ValueId,

@@ -339,6 +339,38 @@ impl MirFunc {
                     return Err(format!("{dest} MatchPayload dest type"));
                 }
             }
+            MirInst::FieldLoad {
+                dest,
+                object,
+                index,
+                ..
+            } => {
+                if !self.ty(*object).is_specialized() {
+                    return Err(format!("{dest} FieldLoad object type"));
+                }
+                if self.ty(*dest) != self.ty(*object) {
+                    return Err(format!("{dest} FieldLoad dest type"));
+                }
+                if *index > 32 {
+                    return Err(format!("{dest} FieldLoad index"));
+                }
+            }
+            MirInst::FieldStore {
+                dest,
+                src,
+                index,
+                ..
+            } => {
+                if !self.ty(*src).is_specialized() {
+                    return Err(format!("{dest} FieldStore src type"));
+                }
+                if self.ty(*dest) != self.ty(*src) {
+                    return Err(format!("{dest} FieldStore dest type"));
+                }
+                if *index > 32 {
+                    return Err(format!("{dest} FieldStore index"));
+                }
+            }
             MirInst::Phi { dest, ty, args } => {
                 if self.ty(*dest) != *ty {
                     return Err(format!("{dest} phi type"));

@@ -164,6 +164,18 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             scrutinee,
             index,
         } => write!(f, "{dest} = matchpayload {scrutinee}, {index}"),
+        MirInst::FieldLoad {
+            dest,
+            object,
+            base,
+            index,
+        } => write!(f, "{dest} = fieldload {object}, {base}, {index}"),
+        MirInst::FieldStore {
+            dest,
+            src,
+            base,
+            index,
+        } => write!(f, "{dest} = fieldstore {src}, {base}, {index}"),
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -350,7 +362,7 @@ impl<'a> Parser<'a> {
                 rhs,
             });
         }
-        if op == "lnot" || op == "matchpayload" {
+        if op == "lnot" || op == "matchpayload" || op == "fieldload" || op == "fieldstore" {
             if op == "lnot" {
                 let src = self.value()?;
                 ensure_ty(types, dest, MirTy::Bool);
@@ -360,13 +372,35 @@ impl<'a> Parser<'a> {
                     src,
                 });
             }
-            let scrutinee = self.value()?;
+            if op == "matchpayload" {
+                let scrutinee = self.value()?;
+                self.expect(',')?;
+                let index = self.uint()? as u32;
+                ensure_ty(types, dest, peek_ty(types, scrutinee));
+                return Ok(MirInst::MatchPayload {
+                    dest,
+                    scrutinee,
+                    index,
+                });
+            }
+            let object = self.value()?;
+            self.expect(',')?;
+            let base = self.uint()? as u32;
             self.expect(',')?;
             let index = self.uint()? as u32;
-            ensure_ty(types, dest, peek_ty(types, scrutinee));
-            return Ok(MirInst::MatchPayload {
+            ensure_ty(types, dest, peek_ty(types, object));
+            if op == "fieldload" {
+                return Ok(MirInst::FieldLoad {
+                    dest,
+                    object,
+                    base,
+                    index,
+                });
+            }
+            return Ok(MirInst::FieldStore {
                 dest,
-                scrutinee,
+                src: object,
+                base,
                 index,
             });
         }

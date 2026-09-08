@@ -4,13 +4,14 @@
 //! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
 //! conservative float peeps (P11 / COI-285), saxpy-reduce HostInvoke
 //! packs (P12 / COI-286), I1 heap/niche `MirTy` names (COI-293), and
-//! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294).
+//! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294), and
+//! I3 field load/store on non-escaping unboxed class locals (COI-295).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
 //! `CALL` uses the one-word typed ABI ([`abi`]; COI-291). Allowlisted
-//! HostInvoke (W4) still boxes at the host edge. Classes / heap stay on
-//! [`crate::il`].
+//! HostInvoke (W4) still boxes at the host edge. Escaping / heap-backed
+//! named class locals stay on [`crate::il`].
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
@@ -49,7 +50,7 @@ pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;
 pub use lower::{LowerError, LowerHints, try_lower_numeric};
-pub use specialize::{try_lower_abi_body, try_specialize_body};
+pub use specialize::{try_lower_abi_body, try_lower_abi_body_with, try_specialize_body};
 pub use strength::strength_reduce;
 pub use text::{ParseError, parse_func};
 pub use ty::MirTy;
@@ -1582,6 +1583,167 @@ fn main() {
             lir.iter()
                 .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
         );
+    }
+
+    #[test]
+    fn i3_unboxed_field_load_store_lowers() {
+        let loc = loc();
+        // let p = new Point(5, 6); return p.x + p.y
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Const { imm: 5, loc },
+            IlOp::StorePop { slot: 0, loc },
+            IlOp::Const { imm: 6, loc },
+            IlOp::StorePop { slot: 1, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body_with(&ops, "point_sum", 0, &mut pool, &[(0, 2)])
+            .expect("I3 unboxed field leaf");
+        assert!(
+            lir.iter()
+                .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
+        );
+        assert!(
+            !lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if matches!(
+                    *byte.bytecode(),
+                    Instruction::DenseBin | Instruction::InitTyped | Instruction::GetField
+                )
+            )),
+            "I3 must stay MIR→LIR without heap fields"
+        );
+        let mut hints = LowerHints::new("point_sum");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.slot_ty.insert(1, MirTy::I64);
+        hints.allow_fields = true;
+        hints.unboxed_fields = vec![(0, 2)];
+        let f = try_lower_numeric(&ops, &hints).expect("lower unboxed fields");
+        f.verify().unwrap();
+        assert!(
+            f.blocks.iter().any(|b| {
+                b.insts
+                    .iter()
+                    .any(|i| matches!(i, MirInst::FieldLoad { index: 0, .. }))
+            }),
+            "SSA has FieldLoad"
+        );
+        assert!(
+            f.blocks.iter().any(|b| {
+                b.insts
+                    .iter()
+                    .any(|i| matches!(i, MirInst::FieldStore { index: 1, .. }))
+            }),
+            "SSA has FieldStore"
+        );
+        let text = f.to_string();
+        assert!(text.contains("fieldload"), "{text}");
+        assert!(text.contains("fieldstore"), "{text}");
+        let g = parse_func(&text).expect(&text);
+        g.verify().unwrap();
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+    }
+
+    #[test]
+    fn i3_heap_getfield_stays_refused() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::GetField { loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        assert!(
+            try_lower_abi_body_with(&ops, "heap_field", 1, &mut pool, &[]).is_none(),
+            "escaping / heap GetField must stay fuse-IL"
+        );
+    }
+
+    #[test]
+    fn pipeline_unboxed_class_field_reads() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn main() {
+    let p = new Point(3, 4);
+    let z = p.x + p.y;
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile unboxed Point");
+        let symbols = p.program_debug().fn_symbols;
+        let main = symbols
+            .iter()
+            .position(|s| s.name == "main")
+            .expect("main symbol");
+        let start = symbols[main].entry_pc as usize;
+        let end = symbols
+            .get(main + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let main_bc = &bc[start..end];
+        assert!(
+            main_bc.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::InitTyped | Instruction::GetField | Instruction::LoadField
+            )),
+            "non-escaping Point must unbox; opcodes={:?}",
+            main_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_escaping_class_stays_heap() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn take(Point q) -> int {
+    return q.x;
+}
+fn hot() -> int {
+    let p = new Point(3, 4);
+    return take(p);
+}
+fn main() {
+    let _ = hot();
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile escaping Point");
+        let symbols = p.program_debug().fn_symbols;
+        let hot = symbols
+            .iter()
+            .position(|s| s.name == "hot")
+            .expect("hot symbol");
+        let start = symbols[hot].entry_pc as usize;
+        let end = symbols
+            .get(hot + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let hot_bc = &bc[start..end];
+        assert!(
+            hot_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::InitTyped),
+            "escaping named local stays InitTyped; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]

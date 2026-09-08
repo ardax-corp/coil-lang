@@ -286,11 +286,12 @@ impl IlModule {
         }
         for i in pending {
             let body = &mut self.funcs[i];
-            if let Some(lir) = crate::mir::try_lower_abi_body(
+            if let Some(lir) = crate::mir::try_lower_abi_body_with(
                 &body.ops,
                 &body.meta.name,
                 body.meta.entry_sp,
                 pool,
+                &body.meta.unboxed_fields,
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).

@@ -220,7 +220,10 @@ fn hoistable(inst: &MirInst) -> bool {
         | MirInst::Cast { .. } => true,
         MirInst::HostInvoke { native_id, .. } => super::host_allow::host_spec(*native_id)
             .is_some_and(|s| s.hoistable),
-        MirInst::Call { .. } | MirInst::MatchPayload { .. } => false,
+        MirInst::Call { .. }
+        | MirInst::MatchPayload { .. }
+        | MirInst::FieldLoad { .. }
+        | MirInst::FieldStore { .. } => false,
     }
 }
 
