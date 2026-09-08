@@ -141,6 +141,31 @@ impl MirFunc {
                         return Err(format!("br cond {} is {}", cond, self.ty(*cond)));
                     }
                 }
+                Terminator::JumpIfMatch {
+                    scrutinee,
+                    tag,
+                    payloads,
+                    ..
+                } => {
+                    if *tag > 1 {
+                        return Err("JumpIfMatch tag must be 0 or 1 (I2)".into());
+                    }
+                    if payloads.len() > 1 {
+                        return Err("JumpIfMatch arity > 1 (I2)".into());
+                    }
+                    if !self.ty(*scrutinee).is_specialized() {
+                        return Err(format!(
+                            "JumpIfMatch scrutinee {} is {}",
+                            scrutinee,
+                            self.ty(*scrutinee)
+                        ));
+                    }
+                    for p in payloads {
+                        if !self.ty(*p).is_specialized() {
+                            return Err(format!("JumpIfMatch payload {p} is {}", self.ty(*p)));
+                        }
+                    }
+                }
                 Terminator::Return { lo, hi } => {
                     if hi.is_some() && lo.is_none() {
                         return Err("two-slot return missing payload word".into());
@@ -188,14 +213,25 @@ impl MirFunc {
                 lhs,
                 rhs,
             } => {
-                if !ty.is_numeric() || *ty == MirTy::Bool {
-                    return Err(format!("{dest} binop on {ty}"));
-                }
-                if op.requires_int() && !ty.is_int() {
-                    return Err(format!("{dest} bitwise on {ty}"));
-                }
-                if self.ty(*lhs) != *ty || self.ty(*rhs) != *ty {
-                    return Err(format!("{dest} binop operand type"));
+                let lt = self.ty(*lhs);
+                let rt = self.ty(*rhs);
+                let heap_bit = ty.is_heap_word()
+                    && matches!(op, super::inst::MirBinOp::BitAnd | super::inst::MirBinOp::BitOr | super::inst::MirBinOp::Xor);
+                if heap_bit {
+                    let ok = |t: MirTy| t.is_heap_word() || t == MirTy::I64;
+                    if !ok(lt) || !ok(rt) {
+                        return Err(format!("{dest} heap bitwise operand type"));
+                    }
+                } else {
+                    if !ty.is_numeric() || *ty == MirTy::Bool {
+                        return Err(format!("{dest} binop on {ty}"));
+                    }
+                    if op.requires_int() && !ty.is_int() {
+                        return Err(format!("{dest} bitwise on {ty}"));
+                    }
+                    if lt != *ty || rt != *ty {
+                        return Err(format!("{dest} binop operand type"));
+                    }
                 }
                 if self.ty(*dest) != *ty {
                     return Err(format!("{dest} binop dest type"));
@@ -204,11 +240,20 @@ impl MirFunc {
             MirInst::Cmp {
                 dest, ty, lhs, rhs, ..
             } => {
-                if !ty.is_numeric() || *ty == MirTy::Bool {
-                    return Err(format!("{dest} cmp on {ty}"));
-                }
-                if self.ty(*lhs) != *ty || self.ty(*rhs) != *ty {
-                    return Err(format!("{dest} cmp operand type"));
+                let lt = self.ty(*lhs);
+                let rt = self.ty(*rhs);
+                if ty.is_heap_word() {
+                    let ok = |t: MirTy| t.is_heap_word() || t == MirTy::I64;
+                    if !ok(lt) || !ok(rt) {
+                        return Err(format!("{dest} heap cmp operand type"));
+                    }
+                } else {
+                    if !ty.is_numeric() || *ty == MirTy::Bool {
+                        return Err(format!("{dest} cmp on {ty}"));
+                    }
+                    if lt != *ty || rt != *ty {
+                        return Err(format!("{dest} cmp operand type"));
+                    }
                 }
                 if self.ty(*dest) != MirTy::Bool {
                     return Err(format!("{dest} cmp dest is not bool"));
@@ -216,8 +261,12 @@ impl MirFunc {
             }
             MirInst::Unary { dest, op, src } => match op {
                 super::inst::MirUnaryOp::Not => {
-                    if self.ty(*src) != MirTy::Bool || self.ty(*dest) != MirTy::Bool {
-                        return Err(format!("{dest} bnot type"));
+                    let t = self.ty(*src);
+                    if self.ty(*dest) != MirTy::Bool {
+                        return Err(format!("{dest} lnot dest is not bool"));
+                    }
+                    if t != MirTy::Bool && !t.is_int() && !t.is_heap_word() {
+                        return Err(format!("{dest} lnot on {t}"));
                     }
                 }
                 super::inst::MirUnaryOp::Neg => {
@@ -273,6 +322,21 @@ impl MirFunc {
                     if !self.ty(*a).is_numeric() {
                         return Err(format!("{dest} call arg {i} type"));
                     }
+                }
+            }
+            MirInst::MatchPayload {
+                dest,
+                scrutinee,
+                index,
+            } => {
+                if *index > 0 {
+                    return Err(format!("{dest} MatchPayload index"));
+                }
+                if !self.ty(*scrutinee).is_specialized() {
+                    return Err(format!("{dest} MatchPayload scrutinee type"));
+                }
+                if !self.ty(*dest).is_specialized() {
+                    return Err(format!("{dest} MatchPayload dest type"));
                 }
             }
             MirInst::Phi { dest, ty, args } => {

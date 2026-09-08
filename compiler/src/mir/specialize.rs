@@ -1,6 +1,8 @@
 //! Try to replace a numeric IL body with dense MIR bytecode, or a
 //! two-slot / niche leaf with MIR→LIR.
 
+use common::Instruction;
+
 use crate::il::IlOp;
 
 use super::abi::{DenseAbi, DenseCallMap};
@@ -85,6 +87,7 @@ pub fn try_lower_abi_body(
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
+    hints.allow_match = true;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     crate::mir::cse(&mut func);
     let entry = ops.iter().find_map(|op| match op {
@@ -96,6 +99,13 @@ pub fn try_lower_abi_body(
 
 fn abi_leaf(ops: &[IlOp]) -> bool {
     let mut ret2 = false;
+    let mut match_shaped = false;
+    let mut jim = false;
+    let mut saw_dup = false;
+    let mut saw_eq = false;
+    let mut saw_jmp = false;
+    let mut saw_lognot = false;
+    let mut saw_bit = false;
     for op in ops {
         match op {
             IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
@@ -110,13 +120,55 @@ fn abi_leaf(ops: &[IlOp]) -> bool {
             | IlOp::UnboxValue { .. }
             | IlOp::Index { .. }
             | IlOp::String { .. }
-            | IlOp::Print { .. }
-            | IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfMatch { .. },
+            | IlOp::Print { .. } => return false,
+            IlOp::Jump {
+                kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
                 ..
-            } => return false,
+            } => {
+                if *tag > 1 || *arity > 1 {
+                    return false;
+                }
+                jim = true;
+                match_shaped = true;
+            }
+            IlOp::Byte { byte, .. }
+                if *byte.bytecode() == Instruction::Unpack
+                    || *byte.bytecode() == Instruction::Seek =>
+            {
+                if *byte.bytecode() == Instruction::Unpack && byte.operand_u32() > 1 {
+                    return false;
+                }
+                if *byte.bytecode() == Instruction::Unpack {
+                    match_shaped = true;
+                }
+            }
+            IlOp::Dup { .. } => saw_dup = true,
+            IlOp::LogNot { .. } => saw_lognot = true,
+            IlOp::Bin { op, .. } => note_match_bin(&mut saw_eq, &mut saw_bit, *op),
+            IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
+                note_match_bin(&mut saw_eq, &mut saw_bit, Instruction::from(*op));
+            }
+            IlOp::Jump {
+                kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
+                ..
+            } => saw_jmp = true,
             _ => {}
         }
     }
-    ret2
+    if saw_jmp && (saw_dup && (saw_eq || saw_lognot) || saw_bit && saw_eq) {
+        match_shaped = true;
+    }
+    ret2 || jim || match_shaped
+}
+
+fn note_match_bin(saw_eq: &mut bool, saw_bit: &mut bool, inst: Instruction) {
+    if matches!(inst, Instruction::EQ | Instruction::NEQ) {
+        *saw_eq = true;
+    }
+    if matches!(
+        inst,
+        Instruction::BITAND | Instruction::BITOR | Instruction::XOR
+    ) {
+        *saw_bit = true;
+    }
 }

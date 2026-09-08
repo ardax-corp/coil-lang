@@ -363,6 +363,16 @@ pub(super) fn dce(func: &mut MirFunc) {
                 super::inst::Terminator::Br { cond, .. } => {
                     live.insert(*cond);
                 }
+                super::inst::Terminator::JumpIfMatch {
+                    scrutinee,
+                    payloads,
+                    ..
+                } => {
+                    live.insert(*scrutinee);
+                    for p in payloads {
+                        live.insert(*p);
+                    }
+                }
                 super::inst::Terminator::Return { lo, hi } => {
                     if let Some(v) = lo {
                         live.insert(*v);
@@ -448,7 +458,10 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         }
         MirInst::Unary { op, src, .. } => ExprKey::Unary { op, src },
         MirInst::Cast { kind, to, src, .. } => ExprKey::Cast { kind, to, src },
-        MirInst::Phi { .. } | MirInst::HostInvoke { .. } | MirInst::Call { .. } => {
+        MirInst::Phi { .. }
+        | MirInst::HostInvoke { .. }
+        | MirInst::Call { .. }
+        | MirInst::MatchPayload { .. } => {
             return None
         }
     })
