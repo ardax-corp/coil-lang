@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::process::exit;
 
-use compiler::{Pipeline, format_bytecode, format_il, format_symbol_index};
+use compiler::{HostGrants, Pipeline, format_bytecode, format_il, format_symbol_index};
 use parser::Pratt;
 use reporting::{ErrorCode, ReportConfig};
 
@@ -16,11 +16,13 @@ pub struct DissectArgs {
     pub show_il: bool,
     pub show_ast: bool,
     pub extra_roots: Vec<std::path::PathBuf>,
+    pub grants: HostGrants,
 }
 
 pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
     let format = config.format;
     let mut pipeline = Pipeline::with_reporter(config, writer_for(format));
+    pipeline.set_host_grants(args.grants);
     let dir = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
     pipeline.bind_project_roots_with_default(dir, args.extra_roots);
 
