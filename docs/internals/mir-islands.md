@@ -31,6 +31,15 @@ island does not fire there.
 **Register VM / Cranelift are later levers**, not prerequisites. Do not
 block islands on P5. Do not revive PGO.
 
+**I8 entry (post I1–I3).** After stack-IL opts, `IlModule` tries dense
+specialize, then IL→MIR→LIR for leftovers that [`lir_eligible`](../../compiler/src/mir/entry.rs)
+accepts for a **named reason**: two-slot `RETURN`, I2 match, I3 unboxed
+fields, or I1 niche `BITAND`/`BITOR`. Plain `if` diamonds and store-only
+loops stay fuse-IL. Hard refuse: I4 strings, I5 alloc, I6 `CALL` / HostInvoke,
+heap index / escaping fields, I2-out-of-range match, I7
+debugger-attached / `-Og`. No dual AST walker. Cost gate: replace only
+when LIR emit ≤ opted fuse-IL.
+
 ## Island ladder
 
 | # | Island | Issue | Outcome | Status |
@@ -42,8 +51,8 @@ block islands on P5. Do not revive PGO.
 | I4 | String / format subset | [COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse) | **Hard refuse.** `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL; no subset, no vanity string bench | on main (#345) |
 | I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) | MakeArray / alloc edges; safepoint / root placeholders; refuse specialize across GC until maps exist | on main (#346) |
 | I6 | Effects / HostInvoke | [COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges) | Broader than W4 allowlist; purity sidecar drives barriers | on main (#347) |
-| I7 | Debugger / deopt | [COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir) | Deopt / stop metadata on MIR edges; VM debugger stays source of truth | this PR |
-| I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) | More bodies enter MIR from codegen or IL→MIR lift — only after I1–I3 | after I1–I3 |
+| I7 | Debugger / deopt | [COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir) | Deopt / stop metadata on MIR edges; VM debugger stays source of truth | on main (#348) |
+| I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) | More bodies enter MIR from IL→MIR lift — infer+lower, not specialize-from-IL accidents | this PR |
 
 I4 is closed as a **hard MIR barrier** (not a type-lattice ticket). No
 narrow string allowlist: nothing in the current language suite needed

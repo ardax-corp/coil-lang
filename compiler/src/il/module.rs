@@ -253,6 +253,7 @@ impl IlModule {
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
+        // I8: leftovers then try IL→MIR→LIR (`lir_eligible`); fuse-IL if refuse.
         let mut dense_calls = crate::mir::DenseCallMap::new();
         let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
         while !pending.is_empty() && opts.mir_specialize {

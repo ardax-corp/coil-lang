@@ -9,17 +9,20 @@
 //! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
 //! I5 alloc / GC-barrier placeholders (COI-300),
 //! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297), and
-//! I7 debugger / deopt boundaries on MIR edges (COI-299).
+//! I7 debugger / deopt boundaries on MIR edges (COI-299), and
+//! I8 broadened MIR emit entry (COI-298).
 //!
-//! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
-//! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
-//! `CALL` uses the one-word typed ABI ([`abi`]; COI-291). Allowlisted
-//! HostInvoke (W4) still boxes at the host edge. Escaping / heap-backed
-//! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
-//! `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies may lower
-//! to `Alloc` + `GcBarrier` SSA; dense / LIR emit still refuse (I5).
-//! Impure HostInvoke / CALL are SSA barriers (I6); W4 dense allowlist stays
-//! closed. Debugger-attached compiles refuse dense / MIR→LIR (I7).
+//! Specialized numeric loops lower to dense 3-address opcodes. Leftover
+//! bodies that [`entry`] accepts lift through MIR→LIR (`RETURN` width 1 or
+//! 2). Dense→dense `CALL` uses the one-word typed ABI ([`abi`]; COI-291).
+//! Allowlisted HostInvoke (W4) still boxes at the host edge. Escaping /
+//! heap-backed named class locals stay on [`crate::il`]. `FORMAT` /
+//! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
+//! may lower to `Alloc` + `GcBarrier` SSA; dense / LIR emit still refuse
+//! (I5). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! allowlist stays closed. Debugger-attached compiles refuse dense /
+//! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
+//! accident.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
@@ -27,6 +30,7 @@ mod builder;
 mod cse;
 mod destprop;
 mod deopt;
+mod entry;
 mod effects;
 mod emit;
 mod gc;
@@ -52,6 +56,7 @@ pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
+pub use entry::{lir_eligible, lir_refuse, LirRefuse};
 pub use func::{MirBlock, MirFunc};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
@@ -153,7 +158,9 @@ mod tests {
             ValueId,
             LowerError,
             ParseError,
+            LirRefuse,
         )>();
+        let _ = (lir_eligible, lir_refuse);
     }
 
     #[test]
@@ -761,11 +768,36 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile below-gate i64");
+        let (bc, constants) = p.compile_src(src).expect("compile below-gate i64");
         assert!(
             !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
             "straight-line below STRAIGHT_LINE_MIN_WORK_OPS stays fuse-IL"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_i8_compare_diamond_stays_not_dense() {
+        let src = r#"
+fn pick(int a, int b, bool c) -> int {
+    if c {
+        return a;
+    }
+    return b;
+}
+fn main() {
+    let _ = pick(1, 2, true) + pick(3, 4, false);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile I8 pick");
+        assert!(
+            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "compare diamond must not dense-specialize"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]
@@ -1461,6 +1493,58 @@ fn main() {
             ) || matches!(op, IlOp::Bin { op, .. } if *op == Instruction::BITOR)),
             "niche LIR must emit BITOR"
         );
+    }
+
+    #[test]
+    fn i8_one_word_niche_enters_lir_without_match() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::BITOR,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert!(lir_eligible(&ops, &[]));
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "niche_err", 1, &mut pool)
+            .expect("I8 one-word niche is LIR, not a match accident");
+        assert!(
+            lir.iter()
+                .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
+        );
+        assert!(try_specialize_body(&ops, "niche_err", 1, &mut pool, &DenseCallMap::new()).is_none());
+    }
+
+    #[test]
+    fn i8_plain_if_diamond_stays_fuse_il() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Bin {
+                op: Instruction::LE,
+                loc,
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(1)),
+            IlOp::Load { slot: 1, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert!(!lir_eligible(&ops, &[]));
+        let mut pool = Vec::new();
+        assert!(try_lower_abi_body(&ops, "min", 2, &mut pool).is_none());
     }
 
     #[test]

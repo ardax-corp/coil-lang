@@ -38,7 +38,7 @@ must not run while a debug controller is attached.
 - Full MIR stepping
 - Archive / opcode bump
 - Growing the W4 dense allowlist
-- Starting I8
+- I8 entry (see [mir-islands.md](mir-islands.md); this island only names edges)
 
 See [mir-islands.md](mir-islands.md), [specialize-refuse.md](specialize-refuse.md),
 and [debugger.md](debugger.md).

@@ -146,7 +146,11 @@ allowlist growth. I7
 ([COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir))
 names `Deopt` stop / leave edges (`allow_deopt`). Debugger-attached
 and `-Og` skip dense + MIR→LIR so the VM debugger stays on fuse-IL
-([mir-deopt.md](mir-deopt.md)). User `CALL` is COI-291
+([mir-deopt.md](mir-deopt.md)). I8
+([COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3))
+lifts leftover bodies through MIR→LIR (`lir_eligible`) when they have a
+named I1–I3 / two-slot reason — not only match / field accidents. Plain
+`if` diamonds stay fuse-IL. User `CALL` is COI-291
 (below). Dense emit keeps `DenseBin` for the numeric region and at each
 allowlisted edge: `LOAD` args (Value words) → `CONST` id → `HostInvoke` →
 `STORE` dest, then more dense ops. P12 whole-body saxpy pack still runs
@@ -301,10 +305,11 @@ stack). Dense `infer_numeric` still refuses that shape.
 - niche bits as existing `BITAND` / `BITOR` / `CONST 0` / `LogNot`
 - no `MakeEnum`, no `ReturnPair` / `PairToHeap` / niche ISA tombstones
 
-`try_lower_abi_body` + `emit_lir` implement that mapping (leaf two-slot IL →
-SSA → fuse-IL, `RETURN` width 2). Production replace is **ON** after
-stack-IL opts: `emit_lir` keeps single-use return/cmp values on the stack
-and `DUP`s a TOS that is also the first word of `k, k+1`. Int
+`try_lower_abi_body` + `emit_lir` implement that mapping (eligible IL →
+SSA → fuse-IL). I8 widens eligibility to any leftover body without an
+I4–I7 refuse (`compiler/src/mir/entry.rs`). Production replace is **ON**
+after stack-IL opts: `emit_lir` keeps single-use return/cmp values on the
+stack and `DUP`s a TOS that is also the first word of `k, k+1`. Int
 `slot ⊕ imm` bins emit `BinSlotImm` so pre-fuse cost matches opted
 fuse-IL. A body is kept only when emitting cost does not grow.
 Stack-IL opts are **not** re-run on the reconstruct (`local_cse`
