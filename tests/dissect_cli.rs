@@ -141,3 +141,83 @@ fn dissect_fib_il_and_ast_sections() {
     );
     let _ = std::fs::remove_dir_all(&cwd);
 }
+
+fn write_attach_entry(dir: &std::path::Path) -> PathBuf {
+    let entry = dir.join("attach.hy");
+    std::fs::write(
+        &entry,
+        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+    )
+    .expect("write attach.hy");
+    entry
+}
+
+#[test]
+fn dissect_attach_fails_without_grant_and_succeeds_with_flag() {
+    ensure_coil_dissect();
+    let bin = coil_bin();
+    let cwd = std::env::temp_dir().join(format!("coil_dissect_grant_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("temp cwd");
+    let entry = write_attach_entry(&cwd);
+
+    let denied = coil_dissect(&bin, Some(&cwd), &entry)
+        .output()
+        .expect("spawn coil dissect attach (denied)");
+    assert!(
+        !denied.status.success(),
+        "expected typecheck failure without --allow-attach"
+    );
+    let err = String::from_utf8_lossy(&denied.stderr);
+    assert!(
+        err.contains("allow-attach") || err.contains("E0408") || err.contains("HostAttach"),
+        "stderr={err}"
+    );
+
+    let granted = coil_dissect(&bin, Some(&cwd), &entry)
+        .arg("--allow-attach")
+        .output()
+        .expect("spawn coil dissect --allow-attach");
+    assert!(
+        granted.status.success(),
+        "dissect --allow-attach failed: {}",
+        String::from_utf8_lossy(&granted.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&granted.stdout);
+    assert!(
+        stdout.contains("=== bytecode ==="),
+        "expected bytecode dump, stdout={stdout}"
+    );
+    assert!(
+        !cwd.join("out.hyc").exists(),
+        "dissect must not write out.hyc"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn dissect_help_lists_host_grant_flags() {
+    ensure_coil_dissect();
+    let coil = PathBuf::from(coil_bin());
+    let helper = coil_cli::sibling_bin(&coil, "coil-dissect");
+    let out = Command::new(&helper)
+        .arg("--help")
+        .output()
+        .expect("spawn coil-dissect --help");
+    assert!(out.status.success());
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    for flag in [
+        "--allow-attach",
+        "--allow-exit",
+        "--allow-exec",
+        "--allow-ffi-exec",
+        "--allow-dload",
+        "--ffi-search-path",
+    ] {
+        assert!(text.contains(flag), "help missing {flag}: {text}");
+    }
+}
