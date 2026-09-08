@@ -29,6 +29,11 @@ pub fn emit_lir(
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
 ) -> Result<Vec<IlOp>, LowerError> {
+    if func.has_gc_edge() {
+        return Err(LowerError::Refused(
+            "MIR→LIR refuses Alloc/GcBarrier (I5: bail to fuse-IL)".into(),
+        ));
+    }
     let plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &plan)?;
     let regs = coalesce_safe_latch_phis(func, regs);
@@ -485,6 +490,11 @@ fn emit_stored(
                 "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
             ));
         }
+        MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
+            return Err(LowerError::Refused(
+                "MIR→LIR refuses Alloc/GcBarrier (I5: bail to fuse-IL)".into(),
+            ));
+        }
     }
     Ok(())
 }
@@ -593,6 +603,9 @@ fn emit_stack(
         }
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
         MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
+        MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => Err(LowerError::Refused(
+            "MIR→LIR refuses Alloc/GcBarrier (I5: bail to fuse-IL)".into(),
+        )),
     }
 }
 

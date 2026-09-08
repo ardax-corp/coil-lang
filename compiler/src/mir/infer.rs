@@ -5,6 +5,7 @@
 //! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer refuses user `CALL`
 //! unless the target is already in the dense ABI map (COI-291), plus
 //! non-allowlisted HostInvoke / heap index / class field / match / string /
+//! alloc (`MakeArray` / `InitTyped`) /
 //! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. W4 accepts
 //! allowlisted math / packed LA / `simd_axpy_reduce` HostInvokes. Compare-only
 //! stays fuse-IL.
@@ -18,6 +19,7 @@ use crate::il::{EntryKind, IlOp, Label};
 use super::abi::DenseCallMap;
 use super::host_allow::host_spec;
 use super::lower::LowerError;
+use super::gc::refuse_reason as alloc_refuse_reason;
 use super::string_barrier::{is_format_inst, refuse_reason};
 use super::ty::MirTy;
 
@@ -581,6 +583,9 @@ fn refuse_il_kind(op: &IlOp) -> &'static str {
     if let Some(reason) = refuse_reason(op) {
         return reason;
     }
+    if let Some(reason) = alloc_refuse_reason(op) {
+        return reason;
+    }
     match op {
         IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => "CALL",
         IlOp::HostInvoke { .. } => "HostInvoke",
@@ -592,7 +597,6 @@ fn refuse_il_kind(op: &IlOp) -> &'static str {
         | IlOp::StoreIndexPinUnchecked { .. }
         | IlOp::ArrayPin { .. } => "heap/index",
         IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => "class/field",
-        IlOp::MakeEnum { .. } | IlOp::MakeTuple { .. } | IlOp::MakeArray { .. } => "heap/aggregate",
         IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => "box",
         IlOp::LoadReturnSlot { .. } | IlOp::ConstReturnImm { .. } | IlOp::BinReturn { .. } => {
             "fused-return"

@@ -291,6 +291,67 @@ pub enum MirInst {
         base: u32,
         index: u32,
     },
+    /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
+    /// safepoint; pair with [`Self::GcBarrier`] so later islands can
+    /// attach roots. Dense / LIR emit refuse these bodies.
+    Alloc {
+        dest: ValueId,
+        kind: MirAllocKind,
+        elems: Vec<ValueId>,
+    },
+    /// GC safepoint / write-barrier placeholder (I5). Dest is `HeapRef`
+    /// (identity of the first root, or a dummy token). `roots` is empty
+    /// until stack maps exist — do not treat this as a precise map.
+    GcBarrier {
+        dest: ValueId,
+        kind: MirGcKind,
+        roots: Vec<ValueId>,
+    },
+}
+
+/// Heap object constructed by [`MirInst::Alloc`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MirAllocKind {
+    Array,
+    Tuple,
+    /// `InitTyped` (`type_id`, `nfields`). Fields stay fuse-IL `SetField`.
+    Object { type_id: u32, nfields: u32 },
+    Enum { tag: u32 },
+}
+
+impl MirAllocKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Array => "array",
+            Self::Tuple => "tuple",
+            Self::Object { .. } => "object",
+            Self::Enum { .. } => "enum",
+        }
+    }
+}
+
+/// Placeholder GC coordination on an alloc / future call edge (I5).
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
+pub enum MirGcKind {
+    Safepoint,
+    Write,
+}
+
+impl MirGcKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Safepoint => "safepoint",
+            Self::Write => "write",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<Self> {
+        Some(match s {
+            "safepoint" => Self::Safepoint,
+            "write" => Self::Write,
+            _ => return None,
+        })
+    }
 }
 
 impl MirInst {
@@ -306,8 +367,15 @@ impl MirInst {
             | Self::Call { dest, .. }
             | Self::MatchPayload { dest, .. }
             | Self::FieldLoad { dest, .. }
-            | Self::FieldStore { dest, .. } => dest,
+            | Self::FieldStore { dest, .. }
+            | Self::Alloc { dest, .. }
+            | Self::GcBarrier { dest, .. } => dest,
         }
+    }
+
+    /// Allocation or GC placeholder — specialize / native must not cross.
+    pub fn is_gc_edge(&self) -> bool {
+        matches!(self, Self::Alloc { .. } | Self::GcBarrier { .. })
     }
 
     pub fn is_phi(&self) -> bool {
@@ -324,6 +392,8 @@ impl MirInst {
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::FieldLoad { object, .. } => vec![*object],
             Self::FieldStore { src, .. } => vec![*src],
+            Self::Alloc { elems, .. } => elems.clone(),
+            Self::GcBarrier { roots, .. } => roots.clone(),
         }
     }
 
@@ -348,6 +418,16 @@ impl MirInst {
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::FieldLoad { object, .. } => *object = map(*object),
             Self::FieldStore { src, .. } => *src = map(*src),
+            Self::Alloc { elems, .. } => {
+                for v in elems.iter_mut() {
+                    *v = map(*v);
+                }
+            }
+            Self::GcBarrier { roots, .. } => {
+                for v in roots.iter_mut() {
+                    *v = map(*v);
+                }
+            }
         }
     }
 }

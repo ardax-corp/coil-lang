@@ -6,14 +6,16 @@
 //! packs (P12 / COI-286), I1 heap/niche `MirTy` names (COI-293), and
 //! I2 match / `JumpIfMatch` on niche and two-slot payloads (COI-294), and
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
-//! I4 hard refuse of `FORMAT` / general string ops (COI-296).
+//! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
+//! I5 alloc / GC-barrier placeholders (COI-300).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
 //! `CALL` uses the one-word typed ABI ([`abi`]; COI-291). Allowlisted
 //! HostInvoke (W4) still boxes at the host edge. Escaping / heap-backed
 //! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
-//! `STRINGIFY` / `PRINT` stay fuse-IL (I4).
+//! `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies may lower
+//! to `Alloc` + `GcBarrier` SSA; dense / LIR emit still refuse (I5).
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
@@ -21,6 +23,7 @@ mod builder;
 mod cse;
 mod destprop;
 mod emit;
+mod gc;
 mod host_allow;
 mod emit_lir;
 mod func;
@@ -45,8 +48,8 @@ pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
 pub use func::{MirBlock, MirFunc};
 pub use inst::{
-    BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
-    ValueId,
+    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst,
+    MirUnaryOp, Terminator, ValueId,
 };
 pub use infer::{STRAIGHT_LINE_MIN_WORK_OPS, infer_lir_with_seed, numeric_work_ops};
 pub use instcombine::instcombine;
@@ -1652,6 +1655,137 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+    }
+
+    #[test]
+    fn i5_alloc_edges_visible_and_emit_refuses() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Const { imm: 1, loc },
+            IlOp::Const { imm: 2, loc },
+            IlOp::MakeArray { arity: 2, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        assert!(
+            try_lower_abi_body(&ops, "arr", 0, &mut pool).is_none(),
+            "I5 ABI leaf must bail to fuse-IL"
+        );
+        assert!(
+            super::infer::infer_numeric(&ops, 0, 0).is_err(),
+            "I5 dense infer refuses MakeArray"
+        );
+        let mut hints = LowerHints::new("arr");
+        hints.allow_alloc = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower alloc");
+        f.verify().unwrap();
+        assert!(f.has_gc_edge());
+        assert!(
+            f.blocks.iter().any(|b| {
+                b.insts
+                    .iter()
+                    .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Array, .. }))
+            }),
+            "Alloc.array visible"
+        );
+        assert!(
+            f.blocks.iter().any(|b| {
+                b.insts
+                    .iter()
+                    .any(|i| matches!(i, MirInst::GcBarrier { kind: MirGcKind::Safepoint, .. }))
+            }),
+            "GcBarrier safepoint visible"
+        );
+        let text = f.to_string();
+        assert!(text.contains("alloc.array"), "{text}");
+        assert!(text.contains("gcbarrier.safepoint"), "{text}");
+        let g = parse_func(&text).expect(&text);
+        g.verify().unwrap();
+        assert!(g.has_gc_edge());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_lir(&f, Some(Label(0)), &mut pool).is_err());
+    }
+
+    #[test]
+    fn i5_init_typed_lowers_object_alloc() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Byte {
+                byte: Byte::new(Instruction::InitTyped)
+                    .with_operand_u32(common::pack_init_typed(3, 2)),
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("obj");
+        hints.allow_alloc = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower InitTyped");
+        f.verify().unwrap();
+        assert!(f.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    MirInst::Alloc {
+                        kind: MirAllocKind::Object {
+                            type_id: 3,
+                            nfields: 2
+                        },
+                        ..
+                    }
+                )
+            })
+        }));
+        let mut pool = Vec::new();
+        assert!(try_lower_abi_body(&ops, "obj", 0, &mut pool).is_none());
+    }
+
+    #[test]
+    fn pipeline_makearray_and_new_stay_fuse_il() {
+        let src = r#"
+fn take(int[] xs) -> int {
+    return xs[0];
+}
+fn hot(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        s = s + take([i, i + 1]);
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(3);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile alloc loop");
+        let symbols = p.program_debug().fn_symbols;
+        let hot = symbols
+            .iter()
+            .position(|s| s.name == "hot")
+            .expect("hot symbol");
+        let start = symbols[hot].entry_pc as usize;
+        let end = symbols
+            .get(hot + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let hot_bc = &bc[start..end];
+        assert!(
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
+            "I5 keeps alloc on fuse-IL; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            hot_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "I5 must not dense-specialize an allocating loop"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]

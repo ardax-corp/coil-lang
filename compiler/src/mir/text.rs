@@ -2,7 +2,8 @@
 
 use super::func::{MirBlock, MirFunc};
 use super::inst::{
-    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
+    BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst,
+    MirUnaryOp, Terminator, ValueId,
 };
 use super::ty::MirTy;
 
@@ -176,6 +177,35 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             base,
             index,
         } => write!(f, "{dest} = fieldstore {src}, {base}, {index}"),
+        MirInst::Alloc { dest, kind, elems } => {
+            write!(f, "{dest} = alloc.{}", kind.as_str())?;
+            match *kind {
+                MirAllocKind::Object { type_id, nfields } => {
+                    write!(f, " {type_id}, {nfields}")?;
+                }
+                MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
+                MirAllocKind::Array | MirAllocKind::Tuple => {}
+            }
+            for (i, e) in elems.iter().enumerate() {
+                if i == 0 && matches!(kind, MirAllocKind::Array | MirAllocKind::Tuple) {
+                    write!(f, " {e}")?;
+                } else {
+                    write!(f, ", {e}")?;
+                }
+            }
+            Ok(())
+        }
+        MirInst::GcBarrier { dest, kind, roots } => {
+            write!(f, "{dest} = gcbarrier.{}", kind.as_str())?;
+            for (i, r) in roots.iter().enumerate() {
+                if i == 0 {
+                    write!(f, " {r}")?;
+                } else {
+                    write!(f, ", {r}")?;
+                }
+            }
+            Ok(())
+        }
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -508,6 +538,44 @@ impl<'a> Parser<'a> {
                 target,
                 args,
             });
+        }
+        if let Some(kind_s) = op.strip_prefix("alloc.") {
+            let kind = match kind_s {
+                "array" => MirAllocKind::Array,
+                "tuple" => MirAllocKind::Tuple,
+                "object" => {
+                    let type_id = self.uint()? as u32;
+                    self.expect(',')?;
+                    let nfields = self.uint()? as u32;
+                    MirAllocKind::Object { type_id, nfields }
+                }
+                "enum" => MirAllocKind::Enum {
+                    tag: self.uint()? as u32,
+                },
+                _ => return Err(ParseError(format!("unknown alloc {kind_s}"))),
+            };
+            let mut elems = Vec::new();
+            if self.peek('v') {
+                elems.push(self.value()?);
+                while self.eat(',') {
+                    elems.push(self.value()?);
+                }
+            }
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::Alloc { dest, kind, elems });
+        }
+        if let Some(kind_s) = op.strip_prefix("gcbarrier.") {
+            let kind =
+                MirGcKind::parse(kind_s).ok_or_else(|| ParseError(format!("unknown gc {kind_s}")))?;
+            let mut roots = Vec::new();
+            if self.peek('v') {
+                roots.push(self.value()?);
+                while self.eat(',') {
+                    roots.push(self.value()?);
+                }
+            }
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::GcBarrier { dest, kind, roots });
         }
         Err(ParseError(format!("unknown op {op}")))
     }

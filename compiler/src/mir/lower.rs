@@ -13,7 +13,11 @@ use crate::il::{EntryKind, IlJumpKind, IlOp, Label};
 use super::abi::DenseCallMap;
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
-use super::inst::{BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, ValueId};
+use super::gc::is_alloc_inst;
+use super::inst::{
+    BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirGcKind, MirInst,
+    ValueId,
+};
 use super::string_barrier::{is_format_inst, refuse_reason};
 use super::ty::MirTy;
 
@@ -59,6 +63,9 @@ pub struct LowerHints {
     pub unboxed_fields: Vec<(u32, u32)>,
     /// I3: Load/Store of those slots become FieldLoad/FieldStore.
     pub allow_fields: bool,
+    /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` → Alloc +
+    /// GcBarrier. Dense / LIR emit still refuse.
+    pub allow_alloc: bool,
 }
 
 impl Default for LowerHints {
@@ -75,6 +82,7 @@ impl Default for LowerHints {
             allow_match: false,
             unboxed_fields: Vec::new(),
             allow_fields: false,
+            allow_alloc: false,
         }
     }
 }
@@ -565,6 +573,20 @@ fn lower_op(
             tos.push(b.ins_call(*target, args, abi)?);
             Ok(())
         }
+        IlOp::MakeTuple { arity, .. } if hints.allow_alloc => {
+            lower_alloc(b, tos, MirAllocKind::Tuple, *arity)
+        }
+        IlOp::MakeArray { arity, .. } if hints.allow_alloc => {
+            lower_alloc(b, tos, MirAllocKind::Array, *arity)
+        }
+        IlOp::MakeEnum { tag, arity, .. } if hints.allow_alloc => lower_alloc(
+            b,
+            tos,
+            MirAllocKind::Enum {
+                tag: u32::from(*tag),
+            },
+            u32::from(*arity),
+        ),
         IlOp::GetField { .. }
         | IlOp::SetField { .. }
         | IlOp::LoadField { .. }
@@ -646,6 +668,17 @@ fn lower_byte(
             Ok(())
         }
         Instruction::Seek if hints.allow_match => Ok(()),
+        inst if is_alloc_inst(inst) && hints.allow_alloc => {
+            let (type_id, nfields) = if inst == Instruction::InitTyped {
+                common::unpack_init_typed(byte.operand_u32())
+            } else {
+                (0, 0)
+            };
+            let obj = b.ins_alloc(MirAllocKind::Object { type_id, nfields }, Vec::new())?;
+            let after = b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])?;
+            tos.push(after);
+            Ok(())
+        }
         inst if is_format_inst(inst) => Err(LowerError::Refused("format".into())),
         Instruction::Unpack if hints.allow_match => {
             let arity = byte.operand_u32();
@@ -669,6 +702,26 @@ fn lower_byte(
             other.mnemonic()
         ))),
     }
+}
+
+fn lower_alloc(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    kind: MirAllocKind,
+    arity: u32,
+) -> Result<(), LowerError> {
+    let n = arity as usize;
+    if tos.len() < n {
+        return Err(LowerError::Refused("alloc stack".into()));
+    }
+    let mut elems = Vec::with_capacity(n);
+    for _ in 0..n {
+        elems.push(tos.pop().expect("arity checked"));
+    }
+    elems.reverse();
+    let obj = b.ins_alloc(kind, elems)?;
+    tos.push(b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])?);
+    Ok(())
 }
 
 fn bin_stack(
@@ -848,6 +901,36 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn lowering_alloc_array_is_visible() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Const { imm: 1, loc },
+            IlOp::MakeArray { arity: 1, loc },
+            IlOp::Return {
+                loc,
+                ret_words: 1,
+            },
+        ];
+        let mut hints = LowerHints::new("arr");
+        hints.allow_alloc = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower alloc");
+        f.verify().unwrap();
+        assert!(f.has_gc_edge());
+        assert!(f.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Array, .. }))
+        }));
+        assert!(f.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::GcBarrier { kind: MirGcKind::Safepoint, .. }))
+        }));
+        assert_eq!(f.ret_ty, Some(MirTy::HeapRef));
+    }
+
     fn lowering_refuses_getfield() {
         let ops = vec![IlOp::GetField { loc: loc() }];
         let err = try_lower_numeric(&ops, &LowerHints::new("cls")).unwrap_err();
