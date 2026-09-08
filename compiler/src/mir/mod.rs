@@ -2,8 +2,8 @@
 //! Result/Option MIR→LIR (P3 / COI-270), LICM (P6 / COI-280),
 //! InstCombine (P7 / COI-281), DestProp (P8 / COI-282),
 //! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
-//! conservative float peeps (P11 / COI-285), and saxpy-reduce HostInvoke
-//! packs (P12 / COI-286).
+//! conservative float peeps (P11 / COI-285), saxpy-reduce HostInvoke
+//! packs (P12 / COI-286), and I1 heap/niche `MirTy` names (COI-293).
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Two-slot
 //! Option/Result leafs lower back to fuse-IL (`RETURN` width 2). Dense→dense
@@ -43,7 +43,7 @@ pub use inst::{
     BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
     ValueId,
 };
-pub use infer::{STRAIGHT_LINE_MIN_WORK_OPS, numeric_work_ops};
+pub use infer::{STRAIGHT_LINE_MIN_WORK_OPS, infer_lir_with_seed, numeric_work_ops};
 pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;
@@ -1359,6 +1359,57 @@ fn main() {
         assert!(
             lir.iter().any(|op| matches!(op, IlOp::Dup { .. })),
             "return (k, k+1) should DUP TOS"
+        );
+    }
+
+    #[test]
+    fn i1_lower_carries_heap_and_niche_words() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        for ty in [MirTy::HeapRef, MirTy::NicheOpt, MirTy::NicheRes] {
+            let mut hints = LowerHints::new("carry");
+            hints.slot_ty.insert(0, ty);
+            hints.param_count = 1;
+            let f = try_lower_numeric(&ops, &hints).expect("lower heap/niche copy");
+            f.verify().unwrap();
+            assert_eq!(f.ty(f.params[0]), ty);
+            assert_eq!(f.ret_ty, Some(ty));
+            assert_eq!(f.ret_layout, ty.layout());
+            let mut pool = Vec::new();
+            assert!(
+                emit_dense(&f, Some(Label(0)), &mut pool).is_err(),
+                "I1 must not dense-specialize heap/niche"
+            );
+        }
+    }
+
+    #[test]
+    fn i1_infer_seed_carries_bitor_niche_res() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::BITOR,
+                loc,
+            },
+            IlOp::StorePop { slot: 1, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut seed = std::collections::HashMap::new();
+        seed.insert(0, MirTy::HeapRef);
+        let inferred = infer_lir_with_seed(&ops, 0, 1, &seed).expect("infer seed");
+        assert_eq!(inferred.slot_ty.get(&0), Some(&MirTy::HeapRef));
+        assert_eq!(inferred.slot_ty.get(&1), Some(&MirTy::NicheRes));
+        assert!(
+            super::infer::infer_numeric(&ops, 0, 1).is_err(),
+            "dense infer still refuses this body"
         );
     }
 

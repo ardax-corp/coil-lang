@@ -35,8 +35,8 @@ block islands on P5. Do not revive PGO.
 
 | # | Island | Issue | Outcome | Status |
 |---|--------|-------|---------|--------|
-| I0 | Doctrine + refuse map | [COI-292](https://linear.app/ardax/issue/COI-292/i0-mir-islands-doctrine-refuse-inventory) | This note; feature → path → target island | this PR |
-| I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | next |
+| I0 | Doctrine + refuse map | [COI-292](https://linear.app/ardax/issue/COI-292/i0-mir-islands-doctrine-refuse-inventory) | This note; feature → path → target island | on main (#340) |
+| I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | this PR |
 | I2 | Match on niche / two-slot | [COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir) | JumpIfMatch-shaped control in MIR → LIR or dense-adjacent emit | after I1 |
 | I3 | Non-escaping class fields | [COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir) | Field load/store using the existing local-escape sidecar; escaping named locals stay fuse-IL | after I1 |
 | I4 | String / format subset | (project ladder) | Narrow string ops **or** keep `FORMAT` as a MIR barrier — decide here, do not invent a vanity string bench | after I1–I3 |
@@ -91,8 +91,8 @@ Dense refuse rows that stay current: [specialize-refuse.md](specialize-refuse.md
    a body the island claims to touch, or a flagship miss outside ±5% when
    archives differ.
 
-I0 is docs-only. I1 must still publish the embed A/B table vs parent
-`30cf992f` (COI-291 / #339).
+I0 is docs-only (on main as #340 / `347ec5a`). I1 must still publish the
+embed A/B table vs that parent (not the earlier COI-291 tip `30cf992f`).
 
 ## Non-goals
 
