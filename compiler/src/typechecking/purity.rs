@@ -722,9 +722,7 @@ mod tests {
 
     fn pure_set(src: &str) -> RecursivePureSet {
         let owned = src.to_string();
-        let ast = Pratt::default()
-            .parse(owned.as_str())
-            .expect("parse");
+        let ast = Pratt::default().parse(owned.as_str()).expect("parse");
         analyze_recursive_pure(&ast)
     }
 
@@ -1042,7 +1040,10 @@ fn main() { return; }
 "#,
         );
         let set = analyze_pure_fns(&ast);
-        assert!(set.contains("wave"), "prelude math must not poison purity: {set:?}");
+        assert!(
+            set.contains("wave"),
+            "prelude math must not poison purity: {set:?}"
+        );
         assert!(!set.contains("tick"), "clocks are observational: {set:?}");
     }
 

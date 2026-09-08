@@ -56,9 +56,7 @@ impl MirFunc {
     pub fn has_impure_host(&self) -> bool {
         self.blocks.iter().any(|b| {
             b.insts.iter().any(|i| match i {
-                MirInst::HostInvoke { native_id, .. } => {
-                    !super::effects::host_is_pure(*native_id)
-                }
+                MirInst::HostInvoke { native_id, .. } => !super::effects::host_is_pure(*native_id),
                 _ => false,
             })
         })

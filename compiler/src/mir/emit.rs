@@ -1,13 +1,12 @@
 //! Lower verified numeric MIR to dense bytecode (`IlOp` residuals + labels).
 
-use common::{Byte, DebugLoc, Instruction, dense};
+use common::{dense, Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::func::MirFunc;
 use super::inst::{
-    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
-    ValueId,
+    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
 };
 use super::lower::LowerError;
 use super::ty::MirTy;
@@ -30,7 +29,9 @@ pub fn emit_dense(
     }
     if func.blocks.iter().any(|b| {
         b.insts.iter().any(|i| match i {
-            MirInst::HostInvoke { native_id, .. } => super::host_allow::host_spec(*native_id).is_none(),
+            MirInst::HostInvoke { native_id, .. } => {
+                super::host_allow::host_spec(*native_id).is_none()
+            }
             _ => false,
         })
     }) {
