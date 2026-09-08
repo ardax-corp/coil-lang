@@ -77,8 +77,8 @@ breakpoints (`setFunctionBreakpoints`) are more reliable when line info is spars
 | `run` / `r` | Start or restart from prologue |
 | `continue` / `c` | Resume until next stop |
 | `stepi` / `si` | One bytecode instruction |
-| `step` / `s` | Until source line changes (into calls); falls back to `stepi` if the current PC has no line |
-| `next` / `n` | Until line changes at ≤ current frame depth |
+| `step` / `s` | Until source line changes (into calls); falls back to `stepi` (prints `Step`) if the current PC has no line |
+| `next` / `n` | Until line changes at ≤ current frame depth; same `stepi` fallback when the PC has no line |
 | `finish` / `fin` | Until current frame returns |
 | `print` / `p` `<name\|$N>` | Format local by name or slot index |
 | `bt` | Call stack with symbol + `file:line` when **exactly** known |
