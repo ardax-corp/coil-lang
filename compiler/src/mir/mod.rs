@@ -38,6 +38,7 @@ pub use inst::{
     BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
     ValueId,
 };
+pub use infer::{STRAIGHT_LINE_MIN_WORK_OPS, numeric_work_ops};
 pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;
@@ -731,7 +732,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_refuses_i64_without_back_edge() {
+    fn pipeline_refuses_straight_line_below_work_gate() {
         let src = r#"
 fn eval_a(int i, int j) -> int {
     return i + j * 2;
@@ -741,10 +742,67 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile straight-line i64");
+        let (bc, _) = p.compile_src(src).expect("compile below-gate i64");
         assert!(
             !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "straight-line i64 stays fuse-IL (W3)"
+            "straight-line below STRAIGHT_LINE_MIN_WORK_OPS stays fuse-IL"
+        );
+    }
+
+    #[test]
+    fn pipeline_specializes_straight_line_above_work_gate() {
+        let src = r#"
+fn hot(float x, float y) -> float {
+    let a = x * x + y * y;
+    let b = a * x + y * 2.0;
+    let c = b * y - x * 4.0;
+    let d = c * x + a * 0.5;
+    return d / (2.0 + x * y);
+}
+fn main() {
+    let _ = hot(1.5, 0.5);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile above-gate kernel");
+        assert_eq!(STRAIGHT_LINE_MIN_WORK_OPS, 8);
+        assert_eq!(numeric_work_ops(&[]), 0);
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "straight-line above work-op gate must emit DenseBin"
+        );
+        assert!(
+            !bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::BinSlotSlotJmpf
+                    | Instruction::BinSlotSlotJmpt
+                    | Instruction::BinSlotImmJmpf
+                    | Instruction::BinSlotImmJmpt
+            )),
+            "W3 kernel is acyclic; no fused compare-jump latch"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_eval_a_follows_straight_line_work_gate() {
+        let src = r#"
+fn eval_a(int i, int j) -> float {
+    let ij = i + j;
+    let t = (ij * (ij + 1)) / 2 + i + 1;
+    return 1.0 / (t as float);
+}
+fn main() {
+    let _ = eval_a(1, 2);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile eval_a");
+        let dense = bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin);
+        assert!(
+            dense,
+            "nbody eval_a meets STRAIGHT_LINE_MIN_WORK_OPS and emits DenseBin"
         );
     }
 

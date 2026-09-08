@@ -1,10 +1,10 @@
 //! Infer specialized slot types from pre-fuse IL (refuse heap / Value).
 //!
-//! Dense eligibility (W2): a back-edge plus float `+/−/×/÷`, i64 `+/−/×/÷/%`
-//! (or int `INC`/`DEC`), or unused `has_i32`. Infer already refuses CALL /
+//! Dense eligibility: float `+/−/×/÷`, i64 `+/−/×/÷/%` (or int `INC`/`DEC`),
+//! or unused `has_i32`, plus either a back-edge **or** a straight-line body
+//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer already refuses CALL /
 //! HostInvoke / heap index / class field / match / string / multi-word
-//! `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. Compare-only and
-//! straight-line kernels stay fuse-IL (W3).
+//! `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. Compare-only stays fuse-IL.
 
 use std::collections::HashMap;
 
@@ -14,6 +14,21 @@ use crate::il::{IlOp, Label};
 
 use super::lower::LowerError;
 use super::ty::MirTy;
+
+/// Minimum numeric work ops for a no-back-edge body to take dense specialize.
+///
+/// Loops amortize dense `Seek` + Value ABI at CALL/RETURN over many trips.
+/// A straight-line helper pays that tax once per CALL. Two-to-four-op
+/// helpers (`i + j * 2`) stay cheaper as fuse-IL. Eight work ops is past
+/// that handful and is the smallest integer that still leaves `eval_a`-sized
+/// kernels optional after stack-IL opts (below → refuse).
+pub const STRAIGHT_LINE_MIN_WORK_OPS: usize = 8;
+
+/// Bin / slot-bin plus residual INC/DEC/NEG/NEGF/`CastIntToFloat`.
+/// Load / Store / Const / control do not count.
+pub fn numeric_work_ops(ops: &[IlOp]) -> usize {
+    ops.iter().filter(|op| is_numeric_work_op(op)).count()
+}
 
 #[derive(Clone, Copy)]
 enum Origin {
@@ -69,7 +84,12 @@ fn infer_walk(
     mode: InferMode,
 ) -> Result<Inferred, LowerError> {
     if mode == InferMode::Dense && !has_back_edge(ops) {
-        return Err(LowerError::Refused("no loop (dense path is for hot numeric)".into()));
+        let work = numeric_work_ops(ops);
+        if work < STRAIGHT_LINE_MIN_WORK_OPS {
+            return Err(LowerError::Refused(format!(
+                "straight-line work {work} < {STRAIGHT_LINE_MIN_WORK_OPS}"
+            )));
+        }
     }
     let mut slot_ty: HashMap<u32, MirTy> = HashMap::new();
     let mut pool_ty = vec![None; pool_len];
@@ -327,6 +347,21 @@ fn infer_walk(
         has_float_arith,
         has_i64_arith,
     })
+}
+
+fn is_numeric_work_op(op: &IlOp) -> bool {
+    match op {
+        IlOp::Bin { .. } | IlOp::BinSlotImm { .. } | IlOp::BinSlotSlot { .. } => true,
+        IlOp::Byte { byte, .. } => matches!(
+            *byte.bytecode(),
+            Instruction::CastIntToFloat
+                | Instruction::NEGF
+                | Instruction::NEG
+                | Instruction::INC
+                | Instruction::DEC
+        ),
+        _ => false,
+    }
 }
 
 fn has_back_edge(ops: &[IlOp]) -> bool {

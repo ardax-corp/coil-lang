@@ -31,7 +31,8 @@ Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`.
 ## P1 — dense exec (COI-268)
 
 Eligible numeric loops (float `+`/`-`/`*`/`/`, counted i64 `+`/`-`/`*`/`/`/`%`,
-or `i32`; no heap/calls; one or more back-edges) emit:
+or `i32`; no heap/calls; one or more back-edges) and W3 straight-line bodies
+at/above eight work ops emit:
 
 - `DenseBin` / `DenseConst` / `DenseMove` / `DenseUnary` / `DenseCast`
 - `Seek` to the typed slot high-water mark
@@ -69,7 +70,8 @@ hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
 
 Specialize no longer refuses multi-header bodies: nested numeric loops
 (including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
-succeed. Straight-line i64 stays fuse-IL (W3).
+succeed. Straight-line bodies need the W3 work-op gate
+([specialize-refuse.md](specialize-refuse.md)).
 
 ## W1 — float arith without requiring `*` (COI-287)
 
@@ -82,8 +84,16 @@ loops emit `DenseBin`. `DIVF` already qualified before W1. Hit bench:
 
 Infer’s dense gate also accepts i64 `+`/`-`/`*`/`/`/`%` (and int `INC`/`DEC`)
 on a back-edge body that is otherwise numeric (no heap / `CALL` / multi-word
-`RETURN`). Compare-only and straight-line stay fuse-IL. Hit bench:
+`RETURN`). Compare-only stays fuse-IL. Hit bench:
 `examples/perf/mir_dense_i64.hy`.
+
+## W3 — cost-gated straight-line (COI-289)
+
+A no-back-edge numeric body specializes when `numeric_work_ops` is at least
+`STRAIGHT_LINE_MIN_WORK_OPS` (**8**): `Bin` / `BinSlotImm` / `BinSlotSlot`
+plus residual `INC`/`DEC`/`NEG`/`NEGF`/`CastIntToFloat`. Dense `Seek` + Value
+ABI is a per-CALL tax that loops amortize; tiny helpers stay fuse-IL.
+Hit bench: `examples/perf/mir_dense_straight.hy`.
 
 ## P7 — MIR InstCombine (COI-281)
 

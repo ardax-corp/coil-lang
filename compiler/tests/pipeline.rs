@@ -3814,6 +3814,12 @@ fn example_perf_mir_dense_i64_prints_checksum() {
 }
 
 #[test]
+fn example_perf_mir_dense_straight_prints_checksum() {
+    let output = run_example("examples/perf/mir_dense_straight.hy");
+    assert_eq!(output, "-146834");
+}
+
+#[test]
 fn example_perf_mandelbrot_prints_checksum() {
     let output = run_example("examples/perf/mandelbrot.hy");
     assert_eq!(output, "625885");
