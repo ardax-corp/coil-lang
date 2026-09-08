@@ -25,7 +25,7 @@ the stack).
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
 | `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted HostInvoke box/unbox) |
-| `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs and I2 niche/two-slot match |
+| `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs, I2 niche/two-slot match, and I3 unboxed class fields |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
@@ -39,6 +39,12 @@ adds `heapref` / `niche_opt` / `niche_res` under `value` so infer/lower can
 stay fuse-IL. I2 ([COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir))
 lowers niche / two-slot match (`LogNot` / tag `Br` / `JumpIfMatch` tag 0/1
 arity ≤ 1) through MIR→LIR. Dense emit still refuses those terminators.
+I3 ([COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir))
+lowers field load/store on **non-escaping** named class locals the
+local_escape sidecar already unboxed into consecutive slots
+(`FieldLoad` / `FieldStore`). Escaping / heap-backed named locals
+(`InitTyped` / `GetField` / `LoadField`) stay fuse-IL. Dense emit
+refuses the new field ops.
 
 ## P1 — dense exec (COI-268)
 
