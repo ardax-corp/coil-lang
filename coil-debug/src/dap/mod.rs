@@ -24,15 +24,14 @@ struct DapServer {
     stop_on_entry: bool,
     pending_start: bool,
     exited: bool,
-    /// Session started but paused before main (stopOnEntry).
-    paused_at_entry: bool,
     /// Captures inferior stdout so it does not corrupt the DAP stdio stream.
     print_buf: Arc<Mutex<Vec<u8>>>,
     extra_roots: Vec<PathBuf>,
+    grants: HostGrants,
 }
 
 impl DapServer {
-    fn new(extra_roots: Vec<PathBuf>) -> Self {
+    fn new(extra_roots: Vec<PathBuf>, grants: HostGrants) -> Self {
         let print_buf = Arc::new(Mutex::new(Vec::new()));
         machine::io::set_shared_print_redirect(Some(Arc::clone(&print_buf)));
         Self {
@@ -42,9 +41,9 @@ impl DapServer {
             stop_on_entry: false,
             pending_start: false,
             exited: false,
-            paused_at_entry: false,
             print_buf,
             extra_roots,
+            grants,
         }
     }
 
@@ -136,11 +135,12 @@ impl DapServer {
                 let config = ReportConfig::from_cli_flags(false, false).map_err(|e| {
                     io::Error::new(io::ErrorKind::Other, e.to_string())
                 })?;
+                let grants = merge_launch_grants(&self.grants, &args);
                 match DebugSession::compile(
                     config,
                     &path_str,
                     Box::new(io::stderr()),
-                    HostGrants::deny_all(),
+                    grants,
                     self.extra_roots.clone(),
                 ) {
                     Ok(mut session) => {
@@ -345,36 +345,20 @@ impl DapServer {
                 }
             }
             "continue" => {
-                if self.paused_at_entry {
-                    self.paused_at_entry = false;
-                    let reason = self
-                        .session
-                        .as_mut()
-                        .map(|s| s.start())
-                        .unwrap_or(StopReason::Halt);
-                    self.send_response(
-                        writer,
-                        request_seq,
-                        command,
-                        json!({ "allThreadsContinued": true }),
-                    )?;
-                    self.emit_stop_or_exit(writer, &reason)?;
-                } else {
-                    let reason = self
-                        .session
-                        .as_mut()
-                        .map(|s| s.continue_exec())
-                        .unwrap_or(Err("not launched".into()));
-                    self.send_response(
-                        writer,
-                        request_seq,
-                        command,
-                        json!({ "allThreadsContinued": true }),
-                    )?;
-                    match reason {
-                        Ok(r) => self.emit_stop_or_exit(writer, &r)?,
-                        Err(e) => self.send_error(writer, request_seq, command, &e)?,
-                    }
+                let reason = self
+                    .session
+                    .as_mut()
+                    .map(|s| s.continue_exec())
+                    .unwrap_or(Err("not launched".into()));
+                self.send_response(
+                    writer,
+                    request_seq,
+                    command,
+                    json!({ "allThreadsContinued": true }),
+                )?;
+                match reason {
+                    Ok(r) => self.emit_stop_or_exit(writer, &r)?,
+                    Err(e) => self.send_error(writer, request_seq, command, &e)?,
                 }
             }
             "next" => {
@@ -448,24 +432,34 @@ impl DapServer {
 
     fn start_or_stop_on_entry<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
         if self.stop_on_entry {
-            self.paused_at_entry = true;
-            self.send_event(
-                writer,
-                "stopped",
-                Some(json!({
-                    "reason": "entry",
-                    "threadId": THREAD_ID,
-                    "allThreadsStopped": true,
-                })),
-            )?;
-            return Ok(());
+            let reason = self
+                .session
+                .as_mut()
+                .map(|s| s.start_paused_at_entry())
+                .unwrap_or(StopReason::Halt);
+            match reason {
+                StopReason::Halt | StopReason::Panic => self.emit_stop_or_exit(writer, &reason),
+                _ => {
+                    self.flush_captured_output(writer)?;
+                    self.send_event(
+                        writer,
+                        "stopped",
+                        Some(json!({
+                            "reason": "entry",
+                            "threadId": THREAD_ID,
+                            "allThreadsStopped": true,
+                        })),
+                    )
+                }
+            }
+        } else {
+            let reason = self
+                .session
+                .as_mut()
+                .map(|s| s.start())
+                .unwrap_or(StopReason::Halt);
+            self.emit_stop_or_exit(writer, &reason)
         }
-        let reason = self
-            .session
-            .as_mut()
-            .map(|s| s.start())
-            .unwrap_or(StopReason::Halt);
-        self.emit_stop_or_exit(writer, &reason)
     }
 
     fn emit_stop_or_exit<W: Write>(&mut self, writer: &mut W, reason: &StopReason) -> io::Result<()> {
@@ -516,6 +510,33 @@ impl DapServer {
     }
 }
 
+fn merge_launch_grants(cli: &HostGrants, args: &Value) -> HostGrants {
+    let mut grants = cli.clone();
+    if args.get("allowAttach").and_then(|v| v.as_bool()) == Some(true) {
+        grants.allow_attach = true;
+    }
+    if args.get("allowExit").and_then(|v| v.as_bool()) == Some(true) {
+        grants.allow_exit = true;
+    }
+    if args.get("allowExec").and_then(|v| v.as_bool()) == Some(true) {
+        grants.allow_exec = true;
+    }
+    if args.get("allowFfiExec").and_then(|v| v.as_bool()) == Some(true) {
+        grants.allow_ffi_exec = true;
+    }
+    if let Some(stems) = args.get("allowDload").and_then(|v| v.as_array()) {
+        for stem in stems.iter().filter_map(|v| v.as_str()) {
+            grants.grant_dload_allow(stem);
+        }
+    }
+    if let Some(paths) = args.get("ffiSearchPath").and_then(|v| v.as_array()) {
+        for path in paths.iter().filter_map(|v| v.as_str()) {
+            grants.add_ffi_search_path(PathBuf::from(path));
+        }
+    }
+    grants
+}
+
 fn resolve_program_path(program: &str, cwd: Option<&Path>) -> PathBuf {
     let p = PathBuf::from(program);
     if p.is_absolute() && p.exists() {
@@ -534,11 +555,11 @@ fn resolve_program_path(program: &str, cwd: Option<&Path>) -> PathBuf {
 }
 
 /// Run the DAP adapter on stdio until disconnect/terminate.
-pub fn run_dap_server(extra_roots: Vec<PathBuf>) -> io::Result<()> {
+pub fn run_dap_server(extra_roots: Vec<PathBuf>, grants: HostGrants) -> io::Result<()> {
     let stdin = io::stdin();
     let mut stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
-    let mut server = DapServer::new(extra_roots);
+    let mut server = DapServer::new(extra_roots, grants);
 
     loop {
         let Some(msg) = read_message(&mut reader)? else {
@@ -558,6 +579,7 @@ pub fn run_dap_server(extra_roots: Vec<PathBuf>) -> io::Result<()> {
 mod tests {
     use super::protocol::{Message, read_message, write_message};
     use super::resolve_program_path;
+    use compiler::HostGrants;
     use std::path::PathBuf;
 
     #[test]
@@ -585,6 +607,23 @@ mod tests {
             "cwd-relative fib.hy missing: {}",
             resolved.display()
         );
+    }
+
+    #[test]
+    fn merge_launch_grants_ors_cli_and_launch() {
+        let mut cli = HostGrants::deny_all();
+        cli.allow_exit = true;
+        let args = serde_json::json!({
+            "allowAttach": true,
+            "allowDload": ["tls"],
+            "ffiSearchPath": ["./native"],
+        });
+        let merged = super::merge_launch_grants(&cli, &args);
+        assert!(merged.allow_exit);
+        assert!(merged.allow_attach);
+        assert!(!merged.allow_exec);
+        assert_eq!(merged.allow_dload, vec!["tls".to_string()]);
+        assert_eq!(merged.ffi_search_paths, vec![PathBuf::from("./native")]);
     }
 
     #[test]
