@@ -2435,4 +2435,65 @@ fn main() {
         vm.run_raw(&bc, &constants, p2.strings(), p2.static_slot_count());
         assert!(!vm.panicked(), "match helpers must run");
     }
+
+    #[test]
+    fn i2_last_arm_unpack_overlap_uses_payload() {
+        // Fuse shape of `score_phase`: two arity-0 JIMs then last-arm
+        // `Unpack` + overlap `LOAD` + `y + 2`.
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 0 },
+                target: Label(2),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::Unpack).with_operand_u32(1),
+                loc,
+            },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Const { imm: 2, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(1)),
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(2)),
+            IlOp::Load { slot: 1, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "score_phase", 1, &mut pool)
+            .expect("last-arm Unpack overlap");
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack
+            )),
+            "last arm must emit Unpack (miss TOS is still the scrutinee)"
+        );
+        assert!(
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::Bin { .. } | IlOp::BinSlotImm { .. }
+            )),
+            "last arm must keep y + 2"
+        );
+    }
 }

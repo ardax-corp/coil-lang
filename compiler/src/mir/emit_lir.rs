@@ -81,7 +81,22 @@ pub fn emit_lir(
         }
         consume_match_tos(&mut out, func, block.id, &plan, &regs, loc);
         for inst in &block.insts {
-            if inst.is_phi() || matches!(inst, MirInst::MatchPayload { .. }) {
+            if inst.is_phi() {
+                continue;
+            }
+            if let MirInst::MatchPayload { dest, .. } = inst {
+                if is_jim_term_payload(func, *dest) || plan.tree[dest.index()] {
+                    continue;
+                }
+                out.push(IlOp::byte(
+                    Byte::new(Instruction::Unpack).with_operand_u32(1),
+                ));
+                if plan.need_slot[dest.index()] {
+                    out.push(IlOp::StorePop {
+                        slot: u32::from(regs[dest.index()]),
+                        loc,
+                    });
+                }
                 continue;
             }
             let dest = inst.dest();
@@ -268,6 +283,15 @@ fn term_values(term: &Terminator) -> Vec<ValueId> {
 
 /// `JumpIfMatch` leaves the scrutinee (miss) or payloads (taken) on the
 /// stack. Store live payload slots; miss keeps TOS for the next match.
+fn is_jim_term_payload(func: &MirFunc, dest: ValueId) -> bool {
+    func.blocks.iter().any(|b| {
+        matches!(
+            &b.term,
+            Some(Terminator::JumpIfMatch { payloads, .. }) if payloads.contains(&dest)
+        )
+    })
+}
+
 fn consume_match_tos(
     out: &mut Vec<IlOp>,
     func: &MirFunc,
@@ -603,12 +627,19 @@ fn emit_stack(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
         MirInst::MatchPayload { dest, .. } => {
-            if plan.need_slot[dest.index()] {
-                out.push(IlOp::Load {
-                    slot: u32::from(regs[dest.index()]),
-                    loc,
-                });
+            if is_jim_term_payload(func, *dest) {
+                if plan.need_slot[dest.index()] {
+                    out.push(IlOp::Load {
+                        slot: u32::from(regs[dest.index()]),
+                        loc,
+                    });
+                }
+                return Ok(());
             }
+            // Last-arm `Unpack`: miss TOS is still the scrutinee.
+            out.push(IlOp::byte(
+                Byte::new(Instruction::Unpack).with_operand_u32(1),
+            ));
             Ok(())
         }
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),

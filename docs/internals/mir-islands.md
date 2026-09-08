@@ -72,7 +72,7 @@ lowering. Unicode / regex stay out of MIR.
 | `Option<int>` / immediate-Ok `Result` / arity-2 immediate product leafs | P3 MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | I2 for match; I1 names the layout only |
 | Heap `Option<T>` / heap-heap `Result<T,E>` (COI-92 niche words) | fuse-IL (`CONST 0` / `BITAND` / `BITOR`); layout already `HeapNiche` | I1 SSA types; I2 match; not dense |
 | Nested / mixed / `CallIndirect` Option/Result | boxed `ObjEnum` + fuse-IL | stay refuse until a later island says otherwise |
-| `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1; arity 0 overlap) | MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | **I2** |
+| `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1; arity 0 overlap; last-arm `Unpack` writes the reserved slot) | MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | **I2** |
 | `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | fuse-IL | stay refuse |
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |

@@ -78,3 +78,39 @@ test("match as let rhs") {
     };
     assert(v == 8)?;
 }
+
+enum Phase {
+    Low(int),
+    Mid(int),
+    High(int),
+}
+
+fn score_phase(Phase p) -> int {
+    return match p {
+        Phase::Low(v) => v,
+        Phase::Mid(x) => x + 1,
+        Phase::High(y) => y + 2,
+    };
+}
+
+fn wrap_phase(int x) -> Phase {
+    let k = x % 3;
+    if k == 0 {
+        return Phase::Low(x);
+    }
+    if k == 1 {
+        return Phase::Mid(x);
+    }
+    return Phase::High(x);
+}
+
+test("boxed last-arm payload plus const") {
+    assert(score_phase(Phase::Low(3)) == 3)?;
+    assert(score_phase(Phase::Mid(4)) == 5)?;
+    assert(score_phase(Phase::High(2)) == 4)?;
+    assert(score_phase(Phase::High(5)) == 7)?;
+    assert(score_phase(Phase::High(8)) == 10)?;
+    assert(score_phase(wrap_phase(2)) == 4)?;
+    assert(score_phase(wrap_phase(5)) == 7)?;
+    assert(score_phase(wrap_phase(8)) == 10)?;
+}

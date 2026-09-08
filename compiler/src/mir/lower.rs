@@ -204,8 +204,10 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         } else {
             started.insert(bid, tos.clone());
         }
-        for op in &ops[start..end] {
-            lower_op(&mut b, &mut tos, op, hints)?;
+        for i in start..end {
+            let op = &ops[i];
+            let next = first_emitting(&ops[i + 1..end]);
+            lower_op(&mut b, &mut tos, op, next, hints)?;
             maybe_ins_deopt(&mut b, op, hints)?;
         }
         if b.func().block(bid).term.is_none() {
@@ -287,26 +289,43 @@ fn label_at(op: &IlOp) -> Option<Label> {
     }
 }
 
+fn first_emitting(ops: &[IlOp]) -> Option<&IlOp> {
+    ops.iter()
+        .find(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+}
+
 /// First emitting op after `taken` (boxed-overlap `JumpIfMatch` arity 0).
 fn first_emitting_at(ops: &[IlOp], taken: Label) -> Option<&IlOp> {
     let i = ops.iter().position(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => *l == taken,
         _ => false,
     })?;
-    ops[i + 1..]
-        .iter()
-        .find(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+    first_emitting(&ops[i + 1..])
 }
 
-/// Boxed match codegen emits `JumpIfMatch` arity 0; VM still pushes a
-/// unary payload when the taken arm is identity-return or a slot `LOAD`.
+/// Boxed match codegen emits `JumpIfMatch` / last-arm `Unpack` arity 0;
+/// the VM still pushes a unary payload. Arity ≥ 1 is explicit. Arity 0
+/// recovers a payload when the taken arm is identity-`RETURN`, overlap
+/// `LOAD` / `BinSlotImm`, or a stack `Bin`.
 fn jim_taken_payloads(arity: u32, first: Option<&IlOp>) -> u32 {
     if arity >= 1 {
-        return arity.min(1);
+        return 1;
     }
     match first {
-        Some(IlOp::Return { .. }) | Some(IlOp::Load { .. }) => 1,
+        Some(IlOp::Return { .. })
+        | Some(IlOp::Load { .. })
+        | Some(IlOp::Bin { .. })
+        | Some(IlOp::BinSlotImm { .. }) => 1,
         _ => 0,
+    }
+}
+
+/// Slot that receives the VM overlap write (`Seek` + reserved local).
+fn boxed_overlap_slot(first: Option<&IlOp>) -> Option<u32> {
+    match first {
+        Some(IlOp::Load { slot, .. }) => Some(*slot),
+        Some(IlOp::BinSlotImm { slot, .. }) => Some(u32::from(*slot)),
+        _ => None,
     }
 }
 
@@ -465,17 +484,17 @@ fn emit_term(
                 payloads.push(b.ins_match_payload(scrutinee, 0, ty)?);
             }
             let mut taken_stack = tos.clone();
-            // Boxed overlap: payload lands in a reserved slot (`LOAD` first).
-            // Identity `Case(x) => x` leaves it on the operand stack.
-            if n_payloads == 1 && matches!(first, Some(IlOp::Load { .. })) {
-                if let (Some(IlOp::Load { slot, .. }), Some(&p)) = (first, payloads.first()) {
+            // Boxed overlap: payload lands in a reserved slot (`LOAD` /
+            // `BinSlotImm` first). Identity `Case(x) => x` leaves it on TOS.
+            if n_payloads == 1 {
+                if let (Some(slot), Some(&p)) = (boxed_overlap_slot(first), payloads.first()) {
                     overlap_defs
                         .entry(taken)
                         .or_default()
-                        .push((LocalId(*slot), p));
+                        .push((LocalId(slot), p));
+                } else {
+                    taken_stack.extend(payloads.iter().copied());
                 }
-            } else {
-                taken_stack.extend(payloads.iter().copied());
             }
             let mut miss_stack = tos.clone();
             miss_stack.push(scrutinee);
@@ -503,6 +522,7 @@ fn lower_op(
     b: &mut MirBuilder,
     tos: &mut Vec<ValueId>,
     op: &IlOp,
+    next: Option<&IlOp>,
     hints: &LowerHints,
 ) -> Result<(), LowerError> {
     match op {
@@ -591,7 +611,7 @@ fn lower_op(
             tos.push(apply_bin(b, inst, lhs, rhs)?);
             Ok(())
         }
-        IlOp::Byte { byte, .. } => lower_byte(b, tos, byte, hints),
+        IlOp::Byte { byte, .. } => lower_byte(b, tos, byte, next, hints),
         IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. } => Ok(()),
         IlOp::HostInvoke { arity, layout, .. } => {
             if *layout != 0 {
@@ -704,6 +724,7 @@ fn lower_byte(
     b: &mut MirBuilder,
     tos: &mut Vec<ValueId>,
     byte: &common::Byte,
+    next: Option<&IlOp>,
     hints: &LowerHints,
 ) -> Result<(), LowerError> {
     match *byte.bytecode() {
@@ -772,12 +793,20 @@ fn lower_byte(
             let src = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
-            if arity == 1 {
+            let n_payloads = jim_taken_payloads(arity, next);
+            if n_payloads == 1 {
                 let ty = match b.func().ty(src) {
                     MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef => MirTy::HeapRef,
                     other => other,
                 };
-                tos.push(b.ins_match_payload(src, 0, ty)?);
+                let p = b.ins_match_payload(src, 0, ty)?;
+                // Last-arm overlap: `Unpack` writes the reserved slot; a
+                // following `LOAD` / `BinSlotImm` must see that local.
+                if let Some(slot) = boxed_overlap_slot(next) {
+                    b.def_local(LocalId(slot), p)?;
+                } else {
+                    tos.push(p);
+                }
             }
             Ok(())
         }
