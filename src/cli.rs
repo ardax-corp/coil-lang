@@ -316,6 +316,8 @@ enum RawCommand {
         #[command(flatten)]
         profile: CompileProfileFlags,
         #[command(flatten)]
+        grants: HostGrantFlags,
+        #[command(flatten)]
         roots: RootFlags,
         #[command(flatten)]
         entry_flag: EntryFlag,
@@ -500,9 +502,9 @@ fn merge_entry(positional: Option<String>, flag: Option<String>) -> Result<Strin
     let pos = positional.filter(|s| !s.is_empty());
     let flag = flag.filter(|s| !s.is_empty());
     match (pos, flag) {
-        (Some(a), Some(b)) if a != b => Err(
-            "pass the entry as a positional file or `--entry`, not both".into(),
-        ),
+        (Some(a), Some(b)) if a != b => {
+            Err("pass the entry as a positional file or `--entry`, not both".into())
+        }
         (Some(a), _) => Ok(a),
         (_, Some(b)) => Ok(b),
         (None, None) => Ok(String::new()),
@@ -696,6 +698,7 @@ impl RawCli {
                 log,
                 opt,
                 profile,
+                grants,
                 roots,
                 entry_flag,
                 fn_pat,
@@ -719,7 +722,7 @@ impl RawCli {
                     false,
                     opt,
                     profile,
-                    HostGrantFlags::default(),
+                    grants,
                     roots.root,
                 )
             }
@@ -868,6 +871,47 @@ mod tests {
                 show_il: true,
                 show_ast: true,
             }
+        );
+        assert_eq!(cli.host_grants, HostGrants::deny_all());
+    }
+
+    #[test]
+    fn parse_host_grant_flags_on_dissect() {
+        let cli = parse_args(&args(&[
+            "dissect",
+            "a.hy",
+            "--allow-attach",
+            "--allow-exec",
+            "--allow-exit",
+            "--allow-ffi-exec",
+            "--allow-dload",
+            "tls",
+            "--allow-dload",
+            "crypto",
+            "--ffi-search-path",
+            "./native",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Dissect {
+                filename: "a.hy".into(),
+                fn_pat: None,
+                show_il: false,
+                show_ast: false,
+            }
+        );
+        assert!(cli.host_grants.allow_attach);
+        assert!(cli.host_grants.allow_exec);
+        assert!(cli.host_grants.allow_exit);
+        assert!(cli.host_grants.allow_ffi_exec);
+        assert_eq!(
+            cli.host_grants.allow_dload,
+            vec!["tls".to_string(), "crypto".to_string()]
+        );
+        assert_eq!(
+            cli.host_grants.ffi_search_paths,
+            vec![PathBuf::from("./native")]
         );
     }
 

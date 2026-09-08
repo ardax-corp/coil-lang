@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::process::exit;
 
-use compiler::Pipeline;
+use compiler::{HostGrants, Pipeline};
 use dissect::{DissectArgs, cmd_dissect};
 use reporting::{ErrorCode, ReportConfig, ReportFormat};
 
@@ -26,17 +26,26 @@ fn fail_and_exit(pipeline: &mut Pipeline, code: ErrorCode, message: impl Into<St
 fn print_help() {
     eprintln!(
         "Usage:\n\
-         \x20 coil-dissect [--log-json | --log-lsp] [--root DIR]... [--entry FILE] <file.hy> [--fn <pat>] [--il] [--ast]\n\
+         \x20 coil-dissect [--log-json | --log-lsp] [--root DIR]... [--entry FILE] <file.hy>\n\
+         \x20              [--fn <pat>] [--il] [--ast]\n\
+         \x20              [--allow-attach] [--allow-exit] [--allow-exec] [--allow-ffi-exec]\n\
+         \x20              [--allow-dload STEM]... [--ffi-search-path DIR]...\n\
          \n\
          Options:\n\
-         \x20 --fn <pat>    Filter functions by FQN substring / trailing name\n\
-         \x20 --il          Also print pre-opt stack IL\n\
-         \x20 --ast         Also print the entry-file AST\n\
-         \x20 --root DIR    Extra module search directory (repeatable; default `src`)\n\
-         \x20 --entry FILE  Entry `.hy` (instead of the positional file)\n\
-         \x20 --log-json    Emit SARIF 2.1 diagnostics on stdout\n\
-         \x20 --log-lsp     Emit LSP Diagnostic NDJSON on stdout\n\
-         \x20 -h, --help    Show this help"
+         \x20 --fn <pat>         Filter functions by FQN substring / trailing name\n\
+         \x20 --il               Also print pre-opt stack IL\n\
+         \x20 --ast              Also print the entry-file AST\n\
+         \x20 --root DIR         Extra module search directory (repeatable; default `src`)\n\
+         \x20 --entry FILE       Entry `.hy` (instead of the positional file)\n\
+         \x20 --allow-attach     Allow Stream.attach (default deny)\n\
+         \x20 --allow-exit       Allow env::exit (default deny)\n\
+         \x20 --allow-exec       Allow env::exec (default deny)\n\
+         \x20 --allow-ffi-exec   Allow FFI process-exec symbols (default deny)\n\
+         \x20 --allow-dload STEM Allow dload of STEM (repeatable; libc still denied)\n\
+         \x20 --ffi-search-path  Extra FFI lookup directory (repeatable; not a grant)\n\
+         \x20 --log-json         Emit SARIF 2.1 diagnostics on stdout\n\
+         \x20 --log-lsp          Emit LSP Diagnostic NDJSON on stdout\n\
+         \x20 -h, --help         Show this help"
     );
 }
 
@@ -49,6 +58,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
     let mut filename: Option<String> = None;
     let mut extra_roots: Vec<PathBuf> = Vec::new();
     let mut entry_flag: Option<String> = None;
+    let mut grants = HostGrants::deny_all();
     let mut i = 1usize;
     while i < args.len() {
         let a = &args[i];
@@ -61,6 +71,31 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             "--log-lsp" => log_lsp = true,
             "--il" => show_il = true,
             "--ast" => show_ast = true,
+            "--allow-attach" => grants.allow_attach = true,
+            "--allow-exit" => grants.allow_exit = true,
+            "--allow-exec" => grants.allow_exec = true,
+            "--allow-ffi-exec" => grants.allow_ffi_exec = true,
+            "--allow-dload" => {
+                i += 1;
+                let stem = args
+                    .get(i)
+                    .ok_or_else(|| "missing STEM after --allow-dload".to_string())?;
+                grants.grant_dload_allow(stem.clone());
+            }
+            s if s.starts_with("--allow-dload=") => {
+                grants.grant_dload_allow(s.trim_start_matches("--allow-dload="));
+            }
+            "--ffi-search-path" => {
+                i += 1;
+                let dir = args
+                    .get(i)
+                    .ok_or_else(|| "missing DIR after --ffi-search-path".to_string())?;
+                grants.add_ffi_search_path(PathBuf::from(dir));
+            }
+            s if s.starts_with("--ffi-search-path=") => {
+                grants
+                    .add_ffi_search_path(PathBuf::from(s.trim_start_matches("--ffi-search-path=")));
+            }
             "--fn" => {
                 i += 1;
                 let pat = args
@@ -117,6 +152,7 @@ fn parse_args(args: &[String]) -> Result<(ReportConfig, DissectArgs), String> {
             show_il,
             show_ast,
             extra_roots,
+            grants,
         },
     ))
 }
@@ -130,5 +166,60 @@ fn main() {
             print_help();
             exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn argv(parts: &[&str]) -> Vec<String> {
+        std::iter::once("coil-dissect".to_string())
+            .chain(parts.iter().map(|s| (*s).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_host_grants_and_search_paths() {
+        let (_cfg, args) = parse_args(&argv(&[
+            "a.hy",
+            "--allow-attach",
+            "--allow-exit",
+            "--allow-exec",
+            "--allow-ffi-exec",
+            "--allow-dload",
+            "tls",
+            "--allow-dload=crypto",
+            "--ffi-search-path",
+            "./native",
+            "--ffi-search-path=./more",
+        ]))
+        .unwrap();
+        assert_eq!(args.filename, "a.hy");
+        assert!(args.grants.allow_attach);
+        assert!(args.grants.allow_exit);
+        assert!(args.grants.allow_exec);
+        assert!(args.grants.allow_ffi_exec);
+        assert_eq!(
+            args.grants.allow_dload,
+            vec!["tls".to_string(), "crypto".to_string()]
+        );
+        assert_eq!(
+            args.grants.ffi_search_paths,
+            vec![PathBuf::from("./native"), PathBuf::from("./more")]
+        );
+    }
+
+    #[test]
+    fn parse_default_denies_host_grants() {
+        let (_cfg, args) = parse_args(&argv(&["a.hy", "--fn", "main", "--il"])).unwrap();
+        assert_eq!(args.grants, HostGrants::deny_all());
+        assert_eq!(args.fn_pat.as_deref(), Some("main"));
+        assert!(args.show_il);
+    }
+
+    #[test]
+    fn parse_rejects_missing_dload_stem() {
+        assert!(parse_args(&argv(&["a.hy", "--allow-dload"])).is_err());
     }
 }

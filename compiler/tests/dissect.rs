@@ -57,3 +57,47 @@ fn compile_dissect_without_il_leaves_snapshot_none() {
         "full bytecode dump should succeed"
     );
 }
+
+#[test]
+fn compile_dissect_attach_matches_compile_grant() {
+    let pid = std::process::id();
+    let dir = std::env::temp_dir().join(format!("coil_dissect_attach_{pid}"));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp dir");
+    let entry = dir.join("main.hy");
+    std::fs::write(
+        &entry,
+        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+    )
+    .expect("write entry");
+
+    let mut denied = Pipeline::new();
+    denied.bind_workspace_language_roots();
+    assert!(
+        denied
+            .compile_dissect(entry.to_str().unwrap(), false)
+            .is_err(),
+        "attach without grant should fail dissect"
+    );
+    assert!(
+        denied
+            .messages()
+            .iter()
+            .any(|m| m.code() == Some(compiler::ErrorCode::HostAttachDenied)),
+        "expected HostAttachDenied, messages={:?}",
+        denied
+            .messages()
+            .iter()
+            .map(|m| m.code())
+            .collect::<Vec<_>>()
+    );
+
+    let mut granted = Pipeline::new();
+    granted.bind_workspace_language_roots();
+    granted.grant_attach();
+    granted
+        .compile_dissect(entry.to_str().unwrap(), false)
+        .expect("attach with grant should dissect");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
