@@ -384,13 +384,37 @@ impl DebugSession {
     }
 
     pub fn start(&mut self) -> StopReason {
+        self.begin_run(false)
+    }
+
+    /// Start and stop before the first bytecode insn (DAP `stopOnEntry`).
+    ///
+    /// Uses a temporary PC-0 breakpoint so the VM actually builds a frame;
+    /// a fake pause left `stackTrace` / step empty.
+    pub fn start_paused_at_entry(&mut self) -> StopReason {
+        self.begin_run(true)
+    }
+
+    fn begin_run(&mut self, stop_on_entry: bool) -> StopReason {
         self.machine.debug_reset();
         if self.machine.debug_controller().is_none() {
             self.machine.attach_debug(DebugController::new());
         }
         self.sync_vm_breakpoints();
+        let entry_pc = 0;
+        let already_bp = self.breakpoints.iter().any(|b| b.pc == entry_pc);
+        if stop_on_entry && !already_bp {
+            if let Some(dbg) = self.machine.debug_controller_mut() {
+                dbg.add_breakpoint(entry_pc);
+            }
+        }
         self.started = true;
         let reason = self.run_from(self.machine.debug_ip());
+        if stop_on_entry && !already_bp {
+            if let Some(dbg) = self.machine.debug_controller_mut() {
+                dbg.remove_breakpoint(entry_pc);
+            }
+        }
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
         }
@@ -571,10 +595,11 @@ impl DebugSession {
             return Err("not started".into());
         }
         let ip = self.machine.debug_ip();
-        let (path, line, _) = self
-            .machine
-            .resolve_pc_location(ip)
-            .ok_or("no source location at current PC")?;
+        let (path, line) = if let Some((p, l, _)) = self.nearest_source_location(ip) {
+            (p, l)
+        } else {
+            self.list_fn_decl_fallback()?
+        };
         let resolved = resolve_path(&path, Some(&self.base_dir));
         let text = fs::read_to_string(&resolved)
             .map_err(|e| format!("cannot read {}: {e}", resolved.display()))?;
@@ -588,6 +613,35 @@ impl DebugSession {
             rows.push((n, mark, src));
         }
         Ok((resolved, line, rows))
+    }
+
+    /// When `debug_locs` miss this function, show the `fn name` decl in source.
+    fn list_fn_decl_fallback(&self) -> Result<(String, u32), String> {
+        let name = self.stop_symbol();
+        let short = name.rsplit("::").next().unwrap_or(name.as_str());
+        if short.is_empty() || short.starts_with('<') {
+            return Err(
+                "no source location near current PC (debug_locs sparse; try `disas` / `bt`)"
+                    .into(),
+            );
+        }
+        let mut files = vec![self.entry.clone()];
+        for f in &self.artifacts.debug.source_files {
+            files.push(f.clone());
+        }
+        for file in files {
+            let resolved = resolve_path(&file, Some(&self.base_dir));
+            let Ok(text) = fs::read_to_string(&resolved) else {
+                continue;
+            };
+            if let Some(line) = find_fn_decl_line(&text, short) {
+                return Ok((resolved.display().to_string(), line));
+            }
+        }
+        Err(
+            "no source location near current PC (debug_locs sparse; try `disas` / `bt`)"
+                .into(),
+        )
     }
 
     pub fn breakpoint_id_at_pc(&self, pc: usize) -> Option<usize> {
@@ -659,6 +713,51 @@ impl DebugSession {
                 dbg.add_breakpoint(b.pc);
             }
         }
+    }
+
+    /// Exact loc at `ip`, else nearest known loc in the **same function**.
+    ///
+    /// Does not walk into callees / stdlib (a raw ±64 scan did).
+    pub fn nearest_source_location(&self, ip: usize) -> Option<(String, u32, u32)> {
+        if let Some(loc) = self.machine.resolve_pc_location(ip) {
+            return Some(loc);
+        }
+        let (start, end) = self.function_pc_range(ip);
+        for cand in ip + 1..end {
+            if let Some(loc) = self.machine.resolve_pc_location(cand) {
+                return Some(loc);
+            }
+        }
+        for cand in (start..ip).rev() {
+            if let Some(loc) = self.machine.resolve_pc_location(cand) {
+                return Some(loc);
+            }
+        }
+        None
+    }
+
+    fn function_pc_range(&self, ip: usize) -> (usize, usize) {
+        let mut starts: Vec<usize> = self
+            .artifacts
+            .functions
+            .iter()
+            .map(|s| s.entry_pc as usize)
+            .collect();
+        starts.sort_unstable();
+        starts.dedup();
+        let len = self.artifacts.debug.debug_locs.len();
+        let start = starts
+            .iter()
+            .copied()
+            .rev()
+            .find(|&s| s <= ip)
+            .unwrap_or(0);
+        let end = starts
+            .iter()
+            .copied()
+            .find(|&s| s > ip)
+            .unwrap_or(len);
+        (start, end)
     }
 
     fn resolve_break_target(&self, arg: &str) -> Result<(Vec<usize>, String), String> {
@@ -738,6 +837,22 @@ fn resolve_local_slot(session: &DebugSession, name: &str) -> Result<usize, Strin
         )),
     }
 }
+fn find_fn_decl_line(text: &str, name: &str) -> Option<u32> {
+    let needle = format!("fn {name}");
+    for (i, line) in text.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with(&needle)
+            && trimmed
+                .as_bytes()
+                .get(needle.len())
+                .is_none_or(|c| !c.is_ascii_alphanumeric() && *c != b'_')
+        {
+            return Some((i + 1) as u32);
+        }
+    }
+    None
+}
+
 fn source_matches(stored: &Option<String>, requested: &str) -> bool {
     let Some(stored) = stored else {
         return false;
@@ -768,16 +883,19 @@ mod tests {
             .to_string()
     }
 
-    fn compile_fib() -> DebugSession {
+    fn compile_entry(path: &str, grants: HostGrants) -> Result<DebugSession, ()> {
         let config = ReportConfig::from_cli_flags(false, false).expect("report config");
         DebugSession::compile(
             config,
-            &fib_path(),
+            path,
             Box::new(std::io::sink()),
-            HostGrants::deny_all(),
+            grants,
             Pipeline::workspace_language_extra_roots(),
         )
-        .expect("compile fib")
+    }
+
+    fn compile_fib() -> DebugSession {
+        compile_entry(&fib_path(), HostGrants::deny_all()).expect("compile fib")
     }
 
     #[test]
@@ -967,5 +1085,133 @@ mod tests {
             "expected fib.hy under examples, got {}",
             resolved.display()
         );
+    }
+
+    #[test]
+    fn start_paused_at_entry_has_frames_and_continue_finishes() {
+        let mut session = compile_fib();
+        let reason = session.start_paused_at_entry();
+        assert!(
+            matches!(
+                reason,
+                StopReason::Breakpoint { .. } | StopReason::Step | StopReason::Next
+            ),
+            "reason={reason:?}"
+        );
+        assert!(session.started());
+        assert!(
+            !session.stack_frames().is_empty(),
+            "stopOnEntry must build a VM frame"
+        );
+        let reason = session.continue_exec().expect("continue");
+        assert!(
+            matches!(reason, StopReason::Halt),
+            "reason={reason:?}"
+        );
+    }
+
+    #[test]
+    fn stepi_step_next_finish_and_restart() {
+        let mut session = compile_fib();
+        session.set_function_breakpoint("fib").expect("break fib");
+        assert!(matches!(session.start(), StopReason::Breakpoint { .. }));
+        let ip0 = session.current_ip();
+        let stepi = session.stepi().expect("stepi");
+        assert!(
+            matches!(stepi, StopReason::Step | StopReason::Breakpoint { .. }),
+            "stepi={stepi:?}"
+        );
+        assert_ne!(session.current_ip(), ip0, "stepi must advance PC");
+        let _ = session.step_in().expect("step");
+        let _ = session.step_over().expect("next");
+        let finish = session.step_out().expect("finish");
+        assert!(
+            matches!(
+                finish,
+                StopReason::Finish | StopReason::Step | StopReason::Next | StopReason::Breakpoint { .. }
+            ),
+            "finish={finish:?}"
+        );
+        session
+            .replace_function_breakpoints(&[])
+            .expect("clear fn bp");
+        let again = session.start();
+        assert!(
+            matches!(again, StopReason::Halt),
+            "restart after delete should finish; reason={again:?}"
+        );
+    }
+
+    #[test]
+    fn list_uses_nearest_debug_loc() {
+        let mut session = compile_fib();
+        session.set_function_breakpoint("fib").expect("break fib");
+        assert!(matches!(session.start(), StopReason::Breakpoint { .. }));
+        let listed = session.list_source();
+        assert!(
+            listed.is_ok(),
+            "list should snap to nearest loc, err={listed:?}"
+        );
+        let (path, line, rows) = listed.unwrap();
+        assert!(path.to_string_lossy().contains("fib.hy"), "path={path:?}");
+        assert!(line >= 1);
+        assert!(rows.iter().any(|(_, mark, _)| *mark));
+    }
+
+    #[test]
+    fn debugger_attached_refuses_dense_opcodes() {
+        use common::Instruction;
+        let src = r#"
+fn hot(float a, float b, int n) -> float {
+    let i = 0;
+    let s = 0.0;
+    while i < n {
+        let xf = i as float;
+        s = s + xf + a - b;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(2.0, 1.0, 8);
+}
+"#;
+        let dir = std::env::temp_dir().join(format!("coil_dbg_i7_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("hot.hy");
+        fs::write(&path, src).unwrap();
+        let session = compile_entry(path.to_str().unwrap(), HostGrants::deny_all())
+            .expect("compile debugger-attached hot");
+        let dense = session.artifacts.bytecode.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::DenseBin
+                    | Instruction::DenseCmp
+                    | Instruction::DenseConst
+                    | Instruction::DenseMove
+                    | Instruction::DenseUnary
+                    | Instruction::DenseCast
+            )
+        });
+        assert!(!dense, "I7: debugger-attached must stay on fuse-IL");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn host_grants_apply_to_debug_compile() {
+        let dir = std::env::temp_dir().join(format!("coil_dbg_grant_{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        let path = dir.join("attach.hy");
+        fs::write(
+            &path,
+            "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+        )
+        .unwrap();
+        let denied = compile_entry(path.to_str().unwrap(), HostGrants::deny_all());
+        assert!(denied.is_err(), "ungranted attach must fail typecheck");
+        let mut grants = HostGrants::deny_all();
+        grants.allow_attach = true;
+        compile_entry(path.to_str().unwrap(), grants).expect("granted attach");
+        let _ = fs::remove_dir_all(&dir);
     }
 }

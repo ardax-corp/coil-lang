@@ -853,6 +853,43 @@ mod tests {
     }
 
     #[test]
+    fn parse_debug_dap_with_host_grants() {
+        let cli = parse_args(&args(&[
+            "debug",
+            "--dap",
+            "--allow-attach",
+            "--allow-exit",
+        ]))
+        .unwrap();
+        assert_eq!(
+            cli.command,
+            Command::Debug {
+                filename: None,
+                script: None,
+                batch: false,
+                dap: true,
+            }
+        );
+        assert!(cli.host_grants.allow_attach);
+        assert!(cli.host_grants.allow_exit);
+    }
+
+    #[test]
+    fn parse_debug_repl_host_grants() {
+        let cli = parse_args(&args(&["debug", "a.hy", "--allow-exec"])).unwrap();
+        assert!(cli.host_grants.allow_exec);
+        assert_eq!(
+            cli.command,
+            Command::Debug {
+                filename: Some("a.hy".into()),
+                script: None,
+                batch: false,
+                dap: false,
+            }
+        );
+    }
+
+    #[test]
     fn parse_dissect_with_fn_il_ast() {
         let cli = parse_args(&args(&[
             "dissect",

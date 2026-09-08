@@ -16,7 +16,8 @@ fn print_help() {
          \x20            [--entry FILE]\n\
          \n\
          Options:\n\
-         \x20 --dap              Debug Adapter Protocol over stdio (program from DAP launch)\n\
+         \x20 --dap              Debug Adapter Protocol over stdio (program from DAP launch;\n\
+         \x20                    host grant flags apply; launch may also set allowAttach/…)\n\
          \x20 -x <script>        Run commands from a script file\n\
          \x20 --batch            Non-interactive; exit after script / stdin\n\
          \x20 --log-json         Emit SARIF 2.1 diagnostics on stdout\n\
@@ -34,7 +35,10 @@ fn print_help() {
 }
 
 enum Parsed {
-    Dap { extra_roots: Vec<PathBuf> },
+    Dap {
+        extra_roots: Vec<PathBuf>,
+        grants: HostGrants,
+    },
     Repl(ReportConfig, DebugArgs),
 }
 
@@ -125,16 +129,13 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
     }
 
     if dap {
-        if filename.is_some()
-            || script.is_some()
-            || batch
-            || log_json
-            || log_lsp
-            || grants != HostGrants::deny_all()
-        {
+        if filename.is_some() || script.is_some() || batch || log_json || log_lsp {
             return Err("--dap cannot be combined with REPL flags or a positional file".into());
         }
-        return Ok(Parsed::Dap { extra_roots });
+        return Ok(Parsed::Dap {
+            extra_roots,
+            grants,
+        });
     }
 
     let filename = match (filename, entry_flag) {
@@ -161,12 +162,67 @@ fn parse_args(args: &[String]) -> Result<Parsed, String> {
 fn main() {
     let raw: Vec<String> = std::env::args().collect();
     match parse_args(&raw) {
-        Ok(Parsed::Dap { extra_roots }) => cmd_dap(extra_roots),
+        Ok(Parsed::Dap {
+            extra_roots,
+            grants,
+        }) => cmd_dap(extra_roots, grants),
         Ok(Parsed::Repl(config, args)) => cmd_debug(config, args),
         Err(msg) => {
             eprintln!("coil-debug: {msg}");
             print_help();
             exit(1);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(parts: &[&str]) -> Vec<String> {
+        std::iter::once("coil-debug".into())
+            .chain(parts.iter().map(|s| (*s).to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_dap_allows_host_grants() {
+        let parsed = parse_args(&args(&[
+            "--dap",
+            "--allow-attach",
+            "--allow-exit",
+            "--root",
+            "src",
+        ]))
+        .expect("dap + grants");
+        match parsed {
+            Parsed::Dap { grants, extra_roots } => {
+                assert!(grants.allow_attach);
+                assert!(grants.allow_exit);
+                assert_eq!(extra_roots, vec![PathBuf::from("src")]);
+            }
+            Parsed::Repl(..) => panic!("expected DAP"),
+        }
+    }
+
+    #[test]
+    fn parse_dap_rejects_positional_and_batch() {
+        assert!(parse_args(&args(&["--dap", "a.hy"])).is_err());
+        assert!(parse_args(&args(&["--dap", "--batch"])).is_err());
+        assert!(parse_args(&args(&["--dap", "-x", "s.txt"])).is_err());
+    }
+
+    #[test]
+    fn parse_repl_grants() {
+        let parsed = parse_args(&args(&["a.hy", "--allow-exec", "--batch"]))
+            .expect("repl grants");
+        match parsed {
+            Parsed::Repl(_, args) => {
+                assert!(args.grants.allow_exec);
+                assert!(args.batch);
+                assert_eq!(args.filename, "a.hy");
+            }
+            Parsed::Dap { .. } => panic!("expected REPL"),
         }
     }
 }

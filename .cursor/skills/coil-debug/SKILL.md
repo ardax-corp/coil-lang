@@ -29,6 +29,9 @@ coil debug --dap
 
 # Scripted (preferred for agents)
 cargo run --quiet -- debug path/to/prog.hy -x /tmp/coil_dbg.txt --batch
+
+# Grant-gated programs (same flags as compile / dissect)
+coil debug gated.hy --allow-attach -x /tmp/coil_dbg.txt --batch
 ```
 
 Use `coil dissect` for bytecode/IL/AST dumps; use `--release` for faster runs.
@@ -140,7 +143,7 @@ quit
 ## Agent rules
 
 1. Write a temp `-x` script; run with `--batch`; capture stdout/stderr.
-2. Start with **function** breakpoints (`break name`) — more reliable than lines when `debug_locs` are sparse.
+2. Start with **function** breakpoints (`break name`) — more reliable than lines when `debug_locs` are sparse (`verified: false` / `no code locations`).
 3. After a recursive hit, `delete` before `continue` unless you intend to stop on every call.
 4. Prefer `next` for source-level progress; use `stepi` + `disas` when line info is missing.
 5. Prefer **named** locals (`print n`, `info locals`); fall back to `$N` when a name is missing.

@@ -36,9 +36,17 @@ fn apply_workspace_roots(cmd: &mut Command) {
 }
 
 fn run_debug_script(script_body: &str, cwd_suffix: &str) -> (std::process::Output, PathBuf) {
+    run_debug_script_on(&fib_entry(), script_body, cwd_suffix, &[])
+}
+
+fn run_debug_script_on(
+    entry: &std::path::Path,
+    script_body: &str,
+    cwd_suffix: &str,
+    extra: &[&str],
+) -> (std::process::Output, PathBuf) {
     ensure_helper("coil-debug");
     let bin = coil_bin();
-    let entry = fib_entry();
     let cwd = std::env::temp_dir().join(format!("coil_debug_{cwd_suffix}_{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&cwd);
     std::fs::create_dir_all(&cwd).expect("temp cwd");
@@ -49,6 +57,7 @@ fn run_debug_script(script_body: &str, cwd_suffix: &str) -> (std::process::Outpu
     cmd.current_dir(&cwd);
     cmd.arg("debug");
     apply_workspace_roots(&mut cmd);
+    cmd.args(extra);
     cmd.args([
         entry.to_str().unwrap(),
         "-x",
@@ -151,5 +160,110 @@ fn debug_batch_continue_without_run_exits_nonzero() {
         err.contains("not started") || err.contains("debug:"),
         "stderr={err}"
     );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn debug_batch_repl_surface_step_list_print_restart() {
+    let (out, cwd) = run_debug_script(
+        "break fib\n\
+         run\n\
+         info registers\n\
+         info locals\n\
+         print n\n\
+         print $0\n\
+         bt\n\
+         list\n\
+         disas fib\n\
+         info break\n\
+         delete\n\
+         stepi\n\
+         step\n\
+         next\n\
+         finish\n\
+         run\n\
+         quit\n",
+        "surface",
+    );
+    assert!(
+        out.status.success(),
+        "debug surface failed: stderr={} stdout={}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for needle in [
+        "Breakpoint",
+        "ip=",
+        "n ($0)",
+        "Step",
+        "Finish",
+        "Program exited normally",
+    ] {
+        assert!(
+            stdout.contains(needle),
+            "missing `{needle}` in stdout={stdout}"
+        );
+    }
+    assert!(
+        stdout.contains("fib.hy") || stdout.contains('>'),
+        "expected list/source, stdout={stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn debug_batch_line_breakpoint_unmapped_is_error() {
+    let (out, cwd) = run_debug_script("break 99999\n", "linebad");
+    assert!(!out.status.success(), "unmapped line BP should fail batch");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("no code locations") || err.contains("debug:"),
+        "stderr={err}"
+    );
+    let _ = std::fs::remove_dir_all(&cwd);
+}
+
+#[test]
+fn debug_allow_attach_applies() {
+    let cwd = std::env::temp_dir().join(format!("coil_debug_grant_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&cwd);
+    std::fs::create_dir_all(&cwd).expect("temp cwd");
+    let entry = cwd.join("attach.hy");
+    std::fs::write(
+        &entry,
+        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+    )
+    .expect("write attach");
+
+    let denied = run_debug_script_on(&entry, "break main\nrun\nquit\n", "grant_deny", &[]);
+    assert!(
+        !denied.0.status.success(),
+        "ungranted attach should fail compile"
+    );
+    let err = String::from_utf8_lossy(&denied.0.stderr);
+    assert!(
+        err.contains("allow-attach") || err.contains("E0408") || err.contains("HostAttach"),
+        "stderr={err}"
+    );
+    let _ = std::fs::remove_dir_all(&denied.1);
+
+    let (out, out_cwd) = run_debug_script_on(
+        &entry,
+        "break main\nrun\nquit\n",
+        "grant_ok",
+        &["--allow-attach"],
+    );
+    assert!(
+        out.status.success(),
+        "debug --allow-attach failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("Breakpoint") || stdout.contains("Program"),
+        "stdout={stdout}"
+    );
+    let _ = std::fs::remove_dir_all(&out_cwd);
     let _ = std::fs::remove_dir_all(&cwd);
 }
