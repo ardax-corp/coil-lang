@@ -74,3 +74,7 @@ breakpoints (`setFunctionBreakpoints`) are more reliable when line info is spars
 - Line breakpoints need known `debug_locs` (coverage is incremental; see [debug-info.md](debug-info.md)).
 - Function breakpoints use live compile symbols (same FQN rules as `coil dissect --fn`).
 - Hot path: stop checks run only when a debug controller is attached.
+- **I7:** `coil debug` sets `Pipeline::set_debugger_attached(true)` so
+  dense specialize and MIR→LIR body replace stay off. Stops remain on
+  fuse-IL bytecode (this debugger). MIR `Deopt` metadata is for a later
+  native tier; see [mir-deopt.md](mir-deopt.md).

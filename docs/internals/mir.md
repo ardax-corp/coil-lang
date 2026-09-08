@@ -142,7 +142,11 @@ set: the purity sidecar (`classify_host_name` / `host_effects`) marks
 math / packed / axpy **pure** (LICM may hoist W4 scalar math) and
 clocks / IO / GC / FFI **impure** (never hoist, never CSE). Dense emit
 still refuses anything outside this closed W4 set — no clock/IO
-allowlist growth. User `CALL` is COI-291
+allowlist growth. I7
+([COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir))
+names `Deopt` stop / leave edges (`allow_deopt`). Debugger-attached
+and `-Og` skip dense + MIR→LIR so the VM debugger stays on fuse-IL
+([mir-deopt.md](mir-deopt.md)). User `CALL` is COI-291
 (below). Dense emit keeps `DenseBin` for the numeric region and at each
 allowlisted edge: `LOAD` args (Value words) → `CONST` id → `HostInvoke` →
 `STORE` dest, then more dense ops. P12 whole-body saxpy pack still runs
