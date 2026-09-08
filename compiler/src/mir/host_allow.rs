@@ -101,5 +101,8 @@ mod tests {
         }
         assert!(host_spec(common::CLOCK_SLEEP_MS_ID).is_none());
         assert!(host_spec(common::RESULT_UNIT_PROBE_ID).is_none());
+        // I4: string byte conversion stays off W4 (I6 may reconsider HostInvoke).
+        assert!(host_spec_by_name("from_bytes").is_none());
+        assert!(host_spec_by_name("to_bytes").is_none());
     }
 }
