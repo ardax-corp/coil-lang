@@ -255,7 +255,7 @@ impl IlModule {
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
         let mut dense_calls = crate::mir::DenseCallMap::new();
         let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
-        while !pending.is_empty() {
+        while !pending.is_empty() && opts.mir_specialize {
             let mut next = Vec::new();
             let mut progressed = false;
             for i in pending.iter().copied() {
@@ -285,6 +285,9 @@ impl IlModule {
             pending = next;
         }
         for i in pending {
+            if !opts.mir_specialize {
+                break;
+            }
             let body = &mut self.funcs[i];
             if let Some(lir) = crate::mir::try_lower_abi_body_with(
                 &body.ops,
@@ -1010,6 +1013,7 @@ mod tests {
                 max_optimization_iterations: 10,
                 collect_stats: false,
                 pure_call_ctx: None,
+                mir_specialize: true,
             },
             &mut Vec::new(),
         );
@@ -1089,6 +1093,7 @@ mod tests {
             max_optimization_iterations: 10,
             collect_stats: false,
             pure_call_ctx: None,
+            mir_specialize: true,
         }
     }
 

@@ -288,6 +288,14 @@ impl Compiler {
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
+    /// I7: debugger-attached compiles refuse dense / MIR→LIR shortcuts.
+    pub fn set_debugger_attached(&mut self, on: bool) {
+        if on {
+            self.opt_options.mir_specialize = false;
+        }
+        self.bytecode.set_opt_options(self.opt_options.clone());
+    }
+
     /// Enable or disable IL opt-stat collection (COI-131).
     pub fn set_collect_opt_stats(&mut self, on: bool) {
         self.opt_options.collect_stats = on;

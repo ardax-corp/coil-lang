@@ -93,6 +93,9 @@ pub struct OptimizeOptions {
     pub collect_stats: bool,
     /// Pure user `fn` names + entry labels for COI-99 length-proof barriers.
     pub pure_call_ctx: Option<super::pure_call::PureCallCtx>,
+    /// Dense specialize + MIR→LIR body replace. Off for `-Og` and
+    /// debugger-attached compiles (I7).
+    pub mir_specialize: bool,
 }
 
 // Default is `OptLevel::Standard.options()` (derived from the driver table).

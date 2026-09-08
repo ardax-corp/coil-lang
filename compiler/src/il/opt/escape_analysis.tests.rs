@@ -56,6 +56,7 @@ fn isolated() -> OptimizeOptions {
                 max_optimization_iterations: 10,
                 collect_stats: false,
                 pure_call_ctx: None,
+                mir_specialize: false,
     }
 }
 

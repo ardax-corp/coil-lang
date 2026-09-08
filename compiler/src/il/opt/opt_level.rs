@@ -151,6 +151,7 @@ fn all_off() -> OptimizeOptions {
         max_optimization_iterations: 10,
         collect_stats: false,
         pure_call_ctx: None,
+        mir_specialize: false,
     }
 }
 
@@ -169,8 +170,10 @@ fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
 }
 
 /// Knobs that are not pass names.
-fn base_knobs(_level: OptLevel) -> OptimizeOptions {
-    all_off()
+fn base_knobs(level: OptLevel) -> OptimizeOptions {
+    let mut o = all_off();
+    o.mir_specialize = !matches!(level, OptLevel::Debug);
+    o
 }
 
 impl Default for OptimizeOptions {
@@ -306,6 +309,8 @@ mod tests {
         assert!(o.algebraic && o.dead_block);
         assert!(!o.slot_promote && !o.slot_promote_tell);
         assert!(!o.escape_analysis && !o.ssa_gvn && !o.loop_unroll);
+        assert!(!o.mir_specialize);
+        assert!(OptLevel::Standard.options().mir_specialize);
     }
 
     #[test]
