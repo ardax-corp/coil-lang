@@ -119,8 +119,7 @@ fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
                 ..
             } => match_shaped = true,
             IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfFalse
-                    | crate::il::IlJumpKind::JumpIfTrue,
+                kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
                 ..
             } => leftover = true,
             IlOp::StorePop { slot, .. } => {
@@ -184,7 +183,8 @@ fn is_compare(op: Instruction) -> bool {
 }
 
 fn body_has_tag_imm(ops: &[IlOp]) -> bool {
-    ops.iter().any(|op| matches!(op, IlOp::Const { imm: 0 | 1, .. }))
+    ops.iter()
+        .any(|op| matches!(op, IlOp::Const { imm: 0 | 1, .. }))
 }
 
 fn slot_in_unboxed_fields(slot: u32, fields: &[(u32, u32)]) -> bool {
