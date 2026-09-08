@@ -33,9 +33,9 @@ block islands on P5. Do not revive PGO.
 
 **I8 entry (post I1–I3).** After stack-IL opts, `IlModule` tries dense
 specialize, then IL→MIR→LIR for leftovers that [`lir_eligible`](../../compiler/src/mir/entry.rs)
-accepts: any unfused body infer+lower can type (I1 niche words,
-compare-only, below-W3 numeric, plus I2 match / I3 unboxed fields).
-Refuse stays fuse-IL: I4 strings, I5 alloc, I6 `CALL` / HostInvoke,
+accepts for a **named reason**: two-slot `RETURN`, I2 match, I3 unboxed
+fields, or I1 niche `BITAND`/`BITOR`. Plain `if` diamonds and store-only
+loops stay fuse-IL. Hard refuse: I4 strings, I5 alloc, I6 `CALL` / HostInvoke,
 heap index / escaping fields, I2-out-of-range match, I7
 debugger-attached / `-Og`. No dual AST walker. Cost gate: replace only
 when LIR emit ≤ opted fuse-IL.

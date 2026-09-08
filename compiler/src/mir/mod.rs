@@ -158,7 +158,9 @@ mod tests {
             ValueId,
             LowerError,
             ParseError,
+            LirRefuse,
         )>();
+        let _ = (lir_eligible, lir_refuse);
     }
 
     #[test]
@@ -776,7 +778,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_i8_compare_diamond_stays_lir_not_dense() {
+    fn pipeline_i8_compare_diamond_stays_not_dense() {
         let src = r#"
 fn pick(int a, int b, bool c) -> int {
     if c {
@@ -1518,7 +1520,7 @@ fn main() {
     }
 
     #[test]
-    fn i8_compare_only_diamond_enters_lir() {
+    fn i8_plain_if_diamond_stays_fuse_il() {
         let loc = loc();
         let ops = vec![
             IlOp::Label(Label(0)),
@@ -1540,14 +1542,9 @@ fn main() {
             IlOp::Load { slot: 1, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert!(lir_eligible(&ops, &[]));
+        assert!(!lir_eligible(&ops, &[]));
         let mut pool = Vec::new();
-        let lir = try_lower_abi_body(&ops, "min", 2, &mut pool).expect("I8 compare diamond");
-        assert!(
-            lir.iter()
-                .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
-        );
-        assert!(try_specialize_body(&ops, "min", 2, &mut pool, &DenseCallMap::new()).is_none());
+        assert!(try_lower_abi_body(&ops, "min", 2, &mut pool).is_none());
     }
 
     #[test]

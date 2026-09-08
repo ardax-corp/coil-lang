@@ -1,13 +1,12 @@
-//! I8 — which bodies enter MIR (dense specialize vs IL→MIR→LIR).
+//! I8 — which leftover bodies enter MIR→LIR after dense specialize.
 //!
 //! Production is two-phase after stack-IL opts (`IlModule`):
 //! 1. [`crate::mir::try_specialize_body`] — numeric loop / W3 dense.
-//! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift + LIR reconstruct
-//!    when [`lir_eligible`].
+//! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift when
+//!    [`lir_eligible`].
 //!
-//! Entry is **infer + lower success**, not a specialize-from-IL shape
-//! accident (two-slot / `JumpIfMatch` / unboxed fields only). Fuse-IL
-//! stays the default for refused shapes. There is no second AST walker.
+//! Entry needs a **named reason** (not “infer succeeded”). Fuse-IL stays
+//! default. There is no second AST walker.
 
 use common::Instruction;
 
@@ -23,14 +22,13 @@ pub enum LirRefuse {
     String,
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`.
     Alloc,
-    /// I6: user `CALL` / `TailCall` / other `Entry` (dense already consumed
-    /// leaf-first COI-291 callees).
+    /// I6: user `CALL` / `TailCall` / other `Entry`.
     Call,
-    /// I6: HostInvoke (W4 is dense-only; clocks / IO stay fuse-IL).
+    /// I6: HostInvoke (W4 is dense-only).
     Host,
-    /// Heap index / pin (I5 maps; dense refuse).
+    /// Heap index / pin.
     Index,
-    /// Escaping / heap-backed `GetField` / `SetField` / `LoadField`.
+    /// Escaping / heap-backed field ops.
     HeapField,
     /// `BoxValue` / `UnboxValue`.
     Box,
@@ -38,21 +36,32 @@ pub enum LirRefuse {
     Match,
     /// `Unpack` arity > 1.
     Unpack,
+    /// No I1–I3 / two-slot / compare-control reason.
+    NoReason,
 }
 
 /// Production LIR entry after dense specialize misses.
 ///
-/// Eligible when the body has no hard refuse. I1 niche words, compare-only
-/// diamonds, and below-W3 numeric helpers may lift; I2 match and I3
-/// unboxed fields still do. `IlModule` still replaces only when LIR cost
-/// ≤ opted fuse-IL.
+/// Eligible when there is no hard refuse **and** a named reason:
+/// two-slot `RETURN`, I2 match, I3 unboxed fields, or I1 niche
+/// `BITAND`/`BITOR`. Plain `if` diamonds stay fuse-IL (stack-IL GVN).
+/// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
     lir_refuse(ops, unboxed_fields).is_none()
 }
 
-/// First hard refuse, if any. `unboxed_fields` unused: I3 ranges are
-/// hints for lower, not a gate (I8).
-pub fn lir_refuse(ops: &[IlOp], _unboxed_fields: &[(u32, u32)]) -> Option<LirRefuse> {
+pub fn lir_refuse(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> Option<LirRefuse> {
+    if let Some(r) = hard_refuse(ops) {
+        return Some(r);
+    }
+    if lir_reason(ops, unboxed_fields) {
+        None
+    } else {
+        Some(LirRefuse::NoReason)
+    }
+}
+
+fn hard_refuse(ops: &[IlOp]) -> Option<LirRefuse> {
     for op in ops {
         match op {
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
@@ -91,6 +100,122 @@ pub fn lir_refuse(ops: &[IlOp], _unboxed_fields: &[(u32, u32)]) -> Option<LirRef
     None
 }
 
+/// I8 reasons — broader than pre-I8 `abi_leaf` (two-slot / match / fields
+/// only), still not “every inferable leftover”.
+fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
+    let mut ret2 = false;
+    let mut match_shaped = false;
+    let mut field_use = false;
+    let mut niche_word = false;
+    for op in ops {
+        match op {
+            IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
+            IlOp::Jump {
+                kind: crate::il::IlJumpKind::JumpIfMatch { .. },
+                ..
+            } => match_shaped = true,
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
+                match_shaped = true;
+            }
+            IlOp::Load { slot, .. } | IlOp::StorePop { slot, .. }
+                if slot_in_unboxed_fields(*slot, unboxed_fields) =>
+            {
+                field_use = true;
+            }
+            IlOp::Bin { op, .. } if matches!(*op, Instruction::BITAND | Instruction::BITOR) => {
+                // I1 heap-niche bits: `ptr | 1` / `ptr & 1` (tag 0/1).
+                if body_has_tag_imm(ops) {
+                    niche_word = true;
+                }
+            }
+            IlOp::BinSlotImm { op, imm, .. }
+                if matches!(
+                    Instruction::from(*op),
+                    Instruction::BITAND | Instruction::BITOR
+                ) && (*imm == 0 || *imm == 1) =>
+            {
+                niche_word = true;
+            }
+            IlOp::BinSlotSlot { op, .. }
+                if matches!(
+                    Instruction::from(*op),
+                    Instruction::BITAND | Instruction::BITOR
+                ) && body_has_tag_imm(ops) =>
+            {
+                niche_word = true;
+            }
+            _ => {}
+        }
+    }
+    ret2 || match_shaped || field_use || niche_word || adjacent_match_probe(ops)
+}
+
+fn body_has_tag_imm(ops: &[IlOp]) -> bool {
+    ops.iter().any(|op| matches!(op, IlOp::Const { imm: 0 | 1, .. }))
+}
+
+fn slot_in_unboxed_fields(slot: u32, fields: &[(u32, u32)]) -> bool {
+    fields
+        .iter()
+        .any(|&(base, n)| slot >= base && slot < base + n)
+}
+
+/// Niche `DUP; LogNot; JMPx` or two-slot `DUP; CONST 0|1; EQ; JMPx`.
+fn adjacent_match_probe(ops: &[IlOp]) -> bool {
+    let solid: Vec<&IlOp> = ops
+        .iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .collect();
+    for w in solid.windows(3) {
+        if matches!(w[0], IlOp::Dup { .. })
+            && matches!(w[1], IlOp::LogNot { .. })
+            && is_cond_jump(w[2])
+        {
+            return true;
+        }
+    }
+    for w in solid.windows(4) {
+        if matches!(w[0], IlOp::Dup { .. })
+            && is_tag_imm(w[1])
+            && is_eq_or_bitand(w[2])
+            && is_cond_jump(w[3])
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_cond_jump(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Jump {
+            kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
+            ..
+        }
+    )
+}
+
+fn is_tag_imm(op: &IlOp) -> bool {
+    matches!(op, IlOp::Const { imm: 0 | 1, .. })
+}
+
+fn is_eq_or_bitand(op: &IlOp) -> bool {
+    match op {
+        IlOp::Bin { op, .. } => matches!(
+            *op,
+            Instruction::EQ | Instruction::NEQ | Instruction::BITAND
+        ),
+        IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
+            matches!(
+                Instruction::from(*op),
+                Instruction::EQ | Instruction::NEQ | Instruction::BITAND
+            )
+        }
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -119,7 +244,7 @@ mod tests {
     }
 
     #[test]
-    fn i8_compare_diamond_is_lir_eligible() {
+    fn i8_plain_if_diamond_has_no_reason() {
         let loc = loc();
         let ops = [
             IlOp::Label(Label(0)),
@@ -141,7 +266,30 @@ mod tests {
             IlOp::Load { slot: 1, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert!(lir_eligible(&ops, &[]));
+        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::NoReason));
+    }
+
+    #[test]
+    fn i8_store_loop_has_no_reason() {
+        let loc = loc();
+        let ops = [
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Const { imm: 1, loc },
+            IlOp::StorePop { slot: 2, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc,
+                hint: Default::default(),
+            },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::NoReason));
     }
 
     #[test]

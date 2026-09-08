@@ -116,7 +116,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier` optional; dense / LIR refuse (no maps) | **I5** |
 | HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; dense emit stays W4 | **I6** |
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
-| Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (infer+lower; I4–I7 refuse) | **I8** |
+| Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (named I1–I3 / two-slot / compare reason; I4–I7 refuse) | **I8** |
 | Escaping classes, boxed nested enums, recursion | fuse-IL | stay refuse unless a later island says otherwise |
 | Cranelift | parked (P5) | not an island |
 
