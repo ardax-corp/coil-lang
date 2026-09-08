@@ -4599,9 +4599,9 @@ let _y = nested[0]; \
             r#"
 fn main() {
     let buf: [byte; 3] = ["H", "i", "\n"];
-    if buf[0] != 72 { raise "H"; }
-    if buf[1] != 105 { raise "i"; }
-    if buf[2] != 10 { raise "nl"; }
+    if buf[0] != (72 as byte) { raise "H"; }
+    if buf[1] != (105 as byte) { raise "i"; }
+    if buf[2] != (10 as byte) { raise "nl"; }
 }
 "#,
         );
