@@ -7,19 +7,20 @@
 There is no in-repo stdlib hot path (collections / HTTP live in other repos).
 This table is `examples/perf/` plus a few numeric demos.
 
-## Gates (after W4)
+## Gates (after COI-291)
 
 | # | Refuse | Typical IL | Next cut |
 |---|--------|------------|----------|
 | 1 | Straight-line below cost gate | `i + j * 2` (2 work ops) | stay fuse-IL |
 | 2 | Need float or i64 arith (or `i32`) | float compare-only | stay fuse-IL |
-| 3 | Non-numeric IL | user `CALL` / non-allowlisted HostInvoke / heap index / class field / match / string | later (heap / match) |
+| 3 | Non-numeric IL | `CALL` to a non-dense callee / non-allowlisted HostInvoke / heap index / class field / match / string | heap / match / recursion |
 | 4 | Multi-word `RETURN` | two-slot Option/Result | P3 LIR (already on) |
 | 5 | Residual `Byte` / `Pow` / `AND`/`OR` | `operators_loop` | stay fuse-IL |
 
 **W4 allowlisted HostInvoke (inside dense):** infer accepts only these
 HostInvoke ids (layout must be boxed `0`; native id must be an inline
-`CONST`). User `CALL` still refuses.
+`CONST`). User `CALL` is allowed only when the callee is already dense
+(COI-291 one-word ABI).
 
 | Ids | Names |
 |-----|--------|
@@ -33,9 +34,10 @@ At those edges, dense emit **boxes** typed slots onto the Value stack,
 dense. Packed LA args stay `i64` Value words (heap pointers); math / axpy
 are scalar `f64` (axpy `n` is `i64`). No open-ended user methods.
 
-**W3 cost gate (no back-edge):** infer still requires numeric IL (no user
-`CALL` / non-allowlisted HostInvoke / heap index / class / match / string /
-multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`) and float
+**W3 cost gate (no back-edge):** infer still requires numeric IL (no
+`CALL` to a non-dense callee / non-allowlisted HostInvoke / heap index /
+class / match / string / multi-word `RETURN` / residual `Byte` / `Pow` /
+`AND`/`OR`) and float
 `+`/`-`/`*`/`/` or i64 `+`/`-`/`*`/`/`/`%` (or int/`float` `INC`/`DEC`).
 Compare-only still refuses. A body **without** a back-edge also needs
 `numeric_work_ops >= STRAIGHT_LINE_MIN_WORK_OPS` (**8**).
@@ -74,6 +76,7 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `hot` | `mir_dense_i64.hy` | dense | i64 +/− counted — **W2** |
 | `hot` | `mir_dense_straight.hy` | dense | no back-edge, ≥8 work ops — **W3** |
 | `hot` | `mir_dense_host.hy` | dense + HostInvoke | allowlisted `math_sin` in loop — **W4** |
+| `hot` / `kernel` | `mir_dense_call.hy` | dense + dense `CALL` | leaf-first typed CALL — **COI-291** |
 | `main` | `numeric.hy` | dense | i64 add — **W2** (side effect) |
 | `iv_mul` | `iv_mul_sr.hy` | dense | i64 mul — **W2** (side effect) |
 | `nested` | `licm_nested_chains.hy` | dense | i64 add — **W2** (side effect) |
@@ -94,5 +97,7 @@ Stack-IL `cse_*` / `dest_prop_field_alias` stay fuse-IL (heap / field). W2
 does not rewrite those sources; `numeric` / `iv_mul_sr` / `licm_nested_chains`
 now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `mir_dense_straight.hy`. The W4 prove bench is `mir_dense_host.hy`
-(`sin` inside an otherwise dense loop). User `CALL` (`times_a` → `eval_a`,
-`tak` / `fib`, `helper` in the negative test) still refuses.
+(`sin` inside an otherwise dense loop). The COI-291 prove bench is
+`mir_dense_call.hy` (`hot` loops a dense `kernel`). User `CALL` to a
+non-dense callee (`times_a` → heap/`eval_a`, `tak` / `fib` recursion,
+`helper` in the negative test) still refuses.

@@ -106,12 +106,31 @@ HostInvoke. The set is **closed** (see
 - M1 math **125–135** (`math_atan` … `math_tanh`)
 - `simd_axpy_reduce` **136** (P12 may still replace a *whole* saxpy body)
 
-User `CALL`, clocks, IO, GC, and other natives still refuse. Dense emit
-keeps `DenseBin` for the numeric region and at each allowlisted edge:
-`LOAD` args (Value words) → `CONST` id → `HostInvoke` → `STORE` dest, then
-more dense ops. P12 whole-body saxpy pack still runs first when the
-pattern matches (no inner host). Hit bench:
+Clocks, IO, GC, and other natives still refuse. User `CALL` is COI-291
+(below). Dense emit keeps `DenseBin` for the numeric region and at each
+allowlisted edge: `LOAD` args (Value words) → `CONST` id → `HostInvoke` →
+`STORE` dest, then more dense ops. P12 whole-body saxpy pack still runs
+first when the pattern matches (no inner host). Hit bench:
 `examples/perf/mir_dense_host.hy`.
+
+## M1–M3 — typed dense→dense CALL (COI-291)
+
+One-word ABI ([`compiler/src/mir/abi.rs`](../../compiler/src/mir/abi.rs)):
+
+- **Args:** `arity` Value words in callee slots `0..arity` (same bits as
+  typed dense slots — `i32`/`i64`/`f32`/`f64`/`bool`).
+- **Return:** one word on TOS (`RETURN` width 1). Caller `STORE`s it.
+- **Two-slot / niche:** refuse (M4 / P3 LIR). `TailCall` / `CallIndirect`
+  refuse. Self- and mutual-recursion stay refuse (leaf-first map).
+
+`IlModule` specializes **bottom-up**: a body may `CALL` only after the
+callee is already in the dense ABI map. Infer/lower treat that `CALL`
+like W4 HostInvoke (typed SSA args). Emit is `LOAD` args → `Entry` →
+`STORE` dest. The VM `CALL`/`RETURN` path already restores the caller
+frame base and keeps caller slots below `callee_sp`; no new opcode.
+
+Non-dense callees still refuse (W4 HostInvoke allowlist unchanged).
+Hit bench: `examples/perf/mir_dense_call.hy`.
 
 ## P7 — MIR InstCombine (COI-281)
 
