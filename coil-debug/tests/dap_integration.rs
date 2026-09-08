@@ -47,9 +47,14 @@ struct DapClient {
 
 impl DapClient {
     fn spawn(cwd: &std::path::Path) -> Self {
+        Self::spawn_with(cwd, &[])
+    }
+
+    fn spawn_with(cwd: &std::path::Path, extra: &[&str]) -> Self {
         let bin = coil_debug_bin();
         let mut cmd = Command::new(&bin);
         cmd.arg("--dap");
+        cmd.args(extra);
         for root in compiler::Pipeline::workspace_language_extra_roots() {
             cmd.arg("--root").arg(root);
         }
@@ -381,4 +386,147 @@ fn dap_launch_compile_failure() {
         "launch={launch}"
     );
     client.disconnect();
+}
+
+#[test]
+fn dap_stop_on_entry_has_stack_and_step() {
+    let entry = fib_entry();
+    let cwd = entry.parent().unwrap().parent().unwrap();
+    let mut client = DapClient::spawn(cwd);
+    initialize_and_launch(
+        &mut client,
+        entry.to_str().unwrap(),
+        cwd.to_str().unwrap(),
+        true,
+    );
+    let done = client.request("configurationDone", serde_json::json!({}));
+    assert_eq!(done.get("success"), Some(&serde_json::json!(true)));
+    let stopped = client.wait_for_event("stopped");
+    assert_eq!(
+        stopped.pointer("/body/reason").and_then(|v| v.as_str()),
+        Some("entry")
+    );
+
+    let stack = client.request("stackTrace", serde_json::json!({ "threadId": 1 }));
+    assert_eq!(stack.get("success"), Some(&serde_json::json!(true)));
+    let frames = stack
+        .pointer("/body/stackFrames")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        !frames.is_empty(),
+        "stopOnEntry must expose a stack, stack={stack}"
+    );
+
+    let step = client.request("stepIn", serde_json::json!({ "threadId": 1 }));
+    assert_eq!(
+        step.get("success"),
+        Some(&serde_json::json!(true)),
+        "stepIn={step}"
+    );
+    let stepped = client.wait_for_event("stopped");
+    assert_eq!(
+        stepped.pointer("/body/reason").and_then(|v| v.as_str()),
+        Some("step"),
+        "stepped={stepped}"
+    );
+
+    let over = client.request("next", serde_json::json!({ "threadId": 1 }));
+    assert_eq!(over.get("success"), Some(&serde_json::json!(true)));
+    let _ = client.wait_for_event("stopped");
+
+    let out = client.request("stepOut", serde_json::json!({ "threadId": 1 }));
+    assert_eq!(out.get("success"), Some(&serde_json::json!(true)));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if std::time::Instant::now() > deadline {
+            panic!("timeout after stepOut");
+        }
+        let msg = client.read_message().expect("dap message");
+        let kind = msg.get("event").and_then(|e| e.as_str());
+        if kind == Some("stopped") || kind == Some("terminated") {
+            break;
+        }
+    }
+    client.disconnect();
+}
+
+#[test]
+fn dap_launch_allow_attach_grant() {
+    let dir = std::env::temp_dir().join(format!("coil_dap_grant_{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    let gated = dir.join("gated.hy");
+    std::fs::write(
+        &gated,
+        "use io::{stdout};\nfn main() { let _ = stdout().attach(0, 0, 0, 0, 0); }\n",
+    )
+    .expect("write gated");
+
+    let mut denied = DapClient::spawn(&dir);
+    let init = denied.request(
+        "initialize",
+        serde_json::json!({ "clientID": "test", "adapterID": "coil" }),
+    );
+    assert_eq!(init.get("success"), Some(&serde_json::json!(true)));
+    let _ = denied.wait_for_event("initialized");
+    let fail = denied.request(
+        "launch",
+        serde_json::json!({
+            "program": gated.to_string_lossy(),
+            "cwd": dir.to_string_lossy(),
+        }),
+    );
+    assert_eq!(
+        fail.get("success"),
+        Some(&serde_json::json!(false)),
+        "launch={fail}"
+    );
+    denied.disconnect();
+
+    let mut granted = DapClient::spawn_with(&dir, &["--allow-attach"]);
+    let init = granted.request(
+        "initialize",
+        serde_json::json!({ "clientID": "test", "adapterID": "coil" }),
+    );
+    assert_eq!(init.get("success"), Some(&serde_json::json!(true)));
+    let _ = granted.wait_for_event("initialized");
+    let ok = granted.request(
+        "launch",
+        serde_json::json!({
+            "program": gated.to_string_lossy(),
+            "cwd": dir.to_string_lossy(),
+            "stopOnEntry": true,
+        }),
+    );
+    assert_eq!(
+        ok.get("success"),
+        Some(&serde_json::json!(true)),
+        "launch with CLI grant={ok}"
+    );
+    granted.disconnect();
+
+    let mut via_launch = DapClient::spawn(&dir);
+    let init = via_launch.request(
+        "initialize",
+        serde_json::json!({ "clientID": "test", "adapterID": "coil" }),
+    );
+    assert_eq!(init.get("success"), Some(&serde_json::json!(true)));
+    let _ = via_launch.wait_for_event("initialized");
+    let ok = via_launch.request(
+        "launch",
+        serde_json::json!({
+            "program": gated.to_string_lossy(),
+            "cwd": dir.to_string_lossy(),
+            "allowAttach": true,
+            "stopOnEntry": true,
+        }),
+    );
+    assert_eq!(
+        ok.get("success"),
+        Some(&serde_json::json!(true)),
+        "launch allowAttach={ok}"
+    );
+    via_launch.disconnect();
+    let _ = std::fs::remove_dir_all(&dir);
 }
