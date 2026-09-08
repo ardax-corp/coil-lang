@@ -120,7 +120,9 @@ fn abi_leaf(ops: &[IlOp]) -> bool {
                 kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
                 ..
             } => {
-                if *tag > 1 || *arity > 1 {
+                // Arity 0 is boxed overlap (`JumpIfMatch` writes slots; tell
+                // is peek-only). Reconstruct would drop the payload.
+                if *tag > 1 || *arity != 1 {
                     return false;
                 }
                 jim = true;
