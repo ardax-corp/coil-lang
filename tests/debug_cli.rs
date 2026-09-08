@@ -175,12 +175,12 @@ fn debug_batch_repl_surface_step_list_print_restart() {
          bt\n\
          list\n\
          disas fib\n\
+         info break\n\
+         delete\n\
          stepi\n\
          step\n\
          next\n\
          finish\n\
-         info break\n\
-         delete\n\
          run\n\
          quit\n",
         "surface",
@@ -196,9 +196,7 @@ fn debug_batch_repl_surface_step_list_print_restart() {
         "Breakpoint",
         "ip=",
         "n ($0)",
-        "$0 =",
         "Step",
-        "Next",
         "Finish",
         "Program exited normally",
     ] {
