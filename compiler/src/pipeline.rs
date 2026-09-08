@@ -137,6 +137,11 @@ impl Pipeline {
         self.ast_cache.remove(file);
         self.overlays.remove(file);
     }
+
+    /// In-memory override for `file`, if the editor (or a test) set one.
+    pub fn overlay_text(&self, file: &Path) -> Option<&str> {
+        self.overlays.get(file).map(String::as_str)
+    }
     /// Register a host native with an explicit [`FfiSignature`]
     /// and Rust closure. Test-only; production ids come from
     /// [`common::HOST_NATIVES`].

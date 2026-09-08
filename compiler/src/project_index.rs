@@ -86,12 +86,23 @@ impl ProjectIndex {
         self.files.insert(path, IndexedFile { source, symbols });
     }
 
+    /// Overlay an unsaved buffer and keep the symbol map on the same text.
+    pub fn apply_open_file(&mut self, path: PathBuf, source: String) {
+        self.pipeline.set_file_text(path.clone(), source.clone());
+        self.upsert_file(path, source);
+    }
+
     pub fn source_for(&self, path: &Path) -> Option<&str> {
         self.files.get(path).map(|f| f.source.as_str())
     }
 
     pub fn symbols_for(&self, path: &Path) -> Option<&SymbolIndex> {
         self.files.get(path).map(|f| &f.symbols)
+    }
+
+    /// Paths currently in the use-graph index (disk + overlays).
+    pub fn indexed_paths(&self) -> impl Iterator<Item = &PathBuf> {
+        self.files.keys()
     }
 
     /// Resolve a reference site via [`DefId`] / checker tables.
@@ -139,9 +150,12 @@ impl ProjectIndex {
         self.files
             .retain(|path, _| discovered.iter().any(|d| d == path));
         for path in discovered {
-            let source = match std::fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(_) => continue,
+            let source = match self.pipeline.overlay_text(&path) {
+                Some(text) => text.to_owned(),
+                None => match std::fs::read_to_string(&path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                },
             };
             let mut symbols = SymbolIndex::from_source(path.clone(), &source);
             if let Some(locals) = self.locals_for_file(&path) {
@@ -362,6 +376,30 @@ mod tests {
             assert_eq!(resolved_b[0].0, b);
         }
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn typecheck_entry_keeps_overlay_text() {
+        let dir = std::env::temp_dir().join(format!(
+            "coil-project-index-overlay-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        write_project(
+            &dir,
+            &[(
+                "main.hy",
+                "fn helper() -> int { return 1; }\nfn main() { let x = helper(); return; }\n",
+            )],
+        );
+        let main = dir.join("main.hy");
+        let overlay = "fn helper() -> int { return 7; }\nfn main() { let x = helper(); return; }\n";
+        let mut index = ProjectIndex::with_roots(dir.clone(), vec![PathBuf::from(".")]);
+        index.apply_open_file(main.clone(), overlay.to_string());
+        index.typecheck_entry(&main);
+        assert_eq!(index.source_for(&main), Some(overlay));
+        assert_eq!(index.pipeline().overlay_text(&main), Some(overlay));
         let _ = fs::remove_dir_all(&dir);
     }
 }
