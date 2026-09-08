@@ -461,7 +461,9 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         MirInst::Phi { .. }
         | MirInst::HostInvoke { .. }
         | MirInst::Call { .. }
-        | MirInst::MatchPayload { .. } => {
+        | MirInst::MatchPayload { .. }
+        | MirInst::FieldLoad { .. }
+        | MirInst::FieldStore { .. } => {
             return None
         }
     })

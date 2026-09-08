@@ -275,6 +275,22 @@ pub enum MirInst {
         scrutinee: ValueId,
         index: u32,
     },
+    /// Field of a non-escaping unboxed class (I3). `object` is the SSA
+    /// value of slot `base + index` from the local-escape unbox map.
+    FieldLoad {
+        dest: ValueId,
+        object: ValueId,
+        base: u32,
+        index: u32,
+    },
+    /// Store into an unboxed class field slot (ctor / rebind). Escaping
+    /// `p.x = …` stays fuse-IL (`local_escape` poisons those).
+    FieldStore {
+        dest: ValueId,
+        src: ValueId,
+        base: u32,
+        index: u32,
+    },
 }
 
 impl MirInst {
@@ -288,7 +304,9 @@ impl MirInst {
             | Self::Phi { dest, .. }
             | Self::HostInvoke { dest, .. }
             | Self::Call { dest, .. }
-            | Self::MatchPayload { dest, .. } => dest,
+            | Self::MatchPayload { dest, .. }
+            | Self::FieldLoad { dest, .. }
+            | Self::FieldStore { dest, .. } => dest,
         }
     }
 
@@ -304,6 +322,8 @@ impl MirInst {
             Self::Phi { args, .. } => args.iter().map(|(_, v)| *v).collect(),
             Self::HostInvoke { args, .. } | Self::Call { args, .. } => args.clone(),
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
+            Self::FieldLoad { object, .. } => vec![*object],
+            Self::FieldStore { src, .. } => vec![*src],
         }
     }
 
@@ -326,6 +346,8 @@ impl MirInst {
                 }
             }
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
+            Self::FieldLoad { object, .. } => *object = map(*object),
+            Self::FieldStore { src, .. } => *src = map(*src),
         }
     }
 }

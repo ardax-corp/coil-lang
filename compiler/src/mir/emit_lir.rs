@@ -450,6 +450,36 @@ fn emit_stored(
             });
         }
         MirInst::Phi { .. } | MirInst::MatchPayload { .. } => {}
+        MirInst::FieldLoad { dest, object, .. } => {
+            emit_stack(out, *object, func, plan, regs, pool, loc)?;
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::FieldStore {
+            dest,
+            src,
+            base,
+            index,
+            ..
+        } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::StorePop {
+                slot: *base + *index,
+                loc,
+            });
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Load {
+                    slot: *base + *index,
+                    loc,
+                });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::HostInvoke { .. } | MirInst::Call { .. } => {
             return Err(LowerError::Refused(
                 "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
@@ -561,6 +591,8 @@ fn emit_stack(
             }
             Ok(())
         }
+        MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
+        MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
     }
 }
 

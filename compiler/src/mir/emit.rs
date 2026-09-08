@@ -384,6 +384,11 @@ fn emit_inst(
                 "dense emit refuses MatchPayload (I2 is MIR→LIR)".into(),
             ));
         }
+        MirInst::FieldLoad { .. } | MirInst::FieldStore { .. } => {
+            return Err(LowerError::Refused(
+                "dense emit refuses FieldLoad/FieldStore (I3 is MIR→LIR)".into(),
+            ));
+        }
     }
     Ok(())
 }
