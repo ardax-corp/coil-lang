@@ -8,7 +8,7 @@ use super::emit_lir::emit_lir;
 use super::infer::{infer_lir, infer_numeric};
 use super::lower::{LowerHints, try_lower_numeric};
 
-/// If `ops` is a specialized numeric loop, return dense IL (Value ABI at edges).
+/// If `ops` is a specialized numeric body, return dense IL (Value ABI at edges).
 ///
 /// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
 /// then saxpy-reduce HostInvoke (P12) or dense emit.
@@ -19,8 +19,9 @@ pub fn try_specialize_body(
     pool: &mut Vec<u64>,
 ) -> Option<Vec<IlOp>> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
-    // Infer requires a back-edge plus float +/−/×/÷, counted i64 +/−/×/÷/%,
-    // or i32. Heap / CALL / multi-word RETURN stay refuse (see specialize-refuse).
+    // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
+    // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
+    // Heap / CALL / multi-word RETURN stay refuse (see specialize-refuse).
     let inferred = infer_numeric(ops, pool.len(), entry_sp).ok()?;
     if !inferred.has_float_arith && !inferred.has_i32 && !inferred.has_i64_arith {
         return None;
