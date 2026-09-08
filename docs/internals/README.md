@@ -6,7 +6,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 |----------|----------|
 | [Pipeline](pipeline.md) | Parse → typecheck → codegen → archive → execute |
 | [Numeric MIR](mir.md) | COI-267/268: SSA sidecar + dense numeric bytecode (Value ABI at edges) |
-| [MIR language islands](mir-islands.md) | COI-292 I0: islands vs full-MIR rewrite; I1–I8 ladder; feature → path table; A/B rules |
+| [MIR language islands](mir-islands.md) | COI-292 I0: islands vs full-MIR rewrite; I1–I8 ladder; I4 FORMAT/string hard refuse; A/B rules |
 | [Specialize refuse](specialize-refuse.md) | Dense refuse inventory (W0–W3); language features still fuse-IL; island targets |
 | [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
