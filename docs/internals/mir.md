@@ -149,8 +149,9 @@ and `-Og` skip dense + MIR→LIR so the VM debugger stays on fuse-IL
 ([mir-deopt.md](mir-deopt.md)). I8
 ([COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3))
 lifts leftover bodies through MIR→LIR (`lir_eligible`) when they have a
-named I1–I3 / two-slot reason — not only match / field accidents. Plain
-`if` diamonds stay fuse-IL. User `CALL` is COI-291
+named I1–I3 / two-slot reason or an inferable leftover (plain `if` /
+compare diamonds, store-only, tiny lets). I4 string/FORMAT, I5 alloc,
+and impure HostInvoke/`CALL` stay fuse-IL. User `CALL` is COI-291
 (below). Dense emit keeps `DenseBin` for the numeric region and at each
 allowlisted edge: `LOAD` args (Value words) → `CONST` id → `HostInvoke` →
 `STORE` dest, then more dense ops. P12 whole-body saxpy pack still runs
