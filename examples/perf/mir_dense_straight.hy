@@ -16,9 +16,11 @@ fn hot(float x, float y) -> float {
 fn main() {
     let i = 0;
     let s = 0.0;
-    while i < 400000 {
-        let xf = i as float;
-        s = s + hot(xf, xf + 0.5);
+    let n = 400000;
+    let nf = n as float;
+    while i < n {
+        let xf = (i as float) / nf;
+        s = s + hot(xf, 1.0 - xf);
         i = i + 1;
     }
     write_all(stdout(), to_bytes(format("%i", s as int)));

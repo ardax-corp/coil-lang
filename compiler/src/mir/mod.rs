@@ -765,6 +765,8 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile above-gate kernel");
+        assert_eq!(STRAIGHT_LINE_MIN_WORK_OPS, 8);
+        assert_eq!(numeric_work_ops(&[]), 0);
         assert!(
             bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
             "straight-line above work-op gate must emit DenseBin"
@@ -781,6 +783,27 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_eval_a_follows_straight_line_work_gate() {
+        let src = r#"
+fn eval_a(int i, int j) -> float {
+    let ij = i + j;
+    let t = (ij * (ij + 1)) / 2 + i + 1;
+    return 1.0 / (t as float);
+}
+fn main() {
+    let _ = eval_a(1, 2);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, _) = p.compile_src(src).expect("compile eval_a");
+        let dense = bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin);
+        assert!(
+            dense,
+            "nbody eval_a meets STRAIGHT_LINE_MIN_WORK_OPS and emits DenseBin"
+        );
     }
 
     #[test]

@@ -59,7 +59,7 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `main` | `numeric.hy` | dense | i64 add — **W2** (side effect) |
 | `iv_mul` | `iv_mul_sr.hy` | dense | i64 mul — **W2** (side effect) |
 | `nested` | `licm_nested_chains.hy` | dense | i64 add — **W2** (side effect) |
-| `eval_a` | `nbody.hy` | fuse-IL or dense | W3 if work ops ≥ 8 after stack-IL opts |
+| `eval_a` | `nbody.hy` | dense | no back-edge, ≥8 work ops — **W3** |
 | `times_a` / `times_at` | `nbody.hy` | fuse-IL | `CALL` + heap/index — W4 |
 | `sum` | `indexed_sum.hy` | fuse-IL | heap/index |
 | `fill` / `scan` | `vec_scan.hy` | fuse-IL | heap/index |
