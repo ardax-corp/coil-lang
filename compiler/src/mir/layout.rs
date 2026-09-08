@@ -1,4 +1,4 @@
-//! Result/Option ABI layouts for MIR→LIR (COI-270).
+//! Result/Option ABI layouts for MIR→LIR (COI-270) and I1 SSA word names.
 //!
 //! Matches the shipped checker/codegen contract in
 //! [`crate::typechecking::return_layout`] and
@@ -23,6 +23,8 @@ pub enum MirLayout {
     /// Heap `Option<T>` (`None` = `0`) or heap-heap `Result<T,E>`
     /// (`Ok` = aligned pointer, `Err` = `pointer | 1`). Host packs at the
     /// HostInvoke edge; LIR uses `CONST 0` / `BITAND` / `BITOR` / `LogNot`.
+    /// SSA names the word [`crate::mir::MirTy::NicheOpt`] vs
+    /// [`crate::mir::MirTy::NicheRes`]; this variant is the shared ABI.
     HeapNiche,
 }
 
@@ -32,6 +34,11 @@ impl MirLayout {
             Self::TwoSlot => 2,
             Self::Word | Self::HeapNiche => 1,
         }
+    }
+
+    /// One-word heap/niche ABI (I1). Two-slot is a pair, not this.
+    pub fn is_heap_word(self) -> bool {
+        matches!(self, Self::HeapNiche)
     }
 
     /// Builtin Option/Result / arity-2 immediate product only. User payload
@@ -91,7 +98,7 @@ fn is_immediate(ty: &Ty) -> bool {
 }
 
 /// Ground heap object, not a nested Option/Result (those stay boxed).
-fn is_ground_heap(ty: &Ty) -> bool {
+pub(crate) fn is_ground_heap(ty: &Ty) -> bool {
     let ty = strip_readonly(ty);
     if is_immediate(ty) || is_option_ty(ty) || is_result_ty(ty) {
         return false;
@@ -188,5 +195,7 @@ mod tests {
         assert_eq!(MirLayout::Word.words(), 1);
         assert_eq!(MirLayout::HeapNiche.words(), 1);
         assert_eq!(MirLayout::TwoSlot.words(), 2);
+        assert!(MirLayout::HeapNiche.is_heap_word());
+        assert!(!MirLayout::Word.is_heap_word());
     }
 }

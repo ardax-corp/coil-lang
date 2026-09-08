@@ -31,7 +31,12 @@ the stack).
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
 | text form | Print / parse for round-trip tests |
 
-Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`.
+Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`. I1
+([COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice))
+adds `heapref` / `niche_opt` / `niche_res` under `value` so infer/lower can
+**carry** shipped heap and niche Option/Result words in SSA. Dense emit and
+`DenseAbi` still require numeric lanes only; allocating / escaping / match
+bodies stay fuse-IL ([mir-islands.md](mir-islands.md)).
 
 ## P1 — dense exec (COI-268)
 
