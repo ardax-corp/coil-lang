@@ -52,7 +52,8 @@ pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) {
-        let dropped = std::mem::take(&mut gc.as_mut().elements);
+        let dropped = gc.as_ref().elements.clone();
+        gc.as_mut().elements.clear();
         heap.satb_shade_values(&dropped);
     }
     Value::from(0i64)
