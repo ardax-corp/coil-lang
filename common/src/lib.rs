@@ -11,6 +11,7 @@ mod opcode;
 mod package;
 mod seekable_iter;
 mod source_pos;
+mod stack_map;
 mod value;
 
 pub use archive::*;
@@ -25,6 +26,7 @@ pub use opcode::*;
 pub use package::*;
 pub use seekable_iter::*;
 pub use source_pos::*;
+pub use stack_map::*;
 pub use value::*;
 
 #[macro_export]
