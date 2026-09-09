@@ -297,3 +297,8 @@ hyperfine -w 2 -r 8.
 select+alloc on a 64-slot prove frame, post-loop-only `return [x]`,
 unmapped alloc, grow dest, arity > 32, `Vec.push` / class `new` loops.
 No further S2* tickets in the refuse queue.
+
+Flagship `.hyc` sha256 identical vs parent `8ce0156f`: `mandelbrot` /
+`tak` / `nsieve` / `binary_trees` / `fib`. Checksums 625885 / 7 / 1900 /
+135854 / 2178309. SROA pack archives also identical (Make-free before
+this gate).
