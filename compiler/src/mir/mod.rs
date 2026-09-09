@@ -2012,7 +2012,8 @@ fn main() {
 
     #[test]
     fn pipeline_inlined_take_makearray_stays_fuse_il() {
-        // Inlined take + in-loop Make* stays fuse-IL (S2e boxing tax).
+        // Inlined take + in-loop Make*: S2l cost-gate keeps fuse-IL
+        // (residual boxing still loses to invert+fuse).
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0];
@@ -2057,6 +2058,59 @@ fn main() {
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "hot checksum; opcodes={names:?}");
+    }
+
+    #[test]
+    fn s2l_inloop_escape_make_stays_fuse_il() {
+        // Escaping `[i, i+1]` cannot SROA. Default cost-gate keeps fuse-IL.
+        let src = r#"
+fn take([int] xs) -> int {
+    return xs[0] + xs[1];
+}
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        s = s + take([i, i + 1]);
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    if pack(5) != 25 {
+        panic "s2l escape checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile escape loop");
+        let symbols = p.program_debug().fn_symbols;
+        let pack = symbols
+            .iter()
+            .position(|s| s.name == "pack")
+            .expect("pack symbol");
+        let start = symbols[pack].entry_pc as usize;
+        let end = symbols
+            .get(pack + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let pack_bc = &bc[start..end];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            pack_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::MakeArray),
+            "in-loop escape MakeArray stays; opcodes={names:?}"
+        );
+        assert!(
+            pack_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S2l cost-gate: leftover in-loop Make* stays fuse-IL; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "s2l escape checksum; opcodes={names:?}");
     }
 
     #[test]

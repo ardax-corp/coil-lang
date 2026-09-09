@@ -39,9 +39,12 @@ pub fn try_specialize_body(
     // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // S2d: mapped *preheader* Make* + index loop may take dense.
-    // S2e: residuals no longer Seek-restore, but in-loop Make* is still
-    // ~13–17% slower than fuse-IL (LOAD/STORE boxing). Default refuse.
-    // `COIL_S2D_DENSE_INLOOP=1` re-enables dense for A/B.
+    // S2e: residuals no longer Seek-restore. In-loop Make* still pays
+    // LOAD/STORE boxing vs invert+fuse. S2l (COI-322): try dense so MIR
+    // SROA / LICM can delete or hoist the alloc; keep it only when the
+    // reconstruct is Make*-free inside loops. Residual in-loop Make* is
+    // a measured loser (op-count ≤ fuse still ~5% slower).
+    // `COIL_S2D_DENSE_INLOOP=1` forces dense; `=0` restores the S2e refuse.
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
     // S2k: slot-select diamonds may take dense when Seek fits the 64-slot
@@ -53,9 +56,9 @@ pub fn try_specialize_body(
     if select_cfg && has_alloc {
         return None;
     }
-    let force_dense_inloop = std::env::var_os("COIL_S2D_DENSE_INLOOP")
-        .is_some_and(|v| v != "0");
-    if (!force_dense_inloop && super::infer::has_alloc_inside_loop(ops))
+    let inloop_mode = dense_inloop_mode();
+    let inloop_alloc = super::infer::has_alloc_inside_loop(ops);
+    if (inloop_mode == DenseInloopMode::ForceOff && inloop_alloc)
         || (has_alloc && super::infer::has_alloc_only_after_loops(ops))
     {
         return None;
@@ -135,7 +138,31 @@ pub fn try_specialize_body(
     if select_cfg && !select_reconstruct_ok(ops, &out) {
         return None;
     }
+    // Residual in-loop Make* still loses to invert+fuse (LOAD/STORE boxing;
+    // escape leftover ~5% on s2d_inloop_escape). Keep dense only when
+    // SROA / LICM deleted the in-loop alloc, or when force-on for A/B.
+    if inloop_mode != DenseInloopMode::ForceOn
+        && inloop_alloc
+        && super::infer::has_alloc_inside_loop(&out)
+    {
+        return None;
+    }
     Some((out, abi))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DenseInloopMode {
+    CostGate,
+    ForceOn,
+    ForceOff,
+}
+
+fn dense_inloop_mode() -> DenseInloopMode {
+    match std::env::var_os("COIL_S2D_DENSE_INLOOP") {
+        None => DenseInloopMode::CostGate,
+        Some(v) if v == "0" => DenseInloopMode::ForceOff,
+        Some(_) => DenseInloopMode::ForceOn,
+    }
 }
 
 /// Index / open CALL dests default to i64 when the next IL is StorePop.
