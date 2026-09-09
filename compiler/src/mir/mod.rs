@@ -2224,14 +2224,16 @@ fn main() {
             .max()
             .unwrap_or(0);
         assert!(
-            seek_hw <= 64,
-            "S2k bump Seek {seek_hw} overflows 64-slot prove frame"
+            seek_hw <= p.operand_stack_slots(),
+            "dense Seek {seek_hw} exceeds operand stack {}",
+            p.operand_stack_slots()
         );
         assert!(
             body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S2k: bump store-select takes dense; opcodes={names:?}"
+            "S2k: bump store-select takes dense; opcodes={names:?} seek={seek_hw}"
         );
-        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "bump checksum; opcodes={names:?}");
     }

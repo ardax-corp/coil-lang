@@ -224,9 +224,11 @@ S2f:
   / `bump`) may emit dense. Latch coalesce only aliases `i` with `i+1`
   when the increment is *in* the latch (CSE of `xs[1] = i+1` must not
   clobber `i`). A terminator `Cmp` reused by a later diamond is stored,
-  not fused-only. Still fuse-IL: in-loop Make* (S2e), unproven `xs[k]`
+  not fused-only.   Still fuse-IL: in-loop Make* (S2e), unproven `xs[k]`
   OOB heap arm (S2h), Seek > 64, last-arm write count drop. Class SROA
-  stays I3 LIR (not EQ-select).
+  stays I3 LIR (not EQ-select). `pack` / `pack_store` (N=3) checksum on
+  a 64-slot operand stack; 4-wide `bump` store-select is dense on the
+  production 256-slot default (fuse residuals can exceed 64).
 
 `pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
 `[T; N]` and the only uses are computed-index load/store (`i % N`).
