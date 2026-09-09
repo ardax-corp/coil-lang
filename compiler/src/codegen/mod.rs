@@ -22,7 +22,7 @@ use reporting::{ErrorCode, Message};
 
 /// Max native recursion depth for [`compiler::Compiler::do_compile`]. Chosen
 /// well under what a debug-build stack of a few MiB can hold even with
-/// `do_compile`'s current per-call frame size — see
+/// `do_compile`'s current per-call frame size, see
 /// docs/internals/limitations.md.
 const CODEGEN_RECURSION_LIMIT: u32 = 2000;
 
@@ -45,7 +45,6 @@ macro_rules! binary {
     };
 }
 
-// --- Match helpers ---
 
 /// Arms grouped by outer variant tag for dispatch and inner-pattern tests.
 #[derive(Debug, Clone)]
@@ -62,8 +61,8 @@ fn ffi_type_tag_from_output(checker: &Checker, expr: &Output) -> Option<(u32, u3
 
 /// Fallback FFI tag from a call-site expression when the typechecker did not
 /// record tags (recovery / missing side-table entry).
-///
-/// Returns `None` for unknown shapes — callers must not invent `INT` and
+                        ///
+/// Returns `None` for unknown shapes, callers must not invent `INT` and
 /// silently mis-promote; prefer skipping the variadic tag tuple or emitting
 /// a diagnostic instead.
 fn ffi_tag_for_expr_fallback(expr: &Output) -> Option<(u32, u32)> {
@@ -341,7 +340,7 @@ fn emit_inner_test<'compiler>(
     match payload {
         PatternPayload::Unit => {
             // Unit inner (e.g. `Option::None`): always matches.
-            // JMP to the arm body when we have a pass_label —
+            // JMP to the arm body when we have a pass_label
             // required when a later tag group follows so we
             // don't fall through into that group's body.
             if let Some(label) = pass_label {
@@ -373,7 +372,7 @@ fn emit_inner_test<'compiler>(
                         // Nested constructor: JUMP_IF_MATCH on inner tag, or recurse for records.
                         any_nested_ctor = true;
                         if matches!(sub_payload, PatternPayload::Record(_)) {
-                            // Nested record — recurse. The recursion
+                            // Nested record, recurse. The recursion
                             // walks the inner record's declared fields
                             // in decl_order and emits per-field
                             // tests (POP / STORE / JUMP_IF_MATCH on
@@ -405,7 +404,7 @@ fn emit_inner_test<'compiler>(
                                 bytecode.push_pop();
                             }
                         } else {
-                            // Last arm in the group — emit POP to
+                            // Last arm in the group, emit POP to
                             // consume the inner value. The arm
                             // body is reached by fall-through.
                             bytecode.push_pop();
@@ -428,7 +427,7 @@ fn emit_inner_test<'compiler>(
                 let sub_pat = match pattern_site.get(decl_name.as_str()) {
                     Some(p) => *p,
                     None => {
-                        // Field omitted from the pattern — emit
+                        // Field omitted from the pattern, emit
                         // POP to discard the value (the test
                         // chain always consumes every slot, so
                         // this is unconditional).
@@ -490,7 +489,7 @@ fn emit_inner_test<'compiler>(
                                 bytecode.push_pop();
                             }
                         } else {
-                            // Last arm in the group — emit POP
+                            // Last arm in the group, emit POP
                             // to consume the inner value. The
                             // arm body is reached by
                             // fall-through.
@@ -507,15 +506,15 @@ fn emit_inner_test<'compiler>(
 }
 
 /// Collect `name → Ty` for every binding in a match pattern.
-///
+                        ///
 /// Used so Access codegen (`p.y`) sees the *current arm's* binding type
 /// rather than whatever last arm wrote into the flat
 /// `codegen_var_types` side-table (same name reused across arms with
 /// different payload types would otherwise emit the wrong `LoadField`).
-///
+                        ///
 /// Open schema placeholders (`Ty::Var`, or `Ty::Con("T")` type-param
 /// markers from poly enums like `Option` / `Result` / `Box<T>`) are
-/// **not** inserted — they would shadow the instantiated binding type
+/// **not** inserted, they would shadow the instantiated binding type
 /// that `infer_pattern` already wrote into `codegen_var_types`.
 fn collect_pattern_binding_types(
     checker: &Checker,
@@ -601,7 +600,7 @@ fn collect_pattern_binding_types_with_expected(
 }
 
 /// Next free binding slot for match payloads.
-///
+                        ///
 /// `base` is the first payload slot (`context.variables.len()` at match
 /// entry). Slot 0 is reserved for the first function argument; trailing
 /// dictionary locals occupy 1..base-1 when `dict_arity > 0`.
@@ -618,7 +617,7 @@ fn next_available_slot(match_bindings: &HashMap<usize, HashMap<String, u32>>, ba
 }
 
 /// Bytecode table key for an overload: `name#2.0` or `name#rest1.0`.
-///
+                        ///
 /// `id` distinguishes same-arity typed overloads (`sum#1.0` vs `sum#1.1`).
 fn overload_fn_key(name: &str, fixed_arity: usize, is_rest: bool, id: u32) -> String {
     if is_rest {
@@ -637,9 +636,9 @@ fn strip_overload_key(name: &str) -> &str {
 }
 
 /// `MakeFn` operand: `[7:0]=n_cap [15:8]=n_filled [23:16]=arity [24]=is_rest`.
-///
+                        ///
 /// `n_cap` and `n_filled` are packed into 8-bit fields (max 255). Callers with
-/// larger values must not reach here — partial-application arity is already
+/// larger values must not reach here, partial-application arity is already
 /// capped at 32 for `filled_mask`.
 fn make_fn_operand(n_cap: u32, n_filled: u32, arity: u32, is_rest: bool) -> u32 {
     debug_assert!(
@@ -702,7 +701,6 @@ struct Context {
     prev: Option<Box<Self>>,
 }
 
-// --- Compiler ---
 
 /// Length of the CALL + JMP + HALT prologue every [`Compiler`] starts with.
 /// Multi-file linking treats `bytecode.len() <= PROLOGUE_BYTECODE_LEN` as a
@@ -797,7 +795,7 @@ pub struct Compiler {
     /// Memoized two-word-return verdicts (enum name or boxed), keyed by the
     /// name codegen looks a function up by. The type env fills in as bodies
     /// are compiled, so an unmemoized query can answer differently for a
-    /// body and for a later caller — see [`Compiler::two_word_return_kind`].
+    /// body and for a later caller, see [`Compiler::two_word_return_kind`].
     pair_return_kinds: std::cell::RefCell<HashMap<String, Option<String>>>,
 
     /// Whole-program names used as function *values* (`Some` after the
@@ -825,7 +823,7 @@ pub struct Compiler {
     expr_depth: u32,
 
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
-    /// guarded against a fixed limit — see the analogous `infer_depth` on
+    /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
     codegen_depth: u32,
 
@@ -839,7 +837,7 @@ pub struct Compiler {
     /// (declaration order). Run LIFO on return / fall-through via
     /// `emit_run_defers`. Kept on `Compiler` (not `Context`) so nested
     /// block frames do not drop registered defers.
-    ///
+                        ///
     /// Each thunk stores an IL label bound at its body entry and the `use (…)`
     /// capture names. At run time those captures are LOADed from the enclosing
     /// frame and passed as CALL arguments so the thunk's fresh frame sees them
@@ -860,7 +858,7 @@ pub struct Compiler {
     /// still runs before `main`).
     ffi_init: CodeBuf,
 
-    /// True while compiling an `impl` method — Function resets locals
+    /// True while compiling an `impl` method. Function resets locals
     /// and reserves slot 0 for `self`.
     compiling_method: bool,
     /// True while lowering a monomorphized clone. Bound-method hints still
@@ -1012,10 +1010,8 @@ impl Default for Compiler {
             extern_runtime_libs: HashMap::with_capacity(4),
             extern_runtime_functions: HashMap::with_capacity(16),
             extern_runtime_libs_loaded: HashSet::new(),
-            // ---
             messages: Vec::default(),
             context: Context::default(),
-            // ---
             checker: crate::typechecking::Checker::new(),
             typed_sidecar: crate::typechecking::TypedSidecar::default(),
             emit_idx: 0,
@@ -1134,7 +1130,7 @@ fn emit_pattern_binding<'compiler>(
         }
         Pattern::Binding { name } => {
             let slot = *next_slot;
-            // Always record the binding — the body still
+            // Always record the binding, the body still
             // needs to be able to look up the slot via
             // `Identifier` / `Assignment`, even if we don't
             // emit the redundant STORE (the test chain
@@ -1147,61 +1143,20 @@ fn emit_pattern_binding<'compiler>(
         }
         Pattern::Constructor { payload, .. } => match payload {
             PatternPayload::Unit => {
-                // A unit-variant nested pattern (e.g. `Option::None`)
-                // is invalid — unit variants have no payload. But
-                // the typechecker would have rejected this. Emit a
-                // defensive POP only if the caller expects a value
-                // to consume on the stack.
-                //
-                // The OUTER-level Unit case is handled by the
-                // caller (the forward pass emits POP / STORE 1 /
-                // nothing depending on whether the arm is the
-                // last, non-last, or a wildcard/binding
-                // catch-all). The recursion's Unit case (when
-                // is_outer = false) emits POP only when the
-                // caller expects a value on the stack
-                // (`consume_values = true`).
+                // Nested unit: defensive POP when caller expects a stack value.
+                // Outer Unit is handled by the forward pass.
                 if consume_values && !is_outer {
                     bytecode.push_pop();
                 }
             }
             PatternPayload::Tuple(parts) => {
-                // The OUTER-level Tuple case: the forward pass
-                // already emitted UNPACK for the last arm (or
-                // JUMP_IF_MATCH for non-last arms). Suppress
-                // UNPACK emission at the OUTER level.
-                //
-                // The recursion's Tuple case (when is_outer =
-                // false): we have a nested constructor on the
-                // stack (pushed by the outer JUMP_IF_MATCH or
-                // UNPACK above), and we need to UNPACK it to
-                // get its payload values at the right slot
-                // positions before binding its sub-patterns.
+                // Outer Tuple: forward pass already UNPACKed / JUMP_IF_MATCHed.
+                // Nested: UNPACK before binding sub-patterns.
                 if consume_values && !is_outer {
                     bytecode
                         .push(Byte::new(Instruction::Unpack).with_operand_u32(parts.len() as u32));
                 }
-                // Recurse for sub-patterns with the same
-                // `consume_values` flag. The inner values were
-                // pushed either by the (emitted) UNPACK above,
-                // or by the outer JUMP_IF_MATCH in the test
-                // chain case (when consume_values was false).
-                // When `consume_values = false`, the test
-                // chain has already emitted the
-                // POP / JUMP_IF_MATCH for the inner values, so
-                // we suppress the redundant bytecode in the
-                // recursion too.
-                //
-                // The recursion is ALWAYS at `is_outer = false`
-                // (the OUTER level is reached exactly once per
-                // arm body — by the caller).
-                //
-                // The sub-pattern's `parent_decl_order` is
-                // empty unless the sub-pattern is itself a
-                // record constructor — then it's the
-                // sub-pattern's declared field order. Tuple
-                // sub-patterns don't use `parent_decl_order`
-                // (they walk in source order).
+                // Nested records get their own decl order; tuples walk source order.
                 for sub in parts {
                     let sub_decl_order: Vec<(String, Ty)> = if let Pattern::Constructor {
                         enum_name: sub_enum,
@@ -1301,8 +1256,8 @@ fn emit_pattern_binding<'compiler>(
                         // forward pass handled missing
                         // fields via UNPACK with the right
                         // arity (the field's slot is just
-                        // left dangling — that's by
-                        // design — UNPACK still pushes N
+                        // left dangling, that's by
+                        // design, UNPACK still pushes N
                         // values; we just don't bind any of
                         // them). At recursion levels, the
                         // previous UnpackAt exposed N
@@ -1311,7 +1266,7 @@ fn emit_pattern_binding<'compiler>(
                         // subsequent fields.
                         bytecode.push_pop();
                     }
-                    // else: `consume_values = false` —
+                    // else: `consume_values = false`
                     // the test chain already consumed the
                     // value. Skip silently.
                 }

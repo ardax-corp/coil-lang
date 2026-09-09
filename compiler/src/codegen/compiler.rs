@@ -401,11 +401,7 @@ impl Compiler {
     ) -> CodeBuf {
         let mut bytecode = CodeBuf::new();
         use parser::ast::EnumConstructPayload;
-        // Look up the variant's tag and arity in the
-        // typechecker's tables. Unknown enum/variant is a
-        // type error with recovery — still walk children for
-        // NodeId alignment, but do not emit MakeEnum (and do
-        // not panic: release builds use panic=abort).
+        // Unknown enum/variant: recover without MakeEnum; still walk children for NodeId (panic=abort).
         let Some(tag) = self.checker.tag_for(enum_name, variant_name) else {
             let fqn = self.class_member_fqn(enum_name, variant_name);
             // Match typechecker order for Unit form: static field
@@ -416,7 +412,7 @@ impl Compiler {
                 bytecode.push(Byte::new(Instruction::LoadStatic).with_operand_u32(slot));
                 return bytecode;
             }
-            // `Class::static_method(...)` — same surface as enum
+            // `Class::static_method(...)`, same surface as enum
             // Construct; lower to a direct CALL or Entry{Call} when
             // the method is compiled or reserved (COI-108 forward).
             if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn) {
@@ -594,7 +590,7 @@ impl Compiler {
                 let call_site: std::collections::HashMap<&str, &Output> =
                     parts.iter().map(|p| (p.name, &p.value)).collect();
                 let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
-                // Walk DECLARATION order REVERSED — so when
+                // Walk DECLARATION order REVERSED, so when
                 // MAKE_ENUM pops, payload[0] is `decl_fields[0]`.
                 for (decl_name, _) in decl_order.iter().rev() {
                     if let Some(arg) = call_site.get(decl_name.as_str()) {
@@ -649,11 +645,7 @@ impl Compiler {
         } else if allow_mul_shl
             && let Some((inner, shift)) = crate::const_fold::strength_mul_to_shl(ast, self.const_env())
         {
-            // Defense-in-depth: only emit int SHL when the non-const operand
-            // is a known integer-like immediate (`int` or `byte` — extend
-            // this match if more int-like primitives are added). VM `SHL`
-            // uses `as_int`; `float * k` is rejected at typecheck. Unknown
-            // types fall through to MUL / dictionary dispatch.
+            // Int SHL only for known int/byte operands; unknown types fall through to MUL / dict dispatch.
             use crate::typechecking::subst::apply_ty_prune;
             use crate::typechecking::ty::{BYTE, INT};
             let inner_is_int_like = self.codegen_expr_ty(inner).is_some_and(|ty| {
@@ -921,7 +913,7 @@ impl Compiler {
         a == b || strip_overload_key(a) == strip_overload_key(b)
     }
 
-    /// Both names sit on a self/mutual cycle — the only sibling TCO we emit.
+    /// Both names sit on a self/mutual cycle, the only sibling TCO we emit.
     fn both_in_rec_cycle(&self, caller: &str, callee: &str) -> bool {
         self.name_in_rec_cycle(caller) && self.name_in_rec_cycle(callee)
     }
@@ -1005,7 +997,7 @@ impl Compiler {
     /// `return f(...)` tail- or sibling-call when the callee is a known entry.
     ///
     /// Emits existing `TailCall` (frame reuse + jump). Same-function and
-    /// other known callees share this path — no new VM call opcode.
+    /// other known callees share this path, no new VM call opcode.
     fn try_emit_tail_call_expr(&mut self, expr: &Output<'_>, bytecode: &mut CodeBuf) -> bool {
         let Some(call_key) = self.resolve_tail_callee_key(expr) else {
             return false;
@@ -1069,10 +1061,7 @@ impl Compiler {
         if Self::is_pure_micro_inline_il(ops) {
             return true;
         }
-        // Inliner copies opcodes until the first `RETURN` and leaves that
-        // value on the stack. Early-return / branched bodies therefore
-        // truncate (else-arm dropped). Only allow a single terminal RETURN
-        // and no control-flow jumps.
+        // Inline only a single terminal RETURN with no control-flow jumps (early return truncates).
         let return_idxs: Vec<usize> = ops
             .iter()
             .enumerate()
@@ -1228,7 +1217,7 @@ impl Compiler {
                     kind: EntryKind::TailCall,
                     .. } => {
                     // Tail-call bodies leave dead fallthrough and rely on
-                    // post-emit opts for arg order — unsafe to peel pre-opt.
+                    // post-emit opts for arg order, unsafe to peel pre-opt.
                     return false;
                 }
                 IlOp::Entry {
@@ -1282,7 +1271,7 @@ impl Compiler {
             return false;
         }
         let last = ops.last().unwrap();
-        // A two-slot RETURN never qualifies — see `inline_is_return`.
+        // A two-slot RETURN never qualifies, see `inline_is_return`.
         let terminal_ok = last.is_plain_return()
             || matches!(
                 last,
@@ -1463,7 +1452,7 @@ impl Compiler {
     ///
     /// The attempt keeps writing into the caller's buffer rather than a scratch
     /// one, because the diamond path flushes that buffer into `self.bytecode` to
-    /// hold both in program order — handing it an empty scratch would sink the
+    /// hold both in program order, handing it an empty scratch would sink the
     /// caller's prefix (e.g. method-receiver staging) *after* the inlined body.
     fn try_emit_inline_direct_call(
         &mut self,
@@ -1604,13 +1593,8 @@ impl Compiler {
             bytecode.push_store_pop(tmp);
             temps.push(tmp);
         }
-        // Compare+branch diamond: emit CFG into `self.bytecode`, stash the
-        // result in a temp, and leave a LOAD in `bytecode` so parents that
-        // accumulate into a local Vec keep program order.
-        //
-        // On emit failure, roll back and clear arg prep so peel/call can
-        // re-emit cleanly — a partial diamond leaves `JMP end_label` unbound
-        // (resolves to PC 0) and poisons later fallbacks.
+        // Diamond CFG into `self.bytecode`, stash result, leave LOAD in `bytecode` for parent order.
+        // On failure, roll back: unbound `JMP end_label` resolves to PC 0 and poisons fallbacks.
         if Self::is_tiny_inline_diamond_il(&ops) {
             let raw = self.bytecode.code_slice_raw_ops(start, end);
             let rollback = self.bytecode.len();
@@ -1718,10 +1702,7 @@ impl Compiler {
         if self.coroutine_fns.contains(fqn) || self.coroutine_fns.contains(&lookup) {
             return false;
         }
-        // Skip callees that use defer (body would miss deferred side effects).
-        // `fn_defers` is only populated while compiling the callee; once its
-        // body is finished the stack is empty — refuse bodies that contain
-        // MakeCoro / Yield (already gated) and nested `fn` defs (not in span).
+        // Skip defer / MakeCoro / Yield / nested `fn` callees (body would miss deferred effects).
         let ops = self.bytecode.code_slice_ops(start, end);
         let self_entry = self.fn_entry_labels.get(fqn).copied();
         if !Self::is_self_unroll_il(&ops, self_entry) {
@@ -1776,7 +1757,7 @@ impl Compiler {
             return true;
         }
         // `remap_peel_ops_ok` pre-checks the slot remaps, so the emit-time bails
-        // are defensive — but without this they would leave arg prep plus a
+        // are defensive, but without this they would leave arg prep plus a
         // half-built diamond whose labels never bind.
         self.bytecode.truncate(rollback);
         Self::restore_emit_attempt(bytecode, prefix);
@@ -1803,10 +1784,7 @@ impl Compiler {
         let Some((start, end, provisional)) = self.resolve_fn_span(fqn) else {
             return false;
         };
-        // A self-recursive site reads its own in-progress body, which works, but
-        // the peel loses to the frame it avoids: on `tak` it grows the body from
-        // 13 to 28 words and re-emits the guard unfused at every non-base call.
-        // See `docs/internals/limitations.md` for the measurement.
+        // Refuse self-recursive peel: grows body and re-emits unfused guards (`limitations.md`).
         if provisional {
             return false;
         }
@@ -2013,7 +1991,7 @@ impl Compiler {
         }
 
         // The caller prefix belongs ahead of everything below, so flush it before
-        // compiling arguments — a spilled argument must not slip in front of it.
+        // compiling arguments, a spilled argument must not slip in front of it.
         self.bytecode.append(bytecode);
         let mut argv: Vec<Vec<Byte>> = Vec::with_capacity(flat.len());
         for arg in &flat {
@@ -2819,7 +2797,7 @@ impl Compiler {
                     });
                 }
                 other => {
-                    // Plain producers / residual bytes — remap LOAD/STORE/BinSlot*.
+                    // Plain producers / residual bytes, remap LOAD/STORE/BinSlot*.
                     if let Some(b) = other.as_plain_byte() {
                         match *b.bytecode() {
                             Instruction::RETURN => {
@@ -3252,10 +3230,7 @@ impl Compiler {
         let rhs_node = unwrap_expr_output(rhs);
         match rhs_node.1.as_ref() {
             Expression::Array(items) if items.len() == n => {
-                // Infer assigned a NodeId to the array (and any wrappers) in
-                // pre-order before the items. This path does not `do_compile`
-                // the array node (no MakeArray), so skip those ids or later
-                // literals in the same fragment steal them (byte_string_lit.hy).
+                // No MakeArray here: skip array NodeIds or later literals steal them (byte_string_lit.hy).
                 self.skip_emit_ids_to_unwrapped(rhs);
                 for (i, item) in items.iter().enumerate() {
                     let mut bc = self.do_compile(item);
@@ -3752,19 +3727,19 @@ impl Compiler {
         };
         if !self.functions.contains_key(&fqn) && !self.functions.contains_key(strip_overload_key(&fqn))
         {
-            // Method / unresolved — keep staging.
+            // Method / unresolved, keep staging.
             return false;
         }
         !self.callee_is_tiny_inlineable(&fqn)
     }
 
-    /// Pure call arg: literals and pure arith/cmp/logic — no Call / HostInvoke /
+    /// Pure call arg: literals and pure arith/cmp/logic. No Call / HostInvoke /
     /// IO / mutation / control side effects.
     ///
-    /// Bare [`Expression::Identifier`] is intentionally **not** pure here: copying
-    /// locals through temps on the shared operand/local stack (STORE extends
-    /// `tell`) before effectful args corrupted frames in large functions
-    /// (`parse_url` → Url field SEGV). Literals still reorder ahead of effects.
+    /// Bare [`Expression::Identifier`] is not pure here: copying locals through
+    /// temps on the shared operand/local stack (STORE extends `tell`) before
+    /// effectful args corrupted frames in large functions (`parse_url` → Url
+    /// field SEGV). Literals still reorder ahead of effects.
     fn call_arg_is_pure(expr: &Output<'_>) -> bool {
         match expr.1.as_ref() {
             Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {
@@ -3834,7 +3809,7 @@ impl Compiler {
             if Self::call_arg_is_pure(arg) {
                 continue;
             }
-            // HostInvoke/format/match emit onto self.bytecode — StorePop must
+            // HostInvoke/format/match emit onto self.bytecode, StorePop must
             // follow immediately there, not in the Call local vec.
             if self.arg_emits_on_self_bytecode(arg) {
                 self.stage_call_arg_to_temp(arg, box_generic, &mut temps[i]);
@@ -4572,7 +4547,7 @@ impl Compiler {
             )
         ) {
             // Slot/static stores consume the RHS; a prior POP already discarded.
-            // SetField / StoreIndex push the value back — still need POP when
+            // SetField / StoreIndex push the value back, still need POP when
             // they are last (handled by the final branch).
         } else if !matches!(
             bytecode.last_byte().map(|b| *b.bytecode()),
@@ -5405,10 +5380,7 @@ impl Compiler {
         };
         let resolved = crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &ty);
         let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
-        // Only dispatch for nominal *user* enums/classes. Open `Ty::Var`s
-        // unify against the first builtin `Eq`/`Ord` instance under
-        // `find_instance_relaxed`, which would incorrectly replace
-        // hardwired `EQ`/`LT` opcodes (and box immediates into garbage).
+        // Dict Eq/Ord only for nominal user enums/classes; open Vars must not replace hardwired EQ/LT.
         let nominal = match &lookup_ty {
             Ty::Con(name) => Some(name.as_str()),
             Ty::App(head, _) => match head.as_ref() {
@@ -5443,16 +5415,9 @@ impl Compiler {
         if !self.functions.contains_key(&fqn) && !self.fn_entry_labels.contains_key(&fqn) {
             return false;
         }
-        // Instance methods use the dictionary ABI: value args are boxed at
-        // the call site and unboxed in the method prologue (see
-        // `instance_method_unbox_tys` + `compile_function_output_with_name`).
-        // Without boxing here, `UnboxValue` on a raw enum/class pointer
-        // yields `Value::default()` and comparisons always fail.
-        //
-        // Stash each boxed operand in a temp before compiling the other
-        // side: `new Class(...)` (Instantiate) uses `StorePop` into temps
-        // and would otherwise steal a pending boxed arg off the operand
-        // stack mid-call.
+        // Dictionary ABI: box value args at the call site (UnboxValue on a raw
+        // pointer yields Value::default()). Stash each boxed arg before the
+        // other operand: Instantiate StorePop would steal a pending boxed arg.
         bytecode.append(&mut self.do_compile(lhs));
         Self::emit_box_if_needed(bytecode, &lookup_ty);
         let lhs_slot = self.alloc_temp_slot();
@@ -5779,7 +5744,7 @@ impl Compiler {
             BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             self.bytecode.il_mut(),
         );
-        // Miss: Err still on stack — unpack `ffi::Error`, then LoadField
+        // Miss: Err still on stack, unpack `ffi::Error`, then LoadField
         // message (field index 1: kind=0, message=1) and Panic.
         self.bytecode
             .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
@@ -5824,8 +5789,7 @@ impl Compiler {
         })
     }
 
-    /// Walk call sites in `node`. `pred(callee_name, is_value_method)` —
-    /// `is_value_method` is true for `recv.method(...)` on an identifier/
+    /// Walk call sites in `node`. `pred(callee_name, is_value_method)`,     /// `is_value_method` is true for `recv.method(...)` on an identifier/
     /// variable receiver.
     fn walk_expr_calls(
         node: &Output<'_>,
@@ -6172,10 +6136,7 @@ impl Compiler {
             }
         }
 
-        // Concrete Show instance at the call site.
-        // Prefer a fully resolved type: span cache from a shared generic body
-        // may still be an open `Ty::Var` even when mono/codegen side-tables
-        // know the ground type (or when the arg is a literal / construct).
+        // Prefer fully resolved Show type over open span-cache Var from a generic body.
         let arg_ty = self.show_format_arg_ty(arg);
 
         if let Some(ty) = arg_ty.as_ref() {
@@ -6188,7 +6149,7 @@ impl Compiler {
             }
 
             // Instance heads use `Ty::Con("Point")`; construct sites often
-            // produce `Constructor` / `Sum` — peel to the enum name.
+            // produce `Constructor` / `Sum`, peel to the enum name.
             let lookup_ty = Self::show_lookup_ty_for_instance(&resolved);
             if let Some(instance) = self
                 .checker
@@ -6391,12 +6352,12 @@ impl Compiler {
                     Self::bind_scheme_vars(p, c, map);
                 }
             }
-            // Rest packs are `[T]` / `[T; N]` — bind `T` from the element.
+            // Rest packs are `[T]` / `[T; N]`, bind `T` from the element.
             (Ty::Array { element: e1, .. }, Ty::Array { element: e2, .. }) => {
                 Self::bind_scheme_vars(e1, e2, map);
             }
             // Rest params are typed as `Vec<T>` in schemes, while call sites
-            // synthesize `Ty::Array` for the packed MakeArray — cross-bind.
+            // synthesize `Ty::Array` for the packed MakeArray, cross-bind.
             (Ty::App(head, args), Ty::Array { element, .. })
                 if args.len() == 1
                     && matches!(
@@ -6612,7 +6573,7 @@ impl Compiler {
     /// constraint. Compiler-provided and source-provided instances use the
     /// same dictionary layout.
     /// Each tuple holds method entry offsets in flattened declaration order
-    /// (subclass methods, then superclass methods — Phase 5)
+    /// (subclass methods, then superclass methods, Phase 5)
     /// (`CodePtr` / `Entry` to the instance method).
     ///
     /// Instances are resolved from the callee's scheme + concrete argument
@@ -6632,11 +6593,7 @@ impl Compiler {
         let Some(scheme) = self.checker.env().lookup(fn_name).cloned() else {
             return 0;
         };
-        // Map quantified vars → concrete arg types by structurally matching
-        // the curried function type against the call's argument types.
-        // Phase 5: `F<A>` vs `Option<int>` binds both `F = Option` and `A = int`.
-        // Do NOT apply the global subst to the scheme — those vars may have
-        // been reused/unified later in the program.
+        // Bind quantified vars by matching curried fn type to args; do not apply global subst (vars reused).
         let mut var_to_ty: HashMap<crate::typechecking::ty::TyVarId, crate::typechecking::Ty> =
             HashMap::new();
         let mut fun = &scheme.ty;
@@ -6714,7 +6671,7 @@ impl Compiler {
                     .then_some(())
             });
             if synthesized.is_none() {
-                // Unresolved sentinel — CallIndirect fills from app evidence.
+                // Unresolved sentinel, CallIndirect fills from app evidence.
                 bytecode.push_const(0);
             }
         }
@@ -6725,7 +6682,7 @@ impl Compiler {
     ///
     /// Nested IO calls (e.g. `read_to_end(stdin())`) also write directly to
     /// `self.bytecode` via this helper. Emit the native-id `CONST` **before**
-    /// compiling arguments so the runtime stack is `[id, arg0, …]` — the order
+    /// compiling arguments so the runtime stack is `[id, arg0, …]`, the order
     /// `HostInvoke` expects. Compiling args into a side buffer first left nested
     /// invokes *above* the id so the arg window packed the wrong values (piped
     /// stdin then looked empty).
@@ -6914,7 +6871,7 @@ impl Compiler {
         let handle_tmp = self.alloc_temp_slot();
         self.bytecode.push_store_pop(handle_tmp);
 
-        // Inline arms first, then join arm 0 — every result is parked in a
+        // Inline arms first, then join arm 0, every result is parked in a
         // slot so the combine can push them in whatever order it needs.
         let mut arm_tmps = vec![0u32; callables.len()];
         for i in 1..callables.len() {
@@ -7099,13 +7056,10 @@ impl Compiler {
             .push(Byte::new(Instruction::CALL).with_call_packed(arity, entry));
     }
 
-    // -----------------------------------------------------------------------
     // Loop IPA (chunked fork-join over an induction range)
-    // -----------------------------------------------------------------------
 
     /// Emit a 2-way chunked fork-join for the counted loop at `span`, replacing
-    /// the sequential loop entirely. Returns `false` — with nothing emitted —
-    /// when any precondition fails, so the caller falls back to the plain loop.
+    /// the sequential loop entirely. Returns `false`, with nothing emitted,     /// when any precondition fails, so the caller falls back to the plain loop.
     ///
     /// The chunk worker is a private `(lo, hi, acc)` function holding the
     /// original body over `[lo, hi)`. `[mid, end)` is spawned onto the reactor
@@ -7247,7 +7201,7 @@ impl Compiler {
     /// Emit the chunk worker `(lo, hi, acc) -> acc'` and return its entry offset.
     ///
     /// Runs in a private frame with the induction variable, the chunk bound and
-    /// the accumulator as slots 0..2 — sound only because the site analysis
+    /// the accumulator as slots 0..2, sound only because the site analysis
     /// proved the body reads nothing else.
     fn emit_par_loop_worker(
         &mut self,
@@ -7357,7 +7311,7 @@ impl Compiler {
             self.bytecode.push_store_pop(slot);
             arg_slots.push(slot);
         }
-        // Native id first, then reload staged args — nested HostInvoke in
+        // Native id first, then reload staged args, nested HostInvoke in
         // args must not sit above the id on the runtime stack.
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(native_id as u32));
@@ -7503,10 +7457,7 @@ impl Compiler {
             }
         }
 
-        // Hash thunks: boxed receiver at slot 0 → int. int/byte/bool identity
-        // after unbox; float returns the float `Value` bits read via
-        // `Value::as_int()` (IEEE bit pattern in the current Value encoding);
-        // unit is 0; string uses the intern FNV via HostInvoke `hash_string`.
+        // Hash thunks: int/byte/bool identity after unbox; float via Value bits; string HostInvoke hash_string.
         for (ty, tag) in [
             ("int", ValueTag::Int),
             ("byte", ValueTag::Int),
@@ -7543,10 +7494,7 @@ impl Compiler {
             }
         }
 
-        // Read/Write for Stream — lower to the same HostInvoke natives as
-        // free functions `read` / `write`. Args may arrive boxed via the
-        // dictionary ABI; unbox then call. `Vec<byte>` shares the Array
-        // carrier tag with dynamic arrays.
+        // Stream Read/Write → same HostInvoke as free `read`/`write`; unbox dict-ABI args first.
         for (class, method, native_name, arity) in [
             ("Read", "read", "read", 2u32),
             ("Write", "write", "write", 2u32),
@@ -7859,7 +7807,7 @@ impl Compiler {
                 UNIT => Some(ValueTag::Unit),
                 _ => Some(ValueTag::Instance), // user-defined class / enum
             },
-            // Same carrier ABI as `Con(enum)` — trait methods unbox Instance.
+            // Same carrier ABI as `Con(enum)`, trait methods unbox Instance.
             Ty::Sum { .. } => Some(ValueTag::Instance),
             // Variant refinements box like their owning enum.
             Ty::Constructor { owner, .. } => Self::ty_to_value_tag(owner),
@@ -7873,7 +7821,7 @@ impl Compiler {
                 _ => None,
             },
             Ty::Record { .. } => Some(ValueTag::Record),
-            // Open type vars — boxing is required but we don't know the tag yet
+            // Open type vars, boxing is required but we don't know the tag yet
             Ty::Var(_) => None,
             _ => None,
         }
@@ -7976,19 +7924,12 @@ impl Compiler {
         if self.coroutine_fns.contains(name) {
             return None;
         }
-        // `CallIndirect` / `MakeFn` / `MakePolyFn` / FFI-callback / spawn
-        // targets keep the one-word boxed ABI. Prefer the package-wide
-        // seed (every AST in this compile) over the per-file sidecar:
-        // file A taking `&f` while file B defines `f` is otherwise a hole.
+        // Escaping CallIndirect/MakeFn/PolyFn/FFI/spawn keep one-word boxed ABI; prefer package-wide seed.
         if self.is_fn_value_escaped(name) {
             return None;
         }
         let lookup = strip_overload_key(name);
-        // `Compiler::fn_return_ty` falls back to the *currently compiling*
-        // function's own return type when a name lookup misses — it is not
-        // a general by-name lookup, so it must not feed this classifier
-        // (querying an unrelated name like `len` would otherwise silently
-        // pick up the caller's own return type).
+        // `fn_return_ty` is not by-name lookup; must not feed this classifier (steals caller return ty).
         let ty = self
             .checker
             .fn_return_ty(name)
@@ -8005,7 +7946,7 @@ impl Compiler {
 
     /// `true` when `callee` is a statically resolvable direct call (free
     /// function, qualified name, or a method whose receiver type is known)
-    /// whose own two-word classification is `enum_name` — i.e. calling it
+    /// whose own two-word classification is `enum_name`, i.e. calling it
     /// leaves `[payload, tag]` matching the caller's own pair shape, so the
     /// caller can forward the pair without boxing.
     fn direct_call_two_word_kind(&self, callee: &Output) -> Option<String> {
@@ -8106,7 +8047,7 @@ impl Compiler {
     /// `Group`/`Expr`), the fast, alloc-free producer of a `[payload, tag]`
     /// pair for that exact enum. A payload that itself nests a `Construct`/
     /// `Instantiate` (e.g. `Result::Err(HttpError::NotFound)`) must not take
-    /// this path — `unbox_enum_context` is a plain counter, so compiling
+    /// this path, `unbox_enum_context` is a plain counter, so compiling
     /// that nested value under it would wrongly unbox it into a second
     /// pair too (same hazard `local_escape::payload_contains_construct`
     /// already fences off for the frame-local case).
@@ -8184,14 +8125,14 @@ impl Compiler {
 
     /// Compile `expr` (the value returned from a two-word `enum_name`
     /// function) as two words for a two-slot `RETURN`. Prefers the
-    /// alloc-free paths — a direct `Construct` of `enum_name`, an arity-2
+    /// alloc-free paths, a direct `Construct` of `enum_name`, an arity-2
     /// tuple literal, or a pass-through direct `CALL` of another two-word
-    /// function returning the same kind — and falls back to ordinary
+    /// function returning the same kind, and falls back to ordinary
     /// (boxed) compilation plus an unbox for anything else.
     fn emit_two_word_return_value(&mut self, bytecode: &mut CodeBuf, expr: &Output, enum_name: &str) {
         if crate::typechecking::return_layout::is_two_word_product_kind(enum_name) {
             if let Some((a, b)) = Self::expr_arity2_tuple_items(expr) {
-                // Compile components only — do not raise `unbox_enum_context`.
+                // Compile components only, do not raise `unbox_enum_context`.
                 self.skip_emit_ids_to_unwrapped(expr);
                 self.append_with_existential_pack(bytecode, a);
                 self.append_with_existential_pack(bytecode, b);
@@ -8238,10 +8179,7 @@ impl Compiler {
             bytecode.push_load(tag_slot);
             return;
         }
-        // Result-mode implicit auto-wrap: a bare `return v` that is not
-        // itself a `Result` construct means `return Result::Ok(v)`. The raw
-        // value already *is* the `Ok` payload for a two-word Result (`Ok`
-        // is always an immediate for this layout) — no unbox needed.
+        // Result-mode bare `return v` → Ok payload already on stack for two-word Result; no unbox.
         if enum_name == common::BUILTIN_RESULT_ENUM
             && self.compiling_result_mode
             && !self.skip_result_ok_wrap_for_return(expr)
@@ -8256,7 +8194,7 @@ impl Compiler {
 
     /// Convert the boxed `ObjEnum` pointer on top of `bytecode`'s stack into
     /// `[payload, tag]` using only generic opcodes (`JumpIfMatch` / `Unpack`
-    /// / `CONST` / `JMP`) — one branch per declared variant besides the last,
+    /// / `CONST` / `JMP`), one branch per declared variant besides the last,
     /// which needs no jump. Never a new opcode (task cut): the same
     /// dispatch `compile_match_expr_boxed` already emits for a boxed match.
     /// A free function (not `&self`) so callers can pass `&self.checker`
@@ -8307,7 +8245,7 @@ impl Compiler {
 
     /// Box the `[payload, tag]` pair (tag on top) left by a direct two-word
     /// `CALL` into an `ObjEnum`, using `STORE` / `LOAD` / `EQ` / `JMPF` /
-    /// `MakeEnum` — one branch per declared variant besides the last, which
+    /// `MakeEnum`, one branch per declared variant besides the last, which
     /// needs no compare. Called when a two-word result escapes into a boxed
     /// consumer (`CallIndirect`, unsure, host/FFI).
     fn emit_box_pair_to_enum(
@@ -8374,12 +8312,7 @@ impl Compiler {
     /// an `ObjEnum` (allocates the two temp slots, then delegates to
     /// [`Self::emit_box_pair_to_enum`]).
     fn emit_box_pair_after_call(&mut self, bytecode: &mut CodeBuf, enum_name: &str) {
-        // The CALL just left `[payload, tag]` live on the operand stack
-        // above any interned locals — count both so `alloc_temp_slot`
-        // cannot hand out a slot that aliases either value (it would
-        // otherwise corrupt one of them: `STORE` pops-then-writes one
-        // slot at a time, so a self-aliasing multi-slot STORE clobbers
-        // the first slot before its old value is popped for the second).
+        // After two-slot CALL, count `[payload, tag]` so `alloc_temp_slot` cannot alias (STORE clobber).
         self.expr_depth += 2;
         let tag_slot = self.alloc_temp_slot();
         let payload_slot = self.alloc_temp_slot();
@@ -8462,7 +8395,7 @@ impl Compiler {
         self.expr_two_word_pair_kind(inner).as_deref() == Some(enum_name)
     }
 
-    /// `e?` or `Ok(e?)` / `Some(e?)` — identity re-bind of a try.
+    /// `e?` or `Ok(e?)` / `Some(e?)`, identity re-bind of a try.
     fn expr_try_return_src<'a>(expr: &'a Output<'a>) -> Option<&'a Output<'a>> {
         let node = unwrap_expr_output(expr);
         match node.1.as_ref() {
@@ -8612,11 +8545,7 @@ impl Compiler {
         self.emit_run_defers();
         self.bytecode.push_const(0);
         if self.compiling_two_word_enum.is_some() {
-            // Unreachable for a genuine two-word layout in well-typed code
-            // (Ok/inner is required to be an immediate, never unit) — HM
-            // already diagnoses non-unit fall-through as E0111. Keep this
-            // a safe no-alloc default: payload `0`, tag `0` (Ok / first
-            // variant), same shape as any other pair.
+            // Fallback two-word default: payload 0, tag 0 (HM already diagnoses non-unit fall-through).
             self.bytecode.push_const(0);
             self.push_return_two_word();
         } else if self.compiling_result_mode {
@@ -8667,7 +8596,7 @@ impl Compiler {
 
     /// Emit an `UnboxValue` instruction for a concrete `Ty` at a generic
     /// call return boundary (generic→concrete).  Does nothing when the
-    /// type is open (`Ty::Var`) — the caller can't know the tag at compile
+    /// type is open (`Ty::Var`), the caller can't know the tag at compile
     /// time in that case (the boxed value stays boxed).
     fn emit_unbox_if_needed(bytecode: &mut CodeBuf, ty: &crate::typechecking::Ty) {
         if let Some(tag) = Self::ty_to_value_tag(ty) {
@@ -8851,7 +8780,7 @@ impl Compiler {
         }
         // Only a bare type-param return (`id<T>(T) -> T`) is boxed at the ABI
         // boundary. Nested ADTs (`Option<T>`, `Vec<T>`) keep their native
-        // representation — UnboxValue would corrupt the heap object.
+        // representation, UnboxValue would corrupt the heap object.
         match current {
             Ty::Var(v) => scheme.bounds.iter().any(|b| b == v) && top_level_vars.contains(v),
             _ => false,
@@ -8867,7 +8796,7 @@ impl Compiler {
     /// snapshotted around `{ … }` blocks so an inner PolyFn cannot poison an
     /// outer same-named ObjFn. Mono partials / lambdas stay unboxed.
     fn local_call_needs_arg_boxing(&self, local: &str) -> bool {
-        // Only the codegen-scoped sets — never a flat name table (that would
+        // Only the codegen-scoped sets, never a flat name table (that would
         // leak across `{ … }` block shadows).
         self.polyfn_sources.contains_key(local) || self.polyfn_vars.contains(local)
     }
@@ -9150,13 +9079,7 @@ impl Compiler {
         }
         if pack_rest {
             if rest.is_empty() {
-                // Empty rest: only match when a fixed formal already pinned T.
-                // Without a rest element we can't invent a ground type here;
-                // specializations with empty rest still key the rest slot from
-                // subst — look up by trying each specialization's arg_types
-                // prefix match below via exact equality, so require the rest
-                // element type from the first fixed arg that shares the rest
-                // type param. Fallback: skip mono (shared body).
+                // Empty rest mono only if a fixed formal pinned T; else skip mono (shared body).
                 return None;
             }
             let elem = crate::monomorphize::ground_ty(&self.checker, &rest[0])?;
@@ -9283,15 +9206,12 @@ impl Compiler {
         lhs: &Output,
         rhs: &Output,
     ) -> bool {
-        // Capture lhs's ID before recursing — `do_compile(lhs)`
+        // Capture lhs's ID before recursing, `do_compile(lhs)`
         // advances `emit_idx` past lhs's entire subtree.
         let lhs_ty = self.codegen_expr_ty(lhs);
         let lhs_id = self.checker.id_table().ids().get(self.emit_idx).copied();
         if self.expr_is_stackable_direct_call(lhs) && self.expr_is_stackable_direct_call(rhs) {
-            // Pure user `CALL`s with leaf args emit `push args; CALL` and leave
-            // the sibling below the callee frame. Raise `expr_depth` so any
-            // unexpected temp pads above the stacked lhs — enabling
-            // `CALL; CALL; ADD; RETURN` → `BinReturn` (fib).
+            // Raise `expr_depth` for pure CALL siblings so temps pad above lhs (enables BinReturn / fib).
             let depth_on_entry = self.expr_depth;
             self.append_with_existential_pack(bytecode, lhs);
             self.expr_depth = depth_on_entry + 1;
@@ -9343,11 +9263,7 @@ impl Compiler {
 
     fn alloc_temp_slot(&mut self) -> u32 {
         self.temp_counter += 1;
-        // Operand stack and locals share one buffer. A `CONST` left on
-        // the stack by `emit_host_native_invoke` (native id before args)
-        // occupies index `variables.len()` without being interned. If we
-        // `StorePop` into that index from `new Class(...)`, we overwrite
-        // the id and `HostInvoke` sees a heap address instead.
+        // Shared stack/locals: do not StorePop into HostInvoke native-id CONST index (overwrites id).
         let min_slot = self.context.variables.len() as u32 + self.expr_depth;
         while (self.context.variables.len() as u32) < min_slot {
             let pad = format!("__pad{}", self.context.variables.len());
@@ -9552,7 +9468,7 @@ impl Compiler {
         self.bytecode.push_const(0);
         self.bytecode.push_store_pop(idx_slot);
 
-        // Hoist ArrayLen once — the array slot is not mutated by for-in.
+        // Hoist ArrayLen once, the array slot is not mutated by for-in.
         let len_slot = self.alloc_temp_slot();
         self.bytecode.push_load(arr_slot);
         self.bytecode.push(Byte::new(Instruction::ArrayLen));
@@ -9645,7 +9561,7 @@ impl Compiler {
     /// Lazy range for-in (`int`/`byte`/`float`).
     ///
     /// Fast path when the iterable is a `Range` literal: locals for
-    /// `cur`/`end` only — no heap. First-class range values
+    /// `cur`/`end` only, no heap. First-class range values
     /// (`let r = 0..n; for x in r`) are dicts `{start,end,inclusive}`
     /// unpacked via `GetField`.
     ///
@@ -9880,7 +9796,7 @@ impl Compiler {
                 },
                 self.bytecode.il_mut(),
             );
-            // Fall-through: Some(v) — unpack payload into binding.
+            // Fall-through: Some(v), unpack payload into binding.
             self.bytecode
                 .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
         }
@@ -10124,7 +10040,7 @@ impl Compiler {
             },
             StaticDecl { init, .. } => Self::count_field_key_uses(init, counts),
             Field { init: Some(i), .. } => Self::count_field_key_uses(i, counts),
-            // Type-only / declaration / leaf nodes — no runtime field keys.
+            // Type-only / declaration / leaf nodes, no runtime field keys.
             _ => {}
         }
     }
@@ -10446,7 +10362,7 @@ impl Compiler {
                     }
                     bytecode.push_store_pop(slot);
                 } else {
-                    // Always stash the RHS — `StoreIndex` pops value/index/array.
+                    // Always stash the RHS, `StoreIndex` pops value/index/array.
                     // Dropping with POP when `leave_value_on_stack == false` left
                     // StoreIndex without a value (stack underflow / wrong write).
                     let stack_info = match arr.1.as_ref() {
@@ -10455,11 +10371,7 @@ impl Compiler {
                     };
                     let tmp_val = self.alloc_temp_slot();
                     if stack_info.is_none() {
-                        // Heap array: RHS is always spilled. Leaving the array on
-                        // the operand stack is only safe when `idx` is a pure push
-                        // (ident/int): a call/inline that `STORE`s temps seeks
-                        // `tell` past the stranded array, so StoreIndex pops a
-                        // stale slot instead of the array pointer.
+                        // Heap array RHS always spilled; impure idx STORE seeks past a stranded array pointer.
                         bytecode.push_store_pop(tmp_val);
                         if Self::index_keeps_array_on_stack_safe(idx.1.as_ref()) {
                             let depth_on_entry = self.expr_depth;
@@ -10515,7 +10427,7 @@ impl Compiler {
                             bytecode.push_load(tmp_val);
                         }
                     } else if leave_value_on_stack {
-                        // StoreIndex leaves the value on the stack; keep it.
+                            // StoreIndex leaves the value on the stack; keep it.
                     } else {
                         bytecode.push_pop();
                     }
@@ -10805,7 +10717,7 @@ impl Compiler {
                 }
                 None
             }
-            // `new Class(...)`, calls, etc. — reuse the general expr-type helper
+            // `new Class(...)`, calls, etc., reuse the general expr-type helper
             // (span cache / Instantiate Con) instead of treating the receiver
             // as unknown and emitting LoadField(0).
             _ => self.codegen_expr_ty(receiver),
@@ -11080,7 +10992,7 @@ impl Compiler {
         }
     }
 
-    /// `DUP; LogNot` — TOS becomes “is None” for a pointer-niche Option (`0`).
+    /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
     ///
     /// `CONST 0; EQ; JMPT` currently joins into `ConstReturnImm 0` and drops
     /// the Some payload (`optional_text`). LogNot is the same zero test.
@@ -11121,19 +11033,19 @@ impl Compiler {
         bb.bind_label(end, bytecode.il_mut());
     }
 
-    /// `CONST 1; BITOR` — set the Result `Err` discriminant on a heap pointer.
+    /// `CONST 1; BITOR`, set the Result `Err` discriminant on a heap pointer.
     fn push_result_err_bit(bytecode: &mut CodeBuf) {
         bytecode.push_const(1);
         bytecode.push(Byte::new(Instruction::BITOR));
     }
 
-    /// `CONST 1; XOR` — clear bit 0 on an `Err` payload (bit is known set).
+    /// `CONST 1; XOR`, clear bit 0 on an `Err` payload (bit is known set).
     fn push_result_untag(bytecode: &mut CodeBuf) {
         bytecode.push_const(1);
         bytecode.push(Byte::new(Instruction::XOR));
     }
 
-    /// `DUP; CONST 1; BITAND` — TOS becomes the Result `Err` bit.
+    /// `DUP; CONST 1; BITAND`, TOS becomes the Result `Err` bit.
     fn push_result_is_err(bytecode: &mut CodeBuf) {
         bytecode.push(Byte::new(Instruction::DUPLICATE));
         bytecode.push_const(1);
@@ -11330,7 +11242,7 @@ impl Compiler {
                 } else {
                     Instruction::SUB
                 };
-                // Load components into temps for clarity.
+                // Load components into temps.
                 let ax = self.alloc_temp_slot();
                 let ay = self.alloc_temp_slot();
                 let az = self.alloc_temp_slot();
@@ -11628,7 +11540,7 @@ impl Compiler {
         };
 
         // HostInvoke stack: [id, arg0, …, meta].
-        // Meta is a full u32 bitfield — must use `with_operand_u32` (not
+        // Meta is a full u32 bitfield, must use `with_operand_u32` (not
         // `with_value_u32`, which only keeps the low 16 bits).
         let depth_on_entry = self.expr_depth;
         bytecode.push(Byte::new(Instruction::CONST).with_operand_u32(native_id as u32));
@@ -11661,7 +11573,7 @@ impl Compiler {
         self.bytecode.append(&mut cond_bc);
         bb.emit_jump_to(fail, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
 
-        // Success: Ok(()) — Result<(), string> is Option-shaped (0 / err ptr).
+        // Success: Ok(()), Result<(), string> is Option-shaped (0 / err ptr).
         self.bytecode.push(Byte::new_with_value(
             Instruction::CONST,
             Value::from(0i64).raw() as _,
@@ -11748,7 +11660,7 @@ impl Compiler {
                 self.bytecode
                     .push(Byte::new(Instruction::CALL).with_call_packed(0, *offset));
             }
-            // Jump if Result::Err (tag 1) — on match, payload (message) is pushed.
+            // Jump if Result::Err (tag 1), on match, payload (message) is pushed.
             let fail = bb.fresh_label(self.bytecode.il_mut());
             let done = bb.fresh_label(self.bytecode.il_mut());
             bb.emit_jump_to(
@@ -11835,7 +11747,6 @@ impl Compiler {
 
         match child.borrow() {
             Expression::Comment(_) => (),
-            // --- Modules ---
             Expression::Use {
                 path: p,
                 name,
@@ -11855,22 +11766,17 @@ impl Compiler {
                 }
             }
             Expression::Noop(_) => (),
-            // `mod foo;` — pipeline loads the file; no bytecode.
+            // `mod foo;`, pipeline loads the file; no bytecode.
             Expression::Module(_, _body) => {}
             Expression::Group(e) => bytecode.append(&mut self.do_compile(e)),
-            // Named call-site arg — compile the value (defensive; Call reorders).
+            // Named call-site arg, compile the value (defensive; Call reorders).
             Expression::NamedArg(_, value) => {
                 bytecode.append(&mut self.do_compile(value));
             }
             Expression::Program(children) => {
                 self.reserve_program_callable_entries(children);
                 if Self::program_needs_phased_emit(children) {
-                    // Emit phases (COI-109): helpers before `impl`, but free fns
-                    // that call user `impl` methods (and their callers) must
-                    // follow their `impl` blocks, in source order within the
-                    // deferred set so callees bind before callers.
-                    // All free fns after inherent impls (source order). Reserve
-                    // entries so `impl` methods can Entry-call later helpers.
+                    // COI-109: free fns that call user impl methods follow those impls (source order); reserve entries.
                     self.reserve_phased_free_fn_entries(children);
                     let phase = |c: &Output| -> u8 {
                         match c.1.as_ref() {
@@ -11895,7 +11801,6 @@ impl Compiler {
                     self.emit_virtual_test_main();
                 }
             }
-            // --- `let (a, b) = expr` / `let { x, y } = expr` ---
             Expression::LetDestructure { pattern, rhs } => {
                 if self.try_emit_two_word_product_destructure(pattern, rhs, &mut bytecode) {
                     // `[a, b]` already bound; no heap tuple.
@@ -11919,7 +11824,6 @@ impl Compiler {
                 }
             }
 
-            // --- Let / const bindings ---
             Expression::Fragment(children) => {
                 // `let x = expr` / `const x = expr` → compile RHS, then
                 // StorePop into x's slot.
@@ -11968,12 +11872,8 @@ impl Compiler {
                         ) {
                             is_binding = true;
                         } else if is_const {
-                            // Compile the RHS BEFORE interning the binding name.
-                            // Match payload slots use `variables.len()` as the first
-                            // free slot; interning early (e.g. `let v = match e`)
-                            // reserved a hole and made bindings land one slot too
-                            // high while JumpIfMatch still pushed at the real
-                            // cursor.
+                            // RHS before interning: match payloads use `variables.len()`
+                            // as first free slot; early intern left a hole vs JumpIfMatch.
                             if rhs_is_match {
                                 self.emit_binding_rhs(&children[1]);
                             } else {
@@ -11993,15 +11893,9 @@ impl Compiler {
                             }
                             is_binding = true;
                         } else {
-                            // Fixed `[T; N]` locals (`N >= 1`): N consecutive slots.
-                            // Element Values may be immediates or heap pointers;
-                            // nested array *elements* compile to MakeArray and
-                            // occupy one pointer slot each in the outer spine.
-                            // Layout decision is structural where possible: array
-                            // literal length, or copy from a known multi-slot local.
-                            // Flat `codegen_var_type` is last-wins across functions
-                            // (sibling tests often reuse `a`/`b`), so it must not be
-                            // the sole source of `N`.
+                            // Fixed `[T; N]` locals: N consecutive slots. Prefer
+                            // structural length (literal / known multi-slot local);
+                            // flat `codegen_var_type` is last-wins across functions.
                             let bind_ty = self
                                 .expr_codegen_ty(rhs_node)
                                 .or_else(|| self.codegen_expr_ty(&children[1]))
@@ -12073,10 +11967,7 @@ impl Compiler {
                 }
             }
             Expression::Block(children) => {
-                // Isolate PolyFn tracking the same way function bodies do:
-                // keep outer entries visible inside the block, then restore
-                // so an inner `let f = capture_show(0)` cannot poison an
-                // outer same-named ObjFn / mono local after the block.
+                // Isolate PolyFn in blocks: restore after so inner `let f = …` cannot poison outer ObjFn.
                 let saved_polyfn_vars = self.polyfn_vars.clone();
                 let saved_polyfn_sources = self.polyfn_sources.clone();
                 self.push_const_env();
@@ -12144,12 +12035,7 @@ impl Compiler {
                     self.coroutine_fns.insert(qualified.clone());
                 }
 
-                // Fresh slot map per function so locals start at 0
-                // (or 1 with `self`) for this frame. Sharing one
-                // Interner across functions made later `let`s use high
-                // slots; `StorePop` then left holes and match bindings
-                // at slot 1 read garbage. Extern preload slots live in
-                // the entry frame (bytecode before `main`).
+                // Fresh slot map per function (locals from 0/1); shared Interner left holes / garbage match binds.
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
                 let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
                 let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
@@ -12195,18 +12081,8 @@ impl Compiler {
 
                 let mut a = self.do_compile(args);
 
-                // ── Dictionary-passing prologue ────────────────────────────────
-                // Generic functions with user-defined trait constraints receive
-                // extra dict tuple arguments after the value params.  Reserve a
-                // stack slot `__dictN` for each expected dict so that the Interner
-                // assigns a slot number that can later be LOAD-ed by CallIndirect
-                // dispatch paths.  The VM pushes these as the trailing elements of
-                // the call frame, one per user constraint, in constraint order.
-                // Every trait constraint (including builtin Num/Ord/Eq/Show)
-                // gets a trailing `__dictN` slot for dictionary dispatch.
-                // Prefer the qualified FQN: bare names are dropped by
-                // `fn_dict_arity.retain(|k| k.contains("::"))` across modules,
-                // while inherent methods always register `Owner::method`.
+                // Reserve `__dictN` slots for CallIndirect (FQN preferred; bare
+                // names are dropped by `fn_dict_arity.retain(|k| k.contains("::"))`).
                 let dict_arity = {
                     let via_fqn = self.checker.dict_arity_for(&qualified);
                     if via_fqn > 0 {
@@ -12284,10 +12160,7 @@ impl Compiler {
                 captures,
                 body,
             } => {
-                // Layout in self.bytecode:
-                //   JMP after_body
-                //   entry: <captures slots 0..n> <params> <body> RETURN
-                //   after_body: LOAD captures...; CONST 0; CodePtr entry; MakeFn
+                // Lambda: JMP after; entry body RETURN; after: LOAD captures; CodePtr; MakeFn.
                 use crate::block_builder::{BlockBuilder, JumpKind};
                 let mut bb = BlockBuilder::new();
                 let after = bb.fresh_label(self.bytecode.il_mut());
@@ -12307,11 +12180,7 @@ impl Compiler {
                 self.emit_field_key_prologue(body);
                 let mut b = self.do_compile(body);
                 self.bytecode.append(&mut b);
-                // Expression-bodied lambdas (`=> x + y` / `{ …; last }`) leave
-                // the result on the stack — emit a bare RETURN. Pushing
-                // `CONST 0; RETURN` (named-fn fall-through) would discard that
-                // value; peephole then fuses it to `ConstReturnImm` and every
-                // call returns 0.
+                // Expr-bodied lambda: bare RETURN (not CONST 0; RETURN) or peephole returns 0.
                 if !matches!(
                     self.bytecode.last_byte().map(|b| *b.bytecode()),
                     Some(Instruction::RETURN)
@@ -12362,22 +12231,11 @@ impl Compiler {
             }
             Expression::ExprStatement(child) => {
                 bytecode.append(&mut self.do_compile(child));
-                // Also skip the POP for a bare `yield expr;` / `yield from expr;`
-                // statement. The parser's `expr_statement()` alternative matches
-                // `yield` before the dedicated (POP-free) `self.yield_()` statement
-                // parser ever gets a chance (see `parser::statement`), so every
-                // bare yield lands here. A trailing POP would be DEAD CODE at
-                // compile time (nothing is pushed when the yield executes) but
-                // becomes the coroutine's `resume_ip` — the NEXT time the
-                // coroutine is resumed, the VM starts by executing that POP,
-                // which pops whatever happens to be on top of the (shared)
-                // stack at the resumer's call site. For a `resume` used inline
-                // inside another expression (e.g. formatting `resume h`),
-                // that top-of-stack value belongs to the RESUMER (e.g. the
-                // format string), not the coroutine — corrupting it.
+                // Bare `yield` matches `expr_statement` before the POP-free yield
+                // statement parser. A trailing POP becomes `resume_ip` and would
+                // pop the resumer's TOS on the next resume (shared stack).
                 Self::discard_statement_value(&mut bytecode);
             }
-            // ---- Userland FFI builtins ----
             Expression::Dload(path) => {
                 let mut bc = self.do_compile(path);
                 self.bytecode.append(&mut bc);
@@ -12388,7 +12246,6 @@ impl Compiler {
                 self.bytecode.append(&mut bc);
                 self.bytecode.push(Byte::new(Instruction::DoneCoro));
             }
-            // --- Aggregates ---
             Expression::Tuple(items) => {
                 for c in items {
                     let mut bc = self.do_compile(c);
@@ -12405,19 +12262,13 @@ impl Compiler {
                 let arity = items.len() as u32;
                 bytecode.push_make_array(arity);
             }
-            // --- Dict literals ---
             Expression::Dict(items) => {
                 // Eagerly resolve field names to strings before
                 // any bytecode emission so the byte offsets
                 // remain stable.
                 let field_names: Vec<&str> = items.iter().map(|f| f.name).collect();
                 for (f, name) in items.iter().zip(field_names.iter()) {
-                    // value first (so it's UNDER the field name
-                    // when both are pushed). MakeDict pops the
-                    // top first (which is the field-name) and
-                    // then the value, so they end up correctly
-                    // paired in (name, value) order in the
-                    // runtime's pair Vec.
+                    // Value under name: MakeDict pops name then value into (name, value) pairs.
                     let mut bc = self.do_compile(&f.value);
                     bytecode.append(&mut bc);
                     self.emit_raw_string_literal(&mut bytecode, name);
@@ -12443,10 +12294,6 @@ impl Compiler {
                 self.emit_raw_string_literal(&mut bytecode, "inclusive");
                 bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(3));
             }
-            // `t[i]` — pop the index (top), pop the target,
-            // push the element at `target[index]`. The Index
-            // opcode carries no operand (the index is at the top
-            // of the operand stack at dispatch time).
             Expression::Index(target, Some(index)) => {
                 // Const index into a multi-slot stack array → direct LOAD.
                 if let Expression::Identifier(name) = target.1.as_ref()
@@ -12484,7 +12331,6 @@ impl Compiler {
                 let fqn = self.qualify_static_fqn(name);
                 self.emit_static_initializer(&fqn, init);
             }
-            // --- FFI declare/invoke (legacy AST; prefer Call + use ffi::{…}) ---
             Expression::Declare(args) => self.emit_ffi_declare(*span, args),
             Expression::Invoke(args) => self.emit_ffi_invoke(*span, args),
             Expression::Return(expr) | Expression::ImplicitReturn(expr) => {
@@ -12498,10 +12344,7 @@ impl Compiler {
                 if tail_match {
                     self.match_tail_call = true;
                 }
-                // Evaluate the return value first, then run defers (LIFO).
-                // Each defer thunk returns a sentinel that we POP so the
-                // pending return value stays on top for RETURN.
-                // Flush the value into `self.bytecode` before labeled defers.
+                // Eval return value, then LIFO defers; POP defer sentinels so return stays TOS.
                 if let Some(enum_name) = self.compiling_two_word_enum.clone() {
                     self.emit_two_word_return_value(&mut bytecode, expr, &enum_name);
                 } else {
@@ -12511,7 +12354,7 @@ impl Compiler {
                 // Result-mode functions: bare `return v` becomes `Ok(v)`.
                 if self.compiling_two_word_enum.is_none() && self.compiling_result_mode {
                     // Explicit flat `return Result::Ok/Err` already builds the
-                    // enum — do not Ok-wrap again (COI-113). Nested Result Ok
+                    // enum, do not Ok-wrap again (COI-113). Nested Result Ok
                     // payloads still wrap.
                     if !self.skip_result_ok_wrap_for_return(expr) {
                         if !self.return_is_niche_result() && !self.return_is_unit_result_niche()
@@ -12688,18 +12531,9 @@ impl Compiler {
                         Byte::new(Instruction::InitTyped)
                             .with_operand_u32(common::pack_init_typed(type_id, nfields)),
                     );
-                    // SetField stack order is value, target[, name]. Stash the
-                    // instance, then for each ctor arg emit that sequence and
-                    // discard the value SetField pushes back.
-                    //
-                    // `StorePop` keeps the instance at `tmp` with the cursor
-                    // past that slot — so the stashed value is already TOS
-                    // for the expression result. Do **not** emit a final
-                    // `LOAD tmp`: that would push a second copy and leave
-                    // the stash sitting between any live values below
-                    // (e.g. a HostInvoke native-id CONST) and the result,
-                    // so `HostInvoke` would pick up the instance
-                    // as the native id.
+                    // SetField is value, target. StorePop stashes instance at tmp
+                    // with cursor past it (already TOS). Do not LOAD tmp after:
+                    // a second copy sits between lower values and breaks HostInvoke.
                     let tmp_inst = self.alloc_temp_slot();
                     bytecode.push_store_pop(tmp_inst);
                     if let Some(arg_list) = args {
@@ -12710,10 +12544,7 @@ impl Compiler {
                             bytecode.push_pop();
                         }
                     }
-                    // Ctor args may stage temps above `tmp_inst` (binary / CALL
-                    // staging). STORE seeks the shared cursor past those temps,
-                    // so the instance is no longer TOS for MakeEnum/assignment.
-                    // Seek back so `tmp_inst` is the expression result.
+                    // Ctor staging may seek past tmp; restore so tmp is expression result.
                     bytecode.push_seek(tmp_inst + 1);
                 }
             }
@@ -12731,7 +12562,6 @@ impl Compiler {
                     rhs,
                 );
             }
-            // --- Loop codegen ---
             // `while`: [top] cond, JMPF→exit, body, JMP→top, [exit]
             // `for x in`: IntoIterator/Iterator (array/tuple/dict/coro/custom)
             Expression::Loop {
@@ -12839,14 +12669,7 @@ impl Compiler {
                 }
             }
             Expression::Defer { captures, body } => {
-                // Layout (emitted into `self.bytecode` so nested Blocks that
-                // write in-place stay contiguous with the thunk):
-                //   JMP after_thunk
-                //   thunk:                ← fn_defers label bound here
-                //     <thunk body>
-                //     (slots 0..N-1 = use captures, pushed by emit_run_defers)
-                //   CONST 0; RETURN
-                // after_thunk:
+                // JMP after_thunk; thunk body (slots 0..N-1 = captures); CONST 0; RETURN.
                 let mut bb = BlockBuilder::new();
                 let after = bb.fresh_label(self.bytecode.il_mut());
                 let thunk = bb.fresh_label(self.bytecode.il_mut());
@@ -12856,8 +12679,7 @@ impl Compiler {
                 let cap_names: Vec<String> = captures.iter().map(|c| (*c).to_string()).collect();
                 self.fn_defers.push((thunk, cap_names));
 
-                // Remap locals so capture names occupy slots 0..N-1 inside the
-                // thunk (matching the CALL args pushed by emit_run_defers).
+                // Captures occupy slots 0..N-1 (matches emit_run_defers CALL args).
                 let prev_vars = std::mem::take(&mut self.context.variables);
                 for cap in captures {
                     self.context.variables.intern((*cap).to_string());
@@ -12887,21 +12709,13 @@ impl Compiler {
             | Expression::TypeFun(_, _)
             | Expression::TypeFnSig { .. }
             | Expression::Forall { .. } => {
-                // Type names appear as metadata inside enum
-                // declarations (e.g. `Some(int)` wraps `int` as
-                // an `Expression::Type`). The typechecker has
-                // already extracted the type name and registered
-                // the enum shape; no runtime bytecode is
-                // emitted for the type wrapper. The pre-walk
-                // still mints a NodeId (so this arm consumes one
-                // to stay in lockstep), but the bytecode here is
-                // empty.
+                // Type metadata only; NodeId consumed for pre-walk lockstep.
             }
             Expression::TypeClass { name, methods, .. } => {
                 for method in methods {
                     match method.1.as_ref() {
                         Expression::AssocTypeDecl { .. } => {
-                            // Type-level only — do_compile consumes the NodeId.
+                            // Type-level only, do_compile consumes the NodeId.
                             let _ = self.do_compile(method);
                         }
                         Expression::Function {
@@ -12935,11 +12749,7 @@ impl Compiler {
                 args,
                 methods,
             } => {
-                // Resolve instance heads by AST shape (not span cache). Bare
-                // `Option`/`Result` must stay `Con(...)` so FQNs match the
-                // typechecker (`Container__Option__first`). Preferring
-                // `codegen_expr_ty` here can pick up a misaligned span type
-                // (e.g. `unit`) and emit `Container__unit__first` instead.
+                // Instance heads from AST shape, not span cache (avoids `Container__unit__first`).
                 let arg_tys: Vec<Ty> = args
                     .iter()
                     .map(|arg| self.codegen_instance_head_ty(arg))
@@ -12955,7 +12765,7 @@ impl Compiler {
                 for method in methods {
                     match method.1.as_ref() {
                         Expression::AssocTypeDef { .. } => {
-                            // Type-level only — do_compile consumes wrapper + RHS IDs.
+                            // Type-level only, do_compile consumes wrapper + RHS IDs.
                             let _ = self.do_compile(method);
                         }
                         Expression::Function {
@@ -12990,7 +12800,7 @@ impl Compiler {
                 }
             }
             Expression::AssocTypeDecl { .. } | Expression::TypeProjection { .. } => {
-                // Type-level only — no bytecode (NodeId already consumed by do_compile).
+                // Type-level only, no bytecode (NodeId already consumed by do_compile).
             }
             Expression::AssocTypeDef { ty, .. } => {
                 bytecode.append(&mut self.do_compile(ty));
@@ -13063,18 +12873,11 @@ impl Compiler {
                         ast,
                     ));
                 } else {
-                    // Not a local variable — check if it's a generic function
-                    // escaping into a non-call position (e.g. `let f = id;`).
-                    // In that case, emit MakePolyFn instead of a direct CALL offset,
-                    // so the variable holds an ObjPolyFn that CallIndirect can use.
+                    // Generic escaping to non-call (`let f = id`) → MakePolyFn for CallIndirect.
                     let resolved_n = self.resolve_free_fn(n);
                     if self.checker.is_generic_fn(&resolved_n) {
                         if let Some(&entry_offset) = self.functions.get(&resolved_n) {
-                            // Phase 4: constrained generics always escape via
-                            // MakePolyFnCapture. Fill slots from in-scope
-                            // `__dictN` or concrete instance synthesis; leave
-                            // null only when evidence is unavailable (e.g.
-                            // top-level `let f = show`).
+                            // Constrained generics escape via MakePolyFnCapture; null only when dict evidence missing.
                             let escape_ty = self.codegen_expr_ty(ast);
                             let dict_arity = self.emit_polyfn_escape_dicts(
                                 &mut bytecode,
@@ -13097,7 +12900,7 @@ impl Compiler {
                                 );
                             }
                         } else {
-                            // Function not yet compiled (forward reference) — fall
+                            // Function not yet compiled (forward reference), fall
                             // through to the unknown-variable diagnostic.
                             let mut message = Message::error(
                                 ErrorCode::UnknownValue,
@@ -13118,7 +12921,7 @@ impl Compiler {
                             let keyed = overload_fn_key(&resolved_n, fa, is_rest, id);
                             (fa, is_rest, keyed)
                         } else if self.checker.is_overloaded(&resolved_n) {
-                            // Ambiguous — typechecker should have diagnosed.
+                            // Ambiguous, typechecker should have diagnosed.
                             let mut message = Message::error(
                                 ErrorCode::UnknownValue,
                                 "Ambiguous overload in value position".to_string(),
@@ -13153,10 +12956,7 @@ impl Compiler {
                             .get(&entry_key)
                             .or_else(|| self.functions.get(&resolved_n))
                         {
-                            // Prefer codegen-recorded arity: multi-file
-                            // `check_program` clears `fn_param_names`, so
-                            // imported names would otherwise MakeFn with
-                            // arity 0 and break `spawn(f, arg)`.
+                            // Prefer codegen arity: multi-file clears `fn_param_names` (else MakeFn arity 0 breaks spawn).
                             let (fa, is_rest) = self
                                 .fn_arities
                                 .get(&entry_key)
@@ -13188,13 +12988,12 @@ impl Compiler {
                     }
                 }
             }
-            // --- If codegen ---
             // Layout: c1, JMPF1, b1, JMP1, c2, JMPF2, b2, JMP2, b3, [end]
             Expression::If(branches) => {
                 if self.try_compile_const_if(branches) {
                     return bytecode;
                 }
-                // `if (!c) { A } else { B }` ≡ `if (c) { B } else { A }` — exposes
+                // `if (!c) { A } else { B }` ≡ `if (c) { B } else { A }`, exposes
                 // BinSlot*/Cmp JMPF fusion (avoids LogNotJmpf after fused cond).
                 let inverted = Self::try_invert_not_if_else(branches);
                 let branches: &[Output<'_>] = inverted.as_deref().unwrap_or(branches);
@@ -13217,11 +13016,7 @@ impl Compiler {
                         _ => unreachable!("If branch must be Expression::Branch"),
                     };
 
-                    // If this is not the first branch, bind the
-                    // previous branch's pre-allocated start label to
-                    // the CURRENT bytecode position (= the start of
-                    // this branch). This patches the JMPF placeholder
-                    // emitted by the previous iteration.
+                    // Bind previous branch start label here to patch prior JMPF placeholder.
                     if i > 0
                         && let Some(prev_label) = branch_start_labels[i - 1]
                     {
@@ -13257,10 +13052,7 @@ impl Compiler {
                     }
                 }
 
-                // Bind `end_label` to the current bytecode position
-                // (= past the last branch's body / JMP). This patches
-                // every JMP → end placeholder AND the last JMPF
-                // placeholder (if any).
+                // Bind end_label past last branch (patches JMP→end and last JMPF).
                 bb.bind_label(end_label, self.bytecode.il_mut());
 
                 // Validate: every label that had a pending jump must
@@ -13558,11 +13350,7 @@ impl Compiler {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
                 } else {
-                    // Prefer trait/`Mul` dictionary dispatch over primitive
-                    // `x * 2^n` → SHL when the checker recorded a bound operator
-                    // (non-primitive `T * 2^n` must not emit int SHL).
-                    // `try_emit_folded_expr` also const-folds literal×literal and
-                    // identity-reduces `* 1` before bound/primitive fallback.
+                    // Prefer Mul dict over int SHL when checker recorded a bound operator.
                     let bound_mul = self.bound_operator_hint(self_id, span.start, span.end);
                     if self.try_emit_folded_expr(ast, &mut bytecode, bound_mul.is_none()) {
                         // Intentional empty body: the emit/try_emit call in the
@@ -13748,10 +13536,7 @@ impl Compiler {
             }
             Expression::String(str) => {
                 let escaped = unescape_coil_string(str);
-                // Prefer this node's sidecar (pointer / span) over `emit_idx`.
-                // Stack-array init used to skip the array NodeId so sequential
-                // lookup returned the parent `[byte; N]` and `or_else` never
-                // ran — elements emitted as heap strings (byte_string_lit.hy).
+                // Prefer node sidecar over emit_idx (stack-array used to skip NodeId → heap strings).
                 let escaped_len = escaped.as_bytes().len();
                 let is_byte_or_bytes = |ty: &Ty| match ty {
                     Ty::Con(n) if n == "byte" => true,
@@ -13908,8 +13693,7 @@ impl Compiler {
                         bytecode.push_load(base + *i as u32);
                     } else {
                         // RHS is evaluated first and spilled. Array may stay on
-                        // the operand stack only for push-only index exprs —
-                        // see `index_keeps_array_on_stack_safe`.
+                        // the operand stack only for push-only index exprs,                         // see `index_keeps_array_on_stack_safe`.
                         let tmp_val = self.alloc_temp_slot();
                         let depth_on_entry = self.expr_depth;
                         self.append_binding_rhs(&mut bytecode, value);
@@ -14054,18 +13838,14 @@ impl Compiler {
                 }
             },
 
-            // --- Sum types, extern, construct ---
             Expression::ExternBlock {
                 library,
                 declarations,
             } => {
                 // Emit into `ffi_init` so setup is spliced into the prologue
-                // at finalize — works for `extern` in imported modules too.
+                // at finalize, works for `extern` in imported modules too.
                 std::mem::swap(&mut self.bytecode, &mut self.ffi_init);
-                // Extern lib / fn-id handles live in static slots so function
-                // locals (which share the prologue frame and restart at slot 0)
-                // cannot overwrite them — that produced `invalid library handle`
-                // on a second call or after any earlier `let`.
+                // Extern lib/fn-id in static slots so function locals cannot overwrite handles.
                 let lib_slot =
                     if let Some(&existing) = self.extern_runtime_libs.get(library.as_str()) {
                         existing
@@ -14121,17 +13901,14 @@ impl Compiler {
                         fn_id_fqn,
                         crate::typechecking::ty::int(),
                     );
-                    // Push the library handle.
                     self.bytecode
                         .push(Byte::new(Instruction::LoadStatic).with_operand_u32(lib_slot));
-                    // Push the function name (string literal).
                     let span: SimpleSpan = (0..0).into();
                     let sym = decl.symbol.unwrap_or(decl.name);
                     let name_expr: parser::ast::Output =
                         (span, Box::new(parser::ast::Expression::String(sym)));
                     let mut name_bc = self.do_compile(&name_expr);
                     self.bytecode.append(&mut name_bc);
-                    // Push each arg type as a CONST tag.
                     let mut arg_type_tags: Vec<u32> = Vec::new();
                     if let Expression::Fragment(items) = decl.args.1.as_ref() {
                         for arg in items {
@@ -14179,14 +13956,13 @@ impl Compiler {
                     }
                     let arity = arg_type_tags.len() as u32;
                     self.bytecode.push_make_tuple(arity);
-                    // Push the ret type tag (top of stack for DeclareFFI).
                     let (ret_tag, ret_aux) = decl
                         .returns
                         .as_ref()
                         .and_then(|r| ffi_type_tag_from_output(&self.checker, r))
                         .unwrap_or((tag::VOID, 0));
                     emit_ffi_type_const(&mut self.bytecode, ret_tag, ret_aux);
-                    // Emit DeclareFFI (bit 16 = C varargs).
+                    // DeclareFFI: bit 16 = C varargs.
                     let mut operand = arity & 0xFFFF;
                     if decl.variadic {
                         operand |= 1 << 16;
@@ -14194,7 +13970,6 @@ impl Compiler {
                     self.bytecode
                         .push(Byte::new(Instruction::DeclareFFI).with_operand_u32(operand));
                     self.emit_result_unwrap_or_panic();
-                    // Store the function id.
                     self.bytecode
                         .push(Byte::new(Instruction::StoreStatic).with_operand_u32(fn_id_slot));
                     self.extern_runtime_functions
@@ -14206,13 +13981,7 @@ impl Compiler {
                 docs: _,
                 name: _, variants, ..
             } => {
-                // Recurse into each variant. Each variant's
-                // `do_compile` consumes 1 ID (for the variant
-                // itself) and then descends into each payload's
-                // `Type` expression. We don't emit any bytecode
-                // here — the enum declaration is metadata that's
-                // already been registered with the typechecker
-                // (15B).
+                // Metadata only; IDs consumed by descending into variants.
                 for v in variants {
                     bytecode.append(&mut self.do_compile(v));
                 }
@@ -14258,7 +14027,7 @@ impl Compiler {
                 self.bytecode.append(&mut body_bc);
 
                 if !self.region_ends_with_return(body_op_start) {
-                    // Test cases are typed as unit / Result<(), string> — zero is safe.
+                    // Test cases are typed as unit / Result<(), string>, zero is safe.
                     self.emit_fallthrough_return(&fn_name, body.0);
                 }
                 self.emit_shared_try_fail_epilogue();
@@ -14292,13 +14061,7 @@ impl Compiler {
                 }
             }
             Expression::EnumVariant { payload, .. } => {
-                // Recurse into each payload's `Type` expression
-                // (or `RecordFieldDecl`'s value type). We don't
-                // emit bytecode — the variant's payload shape is
-                // metadata that's already registered with the
-                // typechecker (15B). the payload is
-                // `EnumVariantPayload` (Unit / Tuple / Record);
-                // only Tuple and Record have children to walk.
+                // Walk payload Type children for NodeId only; no bytecode (shape already in typechecker).
                 use parser::ast::EnumVariantPayload;
                 match payload {
                     EnumVariantPayload::Unit => {}
@@ -14326,14 +14089,12 @@ impl Compiler {
                     ast,
                 ));
             }
-            // --- Match codegen (threaded layout) ---
             // Forward: scrutinee, JUMP_IF_MATCH cascade, last-arm UNPACK/POP/STORE.
             // Reverse: arm bindings + bodies; non-first arms JMP to end.
             Expression::Match { scrutinee, arms } => bytecode.append(&mut self.compile_match_expr(scrutinee, arms)),
             // Parser maps `default` to Pattern::Default; arm consumes NodeId only.
             Expression::Default(_) => (),
 
-            // --- Field access ---
             // receiver bytecode + LoadField(index) for enums and typed
             // class instances; GetField(name) for dicts / records.
             Expression::Access(receiver, field) => {
@@ -14366,14 +14127,7 @@ impl Compiler {
                 let is_class = receiver_ty
                     .as_ref()
                     .is_some_and(|ty| self.checker.ty_is_class(ty));
-                // LoadField for confirmed sum record payloads and typed class
-                // slots. GetField for anonymous records / dicts.
-                // `extract_enum_name` alone is unsafe (Ty::Con class
-                // names look like enums) — require field_index_for
-                // or an is_class check. Unknown receivers that are
-                // not classes fall back to LoadField(0) (legacy
-                // defensive path) rather than GetField, which would
-                // corrupt ObjEnum stacks.
+                // LoadField for sum/class; GetField for anon; unknown non-class → LoadField(0) not GetField.
                 let enum_field_index = if !is_record && !is_class {
                     self.receiver_type(receiver).and_then(|ty| {
                         use crate::typechecking::ty::Ty;
@@ -14415,19 +14169,15 @@ impl Compiler {
                     self.emit_field_name(&mut bytecode, field);
                     bytecode.push_get_field();
                 } else {
-                    // Unknown receiver — do not emit GetField (enum
-                    // match bindings historically lacked side-table
-                    // types). LoadField(0) keeps the stack balanced;
-                    // VM hardens non-enum receivers.
+                    // Unknown receiver: LoadField(0) keeps stack balanced; VM hardens non-enum.
                     bytecode.push_load_field(0);
                 }
             }
 
             Expression::Field { .. } => {
-                // Class field decls are metadata only — consumed for ID alignment.
+                // Class field decls are metadata only, consumed for ID alignment.
             }
 
-            // --- Error-handling operators (desugar to MakeEnum / JumpIfMatch) ---
             Expression::Raise(expr) => {
                 // `raise e` → push e, wrap Err(e), RETURN. `raise` only
                 // targets Result-mode functions, so `Err`'s builtin tag (`1`)
@@ -14483,10 +14233,7 @@ impl Compiler {
                 }
             }
             Expression::Try(inner) => {
-                // `e?` → if Ok/Some, leave payload; else RETURN the failure.
-                // Two-slot CALL / unboxed bind stay `[payload, tag]` — no
-                // intermediate ObjEnum. Niche and boxed operands keep the
-                // existing one-word paths. Unsure / CallIndirect still box.
+                // `e?`: Ok/Some leave payload else RETURN failure; two-slot stays [payload,tag].
                 let is_option = self.expr_is_option(inner);
                 let success_tag: u32 = if is_option { 1 } else { 0 }; // Some=1, Ok=0
 
@@ -14518,7 +14265,7 @@ impl Compiler {
                     );
                     if self.compiling_two_word_enum.is_some() {
                         // `?` on Option requires the enclosing function to
-                        // also return Option — `None`'s builtin tag is `0`.
+                        // also return Option, `None`'s builtin tag is `0`.
                         self.bytecode.push_pop();
                         self.bytecode.push_const(0);
                         self.bytecode.push_const(0);
@@ -14634,7 +14381,7 @@ impl Compiler {
                 let niche_result_lhs = self.expr_is_niche_result(lhs);
 
                 // `lhs` always compiles to its ordinary (boxed / niche)
-                // representation — a two-word call auto-boxes unless
+                // representation, a two-word call auto-boxes unless
                 // immediately consumed, and `??` never opts into that.
                 let previous_niche_context = self.force_niche_option;
                 self.force_niche_option = niche_lhs;
@@ -14794,7 +14541,7 @@ impl Compiler {
                 bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
                 bb.bind_label(success, self.bytecode.il_mut());
 
-                // Payload (inner of Some) on stack — read `.field` then re-wrap Some.
+                // Payload (inner of Some) on stack, read `.field` then re-wrap Some.
                 use crate::typechecking::ty::{is_option_ty, option_inner};
                 let inner_ty = self.codegen_expr_ty(receiver).and_then(|t| {
                     if is_option_ty(&t) {
@@ -14844,7 +14591,7 @@ impl Compiler {
                 bb.bind_label(end, self.bytecode.il_mut());
             }
             Expression::TypeApp { args, .. } => {
-                // Type-position only — consume child IDs, emit no bytes.
+                // Type-position only, consume child IDs, emit no bytes.
                 for arg in args {
                     let _ = self.do_compile(arg);
                 }
@@ -14908,13 +14655,9 @@ impl Compiler {
         self.aliases.clear();
         self.loop_stack.clear();
         self.loop_bbs.clear();
-        // Constant pool is shared across multi-file `compile_module`
-        // calls. `JumpIfMatch` (and pool-backed `CONST`) store indices
-        // into this vec; clearing between modules orphans earlier
-        // instructions so the worker VM panics in
-        // `Byte::jump_if_match_target` (e.g. index 2, len 1) when a
-        // dependency uses `?` / match. Only reset on a fresh compile
-        // (still just the CALL/JMP/HALT prologue).
+        // Shared constant pool across `compile_module` calls. Clearing between
+        // modules orphans JumpIfMatch/CONST indices (VM panic). Reset only on
+        // a fresh prologue (CALL/JMP/HALT).
         if self.bytecode.len() <= PROLOGUE_BYTECODE_LEN {
             self.constants.clear();
             self.strings.clear();
@@ -14950,7 +14693,7 @@ impl Compiler {
                 ));
             }
         }
-        // Recursion depth / `#[max_depth]` — independent of auto-par.
+        // Recursion depth / `#[max_depth]`, independent of auto-par.
         let stack_bound = crate::typechecking::analyze_stack_bounds(ast);
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
@@ -14976,10 +14719,7 @@ impl Compiler {
         self.emit_builtin_dict_thunks();
         self.emit_vec_method_thunks();
         self.emit_stream_method_thunks();
-        // Builtin dictionary thunks are emitted immediately after the
-        // prologue and before user code. Keep `program_start_offset`
-        // pointing at the first user byte so `extern` prologue JMPs
-        // don't fall into a Num/Ord/Eq/Show thunk body.
+        // Dict thunks after prologue; keep program_start_offset at first user byte.
         self.program_start_offset = self.bytecode.len() as u32;
         self.setup_entry_offset = self.program_start_offset;
         // Label the setup / top-level region so `dead_block` keeps it
@@ -15405,7 +15145,7 @@ impl Compiler {
                 .is_none()
         {
             // Only swallow our own recursion-limit signal (message already
-            // recorded in `do_compile`) — any other panic is a real bug.
+            // recorded in `do_compile`), any other panic is a real bug.
             std::panic::resume_unwind(payload);
         }
         Vec::new()

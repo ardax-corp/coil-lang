@@ -59,7 +59,6 @@
         (bc, compiler.constants)
     }
 
-    // ---- Recursion-depth guard ----
 
     #[test]
     fn codegen_depth_guard_panics_with_expected_diagnostic_past_limit() {
@@ -386,7 +385,7 @@ test("two") { assert(true)?; }
     /// before the dedicated `self.yield_()` alternative), landing as
     /// `ExprStatement(Yield(...))`. Regression guard: `ExprStatement`
     /// must NOT emit a trailing `POP` after `YieldCoro` (or
-    /// `YieldFromCoro`) — that POP becomes the coroutine's `resume_ip`
+    /// `YieldFromCoro`) ,  that POP becomes the coroutine's `resume_ip`
     /// and, on the NEXT resume, pops whatever the resumer happens to
     /// have on top of the shared operand stack (e.g. a format string
     /// mid-construction), corrupting it.
@@ -448,7 +447,7 @@ fn main() {
     fn return_match_keeps_fusion_barrier() {
         use common::Instruction;
         // Parameter ABI is boxed `ObjEnum`. A two-slot `let r = make()`
-        // would stay a pair and skip JumpIfMatch — this test needs the
+        // would stay a pair and skip JumpIfMatch ,  this test needs the
         // boxed cascade so the Some arm's Unpack;RETURN fusion barrier
         // stays observable.
         let (bc, _pool) = compile_src(
@@ -465,7 +464,7 @@ fn main() {
 "#,
         );
         // clone_shared_return may fuse the const arm to ConstReturnImm, but the
-        // payload arm must RETURN locally — never JMP into ConstReturnImm (that
+        // payload arm must RETURN locally ,  never JMP into ConstReturnImm (that
         // would ignore the stacked Unpack value). Scope to the match region so
         // prologue / other fn JMPs do not trip the guard.
         let jim = bc
@@ -539,7 +538,7 @@ fn main() {
     }
 
     /// Float arithmetic should pick `ADDF` (float) instead of `ADD`
-    /// (int) — that's the whole point of the cache lookup.
+    /// (int) ,  that's the whole point of the cache lookup.
     #[test]
     fn float_arithmetic_emits_float_opcode() {
         use common::Instruction;
@@ -599,7 +598,7 @@ fn main() {
 
     /// Integer arithmetic should pick `ADD`, not `ADDF`. Two literals
     /// (`1 + 2`) now constant-fold to a single `CONST`, so we use two
-    /// int parameters — `a + b` compiles to a slot/slot binary op whose
+    /// int parameters ,  `a + b` compiles to a slot/slot binary op whose
     /// packed operator must be the int `ADD` (not the float `ADDF`).
     #[test]
     fn integer_arithmetic_emits_int_opcode() {
@@ -1115,7 +1114,7 @@ use string::{format, to_bytes};
 
     /// Mixed int+float picks float (because HM unifies the operands
     /// and one is float). The pipeline emits a single, well-typed
-    /// result — either way, the test should not panic.
+    /// result ,  either way, the test should not panic.
     #[test]
     fn mixed_int_float_arithmetic_emits_bytecode() {
         let (bc, _pool) = compile_src("1 + 2.0;");
@@ -1379,9 +1378,7 @@ fn main() {
         assert_eq!(call_indirect.operand_u32(), 2);
     }
 
-    // ============================================================
     // sum types and pattern matching codegen
-    // ============================================================
 
     /// Codegen test 1: a constructor call emits a `MAKE_ENUM`
     /// with the correct tag and arity in the operand (upper 16
@@ -1392,7 +1389,7 @@ fn main() {
         let (bc, _pool) = compile_src("let x = Option::Some(42);");
 
         // Find the MAKE_ENUM instruction. Its operands encode
-        // (tag, arity) — for `Option::Some(42)`, tag=1, arity=1.
+        // (tag, arity) ,  for `Option::Some(42)`, tag=1, arity=1.
         let make_enum = bc
             .iter()
             .find(|b| matches!(b.bytecode(), Instruction::MakeEnum))
@@ -1421,7 +1418,7 @@ fn main() {
         );
 
         // Two arms, both constructor. Two JUMP_IF_MATCH should
-        // be emitted (one per arm — actually only one, since
+        // be emitted (one per arm ,  actually only one, since
         // arm 0 is non-last and arm 1 is last. So we expect 1
         // JUMP_IF_MATCH and 1 UNPACK.
         let jump_if_match_count = bc
@@ -1443,7 +1440,7 @@ fn main() {
     }
 
     /// Codegen test 3: a `default` match arm emits `POP` to
-    /// discard the scrutinee.
+        /// discard the scrutinee.
     #[test]
     fn default_match_arm_emits_pop() {
         use common::Instruction;
@@ -1467,7 +1464,7 @@ fn main() {
 
     /// Codegen test 4 (LOW #5): a `match` with a
     /// NESTED constructor pattern (`Result::Ok(Option::Some(v))`)
-    /// emits at least 2 `UNPACK`s — one for the outer `Result::Ok`
+    /// emits at least 2 `UNPACK`s ,  one for the outer `Result::Ok`
     /// and one for the inner `Option::Some`. The codegen
     /// recurses through `emit_pattern_binding` for nested
     /// constructors; the test guards against accidental
@@ -1509,9 +1506,7 @@ fn main() {
         );
     }
 
-    // ============================================================
     // VM perf: peephole superinstruction fusion
-    // ============================================================
 
     #[test]
     fn compile_module_diff_matches_compile_tail_for_fib() {
@@ -1732,7 +1727,7 @@ fn main() {
         );
     }
 
-    /// Nested call args are not stack leaves — binop arms must stage so the
+    /// Nested call args are not stack leaves ,  binop arms must stage so the
     /// nested CALL's temps cannot bury the stacked sibling.
     #[test]
     fn nested_call_arg_binop_arms_stage_through_temps() {
@@ -1750,7 +1745,7 @@ fn main() {
             .filter(|(_, b)| *b.bytecode() == Instruction::CALL)
             .map(|(i, _)| i)
             .collect();
-        // main: CALL leaf(2), CALL leaf(leaf(2)), CALL leaf(3) — at least 3.
+        // main: CALL leaf(2), CALL leaf(leaf(2)), CALL leaf(3) ,  at least 3.
         assert!(
             call_pos.len() >= 3,
             "expected nested + sibling CALLs; ops={:?}",
@@ -1767,7 +1762,7 @@ fn main() {
         );
     }
 
-    /// Match arms clobber the operand stack — binary ops must stage even when
+    /// Match arms clobber the operand stack ,  binary ops must stage even when
     /// the other arm is a stackable pure CALL.
     #[test]
     fn match_plus_pure_call_binop_stages() {
@@ -1803,28 +1798,9 @@ fn main() {
         );
     }
 
-    // ============================================================
-    // BlockBuilder for Loop and Match codegen
-    // ============================================================
-    //
-    // The 17A refactor moves both the Loop and Match codegen
-    // from manual `Vec<usize>`-based placeholder tracking to
-    // the placeholder-tracking `BlockBuilder` (the same
-    // primitive that drives If since 16.6). The semantics are
-    // IDENTICAL — only the placeholder mechanism changes.
-    //
-    // These tests guard against regressions in the
-    // BlockBuilder-based Loop and Match codegen. The key
-    // invariant we check is that the placeholder TARGETS
-    // (operands) are correctly patched to the absolute
-    // positions of the arm bodies / loop tops — if a `bind_label`
-    // is missed, the operand would be `0` (the placeholder
-    // value), and the program would either infinite-loop or
-    // jump to the prologue.
-
     /// Codegen test 5 : a `while` loop emits
     /// the structural shape expected by the
-    /// BlockBuilder-based codegen — at least 1 JMPF (the
+    /// BlockBuilder-based codegen ,  at least 1 JMPF (the
     /// exit condition) and at least 1 JMP (the back-edge).
     /// This mirrors the 16.5 regression test for If, but
     /// for the new Loop codegen.
@@ -2462,11 +2438,11 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
 
         // The JMP's target must point INTO the function
         // body (i.e., not be 0 which would be the start of
-        // the body itself — the back-edge is to the loop's
+        // the body itself ,  the back-edge is to the loop's
         // iterable, not to the very first byte). The
         // body is what `compile_src` returns, so offset
         // 0 is the start of `main` (no prologue in the
-        // returned slice — see the changes
+        // returned slice ,  see the changes
         // to `Compiler::compile`).
         assert!(
             jmp_target > 0,
@@ -2483,7 +2459,7 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     /// fire for some non-last constructor arm), the
     /// placeholder's `value[31:0]` would be `0` (the
     /// `BlockBuilder` placeholder value), and the VM would
-    /// jump to the prologue — crashing with a `HALT`.
+    /// jump to the prologue ,  crashing with a `HALT`.
     ///
     /// the JUMP_IF_MATCH target lives in
     /// `value[31:0]` (a full 32-bit absolute bytecode offset),
@@ -2528,19 +2504,6 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
 
     /// Codegen test 8 : in the BlockBuilder-based
     /// Match codegen, the `end_label` is correctly bound to
-    /// the position just past the FIRST arm body in source
-    /// order. The JMP-to-end placeholder (emitted after
-    /// every non-FIRST arm body) is patched to this
-    /// position. If the binding were missed, the JMP would
-    /// point at offset 0 (prologue) and crash.
-    ///
-    /// We verify by checking that the number of JMP
-    /// instructions emitted by a 3-arm match is exactly 2
-    /// (one for each non-first arm's JMP-to-end), AND that
-    /// the LAST arm body has no JMP after it (it's reached
-    /// by fall-through from the previous arm's JMP-to-end).
-    /// The 15C codegen produced this exact same
-    /// shape; the 17A refactor preserves it.
     #[test]
     fn match_jmp_to_end_placeholders_are_patched_to_end_label() {
         use common::Instruction;
@@ -2574,26 +2537,7 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
     }
 
     /// Codegen test 9 : a `match` inside a `while`
-    /// loop body — the canonical nested-control-flow
-    /// scenario for the BlockBuilder-based codegen. The
-    /// 16.5/16.6 If-in-If scenario was the regression that
-    /// motivated `BlockBuilder`; this test guards against
-    /// the equivalent regression in the Match-in-Loop case.
-    /// We don't run the VM (the test infrastructure doesn't
-    /// support that for arbitrary programs), but we do
-    /// assert the bytecode has the expected control-flow
-    /// opcode shape: at least 1 JMPF (the loop's exit
-    /// condition), at least 1 JMP (the loop's back-edge),
-    /// at least 1 JUMP_IF_MATCH (the match's tag dispatch),
-    /// and at least 1 UNPACK (the match's last arm
-    /// scrutinee-consumer).
-    ///
-    /// The match's result is the last expression in the
-    /// loop body, which sidesteps the parser's
-    /// statement-vs-expression ambiguity (the parser
-    /// doesn't accept `match { ... }` followed by another
-    /// statement — the `match` is an expression and the
-    /// parser wants an operator, not a new statement).
+    /// loop body ,  the canonical nested-control-flow
     #[test]
     fn nested_match_in_loop_emits_expected_opcodes() {
         use common::Instruction;
@@ -2646,17 +2590,6 @@ fn main() { for x in counter() { if x == 1 { break; } } }",
         );
     }
 
-    // ============================================================
-    // record-payload codegen tests
-    // ============================================================
-    //
-    // The 17B spec listed 6 record-payload codegen tests. The
-    // developer claimed to add them but in fact added 0 — all 6
-    // were silently skipped. This section adds the missing tests,
-    // including the red-team's canonical
-    // `record_construct_reorders_shuffled_call_site_fields` test
-    // that locks in the record-field reordering behavior.
-
     /// Codegen test 10 : the red-team's canonical
     /// record-payload reorder test. The variant is declared as
     /// `Foo { x: int, y: int, z: int }` and the user calls it
@@ -2684,8 +2617,8 @@ fn main() {
         );
 
         // The construct `E::Foo { z: 1, x: 2, y: 3 }` should
-        // emit CONST 1 (z), CONST 3 (y), CONST 2 (x) — that
-        // is, REVERSE declaration order — so that MAKE_ENUM's
+        // emit CONST 1 (z), CONST 3 (y), CONST 2 (x) ,  that
+        // is, REVERSE declaration order ,  so that MAKE_ENUM's
         // top-first pop order places them at payload[0..2]
         // in declaration order.
         let const_operands: Vec<i64> = bc
@@ -2800,7 +2733,7 @@ fn main() {
         );
 
         // Find all MAKE_ENUM ops (one per construct call,
-        // including unit variants — the codegen always emits
+        // including unit variants ,  the codegen always emits
         // MAKE_ENUM, even for Unit, with arity=0).
         let make_enums: Vec<_> = bc
             .iter()
@@ -2908,41 +2841,7 @@ fn main() {
         );
     }
 
-    // ============================================================
-    // inner-pattern dispatch regression tests
-    // ============================================================
-    //
-    // fixes the inner-pattern dispatch for multi-arm match
-    // groups that share the same OUTER variant tag but differ on the
-    // INNER sub-pattern. Before 18A, the codegen emitted POP
-    // placeholders for nested Constructor sub-patterns in the test
-    // chain, so all arms in a multi-arm group that shared an outer
-    // tag were dispatched in source order regardless of the actual
-    // inner tag (the first matching arm always won, even if the
-    // runtime inner tag would have picked a different arm).
-    //
-    // After 18A:
-    // - `arm_has_runtime_test` is more selective — it only flags
-    // arms whose inner sub-patterns carry a `Binding` or further
-    // nested `Constructor` (i.e., the inner pattern actually
-    // binds a value that needs runtime extraction).
-    // - `emit_inner_test` emits a real `JUMP_IF_MATCH` for the
-    // inner tag instead of a POP placeholder, so the runtime
-    // correctly picks the arm whose inner tag matches.
-    // - The forward pass keeps the existing behavior (one
-    // JUMP_IF_MATCH per non-last group + UNPACK for the last
-    // arm of the last group) — the common case (1 arm per tag,
-    // all binding/wildcard sub-patterns) produces byte-for-byte
-    // identical bytecode.
-    //
-    // These five tests pin down the new behavior at the codegen
-    // level. The end-to-end runtime behavior is verified separately
-    // by the `example_match_with_two_ok_arms_dispatches_correctly`
-    // test in `compiler/tests/pipeline.rs` (which compiles and runs
-    // `examples/result.hy` after it's extended to two `Result::Ok`
-    // arms).
-
-    /// Codegen test 16 : Case 4 — a multi-arm match
+    /// Codegen test 16 : Case 4 ,  a multi-arm match
     /// group with two arms sharing the outer tag and BOTH arms
     /// having inner Constructor sub-patterns with bindings emits
     /// ≥2 JUMP_IF_MATCH (one for the outer tag dispatch, one for
@@ -2952,7 +2851,7 @@ fn main() {
         use common::Instruction;
         // Case 4: `match x { E::A(Option::Some(v)) => v, E::A(Option::None) => 0 }`
         // Both arms share the outer tag `E::A`. The first arm's
-        // inner pattern is `Option::Some(v)` — a Constructor with a
+        // inner pattern is `Option::Some(v)` ,  a Constructor with a
         // Binding sub-pattern, which triggers the new test chain.
         let (bc, _pool) = compile_src(
             "enum E { A(Option) } \
@@ -2980,7 +2879,7 @@ fn main() {
         let _ = pop_count;
     }
 
-    /// Codegen test 17 : Case 1 — wildcard inner
+    /// Codegen test 17 : Case 1 ,  wildcard inner
     /// sub-patterns DON'T trigger the new test chain. The runtime
     /// always accepts a wildcard, so a runtime inner test would be
     /// redundant; the codegen keeps the existing layout (just one
@@ -2990,7 +2889,7 @@ fn main() {
         use common::Instruction;
         // Case 1: `match x { E::A(Option::None) => 1, E::A(Option::Some(_)) => 2 }`
         // Both arms share the outer tag `E::A`. The inner
-        // sub-patterns are Unit (`None`) and Wildcard (`Some(_)`) —
+        // sub-patterns are Unit (`None`) and Wildcard (`Some(_)`) , 
         // neither carries a Binding, so `arm_has_runtime_test`
         // returns false for both arms. No test chain is emitted;
         // the codegen keeps the existing layout.
@@ -3015,26 +2914,8 @@ fn main() {
         );
     }
 
-    /// Codegen test 18 : Case 2 — Binding inner
+    /// Codegen test 18 : Case 2 ,  Binding inner
     /// sub-patterns at the OUTER level (i.e., simple bindings like
-    /// `A(v)` with no nested Constructor) DON'T trigger the new
-    /// test chain. The codegen keeps the existing layout.
-    ///
-    /// The user's source for this test uses nested Constructor
-    /// sub-patterns to match the description
-    /// (`E::A(Option::Some(v))`, `E::A(Option::None)`). With the
-    /// refined `arm_has_runtime_test`, the `Some(v)` arm DOES
-    /// trigger a test chain (its inner pattern has a Binding).
-    /// However, this test specifically asserts the COMBINED-CASE
-    /// count for an arms-only-Bindings scenario (no nested
-    /// Constructor at all). See
-    /// `match_bindings_per_arm_still_works_with_test_chain`
-    /// for the test-chain-enabled variant.
-    ///
-    /// We assert 1 JUMP_IF_MATCH here to lock in the
-    /// single-JUMP_IF_MATCH case. This guards against future
-    /// changes that would over-emit JUMP_IF_MATCH for trivial
-    /// bindings.
     #[test]
     fn match_with_simple_binding_subpatterns_keeps_current_layout() {
         use common::Instruction;
@@ -3065,7 +2946,7 @@ fn main() {
         // For a 2-arm match with unique outer tags, the existing
         // behavior is one JUMP_IF_MATCH (for the non-last arm) + one
         // UNPACK (for the last arm's scrutinee-consumer). The
-        // simple-binding case is unaffected by .
+        // simple-binding case is unaffected by
         assert_eq!(
             jimp_count, 1,
             "expected 1 JUMP_IF_MATCH (simple bindings keep the existing layout); got {}",
@@ -3073,7 +2954,7 @@ fn main() {
         );
     }
 
-    /// Codegen test 19 : Case 5 — a match with two
+    /// Codegen test 19 : Case 5 ,  a match with two
     /// tag groups where one group is multi-arm emits one
     /// JUMP_IF_MATCH per GROUP (not per arm). The codegen
     /// emitted one JUMP_IF_MATCH per non-last arm, which would have
@@ -3081,7 +2962,7 @@ fn main() {
     /// is non-last, arm 1 for B is non-last). After 18A the
     /// grouping is by outer tag, so the multi-arm group A gets one
     /// JUMP_IF_MATCH and the single-arm group B (last) gets a
-    /// different shape — the result is exactly 2 JUMP_IF_MATCH
+    /// different shape ,  the result is exactly 2 JUMP_IF_MATCH
     /// (one per group).
     #[test]
     fn match_with_two_tag_groups_dispatches_correctly() {
@@ -3117,24 +2998,6 @@ fn main() {
 
     /// Codegen test 20 : verifies that the test chain
     /// correctly populates the per-arm `match_bindings` map for
-    /// arms with inner Binding sub-patterns. The arm body for the
-    /// `Some(v)` arm must be able to read `v` (via `LOAD v`),
-    /// which requires the codegen to record `v → slot 1` in
-    /// `match_bindings_per_arm`. We don't assert on the slot value
-    /// directly (it's an internal detail), but we verify the
-    /// bytecode is well-formed and the `Expression::Identifier`
-    /// lookup inside the arm body resolves correctly by checking
-    /// that the bytecode compiles to a non-empty sequence and
-    /// contains the expected opcodes.
-    ///
-    /// (The HM typechecker currently flags the second arm as
-    /// "Unreachable arm" because it doesn't track inner-pattern
-    /// distinctions — a known limitation. The codegen still emits
-    /// bytecode for the unreachable arm defensively, which is what
-    /// we want for the inner-pattern dispatch fix. The end-to-end
-    /// runtime behavior is verified by the
-    /// `example_match_with_two_ok_arms_dispatches_correctly` golden
-    /// test in `compiler/tests/pipeline.rs`.)
     #[test]
     fn match_bindings_per_arm_still_works_with_test_chain() {
         use common::Instruction;
@@ -3154,7 +3017,7 @@ fn main() {
         let mut ast = Pratt::default().parse(src).expect("parse failed");
         let bc = Compiler::default().compile("test", &mut ast);
         // The bytecode must include the outer JUMP_IF_MATCH (for A)
-        // and the inner JUMP_IF_MATCH (for Some) — the test chain
+        // and the inner JUMP_IF_MATCH (for Some) ,  the test chain
         // emitted both.
         let jimp_count = bc
             .iter()
@@ -3242,9 +3105,7 @@ fn main() {
         );
     }
 
-    // ============================================================
     // field-access codegen tests
-    // ============================================================
     //
     // The spec locked in 2 codegen tests for the new
     // `Expression::Access` arm. Both verify the bytecode SHAPE
@@ -3291,7 +3152,7 @@ fn main() {
     }
 
     /// Codegen test 23 : a field access on a DIFFERENT
-    /// field of the same record emits `LoadField(1)` — the
+    /// field of the same record emits `LoadField(1)` ,  the
     /// declaration position of `y`. The red-team flagged this as
     /// a critical regression test: a buggy codegen that always
     /// emitted `LoadField(0)` would pass the previous test but
@@ -3323,7 +3184,7 @@ fn main() {
 
         // Collect every LoadField operand; we expect [0, 1]
         // (x_coord uses field 0, y_coord uses field 1). The order
-        // depends on the function layout — both x_coord and y_coord
+        // depends on the function layout ,  both x_coord and y_coord
         // are emitted before main, so the operands appear in source
         // order in the bytecode.
         let field_indices: Vec<u32> = bc
@@ -3339,27 +3200,6 @@ fn main() {
         );
     }
 
-    // ============================================================
-    // let-bound variable codegen tests
-    // ============================================================
-    //
-    // fixes the `let x = expr;` codegen bug — the
-    // `Expression::Variable` codegen emitted no bytecode,
-    // so the slot was never explicitly written. The simple case
-    // `let x = 5; print x;` worked by coincidence (slot 0
-    // coincided with the operand-stack top). Reassignment via
-    // `x = 10;` used `STORE` (a no-op since 15D) + `DUPLICATE`,
-    // which didn't fix the slot either.
-    //
-    // The fix: the `Expression::Fragment` arm special-cases the
-    // `[Variable, expr]` shape and emits `STORE_POP slot` after
-    // the RHS bytecode. `Expression::Assignment` now emits
-    // `STORE_POP slot` instead of the buggy `STORE` + `DUPLICATE`.
-    //
-    // These tests assert runtime behavior (re-assignment picks up
-    // the new value, multiple bindings are preserved). Opcode
-    // shape is not pinned — MIR→LIR may rewrite STORE slots.
-
     /// `let x = expr; let y = x;` keeps `x` readable after the bind.
     #[test]
     fn let_x_then_print_x_emits_store_pop() {
@@ -3372,7 +3212,7 @@ fn main() {
         use common::Instruction;
         // Two early-return guards → not a single tiny-inline diamond.
         // Predicate peel (2B) still applies, and since every arg is a plain
-        // local the re-materializing peel reads them in place — the packed
+        // local the re-materializing peel reads them in place ,  the packed
         // LOAD feeding the CALL names `x, y, z`, not argument spills.
         let (bc, _pool) = compile_src(
             "fn add(int a, int b, int c) -> int { \
@@ -3431,7 +3271,7 @@ fn main() {
     }
 
     /// An argument the guard reads but that needs more than one byte keeps its
-    /// spill — `x + 1` is staged to a temp, so the packed LOAD names temps.
+    /// spill ,  `x + 1` is staged to a temp, so the packed LOAD names temps.
     #[test]
     fn predicate_peel_spills_computed_guard_arg() {
         use common::Instruction;
@@ -3460,7 +3300,7 @@ fn main() {
     }
 
     /// The peel replaces the callee's `return`, so a matched base-case value must
-    /// actually be returned — a bare value falling through is not a base case.
+    /// actually be returned ,  a bare value falling through is not a base case.
     #[test]
     fn predicate_peel_shape_requires_returned_base_value() {
         let mut buf = CodeBuf::default();
@@ -3556,7 +3396,7 @@ fn main() {
     }
 
     /// Codegen test 25 : two `let` bindings in the same
-    /// scope emit two `STORE_POP`s — one per binding, with
+    /// scope emit two `STORE_POP`s ,  one per binding, with
     /// distinct slot operands (0 and 1).
     #[test]
     fn let_two_bindings_emit_two_store_pops() {
@@ -3579,7 +3419,7 @@ fn main() {
             "expected ≥2 STORE for two `let` bindings; got {}",
             store_pops.len()
         );
-        // The slot operands should include 0 and 1 (in source order —
+        // The slot operands should include 0 and 1 (in source order , 
         // `x` first, then `y`).
         assert!(
             store_pops.contains(&0) && store_pops.contains(&1),
@@ -3589,7 +3429,7 @@ fn main() {
     }
 
     /// Codegen test 26 : `x = 10;` re-assignment emits
-    /// `STORE_POP slot` (the new opcode) — NOT the
+    /// `STORE_POP slot` (the new opcode) ,  NOT the
     /// `STORE` (a no-op since ) + `DUPLICATE`
     /// shape. The codegen would emit `STORE` here, which
     /// is the red-team's critical regression signature.
@@ -3604,7 +3444,7 @@ fn main() {
  }",
         );
 
-        // At least one STORE_POP — the re-assignment for
+        // At least one STORE_POP ,  the re-assignment for
         // `x = 10`. The codegen would have used
         // STORE here instead.
         let store_pop_count = bc
@@ -4303,7 +4143,7 @@ fn run() -> int { return add(1, 2); }
             cmp_jmps.len(),
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
         );
-        // At least one cmp-jmp must be followed (later) by a CALL — the peeled site.
+        // At least one cmp-jmp must be followed (later) by a CALL ,  the peeled site.
         let has_cmp_before_call = cmp_jmps.iter().any(|&ci| {
             bc[ci + 1..]
                 .iter()
@@ -4359,7 +4199,7 @@ return s; \
         );
     }
 
-    /// `if 5 < 5` (strict) must take the else branch — guards Le/`<=` fold mix-up.
+    /// `if 5 < 5` (strict) must take the else branch ,  guards Le/`<=` fold mix-up.
     #[test]
     fn const_if_strict_lt_equality_takes_else() {
         use common::Instruction;
@@ -4370,7 +4210,7 @@ return s; \
             !bc.iter().any(|b| matches!(b.bytecode(), Instruction::JMPF)),
             "folded `if 5 < 5` should not emit JMPF"
         );
-        // Taken else prints 0 — must see CONST 0 (or ConstReturnImm), not only CONST 1.
+        // Taken else prints 0 ,  must see CONST 0 (or ConstReturnImm), not only CONST 1.
         let has_zero = bc.iter().any(|b| {
             matches!(b.bytecode(), Instruction::CONST | Instruction::ConstReturnImm)
                 && b.operand_u32() as i32 == 0
@@ -4448,9 +4288,7 @@ fn main() { let h = tick(2); write(stdout(), to_bytes(format(\"%i\", resume h)))
         );
     }
 
-    // ============================================================
     // growing array builtin codegen tests
-    // ============================================================
 
     #[test]
     fn vec_push_and_len_emit_array_opcodes() {
@@ -4572,7 +4410,7 @@ let _y = nested[0]; \
         let main_bc = &bc[main_off..];
         // Nested inners → MakeArray; outer nested spine is stack (no third MakeArray
         // for the outer literal). Escape of nested[0] may MakeArray the outer row
-        // when indexing produces a value — row is heap already from inner lit.
+        // when indexing produces a value ,  row is heap already from inner lit.
         let make_arrays = main_bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
@@ -4745,22 +4583,9 @@ fn main() {
         );
     }
 
-    // ============================================================
-    // chained field-access codegen tests
-    // ============================================================
-    //
-    // fixes the chained-access limitation: `p.x.v` (where
-    // `p.x` is itself a record-shaped enum) now resolves to the
-    // INNER enum's field, not the OUTER enum's. The bytecode
-    // shape for a chained access is the same as for two
-    // independent accesses — two `LoadField` opcodes stacked on
-    // top of the receiver bytecode — but the operand of the
-    // SECOND `LoadField` is indexed against the INNER enum, not
-    // the OUTER one.
-
     /// Codegen test 27 : a chained field access
     /// (`p.x.v` where `x: Inner`, `v: int`) emits exactly TWO
-    /// `LoadField` opcodes in the function body — one for the
+    /// `LoadField` opcodes in the function body ,  one for the
     /// inner access (`x`) and one for the OUTER access (`v`).
     /// The codegen would emit only one `LoadField`
     /// (followed by a defensive `LoadField(0)` for the OUTER),
@@ -4789,7 +4614,7 @@ fn main() {
     }
 
     /// Codegen test 28 : the SECOND `LoadField`'s
-    /// operand is `0` — `v`'s declaration index in the INNER
+    /// operand is `0` ,  `v`'s declaration index in the INNER
     /// `Inner` enum, NOT something from `Outer`. The earlier
     /// codegen would emit `LoadField(0)` as a defensive
     /// fallback, which happens to coincide with `v`'s index
@@ -4817,8 +4642,8 @@ fn main() {
         );
 
         // Collect every LoadField operand. We expect:
-        // - First LoadField(0) — Outer's `x` field index.
-        // - Second LoadField(0) — Inner's `v` field index.
+        // - First LoadField(0) ,  Outer's `x` field index.
+        // - Second LoadField(0) ,  Inner's `v` field index.
         // (Both happen to be 0 because `x` is Outer's first
         // declared field and `v` is Inner's first declared
         // field. The order is determined by the source-order
@@ -4838,18 +4663,6 @@ fn main() {
 
     /// Codegen test 29 : the critical regression
     /// test. When the OUTER access's field is at a DIFFERENT
-    /// declaration position in the INNER enum than it would
-    /// be in the OUTER enum, the codegen must pick the INNER
-    /// position. Setup: `Inner.w` is at index 1 (not 0); the
-    /// codegen would emit `LoadField(0)` for the OUTER
-    /// access, silently reading `v` when the user asked for
-    /// `w`.
-    ///
-    /// Note: we can't easily observe the runtime value of the
-    /// OUTER access in this codegen test (the VM doesn't
-    /// return a value we can assert on), so we just check the
-    /// bytecode SHAPE — the second LoadField operand is `1`
-    /// (`w`'s index in `Inner`), not `0`.
     #[test]
     fn access_chained_field_with_correct_field_index() {
         use common::Instruction;
@@ -4872,9 +4685,9 @@ fn main() {
         );
 
         // Collect every LoadField operand. We expect:
-        // - First LoadField(0) — Outer's `x` field index.
-        // - Second LoadField(1) — Inner's `w` field index
-        // (NOT Outer's `y` index — which would be 1 in
+        // - First LoadField(0) ,  Outer's `x` field index.
+        // - Second LoadField(1) ,  Inner's `w` field index
+        // (NOT Outer's `y` index ,  which would be 1 in
         // Outer but isn't what the user asked for).
         let field_indices: Vec<u32> = bc
             .iter()
@@ -4888,32 +4701,6 @@ fn main() {
             field_indices
         );
     }
-
-    // ============================================================
-    // nested record patterns — codegen tests
-    // ============================================================
-    //
-    // lifts the -cleanup limitation #1
-    // (nested record patterns inside an arm body are rejected).
-    // The codegen emitted a POP for an inner record
-    // pattern instead of walking its declared fields, so the
-    // binding slot for the inner record's fields was never
-    // populated and the arm body read garbage values.
-    //
-    // These tests guard the codegen for the four
-    // nested-record scenarios called out in the spec:
-    //
-    // 1. Nested record in tuple: `Result::Ok(Inner { v })`.
-    // 2. Nested record in record: `Result::Ok { x: Inner { v } }`.
-    // 3. Depth-3 nesting: `Foo::Bar(Baz::Qux { a: W::W { v } })`.
-    // 4. Missing field in inner record (defensive POP emitted).
-    //
-    // The tests check the bytecode SHAPE (opcodes emitted) so
-    // accidental regressions in the codegen are caught even if
-    // the runtime happens to produce the right output for a
-    // buggy bytecode (e.g. by accidentally emitting POP for
-    // every record, which would compile and run but bind to
-    // the wrong slots).
 
     /// Codegen test 23 : a record pattern inside a
     /// tuple pattern (`Result::Ok(Inner::I { v })`) compiles
@@ -4938,7 +4725,7 @@ fn main() {
         // so it consumes the scrutinee via UNPACK (not
         // JUMP_IF_MATCH). The INNER Inner::I is a nested
         // Inner Binding `v` needs no STORE (value already in slot).
-        // Pre-18B swallowed the inner record with POP — require UNPACK.
+        // Pre-18B swallowed the inner record with POP ,  require UNPACK.
 
         let unpack_count = bc
             .iter()
@@ -4983,7 +4770,7 @@ fn main() {
     }
 
     /// Nested multi-field records emit scratch relocate (LOAD+StorePop)
-    /// then UnpackAt with operands `[arity, scratch_slot]` — not in-place
+    /// then UnpackAt with operands `[arity, scratch_slot]` ,  not in-place
     /// at the outer field (which would clobber siblings).
     #[test]
     fn match_nested_multifield_record_emits_scratch_unpack_at() {
@@ -5037,7 +4824,7 @@ fn main() {
 
     /// Codegen test 25 : depth-3 nested constructor
     /// patterns (`Foo::Bar(Baz::Qux { a: W::W { v } })`).
-    /// The codegen recurses at unbounded depth — three levels
+    /// The codegen recurses at unbounded depth ,  three levels
     /// of nested constructor patterns, with the innermost being
     /// a record. Pre-18B, the inner record was silently
     /// swallowed at any depth > 1.
@@ -5090,13 +4877,13 @@ fn main() {
         // the inner record's declared fields in decl_order
         // and emits POP for the missing field. Pre-18B, the
         // codegen emitted a single POP for the inner record
-        // (regardless of how many fields it had) — this
+        // (regardless of how many fields it had) ,  this
         // assertion is a sanity check that the codegen still
         // produces a well-formed bytecode for this case (the
         // arm body is `99` and doesn't reference any bindings).
         //
         // We don't assert exact POP count (other parts of
-        // the bytecode emit POPs too — e.g. the prologue's
+        // the bytecode emit POPs too ,  e.g. the prologue's
         // scrutinee POP for the wildcard arm); we just check
         // the bytecode compiles.
         assert!(!bc.is_empty(), "bytecode should not be empty");
@@ -5104,7 +4891,7 @@ fn main() {
         // Sanity: the arm body `99` should produce a
         // non-zero integer constant somewhere in the bytecode.
         // (The CONST opcode uses `value[63:0]` for the
-        // constant — see `Byte::constant()`.)
+        // constant ,  see `Byte::constant()`.)
         let has_99 = bc
             .iter()
             .any(|b| matches!(b.bytecode(), Instruction::CONST) && b.constant(&[]) == 99);
@@ -5140,7 +4927,7 @@ fn main() {
     }
 
     /// Codegen test B1-2: a concrete `fn add(int a, int b) -> int { return a + b; }`
-    /// must NOT emit `DynAdd` — it should use the regular `ADD` (or the peephole-fused
+    /// must NOT emit `DynAdd` ,  it should use the regular `ADD` (or the peephole-fused
     /// `BinSlotSlot`) path.
     #[test]
     fn concrete_add_still_emits_add() {
@@ -5171,13 +4958,13 @@ fn main() {
     /// `ObjPolyFn` heap pointer that `CallIndirect` can dispatch through.
     ///
     /// The function `id<T>(T x) -> T` is a canonical unconstrained identity and has
-    /// no trait bound, so no DynAdd / DynCmp / etc. opcode is emitted — this
+    /// no trait bound, so no DynAdd / DynCmp / etc. opcode is emitted ,  this
     /// purely tests the MakePolyFn path.
     #[test]
     fn generic_fn_as_value_emits_make_polyfn() {
         use common::Instruction;
         // `let f = id;` in main must compile `id` (a generic fn) as a MakePolyFn rather
-        // than a direct CALL or LOAD — id is not a local variable, so the Identifier arm
+        // than a direct CALL or LOAD ,  id is not a local variable, so the Identifier arm
         // must detect `is_generic_fn("id")` and emit MakePolyFn with id's entry offset.
         let (bc, _pool) = compile_src("fn id<T>(T x) -> T { return x; } fn main() { let f = id; }");
         assert!(
@@ -5438,7 +5225,6 @@ fn main() { let _ = (new Cell(7)).get(); }
         );
     }
 
-    // ── Dictionary-passing calling convention tests ─────────────────────────
 
     /// Codegen test: a first-class generic (shared body) with a user-defined
     /// trait constraint emits a dict `MakeTuple` at the PolyFn escape and a
@@ -5773,7 +5559,7 @@ fn main() { \
         let mut ast = Pratt::default().parse(src).expect("parse failed");
         let mut compiler = Compiler::default();
         // Stable ids matching Pipeline::register_io_natives order is not
-        // required — only the relative nesting shape is asserted.
+        // required ,  only the relative nesting shape is asserted.
         compiler.register_native_id("stdin", 1);
         compiler.register_native_id("read", 2);
         let bc = compiler.compile("", &mut ast);
@@ -5985,7 +5771,7 @@ fn main() { \
     fn polyfn_plus_fib_style_body_still_fuses() {
         use common::Instruction;
         // Shared fib-style body uses LOAD/CONST/op patterns that fuse when
-        // CodePtr/MakePolyFn are relocatable (Phase 1 — no global skip-fusion).
+        // CodePtr/MakePolyFn are relocatable (Phase 1 ,  no global skip-fusion).
         let (bc, _pool) = compile_src(
             "fn id<T>(T x) -> T { return x; } \
              fn fib(int n) -> int { \
@@ -6028,7 +5814,7 @@ fn main() { \
     }
 
     /// Generic HostInvoke Call path (`self.native`) has the same id-before-args
-    /// contract as `emit_io_host_invoke` — nested `outer(inner())` must not
+    /// contract as `emit_io_host_invoke` ,  nested `outer(inner())` must not
     /// leave the inner invoke above the outer id.
     ///
     /// Mirrors `nested_io_host_invoke_emits_outer_const_before_inner_host_invoke`:
@@ -6103,7 +5889,7 @@ fn main() {
 }
 "#,
         );
-        // Find the CALL in main (arity 2) — skip any earlier CALLs.
+        // Find the CALL in main (arity 2) ,  skip any earlier CALLs.
         // call_parts() = (arity, target).
         let call_idx = bc
             .iter()
@@ -6693,7 +6479,7 @@ fn main() {
         assert_eq!(bc[hi].operand_u32(), 3, "binary arity HostInvoke(3)");
     }
 
-    /// N < 8 stays on scalar unroll — packed path must not fire.
+    /// N < 8 stays on scalar unroll ,  packed path must not fire.
     #[test]
     fn aggregate_zip_len7_does_not_emit_packed_vec_arith() {
         use common::Instruction;
@@ -7585,7 +7371,7 @@ fn main() {
     }
 
     /// True for a plain `BITAND`, or a `CmpJmpf`/`CmpJmpt` fused superinstruction
-    /// whose comparison op is `BITAND` — `branch_opt`/fuse-select may fold the
+    /// whose comparison op is `BITAND` ,  `branch_opt`/fuse-select may fold the
     /// niche-Result Err-bit test (`DUP; CONST 1; BITAND; JMPF`) into one op
     /// once a `DUPLICATE` keeps the pointer alive under the jump.
     fn tests_err_bit(b: &Byte) -> bool {
@@ -7599,7 +7385,7 @@ fn main() {
     }
 
     /// COI-108: `self.inner()?` with a different Ok payload must keep the
-    /// ReturnPair and use the tag EQ/JMPF path — not PairToHeap + JumpIfMatch.
+    /// ReturnPair and use the tag EQ/JMPF path ,  not PairToHeap + JumpIfMatch.
     #[test]
     fn nested_method_try_mismatched_result_keeps_pair_path() {
         let (bc, _) = compile_src(
