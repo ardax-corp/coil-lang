@@ -1,6 +1,9 @@
 //! MIR function / block containers and SSA verification.
 
-use super::inst::{BlockId, MirInst, Terminator, ValueId};
+use std::collections::HashMap;
+
+use super::gc::LiveRootSet;
+use super::inst::{BlockId, LocalId, MirInst, Terminator, ValueId};
 use super::layout::MirLayout;
 use super::ty::MirTy;
 
@@ -32,6 +35,10 @@ pub struct MirFunc {
     pub blocks: Vec<MirBlock>,
     /// Type of each allocated value, indexed by [`ValueId::index`].
     pub types: Vec<MirTy>,
+    /// IL slot → SSA value at each Alloc / GcBarrier dest (S2a).
+    pub slot_env: HashMap<ValueId, Vec<(LocalId, ValueId)>>,
+    /// Live heap words at each Alloc / GcBarrier (S2a).
+    pub gc_roots: Vec<LiveRootSet>,
 }
 
 impl MirFunc {
@@ -45,7 +52,14 @@ impl MirFunc {
             entry: BlockId(0),
             blocks: vec![MirBlock::new(BlockId(0))],
             types: Vec::new(),
+            slot_env: HashMap::new(),
+            gc_roots: Vec::new(),
         }
+    }
+
+    /// Sidecar row for the Alloc or GcBarrier whose dest is `at`.
+    pub fn live_roots_at(&self, at: ValueId) -> Option<&LiveRootSet> {
+        self.gc_roots.iter().find(|s| s.at == at)
     }
 
     pub fn ty(&self, v: ValueId) -> MirTy {
@@ -238,7 +252,12 @@ impl MirFunc {
                 let lt = self.ty(*lhs);
                 let rt = self.ty(*rhs);
                 let heap_bit = ty.is_heap_word()
-                    && matches!(op, super::inst::MirBinOp::BitAnd | super::inst::MirBinOp::BitOr | super::inst::MirBinOp::Xor);
+                    && matches!(
+                        op,
+                        super::inst::MirBinOp::BitAnd
+                            | super::inst::MirBinOp::BitOr
+                            | super::inst::MirBinOp::Xor
+                    );
                 if heap_bit {
                     let ok = |t: MirTy| t.is_heap_word() || t == MirTy::I64;
                     if !ok(lt) || !ok(rt) {
@@ -378,10 +397,7 @@ impl MirFunc {
                 }
             }
             MirInst::FieldStore {
-                dest,
-                src,
-                index,
-                ..
+                dest, src, index, ..
             } => {
                 if !self.ty(*src).is_specialized() {
                     return Err(format!("{dest} FieldStore src type"));
@@ -408,8 +424,8 @@ impl MirFunc {
                     return Err(format!("{dest} GcBarrier dest is not heapref"));
                 }
                 for (i, r) in roots.iter().enumerate() {
-                    if !self.ty(*r).is_specialized() {
-                        return Err(format!("{dest} GcBarrier root {i} type"));
+                    if !self.ty(*r).is_heap_word() {
+                        return Err(format!("{dest} GcBarrier root {i} is not a heap word"));
                     }
                 }
             }

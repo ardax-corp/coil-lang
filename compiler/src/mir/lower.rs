@@ -64,7 +64,7 @@ pub struct LowerHints {
     /// I3: Load/Store of those slots become FieldLoad/FieldStore.
     pub allow_fields: bool,
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` → Alloc +
-    /// GcBarrier. Dense / LIR emit still refuse.
+    /// GcBarrier with S2a live roots. Dense / LIR emit still refuse.
     pub allow_alloc: bool,
     /// I6: type non-W4 HostInvoke (clocks / IO / GC / FFI names) as SSA
     /// edges. Dense emit still refuses anything outside W4.
@@ -1020,10 +1020,7 @@ mod tests {
             IlOp::Label(Label(0)),
             IlOp::Const { imm: 1, loc },
             IlOp::MakeArray { arity: 1, loc },
-            IlOp::Return {
-                loc,
-                ret_words: 1,
-            },
+            IlOp::Return { loc, ret_words: 1 },
         ];
         let mut hints = LowerHints::new("arr");
         hints.allow_alloc = true;
@@ -1031,14 +1028,26 @@ mod tests {
         f.verify().unwrap();
         assert!(f.has_gc_edge());
         assert!(f.blocks.iter().any(|b| {
-            b.insts
-                .iter()
-                .any(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Array, .. }))
+            b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    MirInst::Alloc {
+                        kind: MirAllocKind::Array,
+                        ..
+                    }
+                )
+            })
         }));
         assert!(f.blocks.iter().any(|b| {
-            b.insts
-                .iter()
-                .any(|i| matches!(i, MirInst::GcBarrier { kind: MirGcKind::Safepoint, .. }))
+            b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    MirInst::GcBarrier {
+                        kind: MirGcKind::Safepoint,
+                        ..
+                    }
+                )
+            })
         }));
         assert_eq!(f.ret_ty, Some(MirTy::HeapRef));
     }
@@ -1057,10 +1066,7 @@ mod tests {
                 layout: 0,
                 loc,
             },
-            IlOp::Return {
-                loc,
-                ret_words: 1,
-            },
+            IlOp::Return { loc, ret_words: 1 },
         ];
         assert!(try_lower_numeric(&ops, &LowerHints::new("clk")).is_err());
         let mut hints = LowerHints::new("clk");

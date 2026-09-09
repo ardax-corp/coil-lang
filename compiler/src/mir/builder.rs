@@ -203,8 +203,8 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         let lt = self.resolve_ty(lhs);
         let rt = self.resolve_ty(rhs);
-        let heap_cmp = (lt.is_heap_word() || rt.is_heap_word())
-            && matches!(op, MirCmpOp::Eq | MirCmpOp::Ne);
+        let heap_cmp =
+            (lt.is_heap_word() || rt.is_heap_word()) && matches!(op, MirCmpOp::Eq | MirCmpOp::Ne);
         if heap_cmp {
             let ok = |t: MirTy| t.is_heap_word() || t == MirTy::I64;
             if !ok(lt) || !ok(rt) {
@@ -347,19 +347,12 @@ impl MirBuilder {
             }
         }
         let dest = self.alloc(abi.ret);
-        self.push(MirInst::Call {
-            dest,
-            target,
-            args,
-        })?;
+        self.push(MirInst::Call { dest, target, args })?;
         Ok(dest)
     }
 
     /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
-    pub fn ins_stack_phi(
-        &mut self,
-        args: Vec<(BlockId, ValueId)>,
-    ) -> Result<ValueId, MirError> {
+    pub fn ins_stack_phi(&mut self, args: Vec<(BlockId, ValueId)>) -> Result<ValueId, MirError> {
         if args.is_empty() {
             return Err(MirError::msg("empty stack phi"));
         }
@@ -491,11 +484,12 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::Alloc { dest, kind, elems })?;
+        self.snapshot_slots(dest);
         Ok(dest)
     }
 
-    /// GC placeholder (I5). Dest is `heapref`: first root if present, else
-    /// a dummy token. Roots are not a stack map.
+    /// GC safepoint (I5). Dest is a heapref token. `roots` is a seed;
+    /// [`super::gc::fill_live_roots`] replaces it with live heap words.
     pub fn ins_gc_barrier(
         &mut self,
         kind: super::inst::MirGcKind,
@@ -503,7 +497,7 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         let roots: Vec<ValueId> = roots.into_iter().map(|v| self.resolve(v)).collect();
         for (i, &r) in roots.iter().enumerate() {
-            if !self.resolve_ty(r).is_specialized() {
+            if !self.resolve_ty(r).is_heap_word() {
                 return Err(MirError::msg(format!(
                     "GcBarrier root {i} is {}",
                     self.resolve_ty(r)
@@ -512,6 +506,7 @@ impl MirBuilder {
         }
         let dest = self.alloc(MirTy::HeapRef);
         self.push(MirInst::GcBarrier { dest, kind, roots })?;
+        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -578,8 +573,23 @@ impl MirBuilder {
         self.seal_all();
         self.rewrite_subst();
         self.finished = true;
+        if self.func.has_gc_edge() {
+            super::gc::fill_live_roots(&mut self.func);
+        }
         self.func.verify().map_err(MirError::msg)?;
         Ok(self.func)
+    }
+
+    fn snapshot_slots(&mut self, at: ValueId) {
+        let Ok(b) = self.cur() else {
+            return;
+        };
+        let mut env: Vec<(LocalId, ValueId)> = self.current_def[b.index()]
+            .iter()
+            .map(|(&l, &v)| (l, self.resolve(v)))
+            .collect();
+        env.sort_by_key(|(l, _)| l.0);
+        self.func.slot_env.insert(at, env);
     }
 
     fn cur(&self) -> Result<BlockId, MirError> {
