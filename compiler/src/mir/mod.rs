@@ -22,7 +22,7 @@
 //! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
 //! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
 //! dense / LIR emit across alloc only when S2b maps exist (S2c), including
-//! mapped in-loop / preheader `Make*` (S2d). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! mapped preheader `Make*` (S2d) and Seek-less residuals (S2e). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
 //! allowlist stays closed. Debugger-attached compiles refuse dense /
 //! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
 //! accident.
@@ -2008,8 +2008,8 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_makearray_and_new_stay_fuse_il() {
-        // In-loop MakeArray stays off dense (S2d rent); maps may still bind.
+    fn pipeline_inlined_take_makearray_stays_fuse_il() {
+        // Inlined take + in-loop Make* stays fuse-IL (S2e boxing tax).
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0];
@@ -2049,7 +2049,7 @@ fn main() {
         );
         assert!(
             hot_bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
-            "in-loop MakeArray stays off dense; opcodes={names:?}"
+            "inlined take + MakeArray stays fuse-IL; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2152,7 +2152,7 @@ fn main() {
             pack_bc
                 .iter()
                 .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S2d keeps in-loop MakeArray off dense; opcodes={names:?}"
+            "S2e keeps in-loop MakeArray off dense (boxing tax); opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2198,6 +2198,14 @@ fn main() {
         assert!(
             body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
             "S2d mapped preheader alloc + index loop takes dense; opcodes={names:?}"
+        );
+        let seeks = body
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Seek)
+            .count();
+        assert_eq!(
+            seeks, 1,
+            "S2e: prologue Seek only after StoreIndex/Index residuals; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

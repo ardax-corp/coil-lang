@@ -39,11 +39,15 @@ pub fn try_specialize_body(
     // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // S2d: mapped *preheader* Make* + index loop may take dense.
-    // In-loop Make* stays off dense (Seek+alloc tax; hit-bench regress).
+    // S2e: residuals no longer Seek-restore, but in-loop Make* is still
+    // ~13–17% slower than fuse-IL (LOAD/STORE boxing). Default refuse.
+    // `COIL_S2D_DENSE_INLOOP=1` re-enables dense for A/B.
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    if super::infer::has_alloc_inside_loop(ops)
+    let force_dense_inloop = std::env::var_os("COIL_S2D_DENSE_INLOOP")
+        .is_some_and(|v| v != "0");
+    if (!force_dense_inloop && super::infer::has_alloc_inside_loop(ops))
         || (has_alloc && super::infer::has_alloc_only_after_loops(ops))
     {
         return None;

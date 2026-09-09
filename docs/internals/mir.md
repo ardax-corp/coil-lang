@@ -64,14 +64,17 @@ lets infer / specialize / `emit_lir` cross alloc **only** when those
 maps exist. S2d
 ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
 extends that to mapped **preheader** `Make*` + index (dense) and
-compare-only looping leftovers (LIR). In-loop `Make*` stays off dense.
+compare-only looping leftovers (LIR). S2e
+([COI-316](https://linear.app/ardax/issue/COI-316)) drops per-residual
+`Seek` restore; in-loop `Make*` stays off dense (boxing tax).
 Post-loop-only heap returns stay fuse-IL (invert+fuse). Unmapped allocating bodies stay fuse-IL. S3
 ([COI-308](https://linear.app/ardax/issue/COI-308/s3-widen-densemir-coverage-match-call-heap-index))
 widens dense coverage: one-word `CALL` beyond the dense map, and I6
 HostInvoke except I4 string bytes. Heap-index / `StoreIndex` take dense after V* miss (S3b): unpinned
-`Index` / `StoreIndex` / `ArrayLen` plus `Seek` restore to the frame
-high-water mark. Pin opcodes stay fuse-IL / proven stack-IL only —
-pin keys do not survive dense `Seek`.
+`Index` / `StoreIndex` / `ArrayLen`. Residual `StorePop` leaves tell at
+the prologue frame high-water; S2e does not emit a per-residual `Seek`.
+Pin opcodes stay fuse-IL / proven stack-IL only — pin keys do not
+survive the dense prologue `Seek`.
 Dense+match stays I2 LIR (JumpIfMatch stack protocol vs dense regs).
 Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).
 
