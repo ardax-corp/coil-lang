@@ -6,6 +6,7 @@ pub mod clock;
 pub mod debug;
 pub mod env;
 mod dense;
+mod simd;
 mod fused;
 mod ffi;
 pub mod fs;

@@ -394,6 +394,8 @@ pub struct Machine<const S: usize> {
     stack_maps: Vec<common::FrameStackMap>,
     /// Bytecode PC of the current GC safepoint (alloc / `gc::collect`).
     gc_ip: usize,
+    /// Compiler-only SIMD file (numeric bits only; never GC-traced).
+    vregs: [[u64; common::simd::LANES]; common::simd::NREGS],
     /// `type_id` → drop method entry PC (empty = no user finalizers).
     finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>,
     /// Drop entry PCs (for explicit `obj.drop()` once-bit intercept).
@@ -458,6 +460,7 @@ impl<const S: usize> Machine<S> {
             io_reactor: crate::io_reactor::IoReactor::new(),
             stack_maps: Vec::new(),
             gc_ip: 0,
+            vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
             finalizer_by_type: std::collections::HashMap::default(),
             finalizer_pcs: std::collections::HashSet::default(),
             gc_in_progress: false,
@@ -895,6 +898,40 @@ impl<const S: usize> Machine<S> {
         } else {
             None
         }
+    }
+
+    fn vload(&mut self, vdest: usize, addr: u64, index: i64, _ty: u8) -> bool {
+        let n = common::simd::LANES;
+        let Some(Object::Array(gc)) = Self::find_object_by_addr(&self.heap, addr) else {
+            return false;
+        };
+        let elems = &gc.as_ref().elements;
+        if index < 0 || (index as usize).saturating_add(n) > elems.len() {
+            return false;
+        }
+        let base = index as usize;
+        for i in 0..n {
+            self.vregs[vdest][i] = unsafe { elems.get_unchecked(base + i).raw() as u64 };
+        }
+        true
+    }
+
+    fn vstore(&mut self, vsrc: usize, addr: u64, index: i64, _ty: u8) -> bool {
+        let n = common::simd::LANES;
+        let Some(Object::Array(mut gc)) = Self::find_object_by_addr(&self.heap, addr) else {
+            return false;
+        };
+        let elems = &mut gc.as_mut().elements;
+        if index < 0 || (index as usize).saturating_add(n) > elems.len() {
+            return false;
+        }
+        let base = index as usize;
+        for i in 0..n {
+            unsafe {
+                *elems.get_unchecked_mut(base + i) = Value::from(self.vregs[vsrc][i]);
+            }
+        }
+        true
     }
 
     fn write_indexed(elements: &mut [Value], index: i64, value: Value, unchecked: bool) -> bool {
@@ -2451,7 +2488,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::DenseCast as u8);
+            promise!(*bc as u8 <= Instruction::VMove as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3622,6 +3659,68 @@ impl<const S: usize> Machine<S> {
                     promise!(sp + dest < stack_cap);
                     promise!(sp + src < stack_cap);
                     self.stack[sp + dest] = crate::dense::eval_cast(kind, self.stack[sp + src]);
+                }
+                Instruction::VLoad => {
+                    let (ty, vdest, arr, idx) = opcode.dense_abc_parts();
+                    promise!(vdest < common::simd::NREGS);
+                    promise!(sp + arr < stack_cap);
+                    promise!(sp + idx < stack_cap);
+                    let index = self.stack[sp + idx].as_int();
+                    let addr = self.stack[sp + arr].raw() as u64;
+                    if !self.vload(vdest, addr, index, ty) {
+                        return self.runtime_panic("VLoad out of bounds", ip.saturating_sub(1));
+                    }
+                }
+                Instruction::VStore => {
+                    let (ty, vsrc, arr, idx) = opcode.dense_abc_parts();
+                    promise!(vsrc < common::simd::NREGS);
+                    promise!(sp + arr < stack_cap);
+                    promise!(sp + idx < stack_cap);
+                    let index = self.stack[sp + idx].as_int();
+                    let addr = self.stack[sp + arr].raw() as u64;
+                    if !self.vstore(vsrc, addr, index, ty) {
+                        return self.runtime_panic("VStore out of bounds", ip.saturating_sub(1));
+                    }
+                }
+                Instruction::VBin => {
+                    let (kind, dest, a, b) = opcode.dense_abc_parts();
+                    promise!(dest < common::simd::NREGS);
+                    let splat = matches!(kind, common::simd::SPLAT_I64 | common::simd::SPLAT_F64);
+                    let scalar = if splat {
+                        promise!(sp + a < stack_cap);
+                        self.stack[sp + a]
+                    } else {
+                        Value::from(0i64)
+                    };
+                    let z = [0u64; common::simd::LANES];
+                    let lhs = if splat || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64)
+                    {
+                        &z
+                    } else {
+                        promise!(a < common::simd::NREGS);
+                        &self.vregs[a]
+                    };
+                    let rhs = if splat
+                        || matches!(
+                            kind,
+                            common::simd::IOTA_I64
+                                | common::simd::IOTA_F64
+                                | common::simd::INEG
+                                | common::simd::FNEG
+                        ) {
+                        &z
+                    } else {
+                        promise!(b < common::simd::NREGS);
+                        &self.vregs[b]
+                    };
+                    let out = crate::simd::eval_vbin(kind, lhs, rhs, scalar);
+                    self.vregs[dest] = out;
+                }
+                Instruction::VMove => {
+                    let (dest, src) = opcode.dense_move_parts();
+                    promise!(dest < common::simd::NREGS);
+                    promise!(src < common::simd::NREGS);
+                    self.vregs[dest] = self.vregs[src];
                 }
                 Instruction::ArrayPush => {
                     // Stack discipline matches `StoreIndex`: codegen emits
