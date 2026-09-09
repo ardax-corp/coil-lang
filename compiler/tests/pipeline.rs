@@ -6783,9 +6783,12 @@ fn s2b_maps_attach_to_alloc_keep_and_collect_survives() {
 use gc::{collect};
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn keep(xs: [int]) -> [int] {
+fn keep([int] xs) -> [int] {
     let junk = [1, 2, 3];
     collect();
+    if junk == xs {
+        return junk;
+    }
     return xs;
 }
 fn main() {
@@ -6798,7 +6801,8 @@ fn main() {
     let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
     let maps = pipeline.stack_maps();
     assert!(
-        maps.iter().any(|m| m.frame_slots.contains(&0) && !m.safepoints.is_empty()),
+        maps.iter()
+            .any(|m| m.frame_slots.contains(&0) && !m.safepoints.is_empty()),
         "keep() should have a mapped heap slot 0: {maps:?}"
     );
     let out = run_bytecode(bytecode, constants, &pipeline, None);

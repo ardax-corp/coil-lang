@@ -22,6 +22,8 @@ pub struct DraftFrameMap {
     pub name: String,
     /// Live heap slots at the n-th alloc site (Make* / InitTyped order).
     pub sites: Vec<Vec<u16>>,
+    /// Frame-wide heap slots (params + union of sites).
+    pub frame_slots: Vec<u16>,
 }
 
 /// Union of Alloc + following GcBarrier slots at each alloc site.
@@ -29,14 +31,14 @@ pub fn encode_draft(func: &MirFunc) -> Option<DraftFrameMap> {
     if func.gc_roots.is_empty() {
         return None;
     }
-    let mut sites = Vec::new();
+    let mut sites: Vec<Vec<u16>> = Vec::new();
     for block in &func.blocks {
         let mut pending_alloc: Option<ValueId> = None;
         for inst in &block.insts {
             match inst {
                 MirInst::Alloc { dest, .. } => pending_alloc = Some(*dest),
                 MirInst::GcBarrier { dest, .. } => {
-                    let mut slots = BTreeSet::new();
+                    let mut slots: BTreeSet<u16> = BTreeSet::new();
                     if let Some(a) = pending_alloc.take() {
                         take_slots(func, a, &mut slots);
                     }
@@ -50,9 +52,16 @@ pub fn encode_draft(func: &MirFunc) -> Option<DraftFrameMap> {
     if sites.is_empty() {
         return None;
     }
+    let mut frame: BTreeSet<u16> = BTreeSet::new();
+    for site in &sites {
+        for s in site {
+            frame.insert(*s);
+        }
+    }
     Some(DraftFrameMap {
         name: func.name.clone(),
         sites,
+        frame_slots: frame.into_iter().collect(),
     })
 }
 
@@ -74,13 +83,26 @@ pub fn try_build_draft(
     pool: &[u64],
     unboxed_fields: &[(u32, u32)],
 ) -> Option<DraftFrameMap> {
+    try_build_draft_err(ops, name, entry_sp, pool, unboxed_fields).ok()
+}
+
+fn try_build_draft_err(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &[u64],
+    unboxed_fields: &[(u32, u32)],
+) -> Result<DraftFrameMap, String> {
     if !ops.iter().any(refuses_alloc) {
-        return None;
+        return Err("no alloc".into());
     }
-    let seed = seed_heap_params(ops, entry_sp);
-    let inferred = infer_stack_map(ops, pool.len(), entry_sp, &seed).ok()?;
+    let inferred = infer_stack_map(ops, pool.len(), entry_sp, &Default::default())
+        .map_err(|e| e.to_string())?;
     let mut hints = LowerHints::new(name);
     hints.slot_ty = inferred.slot_ty;
+    for i in 0..entry_sp {
+        hints.slot_ty.insert(i, MirTy::HeapRef);
+    }
     hints.pool = pool.to_vec();
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
@@ -89,41 +111,26 @@ pub fn try_build_draft(
     hints.allow_effects = true;
     hints.unboxed_fields = unboxed_fields.to_vec();
     hints.allow_fields = !unboxed_fields.is_empty();
-    let mut func = try_lower_numeric(ops, &hints).ok()?;
+    hints.skip_verify = true;
+    let mut func = try_lower_numeric(ops, &hints).map_err(|e| e.to_string())?;
     if func.gc_roots.is_empty() && func.has_gc_edge() {
         fill_live_roots(&mut func);
     }
-    let mut draft = encode_draft(&func)?;
+    let mut draft = encode_draft(&func).ok_or_else(|| "empty draft".to_string())?;
     draft.name = name.to_string();
-    Some(draft)
-}
-
-/// Params that never see integer arith / INC are likely heap (`keep(xs)`).
-fn seed_heap_params(ops: &[IlOp], entry_sp: u32) -> std::collections::HashMap<u32, MirTy> {
-    let mut intish = BTreeSet::new();
-    for op in ops {
-        match op {
-            IlOp::BinSlotImm { slot, .. } | IlOp::BinSlotSlot { a: slot, .. } => {
-                intish.insert(u32::from(*slot));
-            }
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::INC | Instruction::DEC
-                ) =>
-            {
-                intish.insert(byte.inc_dec_parts().0 as u32);
-            }
-            _ => {}
+    let mut frame: BTreeSet<u16> = draft.frame_slots.iter().copied().collect();
+    for i in 0..entry_sp {
+        if let Ok(u) = u16::try_from(i) {
+            frame.insert(u);
         }
     }
-    let mut seed = std::collections::HashMap::new();
-    for s in 0..entry_sp {
-        if !intish.contains(&s) {
-            seed.insert(s, MirTy::HeapRef);
+    draft.frame_slots = frame.into_iter().collect();
+    if draft.sites.iter().all(|s| s.is_empty()) {
+        for site in &mut draft.sites {
+            *site = draft.frame_slots.clone();
         }
     }
-    seed
+    Ok(draft)
 }
 
 /// Bytecode opcodes that are interpreter GC safepoints (alloc).
@@ -169,7 +176,7 @@ pub fn bind_drafts(
         if alloc_pcs.len() != draft.sites.len() {
             continue;
         }
-        let mut frame: BTreeSet<u16> = BTreeSet::new();
+        let mut frame: BTreeSet<u16> = draft.frame_slots.iter().copied().collect();
         let mut safepoints = Vec::with_capacity(draft.sites.len());
         for (pc, slots) in alloc_pcs.into_iter().zip(draft.sites.iter()) {
             for s in slots {
@@ -249,6 +256,7 @@ mod tests {
         let draft = DraftFrameMap {
             name: "keep".into(),
             sites: vec![vec![0]],
+            frame_slots: vec![0],
         };
         let bytecode = vec![
             Byte::new(Instruction::CONST).with_const_inline(1),

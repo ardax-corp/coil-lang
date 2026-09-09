@@ -1,9 +1,12 @@
 // S2b: live heap in a mapped frame slot survives alloc + collect.
 use gc::{collect};
 
-fn keep(xs: [int]) -> [int] {
+fn keep([int] xs) -> [int] {
     let junk = [1, 2, 3];
     collect();
+    if junk == xs {
+        return junk;
+    }
     return xs;
 }
 

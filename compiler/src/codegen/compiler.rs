@@ -130,6 +130,10 @@ impl Compiler {
         &self.stack_maps
     }
 
+    pub fn stack_map_drafts(&self) -> &[crate::mir::DraftFrameMap] {
+        &self.stack_map_drafts
+    }
+
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
     pub fn fn_debug_symbols(&self) -> Vec<FnDebugSym> {
         let mut syms: Vec<FnDebugSym> = self
@@ -15057,6 +15061,7 @@ impl Compiler {
             .iter()
             .map(|(n, pc)| (n.clone(), *pc as u32))
             .collect();
+        self.stack_map_drafts = lowered.stack_map_drafts.clone();
         self.stack_maps = crate::mir::bind_drafts(
             &lowered.stack_map_drafts,
             self.bytecode.as_slice(),

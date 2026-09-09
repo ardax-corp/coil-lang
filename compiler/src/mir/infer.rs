@@ -393,7 +393,11 @@ fn infer_walk(
                 return Err(LowerError::Refused("multi-word return".into()));
             }
             IlOp::HostInvoke { arity, layout, .. } => {
-                apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
+                if mode == InferMode::Map {
+                    apply_host_map(&mut stack, *arity, *layout)?;
+                } else {
+                    apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
+                }
             }
             IlOp::Entry {
                 kind: EntryKind::Call,
@@ -802,6 +806,25 @@ fn apply_call(
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(abi.ret),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_host_map(stack: &mut Vec<Cell>, arity: u32, layout: u8) -> Result<(), LowerError> {
+    if layout != 0 {
+        return Err(LowerError::Refused("HostInvoke layout".into()));
+    }
+    let n = arity as usize;
+    if stack.len() < n + 1 {
+        return Err(LowerError::Refused("HostInvoke stack".into()));
+    }
+    for _ in 0..n + 1 {
+        let _ = stack.pop();
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::I64),
         imm: None,
     });
     Ok(())

@@ -987,6 +987,8 @@ pub struct Compiler {
     cursor_il: Option<crate::il::tell::CursorIlSnap>,
     /// S2b interpreter maps (empty when no alloc body lifted).
     stack_maps: Vec<common::FrameStackMap>,
+    /// Drafts before PC bind (tests / diagnostics).
+    stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
 }
 
 impl Default for Compiler {
@@ -1082,6 +1084,7 @@ impl Default for Compiler {
             retain_cursor_il: false,
             cursor_il: None,
             stack_maps: Vec::new(),
+            stack_map_drafts: Vec::new(),
         }
     }
 }

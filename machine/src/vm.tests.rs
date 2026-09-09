@@ -1503,8 +1503,8 @@
                 slots: vec![0],
             }],
         }]);
-        vm.rewrite_mapped_slots_for_test(|a| if a == before { 0xBEEF } else { a });
-        assert_eq!(vm.stack_at_for_test(0).heap_addr(), 0xBEEF);
+        vm.rewrite_mapped_slots_for_test(|a| if a == before { 0xBEE0 } else { a });
+        assert_eq!(vm.stack_at_for_test(0).heap_addr(), 0xBEE0);
     }
 
     #[test]
