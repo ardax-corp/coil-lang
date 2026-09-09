@@ -106,7 +106,7 @@ pub fn emit_lir(
             if plan.tree[dest.index()] {
                 continue;
             }
-            if term_cmp_dest(block).is_some_and(|d| dest == d) {
+            if term_cmp_dest(func, block).is_some_and(|d| dest == d) {
                 continue;
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
@@ -178,7 +178,7 @@ impl EmitPlan {
                         );
                     }
                 }
-                if let Some(d) = term_cmp_dest(block) {
+                if let Some(d) = term_cmp_dest(func, block) {
                     if let Some(MirInst::Cmp { lhs, rhs, .. }) =
                         def[d.index()].and_then(|(b, i)| {
                             (b == block.id).then_some(&func.block(b).insts[i])
@@ -260,7 +260,7 @@ fn mark_tree(
 fn fused_cmp_dests(func: &MirFunc) -> Vec<bool> {
     let mut fused = vec![false; func.types.len()];
     for block in &func.blocks {
-        if let Some(d) = term_cmp_dest(block) {
+        if let Some(d) = term_cmp_dest(func, block) {
             fused[d.index()] = true;
         }
     }

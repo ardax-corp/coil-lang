@@ -86,7 +86,7 @@ pub fn emit_dense(
             if inst.is_phi() {
                 continue;
             }
-            if term_cmp_dest(block).is_some_and(|d| {
+            if term_cmp_dest(func, block).is_some_and(|d| {
                 matches!(inst, MirInst::Cmp { dest, .. } if *dest == d)
             }) {
                 continue;
@@ -185,20 +185,55 @@ fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: 
             return false;
         }
     }
+    if !seen_def {
+        // CSE can merge `i+1` with an earlier body use (SROA last-arm
+        // `xs[1]`). Aliasing the header φ with that value then clobbers
+        // `i` before later arms / `i % n`.
+        return false;
+    }
     match &block.term {
-        Some(Terminator::Br { cond, .. }) if seen_def && *cond == dest => false,
+        Some(Terminator::Br { cond, .. }) if *cond == dest => false,
         _ => true,
     }
 }
 
-pub(super) fn term_cmp_dest(block: &super::func::MirBlock) -> Option<ValueId> {
+pub(super) fn term_cmp_dest(func: &MirFunc, block: &super::func::MirBlock) -> Option<ValueId> {
     let Terminator::Br { cond, .. } = block.term.as_ref()? else {
         return None;
     };
-    block.insts.iter().find_map(|inst| match inst {
+    let dest = block.insts.iter().find_map(|inst| match inst {
         MirInst::Cmp { dest, .. } if dest == cond => Some(*dest),
         _ => None,
-    })
+    })?;
+    if cmp_used_outside_term(func, dest, block.id) {
+        return None;
+    }
+    Some(dest)
+}
+
+fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
+    for b in &func.blocks {
+        for inst in &b.insts {
+            if inst.operands().contains(&dest) {
+                return true;
+            }
+        }
+        match &b.term {
+            Some(Terminator::Br { cond, .. }) if *cond == dest && b.id != home => return true,
+            Some(Terminator::Return { lo, hi }) => {
+                if lo.is_some_and(|v| v == dest) || hi.is_some_and(|v| v == dest) {
+                    return true;
+                }
+            }
+            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
+                if *scrutinee == dest || payloads.contains(&dest) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 pub(super) fn emit_br_cond(
