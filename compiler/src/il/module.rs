@@ -259,6 +259,23 @@ impl IlModule {
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
         // I8: leftovers then try IL→MIR→LIR (`lir_eligible`); fuse-IL if refuse.
+        // S2d: snapshot maps from stack-IL before dense replace (dense residuals
+        // cannot re-infer). Re-lift after LIR / fuse-IL when that succeeds.
+        self.stack_map_drafts.clear();
+        let mut pre_maps = std::collections::HashMap::<String, crate::mir::DraftFrameMap>::new();
+        if opts.mir_specialize {
+            for body in &self.funcs {
+                if let Some(draft) = crate::mir::try_build_draft(
+                    &body.ops,
+                    &body.meta.name,
+                    body.meta.entry_sp,
+                    pool,
+                    &body.meta.unboxed_fields,
+                ) {
+                    pre_maps.insert(body.meta.name.clone(), draft);
+                }
+            }
+        }
         let mut dense_calls = crate::mir::DenseCallMap::new();
         let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
         while !pending.is_empty() && opts.mir_specialize {
@@ -312,9 +329,8 @@ impl IlModule {
             }
         }
 
-        // S2b: encode S2a roots for allocating bodies (fuse-IL leftovers and
-        // S2c mapped dense / LIR). Bind after PC assign.
-        self.stack_map_drafts.clear();
+        // S2b: prefer a draft from the final body (fuse-IL / LIR). Dense
+        // keep the pre-MIR snapshot so looping Make* still bind.
         if opts.mir_specialize {
             for body in &self.funcs {
                 if let Some(draft) = crate::mir::try_build_draft(
@@ -324,6 +340,8 @@ impl IlModule {
                     pool,
                     &body.meta.unboxed_fields,
                 ) {
+                    self.stack_map_drafts.push(draft);
+                } else if let Some(draft) = pre_maps.remove(&body.meta.name) {
                     self.stack_map_drafts.push(draft);
                 }
             }

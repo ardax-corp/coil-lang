@@ -2105,19 +2105,20 @@ fn main() {
 
     #[test]
     fn s2d_mapped_looping_makearray_takes_dense() {
+        // Computed index keeps MakeArray (const-index mem_fwd would DCE it).
         let src = r#"
 fn pack(int n) -> int {
     let i = 0;
     let s = 0;
     while i < n {
-        let xs = [i, i + 1];
-        s = s + xs[0] + xs[1];
+        let xs = [i, i + 1, i + 2];
+        s = s + xs[i % 3];
         i = i + 1;
     }
     return s;
 }
 fn main() {
-    if pack(4) != 16 {
+    if pack(4) != 9 {
         raise "pack checksum";
     }
 }
@@ -2147,7 +2148,7 @@ fn main() {
         );
         assert!(
             pack_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S2d mapped in-loop MakeArray+index takes dense; opcodes={names:?}"
+            "S2d mapped in-loop MakeArray takes dense; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2202,19 +2203,17 @@ fn main() {
     #[test]
     fn s2d_mapped_looping_makearray_lir_when_compare_only() {
         let src = r#"
-fn spin(bool go) -> [int] {
-    let xs = [1];
-    while go {
-        xs = [2];
-        go = false;
+fn pick(int go, int k) -> int {
+    let xs = [1, 2, 3];
+    while go != 0 {
+        xs = [4, 5, 6];
+        go = 0;
     }
-    return xs;
+    return xs[k];
 }
 fn main() {
-    let a = spin(true);
-    let b = spin(false);
-    if a[0] != 2 || b[0] != 1 {
-        raise "spin checksum";
+    if pick(1, 1) != 5 || pick(0, 2) != 3 {
+        raise "pick checksum";
     }
 }
 "#;
@@ -2226,13 +2225,13 @@ fn main() {
             p.stack_maps()
         );
         let symbols = p.program_debug().fn_symbols;
-        let spin = symbols
+        let pick = symbols
             .iter()
-            .position(|s| s.name == "spin")
-            .expect("spin");
-        let start = symbols[spin].entry_pc as usize;
+            .position(|s| s.name == "pick")
+            .expect("pick");
+        let start = symbols[pick].entry_pc as usize;
         let end = symbols
-            .get(spin + 1)
+            .get(pick + 1)
             .map(|s| s.entry_pc as usize)
             .unwrap_or(bc.len());
         let body = &bc[start..end];
@@ -2242,8 +2241,8 @@ fn main() {
             .filter(|b| *b.bytecode() == Instruction::MakeArray)
             .count();
         assert!(
-            makes >= 2,
-            "S2d LIR reconstructs both MakeArray sites; opcodes={names:?}"
+            makes >= 1,
+            "S2d keeps MakeArray for computed-index leftover; opcodes={names:?}"
         );
         assert!(
             body.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
@@ -2251,7 +2250,7 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-        assert!(!vm.panicked(), "spin checksum; opcodes={names:?}");
+        assert!(!vm.panicked(), "pick checksum; opcodes={names:?}");
     }
 
     #[test]

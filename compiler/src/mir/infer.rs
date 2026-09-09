@@ -730,6 +730,9 @@ pub(crate) fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
 /// Every Make* / InitTyped sits after the last back-edge (`return [sum]`).
 /// Those bodies stay fuse-IL so COI-87 invert+fuse remains observable.
 pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
+    if has_alloc_inside_loop(ops) {
+        return false;
+    }
     let loops = loop_ranges(ops);
     if loops.is_empty() {
         return false;
