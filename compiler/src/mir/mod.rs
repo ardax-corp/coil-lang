@@ -2110,7 +2110,7 @@ fn main() {
 
     #[test]
     fn s2d_mapped_looping_makearray_takes_dense() {
-        // Computed index keeps MakeArray (const-index mem_fwd would DCE it).
+        // S2f SROA: computed-index `[T; N]` is slots, not in-loop MakeArray.
         let src = r#"
 fn pack(int n) -> int {
     let i = 0;
@@ -2130,11 +2130,6 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile pack");
-        assert!(
-            !p.stack_maps().is_empty(),
-            "S2d looping MakeArray should emit S2b maps: {:?}",
-            p.stack_maps()
-        );
         let symbols = p.program_debug().fn_symbols;
         let pack = symbols
             .iter()
@@ -2148,14 +2143,10 @@ fn main() {
         let pack_bc = &bc[start..end];
         let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            pack_bc.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
-            "S2d reconstructs in-loop MakeArray; opcodes={names:?}"
-        );
-        assert!(
             pack_bc
                 .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S2e keeps in-loop MakeArray off dense (boxing tax); opcodes={names:?}"
+                .all(|b| *b.bytecode() != Instruction::MakeArray),
+            "S2f SROA drops in-loop MakeArray; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2208,8 +2199,12 @@ fn main() {
             .filter(|b| *b.bytecode() == Instruction::Seek)
             .count();
         assert_eq!(
-            seeks, 1,
-            "S2e: prologue Seek only after StoreIndex/Index residuals; opcodes={names:?}"
+            seeks, 0,
+            "S2f SROA: no MakeArray/Seek on computed-index [T; N]; opcodes={names:?}"
+        );
+        assert_eq!(
+            makes, 0,
+            "S2f SROA drops preheader MakeArray; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2235,11 +2230,6 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile spin");
-        assert!(
-            !p.stack_maps().is_empty(),
-            "S2d compare-only looping alloc should map: {:?}",
-            p.stack_maps()
-        );
         let symbols = p.program_debug().fn_symbols;
         let pick = symbols
             .iter()
@@ -2257,8 +2247,8 @@ fn main() {
             .filter(|b| *b.bytecode() == Instruction::MakeArray)
             .count();
         assert!(
-            makes >= 1,
-            "S2d keeps MakeArray for computed-index leftover; opcodes={names:?}"
+            makes <= 1,
+            "S2f SROA: at most OOB MakeArray for xs[k]; opcodes={names:?}"
         );
         assert!(
             body.iter().all(|b| *b.bytecode() != Instruction::DenseBin),

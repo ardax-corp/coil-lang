@@ -199,5 +199,7 @@ S2f:
   arity > 32; named class SROA; negative `i % N` (last slot, not OOB);
   in-loop Make* dense (S2e boxing tax unchanged).
 
-`pack` / `pack_arith` / `pack_wide` keep one in-loop `MakeArray` (variant
-elems). `pack_store` should show **0** `MakeArray` after S2f.
+`pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
+`[T; N]` and the only uses are computed-index load/store (`i % N`).
+Computed *element* values (`i`, `i+1`) still materialize into slots;
+they do not stay heap. Escape / `vec_array.hy` still heap.
