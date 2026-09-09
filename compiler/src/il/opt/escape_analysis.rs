@@ -5,7 +5,9 @@
 //! escape (return, call-arg, `ArrayPush` value, field store, HostInvoke /
 //! print) boxes once (`MakeArray` from slots) at that edge (S2g). Computed
 //! elements stay heap (`vec_array.hy`). Growing `ArrayPush` dest, private
-//! use after escape, unproven `xs[k]`, and named class SROA stay refused.
+//! use after escape, and named class SROA stay refused. Unproven `xs[k]`
+//! on a leftover heap `MakeArray` stays heap (S2h pick). Codegen `[T; N]`
+//! locals use OOB-safe select instead.
 
 use common::Instruction;
 

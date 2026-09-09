@@ -47,6 +47,17 @@ test("string pointer elems") {
     assert(s[1] == "x")?;
 }
 
+test("unproven index load and store") {
+    let xs = [10, 20, 30];
+    let k = 1;
+    assert(xs[k] == 20)?;
+    xs[k] = 7;
+    assert(xs[0] + xs[1] + xs[2] == 47)?;
+    let m = 2;
+    xs[k % m] = 3;
+    assert(xs[1] == 3)?;
+}
+
 test("whole array assign copies slots") {
     let a = [1, 2, 3, 4];
     let b = [0, 0, 0, 0];

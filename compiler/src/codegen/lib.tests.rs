@@ -4604,6 +4604,160 @@ fn main() {
         assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
     }
 
+    /// S2h: unproven `xs[k]` load uses runtime 0<=k<N then slots; OOB arm is heap Index.
+    #[test]
+    fn stack_array_unproven_index_load_checksum() {
+        use common::Instruction;
+        let src = r#"
+fn pick(int k) -> int {
+    let xs = [10, 20, 30];
+    return xs[k];
+}
+fn main() {
+    if pick(0) != 10 || pick(1) != 20 || pick(2) != 30 {
+        panic "unproven load checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pick_off = pipeline
+            .compiler_mut()
+            .get_function("pick")
+            .expect("pick");
+        let pick_bc = &bc[pick_off..];
+        let names: Vec<_> = pick_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            pick_bc
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::Index | Instruction::IndexUnchecked)),
+            "OOB arm must heap-Index; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pick 10/20/30; opcodes={names:?}");
+    }
+
+    /// S2h: unproven store then load; slots stay coherent (not a discarded box).
+    #[test]
+    fn stack_array_unproven_index_store_checksum() {
+        use common::Instruction;
+        let src = r#"
+fn fill(int k, int v) -> int {
+    let xs = [0, 0, 0];
+    xs[k] = v;
+    return xs[0] + xs[1] + xs[2] + xs[k];
+}
+fn main() {
+    if fill(1, 4) != 8 || fill(2, 5) != 10 {
+        panic "unproven store checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let fill_off = pipeline
+            .compiler_mut()
+            .get_function("fill")
+            .expect("fill");
+        let fill_bc = &bc[fill_off..];
+        let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            fill_bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            )),
+            "OOB arm must StoreIndex; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "fill checksum; opcodes={names:?}");
+    }
+
+    /// S2h: OOB load and store panic (heap Index/StoreIndex), never a raw slot.
+    #[test]
+    fn stack_array_unproven_index_oob_panics() {
+        let load = r#"
+fn pick(int k) -> int {
+    let xs = [1, 2, 3];
+    return xs[k];
+}
+fn main() {
+    pick(3);
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(load).expect("compile");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(vm.panicked(), "xs[3] load must OOB");
+
+        let store = r#"
+fn poke(int k) -> int {
+    let xs = [1, 2, 3];
+    xs[k] = 9;
+    return xs[0];
+}
+fn main() {
+    poke(-1);
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(store).expect("compile");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(vm.panicked(), "xs[-1] store must OOB");
+    }
+
+    /// S2h weaker static bound: `i % 2` on `[T; 3]` is in-range (no OOB arm).
+    #[test]
+    fn stack_array_weaker_mod_bound_sroa() {
+        use common::Instruction;
+        let src = r#"
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    let xs = [0, 0, 0];
+    while i < n {
+        xs[i % 2] = i;
+        s = s + xs[i % 2];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    if pack(4) != 6 {
+        panic "weaker mod checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let pack_bc = &bc[pack_off..];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            pack_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::StoreIndex
+                    && *b.bytecode() != Instruction::StoreIndexUnchecked
+                    && *b.bytecode() != Instruction::Index
+                    && *b.bytecode() != Instruction::IndexUnchecked),
+            "m<=N mod is proven SROA; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pack(4)==6; opcodes={names:?}");
+    }
+
     #[test]
     fn stack_array_computed_elem_index_sroa_checksum() {
         let src = r#"
