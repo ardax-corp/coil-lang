@@ -499,6 +499,7 @@ mod tests {
             static_slot_count: 0,
             debug: ProgramDebug::default(),
             operand_stack_slots: crate::DEFAULT_OPERAND_STACK_SLOTS as u32,
+            stack_maps: Vec::new(),
         })
     }
 
@@ -680,6 +681,7 @@ mod tests {
             static_slot_count: 0,
             debug: ProgramDebug::default(),
             operand_stack_slots: 1024,
+            stack_maps: Vec::new(),
         });
         let vm = machine_for_program(&prog);
         assert_eq!(vm.operand_stack_capacity(), 1024);

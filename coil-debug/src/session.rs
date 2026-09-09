@@ -197,7 +197,7 @@ impl DebugSession {
                 c_structs: &structs,
             },
         );
-        machine::wire_thread_program(
+        machine::wire_thread_program_with_maps(
             &mut machine,
             &artifacts.bytecode,
             &artifacts.constants,
@@ -205,6 +205,7 @@ impl DebugSession {
             pipeline.static_slot_count(),
             pipeline.program_debug(),
             pipeline.operand_stack_slots(),
+            pipeline.stack_maps().to_vec(),
         );
         machine.set_program_debug(artifacts.debug.clone());
         machine.attach_debug(DebugController::new());

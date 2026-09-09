@@ -390,6 +390,10 @@ pub struct Machine<const S: usize> {
     reactor: std::sync::Arc<crate::reactor::Reactor>,
     /// IO readiness reactor (sync adapters + async waiters).
     io_reactor: std::sync::Arc<crate::io_reactor::IoReactor>,
+    /// S2b maps: live heap IL slots at alloc safepoints.
+    stack_maps: Vec<common::FrameStackMap>,
+    /// Bytecode PC of the current GC safepoint (alloc / `gc::collect`).
+    gc_ip: usize,
     /// `type_id` → drop method entry PC (empty = no user finalizers).
     finalizer_by_type: std::collections::HashMap<u32, u32, AddrHashBuilder>,
     /// Drop entry PCs (for explicit `obj.drop()` once-bit intercept).
@@ -452,6 +456,8 @@ impl<const S: usize> Machine<S> {
             worker_cap,
             reactor,
             io_reactor: crate::io_reactor::IoReactor::new(),
+            stack_maps: Vec::new(),
+            gc_ip: 0,
             finalizer_by_type: std::collections::HashMap::default(),
             finalizer_pcs: std::collections::HashSet::default(),
             gc_in_progress: false,
@@ -1067,6 +1073,7 @@ impl<const S: usize> Machine<S> {
             });
 
             self.mark_from_vm_roots();
+            self.relocate_mapped_slots();
             let queue = self.queue_unmarked_finalizers();
             if !queue.is_empty() {
                 let mut gray = Vec::new();
@@ -1089,6 +1096,7 @@ impl<const S: usize> Machine<S> {
             self.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
             unsafe { self.heap.sweep() };
+            self.relocate_mapped_slots();
             // Cache is not a GC root; unmarked interned literals are gone.
             self.program_string_cache.fill(Value::default());
             if !self.gc_deferred {
@@ -1130,7 +1138,93 @@ impl<const S: usize> Machine<S> {
         // lifetime; the Coil handle is only an addr. Root those keys so GC
         // cannot sweep a live dload and `FfiInvoke` hit `invalid library handle`.
         roots.extend(self.userland_libraries.keys().copied());
+        self.collect_mapped_slot_addrs(&mut roots);
         roots
+    }
+
+    fn collect_mapped_slot_addrs(&self, roots: &mut Vec<u64>) {
+        self.for_each_mapped_slot_index(|idx| {
+            if idx >= self.stack.capacity() {
+                return;
+            }
+            let addr = self.stack[idx].heap_addr();
+            if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                roots.push(addr);
+            }
+        });
+    }
+
+    fn for_each_mapped_slot_index(&self, mut visit: impl FnMut(usize)) {
+        if self.stack_maps.is_empty() {
+            return;
+        }
+        let n = self.frames.len();
+        for i in 0..n {
+            let sp = self.frames[i].get();
+            let ip = if i + 1 == n {
+                self.gc_ip as u32
+            } else {
+                self.frames[i].tell() as u32
+            };
+            let Some(map) = common::map_for_ip(&self.stack_maps, ip) else {
+                continue;
+            };
+            for &slot in map.slots_at(ip) {
+                visit(sp.saturating_add(slot as usize));
+            }
+        }
+    }
+
+    /// Rewrite mapped frame slots when a live object moved (identity today).
+    fn relocate_mapped_slots(&mut self) {
+        if self.stack_maps.is_empty() {
+            return;
+        }
+        let mut idxs = Vec::new();
+        self.for_each_mapped_slot_index(|i| idxs.push(i));
+        for idx in idxs {
+            if idx >= self.stack.capacity() {
+                continue;
+            }
+            let addr = self.stack[idx].heap_addr();
+            if addr == 0 {
+                continue;
+            }
+            if let Some(obj) = self.heap.find_object_by_addr(addr) {
+                let live = obj.addr();
+                if live != addr {
+                    self.stack[idx] = Value::from(live);
+                }
+            }
+        }
+    }
+
+    #[cfg(any(test, feature = "debugger"))]
+    pub fn stack_at_for_test(&self, idx: usize) -> Value {
+        self.stack[idx]
+    }
+
+    /// Test helper: apply `rewrite` to every mapped heap slot.
+    #[cfg(any(test, feature = "debugger"))]
+    pub fn rewrite_mapped_slots_for_test(&mut self, rewrite: impl Fn(u64) -> u64) {
+        if self.gc_ip == 0 {
+            self.gc_ip = self.frames.get().tell();
+        }
+        let mut idxs = Vec::new();
+        self.for_each_mapped_slot_index(|i| idxs.push(i));
+        for idx in idxs {
+            if idx >= self.stack.capacity() {
+                continue;
+            }
+            let addr = self.stack[idx].heap_addr();
+            if addr == 0 {
+                continue;
+            }
+            let next = rewrite(addr);
+            if next != addr {
+                self.stack[idx] = Value::from(next);
+            }
+        }
     }
 
     fn mark_from_vm_roots(&mut self) {
@@ -1420,7 +1514,17 @@ impl<const S: usize> Machine<S> {
     }
 
     pub fn set_thread_program(&mut self, program: std::sync::Arc<crate::thread::ThreadProgram>) {
+        self.stack_maps = program.stack_maps.clone();
         self.thread_program = Some(program);
+    }
+
+    /// Attach S2b maps (compile-and-run). Empty keeps conservative stack GC.
+    pub fn set_stack_maps(&mut self, maps: Vec<common::FrameStackMap>) {
+        self.stack_maps = maps;
+    }
+
+    pub fn stack_maps(&self) -> &[common::FrameStackMap] {
+        &self.stack_maps
     }
 
     pub fn thread_program(&self) -> Option<&crate::thread::ThreadProgram> {
@@ -1513,6 +1617,7 @@ impl<const S: usize> Machine<S> {
             static_slot_count: self.statics.len() as u32,
             debug: self.program_debug.clone(),
             operand_stack_slots: self.stack.capacity() as u32,
+            stack_maps: self.stack_maps.clone(),
         }));
     }
 
@@ -2229,6 +2334,9 @@ impl<const S: usize> Machine<S> {
         let code_len = code.len();
 
         while ip < code_len {
+            if unlikely(!self.stack_maps.is_empty()) {
+                self.gc_ip = ip;
+            }
             #[cfg(any(test, feature = "debugger"))]
             if unlikely(self.debug.is_some())
                 && let Some(reason) = self.debug_check_stop_at(ip)

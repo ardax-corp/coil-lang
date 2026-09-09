@@ -1477,6 +1477,37 @@
     }
 
     #[test]
+    fn s2b_rewrite_updates_mapped_frame_slot() {
+        use common::{FrameStackMap, SlotMap};
+
+        let mut vm = Machine::<64>::default();
+        let strings = vec!["keep".to_string()];
+        vm.run_with_pool(
+            &[
+                Byte::new(Instruction::STRING).with_operand_u32(0),
+                Byte::new(Instruction::StorePop).with_operand_u32(0),
+                Byte::new(Instruction::HALT),
+            ],
+            &[],
+            &strings,
+            0,
+        );
+        let before = vm.stack_at_for_test(0).heap_addr();
+        assert_ne!(before, 0, "slot 0 must hold the interned string");
+        vm.set_stack_maps(vec![FrameStackMap {
+            entry_pc: 0,
+            end_pc: 8,
+            frame_slots: vec![0],
+            safepoints: vec![SlotMap {
+                pc: 0,
+                slots: vec![0],
+            }],
+        }]);
+        vm.rewrite_mapped_slots_for_test(|a| if a == before { 0xBEEF } else { a });
+        assert_eq!(vm.stack_at_for_test(0).heap_addr(), 0xBEEF);
+    }
+
+    #[test]
     fn nested_enum_gc_traces_correctly() {
         use crate::{Heap, Member, ObjString, Object};
         use std::collections::HashSet;
