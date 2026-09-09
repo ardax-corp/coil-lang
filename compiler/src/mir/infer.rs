@@ -629,7 +629,8 @@ fn is_numeric_work_op(op: &IlOp) -> bool {
     }
 }
 
-fn has_back_edge(ops: &[IlOp]) -> bool {
+/// True when a jump targets an earlier label (counted / while loops).
+pub(crate) fn has_back_edge(ops: &[IlOp]) -> bool {
     let mut seen = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
         if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {

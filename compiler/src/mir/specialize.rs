@@ -107,7 +107,12 @@ pub fn try_lower_abi_body_with(
 ) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
+    // Looping alloc bodies stay fuse-IL so invert+fuse (COI-87) remains;
+    // straight-line mapped leaves may reconstruct.
     let has_alloc = ops.iter().any(refuses_alloc);
+    if has_alloc && super::infer::has_back_edge(ops) {
+        return None;
+    }
     let maps_ok =
         has_alloc && has_real_maps(ops, name, entry_sp, pool, unboxed_fields);
     if !lir_eligible_with(ops, unboxed_fields, maps_ok) {
@@ -128,10 +133,20 @@ pub fn try_lower_abi_body_with(
     hints.allow_fields = !unboxed_fields.is_empty();
     hints.allow_alloc = has_alloc;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
-    crate::mir::cse(&mut func);
+    if !has_alloc {
+        crate::mir::cse(&mut func);
+    }
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,
     });
-    emit_lir(&func, entry, pool, has_alloc).ok()
+    let out = emit_lir(&func, entry, pool, has_alloc).ok()?;
+    if has_alloc {
+        let before = ops.iter().filter(|o| refuses_alloc(o)).count();
+        let after = out.iter().filter(|o| refuses_alloc(o)).count();
+        if after < before {
+            return None;
+        }
+    }
+    Some(out)
 }
