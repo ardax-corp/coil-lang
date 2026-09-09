@@ -13990,6 +13990,8 @@ impl Compiler {
                         let tmp_idx = self.alloc_temp_slot();
                         bytecode.push_store_pop(tmp_idx);
                         let proven = true;
+                        // Statement form: last-arm is StorePop; ExprStatement
+                        // skips the extra POP. Do not rematerialize TOS.
                         self.emit_stack_array_select_store(
                             &mut bytecode,
                             base,
