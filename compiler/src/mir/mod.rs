@@ -22,7 +22,8 @@
 //! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
 //! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
 //! dense / LIR emit across alloc only when S2b maps exist (S2c), including
-//! mapped preheader `Make*` (S2d) and Seek-less residuals (S2e). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! mapped preheader `Make*` (S2d), Seek-less residuals (S2e), and S2f
+//! SROA / StoreIndex-array reuse. Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
 //! allowlist stays closed. Debugger-attached compiles refuse dense /
 //! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
 //! accident.
@@ -48,6 +49,7 @@ mod licm;
 mod lower;
 mod pack;
 mod specialize;
+mod sroa;
 mod vectorize;
 mod strength;
 mod stackmap;
@@ -77,6 +79,7 @@ pub use layout::MirLayout;
 pub use licm::licm;
 pub use lower::{LowerError, LowerHints, try_lower_numeric};
 pub use specialize::{try_lower_abi_body, try_lower_abi_body_with, try_specialize_body};
+pub use sroa::sroa;
 pub use strength::strength_reduce;
 pub use text::{ParseError, parse_func};
 pub use ty::MirTy;
@@ -2191,13 +2194,14 @@ fn main() {
             .unwrap_or(bc.len());
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = body
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::MakeArray)
+            .count();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
-            "preheader MakeArray stays; opcodes={names:?}"
-        );
-        assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S2d mapped preheader alloc + index loop takes dense; opcodes={names:?}"
+            makes == 0
+                || body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S2f SROA drops MakeArray, or S2d dense keeps it; opcodes={names:?}"
         );
         let seeks = body
             .iter()

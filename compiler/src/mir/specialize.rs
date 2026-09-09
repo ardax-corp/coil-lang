@@ -88,6 +88,8 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
+    // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
+    crate::mir::sroa(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
         .blocks
@@ -251,7 +253,9 @@ pub fn try_lower_abi_body_with(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
-    if !has_alloc {
+    if has_alloc {
+        crate::mir::sroa(&mut func);
+    } else {
         crate::mir::cse(&mut func);
     }
     let entry = ops.iter().find_map(|op| match op {
