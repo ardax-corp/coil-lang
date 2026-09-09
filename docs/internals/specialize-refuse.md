@@ -103,10 +103,13 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
 `times_a` call `eval_a` with unpinned dense Index residuals (S3b).
 Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped in-loop
-and preheader `MakeArray` may take dense / LIR (S2d). A live heap return
-(`return [i]`) plus a counted loop and **no** earlier alloc stays fuse-IL
-so invert+fuse remains observable. Unmapped alloc, CALL+alloc (map lift
-refuses `CALL`), and `Vec.push` / class `new` loops stay fuse-IL.
+and preheader `MakeArray` may take dense / LIR (S2d) when the object
+survives stack-IL (computed index, or a live heap local). Const-index
+`s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live
+heap return (`return [i]`) plus a counted loop and **no** earlier alloc
+stays fuse-IL so invert+fuse remains observable. Unmapped alloc,
+CALL+alloc (map lift refuses `CALL`), and `Vec.push` / class `new` loops
+stay fuse-IL.
 
 ## Language refuse → island (COI-292 I0)
 

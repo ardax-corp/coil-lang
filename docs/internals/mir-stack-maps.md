@@ -29,7 +29,9 @@ and relocate mapped slots on collect.
   [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
   S2d ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
   also lets **in-loop** and **preheader** `Make*` take dense / LIR when
-  maps exist and reconstruct keeps every alloc site. Post-loop-only
+  maps exist and reconstruct keeps every alloc site. Draft lift keeps
+  inferred param types (not forced `heapref`) and snapshots the stack-IL
+  map **before** dense replace so `DenseBin` bodies still bind. Post-loop-only
   `return [x]` after a counted loop stays fuse-IL so invert+fuse (COI-87)
   remains. Unmapped allocating bodies stay fuse-IL. S3b heap-index takes
   dense unpinned residuals plus `Seek` restore. Dense+match stays I2 LIR.
