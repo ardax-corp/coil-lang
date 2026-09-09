@@ -48,6 +48,11 @@ pub fn try_specialize_body(
     // prove frame and last-arm writes survive reconstruct.
     let select_cfg = has_sroa_select_cfg(ops);
     let has_alloc = ops.iter().any(refuses_alloc);
+    // S2h OOB heap arm (MakeArray + Index) stays fuse-IL: dense Seek plus
+    // the existing frame overflows the 64-slot prove VM.
+    if select_cfg && has_alloc {
+        return None;
+    }
     let force_dense_inloop = std::env::var_os("COIL_S2D_DENSE_INLOOP")
         .is_some_and(|v| v != "0");
     if (!force_dense_inloop && super::infer::has_alloc_inside_loop(ops))
@@ -235,6 +240,9 @@ pub fn try_lower_abi_body_with(
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
+    if has_sroa_select_cfg(ops) && has_alloc {
+        return None;
+    }
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
     }
