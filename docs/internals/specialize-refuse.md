@@ -95,7 +95,7 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `array_mut` | `array_mut.hy` | fuse-IL | `main` + I4 write; S2d does not fire |
 | `bump` | `looping_makearray.hy` | dense or SROA | S2d preheader `MakeArray`, or S2f slot SROA of computed-index `[T; N]` |
 | `pack` | `s2d_inloop_pack_store.hy` | dense SROA | S2k computed-index stack-array select (no `MakeArray`) |
-| `pack` | `s2d_inloop_escape.hy` | fuse-IL | S2l cost-gate: escaping in-loop Make* still loses to invert+fuse |
+| `pack` | `s2d_inloop_escape.hy` | fuse-IL | S2l win-or-gate: escaping in-loop Make* still loses to invert+fuse |
 | `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host / class `new` |
 
 Stack-IL `cse_*` / `dest_prop_field_alias` stay fuse-IL (heap / field). W2

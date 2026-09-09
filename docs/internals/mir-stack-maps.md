@@ -34,8 +34,7 @@ and relocate mapped slots on collect.
   ([COI-322](https://linear.app/ardax/issue/COI-322)) tries mapped
   **in-loop** `Make*` dense after SROA/LICM and keeps it only when the
   reconstruct is Make*-free inside loops (LOAD/STORE boxing still loses;
-  A/B: [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
-  `COIL_S2D_DENSE_INLOOP=1` forces dense; `=0` restores the S2e refuse. Compare-only leftovers
+  [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)). Compare-only leftovers
   may take LIR. Draft lift keeps inferred param types (not forced `heapref`)
   and snapshots the stack-IL map **before** dense replace so `DenseBin`
   bodies still bind. Post-loop-only `return [x]` after a counted loop stays
@@ -64,8 +63,7 @@ and relocate mapped slots on collect.
    fuse-IL unless SROA/LICM deletes it (S2l). Still refuse: post-loop-only heap return
    (invert+fuse); unmapped alloc; CALL+alloc (map lift refuses user
    `CALL`); computed-element stack scalarize; compiler write-barrier
-   opcodes; growing `ArrayPush` dest. `COIL_S2D_DENSE_INLOOP=1` forces
-   in-loop dense for A/B.
+   opcodes; growing `ArrayPush` dest.
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 
