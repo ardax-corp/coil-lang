@@ -100,7 +100,9 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 (`sin` inside an otherwise dense loop). The COI-291 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
 `times_a` call `eval_a`. Recursion (`tak` / `fib`) stays fuse-IL on the
-callee. In-loop `MakeArray` stays fuse-IL (invert+fuse).
+callee. In-loop `MakeArray` stays fuse-IL (invert+fuse). A live heap
+return (`return [i]`) plus a counted loop without index stays fuse-IL
+so invert+fuse remains observable.
 
 ## Language refuse → island (COI-292 I0)
 
