@@ -28,6 +28,8 @@ User code does not name these directly; the compiler emits them:
 | `DenseConst` | Typed slot const. Bit 31 = pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm or pool index. |
 | `DenseMove` | Copy slot to slot (`[15:8]` dest, `[7:0]` src). Used for φ edge copies. |
 | `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). |
+| `VLoad` / `VStore` | Compiler-only 8-lane numeric heap access (COI-310). `[31:24]` ty (`TY_I64` / `TY_F64`), `[23:16]` vreg, `[15:8]` array slot, `[7:0]` index slot. No heap refs in vregs. Archive **minor 8**. |
+| `VBin` / `VMove` | 8-lane zip / splat / iota / neg via `coil-simd` (`VBin` packing matches `DenseBin`; splat `a` is a frame slot). `VMove` copies vregs. HostInvoke packs (P12) stay. |
 
 ---
 
