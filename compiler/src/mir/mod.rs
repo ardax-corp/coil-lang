@@ -22,7 +22,7 @@
 //! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
 //! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
 //! dense / LIR emit across alloc only when S2b maps exist (S2c), including
-//! mapped in-loop / preheader `Make*` (S2d / S2e Seek-less residuals). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! mapped preheader `Make*` (S2d) and Seek-less residuals (S2e). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
 //! allowlist stays closed. Debugger-attached compiles refuse dense /
 //! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
 //! accident.
@@ -2008,8 +2008,8 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_inlined_take_makearray_takes_dense() {
-        // `take` inlines; mapped in-loop Make* + Index is S2e dense.
+    fn pipeline_inlined_take_makearray_stays_fuse_il() {
+        // Inlined take + in-loop Make* stays fuse-IL (S2e boxing tax).
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0];
@@ -2048,14 +2048,9 @@ fn main() {
             "in-loop MakeArray stays; opcodes={names:?}"
         );
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "inlined take + MakeArray takes dense; opcodes={names:?}"
+            hot_bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
+            "inlined take + MakeArray stays fuse-IL; opcodes={names:?}"
         );
-        let seeks = hot_bc
-            .iter()
-            .filter(|b| *b.bytecode() == Instruction::Seek)
-            .count();
-        assert_eq!(seeks, 1, "S2e prologue Seek only; opcodes={names:?}");
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "hot checksum; opcodes={names:?}");
@@ -2156,16 +2151,8 @@ fn main() {
         assert!(
             pack_bc
                 .iter()
-                .any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S2e mapped in-loop MakeArray takes dense; opcodes={names:?}"
-        );
-        let seeks = pack_bc
-            .iter()
-            .filter(|b| *b.bytecode() == Instruction::Seek)
-            .count();
-        assert_eq!(
-            seeks, 1,
-            "S2e: only prologue Seek, no per-residual restore; opcodes={names:?}"
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S2e keeps in-loop MakeArray off dense (boxing tax); opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
