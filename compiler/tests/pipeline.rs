@@ -4731,7 +4731,6 @@ fn main() {
     assert_eq!(output, "1035");
 }
 
-// ── Harness stripping + cross-feature integration ─────────────────────────────
 
 #[test]
 fn production_compile_strips_harness_declarations() {

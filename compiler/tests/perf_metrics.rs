@@ -605,10 +605,8 @@ fn perf_mandelbrot_slot_promote_drops_ci_temp_copy() {
     assert_eq!(index, 0, "mandelbrot has no array Index");
 }
 
-// ---------------------------------------------------------------------------
 // Phase 0 — register-win shape inventory + opcode-candidate gap tallies
 // Phase 4 — fuse-select feed + near-miss audit (counters below)
-// ---------------------------------------------------------------------------
 //
 // Helpers return structs so Phase 1+ can assert deltas. Ceilings are headroom-
 // based (like dispatch_count tests), not brittle exact equals. Static counts
@@ -1213,7 +1211,6 @@ fn perf_phase0_nsieve_dispatch_regression() {
     );
 }
 
-// ---------------------------------------------------------------------------
 // AOT harvest — Phase 0 inventory
 //
 // Soft ceilings on the bytecode shapes that later phases are supposed to move.
@@ -1230,7 +1227,6 @@ fn perf_phase0_nsieve_dispatch_regression() {
 //   P2 — Index / StoreIndex in array-hot fns.
 //   P3 — MakeEnum / MakeTuple / MakeArray allocation sites.
 //   P4 — CALL / TailCall density in recursion-hot fns.
-// ---------------------------------------------------------------------------
 
 /// P1 + P4 baseline: `mandelbrot`'s float loops keep 8 LOADs / 13 STOREs, all
 /// single-slot, against 13 already-fused `BinSlot*` words and zero calls.
