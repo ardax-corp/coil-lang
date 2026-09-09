@@ -113,7 +113,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); dense still refuse | **I2** |
 | Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
-| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier` optional; S2a live-root sidecar; dense / LIR refuse (no S2b maps) | **I5** / **S2a** |
+| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier` optional; S2a live-root sidecar; S2b interpreter maps; dense / LIR refuse (S2c specialize) | **I5** / **S2a** / **S2b** |
 | HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; dense emit stays W4 | **I6** |
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
 | Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse) | **I8** |

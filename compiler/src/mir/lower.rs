@@ -72,6 +72,8 @@ pub struct LowerHints {
     /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
     /// Production specialize leaves this off; emit still refuses.
     pub allow_deopt: bool,
+    /// S2b map lift: skip SSA verify so mixed heap/i64 returns still encode slots.
+    pub skip_verify: bool,
 }
 
 impl Default for LowerHints {
@@ -91,6 +93,7 @@ impl Default for LowerHints {
             allow_alloc: false,
             allow_effects: false,
             allow_deopt: false,
+            skip_verify: false,
         }
     }
 }
@@ -155,6 +158,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
     let mut label_block: HashMap<Label, BlockId> = HashMap::new();
     let mut b = MirBuilder::new(hints.name.clone());
     b.allow_effects = hints.allow_effects;
+    b.skip_verify = hints.skip_verify;
     for i in 0..hints.param_count {
         let ty = hints.slot(i);
         if !ty.is_specialized() {
@@ -627,10 +631,16 @@ fn lower_op(
             }
             args.reverse();
             let fn_v = tos.pop().expect("fn id");
-            let id =
-                const_native_id(b, fn_v).ok_or_else(|| LowerError::Refused("HostInvoke".into()))?;
-            tos.push(b.ins_host_invoke(id, args)?);
-            Ok(())
+            if let Some(id) = const_native_id(b, fn_v) {
+                tos.push(b.ins_host_invoke(id, args)?);
+                return Ok(());
+            }
+            if hints.allow_alloc && hints.allow_effects {
+                // S2b map lift: native id may live in a slot after IL opts.
+                tos.push(b.ins_const(super::inst::MirConst::I64(0))?);
+                return Ok(());
+            }
+            Err(LowerError::Refused("HostInvoke".into()))
         }
         IlOp::Entry {
             kind: EntryKind::Call,

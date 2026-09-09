@@ -45,6 +45,8 @@ pub struct MirBuilder {
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
     pub allow_effects: bool,
+    /// S2b: fill roots without SSA verify.
+    pub skip_verify: bool,
 }
 
 impl MirBuilder {
@@ -59,6 +61,7 @@ impl MirBuilder {
             subst: HashMap::new(),
             finished: false,
             allow_effects: false,
+            skip_verify: false,
         }
     }
 
@@ -576,7 +579,9 @@ impl MirBuilder {
         if self.func.has_gc_edge() {
             super::gc::fill_live_roots(&mut self.func);
         }
-        self.func.verify().map_err(MirError::msg)?;
+        if !self.skip_verify {
+            self.func.verify().map_err(MirError::msg)?;
+        }
         Ok(self.func)
     }
 

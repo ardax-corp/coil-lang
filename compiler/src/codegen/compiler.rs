@@ -125,6 +125,15 @@ impl Compiler {
         &self.debug_locs
     }
 
+    /// S2b slot / frame maps (empty when no allocating body lifted).
+    pub fn stack_maps(&self) -> &[common::FrameStackMap] {
+        &self.stack_maps
+    }
+
+    pub fn stack_map_drafts(&self) -> &[crate::mir::DraftFrameMap] {
+        &self.stack_map_drafts
+    }
+
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
     pub fn fn_debug_symbols(&self) -> Vec<FnDebugSym> {
         let mut syms: Vec<FnDebugSym> = self
@@ -15046,6 +15055,18 @@ impl Compiler {
         self.setup_entry_offset = resolve_entry(self.setup_entry_offset as usize) as u32;
 
         self.debug_locs = lowered.debug_locs;
+
+        let entries: Vec<(String, u32)> = self
+            .functions
+            .iter()
+            .map(|(n, pc)| (n.clone(), *pc as u32))
+            .collect();
+        self.stack_map_drafts = lowered.stack_map_drafts.clone();
+        self.stack_maps = crate::mir::bind_drafts(
+            &lowered.stack_map_drafts,
+            self.bytecode.as_slice(),
+            &entries,
+        );
 
         self.operand_stack_slots = self
             .operand_stack_slots

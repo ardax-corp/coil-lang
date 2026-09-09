@@ -9,7 +9,7 @@
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
 //! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
 //! I5 alloc / GC-barrier edges (COI-300) with S2a live-root
-//! sidecar (COI-305),
+//! sidecar (COI-305) and S2b slot / frame maps (COI-306),
 //! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297), and
 //! I7 debugger / deopt boundaries on MIR edges (COI-299), and
 //! I8 broadened MIR emit entry (COI-298).
@@ -21,7 +21,7 @@
 //! heap-backed named class locals stay on [`crate::il`]. `FORMAT` /
 //! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
 //! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
-//! dense / LIR emit still refuse (I5 / S2a). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! dense / LIR emit still refuse (I5; S2c specialize). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
 //! allowlist stays closed. Debugger-attached compiles refuse dense /
 //! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
 //! accident.
@@ -48,6 +48,7 @@ mod lower;
 mod pack;
 mod specialize;
 mod strength;
+mod stackmap;
 mod string_barrier;
 mod text;
 mod ty;
@@ -61,11 +62,14 @@ pub use emit_lir::emit_lir;
 pub use entry::{lir_eligible, lir_refuse, LirRefuse};
 pub use func::{MirBlock, MirFunc};
 pub use gc::{fill_live_roots, LiveRootSet};
+pub use stackmap::{bind_drafts, try_build_draft, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
 };
-pub use infer::{STRAIGHT_LINE_MIN_WORK_OPS, infer_lir_with_seed, numeric_work_ops};
+pub use infer::{
+    STRAIGHT_LINE_MIN_WORK_OPS, infer_lir_with_seed, infer_stack_map, numeric_work_ops,
+};
 pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;

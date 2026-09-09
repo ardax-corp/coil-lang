@@ -56,11 +56,12 @@ I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir
 names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 `GcBarrier` safepoints. S2a
 ([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
-fills live-heap `roots` (and IL slots when snapshotted). Infer /
-specialize / `emit_lir` refuse those bodies so fuse-IL keeps the
-interpreter GC. Stack-map roadmap:
-[mir-stack-maps.md](mir-stack-maps.md). Do not specialize or JIT across
-GC until S2b frame maps exist.
+fills live-heap `roots` (and IL slots when snapshotted). S2b
+([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
+encodes those slots as interpreter frame maps. Infer / specialize /
+`emit_lir` still refuse allocating bodies (fuse-IL). Do not specialize
+across GC until S2c. Stack-map note:
+[mir-stack-maps.md](mir-stack-maps.md).
 
 ## P1 — dense exec (COI-268)
 

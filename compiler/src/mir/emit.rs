@@ -19,7 +19,7 @@ pub fn emit_dense(
 ) -> Result<Vec<IlOp>, LowerError> {
     if func.has_gc_edge() {
         return Err(LowerError::Refused(
-            "dense emit refuses Alloc/GcBarrier (I5: no S2b frame maps)".into(),
+            "dense emit refuses Alloc/GcBarrier (I5: fuse-IL until S2c)".into(),
         ));
     }
     if func.has_deopt_edge() {
@@ -417,7 +417,7 @@ fn emit_inst(
         }
         MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
             return Err(LowerError::Refused(
-                "dense emit refuses Alloc/GcBarrier (I5: no S2b frame maps)".into(),
+                "dense emit refuses Alloc/GcBarrier (I5: fuse-IL until S2c)".into(),
             ));
         }
         MirInst::Deopt { .. } => {

@@ -112,10 +112,35 @@ pub fn infer_lir_with_seed(
     )
 }
 
+/// Slot types for S2b stack-map lift: LIR rules plus Make* / InitTyped.
+pub fn infer_stack_map(
+    ops: &[IlOp],
+    pool_len: usize,
+    param_count: u32,
+    seed: &HashMap<u32, MirTy>,
+) -> Result<Inferred, LowerError> {
+    infer_walk(
+        ops,
+        pool_len,
+        param_count,
+        InferMode::Map,
+        &DenseCallMap::new(),
+        seed,
+    )
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum InferMode {
     Dense,
     Lir,
+    /// S2b sidecar: alloc ops are `HeapRef`; still refuse user `CALL`.
+    Map,
+}
+
+impl InferMode {
+    fn lir_shape(self) -> bool {
+        matches!(self, Self::Lir | Self::Map)
+    }
 }
 
 fn infer_walk(
@@ -151,6 +176,14 @@ fn infer_walk(
                     ty: slot_ty.get(slot).copied(),
                     imm: slot_imm.get(slot).copied(),
                 });
+            }
+            IlOp::MakeArray { arity, .. } | IlOp::MakeTuple { arity, .. }
+                if mode == InferMode::Map =>
+            {
+                push_map_alloc(&mut stack, *arity as usize)?;
+            }
+            IlOp::MakeEnum { arity, .. } if mode == InferMode::Map => {
+                push_map_alloc(&mut stack, *arity as usize)?;
             }
             IlOp::StorePop { slot, .. } => {
                 let c = stack
@@ -292,8 +325,8 @@ fn infer_walk(
                         imm: None,
                     });
                 }
-                Instruction::Seek if mode == InferMode::Lir => {}
-                Instruction::Unpack if mode == InferMode::Lir => {
+                Instruction::Seek if mode.lir_shape() => {}
+                Instruction::Unpack if mode.lir_shape() => {
                     let arity = byte.operand_u32();
                     if arity > 1 {
                         return Err(LowerError::Refused("Unpack arity > 1 (I2)".into()));
@@ -322,6 +355,13 @@ fn infer_walk(
                 other if is_format_inst(other) => {
                     return Err(LowerError::Refused("format".into()));
                 }
+                other if mode == InferMode::Map && super::gc::is_alloc_inst(other) => {
+                    stack.push(Cell {
+                        origin: Origin::Tmp,
+                        ty: Some(MirTy::HeapRef),
+                        imm: None,
+                    });
+                }
                 other => {
                     return Err(LowerError::Refused(format!(
                         "residual byte {}",
@@ -333,7 +373,7 @@ fn infer_walk(
                 kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
                 ..
             } => {
-                if mode != InferMode::Lir {
+                if !mode.lir_shape() {
                     return Err(LowerError::Refused("match".into()));
                 }
                 if *arity > 1 {
@@ -348,12 +388,16 @@ fn infer_walk(
                 // Peek: miss fallthrough is the linear walk.
             }
             IlOp::Jump { .. } | IlOp::Return { ret_words: 1, .. } | IlOp::Halt { .. } => {}
-            IlOp::Return { ret_words, .. } if *ret_words == 2 && mode == InferMode::Lir => {}
+            IlOp::Return { ret_words, .. } if *ret_words == 2 && mode.lir_shape() => {}
             IlOp::Return { ret_words, .. } if *ret_words != 1 => {
                 return Err(LowerError::Refused("multi-word return".into()));
             }
             IlOp::HostInvoke { arity, layout, .. } => {
-                apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
+                if mode == InferMode::Map {
+                    apply_host_map(&mut stack, *arity, *layout)?;
+                } else {
+                    apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
+                }
             }
             IlOp::Entry {
                 kind: EntryKind::Call,
@@ -535,6 +579,21 @@ fn has_back_edge(ops: &[IlOp]) -> bool {
         }
     }
     false
+}
+
+fn push_map_alloc(stack: &mut Vec<Cell>, arity: usize) -> Result<(), LowerError> {
+    if stack.len() < arity {
+        return Err(LowerError::Refused("alloc stack".into()));
+    }
+    for _ in 0..arity {
+        let _ = stack.pop();
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::HeapRef),
+        imm: None,
+    });
+    Ok(())
 }
 
 fn operand_ty(inst: Instruction) -> MirTy {
@@ -747,6 +806,25 @@ fn apply_call(
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(abi.ret),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_host_map(stack: &mut Vec<Cell>, arity: u32, layout: u8) -> Result<(), LowerError> {
+    if layout != 0 {
+        return Err(LowerError::Refused("HostInvoke layout".into()));
+    }
+    let n = arity as usize;
+    if stack.len() < n + 1 {
+        return Err(LowerError::Refused("HostInvoke stack".into()));
+    }
+    for _ in 0..n + 1 {
+        let _ = stack.pop();
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::I64),
         imm: None,
     });
     Ok(())

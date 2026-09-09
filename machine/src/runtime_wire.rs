@@ -62,6 +62,29 @@ pub fn wire_thread_program<const N: usize>(
     debug: ProgramDebug,
     operand_stack_slots: u32,
 ) {
+    wire_thread_program_with_maps(
+        machine,
+        bytecode,
+        constants,
+        strings,
+        static_slot_count,
+        debug,
+        operand_stack_slots,
+        Vec::new(),
+    )
+}
+
+/// Like [`wire_thread_program`], attaching S2b maps for compile-and-run.
+pub fn wire_thread_program_with_maps<const N: usize>(
+    machine: &mut Machine<N>,
+    bytecode: &[Byte],
+    constants: &[u64],
+    strings: &[String],
+    static_slot_count: u32,
+    debug: ProgramDebug,
+    operand_stack_slots: u32,
+    stack_maps: Vec<common::FrameStackMap>,
+) {
     machine.set_thread_program(Arc::new(ThreadProgram {
         code: Arc::from(bytecode.to_vec()),
         constants: Arc::from(constants.to_vec()),
@@ -69,5 +92,6 @@ pub fn wire_thread_program<const N: usize>(
         static_slot_count,
         debug,
         operand_stack_slots,
+        stack_maps,
     }));
 }

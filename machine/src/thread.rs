@@ -143,6 +143,8 @@ pub struct ThreadProgram {
     pub debug: ProgramDebug,
     /// Operand-stack capacity for worker VMs running this program.
     pub operand_stack_slots: u32,
+    /// S2b slot / frame maps (empty when the archive had none).
+    pub stack_maps: Vec<common::FrameStackMap>,
 }
 
 /// Tag indices for [`ThreadError`](common::BUILTIN_THREAD_ERROR_ENUM).

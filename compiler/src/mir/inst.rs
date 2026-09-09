@@ -295,7 +295,7 @@ pub enum MirInst {
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
     /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
     /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
-    /// Dense / LIR emit still refuse (no S2b consumer).
+    /// Dense / LIR emit still refuse (S2c specialize).
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,

@@ -122,6 +122,7 @@ pub fn execute_archived_program(
         static_slot_count: loaded.static_slots,
         debug: loaded.debug.clone(),
         operand_stack_slots: machine::DEFAULT_OPERAND_STACK_SLOTS as u32,
+        stack_maps: Vec::new(),
     }));
     machine.set_program_debug(loaded.debug.clone());
     machine.run_raw(
