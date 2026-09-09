@@ -1994,19 +1994,31 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile fill");
-        let fill = p.function_offset("fill").expect("fill");
-        let main = p.function_offset("main").expect("main");
-        let fill_bc = if fill < main { &bc[fill..main] } else { &bc[fill..] };
+        let symbols = p.program_debug().fn_symbols;
+        let fill_i = symbols
+            .iter()
+            .position(|s| s.name == "fill")
+            .expect("fill");
+        let start = symbols[fill_i].entry_pc as usize;
+        let end = symbols
+            .get(fill_i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let fill_bc = &bc[start..end];
         let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
             fill_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
             "fill is dense; opcodes={names:?}"
         );
         assert!(
-            fill_bc
-                .iter()
-                .any(|b| *b.bytecode() == Instruction::ArrayPin),
-            "dense fill reconstructs ArrayPin; opcodes={names:?}"
+            fill_bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )),
+            "dense fill must keep the heap store; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2050,6 +2062,155 @@ fn main() {
             "dense reconstruct keeps Index; opcodes={:?}",
             sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s3_times_a_is_dense_call_and_index() {
+        let src = r#"
+fn eval_a(int i, int j) -> float {
+    let ij = i + j;
+    let t = (ij * (ij + 1)) / 2 + i + 1;
+    return 1.0 / (t as float);
+}
+fn times_a(Vec<float> v, Vec<float> out) -> float {
+    let n = len(v);
+    let i = 0;
+    while i < n {
+        let s = 0.0;
+        let j = 0;
+        while j < n {
+            s = s + eval_a(i, j) * v[j];
+            j = j + 1;
+        }
+        out[i] = s;
+        i = i + 1;
+    }
+    return out[0];
+}
+fn main() {
+    let v: Vec<float> = Vec::from([1.0, 2.0]);
+    let out: Vec<float> = Vec::from([0.0, 0.0]);
+    let _ = times_a(v, out);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile times_a");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "times_a")
+            .expect("times_a");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "times_a is dense; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "open CALL to eval_a; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )),
+            "times_a keeps Index; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )),
+            "times_a keeps StoreIndex; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s3_nsieve_index_store_or_fuse_il() {
+        let src = r#"
+fn nsieve(int n) -> int {
+    let flags: Vec<int> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        flags.push(1);
+        i = i + 1;
+    }
+    let count = 0;
+    let p = 2;
+    while p < n {
+        if flags[p] == 1 {
+            count = count + 1;
+            let k = p + p;
+            while k < n {
+                flags[k] = 0;
+                k = k + p;
+            }
+        }
+        p = p + 1;
+    }
+    return count;
+}
+fn main() {
+    let _ = nsieve(16);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile nsieve");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "nsieve")
+            .expect("nsieve");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let dense = body.iter().any(|b| *b.bytecode() == Instruction::DenseBin);
+        let has_store = body.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )
+        });
+        let has_index = body.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )
+        });
+        if dense {
+            assert!(has_store && has_index, "dense nsieve keeps index/store; opcodes={names:?}");
+        } else {
+            assert!(
+                has_store && has_index,
+                "nsieve leftover stays fuse-IL with index/store; opcodes={names:?}"
+            );
+        }
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
