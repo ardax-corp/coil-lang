@@ -3,7 +3,7 @@
 
 use common::Instruction;
 
-use crate::il::IlOp;
+use crate::il::{IlOp, Label};
 
 use super::abi::{DenseAbi, DenseCallMap};
 use super::emit::emit_dense;
@@ -14,6 +14,9 @@ use super::infer::{infer_lir, infer_lir_across_alloc, infer_numeric_across_alloc
 use super::lower::{try_lower_numeric, LowerHints};
 use super::stackmap::has_real_maps;
 
+/// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
+/// not reuse that id or concat lands calls on a loop header.
+///
 /// If `ops` is a specialized numeric body, return dense IL plus its ABI.
 ///
 /// CSE → LICM → CSE → InstCombine (incl. P11 float peeps) → DestProp → SR → CSE → GVN/PRE,
@@ -26,6 +29,7 @@ pub fn try_specialize_body(
     entry_sp: u32,
     pool: &mut Vec<u64>,
     calls: &DenseCallMap,
+    official_entry: Option<Label>,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
@@ -90,14 +94,18 @@ pub fn try_specialize_body(
         return None;
     }
     let abi = DenseAbi::from_func_and_live_ins(&func, ops, &hints.slot_ty)?;
-    let entry = ops.iter().find_map(|op| match op {
-        IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
-        _ => None,
+    let entry = official_entry.or_else(|| {
+        ops.iter().find_map(|op| match op {
+            IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
+            _ => None,
+        })
     });
+    let label_hi = crate::il::opt::max_code_label(ops)
+        .max(official_entry.map(|Label(id)| id).unwrap_or(0));
     if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
         return Some((packed, abi));
     }
-    if let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool) {
+    if let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool, label_hi) {
         return Some((vecd, abi));
     }
     if heap_index {

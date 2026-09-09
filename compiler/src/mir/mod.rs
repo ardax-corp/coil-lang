@@ -723,6 +723,16 @@ fn main() {
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "fill CALL must run Seek/init before V*");
+        let symbols = p.program_debug().fn_symbols;
+        let fill = symbols.iter().find(|s| s.name == "fill").expect("fill");
+        let op = bc[fill.entry_pc as usize].bytecode();
+        assert_eq!(
+            *op,
+            Instruction::Seek,
+            "CALL target must be the V* prelude, not the loop header ({})",
+            op.mnemonic()
+        );
     }
 
     #[test]
@@ -1582,7 +1592,10 @@ fn main() {
             lir.iter()
                 .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
         );
-        assert!(try_specialize_body(&ops, "niche_err", 1, &mut pool, &DenseCallMap::new()).is_none());
+        assert!(
+            try_specialize_body(&ops, "niche_err", 1, &mut pool, &DenseCallMap::new(), None)
+                .is_none()
+        );
     }
 
     #[test]
@@ -2376,7 +2389,7 @@ fn main() {
             super::infer::infer_numeric(&ops, 0, 0).is_err(),
             "clock-only body still misses the numeric work gate"
         );
-        assert!(try_specialize_body(&ops, "clk", 0, &mut pool, &DenseCallMap::new()).is_none());
+        assert!(try_specialize_body(&ops, "clk", 0, &mut pool, &DenseCallMap::new(), None).is_none());
         let mut hints = LowerHints::new("clk");
         hints.allow_effects = true;
         let f = try_lower_numeric(&ops, &hints).expect("lower clock");

@@ -23,6 +23,7 @@ pub fn try_vectorize(
     func: &MirFunc,
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
+    label_hi: u32,
 ) -> Option<Vec<IlOp>> {
     if func.has_gc_edge() || func.has_deopt_edge() {
         return None;
@@ -45,7 +46,7 @@ pub fn try_vectorize(
         return None;
     }
     let spec = match_store_loop(func)?;
-    emit_vectorized(func, &spec, entry_label, pool)
+    emit_vectorized(func, &spec, entry_label, pool, label_hi)
 }
 
 struct StoreLoop {
@@ -289,6 +290,7 @@ fn emit_vectorized(
     spec: &StoreLoop,
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
+    label_hi: u32,
 ) -> Option<Vec<IlOp>> {
     let (regs, scratch) = assign_regs(func).ok()?;
     let i_slot = regs[spec.iv.index()];
@@ -298,7 +300,11 @@ fn emit_vectorized(
     let eight = scratch.checked_add(2)?;
     let max_reg = scratch.checked_add(3)?;
     let loc = DebugLoc::unknown();
-    let mut next_label = max_label_hint(entry_label);
+    // Fresh ids must not reuse the official CALL entry or any pre-rewrite
+    // label: concat maps `meta.entry` onto whichever new Label keeps that id.
+    let mut next_label = label_hi
+        .saturating_add(1)
+        .max(max_label_hint(entry_label));
     let entry = entry_label.unwrap_or_else(|| {
         let l = Label(next_label);
         next_label += 1;
@@ -456,6 +462,9 @@ fn emit_vectorized(
     out.push(IlOp::Label(exit_l));
     for inst in &func.block(spec.exit).insts {
         if inst.is_phi() {
+            continue;
+        }
+        if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
             continue;
         }
         emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
