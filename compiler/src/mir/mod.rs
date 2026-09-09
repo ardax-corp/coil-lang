@@ -2012,7 +2012,7 @@ fn main() {
 
     #[test]
     fn pipeline_inlined_take_makearray_stays_fuse_il() {
-        // Inlined take + in-loop Make*: S2l cost-gate keeps fuse-IL
+        // Inlined take + in-loop Make*: S2l win-or-gate keeps fuse-IL
         // (residual boxing still loses to invert+fuse).
         let src = r#"
 fn take([int] xs) -> int {
@@ -2062,7 +2062,7 @@ fn main() {
 
     #[test]
     fn s2l_inloop_escape_make_stays_fuse_il() {
-        // Escaping `[i, i+1]` cannot SROA. Default cost-gate keeps fuse-IL.
+        // Escaping `[i, i+1]` cannot SROA. Win-or-gate keeps fuse-IL.
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0] + xs[1];
@@ -2106,7 +2106,7 @@ fn main() {
             pack_bc
                 .iter()
                 .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S2l cost-gate: leftover in-loop Make* stays fuse-IL; opcodes={names:?}"
+            "S2l win-or-gate: leftover in-loop Make* stays fuse-IL; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
