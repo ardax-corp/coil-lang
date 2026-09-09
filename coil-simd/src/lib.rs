@@ -13,6 +13,7 @@
 
 pub mod bytes;
 mod kernels;
+pub mod lanes;
 mod level;
 pub mod scalar;
 
@@ -27,4 +28,5 @@ pub use kernels::{
     zip_add_i64, zip_div_f64, zip_mul_f64, zip_mul_i64, zip_neg_f64, zip_neg_i64, zip_sub_f64,
     zip_sub_i64,
 };
+pub use lanes::LANES;
 pub use level::{detect, SimdLevel};
