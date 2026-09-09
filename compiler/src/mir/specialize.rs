@@ -123,7 +123,6 @@ pub fn try_specialize_body(
 /// Repaint from float uses so DenseBin / RETURN keep the Value bits.
 fn paint_index_dest_from_uses(func: &mut crate::mir::func::MirFunc) {
     use crate::mir::inst::{MirInst, ValueId};
-    use crate::mir::ty::MirTy;
     let mut paint = Vec::new();
     for b in &func.blocks {
         for inst in &b.insts {
