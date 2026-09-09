@@ -416,16 +416,20 @@ from `cfg_gvn_with` when the flag is on.
   other locals unchanged; new slots are GC roots.
 - **Refusals:** Growing `ArrayPush` dest; private use after an escape;
   unproven `xs[k]` on leftover heap `MakeArray` (S2h keeps Index/StoreIndex);
-  computed elements; second store to `s`; opaque / residual
+  computed elements (S2i: observed/escape `vec_array.hy` stays heap);
+  second store to `s`; opaque / residual
   `Byte` use that is not a local element op or named edge; arity 0 or > 32;
   frame would exceed slot 256. Not named-local class SROA.
   Codegen `[T; N]` locals handle unproven `xs[k]` with a runtime bound +
-  slot-select (OOB heap Index/StoreIndex).
+  slot-select (OOB heap Index/StoreIndex). Zip/broadcast operands that are
+  literals or stack-array locals load elements directly; the result is still
+  a heap `MakeArray`.
 - **Tests:** `opt/escape_analysis.tests.rs` `scalarizes_non_escaping_index`,
   `boxes_at_return_edge`, `boxes_at_call_arg_edge`, `boxes_at_field_store_edge`,
   `boxes_at_host_edge`, `boxes_array_push_value_not_dest`,
   `refuses_array_push_grow_dest`, `refuses_private_use_after_escape`,
-  `keeps_heap_for_unproven_index`.
+  `keeps_heap_for_unproven_index`, `keeps_heap_when_elements_are_computed`,
+  `keeps_heap_when_computed_elems_escape`.
   Isolated flag: `isolated_optimize_flag_runs_pass`.
 
 ## `slot_promote`
