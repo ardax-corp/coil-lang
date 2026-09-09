@@ -1,8 +1,12 @@
-# S2d in-loop Make* dense tax (COI-314 follow-up)
+# S2d / S2e in-loop Make* dense tax
 
-Investigation only. Landed S2d ([PR #365](https://github.com/ardax-corp/coil-lang/pull/365))
-keeps **in-loop** `Make*` off dense. This note reconstructs the ~18% A/B and
-ranks the cost. **No fix shipped here.**
+S2d ([PR #365](https://github.com/ardax-corp/coil-lang/pull/365)) kept
+**in-loop** `Make*` off dense after an ~18% regress. S2e
+([COI-316](https://linear.app/ardax/issue/COI-316)) removes per-residual
+`Seek` restore and **enables** mapped in-loop Make* dense. Historical A/B
+below; S2e board at the end.
+
+`COIL_S2D_DENSE_INLOOP=0` restores the S2d in-loop refuse (fuse-IL A/B).
 
 ## Where the 18% came from
 
@@ -129,14 +133,22 @@ Two Seeks per Index+Make trip on `pack`.
 | Hoist/batch Make outside loop | Only if semantics allow (not this kernel) | Different program |
 | Flagship Make* | `nsieve` is `Vec.push`, not Make* | Do not twist flagships for the bench |
 
-Recommended next experiment: **compile a Seek-less dense residual prototype
-behind the same env flag** and re-run `s2d_inloop_pack` + `s2d_preheader_bump`
-(bump still Seeks after Index/StoreIndex and *wins*, so dropping Seek may
-help both). Second: SSA reuse after `StoreIndex` so `pack_store` is one alloc
-per trip on fuse and dense.
+## S2e ABI (COI-316)
+
+Dense still opens with one prologue `Seek` to `max_reg+1`. Stack residuals
+(`Make*` / `Index` / `StoreIndex` / `ArrayLen` / `CALL` / HostInvoke) box
+through `LOAD` + residual + `StorePop`. `StorePop` is `DeltaThenFloor(-1,
+dest+1)` from residual height 1, so tell lands back on the frame
+high-water. `restore_dense_tell` was hybrid ABI glue, not a GC
+requirement — maps already root live heap slots. S2e deletes those Seeks.
+
+Pins stay fuse-IL: pin keys still do not survive the **prologue** Seek.
+
+In-loop mapped Make* is on by default. Next after this: SROA / hoist
+(COI-315), not more Seeks.
 
 ## Flagships
 
-`nsieve` / `binary_trees` / `array_mut` / `gc_churn` archives were identical
-on S2d vs S3b. They cannot be “forced onto dense Make*” without becoming a
-different program.
+`nsieve` / `binary_trees` / `array_mut` / `gc_churn` do not take in-loop
+Make* dense (`Vec.push` / I4 / classes). S2e A/B uses the pack harness
+plus parent-tip embed on flagships (flat ±5%).
