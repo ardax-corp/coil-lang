@@ -197,7 +197,7 @@ S2f:
 - **Refused:** growing `ArrayPush` dest; private use after an escape;
   unproven `xs[k]` as a raw slot; slot-SROA of observed computed elems
   (`vec_array.hy`); arity > 32; named
-  class SROA; negative `i % N` (last slot, not OOB); in-loop Make*
+  class SROA in this array pass (S2j is `local_escape`); negative `i % N` (last slot, not OOB); in-loop Make*
   **dense** (S2e boxing tax). Non-escaping computed *elements*
   (`[i,i+1,i+2]`) still SROA into slots.
 - **S2g (COI-317):** a named escape (return, call-arg, `ArrayPush` *value*,
@@ -214,8 +214,13 @@ S2f:
   a heap object with sound `Index` / `StoreIndex`. Zip/broadcast operands
   that are literals or stack-array locals load slots (S2f); the result is
   not slot-SROA'd. Remaining refuse: grow dest, private after escape,
-  arity > 32, named class SROA, negative remainder, slot-SROA of computed
-  elems.
+  arity > 32, named class SROA in *this* array pass (S2j is separate),
+  negative remainder, slot-SROA of computed elems.
+- **S2j (COI-320):** unique named `let p = new C(...)` with field
+  load/store unboxes into consecutive slots. A named escape after that
+  private region rematerializes one `InitTyped`. Still heap: `fn drop()`,
+  method `self`, aliases, nested captures, parameters, whole-object
+  compare, private use after the first escape. Hit: `s2j_class_sroa.hy`.
 
 `pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
 `[T; N]` and the only uses are computed-index load/store (`i % N`).

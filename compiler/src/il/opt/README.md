@@ -419,7 +419,7 @@ from `cfg_gvn_with` when the flag is on.
   computed elements (S2i: observed/escape `vec_array.hy` stays heap);
   second store to `s`; opaque / residual
   `Byte` use that is not a local element op or named edge; arity 0 or > 32;
-  frame would exceed slot 256. Not named-local class SROA.
+  frame would exceed slot 256. Named class SROA is S2j (`local_escape`).
   Codegen `[T; N]` locals handle unproven `xs[k]` with a runtime bound +
   slot-select (OOB heap Index/StoreIndex). Zip/broadcast operands that are
   literals or stack-array locals load elements directly; the result is still
