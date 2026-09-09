@@ -38,11 +38,14 @@ pub fn try_specialize_body(
     // string bytes, heap index / ArrayLen / StoreIndex (dense residuals
     // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
-    // S2d: in-loop / preheader Make* may cross when maps exist.
+    // S2d: mapped *preheader* Make* + index loop may take dense.
+    // In-loop Make* stays off dense (Seek+alloc tax; hit-bench regress).
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
+    if super::infer::has_alloc_inside_loop(ops)
+        || (has_alloc && super::infer::has_alloc_only_after_loops(ops))
+    {
         return None;
     }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {

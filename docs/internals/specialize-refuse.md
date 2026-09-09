@@ -92,7 +92,8 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `nsieve` | `nsieve.hy` | fuse-IL | heap-index + `Vec.push` (no `Make*`; S2d does not fire) |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | heap / match / two-slot — P3 |
-| `array_mut` | `array_mut.hy` | dense when maps bind | S2d preheader `MakeArray` + index loop |
+| `array_mut` | `array_mut.hy` | fuse-IL | `main` + I4 write; S2d does not fire |
+| `bump` | `looping_makearray.hy` | dense | S2d preheader `MakeArray` + computed-index store |
 | `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host / class `new` |
 
 Stack-IL `cse_*` / `dest_prop_field_alias` stay fuse-IL (heap / field). W2
@@ -102,14 +103,14 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 (`sin` inside an otherwise dense loop). The COI-291 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
 `times_a` call `eval_a` with unpinned dense Index residuals (S3b).
-Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped in-loop
-and preheader `MakeArray` may take dense / LIR (S2d) when the object
-survives stack-IL (computed index, or a live heap local). Const-index
-`s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live
-heap return (`return [i]`) plus a counted loop and **no** earlier alloc
-stays fuse-IL so invert+fuse remains observable. Unmapped alloc,
-CALL+alloc (map lift refuses `CALL`), and `Vec.push` / class `new` loops
-stay fuse-IL.
+Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped **preheader**
+`MakeArray` plus an index loop may take dense (S2d). In-loop `Make*` stays
+off dense (Seek+alloc tax). Compare-only leftovers may take LIR when maps
+exist and the cost gate holds. Const-index `s += xs[0]` usually mem_fwd+DCE's
+the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
+loop and **no** earlier alloc stays fuse-IL so invert+fuse remains
+observable. Unmapped alloc, CALL+alloc (map lift refuses `CALL`), and
+`Vec.push` / class `new` loops stay fuse-IL.
 
 ## Language refuse → island (COI-292 I0)
 

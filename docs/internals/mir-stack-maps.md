@@ -28,13 +28,14 @@ and relocate mapped slots on collect.
   [`has_real_maps`](../../compiler/src/mir/stackmap.rs) is true (S2c /
   [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
   S2d ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
-  also lets **in-loop** and **preheader** `Make*` take dense / LIR when
-  maps exist and reconstruct keeps every alloc site. Draft lift keeps
-  inferred param types (not forced `heapref`) and snapshots the stack-IL
-  map **before** dense replace so `DenseBin` bodies still bind. Post-loop-only
-  `return [x]` after a counted loop stays fuse-IL so invert+fuse (COI-87)
-  remains. Unmapped allocating bodies stay fuse-IL. S3b heap-index takes
-  dense unpinned residuals plus `Seek` restore. Dense+match stays I2 LIR.
+  lets **preheader** `Make*` + index loops take dense when maps exist.
+  In-loop `Make*` stays off dense (Seek+alloc tax). Compare-only leftovers
+  may take LIR. Draft lift keeps inferred param types (not forced `heapref`)
+  and snapshots the stack-IL map **before** dense replace so `DenseBin`
+  bodies still bind. Post-loop-only `return [x]` after a counted loop stays
+  fuse-IL so invert+fuse (COI-87) remains. Unmapped allocating bodies stay
+  fuse-IL. S3b heap-index takes dense unpinned residuals plus `Seek`
+  restore. Dense+match stays I2 LIR.
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
   rewritten if a live object address changes. Unmapped alloc bodies stay
   fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
@@ -50,11 +51,12 @@ and relocate mapped slots on collect.
 3. ~~**Specialize across GC**~~ — **S2c.** Mapped allocating bodies may
    take dense / LIR when otherwise eligible. Default remains refuse
    without maps.
-4. ~~**Looping alloc**~~ — **S2d.** Mapped in-loop / preheader `Make*`
-   may specialize. Still refuse: post-loop-only heap return (invert+fuse);
-   unmapped alloc; CALL+alloc (map lift refuses user `CALL`); computed-
-   element stack scalarize; compiler write-barrier opcodes; alloc sink /
-   hoist of `Alloc` (LICM keeps it in-loop — new object per trip).
+4. ~~**Looping alloc**~~ — **S2d.** Mapped preheader `Make*` + index
+   may take dense. In-loop `Make*` is LIR-or-fuse only (dense regresses).
+   Still refuse: post-loop-only heap return (invert+fuse); unmapped alloc;
+   CALL+alloc (map lift refuses user `CALL`); computed-element stack
+   scalarize; compiler write-barrier opcodes; alloc sink / hoist of
+   `Alloc` (LICM keeps it in-loop — new object per trip).
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 

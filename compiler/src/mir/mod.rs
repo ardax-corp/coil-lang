@@ -2008,8 +2008,8 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_makearray_loop_takes_dense_when_mapped() {
-        // Inlined `take([i, i+1])` leaves in-loop MakeArray; S2d maps it.
+    fn pipeline_makearray_and_new_stay_fuse_il() {
+        // In-loop MakeArray stays off dense (S2d rent); maps may still bind.
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0];
@@ -2045,11 +2045,11 @@ fn main() {
         let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
             hot_bc.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
-            "S2d reconstructs in-loop MakeArray; opcodes={names:?}"
+            "in-loop MakeArray stays; opcodes={names:?}"
         );
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S2d mapped allocating loop may take dense; opcodes={names:?}"
+            hot_bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
+            "in-loop MakeArray stays off dense; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2149,8 +2149,10 @@ fn main() {
             "S2d reconstructs in-loop MakeArray; opcodes={names:?}"
         );
         assert!(
-            pack_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S2d mapped in-loop MakeArray takes dense; opcodes={names:?}"
+            pack_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S2d keeps in-loop MakeArray off dense; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
