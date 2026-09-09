@@ -3204,6 +3204,159 @@ impl Compiler {
         }
     }
 
+    /// Computed-index load from a stack-array local (S2f SROA).
+    ///
+    /// In-range `idx` becomes `LOAD base+k`. The cold arm boxes and `Index`es
+    /// so OOB still panics. Proven in-bounds skips the box arm.
+    fn emit_stack_array_select_load(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        base: u32,
+        n: usize,
+        idx_slot: u32,
+        proven: bool,
+    ) {
+        if n == 0 {
+            return;
+        }
+        let mut bb = BlockBuilder::new();
+        let join = bytecode.fresh_label();
+        if !proven {
+            let oob = bytecode.fresh_label();
+            bytecode.push_load(idx_slot);
+            bytecode.push_const(0);
+            bytecode.push(Byte::new(Instruction::LE));
+            bb.emit_jump_to(oob, BbJumpKind::JumpIfTrue, bytecode.il_mut());
+            bytecode.push_load(idx_slot);
+            bytecode.push_const(n as i32);
+            bytecode.push(Byte::new(Instruction::GEQ));
+            bb.emit_jump_to(oob, BbJumpKind::JumpIfTrue, bytecode.il_mut());
+            self.emit_stack_array_in_range_load(bytecode, &mut bb, join, base, n, idx_slot);
+            bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
+            bb.bind_label(oob, bytecode.il_mut());
+            self.emit_box_stack_array(bytecode, base, n);
+            bytecode.push_load(idx_slot);
+            bytecode.push_index();
+        } else {
+            self.emit_stack_array_in_range_load(bytecode, &mut bb, join, base, n, idx_slot);
+        }
+        bb.bind_join_label(join, bytecode.il_mut());
+    }
+
+    fn emit_stack_array_in_range_load(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        bb: &mut BlockBuilder,
+        join: crate::il::Label,
+        base: u32,
+        n: usize,
+        idx_slot: u32,
+    ) {
+        if n == 1 {
+            bytecode.push_load(base);
+            return;
+        }
+        let last = n - 1;
+        for k in 0..last {
+            let next = bytecode.fresh_label();
+            bytecode.push_load(idx_slot);
+            bytecode.push_const(k as i32);
+            bytecode.push(Byte::new(Instruction::EQ));
+            bb.emit_jump_to(next, BbJumpKind::JumpIfFalse, bytecode.il_mut());
+            bytecode.push_load(base + k as u32);
+            bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
+            bb.bind_label(next, bytecode.il_mut());
+        }
+        bytecode.push_load(base + last as u32);
+    }
+
+    /// Computed-index store into a stack-array local (S2f SROA).
+    fn emit_stack_array_select_store(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        base: u32,
+        n: usize,
+        idx_slot: u32,
+        val_slot: u32,
+        leave_value: bool,
+        proven: bool,
+    ) {
+        if n == 0 {
+            return;
+        }
+        let mut bb = BlockBuilder::new();
+        let join = bytecode.fresh_label();
+        if !proven {
+            let oob = bytecode.fresh_label();
+            bytecode.push_load(idx_slot);
+            bytecode.push_const(0);
+            bytecode.push(Byte::new(Instruction::LE));
+            bb.emit_jump_to(oob, BbJumpKind::JumpIfTrue, bytecode.il_mut());
+            bytecode.push_load(idx_slot);
+            bytecode.push_const(n as i32);
+            bytecode.push(Byte::new(Instruction::GEQ));
+            bb.emit_jump_to(oob, BbJumpKind::JumpIfTrue, bytecode.il_mut());
+            self.emit_stack_array_in_range_store(
+                bytecode, &mut bb, join, base, n, idx_slot, val_slot, leave_value,
+            );
+            bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
+            bb.bind_label(oob, bytecode.il_mut());
+            self.emit_box_stack_array(bytecode, base, n);
+            bytecode.push_load(idx_slot);
+            bytecode.push_load(val_slot);
+            bytecode.push(Byte::new(Instruction::StoreIndex));
+            if !leave_value {
+                bytecode.push_pop();
+            }
+        } else {
+            self.emit_stack_array_in_range_store(
+                bytecode, &mut bb, join, base, n, idx_slot, val_slot, leave_value,
+            );
+        }
+        bb.bind_join_label(join, bytecode.il_mut());
+    }
+
+    fn emit_stack_array_in_range_store(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        bb: &mut BlockBuilder,
+        join: crate::il::Label,
+        base: u32,
+        n: usize,
+        idx_slot: u32,
+        val_slot: u32,
+        leave_value: bool,
+    ) {
+        if n == 1 {
+            bytecode.push_load(val_slot);
+            bytecode.push_store_pop(base);
+            if leave_value {
+                bytecode.push_load(val_slot);
+            }
+            return;
+        }
+        let last = n - 1;
+        for k in 0..last {
+            let next = bytecode.fresh_label();
+            bytecode.push_load(idx_slot);
+            bytecode.push_const(k as i32);
+            bytecode.push(Byte::new(Instruction::EQ));
+            bb.emit_jump_to(next, BbJumpKind::JumpIfFalse, bytecode.il_mut());
+            bytecode.push_load(val_slot);
+            bytecode.push_store_pop(base + k as u32);
+            if leave_value {
+                bytecode.push_load(val_slot);
+            }
+            bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
+            bb.bind_label(next, bytecode.il_mut());
+        }
+        bytecode.push_load(val_slot);
+        bytecode.push_store_pop(base + last as u32);
+        if leave_value {
+            bytecode.push_load(val_slot);
+        }
+    }
+
     /// Advance `emit_idx` through wrapper nodes and the unwrapped head, without
     /// emitting. Used when a parent is lowered specially (stack-array init)
     /// but children are still `do_compile`'d.
@@ -3966,6 +4119,30 @@ impl Compiler {
     fn node_in_bounds_index(&self, node: &Output<'_>) -> bool {
         self.node_id_of(node)
             .is_some_and(|id| self.typed_sidecar.is_in_bounds_index(id))
+    }
+
+    /// `i % n` into a stack array of length `n` is in-range for non-negative `i`.
+    fn stack_array_mod_index_proven(index: &Output<'_>, n: usize) -> bool {
+        if n == 0 {
+            return false;
+        }
+        let Expression::Mod(_, rhs) = unwrap_expr_output(index).1.as_ref() else {
+            return false;
+        };
+        matches!(
+            unwrap_expr_output(rhs).1.as_ref(),
+            Expression::Integer(m) if *m > 0 && *m as usize == n
+        )
+    }
+
+    fn stack_array_index_proven(
+        &self,
+        index_node: &Output<'_>,
+        index: &Output<'_>,
+        n: usize,
+    ) -> bool {
+        self.node_in_bounds_index(index_node)
+            || Self::stack_array_mod_index_proven(index, n)
     }
 
     fn fn_param_is_sidecar_pin(&self, param: &str) -> bool {
@@ -10379,6 +10556,23 @@ impl Compiler {
                         _ => None,
                     };
                     let tmp_val = self.alloc_temp_slot();
+                    if let Some((base, n)) = stack_info.filter(|(_, n)| *n >= 1 && *n <= 32) {
+                        bytecode.push_store_pop(tmp_val);
+                        let tmp_idx = self.alloc_temp_slot();
+                        bytecode.append(&mut self.do_compile(idx));
+                        bytecode.push_store_pop(tmp_idx);
+                        let proven = self.stack_array_index_proven(target, idx, n);
+                        self.emit_stack_array_select_store(
+                            bytecode,
+                            base,
+                            n,
+                            tmp_idx,
+                            tmp_val,
+                            leave_value_on_stack,
+                            proven,
+                        );
+                        return;
+                    }
                     if stack_info.is_none() {
                         // Heap array RHS always spilled; impure idx STORE seeks past a stranded array pointer.
                         bytecode.push_store_pop(tmp_val);
@@ -10524,6 +10718,21 @@ impl Compiler {
                 Expression::Identifier(name) => self.stack_array_info(name),
                 _ => None,
             };
+            if let Some((base, n)) = stack_info.filter(|(_, n)| *n >= 1 && *n <= 32) {
+                bytecode.append(&mut self.do_compile(idx));
+                let tmp_idx = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp_idx);
+                let proven = self.stack_array_index_proven(target, idx, n);
+                self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
+                bytecode.append(&mut self.do_compile(rhs));
+                bytecode.push(Byte::new(Self::binop_for_assign_op(op, false)));
+                let tmp_val = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp_val);
+                self.emit_stack_array_select_store(
+                    bytecode, base, n, tmp_idx, tmp_val, false, proven,
+                );
+                return;
+            }
             let tmp_arr = self.alloc_temp_slot();
             let tmp_idx = self.alloc_temp_slot();
             bytecode.append(&mut self.do_compile(arr));
@@ -10592,6 +10801,41 @@ impl Compiler {
                     parser::ast::AdjustOp::Dec => Instruction::DEC,
                 };
                 bytecode.push(Byte::new(instr).with_inc_dec(slot, prefix, is_float));
+                return;
+            }
+            if let Expression::Identifier(name) = arr.1.as_ref()
+                && let Some((base, n)) = self.stack_array_info(name)
+                && n >= 1
+                && n <= 32
+            {
+                bytecode.append(&mut self.do_compile(idx));
+                let tmp_idx = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp_idx);
+                let proven = self.stack_array_index_proven(target, idx, n);
+                self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
+                let tmp_old = if !prefix {
+                    let t = self.alloc_temp_slot();
+                    bytecode.push(Byte::new(Instruction::DUPLICATE));
+                    bytecode.push_store_pop(t);
+                    t
+                } else {
+                    0
+                };
+                bytecode.push(Byte::new_with_value(
+                    Instruction::CONST,
+                    Value::from(delta).raw() as _,
+                ));
+                bytecode.push(Byte::new(Instruction::ADD));
+                let tmp_val = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp_val);
+                self.emit_stack_array_select_store(
+                    bytecode, base, n, tmp_idx, tmp_val, false, proven,
+                );
+                if prefix {
+                    bytecode.push_load(tmp_val);
+                } else {
+                    bytecode.push_load(tmp_old);
+                }
                 return;
             }
             let tmp_arr = self.alloc_temp_slot();
@@ -12313,6 +12557,18 @@ impl Compiler {
                 {
                     bytecode.push_load(base + *idx as u32);
                 } else if let Expression::Identifier(name) = target.1.as_ref()
+                    && let Some((base, n)) = self.stack_array_info(name)
+                    && n >= 1
+                    && n <= 32
+                {
+                    bytecode.append(&mut self.do_compile(index));
+                    let idx_slot = self.alloc_temp_slot();
+                    bytecode.push_store_pop(idx_slot);
+                    let proven = self.stack_array_index_proven(ast, index, n);
+                    self.emit_stack_array_select_load(
+                        &mut bytecode, base, n, idx_slot, proven,
+                    );
+                } else if let Expression::Identifier(name) = target.1.as_ref()
                     && let Some((a, b)) = self.unboxed_enum_info(name)
                     && self
                         .unboxed_enum_kind(name)
@@ -13700,6 +13956,27 @@ impl Compiler {
                         bytecode.push_store_pop(base + *i as u32);
                         // Leave value on stack like StoreIndex.
                         bytecode.push_load(base + *i as u32);
+                    } else if let Expression::Identifier(name) = arr.1.as_ref()
+                        && let Some((base, n)) = self.stack_array_info(name)
+                        && n >= 1
+                        && n <= 32
+                    {
+                        self.append_binding_rhs(&mut bytecode, value);
+                        let tmp_val = self.alloc_temp_slot();
+                        bytecode.push_store_pop(tmp_val);
+                        bytecode.append(&mut self.do_compile(idx));
+                        let tmp_idx = self.alloc_temp_slot();
+                        bytecode.push_store_pop(tmp_idx);
+                        let proven = self.stack_array_index_proven(lhs, idx, n);
+                        self.emit_stack_array_select_store(
+                            &mut bytecode,
+                            base,
+                            n,
+                            tmp_idx,
+                            tmp_val,
+                            true,
+                            proven,
+                        );
                     } else {
                         // RHS is evaluated first and spilled. Array may stay on
                         // the operand stack only for push-only index exprs,                         // see `index_keeps_array_on_stack_safe`.

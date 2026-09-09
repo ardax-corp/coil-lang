@@ -4319,6 +4319,58 @@ let n = len(a); \
     }
 
     
+    /// Computed-index store+load on a stack `[T; N]` must not rematerialize
+    /// `[0,0,0]` after StoreIndex (S2f). Checksum is sum 0..5 = 15.
+    #[test]
+    fn stack_array_computed_index_sroa_pack_store() {
+        use common::Instruction;
+        let src = r#"
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        let xs = [0, 0, 0];
+        xs[i % 3] = i;
+        s = s + xs[i % 3];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    if pack(6) != 15 {
+        raise "pack_store sroa checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let pack_bc = &bc[pack_off..];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = pack_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(
+            makes, 0,
+            "computed-index SROA should drop MakeArray; opcodes={names:?}"
+        );
+        assert!(
+            pack_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::StoreIndex
+                    && *b.bytecode() != Instruction::StoreIndexUnchecked),
+            "in-range SROA should not StoreIndex; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pack(6)==15; opcodes={names:?}");
+    }
+
     /// Fixed `[T; N]` locals use consecutive LOAD/STORE for const indices;
     /// escaping the local into a call boxes via MakeArray.
     #[test]
