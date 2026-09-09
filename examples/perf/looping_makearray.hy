@@ -1,9 +1,5 @@
 // S2d: preheader MakeArray + computed-index store (maps + dense).
-// 200000 stores; checksum 200000.
-use io::{stdout};
-use io::sync::{write_all};
-use string::{format, to_bytes};
-
+// 200000 stores; checksum 200000 (raise on mismatch).
 fn bump() -> int {
     let arr = [0, 0, 0, 0];
     let i = 0;
@@ -15,5 +11,7 @@ fn bump() -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", bump())));
+    if bump() != 200000 {
+        raise "looping_makearray checksum";
+    }
 }
