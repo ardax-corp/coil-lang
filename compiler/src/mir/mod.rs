@@ -2206,7 +2206,19 @@ fn main() {
             seeks <= 1,
             "S2f SROA: no residual Seek tax (prologue only if dense); opcodes={names:?}"
         );
-        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        let seek_hw = body
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Seek)
+            .map(|b| b.operand_u32())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            seek_hw <= p.operand_stack_slots(),
+            "dense Seek {seek_hw} exceeds operand stack {}",
+            p.operand_stack_slots()
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "bump checksum; opcodes={names:?}");
     }
