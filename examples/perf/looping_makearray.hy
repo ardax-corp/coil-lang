@@ -12,6 +12,6 @@ fn bump() -> int {
 
 fn main() {
     if bump() != 200000 {
-        raise "looping_makearray checksum";
+        panic "looping_makearray checksum";
     }
 }
