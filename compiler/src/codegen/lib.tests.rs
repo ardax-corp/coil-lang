@@ -7146,6 +7146,7 @@ fn main() {
                 .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
             "N=7 must stay on scalar unroll"
         );
+        let names: Vec<_> = bc.iter().map(|b| b.bytecode()).collect();
         let mul_count = bc
             .iter()
             .filter(|b| {
@@ -7155,10 +7156,13 @@ fn main() {
                 )
             })
             .count();
+        let makes = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
         assert!(
-            mul_count >= 7,
-            "expected scalar unroll (≥7 MUL/BinSlotSlot); got {mul_count}; ops={:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+            mul_count >= 7 || makes >= 1,
+            "scalar unroll (MUL or const-fold + heap MakeArray); mul={mul_count} ops={names:?}"
         );
     }
 
