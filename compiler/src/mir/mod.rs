@@ -3,7 +3,7 @@
 //! InstCombine (P7 / COI-281), DestProp (P8 / COI-282),
 //! IV strength reduction (P9 / COI-283), cross-block GVN/PRE (P10 / COI-284),
 //! conservative float peeps (P11 / COI-285), saxpy-reduce HostInvoke
-//! packs (P12 / COI-286), I1 heap/niche `MirTy` names (COI-293), and
+//! packs (P12 / COI-286), compiler-only `V*` SIMD (COI-310), I1 heap/niche `MirTy` names (COI-293), and
 //! I2 match / `JumpIfMatch` on niche, two-slot, and boxed-overlap payloads
 //! (COI-294 / COI-302), and
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
@@ -47,6 +47,7 @@ mod licm;
 mod lower;
 mod pack;
 mod specialize;
+mod vectorize;
 mod strength;
 mod stackmap;
 mod string_barrier;
@@ -675,6 +676,49 @@ fn main() {
         assert!(
             !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
             "packed axpy must not keep DenseBin"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_vectorizes_stride1_iota_store() {
+        let src = r#"
+fn fill(Vec<int> v) -> int {
+    let i = 0;
+    while i < len(v) {
+        v[i] = i;
+        i = i + 1;
+    }
+    return len(v);
+}
+fn main() {
+    let v: Vec<int> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
+    let n = fill(v);
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + v[i];
+        i = i + 1;
+    }
+    if s != 120 {
+        raise "fill simd checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile fill");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::VStore),
+            "stride-1 iota store must emit VStore; opcodes={:?}",
+            bc.iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::VBin),
+            "expected VBin splat/iota"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         p.wire_host_natives(&mut vm);

@@ -285,7 +285,7 @@ pub(super) fn emit_cond_jumps(
     }
 }
 
-fn emit_inst(
+pub(super) fn emit_inst(
     out: &mut Vec<IlOp>,
     inst: &MirInst,
     func: &MirFunc,
