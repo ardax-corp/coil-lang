@@ -3,11 +3,16 @@
 S2d ([PR #365](https://github.com/ardax-corp/coil-lang/pull/365)) kept
 **in-loop** `Make*` off dense after an ~18% regress. S2e
 ([COI-316](https://linear.app/ardax/issue/COI-316)) removes per-residual
-`Seek` restore. In-loop Make* stays **refused**: Seek cut is real
-(pack `Seek` 3→1, bump 5→1) but dense is still 8–17% slower than
-fuse-IL. Historical A/B below; S2e board at the end.
+`Seek` restore. S2f–S2k SROA / escape / select delete most in-loop
+`Make*` (those bodies already take dense). S2l
+([COI-322](https://linear.app/ardax/issue/COI-322)) is the leftover
+policy: **try** dense so MIR SROA / LICM can drop or hoist the alloc;
+**keep** it only when the reconstruct cost is ≤ fuse-IL. Residual
+in-loop Make* still loses to invert+fuse (LOAD/STORE boxing). Historical
+A/B below; S2e / S2l boards at the end.
 
-`COIL_S2D_DENSE_INLOOP=1` forces in-loop dense at compile time (A/B).
+`COIL_S2D_DENSE_INLOOP=1` forces in-loop dense (A/B). `=0` restores the
+S2e refuse. Unset is the cost-gate.
 
 ## Where the 18% came from
 
@@ -244,8 +249,9 @@ hyperfine -w 2 -r 8). `coil-dissect --fn pack` / `bump`:
 | pack / pack_arith / pack_wide | 1 | 0 | 0 | 0 |
 | bump | 2 (dense) | 0 | 1 | 0 |
 
-`COIL_S2D_DENSE_INLOOP=1` is still S2e in-loop Make* only. Proven
-select diamonds now take dense (S2k).
+`COIL_S2D_DENSE_INLOOP=1` still forces residual in-loop Make* dense.
+Proven select diamonds take dense (S2k). S2l cost-gates leftover
+escaping Make* (see board below).
 
 | kernel | parent | tip | ratio |
 |---|---|---|---|
@@ -261,3 +267,33 @@ Parent `pack_store` / `bump` return **0** (Index rematerializes zeros;
 
 Flagship `.hyc` sha256 identical: `mandelbrot` / `tak` / `nsieve` /
 `binary_trees` / `fib`.
+
+## S2l leftover in-loop Make* (COI-322)
+
+After S2f–S2k, `pack` / `pack_arith` / `pack_wide` / `pack_store` /
+`bump` are **Make-free** (slot SROA + dense select). The remaining
+in-loop `Make*` shape is an **escaping** heap array (`take([i, i+1])`,
+zip/broadcast results, grow `ArrayPush`). Those still allocate once per
+trip; invert+fuse stays cheaper than dense boxing.
+
+Default (`COIL_S2D_DENSE_INLOOP` unset):
+
+1. Do not refuse at infer. MIR SROA / LICM may delete or hoist the alloc.
+2. If the reconstruct still has Make* inside a loop, keep dense only
+   when `emit_replace_cost(dense) ≤ emit_replace_cost(fuse)` (Seek /
+   StorePop weight 2, labels free — same as LIR).
+3. Otherwise stay fuse-IL. `=1` / `=0` remain A/B overrides.
+
+Hit: `examples/perf/s2d_inloop_escape.hy` (`pack(n)` = `n²`; N=2e6
+checksum `4000000000000`).
+
+| Body | Make* after S2k | Default | Force-dense vs fuse |
+|------|-----------------|---------|---------------------|
+| pack / arith / wide / store | 0 (SROA) | dense select (S2k) | n/a (already Make-free) |
+| preheader bump | 0 (SROA) | dense select (S2k) | n/a |
+| `s2d_inloop_escape` | 1 / trip | **fuse-IL** (cost-gate) | slower (boxing) — see prove board |
+
+**Remaining refuse:** residual escaping Make* (this gate), S2h OOB
+select+alloc on a 64-slot prove frame, post-loop-only `return [x]`,
+unmapped alloc, grow dest, arity > 32, `Vec.push` / class `new` loops.
+No further S2* tickets in the refuse queue.

@@ -142,7 +142,8 @@ Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `result_try_churn`, `mir_cse_divf`, `mir_licm_divf`, `mir_instcombine`,
 `mir_destprop`, `mir_iv_sr`, `mir_gvn_divf`, `mir_float_pipeline`,
 `mir_simd_axpy`, `vec_scan` (`fill` V0 / `scan` V1), `vec_axpy` (V1 FMA),
-`s2j_class_sroa`, `s2d_inloop_pack` / `pack_store` (S2k dense select).
+`s2j_class_sroa`, `s2d_inloop_pack` / `pack_store` (S2k dense select),
+`s2d_inloop_escape` (S2l leftover Make* cost-gate).
 
 ## AOT priorities
 
