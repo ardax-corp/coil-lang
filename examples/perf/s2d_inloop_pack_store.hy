@@ -1,5 +1,9 @@
-// In-loop MakeArray + Index + StoreIndex (computed index).
+// In-loop MakeArray + Index + StoreIndex (computed index) — S2f SROA hit.
 // N=2000000; checksum 1999999000000 (sum 0..n-1).
+use io::{stdout};
+use io::sync::{write_all};
+use string::{format, to_bytes};
+
 fn pack(int n) -> int {
     let i = 0;
     let s = 0;
@@ -13,7 +17,5 @@ fn pack(int n) -> int {
 }
 
 fn main() {
-    if pack(2000000) != 1999999000000 {
-        raise "s2d_inloop_pack_store checksum";
-    }
+    write_all(stdout(), to_bytes(format("%i", pack(2000000))));
 }

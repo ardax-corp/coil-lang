@@ -145,8 +145,9 @@ requirement — maps already root live heap slots. S2e deletes those Seeks.
 
 Pins stay fuse-IL: pin keys still do not survive the **prologue** Seek.
 
-In-loop mapped Make* stays **off** by default. Next: SROA / hoist
-(COI-315), not more Seeks.
+In-loop mapped Make* stays **off** by default. S2f (COI-315) SROAs
+non-escaping `[T; N]` computed-index load/store so `pack_store` does not
+rebuild `[0,0,0]` after `StoreIndex`.
 
 ## S2e board (coil-embed packaged, `COIL_AUTO_PAR=0`)
 
@@ -176,3 +177,27 @@ Seek-less win (prologue `Seek` only).
 
 `nsieve` / `binary_trees` / `array_mut` / `gc_churn` do not take in-loop
 Make* dense (`Vec.push` / I4 / classes).
+
+## S2f SROA / StoreIndex reuse (COI-315)
+
+Codegen already exploded `[T; N]` locals into slots for **const** index.
+Computed `xs[i % 3] = i; s += xs[i % 3]` boxed twice per trip (`MakeArray`
+from stale zeros, then `Index` of a *new* `[0,0,0]`). VM `StoreIndex`
+mutates in place; the rematerialized array never saw the store — so
+`pack_store` returned `0` (the old raise used a >i32 literal and did not
+fire).
+
+S2f:
+
+- **Landed:** slot-select SROA for non-escaping `[T; N]` computed index
+  (load / store / `+=` / `++`). `i % N` is treated as in-range.
+  MIR `sroa` rewrites a second `Alloc` of the same elems after
+  `StoreIndex` to the mutated array. MIR LICM may hoist invariant
+  `Alloc`/`GcBarrier` when the loop has no `StoreIndex` / `CALL`.
+- **Refused:** escaping / returned / call-arg / `ArrayPush` / field /
+  host arrays; computed *elements* (`[i, i+1, i+2]`, `vec_array.hy`);
+  arity > 32; named class SROA; negative `i % N` (last slot, not OOB);
+  in-loop Make* dense (S2e boxing tax unchanged).
+
+`pack` / `pack_arith` / `pack_wide` keep one in-loop `MakeArray` (variant
+elems). `pack_store` should show **0** `MakeArray` after S2f.
