@@ -28,7 +28,10 @@ typed instances with ≤2 fields keep those slots in the header
 Do not treat any of these as a nursery or a second ArrayPtr.
 
 Traversal stays the intrusive `head` list. Collection trigger stays
-`alloc_bytes` versus `gc_next_threshold`.
+`alloc_bytes` versus `gc_next_threshold` while **idle**. Incremental mark +
+SATB + lazy sweep (COI-309 S4) is documented in
+[gc-incremental.md](gc-incremental.md). Mark seeds roots via slab lookup;
+the list walk is only the sweep cursor.
 
 ### Lookup
 
