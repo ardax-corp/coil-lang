@@ -2008,7 +2008,8 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_makearray_and_new_stay_fuse_il() {
+    fn pipeline_makearray_loop_takes_dense_when_mapped() {
+        // Inlined `take([i, i+1])` leaves in-loop MakeArray; S2d maps it.
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0];
@@ -2023,7 +2024,9 @@ fn hot(int n) -> int {
     return s;
 }
 fn main() {
-    let _ = hot(3);
+    if hot(3) != 3 {
+        raise "hot checksum";
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
@@ -2039,19 +2042,18 @@ fn main() {
             .map(|s| s.entry_pc as usize)
             .unwrap_or(bc.len());
         let hot_bc = &bc[start..end];
+        let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
             hot_bc.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
-            "I5 keeps alloc on fuse-IL; opcodes={:?}",
-            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "S2d reconstructs in-loop MakeArray; opcodes={names:?}"
         );
         assert!(
-            hot_bc
-                .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "I5 must not dense-specialize an allocating loop"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S2d mapped allocating loop may take dense; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "hot checksum; opcodes={names:?}");
     }
 
     #[test]
