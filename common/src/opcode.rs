@@ -361,6 +361,17 @@ pub enum Instruction {
     DenseUnary,
     /// Dense cast. `[31:24]` kind, `[15:8]` dest, `[7:0]` src.
     DenseCast,
+
+    /// Compiler-only 8-lane load (COI-310). Numeric heap words only.
+    /// Operand: `[31:24]` ty, `[23:16]` vdest, `[15:8]` arr slot, `[7:0]` idx slot.
+    VLoad,
+    /// Compiler-only 8-lane store. Same packing as [`Self::VLoad`].
+    VStore,
+    /// Compiler-only 8-lane binop / splat / iota. Same packing as [`Self::DenseBin`].
+    /// Dest / src bytes are vector-register ids except splat (`a` is a frame slot).
+    VBin,
+    /// Compiler-only vector move. `[15:8]` dest, `[7:0]` src (vector regs).
+    VMove,
 }
 
 impl From<u8> for Instruction {
@@ -459,6 +470,28 @@ pub mod dense {
     pub const fn unpack_cmp(kind: u8) -> (u8, u8) {
         (kind >> 4, kind & 0x0F)
     }
+}
+
+/// Compiler-only SIMD (`V*`) kinds. Lane width is [`simd::LANES`].
+pub mod simd {
+    use super::dense;
+
+    pub const LANES: usize = 8;
+    pub const NREGS: usize = 8;
+
+    pub const IADD64: u8 = dense::IADD64;
+    pub const ISUB64: u8 = dense::ISUB64;
+    pub const IMUL64: u8 = dense::IMUL64;
+    pub const FADD64: u8 = dense::FADD64;
+    pub const FSUB64: u8 = dense::FSUB64;
+    pub const FMUL64: u8 = dense::FMUL64;
+    pub const FDIV64: u8 = dense::FDIV64;
+    pub const SPLAT_I64: u8 = 32;
+    pub const SPLAT_F64: u8 = 33;
+    pub const IOTA_I64: u8 = 34;
+    pub const IOTA_F64: u8 = 35;
+    pub const INEG: u8 = 36;
+    pub const FNEG: u8 = 37;
 }
 
 /// Slot index when `operand` is an indexed [`Instruction::SetField`].
@@ -622,6 +655,10 @@ impl Instruction {
             Self::DenseMove => "DenseMove",
             Self::DenseUnary => "DenseUnary",
             Self::DenseCast => "DenseCast",
+            Self::VLoad => "VLoad",
+            Self::VStore => "VStore",
+            Self::VBin => "VBin",
+            Self::VMove => "VMove",
         }
     }
 }
@@ -1630,7 +1667,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DenseCast as u8;
+        let last = Instruction::VMove as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
