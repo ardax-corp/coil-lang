@@ -22,7 +22,7 @@ pub struct IlFunc {
     /// Non-escaping unboxed class field ranges `(base, n)` from the
     /// local_escape sidecar (I3). Empty when the body has no such locals.
     pub unboxed_fields: Vec<(u32, u32)>,
-    /// Body emitted S2f computed-index slot-select (keep fuse-IL).
+    /// Body emitted S2f computed-index slot-select (S2k: dense/LIR when sound).
     pub sroa_select: bool,
 }
 

@@ -44,11 +44,9 @@ pub fn try_specialize_body(
     // `COIL_S2D_DENSE_INLOOP=1` re-enables dense for A/B.
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
-    // S2f slot-select diamonds (EQ/JMPF arms) stay fuse-IL: dense reconstruct
-    // of those joins drops last-arm stores and blows the frame.
-    if has_sroa_select_cfg(ops) {
-        return None;
-    }
+    // S2k: slot-select diamonds may take dense when Seek fits the 64-slot
+    // prove frame and last-arm writes survive reconstruct.
+    let select_cfg = has_sroa_select_cfg(ops);
     let has_alloc = ops.iter().any(refuses_alloc);
     let force_dense_inloop = std::env::var_os("COIL_S2D_DENSE_INLOOP")
         .is_some_and(|v| v != "0");
@@ -127,6 +125,9 @@ pub fn try_specialize_body(
     }
     // Const-fold must not erase every Index (for-in / invert+fuse leftover).
     if count_index(ops) > 0 && count_index(&out) == 0 {
+        return None;
+    }
+    if select_cfg && !select_reconstruct_ok(ops, &out) {
         return None;
     }
     Some((out, abi))
@@ -275,7 +276,74 @@ pub fn try_lower_abi_body_with(
             return None;
         }
     }
+    if has_sroa_select_cfg(ops) && !select_reconstruct_ok(ops, &out) {
+        return None;
+    }
     Some(out)
+}
+
+/// Prove-frame cap used by `Machine::<64>` MIR tests and S2k accept.
+const SELECT_OPERAND_STACK_CAP: u32 = 64;
+
+/// Seek must fit the 64-slot prove frame. Last-arm writes must remain as
+/// `StorePop` (LIR) or `DenseMove` (dense phi copies).
+fn select_reconstruct_ok(src: &[IlOp], out: &[IlOp]) -> bool {
+    if max_seek(out) > SELECT_OPERAND_STACK_CAP {
+        return false;
+    }
+    last_arm_writes(out) >= last_arm_writes(src)
+}
+
+fn max_seek(ops: &[IlOp]) -> u32 {
+    ops.iter()
+        .filter_map(|op| match op {
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
+                Some(byte.operand_u32())
+            }
+            _ => None,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+fn last_arm_writes(ops: &[IlOp]) -> usize {
+    let mut n = 0usize;
+    for (i, op) in ops.iter().enumerate() {
+        if !is_select_write(op) {
+            continue;
+        }
+        if is_last_arm_write(ops, i) {
+            n += 1;
+        }
+    }
+    n
+}
+
+fn is_select_write(op: &IlOp) -> bool {
+    matches!(op, IlOp::StorePop { .. })
+        || matches!(
+            op,
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::STORE | Instruction::StorePop | Instruction::DenseMove
+                )
+        )
+}
+
+/// A last arm falls into a join: write, then only labels until a join bind
+/// (no intervening jump).
+fn is_last_arm_write(ops: &[IlOp], write_i: usize) -> bool {
+    let mut saw_join = false;
+    for op in &ops[write_i + 1..] {
+        match op {
+            IlOp::Label(_) | IlOp::JoinLabel(_) => saw_join = true,
+            IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. } => return false,
+            _ if saw_join => return true,
+            _ => {}
+        }
+    }
+    saw_join
 }
 
 /// S2f computed-index slot-select: several EQ/JMPF arms into one join.

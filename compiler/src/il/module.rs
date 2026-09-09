@@ -283,9 +283,6 @@ impl IlModule {
             let mut progressed = false;
             for i in pending.iter().copied() {
                 let body = &mut self.funcs[i];
-                if body.meta.sroa_select {
-                    continue;
-                }
                 if let Some((dense, abi)) = crate::mir::try_specialize_body(
                     &body.ops,
                     &body.meta.name,
@@ -316,9 +313,6 @@ impl IlModule {
                 break;
             }
             let body = &mut self.funcs[i];
-            if body.meta.sroa_select {
-                continue;
-            }
             if let Some(lir) = crate::mir::try_lower_abi_body_with(
                 &body.ops,
                 &body.meta.name,
