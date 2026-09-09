@@ -372,6 +372,13 @@ pub enum Instruction {
     VBin,
     /// Compiler-only vector move. `[15:8]` dest, `[7:0]` src (vector regs).
     VMove,
+    /// Compiler-only horizontal reduce into a scalar slot (COI-311).
+    /// Operand: `[31:24]` ty (`TY_I64` / `TY_F64`), `[23:16]` dest slot,
+    /// `[15:8]` vsrc. `dest = fold_left_add(dest, vsrc)` (P11 left-assoc).
+    VReduce,
+    /// Compiler-only conservative FMA (COI-311). Same packing as [`Self::VBin`].
+    /// `v[dest] = v[a] * v[b] + v[dest]` (mul then add; two IEEE roundings).
+    VFma,
 }
 
 impl From<u8> for Instruction {
@@ -659,6 +666,8 @@ impl Instruction {
             Self::VStore => "VStore",
             Self::VBin => "VBin",
             Self::VMove => "VMove",
+            Self::VReduce => "VReduce",
+            Self::VFma => "VFma",
         }
     }
 }
@@ -1667,7 +1676,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::VMove as u8;
+        let last = Instruction::VFma as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
