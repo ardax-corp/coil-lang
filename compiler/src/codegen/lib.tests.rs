@@ -4338,7 +4338,7 @@ fn pack(int n) -> int {
 }
 fn main() {
     if pack(3) != 3 || pack(6) != 15 {
-        raise "pack_store sroa checksum";
+        panic "pack_store sroa checksum";
     }
 }
 "#;
@@ -4386,7 +4386,7 @@ fn pack(int n) -> int {
 }
 fn main() {
     if pack(4) != 9 || pack(6) != 21 {
-        raise "pack computed-elem checksum";
+        panic "pack computed-elem checksum";
     }
 }
 "#;

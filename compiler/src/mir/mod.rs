@@ -2167,7 +2167,7 @@ fn bump() -> int {
 }
 fn main() {
     if bump() != 8 {
-        raise "bump checksum";
+        panic "bump checksum";
     }
 }
 "#;

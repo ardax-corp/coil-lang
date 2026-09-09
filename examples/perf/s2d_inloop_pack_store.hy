@@ -15,9 +15,9 @@ fn pack(int n) -> int {
 fn main() {
     let n = 2000000;
     if pack(6) != 15 {
-        raise "s2d_inloop_pack_store pack(6)";
+        panic "s2d_inloop_pack_store pack(6)";
     }
     if pack(n) != n * (n - 1) / 2 {
-        raise "s2d_inloop_pack_store checksum";
+        panic "s2d_inloop_pack_store checksum";
     }
 }
