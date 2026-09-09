@@ -32,10 +32,9 @@ fn code_label_id(op: &IlOp) -> Option<u32> {
 
 /// Remap labels in `ops` into a fresh id space starting at `*next_label`.
 ///
-/// Jump targets remap only when this chunk binds them. Do not fall back to
-/// `prior_labels` — that steals an earlier body's id when the bind sits in
-/// epilogue (trailing `if` end-label). Cross-function `Entry` (CALL/CodePtr)
-/// is patched separately from each function's recorded entry label.
+/// Jump targets that this chunk binds remap locally. Targets still unbound
+/// after [`super::super::module::absorb_trailing_labels`] may use
+/// `prior_labels` (true cross-function jumps). CALL/CodePtr use Entry.
 pub(crate) fn remap_label_space(
     ops: &[IlOp],
     next_label: &mut u32,
@@ -69,11 +68,12 @@ pub(crate) fn remap_label_space(
                 hint,
             } => IlOp::Jump {
                 kind: *kind,
-                // Intra-body jumps only. Falling back to `prior_labels` steals
-                // another function's remapped id when this chunk's bind lives
-                // in epilogue/glue (trailing `if` end-label). Cross-function
-                // jumps are patched after concat.
-                target: Label(map.get(&target.0).copied().unwrap_or(target.0)),
+                target: Label(
+                    map.get(&target.0)
+                        .copied()
+                        .or_else(|| prior_labels.get(&target.0).copied())
+                        .unwrap_or(target.0),
+                ),
                 loc: *loc,
                 hint: *hint,
             },
