@@ -2008,8 +2008,8 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_makearray_and_new_stay_fuse_il() {
-        // CALL + in-loop MakeArray stays fuse-IL (map lift refuses user CALL).
+    fn pipeline_inlined_take_makearray_takes_dense() {
+        // `take` inlines; mapped in-loop Make* + Index is S2e dense.
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0];
@@ -2048,9 +2048,14 @@ fn main() {
             "in-loop MakeArray stays; opcodes={names:?}"
         );
         assert!(
-            hot_bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
-            "in-loop MakeArray stays off dense; opcodes={names:?}"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "inlined take + MakeArray takes dense; opcodes={names:?}"
         );
+        let seeks = hot_bc
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Seek)
+            .count();
+        assert_eq!(seeks, 1, "S2e prologue Seek only; opcodes={names:?}");
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "hot checksum; opcodes={names:?}");
