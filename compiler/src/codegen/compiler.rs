@@ -3776,7 +3776,8 @@ impl Compiler {
                 self.expr_may_clobber_operand_stack(recv)
             }
             Expression::Index(recv, idx) => {
-                self.expr_may_clobber_operand_stack(recv)
+                self.stack_array_select_index(recv, idx.as_ref())
+                    || self.expr_may_clobber_operand_stack(recv)
                     || idx
                         .as_ref()
                         .is_some_and(|i| self.expr_may_clobber_operand_stack(i))
@@ -4131,6 +4132,29 @@ impl Compiler {
     ) -> bool {
         self.node_in_bounds_index(index_node)
             || Self::stack_array_mod_index_proven(index, n)
+    }
+
+    /// Computed-index SROA uses STORE/JMP that share the operand stack.
+    fn stack_array_select_index(&self, arr: &Output<'_>, idx: Option<&Output<'_>>) -> bool {
+        let Some(idx) = idx else {
+            return false;
+        };
+        let Expression::Identifier(name) = arr.1.as_ref() else {
+            return false;
+        };
+        let Some((.., n)) = self.stack_array_info(name) else {
+            return false;
+        };
+        if n < 1 || n > 32 {
+            return false;
+        }
+        if matches!(
+            unwrap_expr_output(idx).1.as_ref(),
+            Expression::Integer(i) if *i >= 0 && (*i as usize) < n
+        ) {
+            return false;
+        }
+        self.stack_array_index_proven(arr, idx, n)
     }
 
     fn fn_param_is_sidecar_pin(&self, param: &str) -> bool {
@@ -10545,21 +10569,23 @@ impl Compiler {
                     };
                     let tmp_val = self.alloc_temp_slot();
                     if let Some((base, n)) = stack_info.filter(|(_, n)| *n >= 1 && *n <= 32) {
-                        bytecode.push_store_pop(tmp_val);
-                        let tmp_idx = self.alloc_temp_slot();
-                        bytecode.append(&mut self.do_compile(idx));
-                        bytecode.push_store_pop(tmp_idx);
                         let proven = self.stack_array_index_proven(target, idx, n);
-                        self.emit_stack_array_select_store(
-                            bytecode,
-                            base,
-                            n,
-                            tmp_idx,
-                            tmp_val,
-                            leave_value_on_stack,
-                            proven,
-                        );
-                        return;
+                        if proven {
+                            bytecode.push_store_pop(tmp_val);
+                            let tmp_idx = self.alloc_temp_slot();
+                            bytecode.append(&mut self.do_compile(idx));
+                            bytecode.push_store_pop(tmp_idx);
+                            self.emit_stack_array_select_store(
+                                bytecode,
+                                base,
+                                n,
+                                tmp_idx,
+                                tmp_val,
+                                leave_value_on_stack,
+                                true,
+                            );
+                            return;
+                        }
                     }
                     if stack_info.is_none() {
                         // Heap array RHS always spilled; impure idx STORE seeks past a stranded array pointer.
@@ -10707,19 +10733,21 @@ impl Compiler {
                 _ => None,
             };
             if let Some((base, n)) = stack_info.filter(|(_, n)| *n >= 1 && *n <= 32) {
-                bytecode.append(&mut self.do_compile(idx));
-                let tmp_idx = self.alloc_temp_slot();
-                bytecode.push_store_pop(tmp_idx);
                 let proven = self.stack_array_index_proven(target, idx, n);
-                self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
-                bytecode.append(&mut self.do_compile(rhs));
-                bytecode.push(Byte::new(Self::binop_for_assign_op(op, false)));
-                let tmp_val = self.alloc_temp_slot();
-                bytecode.push_store_pop(tmp_val);
-                self.emit_stack_array_select_store(
-                    bytecode, base, n, tmp_idx, tmp_val, false, proven,
-                );
-                return;
+                if proven {
+                    bytecode.append(&mut self.do_compile(idx));
+                    let tmp_idx = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp_idx);
+                    self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, true);
+                    bytecode.append(&mut self.do_compile(rhs));
+                    bytecode.push(Byte::new(Self::binop_for_assign_op(op, false)));
+                    let tmp_val = self.alloc_temp_slot();
+                    bytecode.push_store_pop(tmp_val);
+                    self.emit_stack_array_select_store(
+                        bytecode, base, n, tmp_idx, tmp_val, false, true,
+                    );
+                    return;
+                }
             }
             let tmp_arr = self.alloc_temp_slot();
             let tmp_idx = self.alloc_temp_slot();
@@ -10795,12 +10823,12 @@ impl Compiler {
                 && let Some((base, n)) = self.stack_array_info(name)
                 && n >= 1
                 && n <= 32
+                && self.stack_array_index_proven(target, idx, n)
             {
                 bytecode.append(&mut self.do_compile(idx));
                 let tmp_idx = self.alloc_temp_slot();
                 bytecode.push_store_pop(tmp_idx);
-                let proven = self.stack_array_index_proven(target, idx, n);
-                self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
+                self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, true);
                 let tmp_old = if !prefix {
                     let t = self.alloc_temp_slot();
                     bytecode.push(Byte::new(Instruction::DUPLICATE));
@@ -10817,7 +10845,7 @@ impl Compiler {
                 let tmp_val = self.alloc_temp_slot();
                 bytecode.push_store_pop(tmp_val);
                 self.emit_stack_array_select_store(
-                    bytecode, base, n, tmp_idx, tmp_val, false, proven,
+                    bytecode, base, n, tmp_idx, tmp_val, false, true,
                 );
                 if prefix {
                     bytecode.push_load(tmp_val);
@@ -12548,13 +12576,13 @@ impl Compiler {
                     && let Some((base, n)) = self.stack_array_info(name)
                     && n >= 1
                     && n <= 32
+                    && self.stack_array_index_proven(ast, index, n)
                 {
                     bytecode.append(&mut self.do_compile(index));
                     let idx_slot = self.alloc_temp_slot();
                     bytecode.push_store_pop(idx_slot);
-                    let proven = self.stack_array_index_proven(ast, index, n);
                     self.emit_stack_array_select_load(
-                        &mut bytecode, base, n, idx_slot, proven,
+                        &mut bytecode, base, n, idx_slot, true,
                     );
                 } else if let Expression::Identifier(name) = target.1.as_ref()
                     && let Some((a, b)) = self.unboxed_enum_info(name)
@@ -13948,6 +13976,7 @@ impl Compiler {
                         && let Some((base, n)) = self.stack_array_info(name)
                         && n >= 1
                         && n <= 32
+                        && self.stack_array_index_proven(lhs, idx, n)
                     {
                         self.append_binding_rhs(&mut bytecode, value);
                         let tmp_val = self.alloc_temp_slot();
@@ -13955,7 +13984,7 @@ impl Compiler {
                         bytecode.append(&mut self.do_compile(idx));
                         let tmp_idx = self.alloc_temp_slot();
                         bytecode.push_store_pop(tmp_idx);
-                        let proven = self.stack_array_index_proven(lhs, idx, n);
+                        let proven = true;
                         self.emit_stack_array_select_store(
                             &mut bytecode,
                             base,

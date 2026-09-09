@@ -2124,7 +2124,7 @@ fn pack(int n) -> int {
 }
 fn main() {
     if pack(4) != 9 {
-        raise "pack checksum";
+        panic "pack checksum";
     }
 }
 "#;
@@ -2235,8 +2235,8 @@ fn pick(int go, int k) -> int {
     return xs[k];
 }
 fn main() {
-    if pick(1, 1) != 5 || pick(0, 2) != 3 {
-        raise "pick checksum";
+    if pick(1, 1) != 5 || pick(0, 2) != 6 {
+        panic "pick checksum";
     }
 }
 "#;

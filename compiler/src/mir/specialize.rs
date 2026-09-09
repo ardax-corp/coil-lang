@@ -44,6 +44,11 @@ pub fn try_specialize_body(
     // `COIL_S2D_DENSE_INLOOP=1` re-enables dense for A/B.
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
+    // S2f slot-select diamonds (EQ/JMPF arms) stay fuse-IL: dense reconstruct
+    // of those joins drops last-arm stores and blows the frame.
+    if has_sroa_select_cfg(ops) {
+        return None;
+    }
     let has_alloc = ops.iter().any(refuses_alloc);
     let force_dense_inloop = std::env::var_os("COIL_S2D_DENSE_INLOOP")
         .is_some_and(|v| v != "0");
@@ -228,6 +233,9 @@ pub fn try_lower_abi_body_with(
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
+    if has_sroa_select_cfg(ops) {
+        return None;
+    }
     let has_alloc = ops.iter().any(refuses_alloc);
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
@@ -271,4 +279,44 @@ pub fn try_lower_abi_body_with(
         }
     }
     Some(out)
+}
+
+/// S2f computed-index slot-select: several EQ/JMPF arms into one join.
+fn has_sroa_select_cfg(ops: &[IlOp]) -> bool {
+    use crate::il::IlJumpKind;
+    let mut n = 0usize;
+    for (i, op) in ops.iter().enumerate() {
+        match op {
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue,
+                ..
+            } if i > 0 && is_eq_byte(&ops[i - 1]) => n += 1,
+            IlOp::Bin {
+                op: Instruction::EQ,
+                ..
+            } => n += 1,
+            IlOp::Byte { byte, .. } if fused_eq_jmp(byte) => n += 1,
+            _ => {}
+        }
+    }
+    n >= 2
+}
+
+fn is_eq_byte(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::EQ
+    ) || matches!(op, IlOp::Bin { op: Instruction::EQ, .. })
+}
+
+fn fused_eq_jmp(byte: &common::Byte) -> bool {
+    match *byte.bytecode() {
+        Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
+            byte.bin_slot_imm_jmpf_parts().0 == Instruction::EQ as u8
+        }
+        Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
+            byte.bin_slot_slot_jmpf_parts().0 == Instruction::EQ as u8
+        }
+        _ => false,
+    }
 }
