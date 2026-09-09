@@ -4265,7 +4265,59 @@ impl Compiler {
     }
 
     fn unboxed_class_info(&self, name: &str) -> Option<(u32, usize)> {
-        self.context.unboxed_class_locals.get(name).copied()
+        self.context
+            .unboxed_class_locals
+            .get(name)
+            .map(|(base, n, _)| (*base, *n))
+    }
+
+    fn unboxed_class_type_name(&self, name: &str) -> Option<&str> {
+        self.context
+            .unboxed_class_locals
+            .get(name)
+            .map(|(_, _, cname)| cname.as_str())
+    }
+
+    /// Rematerialize an unboxed class at a named escape (S2j / S2g).
+    fn emit_box_unboxed_class(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        class_name: &str,
+        base: u32,
+        nfields: usize,
+    ) {
+        let type_id = self.checker.class_type_id(class_name);
+        let n = nfields as u32;
+        bytecode.push(
+            Byte::new(Instruction::InitTyped)
+                .with_operand_u32(common::pack_init_typed(type_id, n)),
+        );
+        let tmp_inst = self.alloc_temp_slot();
+        bytecode.push_store_pop(tmp_inst);
+        for i in 0..nfields {
+            bytecode.push_load(base + i as u32);
+            bytecode.push_load(tmp_inst);
+            bytecode.push_set_field_slot(i as u32);
+            bytecode.push_pop();
+        }
+        bytecode.push_seek(tmp_inst + 1);
+    }
+
+    fn unboxed_class_field_slot(
+        &self,
+        receiver: &Output<'_>,
+        field: &str,
+    ) -> Option<u32> {
+        let Expression::Identifier(name) = unwrap_expr_output(receiver).1.as_ref() else {
+            return None;
+        };
+        let (base, nfields) = self.unboxed_class_info(name)?;
+        let idx = self.class_field_slot(receiver, field)?;
+        if (idx as usize) < nfields {
+            Some(base + idx)
+        } else {
+            None
+        }
     }
 
     /// Snapshot local_escape unbox ranges onto the last recorded `IlFunc` (I3).
@@ -4280,7 +4332,7 @@ impl Compiler {
             .context
             .unboxed_class_locals
             .values()
-            .map(|(base, n)| (*base, *n as u32))
+            .map(|(base, n, _)| (*base, *n as u32))
             .collect();
         self.bytecode.set_last_func_unboxed_fields(fields);
     }
@@ -4296,16 +4348,17 @@ impl Compiler {
         (payload, tag)
     }
 
-    fn alloc_unboxed_class_slots(&mut self, name: &str, n: usize) -> u32 {
+    fn alloc_unboxed_class_slots(&mut self, name: &str, class_name: &str, n: usize) -> u32 {
         let base = self.alloc_binding_slot(name);
         for i in 1..n {
             let pad = format!("__unbox_cls_{name}_{i}");
             let slot = self.context.variables.intern(pad) as u32;
             debug_assert_eq!(slot, base + i as u32);
         }
-        self.context
-            .unboxed_class_locals
-            .insert(name.to_string(), (base, n));
+        self.context.unboxed_class_locals.insert(
+            name.to_string(),
+            (base, n, class_name.to_string()),
+        );
         base
     }
 
@@ -4367,7 +4420,7 @@ impl Compiler {
             self.skip_emit_ids_to_unwrapped(rhs);
             let _ = self.next_emit_id(); // class name
             let _ = class;
-            let base = self.alloc_unboxed_class_slots(name, n);
+            let base = self.alloc_unboxed_class_slots(name, cname, n);
             if let Some(args) = args {
                 for (i, arg) in args.iter().enumerate().take(n) {
                     if rhs_is_match {
@@ -10547,6 +10600,10 @@ impl Compiler {
                 }
             }
             Expression::Access(receiver, field) => {
+                if let Some(slot) = self.unboxed_class_field_slot(receiver, field) {
+                    bytecode.push_load(slot);
+                    return self.is_float_ty(target);
+                }
                 bytecode.append(&mut self.do_compile(receiver));
                 if let Some(idx) = self.class_field_slot(receiver, field) {
                     bytecode.push_load_field(idx);
@@ -10602,6 +10659,13 @@ impl Compiler {
                 }
             }
             Expression::Access(receiver, field) => {
+                if let Some(slot) = self.unboxed_class_field_slot(receiver, field) {
+                    if leave_value_on_stack {
+                        bytecode.push(Byte::new(Instruction::DUPLICATE));
+                    }
+                    bytecode.push_store_pop(slot);
+                    return;
+                }
                 if leave_value_on_stack {
                     bytecode.push(Byte::new(Instruction::DUPLICATE));
                 }
@@ -13171,6 +13235,12 @@ impl Compiler {
                         bytecode.push_load(payload);
                         bytecode.push_load(tag_slot);
                     }
+                } else if let Some((base, nfields)) = self.unboxed_class_info(n) {
+                    let cname = self
+                        .unboxed_class_type_name(n)
+                        .unwrap_or(n)
+                        .to_string();
+                    self.emit_box_unboxed_class(&mut bytecode, &cname, base, nfields);
                 } else if let Some(slot) = self.lookup_slot(n) {
                     if let Some((base, len)) = self.stack_array_info(n) {
                         // Escape multi-slot local to a heap ObjArray.
@@ -13972,13 +14042,20 @@ impl Compiler {
                     }
                 }
                 Expression::Access(target_expr, field) => {
-                    self.append_binding_rhs(&mut bytecode, value);
-                    bytecode.append(&mut self.do_compile(target_expr));
-                    if let Some(idx) = self.class_field_slot(target_expr, field) {
-                        bytecode.push_set_field_slot(idx);
+                    if let Some(slot) = self.unboxed_class_field_slot(target_expr, field) {
+                        self.append_binding_rhs(&mut bytecode, value);
+                        self.skip_emit_ids_to_unwrapped(target_expr);
+                        bytecode.push_store_pop(slot);
+                        bytecode.push_load(slot);
                     } else {
-                        self.emit_field_name(&mut bytecode, field);
-                        bytecode.push_set_field();
+                        self.append_binding_rhs(&mut bytecode, value);
+                        bytecode.append(&mut self.do_compile(target_expr));
+                        if let Some(idx) = self.class_field_slot(target_expr, field) {
+                            bytecode.push_set_field_slot(idx);
+                        } else {
+                            self.emit_field_name(&mut bytecode, field);
+                            bytecode.push_set_field();
+                        }
                     }
                     // Value left on stack for expression result; ExprStatement POPs.
                 }

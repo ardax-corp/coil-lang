@@ -284,8 +284,9 @@ pub enum MirInst {
         base: u32,
         index: u32,
     },
-    /// Store into an unboxed class field slot (ctor / rebind). Escaping
-    /// `p.x = …` stays fuse-IL (`local_escape` poisons those).
+    /// Store into an unboxed class field slot (ctor / rebind / S2j
+    /// non-escaping `p.x = …`). Method/`fn drop()` / identity / private
+    /// use after a named escape stay fuse-IL.
     FieldStore {
         dest: ValueId,
         src: ValueId,
