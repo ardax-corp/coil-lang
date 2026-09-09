@@ -328,6 +328,11 @@ fn emit_vectorized(
             emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
         }
     }
+    // Bound may be an ArrayLen that SSA left in the exit block.
+    if defined_in(func, spec.n) == Some(spec.exit) {
+        let inst = def(func, spec.n)?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+    }
 
     out.push(IlOp::byte(
         Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, i_slot, 0, false),
