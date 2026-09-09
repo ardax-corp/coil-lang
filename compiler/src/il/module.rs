@@ -111,6 +111,7 @@ impl IlModule {
     /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
     pub fn to_flat(&self) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
         let mut out = Vec::new();
+        absorb_trailing_labels(self);
         // New ids must not overlap old Label/Jump/Entry ids still sitting on
         // cross-function CALL sites until the post-concat patch.
         let mut next_label = self.max_code_label().saturating_add(1);
@@ -376,6 +377,51 @@ fn lir_cost_slack(ops: &[IlOp]) -> usize {
     slack
 }
 
+/// Trailing `Label` / `JoinLabel` after a function's last emitting op sit in
+/// glue or epilogue (`emitting_range_to_raw` stops at the last code op).
+/// Keep them on the preceding body so `if cond { raise }` end-labels remap
+/// with that function's jumps instead of colliding with an earlier dense
+/// body's reused emit ids (S3b).
+fn absorb_trailing_labels(module: &mut IlModule) {
+    for i in 0..module.glue.len() {
+        let next_entry = module.funcs.get(i + 1).and_then(|f| f.meta.entry);
+        let mut glue = std::mem::take(&mut module.glue[i]);
+        let take = trailing_label_prefix(&glue, next_entry);
+        if take > 0 {
+            let rest = glue.split_off(take);
+            if let Some(prev) = module.funcs.get_mut(i) {
+                prev.ops.extend(glue);
+            }
+            module.glue[i] = rest;
+        } else {
+            module.glue[i] = glue;
+        }
+    }
+    if let Some(last) = module.funcs.last_mut() {
+        let take = trailing_label_prefix(&module.epilogue, None);
+        if take > 0 {
+            let rest = module.epilogue.split_off(take);
+            last.ops.extend(std::mem::replace(&mut module.epilogue, rest));
+        }
+    }
+}
+
+fn trailing_label_prefix(ops: &[IlOp], stop_entry: Option<Label>) -> usize {
+    let mut take = 0;
+    for op in ops {
+        match op {
+            IlOp::Label(id) | IlOp::JoinLabel(id) => {
+                if stop_entry == Some(*id) {
+                    break;
+                }
+                take += 1;
+            }
+            _ => break,
+        }
+    }
+    take
+}
+
 fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
     for (old, new) in local {
         prior.entry(old).or_insert(new);
@@ -444,7 +490,7 @@ fn remap_cross_function_entry_call_targets(
 
 fn remap_cross_function_jump_targets(
     ops: &mut [IlOp],
-    prior: &HashMap<u32, u32>,
+    _prior: &HashMap<u32, u32>,
     flat_label_ids: &std::collections::HashSet<u32>,
 ) {
     use std::collections::HashSet;
@@ -461,14 +507,13 @@ fn remap_cross_function_jump_targets(
             if local.contains(&target.0) {
                 continue;
             }
+            // Already a post-remap id, or a trailing bind that still uses the
+            // emit-time id (epilogue / absorbed end-label).
             if flat_label_ids.contains(&target.0) {
                 continue;
             }
-            if let Some(&new_id) = prior.get(&target.0) {
-                if new_id != target.0 && !local.contains(&new_id) {
-                    target.0 = new_id;
-                }
-            }
+            // Do not steal an earlier function's remapped id for a jump whose
+            // bind was not in this chunk (S3b). CALL/CodePtr use Entry.
         }
     }
 }
@@ -818,6 +863,71 @@ mod tests {
         assert_eq!(
             entry_target, method_label,
             "unique non-entry CALL must follow the method body label"
+        );
+    }
+
+    #[test]
+    /// `if x != 10 { raise }` binds `end_label` after the last RETURN, so the
+    /// label lives in epilogue. A prior dense body that reused emit id 8 must
+    /// not steal that jump (S3b reverse-index / times_a checksum OOB).
+    #[test]
+    fn to_flat_keeps_trailing_if_end_label_on_last_func() {
+        let loc = loc();
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("sum", Some(Label(3)), 0, 4),
+            ops: vec![
+                IlOp::Label(Label(3)),
+                IlOp::Label(Label(8)),
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("main", Some(Label(7)), 0, 3),
+            ops: vec![
+                IlOp::Label(Label(7)),
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: Label(8),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        m.epilogue = vec![IlOp::Label(Label(8))];
+        let (flat, _, _) = m.to_flat();
+        let main_jmp = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Jump {
+                    target,
+                    kind: IlJumpKind::JumpIfFalse,
+                    ..
+                } => Some(target.0),
+                _ => None,
+            })
+            .expect("main JMPF");
+        let last_label = flat.iter().rev().find_map(|op| match op {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            _ => None,
+        });
+        assert_eq!(
+            Some(main_jmp),
+            last_label,
+            "main skip-raise must bind the trailing end-label, not sum's reused id 8; flat={flat:?}"
+        );
+        let sum_mid = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .nth(1)
+            .expect("sum's second label");
+        assert_ne!(
+            main_jmp, sum_mid,
+            "main must not jump into sum's remapped Label(8)"
         );
     }
 

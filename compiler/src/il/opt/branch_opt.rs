@@ -30,15 +30,6 @@ fn code_label_id(op: &IlOp) -> Option<u32> {
     }
 }
 
-#[inline]
-fn remap_label_target(id: u32, local: &HashMap<u32, u32>, prior: &HashMap<u32, u32>) -> u32 {
-    local
-        .get(&id)
-        .or_else(|| prior.get(&id))
-        .copied()
-        .unwrap_or(id)
-}
-
 /// Remap labels in `ops` into a fresh id space starting at `*next_label`.
 ///
 /// Jump targets that refer to labels bound in earlier concatenated chunks
@@ -77,7 +68,11 @@ pub(crate) fn remap_label_space(
                 hint,
             } => IlOp::Jump {
                 kind: *kind,
-                target: Label(remap_label_target(target.0, &map, prior_labels)),
+                // Intra-body jumps only. Falling back to `prior_labels` steals
+                // another function's remapped id when this chunk's bind lives
+                // in epilogue/glue (trailing `if` end-label). Cross-function
+                // jumps are patched after concat.
+                target: Label(map.get(&target.0).copied().unwrap_or(target.0)),
                 loc: *loc,
                 hint: *hint,
             },
