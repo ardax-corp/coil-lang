@@ -736,6 +736,75 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_vectorizes_stride1_reduce() {
+        let src = r#"
+fn scan(Vec<int> v) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < len(v) {
+        acc = acc + v[i];
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    let v: Vec<int> = Vec::from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    if scan(v) != 120 {
+        raise "scan simd checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile scan");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::VReduce),
+            "stride-1 add-reduce must emit VReduce; opcodes={:?}",
+            bc.iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "scan reduce checksum");
+    }
+
+    #[test]
+    fn pipeline_vectorizes_conservative_fma_store() {
+        let src = r#"
+fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
+    let i = 0;
+    while i < len(x) {
+        y[i] = a * x[i] + y[i];
+        i = i + 1;
+    }
+    return y[0];
+}
+fn main() {
+    let x: Vec<float> = Vec::from([1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0, 13.0, 14.0, 15.0, 16.0]);
+    let y: Vec<float> = Vec::from([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
+    let z = axpy(2.0, x, y);
+    if z != 3.0 {
+        raise "axpy simd checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile axpy");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::VFma),
+            "saxpy store must emit VFma; opcodes={:?}",
+            bc.iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "axpy FMA checksum");
+    }
+
+    #[test]
     fn pipeline_specializes_counted_i64_loop() {
         let src = r#"
 fn sum(int n) -> int {
@@ -2104,10 +2173,8 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let sum_bc = if sum < main { &bc[sum..main] } else { &bc[sum..] };
         assert!(
-            sum_bc
-                .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S3 leftover: Vec index loop stays fuse-IL; opcodes={:?}",
+            sum_bc.iter().any(|b| *b.bytecode() == Instruction::VReduce),
+            "S5b V1: Vec add-reduce emits VReduce; opcodes={:?}",
             sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
@@ -2118,7 +2185,7 @@ fn main() {
                     | Instruction::IndexPin
                     | Instruction::IndexPinUnchecked
             )),
-            "dense reconstruct keeps Index; opcodes={:?}",
+            "scalar tail keeps Index; opcodes={:?}",
             sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
