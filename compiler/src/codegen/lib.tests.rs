@@ -4372,6 +4372,237 @@ fn main() {
     }
 
     #[test]
+    /// S2g: private slot-select then one MakeArray at `return xs`.
+    #[test]
+    fn stack_array_sroa_boxes_at_return_edge() {
+        use common::Instruction;
+        let src = r#"
+fn fill(int n) -> [int; 3] {
+    let xs = [0, 0, 0];
+    let i = 0;
+    while i < n {
+        xs[i % 3] = i;
+        i = i + 1;
+    }
+    return xs;
+}
+fn main() {
+    let a = fill(6);
+    if a[0] + a[1] + a[2] != 12 {
+        panic "return-edge checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let fill_off = pipeline
+            .compiler_mut()
+            .get_function("fill")
+            .expect("fill");
+        let fill_bc = &bc[fill_off..];
+        let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = fill_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(
+            makes, 1,
+            "one box at return; opcodes={names:?}"
+        );
+        assert!(
+            fill_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::StoreIndex
+                    && *b.bytecode() != Instruction::StoreIndexUnchecked),
+            "private region stays slot-select; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "fill(6) elems sum 12; opcodes={names:?}");
+    }
+
+    /// S2g: box once as a call argument after computed-index stores.
+    #[test]
+    fn stack_array_sroa_boxes_at_call_arg_edge() {
+        use common::Instruction;
+        let src = r#"
+fn sum3([int; 3] xs) -> int {
+    return xs[0] + xs[1] + xs[2];
+}
+fn pack(int n) -> int {
+    let xs = [0, 0, 0];
+    let i = 0;
+    while i < n {
+        xs[i % 3] = i;
+        i = i + 1;
+    }
+    return sum3(xs);
+}
+fn main() {
+    if pack(6) != 12 {
+        panic "call-arg checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let pack_bc = &bc[pack_off..];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = pack_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(makes, 1, "one box at call-arg; opcodes={names:?}");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
+    }
+
+    /// S2g: `ArrayPush` of the array value boxes once; dest stays heap Vec.
+    #[test]
+    fn stack_array_sroa_boxes_at_array_push_value() {
+        use common::Instruction;
+        let src = r#"
+fn pack(int n) -> int {
+    let xs = [0, 0, 0];
+    let i = 0;
+    while i < n {
+        xs[i % 3] = i;
+        i = i + 1;
+    }
+    let v = Vec::from([[1, 1, 1]]);
+    v.push(xs);
+    let last = v[1];
+    return last[0] + last[1] + last[2];
+}
+fn main() {
+    if pack(6) != 12 {
+        panic "array-push checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let pack_bc = &bc[pack_off..];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = pack_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert!(
+            makes >= 1,
+            "box xs at ArrayPush (plus Vec::from row); opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
+    }
+
+    /// S2g: field store of a slot array boxes once.
+    #[test]
+    fn stack_array_sroa_boxes_at_field_store() {
+        use common::Instruction;
+        let src = r#"
+class Holder {
+    pub a: [int; 3]
+}
+fn pack(int n) -> int {
+    let xs = [0, 0, 0];
+    let i = 0;
+    while i < n {
+        xs[i % 3] = i;
+        i = i + 1;
+    }
+    let h = new Holder([0, 0, 0]);
+    h.a = xs;
+    return h.a[0] + h.a[1] + h.a[2];
+}
+fn main() {
+    if pack(6) != 12 {
+        panic "field-store checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let pack_bc = &bc[pack_off..];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = pack_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert!(
+            makes >= 1,
+            "box xs at field store; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
+    }
+
+    /// S2g: HostInvoke (`Vec::from`) observes a boxed snapshot.
+    #[test]
+    fn stack_array_sroa_boxes_at_host_edge() {
+        use common::Instruction;
+        let src = r#"
+fn pack(int n) -> int {
+    let xs = [0, 0, 0];
+    let i = 0;
+    while i < n {
+        xs[i % 3] = i;
+        i = i + 1;
+    }
+    let v = Vec::from(xs);
+    return v[0] + v[1] + v[2];
+}
+fn main() {
+    if pack(6) != 12 {
+        panic "host-edge checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let pack_bc = &bc[pack_off..];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            pack_bc
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
+            "Vec::from is HostInvoke; opcodes={names:?}"
+        );
+        let makes = pack_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(makes, 1, "one box at host; opcodes={names:?}");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
+    }
+
+    #[test]
     fn stack_array_computed_elem_index_sroa_checksum() {
         let src = r#"
 fn pack(int n) -> int {
