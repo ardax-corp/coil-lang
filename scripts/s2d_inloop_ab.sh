@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# S2e A/B: parent vs tip fuse (default) vs tip dense (`COIL_S2D_DENSE_INLOOP=1`).
+# S2l A/B: parent vs tip default (cost-gate) vs tip force-dense
+# (`COIL_S2D_DENSE_INLOOP=1`). `=0` is tip fuse-IL (S2e refuse).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 OUT="${OUT:-/tmp/coil-s2d-inloop-ab}"
@@ -18,6 +19,7 @@ benches=(
   examples/perf/s2d_inloop_pack_store.hy
   examples/perf/s2d_inloop_pack_arith.hy
   examples/perf/s2d_inloop_pack_wide.hy
+  examples/perf/s2d_inloop_escape.hy
   examples/perf/s2d_preheader_bump.hy
   examples/perf/looping_makearray.hy
 )
@@ -60,11 +62,13 @@ for path in "${benches[@]}"; do
   echo "======== $name ($fn) ========"
   "$PARENT_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.parent.hyc"
   "$CUR_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.tip.hyc"
+  COIL_S2D_DENSE_INLOOP=0 "$CUR_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.fuse.hyc"
   COIL_S2D_DENSE_INLOOP=1 "$CUR_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.dense.hyc"
-  sha256sum "$OUT/${name}.parent.hyc" "$OUT/${name}.tip.hyc" "$OUT/${name}.dense.hyc"
+  sha256sum "$OUT/${name}.parent.hyc" "$OUT/${name}.tip.hyc" "$OUT/${name}.fuse.hyc" "$OUT/${name}.dense.hyc"
   echo "-- checksums --"
   "$CUR_BIN" run "$OUT/${name}.parent.hyc" | tee "$OUT/${name}.parent.out"
   "$CUR_BIN" run "$OUT/${name}.tip.hyc" | tee "$OUT/${name}.tip.out"
+  "$CUR_BIN" run "$OUT/${name}.fuse.hyc" | tee "$OUT/${name}.fuse.out"
   "$CUR_BIN" run "$OUT/${name}.dense.hyc" | tee "$OUT/${name}.dense.out"
   if [[ -x "$DISSECT_BIN" ]]; then
     PARENT_DISSECT="${PARENT_DISSECT:-$(dirname "$PARENT_BIN")/coil-dissect}"
@@ -72,15 +76,19 @@ for path in "${benches[@]}"; do
       "$PARENT_DISSECT" "${ROOTS[@]}" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.parent.dissect.txt" || true
     fi
     "$DISSECT_BIN" "${ROOTS[@]}" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.tip.dissect.txt" || true
+    COIL_S2D_DENSE_INLOOP=0 "$DISSECT_BIN" "${ROOTS[@]}" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.fuse.dissect.txt" || true
     COIL_S2D_DENSE_INLOOP=1 "$DISSECT_BIN" "${ROOTS[@]}" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.dense.dissect.txt" || true
     echo "-- opcode mix tip --"
     count_ops "$OUT/${name}.tip.dissect.txt"
+    echo "-- opcode mix fuse --"
+    count_ops "$OUT/${name}.fuse.dissect.txt"
     echo "-- opcode mix dense --"
     count_ops "$OUT/${name}.dense.dissect.txt"
   fi
   hyperfine -w 2 -r 8 --export-markdown "$OUT/${name}.md" \
     "$CUR_BIN run $OUT/${name}.parent.hyc" \
     "$CUR_BIN run $OUT/${name}.tip.hyc" \
+    "$CUR_BIN run $OUT/${name}.fuse.hyc" \
     "$CUR_BIN run $OUT/${name}.dense.hyc"
 done
 echo "done: $OUT"
