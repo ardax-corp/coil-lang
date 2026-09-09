@@ -6,6 +6,11 @@ OUT="${OUT:-/tmp/coil-s2d-inloop-ab}"
 PARENT_BIN="${PARENT_BIN:-/tmp/coil-s3b/target/release/coil}"
 CUR_BIN="${CUR_BIN:-$ROOT/target/release/coil}"
 DISSECT_BIN="${DISSECT_BIN:-$ROOT/target/release/coil-dissect}"
+STDLIB_SRC="${STDLIB_SRC:-$ROOT/.deps/coil-stdlib/src}"
+ROOTS=()
+if [[ -d "$STDLIB_SRC" ]]; then
+  ROOTS=(--root "$STDLIB_SRC")
+fi
 mkdir -p "$OUT"
 
 benches=(
@@ -53,22 +58,21 @@ for path in "${benches[@]}"; do
   fn="$(fn_for "$path")"
   echo
   echo "======== $name ($fn) ========"
-  "$PARENT_BIN" compile "$ROOT/$path" -o "$OUT/${name}.parent.hyc"
-  "$CUR_BIN" compile "$ROOT/$path" -o "$OUT/${name}.tip.hyc"
-  COIL_S2D_DENSE_INLOOP=1 "$CUR_BIN" compile "$ROOT/$path" -o "$OUT/${name}.dense.hyc"
+  "$PARENT_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.parent.hyc"
+  "$CUR_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.tip.hyc"
+  COIL_S2D_DENSE_INLOOP=1 "$CUR_BIN" compile "${ROOTS[@]}" "$ROOT/$path" -o "$OUT/${name}.dense.hyc"
   sha256sum "$OUT/${name}.parent.hyc" "$OUT/${name}.tip.hyc" "$OUT/${name}.dense.hyc"
   echo "-- checksums --"
   "$CUR_BIN" run "$OUT/${name}.parent.hyc" | tee "$OUT/${name}.parent.out"
   "$CUR_BIN" run "$OUT/${name}.tip.hyc" | tee "$OUT/${name}.tip.out"
   "$CUR_BIN" run "$OUT/${name}.dense.hyc" | tee "$OUT/${name}.dense.out"
   if [[ -x "$DISSECT_BIN" ]]; then
-    for kind in parent tip dense; do
-      # parent archives: dissect from matching compiler if needed; use current dissect
-      "$DISSECT_BIN" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.${kind}.dissect.txt" 2>/dev/null || true
-    done
-    # Re-dissect with the compiler that produced each body by compiling src:
-    "$DISSECT_BIN" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.tip.dissect.txt" || true
-    COIL_S2D_DENSE_INLOOP=1 "$DISSECT_BIN" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.dense.dissect.txt" || true
+    PARENT_DISSECT="${PARENT_DISSECT:-$(dirname "$PARENT_BIN")/coil-dissect}"
+    if [[ -x "$PARENT_DISSECT" ]]; then
+      "$PARENT_DISSECT" "${ROOTS[@]}" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.parent.dissect.txt" || true
+    fi
+    "$DISSECT_BIN" "${ROOTS[@]}" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.tip.dissect.txt" || true
+    COIL_S2D_DENSE_INLOOP=1 "$DISSECT_BIN" "${ROOTS[@]}" "$ROOT/$path" --fn "$fn" > "$OUT/${name}.dense.dissect.txt" || true
     echo "-- opcode mix tip --"
     count_ops "$OUT/${name}.tip.dissect.txt"
     echo "-- opcode mix dense --"

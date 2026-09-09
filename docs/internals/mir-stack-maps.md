@@ -29,7 +29,8 @@ and relocate mapped slots on collect.
   [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
   S2d ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
   lets **preheader** `Make*` + index loops take dense when maps exist.
-  In-loop `Make*` stays off dense (Seek+alloc tax). Compare-only leftovers
+  In-loop `Make*` stays off dense (Seek+alloc tax; measurement:
+  [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)). Compare-only leftovers
   may take LIR. Draft lift keeps inferred param types (not forced `heapref`)
   and snapshots the stack-IL map **before** dense replace so `DenseBin`
   bodies still bind. Post-loop-only `return [x]` after a counted loop stays
