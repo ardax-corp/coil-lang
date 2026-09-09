@@ -63,10 +63,11 @@ encodes those slots as interpreter frame maps. S2c
 lets infer / specialize / `emit_lir` cross alloc **only** when those
 maps exist. Unmapped allocating bodies stay fuse-IL. S3
 ([COI-308](https://linear.app/ardax/issue/COI-308/s3-widen-densemir-coverage-match-call-heap-index))
-widens dense coverage: `Index` / `StoreIndex` / `ArrayLen` residuals,
-one-word `CALL` beyond the dense map, and I6 HostInvoke except I4
-string bytes. Dense+match stays I2 LIR (JumpIfMatch stack protocol vs
-dense regs). Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).
+widens dense coverage: one-word `CALL` beyond the dense map, and I6
+HostInvoke except I4 string bytes. Heap-index / `StoreIndex` stay
+fuse-IL (dense residuals next to `Seek` are unsound on `Vec`).
+Dense+match stays I2 LIR (JumpIfMatch stack protocol vs dense regs).
+Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).
 
 ## P1 — dense exec (COI-268)
 

@@ -81,14 +81,14 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `iv_mul` | `iv_mul_sr.hy` | dense | i64 mul — **W2** (side effect) |
 | `nested` | `licm_nested_chains.hy` | dense | i64 add — **W2** (side effect) |
 | `eval_a` | `nbody.hy` | dense | no back-edge, ≥8 work ops — **W3** |
-| `times_a` / `times_at` | `nbody.hy` | dense + open CALL + index/store | S3 `eval_a` + heap-index |
-| `sum` | `indexed_sum.hy` | dense + index | S3 heap-index loop |
-| `fill` / `scan` | `vec_scan.hy` | dense + index/store | S3 heap-index loop |
+| `times_a` / `times_at` | `nbody.hy` | fuse-IL | S3 leftover: heap-index + CALL (dense residuals unsound on `Vec`) |
+| `sum` | `indexed_sum.hy` | fuse-IL | S3 leftover: heap-index |
+| `fill` / `scan` | `vec_scan.hy` | fuse-IL | S3 leftover: heap-index / store |
 | `main` | `for_in_sum.hy` | fuse-IL | heap + `for` iterator |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | class/field + `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | `CALL` (recursion) |
-| `nsieve` | `nsieve.hy` | dense if inferable; else fuse-IL | `Vec.push` / grow in-loop may keep fuse-IL; index/store stay |
+| `nsieve` | `nsieve.hy` | fuse-IL | heap-index + `Vec.push` |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes |
 | `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | heap / match / two-slot — P3 |
 | `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host |
@@ -99,10 +99,12 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `mir_dense_straight.hy`. The W4 prove bench is `mir_dense_host.hy`
 (`sin` inside an otherwise dense loop). The COI-291 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
-`times_a` call `eval_a`. Recursion (`tak` / `fib`) stays fuse-IL on the
-callee. In-loop `MakeArray` stays fuse-IL (invert+fuse). A live heap
-return (`return [i]`) plus a counted loop without index stays fuse-IL
-so invert+fuse remains observable.
+`times_a` call `eval_a` only when the caller has no heap-index (dense
+index residuals are unsound on `Vec`; those bodies stay fuse-IL).
+Recursion (`tak` / `fib`) stays fuse-IL on the callee. In-loop
+`MakeArray` stays fuse-IL (invert+fuse). A live heap return
+(`return [i]`) plus a counted loop stays fuse-IL so invert+fuse
+remains observable.
 
 ## Language refuse → island (COI-292 I0)
 

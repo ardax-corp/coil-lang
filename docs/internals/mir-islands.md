@@ -76,7 +76,7 @@ lowering. Unicode / regex stay out of MIR.
 | `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | fuse-IL | stay refuse |
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |
-| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a live-heap `roots`; S2b frame maps; S2c dense / LIR when maps exist; S3 `Index` / `StoreIndex` / `ArrayLen` on MIR exec (dense residual or LIR). Dense+match stays LIR (I2) | **I5** / **S2a** / **S2b** / **S2c** / **S3** |
+| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a live-heap `roots`; S2b frame maps; S2c dense / LIR when maps exist. S3 tried dense `Index` / `StoreIndex` residuals — **unsound on `Vec`** (checksum); stay fuse-IL. Dense+match stays LIR (I2) | **I5** / **S2a** / **S2b** / **S2c** / **S3** |
 | `FORMAT` / string ops | fuse-IL (`IlOp::Byte` / `String` / `Print`) | **I4 barrier** — no MIR subset |
 | Non-allowlisted HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
