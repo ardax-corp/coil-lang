@@ -38,12 +38,11 @@ pub fn try_specialize_body(
     // string bytes, heap index / ArrayLen / StoreIndex (dense residuals
     // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
+    // S2d: in-loop / preheader Make* may cross when maps exist.
+    // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    // S3b: heap-index bodies may take V* first, then dense residuals.
-    if super::infer::has_alloc_inside_loop(ops)
-        || (has_alloc && super::infer::has_back_edge(ops))
-    {
+    if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
     }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
@@ -218,10 +217,10 @@ pub fn try_lower_abi_body_with(
 ) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
-    // In-loop Make* stays fuse-IL so invert+fuse (COI-87) remains;
-    // preheader alloc + leftover body may reconstruct when mapped.
+    // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
+    // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_alloc && super::infer::has_back_edge(ops) {
+    if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
     }
     let maps_ok =
