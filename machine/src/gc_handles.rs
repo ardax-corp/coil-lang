@@ -61,7 +61,11 @@ pub fn host_gc_unroot(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
         Some(Object::Root(gc)) => match gc.payload_mut().payload.take() {
-            Some(m) => pack_gc_option(heap, Some(member_to_value(&m))),
+            Some(m) => {
+                let v = member_to_value(&m);
+                heap.satb_shade_member(m);
+                pack_gc_option(heap, Some(v))
+            }
             None => pack_gc_option(heap, None),
         },
         _ => pack_gc_option(heap, None),

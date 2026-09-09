@@ -897,24 +897,27 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    fn write_indexed(elements: &mut [Value], index: i64, value: Value, unchecked: bool) -> bool {
+    fn write_indexed(
+        heap: &mut Heap,
+        elements: &mut [Value],
+        index: i64,
+        value: Value,
+        unchecked: bool,
+    ) -> bool {
         let len = elements.len();
-        if unchecked {
+        let slot = if unchecked {
             let idx = index as usize;
             promise!(index >= 0);
             promise!(idx < len);
-            unsafe {
-                *elements.get_unchecked_mut(idx) = value;
-            }
-            true
+            unsafe { elements.get_unchecked_mut(idx) }
         } else if index >= 0 && (index as usize) < len {
-            unsafe {
-                *elements.get_unchecked_mut(index as usize) = value;
-            }
-            true
+            unsafe { elements.get_unchecked_mut(index as usize) }
         } else {
-            false
-        }
+            return false;
+        };
+        heap.satb_shade_value(*slot);
+        *slot = value;
+        true
     }
 
     fn ffi_type_from_value(v: &Value, heap: &Heap) -> crate::memory::FfiType {
@@ -1058,7 +1061,8 @@ impl<const S: usize> Machine<S> {
         Ok(Value::from(addr as *mut u8))
     }
 
-    /// Mark-and-sweep GC, running registered class finalizers after mark.
+    /// Complete a GC cycle (explicit `gc::collect` / tests). Finishes any
+    /// in-flight incremental sweep first so unmarked survivors are not freed.
     fn gc_collect(&mut self) {
         if self.gc_in_progress {
             self.gc_deferred = true;
@@ -1071,6 +1075,10 @@ impl<const S: usize> Machine<S> {
             VM_GC_COUNT.with(|c| {
                 c.fetch_add(1, Ordering::Relaxed);
             });
+
+            if self.heap.gc_is_sweeping() {
+                self.heap.finish_sweep();
+            }
 
             self.mark_from_vm_roots();
             self.relocate_mapped_slots();
@@ -1104,6 +1112,76 @@ impl<const S: usize> Machine<S> {
             }
         }
         self.gc_in_progress = false;
+    }
+
+    fn gc_start_mark(&mut self) {
+        let roots = self.collect_vm_root_addrs();
+        self.heap.begin_mark(&roots);
+        self.heap.restore_gc_roots(roots);
+    }
+
+    fn gc_remark_vm_roots(&mut self) {
+        let roots = self.collect_vm_root_addrs();
+        self.heap.remark_roots(&roots);
+        self.heap.restore_gc_roots(roots);
+    }
+
+    /// Incremental mark / SATB remark / lazy sweep at an alloc safepoint.
+    fn gc_safepoint(&mut self) {
+        if self.gc_in_progress {
+            return;
+        }
+        match self.heap.gc_phase() {
+            crate::memory::GcPhase::Idle => {
+                if self.heap.should_collect() {
+                    #[cfg(any(test, feature = "vm_profile"))]
+                    VM_GC_COUNT.with(|c| {
+                        c.fetch_add(1, Ordering::Relaxed);
+                    });
+                    self.gc_start_mark();
+                    self.gc_mark_slice();
+                }
+            }
+            crate::memory::GcPhase::Marking => self.gc_mark_slice(),
+            crate::memory::GcPhase::Sweeping => self.gc_sweep_slice(),
+        }
+    }
+
+    fn gc_mark_slice(&mut self) {
+        let n = self.heap.gc_work_quantum();
+        if !self.heap.mark_quantum(n) {
+            return;
+        }
+        self.gc_remark_vm_roots();
+        if !self.heap.mark_quantum(n) {
+            return;
+        }
+        self.relocate_mapped_slots();
+        let queue = self.queue_unmarked_finalizers();
+        if !queue.is_empty() {
+            for (val, _) in &queue {
+                if let Some(obj) = Self::find_object_by_addr(&self.heap, val.raw() as u64) {
+                    self.heap.satb_shade_member(crate::memory::Member::Object(obj));
+                }
+            }
+            self.gc_in_progress = true;
+            for (val, pc) in queue {
+                self.run_finalizer(val, pc);
+            }
+            self.gc_in_progress = false;
+            return;
+        }
+        self.heap.clear_dead_weaks();
+        self.heap.begin_sweep();
+        self.gc_sweep_slice();
+    }
+
+    fn gc_sweep_slice(&mut self) {
+        let n = self.heap.gc_work_quantum();
+        if self.heap.sweep_quantum(n) {
+            self.relocate_mapped_slots();
+            self.program_string_cache.fill(Value::default());
+        }
     }
 
     fn collect_vm_root_addrs(&mut self) -> Vec<u64> {
@@ -1320,15 +1398,16 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// Run GC when live heap bytes exceed the heap threshold.
+    /// Incremental GC work after an allocation safepoint.
     #[inline]
     fn maybe_gc_after_alloc(&mut self, ip: usize) {
-        if unlikely(self.heap.should_collect()) {
-            if unlikely(!self.stack_maps.is_empty()) {
-                self.gc_ip = ip;
-            }
-            self.gc_collect();
+        if likely(self.heap.gc_is_idle() && !self.heap.should_collect()) {
+            return;
         }
+        if unlikely(!self.stack_maps.is_empty()) {
+            self.gc_ip = ip;
+        }
+        self.gc_safepoint();
     }
 
     /// Classify a stack value as an enum member; heap pointers become `Object`.
@@ -3422,6 +3501,9 @@ impl<const S: usize> Machine<S> {
                         {
                             let idx = slot as usize;
                             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
+                            if let Some(old) = gc.as_ref().slot(idx) {
+                                self.heap.satb_shade_member(old);
+                            }
                             gc.as_mut()
                                 .set_slot(idx, Self::value_as_member(&self.heap, value));
                         } else {
@@ -3440,6 +3522,9 @@ impl<const S: usize> Machine<S> {
                         if let Some(crate::memory::Object::Instance(mut gc)) =
                             Self::find_object_by_addr(&self.heap, target_addr)
                         {
+                            if let Some(old) = gc.as_ref().get(key) {
+                                self.heap.satb_shade_member(old);
+                            }
                             let member = Self::value_as_member(&self.heap, value);
                             gc.as_mut().set(key, member);
                         } else {
@@ -3462,19 +3547,13 @@ impl<const S: usize> Machine<S> {
                         Self::find_object_by_addr(&self.heap, target_addr)
                     {
                         let arr = gc.as_mut();
-                        let len = arr.elements.len();
-                        if unchecked {
-                            let idx = index as usize;
-                            promise!(index >= 0);
-                            promise!(idx < len);
-                            unsafe {
-                                *arr.elements.get_unchecked_mut(idx) = value;
-                            }
-                        } else if index >= 0 && (index as usize) < len {
-                            unsafe {
-                                *arr.elements.get_unchecked_mut(index as usize) = value;
-                            }
-                        } else {
+                        if !Self::write_indexed(
+                            &mut self.heap,
+                            &mut arr.elements,
+                            index,
+                            value,
+                            unchecked,
+                        ) {
                             return self
                                 .runtime_panic("index out of bounds", ip.saturating_sub(1));
                         }
@@ -3493,7 +3572,13 @@ impl<const S: usize> Machine<S> {
                     let unchecked = matches!(*bc, Instruction::StoreIndexPinUnchecked);
                     if let Some(Object::Array(mut gc)) = self.pinned_object(slot) {
                         let arr = gc.as_mut();
-                        if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
+                        if !Self::write_indexed(
+                            &mut self.heap,
+                            &mut arr.elements,
+                            index,
+                            value,
+                            unchecked,
+                        ) {
                             return self
                                 .runtime_panic("index out of bounds", ip.saturating_sub(1));
                         }

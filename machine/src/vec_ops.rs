@@ -52,7 +52,8 @@ pub fn host_vec_reserve(heap: &mut Heap, args: &[Value]) -> Value {
 pub fn host_vec_clear(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     if let Some(Object::Array(mut gc)) = heap.find_object_by_addr(handle.raw() as u64) {
-        gc.as_mut().elements.clear();
+        let dropped = std::mem::take(&mut gc.as_mut().elements);
+        heap.satb_shade_values(&dropped);
     }
     Value::from(0i64)
 }
@@ -62,7 +63,10 @@ pub fn host_vec_pop(heap: &mut Heap, args: &[Value]) -> Value {
     let handle = args.first().copied().unwrap_or(Value::from(0i64));
     match heap.find_object_by_addr(handle.raw() as u64) {
         Some(Object::Array(mut gc)) => match gc.as_mut().elements.pop() {
-            Some(v) => pack_vec_option(heap, Some(v)),
+            Some(v) => {
+                heap.satb_shade_value(v);
+                pack_vec_option(heap, Some(v))
+            }
             None => pack_vec_option(heap, None),
         },
         _ => pack_vec_option(heap, None),
@@ -101,6 +105,7 @@ pub fn host_vec_remove(heap: &mut Heap, args: &[Value]) -> Value {
                 pack_vec_option(heap, None)
             } else {
                 let v = gc.as_mut().elements.remove(index as usize);
+                heap.satb_shade_value(v);
                 pack_vec_option(heap, Some(v))
             }
         }
