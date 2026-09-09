@@ -21,7 +21,7 @@
 //! heap-backed named class locals stay on [`crate::il`]. `FORMAT` /
 //! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
 //! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
-//! dense / LIR emit still refuse (I5; S2c specialize). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! dense / LIR emit across alloc only when S2b maps exist (S2c). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
 //! allowlist stays closed. Debugger-attached compiles refuse dense /
 //! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
 //! accident.
@@ -1250,7 +1250,7 @@ fn main() {
         let f = try_lower_numeric(&ops, &hints).expect("lower mandel-like IL");
         f.verify().unwrap();
         let mut pool = hints.pool.clone();
-        let dense = emit_dense(&f, Some(Label(0)), &mut pool).expect("emit");
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("emit");
         assert!(
             dense.iter().any(|op| matches!(
                 op,
@@ -1345,7 +1345,7 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert_eq!(g.ret_layout, MirLayout::TwoSlot);
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
         assert!(
             !lir.iter().any(|op| matches!(op, IlOp::StorePop { .. })),
             "return/cmp immediates must stay on the stack"
@@ -1434,7 +1434,7 @@ fn main() {
             assert_eq!(f.ret_layout, ty.layout());
             let mut pool = Vec::new();
             assert!(
-                emit_dense(&f, Some(Label(0)), &mut pool).is_err(),
+                emit_dense(&f, Some(Label(0)), &mut pool, false).is_err(),
                 "I1 must not dense-specialize heap/niche"
             );
         }
@@ -1487,7 +1487,7 @@ fn main() {
         f.verify().unwrap();
         assert_eq!(f.ret_layout, MirLayout::Word);
         let mut pool = Vec::new();
-        let lir = emit_lir(&f, Some(Label(0)), &mut pool).expect("emit niche");
+        let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("emit niche");
         assert!(
             lir.iter()
                 .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
@@ -1651,7 +1651,7 @@ fn main() {
         assert!(text.contains("jumpifmatch"), "{text}");
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
     }
 
     #[test]
@@ -1752,7 +1752,7 @@ fn main() {
         assert!(text.contains("fieldstore"), "{text}");
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
     }
 
     #[test]
@@ -1767,8 +1767,8 @@ fn main() {
         ];
         let mut pool = Vec::new();
         assert!(
-            try_lower_abi_body(&ops, "arr", 0, &mut pool).is_none(),
-            "I5 ABI leaf must bail to fuse-IL"
+            try_lower_abi_body(&ops, "arr", 0, &mut pool).is_some(),
+            "S2c mapped MakeArray leaf may take LIR"
         );
         assert!(
             super::infer::infer_numeric(&ops, 0, 0).is_err(),
@@ -1819,8 +1819,13 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert!(g.has_gc_edge());
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
-        assert!(emit_lir(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        assert!(emit_lir(&f, Some(Label(0)), &mut pool, false).is_err());
+        let lir = emit_lir(&f, Some(Label(0)), &mut pool, true).expect("S2c mapped LIR");
+        assert!(
+            lir.iter().any(|op| matches!(op, IlOp::MakeArray { .. })),
+            "mapped emit reconstructs MakeArray"
+        );
     }
 
     #[test]
@@ -1854,7 +1859,10 @@ fn main() {
             })
         }));
         let mut pool = Vec::new();
-        assert!(try_lower_abi_body(&ops, "obj", 0, &mut pool).is_none());
+        assert!(
+            try_lower_abi_body(&ops, "obj", 0, &mut pool).is_some(),
+            "S2c mapped InitTyped may take LIR"
+        );
     }
 
     #[test]
@@ -1905,6 +1913,55 @@ fn main() {
     }
 
     #[test]
+    fn s2c_mapped_pair_helper_takes_lir() {
+        let src = r#"
+fn pair(int a, int b) -> [int] {
+    return [a, b];
+}
+fn main() {
+    let xs = pair(3, 4);
+    let _ = xs[0] + xs[1];
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile pair");
+        assert!(
+            !p.stack_maps().is_empty(),
+            "mapped pair/main should emit S2b maps: {:?}",
+            p.stack_maps()
+        );
+        let symbols = p.program_debug().fn_symbols;
+        let pair = symbols
+            .iter()
+            .position(|s| s.name == "pair")
+            .expect("pair symbol");
+        let start = symbols[pair].entry_pc as usize;
+        let end = symbols
+            .get(pair + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let pair_bc = &bc[start..end];
+        assert!(
+            pair_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::MakeArray),
+            "pair keeps MakeArray; opcodes={:?}",
+            pair_bc
+                .iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            pair_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S3: no dense+match; pair is LIR not dense+heap-index"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
     fn i7_deopt_edges_visible_and_emit_refuses() {
         let loc = DebugLoc {
             file: 0,
@@ -1943,8 +2000,8 @@ fn main() {
         g.verify().unwrap();
         assert!(g.has_deopt_edge());
         let mut pool = Vec::new();
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
-        assert!(emit_lir(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        assert!(emit_lir(&f, Some(Label(0)), &mut pool, false).is_err());
         let mut no = LowerHints::new("plain");
         no.slot_ty.insert(0, MirTy::I64);
         no.param_count = 1;
@@ -2029,8 +2086,8 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert!(g.has_impure_host());
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool).is_err());
-        assert!(emit_lir(&f, Some(Label(0)), &mut pool).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        assert!(emit_lir(&f, Some(Label(0)), &mut pool, false).is_err());
     }
 
     #[test]

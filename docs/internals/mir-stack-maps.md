@@ -24,9 +24,12 @@ and relocate mapped slots on collect.
   attaches [`FrameStackMap`](../../common/src/stack_map.rs) rows to those
   bodies. Compile-and-run installs them on the VM. `.hyc` load does **not**
   require maps (no archive bump): older archives stay conservative-stack GC.
-- Dense specialize (`try_specialize_body`) still refuses allocating IL.
-- MIR→LIR (`try_lower_abi_body` / `emit_lir`) **bails to fuse-IL** when it
-  sees alloc or a GC edge. Specialize across GC is S2c.
+- Dense specialize / MIR→LIR **may cross alloc** when
+  [`has_real_maps`](../../compiler/src/mir/stackmap.rs) is true (S2c /
+  [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
+  LIR-across-alloc is straight-line only (looping alloc stays fuse-IL so
+  invert+fuse remains). Unmapped allocating bodies stay fuse-IL. Heap
+  index / `match`+dense stay refuse (S3).
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
   rewritten if a live object address changes. Unmapped alloc bodies stay
   fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
@@ -39,9 +42,9 @@ and relocate mapped slots on collect.
 2. ~~**Slot / frame maps**~~ — **S2b (this note).** Encode those roots
    for the interpreter (and later deopt) so a collect can update slots.
    Archive bump only if load-time requires maps — S2b does not.
-3. **Specialize across GC** — only after maps exist, and only for a body
-   that actually emits the map. Default remains refuse.
-   [COI-307](https://linear.app/ardax/issue/COI-307).
+3. ~~**Specialize across GC**~~ — **S2c.** Mapped allocating bodies may
+   take dense / LIR when otherwise eligible. Default remains refuse
+   without maps.
 4. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 

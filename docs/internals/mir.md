@@ -58,9 +58,10 @@ names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 ([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
 fills live-heap `roots` (and IL slots when snapshotted). S2b
 ([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
-encodes those slots as interpreter frame maps. Infer / specialize /
-`emit_lir` still refuse allocating bodies (fuse-IL). Do not specialize
-across GC until S2c. Stack-map note:
+encodes those slots as interpreter frame maps. S2c
+([COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist))
+lets infer / specialize / `emit_lir` cross alloc **only** when those
+maps exist. Unmapped allocating bodies stay fuse-IL. Stack-map note:
 [mir-stack-maps.md](mir-stack-maps.md).
 
 ## P1 — dense exec (COI-268)

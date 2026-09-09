@@ -4,7 +4,7 @@
 //! [`crate::mir::MirInst::Alloc`] plus a [`crate::mir::MirInst::GcBarrier`]
 //! safepoint. [`fill_live_roots`] records live heap-word SSA values (and IL
 //! slots when the builder snapshotted them). Dense specialize and MIR→LIR
-//! still refuse: S2b consumes the sidecar. Production bodies stay fuse-IL.
+//! sidecar. S2c may emit dense / LIR across alloc when S2b maps exist.
 //!
 //! Stack-map roadmap: `docs/internals/mir-stack-maps.md`.
 
@@ -34,7 +34,7 @@ pub fn is_alloc_inst(inst: Instruction) -> bool {
     matches!(inst, Instruction::InitTyped | Instruction::INIT)
 }
 
-/// IL that must not enter dense specialize or MIR→LIR (I5).
+/// IL that is an alloc / GC safepoint (I5). Unmapped bodies still refuse.
 pub fn refuses_alloc(op: &IlOp) -> bool {
     refuse_reason(op).is_some()
 }

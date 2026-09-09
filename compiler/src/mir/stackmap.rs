@@ -1,7 +1,7 @@
 //! S2b — encode S2a live roots as interpreter slot / frame maps.
 //!
-//! Production still emits fuse-IL for allocating bodies. Maps attach when
-//! IL→MIR with `allow_alloc` succeeds; dense / LIR emit stay refused.
+//! S2c may specialize / MIR→LIR across alloc only when
+//! [`try_build_draft`] succeeds (real maps). Unmapped alloc stays fuse-IL.
 
 use std::collections::BTreeSet;
 
@@ -75,7 +75,19 @@ fn take_slots(func: &MirFunc, at: ValueId, into: &mut BTreeSet<u16>) {
     }
 }
 
-/// Lift an allocating fuse-IL body for maps only (does not replace IL).
+/// True when an allocating body encodes a real S2b draft (one or more sites).
+pub fn has_real_maps(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &[u64],
+    unboxed_fields: &[(u32, u32)],
+) -> bool {
+    try_build_draft(ops, name, entry_sp, pool, unboxed_fields)
+        .is_some_and(|d| !d.sites.is_empty())
+}
+
+/// Lift an allocating body for maps (and S2c specialize / LIR eligibility).
 pub fn try_build_draft(
     ops: &[IlOp],
     name: &str,

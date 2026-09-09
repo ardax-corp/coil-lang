@@ -46,16 +46,34 @@ pub enum LirRefuse {
 /// two-slot `RETURN`, I2 match, I3 unboxed fields, I1 niche
 /// `BITAND`/`BITOR`, or an inferable leftover (plain `if`/compare
 /// diamonds, store-only loops, tiny lets). Hard refuse stays I4
-/// string/FORMAT, I5 alloc, impure HostInvoke/`CALL`, heap index /
+/// string/FORMAT, I5 alloc without maps, impure HostInvoke/`CALL`, heap index /
 /// escaping fields. Boxed `JumpIfMatch` (arity 0 overlap, any tag)
 /// is I2 when reconstruct can model the taken payload.
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
+/// S2c: mapped alloc is not a hard refuse ([`lir_eligible_with`]).
 pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
-    lir_refuse(ops, unboxed_fields).is_none()
+    lir_eligible_with(ops, unboxed_fields, false)
+}
+
+/// Like [`lir_eligible`], with S2c maps: `maps_ok` lets alloc through.
+pub fn lir_eligible_with(
+    ops: &[IlOp],
+    unboxed_fields: &[(u32, u32)],
+    maps_ok: bool,
+) -> bool {
+    lir_refuse_with(ops, unboxed_fields, maps_ok).is_none()
 }
 
 pub fn lir_refuse(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> Option<LirRefuse> {
-    if let Some(r) = hard_refuse(ops) {
+    lir_refuse_with(ops, unboxed_fields, false)
+}
+
+pub fn lir_refuse_with(
+    ops: &[IlOp],
+    unboxed_fields: &[(u32, u32)],
+    maps_ok: bool,
+) -> Option<LirRefuse> {
+    if let Some(r) = hard_refuse(ops, maps_ok) {
         return Some(r);
     }
     if lir_reason(ops, unboxed_fields) {
@@ -65,7 +83,7 @@ pub fn lir_refuse(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> Option<LirRefu
     }
 }
 
-fn hard_refuse(ops: &[IlOp]) -> Option<LirRefuse> {
+fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
     for op in ops {
         match op {
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
@@ -82,7 +100,7 @@ fn hard_refuse(ops: &[IlOp]) -> Option<LirRefuse> {
             | IlOp::StoreIndexPinUnchecked { .. }
             | IlOp::ArrayPin { .. } => return Some(LirRefuse::Index),
             op if refuses_string_or_format(op) => return Some(LirRefuse::String),
-            op if refuses_alloc(op) => return Some(LirRefuse::Alloc),
+            op if refuses_alloc(op) && !maps_ok => return Some(LirRefuse::Alloc),
             IlOp::Jump {
                 kind: crate::il::IlJumpKind::JumpIfMatch { arity, .. },
                 ..
@@ -133,6 +151,12 @@ fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
             }
             IlOp::Load { slot, .. } if slot_in_unboxed_fields(*slot, unboxed_fields) => {
                 field_use = true;
+            }
+            IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => {
+                leftover = true;
+            }
+            IlOp::Byte { byte, .. } if super::gc::is_alloc_inst(*byte.bytecode()) => {
+                leftover = true;
             }
             IlOp::Const { .. } => leftover = true,
             IlOp::Bin { op, .. } if is_compare(*op) => leftover = true,
@@ -374,5 +398,20 @@ mod tests {
             loc,
         }];
         assert_eq!(lir_refuse(&host, &[]), Some(LirRefuse::Host));
+    }
+
+    #[test]
+    fn s2c_mapped_alloc_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::MakeArray { arity: 2, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_with(&ops, &[], true), None);
+        assert!(lir_eligible_with(&ops, &[], true));
     }
 }
