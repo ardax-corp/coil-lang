@@ -95,10 +95,9 @@ Both paths allocate **once per trip** (same `MakeArray` fast path). Fuse also
 builds `[i, i+1, i+2]` with two fused slot stores; dense materializes those as
 `DenseBin` then `LOAD`s them for `MakeArray`.
 
-`pack_store` is a worse SSA reconstruct: **two** `MakeArray`s per trip on
-**both** fuse and dense (StoreIndex result is a new object; the later Index
-rebuilds `[0,0,0]` instead of reading the stored array). Dense then pays **four
-loop Seeks**. Alloc dominates, so the Seek tax is a smaller fraction (**+6%**).
+`pack_store` **was** a worse SSA reconstruct: **two** `MakeArray`s per trip
+on both fuse and dense (Index rebuilt `[0,0,0]`). S2f SROAs that body
+(0 `MakeArray`). Historical mix below is parent / S2e.
 
 ## Cause ranking
 
@@ -145,8 +144,9 @@ requirement — maps already root live heap slots. S2e deletes those Seeks.
 
 Pins stay fuse-IL: pin keys still do not survive the **prologue** Seek.
 
-In-loop mapped Make* stays **off** by default. Next: SROA / hoist
-(COI-315), not more Seeks.
+In-loop mapped Make* stays **off** by default. S2f (COI-315) SROAs
+non-escaping `[T; N]` computed-index load/store so `pack_store` does not
+rebuild `[0,0,0]` after `StoreIndex`.
 
 ## S2e board (coil-embed packaged, `COIL_AUTO_PAR=0`)
 
@@ -176,3 +176,57 @@ Seek-less win (prologue `Seek` only).
 
 `nsieve` / `binary_trees` / `array_mut` / `gc_churn` do not take in-loop
 Make* dense (`Vec.push` / I4 / classes).
+
+## S2f SROA / StoreIndex reuse (COI-315)
+
+Codegen already exploded `[T; N]` locals into slots for **const** index.
+Computed `xs[i % 3] = i; s += xs[i % 3]` boxed twice per trip (`MakeArray`
+from stale zeros, then `Index` of a *new* `[0,0,0]`). VM `StoreIndex`
+mutates in place; the rematerialized array never saw the store — so
+`pack_store` returned `0` (the old raise used a >i32 literal and did not
+fire).
+
+S2f:
+
+- **Landed:** slot-select SROA for non-escaping `[T; N]` when the index
+  is proven (`i % N` or sidecar in-bounds). Binop lhs is spilled
+  (`expr_may_clobber`); select diamonds stay fuse-IL (dense reconstruct
+  drops last-arm stores). MIR `sroa` reuses the StoreIndex array.
+  MIR LICM may hoist invariant `Alloc`/`GcBarrier` when the loop has
+  no `StoreIndex` / `CALL`. Use `panic` (not `raise`) for checksums.
+- **Refused:** escaping / returned / call-arg / `ArrayPush` / field /
+  host arrays; observed escape (`vec_array.hy`); arity > 32; named
+  class SROA; negative `i % N` (last slot, not OOB); in-loop Make*
+  **dense** (S2e boxing tax). Non-escaping computed *elements*
+  (`[i,i+1,i+2]`) still SROA into slots.
+
+`pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
+`[T; N]` and the only uses are computed-index load/store (`i % N`).
+Computed *element* values (`i`, `i+1`) still materialize into slots;
+they do not stay heap. Escape / `vec_array.hy` still heap.
+
+Prove vs parent `3bcaf9e8` (same tip `coil run`, `COIL_AUTO_PAR=0`,
+hyperfine -w 2 -r 8). `coil-dissect --fn pack` / `bump`:
+
+| kernel | parent MakeArray | tip MakeArray | parent StoreIndex | tip StoreIndex |
+|---|---|---|---|---|
+| pack_store | **2** | **0** | 1 | 0 |
+| pack / pack_arith / pack_wide | 1 | 0 | 0 | 0 |
+| bump | 2 (dense) | 0 | 1 | 0 |
+
+`COIL_S2D_DENSE_INLOOP=1` matches tip (select bodies skip dense).
+
+| kernel | parent | tip | ratio |
+|---|---|---|---|
+| pack_store N=2e6 | 493.6 ± 1.4 ms | 121.6 ± 1.0 ms | **4.06×** |
+| pack N=2e6 | 286.1 ± 1.2 ms | 77.6 ± 1.0 ms | **3.69×** |
+| pack_arith | 306.9 ± 0.4 ms | 95.6 ± 1.0 ms | **3.21×** |
+| pack_wide N=5e5 | 92.8 ± 0.4 ms | 46.7 ± 0.3 ms | **1.99×** |
+| bump N=2e5 (time-only) | 7.6 ± 1.2 ms | 12.9 ± 0.2 ms | tip **1.71×** slower |
+
+Parent `pack_store` / `bump` return **0** (Index rematerializes zeros;
+`raise` hid it). Tip: `pack(6)==15`, `pack(2e6)==1999999000000`,
+`bump()==200000`. Do not use coil `n*(n-1)/2` at this magnitude.
+
+Flagship `.hyc` sha256 identical: `mandelbrot` / `tak` / `nsieve` /
+`binary_trees` / `fib`.

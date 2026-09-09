@@ -44,6 +44,11 @@ pub fn try_specialize_body(
     // `COIL_S2D_DENSE_INLOOP=1` re-enables dense for A/B.
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
+    // S2f slot-select diamonds (EQ/JMPF arms) stay fuse-IL: dense reconstruct
+    // of those joins drops last-arm stores and blows the frame.
+    if has_sroa_select_cfg(ops) {
+        return None;
+    }
     let has_alloc = ops.iter().any(refuses_alloc);
     let force_dense_inloop = std::env::var_os("COIL_S2D_DENSE_INLOOP")
         .is_some_and(|v| v != "0");
@@ -88,6 +93,8 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
+    // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
+    crate::mir::sroa(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
         .blocks
@@ -251,7 +258,9 @@ pub fn try_lower_abi_body_with(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
-    if !has_alloc {
+    if has_alloc {
+        crate::mir::sroa(&mut func);
+    } else {
         crate::mir::cse(&mut func);
     }
     let entry = ops.iter().find_map(|op| match op {
@@ -267,4 +276,52 @@ pub fn try_lower_abi_body_with(
         }
     }
     Some(out)
+}
+
+/// S2f computed-index slot-select: several EQ/JMPF arms into one join.
+fn has_sroa_select_cfg(ops: &[IlOp]) -> bool {
+    use crate::il::IlJumpKind;
+    let mut n = 0usize;
+    for (i, op) in ops.iter().enumerate() {
+        match op {
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue,
+                ..
+            } if eq_immediately_before(ops, i) => n += 1,
+            IlOp::Byte { byte, .. } if fused_eq_jmp(byte) => n += 1,
+            _ => {}
+        }
+    }
+    n >= 2
+}
+
+fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {
+    let mut i = jump_i;
+    while i > 0 {
+        i -= 1;
+        match &ops[i] {
+            IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
+            other => return is_eq_byte(other),
+        }
+    }
+    false
+}
+
+fn is_eq_byte(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::EQ
+    ) || matches!(op, IlOp::Bin { op: Instruction::EQ, .. })
+}
+
+fn fused_eq_jmp(byte: &common::Byte) -> bool {
+    match *byte.bytecode() {
+        Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
+            byte.bin_slot_imm_jmpf_parts().0 == Instruction::EQ as u8
+        }
+        Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
+            byte.bin_slot_slot_jmpf_parts().0 == Instruction::EQ as u8
+        }
+        _ => false,
+    }
 }

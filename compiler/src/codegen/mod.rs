@@ -974,6 +974,8 @@ pub struct Compiler {
 
     /// Operand-stack capacity for the VM (from recursion-depth analysis).
     operand_stack_slots: u32,
+    /// Current function emitted S2f slot-select (copied onto [`IlFunc`]).
+    emitted_sroa_select: bool,
 
     /// IL optimization preset (COI-127).
     opt_options: crate::il::opt::OptimizeOptions,
@@ -1079,6 +1081,7 @@ impl Default for Compiler {
             loop_par_sites: crate::typechecking::LoopParSites::new(),
             loop_par_helpers: 0,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
+            emitted_sroa_select: false,
             opt_options: crate::il::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
             retain_cursor_il: false,

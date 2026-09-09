@@ -1,0 +1,152 @@
+//! S2f: reuse the StoreIndex array instead of rematerializing `Alloc`.
+//!
+//! Stack-IL / codegen already SROAs non-escaping `[T; N]` locals. Dense /
+//! leftover reconstruct can still emit a second `Alloc` of the same elems
+//! after `StoreIndex` (dest is the stored *value*). VM mutates in place, so
+//! later `Index` must read that object — not a fresh `[0, 0, 0]`.
+
+use std::collections::HashMap;
+
+use super::cse::dce;
+use super::func::MirFunc;
+use super::inst::{MirAllocKind, MirInst, ValueId};
+
+/// Rewrite rematerialized `Alloc` after `StoreIndex` to the mutated array.
+/// Returns how many instructions were removed by the follow-up DCE.
+pub fn sroa(func: &mut MirFunc) -> usize {
+    let mut subst: HashMap<ValueId, ValueId> = HashMap::new();
+    for block in &func.blocks {
+        let mut alloc_of: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
+        let mut live_obj: HashMap<Vec<ValueId>, ValueId> = HashMap::new();
+        for inst in &block.insts {
+            match inst {
+                MirInst::Alloc {
+                    dest,
+                    kind: MirAllocKind::Array | MirAllocKind::Tuple,
+                    elems,
+                } => {
+                    alloc_of.insert(*dest, elems.clone());
+                    if let Some(&prev) = live_obj.get(elems) {
+                        subst.insert(*dest, prev);
+                    } else {
+                        live_obj.insert(elems.clone(), *dest);
+                    }
+                }
+                MirInst::GcBarrier { dest, roots, .. } => {
+                    if let Some(&r0) = roots.first() {
+                        let obj = subst.get(&r0).copied().unwrap_or(r0);
+                        subst.insert(*dest, obj);
+                        if let Some(elems) = alloc_of.get(&r0).cloned() {
+                            live_obj.insert(elems, obj);
+                        }
+                    }
+                }
+                MirInst::StoreIndex { array, .. } => {
+                    let arr = subst.get(array).copied().unwrap_or(*array);
+                    if let Some(elems) = alloc_of.get(&arr).cloned() {
+                        live_obj.insert(elems, arr);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    if subst.is_empty() {
+        return 0;
+    }
+    for block in &mut func.blocks {
+        for inst in &mut block.insts {
+            inst.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
+        }
+        if let Some(term) = &mut block.term {
+            term.rewrite_values(|v| *subst.get(&v).unwrap_or(&v));
+        }
+    }
+    let used = used_values(func);
+    let mut removed = 0;
+    for block in &mut func.blocks {
+        let before = block.insts.len();
+        block.insts.retain(|inst| {
+            if matches!(inst, MirInst::Alloc { .. } | MirInst::GcBarrier { .. })
+                && !used.contains(&inst.dest())
+            {
+                return false;
+            }
+            true
+        });
+        removed += before - block.insts.len();
+    }
+    dce(func);
+    removed
+}
+
+fn used_values(func: &MirFunc) -> std::collections::HashSet<ValueId> {
+    let mut used = std::collections::HashSet::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            for o in inst.operands() {
+                used.insert(o);
+            }
+        }
+        if let Some(term) = &block.term {
+            match term {
+                super::inst::Terminator::Br { cond, .. } => {
+                    used.insert(*cond);
+                }
+                super::inst::Terminator::JumpIfMatch {
+                    scrutinee,
+                    payloads,
+                    ..
+                } => {
+                    used.insert(*scrutinee);
+                    used.extend(payloads.iter().copied());
+                }
+                super::inst::Terminator::Return { lo, hi } => {
+                    if let Some(v) = lo {
+                        used.insert(*v);
+                    }
+                    if let Some(v) = hi {
+                        used.insert(*v);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    used
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::mir::builder::MirBuilder;
+    use crate::mir::{MirConst, MirTy};
+
+    #[test]
+    fn reuses_array_after_storeindex() {
+        let mut b = MirBuilder::new("pack");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let z = b.ins_const(MirConst::I64(0)).unwrap();
+        let a0 = b.ins_alloc(MirAllocKind::Array, vec![z, z, z]).unwrap();
+        let g0 = b
+            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![a0])
+            .unwrap();
+        let _st = b.ins_store_index(g0, i, i, false).unwrap();
+        let a1 = b.ins_alloc(MirAllocKind::Array, vec![z, z, z]).unwrap();
+        let g1 = b
+            .ins_gc_barrier(crate::mir::MirGcKind::Safepoint, vec![a1])
+            .unwrap();
+        let v = b.ins_index(g1, i, MirTy::I64, false).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        assert!(sroa(&mut func) >= 1);
+        let allocs = func
+            .blocks
+            .iter()
+            .flat_map(|bl| bl.insts.iter())
+            .filter(|i| matches!(i, MirInst::Alloc { .. }))
+            .count();
+        assert_eq!(allocs, 1, "second Alloc must die; {func:?}");
+    }
+}

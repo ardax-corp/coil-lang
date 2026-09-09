@@ -11,6 +11,6 @@ fn bump() -> int {
 
 fn main() {
     if bump() != 200000 {
-        raise "s2d_preheader_bump checksum";
+        panic "s2d_preheader_bump checksum";
     }
 }

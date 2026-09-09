@@ -145,7 +145,6 @@ fn loop_mutates_heap_or_calls(func: &MirFunc, lp: &LoopInfo) -> bool {
                 inst,
                 MirInst::StoreIndex { .. }
                     | MirInst::Call { .. }
-                    | MirInst::Alloc { .. }
                     | MirInst::FieldStore { .. }
             ) {
                 return true;
@@ -155,8 +154,13 @@ fn loop_mutates_heap_or_calls(func: &MirFunc, lp: &LoopInfo) -> bool {
     false
 }
 
+fn loop_has_store_or_call(func: &MirFunc, lp: &LoopInfo) -> bool {
+    loop_mutates_heap_or_calls(func, lp)
+}
+
 fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
     let allow_index = !loop_mutates_heap_or_calls(func, lp);
+    let allow_alloc = !loop_has_store_or_call(func, lp);
     let defined = values_defined_in(func, &lp.blocks);
     let mut invariant: HashSet<ValueId> = HashSet::new();
     for i in 0..func.types.len() {
@@ -174,7 +178,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
                 continue;
             }
             for (idx, inst) in b.insts.iter().enumerate() {
-                if inst.is_phi() || !hoistable(inst, allow_index) {
+                if inst.is_phi() || !hoistable(inst, allow_index, allow_alloc) {
                     continue;
                 }
                 if invariant.contains(&inst.dest()) {
@@ -226,7 +230,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
     n
 }
 
-fn hoistable(inst: &MirInst, allow_index: bool) -> bool {
+fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
     match inst {
         MirInst::Phi { .. } => false,
         MirInst::Bin {
@@ -242,13 +246,17 @@ fn hoistable(inst: &MirInst, allow_index: bool) -> bool {
         MirInst::HostInvoke { native_id, .. } => super::effects::host_may_hoist(*native_id),
         MirInst::Index { .. } => allow_index,
         MirInst::ArrayLen { .. } => true,
+        MirInst::Alloc {
+            kind: super::inst::MirAllocKind::Array | super::inst::MirAllocKind::Tuple,
+            ..
+        }
+        | MirInst::GcBarrier { .. } => allow_alloc,
         MirInst::Call { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
         | MirInst::StoreIndex { .. }
         | MirInst::Alloc { .. }
-        | MirInst::GcBarrier { .. }
         | MirInst::Deopt { .. } => false,
     }
 }
