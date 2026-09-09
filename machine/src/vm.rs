@@ -2488,7 +2488,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::VMove as u8);
+            promise!(*bc as u8 <= Instruction::VFma as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3721,6 +3721,27 @@ impl<const S: usize> Machine<S> {
                     promise!(dest < common::simd::NREGS);
                     promise!(src < common::simd::NREGS);
                     self.vregs[dest] = self.vregs[src];
+                }
+                Instruction::VReduce => {
+                    let (ty, dest, vsrc, _) = opcode.dense_abc_parts();
+                    promise!(vsrc < common::simd::NREGS);
+                    promise!(sp + dest < stack_cap);
+                    let acc = self.stack[sp + dest];
+                    self.stack[sp + dest] =
+                        crate::simd::eval_vreduce(ty, acc, &self.vregs[vsrc]);
+                }
+                Instruction::VFma => {
+                    let (ty, dest, a, b) = opcode.dense_abc_parts();
+                    promise!(dest < common::simd::NREGS);
+                    promise!(a < common::simd::NREGS);
+                    promise!(b < common::simd::NREGS);
+                    let out = crate::simd::eval_vfma(
+                        ty,
+                        &self.vregs[a],
+                        &self.vregs[b],
+                        &self.vregs[dest],
+                    );
+                    self.vregs[dest] = out;
                 }
                 Instruction::ArrayPush => {
                     // Stack discipline matches `StoreIndex`: codegen emits

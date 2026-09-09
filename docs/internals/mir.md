@@ -290,6 +290,24 @@ fuse-IL. P12 HostInvoke packs are unchanged.
 Prove: `fill` in `examples/perf/vec_scan.hy` (`v[i] = i`). Flagships
 stay dense / fuse-IL.
 
+## S5b V1 — SIMD reductions + conservative FMA (COI-311)
+
+After V0, a **single counted stride-1 add-reduce**
+(`s = s + a[i]` / `s = s + a[i] * b[i]`) may emit `VLoad` / `VBin` /
+`VReduce`. A store of `a * x[i] + y[i]` (or zip `a[i] * b[i] + c[i]`)
+may emit `VFma`. Archive **minor 9**.
+
+P11 still holds: float `VReduce` left-folds lanes into the running
+scalar (`s = (…((s+x0)+x1)…)`); `VFma` is mul-then-add (two
+roundings). No fast-math / contract flag. Hardware `fmadd` is not used.
+
+Same refuse map as V0 (alloc/GC, match, impure CALL/HostInvoke,
+debugger/`-Og`, heap words in vregs). Reductions without a heap load
+stay dense (`s = s + i`). P12 HostInvoke packs stay first.
+
+Prove: `scan` in `examples/perf/vec_scan.hy`; saxpy store in
+`examples/perf/vec_axpy.hy`.
+
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
 LIR here is the existing **fuse-IL / stack IL**, not a new ISA. Review Board

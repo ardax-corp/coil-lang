@@ -1,8 +1,8 @@
-//! V0 compiler-only SIMD: rewrite a counted stride-1 numeric store loop
-//! to `VLoad` / `VStore` / `VBin` / `VMove` (COI-310).
+//! V0/V1 compiler-only SIMD: counted stride-1 numeric store (COI-310)
+//! plus horizontal add-reduce and conservative FMA (COI-311).
 //!
 //! Execution is `coil-simd` 8-lane kernels. Heap refs never enter vregs.
-//! Reductions, gather/scatter, and dense+Index mix stay refused.
+//! Float reduce left-folds into the scalar acc (P11). `VFma` is mul-then-add.
 
 use common::{dense, simd, Byte, DebugLoc, Instruction};
 
@@ -45,8 +45,11 @@ pub fn try_vectorize(
     }) {
         return None;
     }
-    let spec = match_store_loop(func)?;
-    emit_vectorized(func, &spec, entry_label, pool, label_hi)
+    if let Some(spec) = match_store_loop(func) {
+        return emit_vectorized(func, &spec, entry_label, pool, label_hi);
+    }
+    let spec = match_reduce_loop(func)?;
+    emit_reduced(func, &spec, entry_label, pool, label_hi)
 }
 
 struct StoreLoop {
@@ -72,6 +75,12 @@ enum VOp {
     Bin { kind: u8, lhs: Box<VOp>, rhs: Box<VOp> },
     Neg { kind: u8, src: Box<VOp> },
     CastI2F(Box<VOp>),
+    Fma {
+        ty: u8,
+        a: Box<VOp>,
+        b: Box<VOp>,
+        c: Box<VOp>,
+    },
 }
 
 fn match_store_loop(func: &MirFunc) -> Option<StoreLoop> {
@@ -195,6 +204,191 @@ fn match_store_loop(func: &MirFunc) -> Option<StoreLoop> {
     })
 }
 
+struct ReduceLoop {
+    header: BlockId,
+    body: BlockId,
+    exit: BlockId,
+    iv: ValueId,
+    acc: ValueId,
+    acc_next: ValueId,
+    acc_init: ValueId,
+    n: ValueId,
+    term: VOp,
+    ty: u8,
+}
+
+fn match_reduce_loop(func: &MirFunc) -> Option<ReduceLoop> {
+    let loops = natural_loops(func);
+    if loops.len() != 1 {
+        return None;
+    }
+    let lp = &loops[0];
+    let header = lp.header;
+    let preds = func.preds();
+    let latch = preds[header.index()]
+        .iter()
+        .copied()
+        .find(|p| lp.blocks.contains(p))?;
+    let Terminator::Br {
+        cond,
+        taken,
+        not_taken,
+    } = func.block(header).term.as_ref()?
+    else {
+        return None;
+    };
+    let (body, exit) = if lp.blocks.contains(taken) && !lp.blocks.contains(not_taken) {
+        (*taken, *not_taken)
+    } else if lp.blocks.contains(not_taken) && !lp.blocks.contains(taken) {
+        (*not_taken, *taken)
+    } else {
+        return None;
+    };
+    if body != latch {
+        return None;
+    }
+    let Terminator::Return { hi: None, .. } = func.block(exit).term.as_ref()? else {
+        return None;
+    };
+    if func
+        .blocks
+        .iter()
+        .any(|b| matches!(b.term, Some(Terminator::Return { .. })) && b.id != exit)
+    {
+        return None;
+    }
+
+    let phis: Vec<&MirInst> = func
+        .block(header)
+        .insts
+        .iter()
+        .filter(|i| i.is_phi())
+        .collect();
+    if phis.len() != 2 {
+        return None;
+    }
+    let mut iv = None;
+    let mut acc = None;
+    for p in &phis {
+        let MirInst::Phi {
+            dest,
+            ty,
+            args,
+            ..
+        } = p
+        else {
+            return None;
+        };
+        let init = phi_from(args, latch, false)?;
+        let step = phi_from(args, latch, true)?;
+        if *ty == MirTy::I64 && is_const_i64(func, init, 0) && is_iadd_k(func, step, *dest, 1) {
+            iv = Some((*dest, step));
+            continue;
+        }
+        if matches!(ty, MirTy::I64 | MirTy::F64) {
+            acc = Some((*dest, init, step, *ty));
+            continue;
+        }
+        return None;
+    }
+    let (iv, _iv_next) = iv?;
+    let (acc, acc_init, acc_next, acc_ty) = acc?;
+    let n = loop_bound(func, *cond, iv)?;
+    if !is_invariant(func, n, &lp.blocks) {
+        return None;
+    }
+    if let Some(k) = as_const_i64(func, n) {
+        if k < LANES {
+            return None;
+        }
+    }
+
+    let add = def(func, acc_next)?;
+    let MirInst::Bin {
+        op: MirBinOp::Add,
+        ty,
+        lhs,
+        rhs,
+        ..
+    } = add
+    else {
+        return None;
+    };
+    if *ty != acc_ty {
+        return None;
+    }
+    let term_v = if *lhs == acc {
+        *rhs
+    } else if *rhs == acc {
+        *lhs
+    } else {
+        return None;
+    };
+
+    for inst in &func.block(body).insts {
+        match inst {
+            MirInst::StoreIndex { .. } | MirInst::Phi { .. } => return None,
+            MirInst::Index { .. }
+            | MirInst::Bin { .. }
+            | MirInst::Unary { .. }
+            | MirInst::Cast { .. }
+            | MirInst::Const { .. }
+            | MirInst::ArrayLen { .. } => {}
+            _ => return None,
+        }
+    }
+
+    let term = classify(func, term_v, iv, &lp.blocks, &[])?;
+    if !vop_has_load(&term) {
+        return None;
+    }
+    Some(ReduceLoop {
+        header,
+        body,
+        exit,
+        iv,
+        acc,
+        acc_next,
+        acc_init,
+        n,
+        term,
+        ty: store_ty(func, acc)?,
+    })
+}
+
+fn split_fma(func: &MirFunc, lhs: ValueId, rhs: ValueId) -> Option<(ValueId, ValueId, ValueId)> {
+    if let Some((a, b)) = as_mul(func, lhs) {
+        return Some((a, b, rhs));
+    }
+    if let Some((a, b)) = as_mul(func, rhs) {
+        return Some((a, b, lhs));
+    }
+    None
+}
+
+fn as_mul(func: &MirFunc, v: ValueId) -> Option<(ValueId, ValueId)> {
+    match def(func, v)? {
+        MirInst::Bin {
+            op: MirBinOp::Mul,
+            ty: MirTy::I64 | MirTy::F64,
+            lhs,
+            rhs,
+            ..
+        } => Some((*lhs, *rhs)),
+        _ => None,
+    }
+}
+
+fn vop_has_load(op: &VOp) -> bool {
+    match op {
+        VOp::Load { .. } => true,
+        VOp::Bin { lhs, rhs, .. } => vop_has_load(lhs) || vop_has_load(rhs),
+        VOp::Neg { src, .. } | VOp::CastI2F(src) => vop_has_load(src),
+        VOp::Fma { a, b, c, .. } => vop_has_load(a) || vop_has_load(b) || vop_has_load(c),
+        VOp::Splat { .. } | VOp::Iota => false,
+    }
+}
+
 fn store_ty(func: &MirFunc, v: ValueId) -> Option<u8> {
     match func.ty(v) {
         MirTy::I64 => Some(dense::TY_I64),
@@ -239,6 +433,19 @@ fn classify(
             rhs,
             ..
         } => {
+            if *op == MirBinOp::Add && matches!(ty, MirTy::I64 | MirTy::F64) {
+                if let Some((a, b, c)) = split_fma(func, *lhs, *rhs) {
+                    let va = classify(func, a, iv, loop_blocks, stored)?;
+                    let vb = classify(func, b, iv, loop_blocks, stored)?;
+                    let vc = classify(func, c, iv, loop_blocks, stored)?;
+                    return Some(VOp::Fma {
+                        ty: store_ty(func, v)?,
+                        a: Box::new(va),
+                        b: Box::new(vb),
+                        c: Box::new(vc),
+                    });
+                }
+            }
             let kind = vbin_kind(*op, *ty)?;
             let l = classify(func, *lhs, iv, loop_blocks, stored)?;
             let r = classify(func, *rhs, iv, loop_blocks, stored)?;
@@ -492,6 +699,229 @@ fn emit_vectorized(
     Some(out)
 }
 
+fn emit_reduced(
+    func: &MirFunc,
+    spec: &ReduceLoop,
+    entry_label: Option<Label>,
+    pool: &mut Vec<u64>,
+    label_hi: u32,
+) -> Option<Vec<IlOp>> {
+    let (regs, scratch) = assign_regs(func).ok()?;
+    let i_slot = regs[spec.iv.index()];
+    let n_slot = regs[spec.n.index()];
+    let acc_slot = regs[spec.acc.index()];
+    let nvec = scratch;
+    let mask = scratch.checked_add(1)?;
+    let eight = scratch.checked_add(2)?;
+    let max_reg = scratch.checked_add(3)?;
+    let loc = DebugLoc::unknown();
+    let mut next_label = label_hi
+        .saturating_add(1)
+        .max(max_label_hint(entry_label));
+    let entry = entry_label.unwrap_or_else(|| {
+        let l = Label(next_label);
+        next_label += 1;
+        l
+    });
+    let vloop = Label(next_label);
+    next_label += 1;
+    let rem = Label(next_label);
+    next_label += 1;
+    let exit_l = Label(next_label);
+
+    let mut out = vec![IlOp::Label(entry)];
+    out.push(IlOp::byte(
+        Byte::new(Instruction::Seek).with_operand_u32(u32::from(max_reg) + 1),
+    ));
+
+    let loop_blocks: std::collections::HashSet<BlockId> =
+        [spec.header, spec.body].into_iter().collect();
+    for block in &func.blocks {
+        if loop_blocks.contains(&block.id) || block.id == spec.exit {
+            continue;
+        }
+        for inst in &block.insts {
+            if inst.is_phi() {
+                continue;
+            }
+            emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        }
+    }
+    if defined_in(func, spec.n) == Some(spec.exit) {
+        let inst = def(func, spec.n)?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+    }
+    if defined_in(func, spec.acc_init) == Some(spec.header) {
+        let inst = def(func, spec.acc_init)?;
+        if !inst.is_phi() {
+            emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        }
+    }
+
+    out.push(IlOp::byte(
+        Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, i_slot, 0, false),
+    ));
+    let init_slot = regs[spec.acc_init.index()];
+    if acc_slot != init_slot {
+        out.push(IlOp::byte(
+            Byte::new(Instruction::DenseMove).with_dense_move(acc_slot, init_slot),
+        ));
+    }
+    out.push(IlOp::byte(
+        Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, mask, (-8i16) as u16, false),
+    ));
+    out.push(IlOp::byte(
+        Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, eight, 8, false),
+    ));
+    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
+        dense::IAND64,
+        nvec,
+        n_slot,
+        mask,
+    )));
+
+    out.push(IlOp::Label(vloop));
+    out.push(IlOp::Load {
+        slot: u32::from(i_slot),
+        loc,
+    });
+    out.push(IlOp::Load {
+        slot: u32::from(nvec),
+        loc,
+    });
+    out.push(IlOp::Bin {
+        op: Instruction::LE,
+        loc,
+    });
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::JumpIfFalse,
+        target: rem,
+        loc,
+        hint: Default::default(),
+    });
+
+    let mut next_v = 0u8;
+    let v = emit_vop(&mut out, &spec.term, &regs, i_slot, spec.ty, &mut next_v)?;
+    out.push(IlOp::byte(Byte::new(Instruction::VReduce).with_dense_abc(
+        spec.ty, acc_slot, v, 0,
+    )));
+    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
+        dense::IADD64,
+        i_slot,
+        i_slot,
+        eight,
+    )));
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::Unconditional,
+        target: vloop,
+        loc,
+        hint: Default::default(),
+    });
+
+    out.push(IlOp::Label(rem));
+    out.push(IlOp::Load {
+        slot: u32::from(i_slot),
+        loc,
+    });
+    out.push(IlOp::Load {
+        slot: u32::from(n_slot),
+        loc,
+    });
+    out.push(IlOp::Bin {
+        op: Instruction::LE,
+        loc,
+    });
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::JumpIfFalse,
+        target: exit_l,
+        loc,
+        hint: Default::default(),
+    });
+    for inst in &func.block(spec.body).insts {
+        if inst.is_phi() {
+            continue;
+        }
+        if matches!(
+            inst,
+            MirInst::Bin {
+                dest,
+                op: MirBinOp::Add,
+                ty: MirTy::I64,
+                ..
+            } if *dest == spec.iv || is_iv_step(func, inst, spec.iv)
+        ) {
+            continue;
+        }
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+    }
+    let acc_next_slot = regs[spec.acc_next.index()];
+    if acc_next_slot != acc_slot {
+        out.push(IlOp::byte(
+            Byte::new(Instruction::DenseMove).with_dense_move(acc_slot, acc_next_slot),
+        ));
+    }
+    let one = {
+        let c = emit_const_i64(pool, 1, loc)?;
+        out.push(c);
+        out.push(IlOp::StorePop {
+            slot: u32::from(max_reg),
+            loc,
+        });
+        max_reg
+    };
+    out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
+        dense::IADD64,
+        i_slot,
+        i_slot,
+        one,
+    )));
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::Unconditional,
+        target: rem,
+        loc,
+        hint: Default::default(),
+    });
+
+    out.push(IlOp::Label(exit_l));
+    for inst in &func.block(spec.exit).insts {
+        if inst.is_phi() {
+            continue;
+        }
+        if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
+            continue;
+        }
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+    }
+    match func.block(spec.exit).term.as_ref()? {
+        Terminator::Return { lo: Some(v), hi: None } => {
+            let ret = if *v == spec.acc_next {
+                acc_slot
+            } else if *v == spec.acc {
+                acc_slot
+            } else {
+                regs[v.index()]
+            };
+            out.push(IlOp::Load {
+                slot: u32::from(ret),
+                loc,
+            });
+            out.push(IlOp::Return {
+                loc,
+                ret_words: 1,
+            });
+        }
+        Terminator::Return { lo: None, hi: None } => {
+            out.push(IlOp::Const { imm: 0, loc });
+            out.push(IlOp::Return {
+                loc,
+                ret_words: 1,
+            });
+        }
+        _ => return None,
+    }
+    Some(out)
+}
+
 fn emit_vop(
     out: &mut Vec<IlOp>,
     op: &VOp,
@@ -558,6 +988,15 @@ fn emit_vop(
                 *kind, dest, s, 0,
             )));
             Some(dest)
+        }
+        VOp::Fma { ty, a, b, c } => {
+            let va = emit_vop(out, a, regs, i_slot, *ty, next_v)?;
+            let vb = emit_vop(out, b, regs, i_slot, *ty, next_v)?;
+            let vc = emit_vop(out, c, regs, i_slot, *ty, next_v)?;
+            out.push(IlOp::byte(Byte::new(Instruction::VFma).with_dense_abc(
+                *ty, vc, va, vb,
+            )));
+            Some(vc)
         }
         VOp::CastI2F(src) => {
             // V0: `i as float` on the IV becomes f64 iota + splat(i as i64 bits).

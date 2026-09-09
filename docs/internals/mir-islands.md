@@ -69,7 +69,8 @@ lowering. Unicode / regex stay out of MIR.
 | Allowlisted HostInvoke inside numeric (W4) | dense + box/unbox at host edge | W4 still hoists; S3 also emits other I6-typed hosts except I4 `from_bytes` / `to_bytes` |
 | One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3; two-slot / niche / `TailCall` still refuse; recursion stays on the callee |
 | Saxpy-reduce | HostInvoke `simd_axpy_reduce` (P12) | stay |
-| Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoad` / `VStore` / `VBin` / `VMove` (S5a V0) | stay; reductions / FMA are V1 |
+| Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoad` / `VStore` / `VBin` / `VMove` (S5a V0) | stay |
+| Stride-1 add-reduce / conservative FMA | `VReduce` / `VFma` (S5b V1) | stay; no fast-math |
 | `Option<int>` / immediate-Ok `Result` / arity-2 immediate product leafs | P3 MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | I2 for match; I1 names the layout only |
 | Heap `Option<T>` / heap-heap `Result<T,E>` (COI-92 niche words) | fuse-IL (`CONST 0` / `BITAND` / `BITOR`); layout already `HeapNiche` | I1 SSA types; I2 match; not dense |
 | Nested / mixed / `CallIndirect` Option/Result | boxed `ObjEnum` + fuse-IL | stay refuse until a later island says otherwise |
