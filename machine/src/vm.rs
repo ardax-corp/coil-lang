@@ -1322,8 +1322,11 @@ impl<const S: usize> Machine<S> {
 
     /// Run GC when live heap bytes exceed the heap threshold.
     #[inline]
-    fn maybe_gc_after_alloc(&mut self) {
+    fn maybe_gc_after_alloc(&mut self, ip: usize) {
         if unlikely(self.heap.should_collect()) {
+            if unlikely(!self.stack_maps.is_empty()) {
+                self.gc_ip = ip;
+            }
             self.gc_collect();
         }
     }
@@ -1421,11 +1424,11 @@ impl<const S: usize> Machine<S> {
     /// The intern table is a cache, not a GC root, unmarked interned strings
     /// are swept. The new object must be on the operand stack before
     /// [`Self::gc_collect`] so it survives the cycle.
-    fn push_interned_string(&mut self, data: String) {
+    fn push_interned_string(&mut self, data: String, ip: usize) {
         let gc_string = self.heap.intern(data);
         self.stack
             .push(Value::from(gc_string.as_ptr() as *mut u8 as u64));
-        self.maybe_gc_after_alloc();
+        self.maybe_gc_after_alloc(ip);
     }
 
     fn install_program_strings(&mut self, strings: &[String]) {
@@ -1435,7 +1438,7 @@ impl<const S: usize> Machine<S> {
             .resize(self.program_strings.len(), Value::default());
     }
 
-    fn push_program_string(&mut self, idx: usize) {
+    fn push_program_string(&mut self, idx: usize, ip: usize) {
         let cached = unsafe { *self.program_string_cache.get_unchecked(idx) };
         if likely(!cached.raw().is_null()) {
             self.stack.push(cached);
@@ -1445,7 +1448,7 @@ impl<const S: usize> Machine<S> {
         let gc_string = self.heap.intern_str(data);
         let handle = Value::from(gc_string.as_ptr() as *mut u8 as u64);
         self.stack.push(handle);
-        self.maybe_gc_after_alloc();
+        self.maybe_gc_after_alloc(ip);
         // Re-store after maybe-GC: sweep zeros the cache (not a root).
         unsafe {
             *self.program_string_cache.get_unchecked_mut(idx) = handle;
@@ -2334,9 +2337,6 @@ impl<const S: usize> Machine<S> {
         let code_len = code.len();
 
         while ip < code_len {
-            if unlikely(!self.stack_maps.is_empty()) {
-                self.gc_ip = ip;
-            }
             #[cfg(any(test, feature = "debugger"))]
             if unlikely(self.debug.is_some())
                 && let Some(reason) = self.debug_check_stop_at(ip)
@@ -2640,7 +2640,7 @@ impl<const S: usize> Machine<S> {
                             }
                         }
 
-                        self.push_interned_string(message);
+                        self.push_interned_string(message, ip);
                     }
                 }
                 Instruction::STRINGIFY => {
@@ -2649,7 +2649,7 @@ impl<const S: usize> Machine<S> {
                     // raw immediate (treated as int).
                     let v = self.stack.pop();
                     let text = Self::stringify_value(&self.heap, v);
-                    self.push_interned_string(text);
+                    self.push_interned_string(text, ip);
                 }
                 Instruction::PRINT => {
                     let ptr = self.stack.pop().as_ptr::<GcData<ObjString>>();
@@ -2753,7 +2753,7 @@ impl<const S: usize> Machine<S> {
                     let _ = r.as_mut();
                     // Root before GC, same rule as `push_interned_string`.
                     self.stack.push(Value::from(r.as_ptr().addr() as u64));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::InitTyped => {
                     let (type_id, nfields) = unpack_init_typed(opcode.operand_u32());
@@ -2763,7 +2763,7 @@ impl<const S: usize> Machine<S> {
                     );
                     let _ = r.as_mut();
                     self.stack.push(Value::from(r.as_ptr().addr() as u64));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::RETURN => {
                     if unlikely(opcode.return_words() >= 2) {
@@ -3115,6 +3115,9 @@ impl<const S: usize> Machine<S> {
                         crate::HostOp::Collect => {
                             self.stack.seek(tell - consume);
                             let before = self.heap.size();
+                            if unlikely(!self.stack_maps.is_empty()) {
+                                self.gc_ip = ip;
+                            }
                             self.gc_collect();
                             let freed = before.saturating_sub(self.heap.size());
                             self.stack.push(Value::from(freed as i64));
@@ -3178,7 +3181,7 @@ impl<const S: usize> Machine<S> {
                     }
                     let allocated = self.heap.live_object_count().saturating_sub(live_before);
                     if allocated > 0 {
-                        self.maybe_gc_after_alloc();
+                        self.maybe_gc_after_alloc(ip);
                     }
                 }
                 Instruction::HostInvokeNiche => {
@@ -3248,7 +3251,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::STRING => {
                     let idx = opcode.operand_u32() as usize;
                     promise!(idx < self.program_strings.len());
-                    self.push_program_string(idx);
+                    self.push_program_string(idx, ip);
                 }
                 Instruction::NOOP => continue,
                 Instruction::MakeEnum => {
@@ -3278,7 +3281,7 @@ impl<const S: usize> Machine<S> {
                     // Drop args, then root the fresh enum before maybe-GC.
                     self.stack.seek(sp - n);
                     self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::MakeTuple | Instruction::MakeArray => {
                     let operands = opcode.operand_u32();
@@ -3307,7 +3310,7 @@ impl<const S: usize> Machine<S> {
                     };
                     self.stack.seek(base);
                     self.stack.push(Value::from(addr));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::ArrayPin => {
                     let slot = opcode.operand_u32();
@@ -3383,7 +3386,7 @@ impl<const S: usize> Machine<S> {
                         }
                     }
                     self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::GetField => {
                     let name_val = self.stack.pop();
@@ -3622,7 +3625,7 @@ impl<const S: usize> Machine<S> {
                         Object::Array,
                     );
                     self.stack.push(Value::from(array_obj.addr()));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::JumpIfMatch => {
                     // Tag in operands[31:16]; pool index in operands[15:0]
@@ -3784,7 +3787,7 @@ impl<const S: usize> Machine<S> {
                     let (object, _) = self.heap.alloc(obj_coro, Object::Coroutine);
 
                     self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::ResumeCoro => {
                     promise!(self.stack.tell() > 0);
@@ -3940,7 +3943,7 @@ impl<const S: usize> Machine<S> {
                             };
                             let (object, _) = self.heap.alloc(partial, Object::Fn);
                             self.stack.push(Value::from(object.addr()));
-                            self.maybe_gc_after_alloc();
+                            self.maybe_gc_after_alloc(ip);
                             continue;
                         }
 
@@ -4099,7 +4102,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let (object, _) = self.heap.alloc(pfn, Object::Fn);
                     self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::LoadStatic => {
                     let slot = opcode.operand_u32() as usize;
@@ -4126,7 +4129,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let boxed = ObjBoxed { tag, payload };
                     let (object, _) = self.heap.alloc(boxed, Object::Boxed);
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                     self.stack.push(Value::from(object.addr()));
                 }
                 Instruction::UnboxValue => {
@@ -4161,7 +4164,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let (object, _) = self.heap.alloc(pfn, Object::PolyFn);
                     self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::MakePolyFnCapture => {
                     let count = (opcode.operand_u32() & 0xFF) as usize;
@@ -4186,7 +4189,7 @@ impl<const S: usize> Machine<S> {
                     };
                     let (object, _) = self.heap.alloc(pfn, Object::PolyFn);
                     self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc();
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::DynAdd
                 | Instruction::DynSub
@@ -4244,7 +4247,7 @@ impl<const S: usize> Machine<S> {
                             let sa = Self::object_string_value(&self.heap, &a_inner);
                             let sb = Self::object_string_value(&self.heap, &b_inner);
                             // Root before any GC (same as FORMAT/STRING).
-                            self.push_interned_string(sa + &sb);
+                            self.push_interned_string(sa + &sb, ip);
                             continue;
                         }
                         _ => {
