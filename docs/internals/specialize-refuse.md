@@ -105,9 +105,9 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `times_a` call `eval_a` with unpinned dense Index residuals (S3b).
 Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped **preheader**
 `MakeArray` plus an index loop may take dense (S2d). In-loop `Make*` stays
-off dense (Seek+alloc tax). Compare-only leftovers may take LIR when maps
-exist and the cost gate holds. Const-index `s += xs[0]` usually mem_fwd+DCE's
-the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
+off dense (Seek+alloc tax; [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
+Compare-only leftovers may take LIR when maps exist and the cost gate holds.
+Const-index `s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
 loop and **no** earlier alloc stays fuse-IL so invert+fuse remains
 observable. Unmapped alloc, CALL+alloc (map lift refuses `CALL`), and
 `Vec.push` / class `new` loops stay fuse-IL.
