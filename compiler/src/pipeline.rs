@@ -2127,6 +2127,51 @@ fn main() { add(1, 2); }
     }
 
     #[test]
+    fn vec_scan_from_file_keeps_fill_store() {
+        use common::Instruction;
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap();
+        let mut pipeline = Pipeline::new();
+        pipeline.bind_workspace_language_roots();
+        let path = root.join("examples/perf/vec_scan.hy");
+        let (bytecode, constants) = pipeline
+            .compile_src_from_file(path.to_str().unwrap())
+            .expect("compile vec_scan from file");
+        let syms = pipeline.program_debug().fn_symbols;
+        let idx = syms.iter().position(|s| s.name == "fill").expect("fill");
+        let start = syms[idx].entry_pc as usize;
+        let end = syms
+            .get(idx + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bytecode.len());
+        let names: Vec<_> = bytecode[start..end]
+            .iter()
+            .map(|b| b.bytecode().mnemonic())
+            .collect();
+        assert!(
+            bytecode[start..end].iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )),
+            "from_file fill must keep StoreIndex; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.set_program_debug(pipeline.program_debug());
+        vm.run_raw(
+            &bytecode,
+            &constants,
+            pipeline.strings(),
+            pipeline.static_slot_count(),
+        );
+        assert!(!vm.panicked(), "vec_scan panicked");
+    }
+
+    #[test]
     fn nsieve_retained_il_and_bytecode_emit_store_index_pin() {
         use common::Instruction;
 

@@ -2007,8 +2007,10 @@ fn main() {
         let fill_bc = &bc[start..end];
         let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            fill_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "fill is dense; opcodes={names:?}"
+            fill_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S3 leftover: Vec store-index stays fuse-IL; opcodes={names:?}"
         );
         assert!(
             fill_bc.iter().any(|b| matches!(
@@ -2018,7 +2020,7 @@ fn main() {
                     | Instruction::StoreIndexPin
                     | Instruction::StoreIndexPinUnchecked
             )),
-            "dense fill must keep the heap store; opcodes={names:?}"
+            "fuse-IL fill must keep the heap store; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2047,8 +2049,10 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let sum_bc = if sum < main { &bc[sum..main] } else { &bc[sum..] };
         assert!(
-            sum_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S3 heap-index loop is dense; opcodes={:?}",
+            sum_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S3 leftover: Vec index loop stays fuse-IL; opcodes={:?}",
             sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
@@ -2110,12 +2114,13 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "times_a is dense; opcodes={names:?}"
+            body.iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S3 leftover: times_a index+CALL stays fuse-IL; opcodes={names:?}"
         );
         assert!(
             body.iter().any(|b| *b.bytecode() == Instruction::CALL),
-            "open CALL to eval_a; opcodes={names:?}"
+            "open CALL to eval_a stays on fuse-IL; opcodes={names:?}"
         );
         assert!(
             body.iter().any(|b| matches!(
@@ -2203,14 +2208,14 @@ fn main() {
                     | Instruction::IndexPinUnchecked
             )
         });
-        if dense {
-            assert!(has_store && has_index, "dense nsieve keeps index/store; opcodes={names:?}");
-        } else {
-            assert!(
-                has_store && has_index,
-                "nsieve leftover stays fuse-IL with index/store; opcodes={names:?}"
-            );
-        }
+        assert!(
+            !dense,
+            "S3 leftover: nsieve stays fuse-IL; opcodes={names:?}"
+        );
+        assert!(
+            has_store && has_index,
+            "nsieve keeps index/store; opcodes={names:?}"
+        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
