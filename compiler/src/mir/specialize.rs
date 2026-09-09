@@ -36,13 +36,13 @@ pub fn try_specialize_body(
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    // In-loop Make* stays fuse-IL (invert+fuse). A live heap return
-    // (`return [i]`) plus a counted loop also stays fuse-IL unless the
-    // body is a heap-index / store loop (S3).
+    // Heap-index residuals next to dense regs are not yet sound on
+    // `Vec` (fill/sum checksums). Keep fuse-IL + invert+fuse (COI-87).
+    if super::infer::has_heap_index(ops) {
+        return None;
+    }
     if super::infer::has_alloc_inside_loop(ops)
-        || (has_alloc
-            && super::infer::has_back_edge(ops)
-            && !super::infer::has_heap_index(ops))
+        || (has_alloc && super::infer::has_back_edge(ops))
     {
         return None;
     }
@@ -81,6 +81,15 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
+    let stores_ssa = func
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter(|i| matches!(i, crate::mir::MirInst::StoreIndex { .. }))
+        .count();
+    if count_store_index(ops) > 0 && stores_ssa == 0 {
+        return None;
+    }
     let abi = DenseAbi::from_func_and_live_ins(&func, ops, &hints.slot_ty)?;
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
