@@ -4587,8 +4587,11 @@ fn main() {
         assert!(
             pack_bc
                 .iter()
-                .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
-            "Vec::from is HostInvoke; opcodes={names:?}"
+                .any(|b| matches!(
+                    b.bytecode(),
+                    Instruction::HostInvoke | Instruction::CALL
+                )),
+            "Vec::from is CALL to a HostInvoke thunk; opcodes={names:?}"
         );
         let makes = pack_bc
             .iter()
