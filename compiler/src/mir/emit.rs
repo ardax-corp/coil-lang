@@ -19,7 +19,7 @@ pub fn emit_dense(
 ) -> Result<Vec<IlOp>, LowerError> {
     if func.has_gc_edge() {
         return Err(LowerError::Refused(
-            "dense emit refuses Alloc/GcBarrier (I5: no stack maps)".into(),
+            "dense emit refuses Alloc/GcBarrier (I5: no S2b frame maps)".into(),
         ));
     }
     if func.has_deopt_edge() {
@@ -82,9 +82,9 @@ pub fn emit_dense(
             if inst.is_phi() {
                 continue;
             }
-            if term_cmp_dest(block).is_some_and(|d| {
-                matches!(inst, MirInst::Cmp { dest, .. } if *dest == d)
-            }) {
+            if term_cmp_dest(block)
+                .is_some_and(|d| matches!(inst, MirInst::Cmp { dest, .. } if *dest == d))
+            {
                 continue;
             }
             emit_inst(&mut out, inst, func, &regs, pool, loc)?;
@@ -132,7 +132,11 @@ pub(super) fn assign_regs(func: &MirFunc) -> Result<(Vec<u8>, u8), LowerError> {
 
 pub(super) fn next_emitted(func: &MirFunc, from: BlockId) -> Option<BlockId> {
     if from == func.entry {
-        return func.blocks.iter().find(|b| b.id != func.entry).map(|b| b.id);
+        return func
+            .blocks
+            .iter()
+            .find(|b| b.id != func.entry)
+            .map(|b| b.id);
     }
     func.blocks
         .iter()
@@ -206,9 +210,11 @@ pub(super) fn emit_br_cond(
 ) -> Result<(), LowerError> {
     if let Some(MirInst::Cmp {
         op, ty, lhs, rhs, ..
-    }) = block.insts.iter().find(|inst| {
-        matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
-    }) {
+    }) = block
+        .insts
+        .iter()
+        .find(|inst| matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond))
+    {
         out.push(IlOp::Load {
             slot: u32::from(regs[lhs.index()]),
             loc,
@@ -301,14 +307,12 @@ fn emit_inst(
             rhs,
         } => {
             let kind = bin_kind(*op, *ty)?;
-            out.push(IlOp::byte(
-                Byte::new(Instruction::DenseBin).with_dense_abc(
-                    kind,
-                    regs[dest.index()],
-                    regs[lhs.index()],
-                    regs[rhs.index()],
-                ),
-            ));
+            out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
+                kind,
+                regs[dest.index()],
+                regs[lhs.index()],
+                regs[rhs.index()],
+            )));
         }
         MirInst::Cmp {
             dest,
@@ -318,14 +322,12 @@ fn emit_inst(
             rhs,
         } => {
             let kind = cmp_kind(*op, *ty)?;
-            out.push(IlOp::byte(
-                Byte::new(Instruction::DenseCmp).with_dense_abc(
-                    kind,
-                    regs[dest.index()],
-                    regs[lhs.index()],
-                    regs[rhs.index()],
-                ),
-            ));
+            out.push(IlOp::byte(Byte::new(Instruction::DenseCmp).with_dense_abc(
+                kind,
+                regs[dest.index()],
+                regs[lhs.index()],
+                regs[rhs.index()],
+            )));
         }
         MirInst::Unary { dest, op, src } => {
             let kind = match (*op, func.ty(*src)) {
@@ -342,10 +344,7 @@ fn emit_inst(
             ));
         }
         MirInst::Cast {
-            dest,
-            kind,
-            src,
-            ..
+            dest, kind, src, ..
         } => {
             let k = match kind {
                 MirCastKind::IntToFloat => dense::CAST_I2F,
@@ -417,7 +416,7 @@ fn emit_inst(
         }
         MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
             return Err(LowerError::Refused(
-                "dense emit refuses Alloc/GcBarrier (I5: no stack maps)".into(),
+                "dense emit refuses Alloc/GcBarrier (I5: no S2b frame maps)".into(),
             ));
         }
         MirInst::Deopt { .. } => {
@@ -463,15 +462,7 @@ fn emit_term(
             let f_moves = phi_moves(func, block.id, *not_taken, regs, scratch);
             emit_br_cond(out, block, regs, *cond, loc)?;
             if t_moves.is_empty() && f_moves.is_empty() {
-                emit_cond_jumps(
-                    out,
-                    func,
-                    block.id,
-                    *taken,
-                    *not_taken,
-                    block_lab,
-                    loc,
-                );
+                emit_cond_jumps(out, func, block.id, *taken, *not_taken, block_lab, loc);
             } else {
                 let f_lab = Label(*next_label);
                 *next_label += 1;
@@ -518,10 +509,7 @@ fn emit_term(
             } else {
                 out.push(IlOp::Const { imm: 0, loc });
             }
-            out.push(IlOp::Return {
-                loc,
-                ret_words: 1,
-            });
+            out.push(IlOp::Return { loc, ret_words: 1 });
         }
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
@@ -575,9 +563,10 @@ fn phi_moves(
 fn resolve_parallel(mut moves: Vec<(u8, u8)>, scratch: u8) -> Vec<(u8, u8)> {
     let mut out = Vec::new();
     while !moves.is_empty() {
-        if let Some(i) = moves.iter().position(|(d, _)| {
-            !moves.iter().any(|(_, s)| s == d)
-        }) {
+        if let Some(i) = moves
+            .iter()
+            .position(|(d, _)| !moves.iter().any(|(_, s)| s == d))
+        {
             out.push(moves.remove(i));
             continue;
         }
@@ -606,64 +595,68 @@ fn emit_const(
     match c {
         MirConst::I64(v) => {
             if let Ok(imm) = i16::try_from(v) {
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                    dense::TY_I64,
-                    dest,
-                    imm as u16,
-                    false,
-                )))
+                Ok(IlOp::byte(
+                    Byte::new(Instruction::DenseConst).with_dense_const(
+                        dense::TY_I64,
+                        dest,
+                        imm as u16,
+                        false,
+                    ),
+                ))
             } else {
                 let idx = intern_pool(pool, v as u64)?;
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                    dense::TY_I64,
-                    dest,
-                    idx,
-                    true,
-                )))
+                Ok(IlOp::byte(
+                    Byte::new(Instruction::DenseConst).with_dense_const(
+                        dense::TY_I64,
+                        dest,
+                        idx,
+                        true,
+                    ),
+                ))
             }
         }
         MirConst::I32(v) => {
             if let Ok(imm) = i16::try_from(v) {
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                    dense::TY_I32,
-                    dest,
-                    imm as u16,
-                    false,
-                )))
+                Ok(IlOp::byte(
+                    Byte::new(Instruction::DenseConst).with_dense_const(
+                        dense::TY_I32,
+                        dest,
+                        imm as u16,
+                        false,
+                    ),
+                ))
             } else {
                 let idx = intern_pool(pool, v as u64)?;
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                    dense::TY_I32,
-                    dest,
-                    idx,
-                    true,
-                )))
+                Ok(IlOp::byte(
+                    Byte::new(Instruction::DenseConst).with_dense_const(
+                        dense::TY_I32,
+                        dest,
+                        idx,
+                        true,
+                    ),
+                ))
             }
         }
         MirConst::F64(bits) => {
             let idx = intern_pool(pool, bits)?;
-            Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                dense::TY_F64,
-                dest,
-                idx,
-                true,
-            )))
+            Ok(IlOp::byte(
+                Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_F64, dest, idx, true),
+            ))
         }
         MirConst::F32(bits) => {
             let idx = intern_pool(pool, u64::from(bits))?;
-            Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
-                dense::TY_F32,
-                dest,
-                idx,
-                true,
-            )))
+            Ok(IlOp::byte(
+                Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_F32, dest, idx, true),
+            ))
         }
-        MirConst::Bool(v) => Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
-            dense::TY_BOOL,
-            dest,
-            u16::from(v),
-            false,
-        ))),
+        MirConst::Bool(v) => Ok(IlOp::byte(
+            Byte::new(Instruction::DenseConst).with_dense_const(
+                dense::TY_BOOL,
+                dest,
+                u16::from(v),
+                false,
+            ),
+        )),
     }
 }
 

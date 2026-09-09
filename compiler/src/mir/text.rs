@@ -3,8 +3,7 @@
 use super::func::{MirBlock, MirFunc};
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind, MirGcKind,
-    MirInst,
-    MirUnaryOp, Terminator, ValueId,
+    MirInst, MirUnaryOp, Terminator, ValueId,
 };
 use super::ty::MirTy;
 
@@ -146,11 +145,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::Call {
-            dest,
-            target,
-            args,
-        } => {
+        MirInst::Call { dest, target, args } => {
             write!(f, "{dest} = call.{} {}", func.ty(*dest), target.0)?;
             for (i, a) in args.iter().enumerate() {
                 if i == 0 {
@@ -261,6 +256,8 @@ impl<'a> Parser<'a> {
             entry: BlockId(0),
             blocks: Vec::new(),
             types: Vec::new(),
+            slot_env: std::collections::HashMap::new(),
+            gc_roots: Vec::new(),
         };
         self.expect('(')?;
         if !self.eat(')') {
@@ -292,6 +289,9 @@ impl<'a> Parser<'a> {
             return Err(ParseError("no blocks".into()));
         }
         func.entry = func.blocks[0].id;
+        if func.has_gc_edge() {
+            super::gc::fill_live_roots(&mut func);
+        }
         Ok(func)
     }
 
@@ -535,11 +535,7 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, ty);
-            return Ok(MirInst::Call {
-                dest,
-                target,
-                args,
-            });
+            return Ok(MirInst::Call { dest, target, args });
         }
         if let Some(kind_s) = op.strip_prefix("alloc.") {
             let kind = match kind_s {
@@ -567,8 +563,8 @@ impl<'a> Parser<'a> {
             return Ok(MirInst::Alloc { dest, kind, elems });
         }
         if let Some(kind_s) = op.strip_prefix("gcbarrier.") {
-            let kind =
-                MirGcKind::parse(kind_s).ok_or_else(|| ParseError(format!("unknown gc {kind_s}")))?;
+            let kind = MirGcKind::parse(kind_s)
+                .ok_or_else(|| ParseError(format!("unknown gc {kind_s}")))?;
             let mut roots = Vec::new();
             if self.peek('v') {
                 roots.push(self.value()?);
@@ -648,10 +644,7 @@ impl<'a> Parser<'a> {
                     } else {
                         None
                     };
-                    Ok(Terminator::Return {
-                        lo: Some(lo),
-                        hi,
-                    })
+                    Ok(Terminator::Return { lo: Some(lo), hi })
                 } else {
                     Ok(Terminator::Return { lo: None, hi: None })
                 }

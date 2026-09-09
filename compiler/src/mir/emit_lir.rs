@@ -31,7 +31,7 @@ pub fn emit_lir(
 ) -> Result<Vec<IlOp>, LowerError> {
     if func.has_gc_edge() {
         return Err(LowerError::Refused(
-            "MIR→LIR refuses Alloc/GcBarrier (I5: bail to fuse-IL)".into(),
+            "MIR→LIR refuses Alloc/GcBarrier (I5: no S2b frame maps)".into(),
         ));
     }
     if func.has_deopt_edge() {
@@ -521,7 +521,7 @@ fn emit_stored(
         }
         MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
             return Err(LowerError::Refused(
-                "MIR→LIR refuses Alloc/GcBarrier (I5: bail to fuse-IL)".into(),
+                "MIR→LIR refuses Alloc/GcBarrier (I5: no S2b frame maps)".into(),
             ));
         }
         MirInst::Deopt { .. } => {
@@ -645,7 +645,7 @@ fn emit_stack(
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
         MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
         MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => Err(LowerError::Refused(
-            "MIR→LIR refuses Alloc/GcBarrier (I5: bail to fuse-IL)".into(),
+            "MIR→LIR refuses Alloc/GcBarrier (I5: no S2b frame maps)".into(),
         )),
         MirInst::Deopt { .. } => Err(LowerError::Refused(
             "MIR→LIR refuses Deopt (I7: bail to fuse-IL)".into(),

@@ -8,7 +8,8 @@
 //! (COI-294 / COI-302), and
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
 //! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
-//! I5 alloc / GC-barrier placeholders (COI-300),
+//! I5 alloc / GC-barrier edges (COI-300) with S2a live-root
+//! sidecar (COI-305),
 //! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297), and
 //! I7 debugger / deopt boundaries on MIR edges (COI-299), and
 //! I8 broadened MIR emit entry (COI-298).
@@ -19,8 +20,8 @@
 //! Allowlisted HostInvoke (W4) still boxes at the host edge. Escaping /
 //! heap-backed named class locals stay on [`crate::il`]. `FORMAT` /
 //! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
-//! may lower to `Alloc` + `GcBarrier` SSA; dense / LIR emit still refuse
-//! (I5). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
+//! dense / LIR emit still refuse (I5 / S2a). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
 //! allowlist stays closed. Debugger-attached compiles refuse dense /
 //! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
 //! accident.
@@ -59,6 +60,7 @@ pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
 pub use entry::{lir_eligible, lir_refuse, LirRefuse};
 pub use func::{MirBlock, MirFunc};
+pub use gc::{fill_live_roots, LiveRootSet};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
@@ -1788,6 +1790,24 @@ fn main() {
                     .any(|i| matches!(i, MirInst::GcBarrier { kind: MirGcKind::Safepoint, .. }))
             }),
             "GcBarrier safepoint visible"
+        );
+        let obj = f.blocks.iter().find_map(|b| {
+            b.insts.iter().find_map(|i| match i {
+                MirInst::Alloc { dest, .. } => Some(*dest),
+                _ => None,
+            })
+        });
+        let roots = f.blocks.iter().find_map(|b| {
+            b.insts.iter().find_map(|i| match i {
+                MirInst::GcBarrier { roots, .. } => Some(roots.clone()),
+                _ => None,
+            })
+        });
+        let obj = obj.expect("alloc dest");
+        let roots = roots.expect("barrier roots");
+        assert!(
+            roots.contains(&obj),
+            "S2a roots include new object: {roots:?}"
         );
         let text = f.to_string();
         assert!(text.contains("alloc.array"), "{text}");

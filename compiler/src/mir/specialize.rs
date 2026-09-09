@@ -28,7 +28,7 @@ pub fn try_specialize_body(
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
     // Heap / CALL to a non-dense callee / multi-word RETURN stay refuse.
     // FORMAT / string ops stay fuse-IL (I4). Alloc / InitTyped stay fuse-IL
-    // (I5: no stack maps). Allowlisted HostInvoke (math / packed LA /
+    // (I5: live-root sidecar; no S2b frame maps). Allowlisted HostInvoke (math / packed LA /
     // simd_axpy_reduce) is W4. Impure HostInvoke / CALL stay barriers (I6);
     // the W4 set is not grown for clocks / IO / FFI. Debugger-attached /
     // -Og skip this entry (I7; `OptimizeOptions::mir_specialize`).

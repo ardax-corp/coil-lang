@@ -293,16 +293,17 @@ pub enum MirInst {
         index: u32,
     },
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
-    /// safepoint; pair with [`Self::GcBarrier`] so later islands can
-    /// attach roots. Dense / LIR emit refuse these bodies.
+    /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
+    /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
+    /// Dense / LIR emit still refuse (no S2b consumer).
     Alloc {
         dest: ValueId,
         kind: MirAllocKind,
         elems: Vec<ValueId>,
     },
-    /// GC safepoint / write-barrier placeholder (I5). Dest is `HeapRef`
-    /// (identity of the first root, or a dummy token). `roots` is empty
-    /// until stack maps exist — do not treat this as a precise map.
+    /// GC safepoint / write-barrier (I5). Dest is a `HeapRef` token
+    /// (not a second object). `roots` is the S2a live-heap SSA list
+    /// (new object plus other live heap words). Not an interpreter map.
     GcBarrier {
         dest: ValueId,
         kind: MirGcKind,
@@ -324,8 +325,13 @@ pub enum MirAllocKind {
     Array,
     Tuple,
     /// `InitTyped` (`type_id`, `nfields`). Fields stay fuse-IL `SetField`.
-    Object { type_id: u32, nfields: u32 },
-    Enum { tag: u32 },
+    Object {
+        type_id: u32,
+        nfields: u32,
+    },
+    Enum {
+        tag: u32,
+    },
 }
 
 impl MirAllocKind {
@@ -409,7 +415,7 @@ impl MirInst {
         }
     }
 
-    /// Allocation or GC placeholder — specialize / native must not cross.
+    /// Allocation or GC safepoint — specialize / native must not cross.
     pub fn is_gc_edge(&self) -> bool {
         matches!(self, Self::Alloc { .. } | Self::GcBarrier { .. })
     }
