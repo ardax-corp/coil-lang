@@ -22,6 +22,7 @@ safe API:
 | `zip_{add,sub,mul,neg}_{f64,i64}` | Element-wise zip / negate (`zip_div_f64` too) |
 | `scale_f64` / `scale_i64` | Broadcast multiply (`out[i] = a[i] * s`) |
 | `axpy_reduce_f64` | Counted `s = (s + a*x) + y; x += dx` (P12 HostInvoke) |
+| `lanes::fold_add_*` / `fmadd_*` | V1 horizontal left-fold add; conservative mul-then-add FMA |
 | `bytes::eq` / `bytes::xor` | Byte equality and XOR |
 
 ## Dispatch
@@ -67,6 +68,9 @@ beat Rust/`memcmp` slice equality.
 - MIR S5a V0 — `VLoad` / `VStore` / `VBin` / `VMove` on stride-1 numeric
   stores (`compiler/src/mir/vectorize.rs`). VM glue in `machine/src/simd.rs`
   calls `coil_simd::lanes` only.
+- MIR S5b V1 — `VReduce` (left-fold add into a scalar slot) and `VFma`
+  (mul-then-add, two IEEE roundings). Same refuse map as V0. Prove:
+  `scan` in `vec_scan.hy`, saxpy store in `vec_axpy.hy`.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 
