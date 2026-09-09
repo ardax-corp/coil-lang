@@ -34,16 +34,13 @@ pub fn try_specialize_body(
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
-    // S3: one-word CALL (dense map or open), I6 HostInvoke except I4
-    // string bytes, heap index / ArrayLen / StoreIndex. FORMAT / string
-    // ops stay fuse-IL (I4). Match stays LIR (dense+match is unsafe).
+    // S3/S3b: one-word CALL (dense map or open), I6 HostInvoke except I4
+    // string bytes, heap index / ArrayLen / StoreIndex (dense residuals
+    // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    // Heap-index + DenseBin residuals stay unsound on `Vec`. V0 may still
-    // take a closed `V*` rewrite (no dense+Index mix). Anything else stays
-    // fuse-IL + invert+fuse (COI-87).
-    let heap_index = super::infer::has_heap_index(ops);
+    // S3b: heap-index bodies may take V* first, then dense residuals.
     if super::infer::has_alloc_inside_loop(ops)
         || (has_alloc && super::infer::has_back_edge(ops))
     {
@@ -107,9 +104,6 @@ pub fn try_specialize_body(
     }
     if let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool, label_hi) {
         return Some((vecd, abi));
-    }
-    if heap_index {
-        return None;
     }
     let out = emit_dense(&func, entry, pool, has_alloc).ok()?;
     // Heap writes have no SSA users; refuse if reconstruct dropped one.

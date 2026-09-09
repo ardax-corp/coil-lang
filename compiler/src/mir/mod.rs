@@ -2164,7 +2164,9 @@ fn sum(Vec<int> arr) -> int {
 }
 fn main() {
     let v: Vec<int> = Vec::from([1, 2, 3, 4]);
-    let _ = sum(v);
+    if sum(v) != 10 {
+        raise "indexed_sum checksum";
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
@@ -2190,6 +2192,62 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "indexed_sum checksum");
+    }
+
+    #[test]
+    fn s3b_index_plus_helper_takes_dense_and_checksums() {
+        let src = r#"
+fn id(int x) -> int {
+    return x;
+}
+fn sum(Vec<int> arr) -> int {
+    let i = 0;
+    let s = 0;
+    while i < len(arr) {
+        s = s + id(arr[i]);
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let v: Vec<int> = Vec::from([1, 2, 3, 4]);
+    if sum(v) != 10 {
+        raise "index+helper checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile index+helper");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "sum")
+            .expect("sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3b: index+CALL sum takes dense; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )),
+            "index+helper keeps Index; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "index+helper checksum; opcodes={names:?}");
     }
 
     #[test]
@@ -2218,7 +2276,10 @@ fn times_a(Vec<float> v, Vec<float> out) -> float {
 fn main() {
     let v: Vec<float> = Vec::from([1.0, 2.0]);
     let out: Vec<float> = Vec::from([0.0, 0.0]);
-    let _ = times_a(v, out);
+    let x = times_a(v, out);
+    if x != 2.0 {
+        raise "times_a checksum";
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
@@ -2236,13 +2297,12 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S3 leftover: times_a index+CALL stays fuse-IL; opcodes={names:?}"
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3b: times_a index+CALL takes dense; opcodes={names:?}"
         );
         assert!(
             body.iter().any(|b| *b.bytecode() == Instruction::CALL),
-            "open CALL to eval_a stays on fuse-IL; opcodes={names:?}"
+            "open CALL to eval_a stays in the dense body; opcodes={names:?}"
         );
         assert!(
             body.iter().any(|b| matches!(
@@ -2266,6 +2326,7 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "times_a checksum; opcodes={names:?}");
     }
 
     #[test]
