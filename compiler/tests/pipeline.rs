@@ -6561,8 +6561,7 @@ fn main() {
     );
 }
 
-/// Named locals keep a heap instance when they escape (calls, returns, fields).
-/// A unique local that is only field-read may unbox into frame slots.
+/// #134 / COI-84 pin: a named class used as a whole object stays `InitTyped`.
 #[test]
 fn named_local_class_stays_heap_allocated() {
     let src = r#"
@@ -6653,6 +6652,56 @@ fn main() {
     );
 }
 
+#[test]
+fn named_local_class_field_store_unboxes_when_no_escape() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn main() {
+    let p = new Point(5, 6);
+    p.x = 10;
+    p.y = p.x + 1;
+    write(stdout(), to_bytes(format("%i", p.x + p.y)));
+}
+"#;
+    let output = run_example_src(src);
+    assert_eq!(output, "21");
+
+    let mut pipeline = test_pipeline();
+    let (bytecode, _) = pipeline.compile_src(src).expect("unbox field store");
+    let symbols = pipeline.program_debug().fn_symbols;
+    let main = symbols
+        .iter()
+        .position(|symbol| symbol.name == "main")
+        .expect("main symbol");
+    let start = symbols[main].entry_pc as usize;
+    let end = symbols
+        .get(main + 1)
+        .map(|symbol| symbol.entry_pc as usize)
+        .unwrap_or(bytecode.len());
+    let main_code = &bytecode[start..end];
+    assert!(
+        main_code.iter().all(|byte| {
+            !matches!(
+                byte.bytecode(),
+                common::Instruction::InitTyped
+                    | common::Instruction::GetField
+                    | common::Instruction::SetField
+                    | common::Instruction::LoadField
+            )
+        }),
+        "non-escaping named local field store should unbox; opcodes: {:?}",
+        main_code
+            .iter()
+            .map(|b| b.bytecode().mnemonic())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// `fn drop()` forces a real instance even for a consumed `new C(args).field`.
 #[test]
 fn drop_class_temp_field_access_still_allocates() {
@@ -6714,10 +6763,12 @@ class Point {
     pub x: int,
     pub y: int,
 }
-fn main() {
-    let p = new Point(1, 2);
+fn bump(Point p) -> int {
     p.x = 3;
-    write(stdout(), to_bytes(format("%i", p.x + p.y)));
+    return p.x + p.y;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", bump(new Point(1, 2)))));
 }
 "#;
     let output = run_example_src(src);
@@ -8034,6 +8085,12 @@ fn example_vec_array_prints_zip_broadcast_pow() {
 fn example_s2i_vec_array_checksums() {
     let output = run_example("examples/perf/s2i_vec_array.hy");
     assert_eq!(output, "");
+}
+
+#[test]
+fn example_s2j_class_sroa_checksums() {
+    let output = run_example("examples/perf/s2j_class_sroa.hy");
+    assert_eq!(output, "28");
 }
 
 #[test]

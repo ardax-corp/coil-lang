@@ -695,8 +695,8 @@ struct Context {
 
     /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, enum_name).
     unboxed_enum_locals: HashMap<String, (u32, u32, String)>,
-    /// Frame-local small class: name → (base_slot, nfields).
-    unboxed_class_locals: HashMap<String, (u32, usize)>,
+    /// Frame-local small class: name → (base_slot, nfields, class_name).
+    unboxed_class_locals: HashMap<String, (u32, usize, String)>,
 
     prev: Option<Box<Self>>,
 }

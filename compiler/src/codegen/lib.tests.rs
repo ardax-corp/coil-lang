@@ -4604,6 +4604,151 @@ fn main() {
         assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
     }
 
+    /// S2j: non-escaping named class field load/store — no InitTyped.
+    #[test]
+    fn named_class_sroa_field_store_checksum() {
+        use common::Instruction;
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn bump(int n) -> int {
+    let p = new Point(0, 1);
+    let i = 0;
+    while i < n {
+        p.x = p.x + p.y;
+        p.y = p.y + 1;
+        i = i + 1;
+    }
+    return p.x + p.y;
+}
+fn main() {
+    if bump(6) != 28 {
+        panic "s2j field-store checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let bump_off = pipeline
+            .compiler_mut()
+            .get_function("bump")
+            .expect("bump");
+        let bump_bc = &bc[bump_off..];
+        let names: Vec<_> = bump_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            bump_bc.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::InitTyped
+                    | Instruction::GetField
+                    | Instruction::SetField
+                    | Instruction::LoadField
+            )),
+            "non-escaping Point SROA; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "bump(6)==28; opcodes={names:?}");
+    }
+
+    /// #134 / COI-84 pin: returning a named class stays heap `InitTyped`.
+    #[test]
+    fn named_class_sroa_return_stays_heap() {
+        use common::Instruction;
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn fill(int n) -> Point {
+    let p = new Point(0, 1);
+    let i = 0;
+    while i < n {
+        p.x = p.x + p.y;
+        p.y = p.y + 1;
+        i = i + 1;
+    }
+    return p;
+}
+fn main() {
+    let q = fill(6);
+    if q.x + q.y != 28 {
+        panic "s2j return-edge checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let fill_off = pipeline
+            .compiler_mut()
+            .get_function("fill")
+            .expect("fill");
+        let fill_bc = &bc[fill_off..];
+        let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            fill_bc
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::InitTyped)),
+            "escaping return stays InitTyped; opcodes={names:?}"
+        );
+        assert!(
+            fill_bc
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::LoadField | Instruction::SetField)),
+            "escaping return keeps heap field ops; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "fill(6) x+y==28; opcodes={names:?}");
+    }
+
+    /// S2j: private-after-escape refuses — construction stays InitTyped.
+    #[test]
+    fn named_class_sroa_refuses_private_after_escape() {
+        use common::Instruction;
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn take(Point q) -> int {
+    return q.x;
+}
+fn hot() -> int {
+    let p = new Point(3, 4);
+    let z = take(p);
+    p.x = 10;
+    return p.x + z;
+}
+fn main() {
+    if hot() != 13 {
+        panic "s2j private-after-escape checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let hot_off = pipeline
+            .compiler_mut()
+            .get_function("hot")
+            .expect("hot");
+        let hot_bc = &bc[hot_off..];
+        let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            hot_bc
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::InitTyped)),
+            "private after escape stays heap; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "hot()==13; opcodes={names:?}");
+    }
+
     /// S2h: unproven `xs[k]` load uses runtime 0<=k<N then slots; OOB arm is heap Index.
     #[test]
     fn stack_array_unproven_index_load_checksum() {

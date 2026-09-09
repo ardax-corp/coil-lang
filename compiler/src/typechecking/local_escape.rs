@@ -1,9 +1,11 @@
 //! In-frame escape facts for ObjEnum / small class values.
 //!
 //! Fail-closed: a local is frame-local only when every use stays in this
-//! frame (local match / class field reads). Calls, returns, field stores,
-//! aggregates, host/FFI, coroutines, aliases, and nested captures poison it.
-//! Function parameters stay boxed (call ABI).
+//! frame (local match / class field load or store). Any whole-object use
+//! (call, return, aggregate, host/FFI, identity compare) keeps a named
+//! class heap-backed (COI-84 pin / S2j non-escaping only). Method
+//! receivers, aliases, nested captures, and `fn drop()` stay heap.
+//! Function parameters stay boxed.
 
 use std::collections::{HashMap, HashSet};
 
@@ -19,6 +21,7 @@ pub const MAX_UNBOX_SLOTS: usize = 32;
 struct Candidate {
     binder: NodeId,
     rhs: NodeId,
+    is_class: bool,
 }
 
 /// Fill [`Checker::frame_local`] for `ast` after inference.
@@ -117,7 +120,18 @@ fn collect_candidates(checker: &Checker, ast: &Output<'_>, cands: &mut HashMap<S
                 {
                     let ids = (nid(checker, &items[0]), nid(checker, rhs));
                     if let (Some(binder), Some(rhs_id)) = ids {
-                        cands.insert(name, Candidate { binder, rhs: rhs_id });
+                        let is_class = instantiate_is_unbox(checker, rhs)
+                            || ty_of(checker, rhs)
+                                .or_else(|| ty_of(checker, &items[0]))
+                                .is_some_and(|ty| checker.ty_is_class(&ty));
+                        cands.insert(
+                            name,
+                            Candidate {
+                                binder,
+                                rhs: rhs_id,
+                                is_class,
+                            },
+                        );
                     }
                 }
             }
@@ -160,15 +174,9 @@ fn scan_uses(
             if let Expression::Identifier(n) = r.1.as_ref() {
                 if nested_fn && cands.contains_key(*n) {
                     escaped.insert((*n).to_string());
-                } else if cands.contains_key(*n) {
-                    match ty_of(checker, r) {
-                        Some(ty) if checker.ty_is_class(&ty) => {}
-                        Some(_) => {
-                            escaped.insert((*n).to_string());
-                        }
-                        None => {
-                            escaped.insert((*n).to_string());
-                        }
+                } else if let Some(cand) = cands.get(*n) {
+                    if !cand.is_class {
+                        escaped.insert((*n).to_string());
                     }
                 }
             } else {
@@ -181,7 +189,7 @@ fn scan_uses(
         }
         Expression::Assignment(lhs, rhs) => {
             if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
-                poison_idents(recv, cands, escaped);
+                note_field_store(recv, cands, escaped, nested_fn);
                 scan_uses(checker, rhs, cands, escaped, nested_fn);
             } else if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 if cands.contains_key(*n) {
@@ -206,7 +214,7 @@ fn scan_uses(
         }
         Expression::CompoundAssign(lhs, _, rhs) => {
             if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
-                poison_idents(recv, cands, escaped);
+                note_field_store(recv, cands, escaped, nested_fn);
             } else {
                 poison_idents(lhs, cands, escaped);
             }
@@ -236,6 +244,22 @@ fn scan_uses(
         | Expression::Try(inner) => {
             poison_idents(inner, cands, escaped);
             scan_uses(checker, inner, cands, escaped, nested_fn);
+        }
+        Expression::Eq(a, b)
+        | Expression::Neq(a, b)
+        | Expression::Le(a, b)
+        | Expression::Gt(a, b)
+        | Expression::Leq(a, b)
+        | Expression::Geq(a, b) => {
+            for side in [a, b] {
+                if let Expression::Identifier(n) = peel(side).1.as_ref() {
+                    if cands.contains_key(*n) {
+                        escaped.insert((*n).to_string());
+                    }
+                } else {
+                    scan_uses(checker, side, cands, escaped, nested_fn);
+                }
+            }
         }
         Expression::Identifier(n) => {
             if cands.contains_key(*n) {
@@ -333,6 +357,22 @@ fn mark_safe_uses(
                 mark_safe_uses(checker, recv, cands, escaped, used);
             }
         }
+        Expression::Assignment(lhs, rhs) | Expression::CompoundAssign(lhs, _, rhs) => {
+            if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
+                let r = peel(recv);
+                if let Expression::Identifier(n) = r.1.as_ref() {
+                    if cands.contains_key(*n) && !escaped.contains(*n) {
+                        used.insert((*n).to_string());
+                        if let Some(id) = nid(checker, r) {
+                            checker.frame_local.insert(id);
+                        }
+                    }
+                } else {
+                    mark_safe_uses(checker, recv, cands, escaped, used);
+                }
+            }
+            mark_safe_uses(checker, rhs, cands, escaped, used);
+        }
         _ => walk_children(ast, &mut |child| {
             mark_safe_uses(checker, child, cands, escaped, used)
         }),
@@ -381,6 +421,22 @@ fn has_direct_match_construct(ast: &Output<'_>) -> bool {
                 }
             });
             found
+        }
+    }
+}
+
+fn note_field_store(
+    recv: &Output<'_>,
+    cands: &HashMap<String, Candidate>,
+    escaped: &mut HashSet<String>,
+    nested_fn: bool,
+) {
+    let r = peel(recv);
+    if let Expression::Identifier(n) = r.1.as_ref() {
+        if cands.contains_key(*n) {
+            if nested_fn || !cands.get(*n).is_some_and(|c| c.is_class) {
+                escaped.insert((*n).to_string());
+            }
         }
     }
 }
@@ -816,7 +872,7 @@ fn main() {
     }
 
     #[test]
-    fn field_store_escapes() {
+    fn field_store_is_frame_local() {
         let src = r#"
 class Point {
     pub x: int,
@@ -827,8 +883,58 @@ fn main() {
     p.x = 10;
 }
 "#;
-        assert_eq!(frame_local_count(src), 0, "field store must stay heap");
+        assert!(
+            frame_local_count(src) >= 2,
+            "non-escaping field store should unbox"
+        );
     }
+
+    #[test]
+    fn field_store_then_call_stays_heap() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn take(Point q) -> int {
+    return q.x;
+}
+fn main() {
+    let p = new Point(1, 2);
+    p.x = 10;
+    let z = take(p);
+}
+"#;
+        assert_eq!(
+            frame_local_count(src),
+            0,
+            "whole-object call-arg stays heap (COI-84 pin)"
+        );
+    }
+
+    #[test]
+    fn private_use_after_escape_stays_heap() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn take(Point q) -> int {
+    return q.x;
+}
+fn main() {
+    let p = new Point(1, 2);
+    let z = take(p);
+    p.x = 10;
+}
+"#;
+        assert_eq!(
+            frame_local_count(src),
+            0,
+            "private store after call-arg escape must stay heap"
+        );
+    }
+
 
     #[test]
     fn method_receiver_escapes() {
@@ -843,6 +949,34 @@ fn main() {
 }
 "#;
         assert_eq!(frame_local_count(src), 0, "method receiver must stay heap");
+    }
+
+    #[test]
+    fn while_field_store_is_frame_local() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn bump(int n) -> int {
+    let p = new Point(0, 1);
+    let i = 0;
+    while i < n {
+        p.x = p.x + p.y;
+        p.y = p.y + 1;
+        i = i + 1;
+    }
+    return p.x + p.y;
+}
+fn main() {
+    let _ = bump(6);
+}
+"#;
+        assert!(
+            frame_local_count(src) >= 2,
+            "loop field stores should unbox; count={}",
+            frame_local_count(src)
+        );
     }
 
     #[test]
