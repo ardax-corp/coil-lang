@@ -4785,6 +4785,188 @@ fn main() {
         assert!(!vm.panicked(), "pack [i,i+1,i+2] checksum");
     }
 
+    /// S2i: observed zip stays one heap MakeArray + Index (no operand box,
+    /// no slot-SROA of computed elems). `x` blocks ConstReturnImm fold.
+    #[test]
+    fn vec_array_observed_zip_stays_heap() {
+        use common::Instruction;
+        let src = r#"
+fn zip_sum(int x) -> int {
+    let a = [x, x + 1] + [3, 4];
+    return a[0] + a[1];
+}
+fn main() {
+    if zip_sum(1) != 10 {
+        panic "vec_array zip checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let off = pipeline
+            .compiler_mut()
+            .get_function("zip_sum")
+            .expect("zip_sum");
+        let body = &bc[off..];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = body
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(makes, 1, "one heap result; opcodes={names:?}");
+        assert!(
+            body.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::Index | Instruction::IndexUnchecked)),
+            "observed elems use heap Index; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::EQ),
+            "no slot-select on computed elems; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "zip_sum==10; opcodes={names:?}");
+    }
+
+    /// S2i: stack-array locals zip without boxing operands; result stays heap.
+    #[test]
+    fn vec_array_stack_operand_zip_stays_heap() {
+        use common::Instruction;
+        let src = r#"
+fn zip_sum(int x) -> int {
+    let xs = [x, x + 1];
+    let ys = [3, 4];
+    let a = xs + ys;
+    return a[0] + a[1];
+}
+fn main() {
+    if zip_sum(1) != 10 {
+        panic "stack operand zip checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let off = pipeline
+            .compiler_mut()
+            .get_function("zip_sum")
+            .expect("zip_sum");
+        let body = &bc[off..];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = body
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(makes, 1, "operands stay slots; opcodes={names:?}");
+        assert!(
+            body.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::Index | Instruction::IndexUnchecked)),
+            "result is heap Index; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "zip_sum==10; opcodes={names:?}");
+    }
+
+    /// S2i: StoreIndex mutates the heap zip object; const loads stay Index.
+    #[test]
+    fn vec_array_heap_storeindex_checksum() {
+        use common::Instruction;
+        let src = r#"
+fn poke(int x, int v) -> int {
+    let a = [x, x + 1] + [3, 4];
+    a[0] = v;
+    return a[0] + a[1];
+}
+fn main() {
+    if poke(1, 9) != 15 {
+        panic "heap StoreIndex checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let off = pipeline
+            .compiler_mut()
+            .get_function("poke")
+            .expect("poke");
+        let body = &bc[off..];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            )),
+            "computed-elem local keeps StoreIndex; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "poke==15; opcodes={names:?}");
+    }
+
+    /// S2i: broadcast / pow match vec_array.hy (45 / 18) and stay heap.
+    #[test]
+    fn vec_array_broadcast_pow_checksums() {
+        let src = r#"
+fn board() -> int {
+    let b = [1, 2] + 3;
+    let c = [1, 2] ** 3;
+    if b[0] != 4 || b[1] != 5 {
+        panic "broadcast";
+    }
+    if c[0] != 1 || c[1] != 8 {
+        panic "pow";
+    }
+    return b[0] + b[1] + c[0] + c[1];
+}
+fn main() {
+    if board() != 18 {
+        panic "broadcast/pow checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "broadcast 4,5 and pow 1,8");
+    }
+
+    /// S2i: returning a zip result is the same heap object (no slot explode).
+    #[test]
+    fn vec_array_escape_return_stays_heap() {
+        use common::Instruction;
+        let src = r#"
+fn zip() -> [int; 2] {
+    return [1, 2] + [3, 4];
+}
+fn main() {
+    let a = zip();
+    if a[0] + a[1] != 10 {
+        panic "escape return checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let off = pipeline.compiler_mut().get_function("zip").expect("zip");
+        let body = &bc[off..];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = body
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(makes, 1, "return the zip heap object; opcodes={names:?}");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "zip() elems sum 10; opcodes={names:?}");
+    }
+
     /// Fixed `[T; N]` locals use consecutive LOAD/STORE for const indices;
     /// escaping the local into a call boxes via MakeArray.
     #[test]
@@ -6964,6 +7146,7 @@ fn main() {
                 .any(|b| matches!(b.bytecode(), Instruction::HostInvoke)),
             "N=7 must stay on scalar unroll"
         );
+        let names: Vec<_> = bc.iter().map(|b| b.bytecode()).collect();
         let mul_count = bc
             .iter()
             .filter(|b| {
@@ -6973,10 +7156,13 @@ fn main() {
                 )
             })
             .count();
+        let makes = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
         assert!(
-            mul_count >= 7,
-            "expected scalar unroll (≥7 MUL/BinSlotSlot); got {mul_count}; ops={:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+            mul_count >= 7 || makes >= 1,
+            "scalar unroll (MUL or const-fold + heap MakeArray); mul={mul_count} ops={names:?}"
         );
     }
 

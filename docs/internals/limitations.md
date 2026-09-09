@@ -60,7 +60,7 @@ GVN has two layers under the COI-82 ceiling — neither is real SSA slot rename.
 
 **Operand-order canon.** `il::canon` rewrites Known-SP `Const; Load; op` and high-then-low `Load; Load; op` windows into preferred forms before algebraic/fuse. Int `ConstPool; Load; int-op` demotes the pool entry to inline `Const` when the value is a non-negative `i32` without `POOL_FLAG` bit 31 (float pool operands and non-commutative ops refused). Ordered cmps flip polarity on swap (`LE`↔`GT`, `LEQ`↔`GEQ`). No float reassociation. Loop bounds' `i < bound` header match accepts `Load i; Load b; LE` and the post-canon `Load b; Load i; GT` (and matching `BinSlotSlot` forms); **`LEQ`/`GEQ` headers are not treated as length proofs** (`i <= len` would allow an OOB index; COI-85 / COI-98). See `CanonStats` / `last_canon_stats()`.
 
-**MakeArray frame scalarization (COI-84 ceiling for named locals; escape pass is narrower).** `escape_analysis` rewrites non-escaping `MakeArray` locals to consecutive frame slots when every element is an immediate (`Const` / pool / string) and arity ≤ 32. Computed elements (zip/broadcast `ADD`s, etc.) stay heap — exploding those miscompiled `examples/vec_array.hy`. A named escape (return, call-arg, `ArrayPush` value, field store, HostInvoke)
+**MakeArray frame scalarization (COI-84 ceiling for named locals; escape pass is narrower).** `escape_analysis` rewrites non-escaping `MakeArray` locals to consecutive frame slots when every element is an immediate (`Const` / pool / string) and arity ≤ 32. Computed elements (zip/broadcast `ADD`s, etc.) stay a heap object with sound `Index` / `StoreIndex` (S2i) — exploding those miscompiled `examples/vec_array.hy`. Zip/broadcast *operands* that are literals or stack-array locals load elements directly (S2f slots); the result is still `MakeArray`. A named escape (return, call-arg, `ArrayPush` value, field store, HostInvoke)
 boxes from those slots at the edge (S2g). Unproven `xs[k]` on a codegen
 `[T; N]` local uses a runtime `0 <= k < N` check then slot-select; the
 cold arm is heap `Index` / `StoreIndex` (S2h). Leftover IL `MakeArray`
@@ -69,7 +69,7 @@ private uses after an escape still refuse. Those slots are already GC roots. Thi
 
 | Refused | Why |
 |---------|-----|
-| Computed or non-immediate elements | Each element must be materialized independently on the stack |
+| Slot-SROA of computed elements | Historical miscompile of `vec_array.hy`; S2i keeps heap identity |
 | Arity > 32 | Hard cap in the pass |
 | Growing `ArrayPush` dest / private use after escape | Slots have no object identity; grow and post-escape slot reads are unsound |
 | Unproven `xs[k]` as a raw slot | Slots have no OOB; S2h uses heap Index/StoreIndex or a proven/weaker bound |

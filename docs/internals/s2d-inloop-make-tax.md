@@ -195,7 +195,8 @@ S2f:
   MIR LICM may hoist invariant `Alloc`/`GcBarrier` when the loop has
   no `StoreIndex` / `CALL`. Use `panic` (not `raise`) for checksums.
 - **Refused:** growing `ArrayPush` dest; private use after an escape;
-  unproven `xs[k]` as a raw slot; observed escape (`vec_array.hy`); arity > 32; named
+  unproven `xs[k]` as a raw slot; slot-SROA of observed computed elems
+  (`vec_array.hy`); arity > 32; named
   class SROA; negative `i % N` (last slot, not OOB); in-loop Make*
   **dense** (S2e boxing tax). Non-escaping computed *elements*
   (`[i,i+1,i+2]`) still SROA into slots.
@@ -208,14 +209,18 @@ S2f:
   locals take a weaker bound (`i % m` with `m <= N`, sidecar in-bounds, or
   a runtime `0 <= k < N` check) and still SROA; the cold arm is heap
   `Index` / `StoreIndex` so OOB panics. Leftover IL `MakeArray` + `xs[k]`
-  stays a heap object (checked Index). Remaining refuse: grow dest, private
-  after escape, arity > 32, named class SROA, negative remainder, observed
-  `vec_array.hy`.
+  stays a heap object (checked Index).
+- **S2i (COI-319):** observed/escape + computed elems (`vec_array.hy`) stay
+  a heap object with sound `Index` / `StoreIndex`. Zip/broadcast operands
+  that are literals or stack-array locals load slots (S2f); the result is
+  not slot-SROA'd. Remaining refuse: grow dest, private after escape,
+  arity > 32, named class SROA, negative remainder, slot-SROA of computed
+  elems.
 
 `pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
 `[T; N]` and the only uses are computed-index load/store (`i % N`).
-Computed *element* values (`i`, `i+1`) still materialize into slots;
-they do not stay heap. Escape / `vec_array.hy` still heap.
+Computed *element* values (`i`, `i+1`) still materialize into slots
+when the local does not escape. Observed zip/broadcast results stay heap.
 
 Prove vs parent `3bcaf9e8` (same tip `coil run`, `COIL_AUTO_PAR=0`,
 hyperfine -w 2 -r 8). `coil-dissect --fn pack` / `bump`:

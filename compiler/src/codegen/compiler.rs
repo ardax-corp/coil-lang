@@ -4944,24 +4944,24 @@ impl Compiler {
                 length,
                 elem_is_float,
             } => {
-                let t0 = self.alloc_temp_slot();
-                bytecode.append(&mut self.do_compile(lhs));
-                bytecode.push_store_pop(t0);
                 match length {
                     Some(n) => {
+                        // S2i: literal / stack-array elems stay slots; result is heap.
+                        let heap = self.prepare_aggregate_src(bytecode, lhs);
                         self.emit_zip_loop(
                             bytecode,
                             n,
                             |c, bc, i| {
-                                bc.push_load(t0);
-                                bc.push_const(i as i32);
-                                bc.push_index();
+                                c.emit_aggregate_elem_at(bc, lhs, i, heap);
                                 c.emit_neg_tos(bc, elem_is_float);
                             },
                             false,
                         );
                     }
                     None => {
+                        let t0 = self.alloc_temp_slot();
+                        bytecode.append(&mut self.do_compile(lhs));
+                        bytecode.push_store_pop(t0);
                         // Flush setup into CodeBuf so loop labels join the main IL.
                         self.bytecode.append(bytecode);
                         self.emit_dynamic_unary_array(t0, elem_is_float);
@@ -5006,23 +5006,17 @@ impl Compiler {
                 let Some(rhs) = rhs else {
                     return false;
                 };
-                let t0 = self.alloc_temp_slot();
-                let t1 = self.alloc_temp_slot();
-                bytecode.append(&mut self.do_compile(lhs));
-                bytecode.push_store_pop(t0);
-                bytecode.append(&mut self.do_compile(rhs));
-                bytecode.push_store_pop(t1);
+                // S2i: do not box/Index stack-array or literal operands. The
+                // zip result stays a heap MakeArray (computed elems).
+                let t0 = self.prepare_aggregate_src(bytecode, lhs);
+                let t1 = self.prepare_aggregate_src(bytecode, rhs);
                 let op = info.op;
                 self.emit_zip_loop(
                     bytecode,
                     length,
-                    |_c, bc, i| {
-                        bc.push_load(t0);
-                        bc.push_const(i as i32);
-                        bc.push_index();
-                        bc.push_load(t1);
-                        bc.push_const(i as i32);
-                        bc.push_index();
+                    |c, bc, i| {
+                        c.emit_aggregate_elem_at(bc, lhs, i, t0);
+                        c.emit_aggregate_elem_at(bc, rhs, i, t1);
                         bc.push(Byte::new(scalar_instr(op, elem_is_float)));
                     },
                     false,
@@ -5086,41 +5080,29 @@ impl Compiler {
                 let Some(rhs) = rhs else {
                     return false;
                 };
-                let t_vec = self.alloc_temp_slot();
-                let t_sc = self.alloc_temp_slot();
-                match scalar_on {
-                    ScalarSide::Right => {
-                        bytecode.append(&mut self.do_compile(lhs));
-                        bytecode.push_store_pop(t_vec);
-                        bytecode.append(&mut self.do_compile(rhs));
-                        bytecode.push_store_pop(t_sc);
-                    }
-                    ScalarSide::Left => {
-                        bytecode.append(&mut self.do_compile(lhs));
-                        bytecode.push_store_pop(t_sc);
-                        bytecode.append(&mut self.do_compile(rhs));
-                        bytecode.push_store_pop(t_vec);
-                    }
-                }
                 let op = info.op;
                 match length {
                     Some(n) => {
+                        let (vec_src, sc_src) = match scalar_on {
+                            ScalarSide::Right => (lhs, rhs),
+                            ScalarSide::Left => (rhs, lhs),
+                        };
+                        let t_vec = self.prepare_aggregate_src(bytecode, vec_src);
+                        bytecode.append(&mut self.do_compile(sc_src));
+                        let t_sc = self.alloc_temp_slot();
+                        bytecode.push_store_pop(t_sc);
                         self.emit_zip_loop(
                             bytecode,
                             n,
-                            |_c, bc, i| {
+                            |c, bc, i| {
                                 match scalar_on {
                                     ScalarSide::Right => {
-                                        bc.push_load(t_vec);
-                                        bc.push_const(i as i32);
-                                        bc.push_index();
+                                        c.emit_aggregate_elem_at(bc, lhs, i, t_vec);
                                         bc.push_load(t_sc);
                                     }
                                     ScalarSide::Left => {
                                         bc.push_load(t_sc);
-                                        bc.push_load(t_vec);
-                                        bc.push_const(i as i32);
-                                        bc.push_index();
+                                        c.emit_aggregate_elem_at(bc, rhs, i, t_vec);
                                     }
                                 }
                                 bc.push(Byte::new(scalar_instr(op, elem_is_float)));
@@ -5129,6 +5111,22 @@ impl Compiler {
                         );
                     }
                     None => {
+                        let t_vec = self.alloc_temp_slot();
+                        let t_sc = self.alloc_temp_slot();
+                        match scalar_on {
+                            ScalarSide::Right => {
+                                bytecode.append(&mut self.do_compile(lhs));
+                                bytecode.push_store_pop(t_vec);
+                                bytecode.append(&mut self.do_compile(rhs));
+                                bytecode.push_store_pop(t_sc);
+                            }
+                            ScalarSide::Left => {
+                                bytecode.append(&mut self.do_compile(lhs));
+                                bytecode.push_store_pop(t_sc);
+                                bytecode.append(&mut self.do_compile(rhs));
+                                bytecode.push_store_pop(t_vec);
+                            }
+                        }
                         // Flush setup into CodeBuf so loop labels join the main IL.
                         self.bytecode.append(bytecode);
                         self.emit_dynamic_broadcast_array(
@@ -5265,6 +5263,61 @@ impl Compiler {
             bytecode.push(Byte::new(Instruction::NEGF));
         } else {
             bytecode.push(Byte::new(Instruction::NEG));
+        }
+    }
+
+    /// Operand can be read as independent elements (no operand-box + Index).
+    fn aggregate_src_is_direct_elems(&self, src: &Output<'_>) -> bool {
+        match unwrap_expr_output(src).1.as_ref() {
+            Expression::Array(items) | Expression::Tuple(items) => !items.is_empty(),
+            Expression::Identifier(name) => self.stack_array_info(name).is_some(),
+            _ => false,
+        }
+    }
+
+    /// `None` = emit elems directly; `Some(slot)` = leftover heap object.
+    fn prepare_aggregate_src(&mut self, bytecode: &mut CodeBuf, src: &Output<'_>) -> Option<u32> {
+        if self.aggregate_src_is_direct_elems(src) {
+            self.skip_emit_ids_to_unwrapped(src);
+            None
+        } else {
+            bytecode.append(&mut self.do_compile(src));
+            let slot = self.alloc_temp_slot();
+            bytecode.push_store_pop(slot);
+            Some(slot)
+        }
+    }
+
+    /// One zip/broadcast/neg element. Heap leftovers use checked `Index`.
+    fn emit_aggregate_elem_at(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        src: &Output<'_>,
+        i: usize,
+        heap: Option<u32>,
+    ) {
+        match unwrap_expr_output(src).1.as_ref() {
+            Expression::Array(items) | Expression::Tuple(items) if i < items.len() => {
+                bytecode.append(&mut self.do_compile(&items[i]));
+            }
+            Expression::Identifier(name) => {
+                if let Some((base, n)) = self.stack_array_info(name)
+                    && i < n
+                {
+                    bytecode.push_load(base + i as u32);
+                } else if let Some(slot) = heap {
+                    bytecode.push_load(slot);
+                    bytecode.push_const(i as i32);
+                    bytecode.push_index();
+                }
+            }
+            _ => {
+                if let Some(slot) = heap {
+                    bytecode.push_load(slot);
+                    bytecode.push_const(i as i32);
+                    bytecode.push_index();
+                }
+            }
         }
     }
 

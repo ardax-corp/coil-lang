@@ -58,6 +58,26 @@ test("unproven index load and store") {
     assert(xs[1] == 3)?;
 }
 
+test("observed zip stays heap") {
+    let x = 1;
+    let a = [x, x + 1] + [3, 4];
+    assert(a[0] == 4)?;
+    assert(a[1] == 6)?;
+    let v = 9;
+    a[0] = v;
+    assert(a[0] + a[1] == 15)?;
+    let xs = [x, x + 1];
+    let ys = [3, 4];
+    let z = xs + ys;
+    assert(z[0] + z[1] == 10)?;
+    let b = [x, x + 1] + 3;
+    assert(b[0] == 4)?;
+    assert(b[1] == 5)?;
+    let c = [x, x + 1] ** 3;
+    assert(c[0] == 1)?;
+    assert(c[1] == 8)?;
+}
+
 test("whole array assign copies slots") {
     let a = [1, 2, 3, 4];
     let b = [0, 0, 0, 0];
