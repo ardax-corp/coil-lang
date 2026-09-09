@@ -112,10 +112,10 @@ fn boxes_at_return_edge() {
         .iter()
         .filter(|op| matches!(op, IlOp::MakeArray { .. }))
         .count();
-    assert_eq!(makes, 1, "one box at return; {ops:?}");
+    assert_eq!(makes, 1, "one box at return");
     assert!(
         matches!(ops.last(), Some(IlOp::Return { .. })),
-        "MakeArray stays on the return edge; {ops:?}"
+        "MakeArray stays on the return edge"
     );
 }
 
@@ -145,7 +145,7 @@ fn boxes_at_call_arg_edge() {
         .iter()
         .filter(|op| matches!(op, IlOp::MakeArray { .. }))
         .count();
-    assert_eq!(makes, 1, "one box at call; {ops:?}");
+    assert_eq!(makes, 1, "one box at call");
 }
 
 #[test]

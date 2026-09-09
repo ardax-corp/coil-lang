@@ -4371,7 +4371,6 @@ fn main() {
         assert!(!vm.panicked(), "pack(3)==3 && pack(6)==15; opcodes={names:?}");
     }
 
-    #[test]
     /// S2g: private slot-select then one MakeArray at `return xs`.
     #[test]
     fn stack_array_sroa_boxes_at_return_edge() {
