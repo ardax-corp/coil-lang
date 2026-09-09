@@ -81,6 +81,7 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
+    paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
         .blocks
         .iter()
@@ -115,6 +116,50 @@ pub fn try_specialize_body(
         return None;
     }
     Some((out, abi))
+}
+
+/// Index / open CALL dests default to i64 when the next IL is StorePop.
+/// Repaint from float uses so DenseBin / RETURN keep the Value bits.
+fn paint_index_dest_from_uses(func: &mut crate::mir::func::MirFunc) {
+    use crate::mir::inst::{MirInst, ValueId};
+    use crate::mir::ty::MirTy;
+    let mut paint = Vec::new();
+    for b in &func.blocks {
+        for inst in &b.insts {
+            match inst {
+                MirInst::Index { dest, .. } | MirInst::Call { dest, .. } => {
+                    paint.push(*dest);
+                }
+                _ => {}
+            }
+        }
+    }
+    if paint.is_empty() {
+        return;
+    }
+    let mut ty_of = vec![None; func.types.len()];
+    for b in &func.blocks {
+        for inst in &b.insts {
+            match inst {
+                MirInst::Bin { ty, lhs, rhs, .. } if ty.is_float() => {
+                    ty_of[lhs.index()] = Some(*ty);
+                    ty_of[rhs.index()] = Some(*ty);
+                }
+                MirInst::StoreIndex { value, .. } => {
+                    let vt = func.ty(*value);
+                    if vt.is_float() {
+                        ty_of[value.index()] = Some(vt);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for ValueId(id) in paint {
+        if let Some(ty) = ty_of.get(id as usize).copied().flatten() {
+            func.types[id as usize] = ty;
+        }
+    }
 }
 
 fn count_store_index(ops: &[IlOp]) -> usize {

@@ -135,7 +135,28 @@ fn loop_body(preds: &[Vec<BlockId>], latch: BlockId, header: BlockId) -> HashSet
     body
 }
 
+fn loop_mutates_heap_or_calls(func: &MirFunc, lp: &LoopInfo) -> bool {
+    for b in &func.blocks {
+        if !lp.blocks.contains(&b.id) {
+            continue;
+        }
+        for inst in &b.insts {
+            if matches!(
+                inst,
+                MirInst::StoreIndex { .. }
+                    | MirInst::Call { .. }
+                    | MirInst::Alloc { .. }
+                    | MirInst::FieldStore { .. }
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
+    let allow_index = !loop_mutates_heap_or_calls(func, lp);
     let defined = values_defined_in(func, &lp.blocks);
     let mut invariant: HashSet<ValueId> = HashSet::new();
     for i in 0..func.types.len() {
@@ -153,7 +174,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
                 continue;
             }
             for (idx, inst) in b.insts.iter().enumerate() {
-                if inst.is_phi() || !hoistable(inst) {
+                if inst.is_phi() || !hoistable(inst, allow_index) {
                     continue;
                 }
                 if invariant.contains(&inst.dest()) {
@@ -205,7 +226,7 @@ fn hoist_loop(func: &mut MirFunc, lp: &LoopInfo) -> usize {
     n
 }
 
-fn hoistable(inst: &MirInst) -> bool {
+fn hoistable(inst: &MirInst, allow_index: bool) -> bool {
     match inst {
         MirInst::Phi { .. } => false,
         MirInst::Bin {
@@ -219,7 +240,8 @@ fn hoistable(inst: &MirInst) -> bool {
         | MirInst::Unary { .. }
         | MirInst::Cast { .. } => true,
         MirInst::HostInvoke { native_id, .. } => super::effects::host_may_hoist(*native_id),
-        MirInst::Index { .. } | MirInst::ArrayLen { .. } => true,
+        MirInst::Index { .. } => allow_index,
+        MirInst::ArrayLen { .. } => true,
         MirInst::Call { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }

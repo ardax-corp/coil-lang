@@ -91,7 +91,16 @@ pub fn emit_dense(
             }) {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, pool, loc, across_alloc)?;
+            emit_inst(
+                &mut out,
+                inst,
+                func,
+                &regs,
+                pool,
+                loc,
+                across_alloc,
+                Some(u32::from(max_reg) + 1),
+            )?;
         }
         emit_term(
             &mut out,
@@ -285,6 +294,14 @@ pub(super) fn emit_cond_jumps(
     }
 }
 
+fn restore_dense_tell(out: &mut Vec<IlOp>, frame: Option<u32>) {
+    if let Some(frame) = frame {
+        out.push(IlOp::byte(
+            Byte::new(Instruction::Seek).with_operand_u32(frame),
+        ));
+    }
+}
+
 pub(super) fn emit_inst(
     out: &mut Vec<IlOp>,
     inst: &MirInst,
@@ -293,6 +310,7 @@ pub(super) fn emit_inst(
     pool: &mut Vec<u64>,
     loc: DebugLoc,
     across_alloc: bool,
+    restore_tell: Option<u32>,
 ) -> Result<(), LowerError> {
     match inst {
         MirInst::Const { dest, c } => {
@@ -390,6 +408,7 @@ pub(super) fn emit_inst(
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+            restore_dense_tell(out, restore_tell);
         }
         MirInst::Call { dest, target, args } => {
             for a in args {
@@ -409,6 +428,7 @@ pub(super) fn emit_inst(
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+            restore_dense_tell(out, restore_tell);
         }
         MirInst::Index {
             dest,
@@ -416,22 +436,26 @@ pub(super) fn emit_inst(
             index,
             unchecked,
         } => {
-            let arr = u32::from(regs[array.index()]);
-            out.push(IlOp::Load { slot: arr, loc });
-            out.push(IlOp::ArrayPin { slot: arr, loc });
+            // Unpinned residuals: pin keys are dense slots and do not
+            // survive Seek / CALL tell. Same reconstruct as MIR→LIR.
+            out.push(IlOp::Load {
+                slot: u32::from(regs[array.index()]),
+                loc,
+            });
             out.push(IlOp::Load {
                 slot: u32::from(regs[index.index()]),
                 loc,
             });
             if *unchecked {
-                out.push(IlOp::IndexPinUnchecked { slot: arr, loc });
+                out.push(IlOp::IndexUnchecked { loc });
             } else {
-                out.push(IlOp::IndexPin { slot: arr, loc });
+                out.push(IlOp::Index { loc });
             }
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+            restore_dense_tell(out, restore_tell);
         }
         MirInst::StoreIndex {
             dest,
@@ -440,9 +464,10 @@ pub(super) fn emit_inst(
             value,
             unchecked,
         } => {
-            let arr = u32::from(regs[array.index()]);
-            out.push(IlOp::Load { slot: arr, loc });
-            out.push(IlOp::ArrayPin { slot: arr, loc });
+            out.push(IlOp::Load {
+                slot: u32::from(regs[array.index()]),
+                loc,
+            });
             out.push(IlOp::Load {
                 slot: u32::from(regs[index.index()]),
                 loc,
@@ -451,15 +476,17 @@ pub(super) fn emit_inst(
                 slot: u32::from(regs[value.index()]),
                 loc,
             });
-            if *unchecked {
-                out.push(IlOp::StoreIndexPinUnchecked { slot: arr, loc });
+            let inst = if *unchecked {
+                Instruction::StoreIndexUnchecked
             } else {
-                out.push(IlOp::StoreIndexPin { slot: arr, loc });
-            }
+                Instruction::StoreIndex
+            };
+            out.push(IlOp::byte(Byte::new(inst)));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+            restore_dense_tell(out, restore_tell);
         }
         MirInst::ArrayLen { dest, array } => {
             out.push(IlOp::Load {
@@ -471,6 +498,7 @@ pub(super) fn emit_inst(
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+            restore_dense_tell(out, restore_tell);
         }
         MirInst::MatchPayload { .. } => {
             return Err(LowerError::Refused(
@@ -499,6 +527,7 @@ pub(super) fn emit_inst(
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+            restore_dense_tell(out, restore_tell);
         }
         MirInst::GcBarrier { dest, .. } => {
             if !across_alloc {

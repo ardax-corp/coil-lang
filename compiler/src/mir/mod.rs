@@ -2191,21 +2191,20 @@ fn main() {
             sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "indexed_sum checksum");
     }
 
     #[test]
-    fn s3b_index_plus_helper_takes_dense_and_checksums() {
+    fn s3b_reverse_index_takes_dense_and_checksums() {
         let src = r#"
-fn id(int x) -> int {
-    return x;
-}
 fn sum(Vec<int> arr) -> int {
+    let n = len(arr);
     let i = 0;
     let s = 0;
-    while i < len(arr) {
-        s = s + id(arr[i]);
+    while i < n {
+        s = s + arr[n - 1 - i];
         i = i + 1;
     }
     return s;
@@ -2213,12 +2212,12 @@ fn sum(Vec<int> arr) -> int {
 fn main() {
     let v: Vec<int> = Vec::from([1, 2, 3, 4]);
     if sum(v) != 10 {
-        raise "index+helper checksum";
+        raise "reverse-index checksum";
     }
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, constants) = p.compile_src(src).expect("compile index+helper");
+        let (bc, constants) = p.compile_src(src).expect("compile reverse-index");
         let symbols = p.program_debug().fn_symbols;
         let i = symbols
             .iter()
@@ -2233,21 +2232,32 @@ fn main() {
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
             body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "S3b: index+CALL sum takes dense; opcodes={names:?}"
+            "S3b: reverse index takes dense; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::VReduce),
+            "gather is not V1; opcodes={names:?}"
         );
         assert!(
             body.iter().any(|b| matches!(
                 *b.bytecode(),
-                Instruction::Index
-                    | Instruction::IndexUnchecked
-                    | Instruction::IndexPin
-                    | Instruction::IndexPinUnchecked
+                Instruction::Index | Instruction::IndexUnchecked
             )),
-            "index+helper keeps Index; opcodes={names:?}"
+            "S3b: unpinned Index residuals; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+                    | Instruction::ArrayPin
+            )),
+            "dense Seek cannot keep pin keys; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-        assert!(!vm.panicked(), "index+helper checksum; opcodes={names:?}");
+        assert!(!vm.panicked(), "reverse-index checksum; opcodes={names:?}");
     }
 
     #[test]
@@ -2325,6 +2335,7 @@ fn main() {
             "times_a keeps StoreIndex; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "times_a checksum; opcodes={names:?}");
     }
