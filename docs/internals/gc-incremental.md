@@ -12,14 +12,14 @@ slice of an incremental cycle:
 1. **O(1) root seed** — gray is seeded with `find_object_by_addr` (slab +
    header poison). The collector no longer walks the intrusive list to match
    root addresses.
-2. **Incremental tricolor mark** — `begin_mark` / `mark_quantum` drain a gray
-   worklist (`GC_MARK_QUANTUM`, doubled while `alloc_bytes` is over the
-   threshold). A **remark** of VM roots runs when the worklist first empties
-   (stack / maps / pins / coros / FFI libraries).
-3. **Yuasa SATB** — heap pointer overwrites during mark shade the *old*
-   referent (`SetField`, `StoreIndex*`, vec clear/pop/remove, `gc::unroot`,
-   IO buffer fills). New objects allocated while marking are **black** (marked,
-   not gray).
+2. **Safepoint mark** — `begin_mark` / `mark_quantum` drain gray
+   (`GC_MARK_QUANTUM`, doubled under pressure). The interpreter **finishes
+   mark at the alloc safepoint** (plus a root remark) so the mutator does not
+   run while `GcPhase::Marking`.
+3. **Yuasa SATB** — `Heap::satb_shade_*` logs overwritten pointers. Host
+   mutations (vec clear/pop/remove, `gc::unroot`, IO fills) shade. Opcode
+   `SetField` / `StoreIndex` skip the barrier because mark is safepoint-atomic.
+   New objects allocated while marking are **black**.
 4. **Lazy sweep** — after weaks are cleared, `sweep_quantum` unlinks unmarked
    objects from a cursor. Allocations during sweep go at list head and are not
    visited this cycle (unmarked; next mark treats them as white).
