@@ -2,14 +2,12 @@
 //!
 //! Dense eligibility: float `+/−/×/÷`, i64 `+/−/×/÷/%` (or int `INC`/`DEC`),
 //! or unused `has_i32`, plus either a back-edge **or** a straight-line body
-//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer refuses user `CALL`
-//! unless the target is already in the dense ABI map (COI-291), plus
-//! non-allowlisted HostInvoke / heap index / class field / match / string /
-//! unmapped alloc (`MakeArray` / `InitTyped`) /
+//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). S3: one-word `CALL` is
+//! ok without a dense callee map; I6-typed HostInvoke except I4 string
+//! bytes; heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes.
+//! Still refuse class field / match (dense) / string / unmapped alloc /
 //! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. S2c maps
-//! allow alloc on dense / LIR infer. W4 accepts allowlisted math / packed
-//! LA / `simd_axpy_reduce` HostInvokes. I6 types other hosts as SSA edges
-//! under `allow_effects`; dense infer stays W4. Compare-only stays fuse-IL.
+//! allow alloc. Compare-only stays fuse-IL.
 
 use std::collections::HashMap;
 
@@ -18,7 +16,7 @@ use common::Instruction;
 use crate::il::{EntryKind, IlOp, Label};
 
 use super::abi::DenseCallMap;
-use super::host_allow::host_spec;
+use super::host_allow::{dense_host_ok, host_edge_spec};
 use super::lower::LowerError;
 use super::gc::refuse_reason as alloc_refuse_reason;
 use super::string_barrier::{is_format_inst, refuse_reason};
@@ -273,6 +271,21 @@ fn infer_walk(
                     imm: None,
                 });
             }
+            IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => {
+                apply_index(&mut stack, &mut slot_ty, &mut pool_ty, false)?;
+            }
+            IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. } => {
+                apply_index(&mut stack, &mut slot_ty, &mut pool_ty, true)?;
+            }
+            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => {
+                apply_store_index(&mut stack, &mut slot_ty, &mut pool_ty, true)?;
+            }
+            IlOp::ArrayPin { .. } => {
+                let arr = stack
+                    .pop()
+                    .ok_or_else(|| LowerError::Refused("ArrayPin stack".into()))?;
+                paint(&mut slot_ty, &mut pool_ty, arr, MirTy::HeapRef)?;
+            }
             IlOp::Bin { op: inst, .. } => {
                 apply_bin(
                     &mut stack,
@@ -384,6 +397,20 @@ fn infer_walk(
                             imm: None,
                         });
                     }
+                }
+                Instruction::ArrayLen => {
+                    let arr = stack
+                        .pop()
+                        .ok_or_else(|| LowerError::Refused("ArrayLen stack".into()))?;
+                    paint(&mut slot_ty, &mut pool_ty, arr, MirTy::HeapRef)?;
+                    stack.push(Cell {
+                        origin: Origin::Tmp,
+                        ty: Some(MirTy::I64),
+                        imm: None,
+                    });
+                }
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked => {
+                    apply_store_index(&mut stack, &mut slot_ty, &mut pool_ty, false)?;
                 }
                 Instruction::INC | Instruction::DEC => {
                     let (slot, _, is_float) = byte.inc_dec_parts();
@@ -545,10 +572,62 @@ fn infer_walk(
                     imm: None,
                 });
             }
+            IlOp::Index { .. } | IlOp::IndexUnchecked { .. } => {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::IndexPin { .. } | IlOp::IndexPinUnchecked { .. } => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::ArrayPin { .. } => {
+                let _ = stack.pop();
+            }
             IlOp::HostInvoke { arity, .. } => {
                 for _ in 0..(*arity as usize + 1) {
                     let _ = stack.pop();
                 }
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::I64),
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+                ) =>
+            {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                let _ = stack.pop();
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: None,
@@ -593,11 +672,12 @@ fn infer_walk(
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
     if mode == InferMode::Dense
-        && !allow_alloc
-        && slot_ty.values().any(|t| t.is_heap_word())
+        && slot_ty
+            .values()
+            .any(|t| matches!(t, MirTy::NicheOpt | MirTy::NicheRes))
     {
         return Err(LowerError::Refused(
-            "dense infer refuses heap/niche slots (I1 carry is LIR/SSA only)".into(),
+            "dense infer refuses niche slots (I2 match stays LIR)".into(),
         ));
     }
     if mode == InferMode::Dense && !has_float_arith && !has_i32 && !has_i64_arith {
@@ -631,23 +711,64 @@ fn is_numeric_work_op(op: &IlOp) -> bool {
 
 /// True when a jump targets an earlier label (counted / while loops).
 pub(crate) fn has_back_edge(ops: &[IlOp]) -> bool {
-    let mut seen = HashMap::new();
+    !loop_ranges(ops).is_empty()
+}
+
+/// Make* / InitTyped between a loop header and its back-edge (invert+fuse).
+/// Preheader alloc plus an index loop is not this — S3 may specialize those.
+pub(crate) fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
+    let loops = loop_ranges(ops);
+    if loops.is_empty() {
+        return false;
+    }
+    ops.iter().enumerate().any(|(i, op)| {
+        alloc_refuse_reason(op).is_some() && loops.iter().any(|&(h, j)| h <= i && i < j)
+    })
+}
+
+/// Heap-index / store / pin / ArrayLen — S3 may specialize these with maps.
+pub(crate) fn has_heap_index(ops: &[IlOp]) -> bool {
+    ops.iter().any(|op| match op {
+        IlOp::Index { .. }
+        | IlOp::IndexUnchecked { .. }
+        | IlOp::IndexPin { .. }
+        | IlOp::IndexPinUnchecked { .. }
+        | IlOp::StoreIndexPin { .. }
+        | IlOp::StoreIndexPinUnchecked { .. }
+        | IlOp::ArrayPin { .. } => true,
+        IlOp::Byte { byte, .. } => matches!(
+            *byte.bytecode(),
+            Instruction::Index
+                | Instruction::IndexUnchecked
+                | Instruction::StoreIndex
+                | Instruction::StoreIndexUnchecked
+                | Instruction::ArrayLen
+        ),
+        _ => false,
+    })
+}
+
+fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
+    let mut label_at = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
         if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-            seen.entry(*id).or_insert(i);
+            label_at.entry(*id).or_insert(i);
         }
+    }
+    let mut ranges = Vec::new();
+    for (j, op) in ops.iter().enumerate() {
         if let IlOp::Jump {
             target: Label(id), ..
         } = op
         {
-            if let Some(&at) = seen.get(id) {
-                if at < i {
-                    return true;
+            if let Some(&h) = label_at.get(id) {
+                if h < j {
+                    ranges.push((h, j));
                 }
             }
         }
     }
-    false
+    ranges
 }
 
 fn push_map_alloc(stack: &mut Vec<Cell>, arity: usize) -> Result<(), LowerError> {
@@ -855,6 +976,58 @@ fn paint_keep_heap(
     Ok(())
 }
 
+fn apply_index(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    pinned: bool,
+) -> Result<(), LowerError> {
+    let idx = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("index stack".into()))?;
+    paint(slot_ty, pool_ty, idx, MirTy::I64)?;
+    if !pinned {
+        let arr = stack
+            .pop()
+            .ok_or_else(|| LowerError::Refused("index stack".into()))?;
+        paint(slot_ty, pool_ty, arr, MirTy::HeapRef)?;
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: None,
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_store_index(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    pinned: bool,
+) -> Result<(), LowerError> {
+    let val = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("StoreIndex stack".into()))?;
+    let idx = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("StoreIndex stack".into()))?;
+    paint(slot_ty, pool_ty, idx, MirTy::I64)?;
+    if !pinned {
+        let arr = stack
+            .pop()
+            .ok_or_else(|| LowerError::Refused("StoreIndex stack".into()))?;
+        paint(slot_ty, pool_ty, arr, MirTy::HeapRef)?;
+    }
+    if let Some(ty) = val.ty {
+        if ty.is_word_lane() {
+            paint(slot_ty, pool_ty, val, ty)?;
+        }
+    }
+    stack.push(val);
+    Ok(())
+}
+
 fn apply_call(
     stack: &mut Vec<Cell>,
     slot_ty: &mut HashMap<u32, MirTy>,
@@ -867,13 +1040,7 @@ fn apply_call(
     if ret_words != 1 {
         return Err(LowerError::Refused("dense CALL is one-word".into()));
     }
-    let Some(abi) = calls.get(&target) else {
-        return Err(LowerError::Refused("CALL".into()));
-    };
     let n = arity as usize;
-    if abi.params.len() != n {
-        return Err(LowerError::Refused("CALL arity".into()));
-    }
     if stack.len() < n {
         return Err(LowerError::Refused("CALL stack".into()));
     }
@@ -882,12 +1049,24 @@ fn apply_call(
         args.push(stack.pop().expect("arity checked"));
     }
     args.reverse();
-    for (cell, ty) in args.iter().zip(abi.params.iter()) {
-        paint(slot_ty, pool_ty, *cell, *ty)?;
+    if let Some(abi) = calls.get(&target) {
+        if abi.params.len() != n {
+            return Err(LowerError::Refused("CALL arity".into()));
+        }
+        for (cell, ty) in args.iter().zip(abi.params.iter()) {
+            paint(slot_ty, pool_ty, *cell, *ty)?;
+        }
+        stack.push(Cell {
+            origin: Origin::Tmp,
+            ty: Some(abi.ret),
+            imm: None,
+        });
+        return Ok(());
     }
+    // S3: one-word open CALL — result typed from later use.
     stack.push(Cell {
         origin: Origin::Tmp,
-        ty: Some(abi.ret),
+        ty: None,
         imm: None,
     });
     Ok(())
@@ -930,7 +1109,10 @@ fn apply_host(
     let Some(id) = fn_cell.imm.and_then(|v| u16::try_from(v).ok()) else {
         return Err(LowerError::Refused("HostInvoke".into()));
     };
-    let Some(spec) = host_spec(id) else {
+    if !dense_host_ok(id) {
+        return Err(LowerError::Refused("HostInvoke".into()));
+    }
+    let Some(spec) = host_edge_spec(id) else {
         return Err(LowerError::Refused("HostInvoke".into()));
     };
     if spec.args.len() != n {

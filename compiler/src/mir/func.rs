@@ -356,13 +356,54 @@ impl MirFunc {
                 }
             }
             MirInst::Call { dest, args, .. } => {
-                if !self.ty(*dest).is_numeric() {
-                    return Err(format!("{dest} call dest is not numeric"));
+                if !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} call dest is not a word lane"));
                 }
                 for (i, a) in args.iter().enumerate() {
-                    if !self.ty(*a).is_numeric() {
+                    if !self.ty(*a).is_word_lane() {
                         return Err(format!("{dest} call arg {i} type"));
                     }
+                }
+            }
+            MirInst::Index {
+                dest,
+                array,
+                index,
+                ..
+            } => {
+                if self.ty(*array) != MirTy::HeapRef {
+                    return Err(format!("{dest} Index array is not heapref"));
+                }
+                if !self.ty(*index).is_int() {
+                    return Err(format!("{dest} Index index type"));
+                }
+                if !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} Index dest type"));
+                }
+            }
+            MirInst::StoreIndex {
+                dest,
+                array,
+                index,
+                value,
+                ..
+            } => {
+                if self.ty(*array) != MirTy::HeapRef {
+                    return Err(format!("{dest} StoreIndex array is not heapref"));
+                }
+                if !self.ty(*index).is_int() {
+                    return Err(format!("{dest} StoreIndex index type"));
+                }
+                if !self.ty(*value).is_word_lane() || self.ty(*dest) != self.ty(*value) {
+                    return Err(format!("{dest} StoreIndex value type"));
+                }
+            }
+            MirInst::ArrayLen { dest, array } => {
+                if self.ty(*array) != MirTy::HeapRef {
+                    return Err(format!("{dest} ArrayLen array is not heapref"));
+                }
+                if self.ty(*dest) != MirTy::I64 {
+                    return Err(format!("{dest} ArrayLen dest type"));
                 }
             }
             MirInst::MatchPayload {

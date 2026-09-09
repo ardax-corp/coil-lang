@@ -27,9 +27,9 @@ and relocate mapped slots on collect.
 - Dense specialize / MIR→LIR **may cross alloc** when
   [`has_real_maps`](../../compiler/src/mir/stackmap.rs) is true (S2c /
   [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
-  LIR-across-alloc is straight-line only (looping alloc stays fuse-IL so
-  invert+fuse remains). Unmapped allocating bodies stay fuse-IL. Heap
-  index / `match`+dense stay refuse (S3).
+  LIR-across-alloc stays off looping alloc (invert+fuse). Unmapped
+  allocating bodies stay fuse-IL. S3 heap-index stays fuse-IL (dense
+  residuals unsound on `Vec`). Dense+match stays I2 LIR.
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
   rewritten if a live object address changes. Unmapped alloc bodies stay
   fuse-IL + conservative stack scan. Cranelift (P5) stays parked.

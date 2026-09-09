@@ -1,11 +1,9 @@
 //! W4 allowlist plus I6 typed HostInvoke edges.
 //!
-//! Dense specialize still emits only pure math, packed LA, and
-//! `coil-simd` `simd_axpy_reduce`. [`host_edge_spec`] types any catalog
-//! native as Value words so impure IO / clocks / GC / FFI can sit on SSA
-//! as barriers. User `CALL` is a separate path (COI-291) when the callee
-//! is already dense. At a W4 edge, dense emit boxes typed slots onto the
-//! Value stack, `HostInvoke`s, then unboxes.
+//! W4 stays the hoist allowlist (math / packed LA / axpy). S3 dense emit
+//! also reconstructs other I6-typed HostInvoke edges (box → call → unbox)
+//! except I4 `from_bytes` / `to_bytes`. Impure hosts are LICM barriers.
+//! User `CALL` is one-word (dense map or open fuse-IL / LIR callee).
 
 use common::{
     HOST_NATIVES, MATH_ATAN_ID, MATH_POW_ID, MATH_SIN_ID, MATH_TANH_ID, PACKED_DOT_ID,
@@ -110,6 +108,19 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
         ret: I64,
         hoistable: false,
     })
+}
+
+/// I4 string bytes stay fuse-IL — not a dense HostInvoke edge.
+pub fn is_i4_host(id: u16) -> bool {
+    matches!(
+        HOST_NATIVES.get(id as usize).map(|n| n.name),
+        Some("from_bytes" | "to_bytes")
+    )
+}
+
+/// S3: any I6-typed host except I4 string bytes may sit in a dense body.
+pub fn dense_host_ok(id: u16) -> bool {
+    !is_i4_host(id) && host_edge_spec(id).is_some()
 }
 
 pub fn host_edge_spec_by_name(name: &str) -> Option<HostSpec> {

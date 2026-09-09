@@ -6409,6 +6409,7 @@ fn main() {
                     | Instruction::MULF
                     | Instruction::BinSlotSlot
                     | Instruction::BinReturn
+                    | Instruction::DenseBin
             )),
             "cross unroll should emit MUL or fused slot mul; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()

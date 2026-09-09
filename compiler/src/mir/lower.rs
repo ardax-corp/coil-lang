@@ -10,7 +10,7 @@ use common::Instruction;
 
 use crate::il::{EntryKind, IlJumpKind, IlOp, Label};
 
-use super::abi::DenseCallMap;
+use super::abi::{DenseAbi, DenseCallMap};
 use super::builder::{MirBuilder, MirError};
 use super::func::MirFunc;
 use super::gc::is_alloc_inst;
@@ -66,6 +66,8 @@ pub struct LowerHints {
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` → Alloc +
     /// GcBarrier with S2a live roots. S2c emit needs maps.
     pub allow_alloc: bool,
+    /// S3: `Index` / `StoreIndex` / `ArrayLen` / `ArrayPin`.
+    pub allow_index: bool,
     /// I6: type non-W4 HostInvoke (clocks / IO / GC / FFI names) as SSA
     /// edges. Dense emit still refuses anything outside W4.
     pub allow_effects: bool,
@@ -91,6 +93,7 @@ impl Default for LowerHints {
             unboxed_fields: Vec::new(),
             allow_fields: false,
             allow_alloc: false,
+            allow_index: false,
             allow_effects: false,
             allow_deopt: false,
             skip_verify: false,
@@ -652,14 +655,7 @@ fn lower_op(
             if *ret_words != 1 {
                 return Err(LowerError::Refused("dense CALL is one-word".into()));
             }
-            let abi = hints
-                .calls
-                .get(&target.0)
-                .ok_or_else(|| LowerError::Refused("CALL".into()))?;
             let n = *arity as usize;
-            if abi.params.len() != n {
-                return Err(LowerError::Refused("CALL arity".into()));
-            }
             if tos.len() < n {
                 return Err(LowerError::Refused("CALL stack".into()));
             }
@@ -668,7 +664,46 @@ fn lower_op(
                 args.push(tos.pop().expect("arity checked"));
             }
             args.reverse();
-            tos.push(b.ins_call(*target, args, abi)?);
+            let dest_ty = use_result_ty(hints, next, MirTy::I64);
+            let abi = if let Some(abi) = hints.calls.get(&target.0) {
+                if abi.params.len() != n {
+                    return Err(LowerError::Refused("CALL arity".into()));
+                }
+                abi.clone()
+            } else {
+                let params: Vec<MirTy> = args.iter().map(|&a| b.func().ty(a)).collect();
+                if !dest_ty.is_word_lane() || params.iter().any(|t| !t.is_word_lane()) {
+                    return Err(LowerError::Refused("CALL".into()));
+                }
+                DenseAbi {
+                    params,
+                    ret: dest_ty,
+                }
+            };
+            tos.push(b.ins_call(*target, args, &abi)?);
+            Ok(())
+        }
+        IlOp::Index { .. } if hints.allow_index => lower_index(b, tos, next, hints, false),
+        IlOp::IndexUnchecked { .. } if hints.allow_index => {
+            lower_index(b, tos, next, hints, true)
+        }
+        IlOp::IndexPin { slot, .. } if hints.allow_index => {
+            lower_index_pin(b, tos, next, hints, *slot, false)
+        }
+        IlOp::IndexPinUnchecked { slot, .. } if hints.allow_index => {
+            lower_index_pin(b, tos, next, hints, *slot, true)
+        }
+        IlOp::StoreIndexPin { slot, .. } if hints.allow_index => {
+            lower_store_index_pin(b, tos, *slot, false)
+        }
+        IlOp::StoreIndexPinUnchecked { slot, .. } if hints.allow_index => {
+            lower_store_index_pin(b, tos, *slot, true)
+        }
+        IlOp::ArrayPin { slot, .. } if hints.allow_index => {
+            let arr = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("ArrayPin stack".into()))?;
+            b.def_local(LocalId(*slot), arr)?;
             Ok(())
         }
         IlOp::MakeTuple { arity, .. } if hints.allow_alloc => {
@@ -781,6 +816,17 @@ fn lower_byte(
                 .ok_or_else(|| LowerError::Refused("not stack".into()))?;
             tos.push(b.ins_not(v)?);
             Ok(())
+        }
+        Instruction::ArrayLen if hints.allow_index => {
+            let arr = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("ArrayLen stack".into()))?;
+            tos.push(b.ins_array_len(arr)?);
+            Ok(())
+        }
+        Instruction::StoreIndex | Instruction::StoreIndexUnchecked if hints.allow_index => {
+            let unchecked = *byte.bytecode() == Instruction::StoreIndexUnchecked;
+            lower_store_index(b, tos, unchecked)
         }
         Instruction::Seek if hints.allow_match => Ok(()),
         inst if is_alloc_inst(inst) && hints.allow_alloc => {
@@ -932,6 +978,115 @@ fn map_bin(inst: Instruction) -> Option<MirBinOp> {
         Instruction::SHR => MirBinOp::Shr,
         _ => return None,
     })
+}
+
+fn use_result_ty(hints: &LowerHints, next: Option<&IlOp>, default: MirTy) -> MirTy {
+    match next {
+        Some(IlOp::StorePop { slot, .. }) => hints.slot(*slot),
+        Some(IlOp::Bin { op, .. }) => {
+            if is_float_op(*op) {
+                MirTy::F64
+            } else if matches!(
+                *op,
+                Instruction::EQ
+                    | Instruction::NEQ
+                    | Instruction::LE
+                    | Instruction::LEQ
+                    | Instruction::GT
+                    | Instruction::GEQ
+            ) {
+                MirTy::Bool
+            } else {
+                MirTy::I64
+            }
+        }
+        _ => default,
+    }
+}
+
+fn is_float_op(op: Instruction) -> bool {
+    matches!(
+        op,
+        Instruction::ADDF
+            | Instruction::SUBF
+            | Instruction::MULF
+            | Instruction::DIVF
+            | Instruction::MODF
+            | Instruction::LEF
+            | Instruction::LEQF
+            | Instruction::GTF
+            | Instruction::GEQF
+    )
+}
+
+fn lower_index(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    next: Option<&IlOp>,
+    hints: &LowerHints,
+    unchecked: bool,
+) -> Result<(), LowerError> {
+    let idx = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("index stack".into()))?;
+    let arr = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("index stack".into()))?;
+    let dest_ty = use_result_ty(hints, next, MirTy::I64);
+    tos.push(b.ins_index(arr, idx, dest_ty, unchecked)?);
+    Ok(())
+}
+
+fn lower_index_pin(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    next: Option<&IlOp>,
+    hints: &LowerHints,
+    slot: u32,
+    unchecked: bool,
+) -> Result<(), LowerError> {
+    let idx = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("IndexPin stack".into()))?;
+    let arr = b.use_local(LocalId(slot), MirTy::HeapRef)?;
+    let dest_ty = use_result_ty(hints, next, MirTy::I64);
+    tos.push(b.ins_index(arr, idx, dest_ty, unchecked)?);
+    Ok(())
+}
+
+fn lower_store_index(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    unchecked: bool,
+) -> Result<(), LowerError> {
+    let val = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("StoreIndex stack".into()))?;
+    let idx = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("StoreIndex stack".into()))?;
+    let arr = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("StoreIndex stack".into()))?;
+    tos.push(b.ins_store_index(arr, idx, val, unchecked)?);
+    Ok(())
+}
+
+fn lower_store_index_pin(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    slot: u32,
+    unchecked: bool,
+) -> Result<(), LowerError> {
+    let val = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("StoreIndexPin stack".into()))?;
+    let idx = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("StoreIndexPin stack".into()))?;
+    let arr = b.use_local(LocalId(slot), MirTy::HeapRef)?;
+    tos.push(b.ins_store_index(arr, idx, val, unchecked)?);
+    Ok(())
 }
 
 fn map_cmp(inst: Instruction) -> Option<MirCmpOp> {

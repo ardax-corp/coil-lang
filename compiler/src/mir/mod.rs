@@ -921,7 +921,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_refuses_call_to_non_dense_helper() {
+    fn pipeline_open_call_to_fuse_il_helper_is_dense() {
         let src = r#"
 fn mid(float x) -> float {
     let a = x * x + x;
@@ -943,23 +943,25 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile mid CALL refuse");
+        let (bc, constants) = p.compile_src(src).expect("compile mid CALL");
         let hot = p.function_offset("hot").expect("hot");
         let main = p.function_offset("main").expect("main");
         let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
         assert!(
-            !hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "CALL to a non-dense callee must refuse caller specialize"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3 open one-word CALL keeps the caller dense; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::CALL)
-                || bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
-            "site stays a direct CALL (or was tiny-inlined — then no DenseBin in hot)"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "dense caller still emits CALL"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]
-    fn pipeline_refuses_user_call_inside_numeric_loop() {
+    fn pipeline_open_call_to_recursive_helper_is_dense() {
         let src = r#"
 fn helper(float x, int k) -> float {
     if k <= 0 {
@@ -981,15 +983,21 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile user CALL refuse");
+        let (bc, constants) = p.compile_src(src).expect("compile open CALL");
+        let hot = p.function_offset("hot").expect("hot");
+        let main = p.function_offset("main").expect("main");
+        let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
         assert!(
-            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "user CALL must refuse dense specialize"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3 open CALL densifies the loop; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
             bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
-            "negative W4 case keeps a direct CALL"
+            "recursive helper stays a direct CALL"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]
@@ -1433,10 +1441,17 @@ fn main() {
             assert_eq!(f.ret_ty, Some(ty));
             assert_eq!(f.ret_layout, ty.layout());
             let mut pool = Vec::new();
-            assert!(
-                emit_dense(&f, Some(Label(0)), &mut pool, false).is_err(),
-                "I1 must not dense-specialize heap/niche"
-            );
+            if matches!(ty, MirTy::NicheOpt | MirTy::NicheRes) {
+                assert!(
+                    emit_dense(&f, Some(Label(0)), &mut pool, false).is_err(),
+                    "I1/I2 niche stays off dense"
+                );
+            } else {
+                assert!(
+                    emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok(),
+                    "S3 HeapRef is a dense word lane"
+                );
+            }
         }
     }
 
@@ -1955,7 +1970,251 @@ fn main() {
             pair_bc
                 .iter()
                 .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S3: no dense+match; pair is LIR not dense+heap-index"
+            "S3: pair stays LIR MakeArray (not dense+match)"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s3_vec_scan_fill_is_dense_with_pin() {
+        let src = r#"
+fn fill(Vec<int> v) -> int {
+    let i = 0;
+    while i < len(v) {
+        v[i] = i;
+        i = i + 1;
+    }
+    return len(v);
+}
+fn main() {
+    let v: Vec<int> = Vec::from([1, 2, 3]);
+    let _ = fill(v);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile fill");
+        let symbols = p.program_debug().fn_symbols;
+        let fill_i = symbols
+            .iter()
+            .position(|s| s.name == "fill")
+            .expect("fill");
+        let start = symbols[fill_i].entry_pc as usize;
+        let end = symbols
+            .get(fill_i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let fill_bc = &bc[start..end];
+        let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            fill_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S3 leftover: Vec store-index stays fuse-IL; opcodes={names:?}"
+        );
+        assert!(
+            fill_bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )),
+            "fuse-IL fill must keep the heap store; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s3_index_loop_takes_dense() {
+        let src = r#"
+fn sum(Vec<int> arr) -> int {
+    let i = 0;
+    let s = 0;
+    while i < len(arr) {
+        s = s + arr[i];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let v: Vec<int> = Vec::from([1, 2, 3, 4]);
+    let _ = sum(v);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile index loop");
+        let sum = p.function_offset("sum").expect("sum");
+        let main = p.function_offset("main").expect("main");
+        let sum_bc = if sum < main { &bc[sum..main] } else { &bc[sum..] };
+        assert!(
+            sum_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S3 leftover: Vec index loop stays fuse-IL; opcodes={:?}",
+            sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            sum_bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )),
+            "dense reconstruct keeps Index; opcodes={:?}",
+            sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s3_times_a_is_dense_call_and_index() {
+        let src = r#"
+fn eval_a(int i, int j) -> float {
+    let ij = i + j;
+    let t = (ij * (ij + 1)) / 2 + i + 1;
+    return 1.0 / (t as float);
+}
+fn times_a(Vec<float> v, Vec<float> out) -> float {
+    let n = len(v);
+    let i = 0;
+    while i < n {
+        let s = 0.0;
+        let j = 0;
+        while j < n {
+            s = s + eval_a(i, j) * v[j];
+            j = j + 1;
+        }
+        out[i] = s;
+        i = i + 1;
+    }
+    return out[0];
+}
+fn main() {
+    let v: Vec<float> = Vec::from([1.0, 2.0]);
+    let out: Vec<float> = Vec::from([0.0, 0.0]);
+    let _ = times_a(v, out);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile times_a");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "times_a")
+            .expect("times_a");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S3 leftover: times_a index+CALL stays fuse-IL; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "open CALL to eval_a stays on fuse-IL; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )),
+            "times_a keeps Index; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )),
+            "times_a keeps StoreIndex; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s3_nsieve_index_store_or_fuse_il() {
+        let src = r#"
+fn nsieve(int n) -> int {
+    let flags: Vec<int> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        flags.push(1);
+        i = i + 1;
+    }
+    let count = 0;
+    let p = 2;
+    while p < n {
+        if flags[p] == 1 {
+            count = count + 1;
+            let k = p + p;
+            while k < n {
+                flags[k] = 0;
+                k = k + p;
+            }
+        }
+        p = p + 1;
+    }
+    return count;
+}
+fn main() {
+    let _ = nsieve(16);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile nsieve");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "nsieve")
+            .expect("nsieve");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let dense = body.iter().any(|b| *b.bytecode() == Instruction::DenseBin);
+        let has_store = body.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::StoreIndexPin
+                    | Instruction::StoreIndexPinUnchecked
+            )
+        });
+        let has_index = body.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )
+        });
+        assert!(
+            !dense,
+            "S3 leftover: nsieve stays fuse-IL; opcodes={names:?}"
+        );
+        assert!(
+            has_store && has_index,
+            "nsieve keeps index/store; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2055,7 +2314,7 @@ fn main() {
     }
 
     #[test]
-    fn i6_clock_edge_visible_and_dense_refuses() {
+    fn i6_clock_edge_visible_and_s3_dense_emits() {
         let loc = loc();
         let ops = vec![
             IlOp::Label(Label(0)),
@@ -2073,7 +2332,7 @@ fn main() {
         let mut pool = Vec::new();
         assert!(
             super::infer::infer_numeric(&ops, 0, 0).is_err(),
-            "I6 dense infer still refuses non-W4 HostInvoke"
+            "clock-only body still misses the numeric work gate"
         );
         assert!(try_specialize_body(&ops, "clk", 0, &mut pool, &DenseCallMap::new()).is_none());
         let mut hints = LowerHints::new("clk");
@@ -2086,12 +2345,12 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert!(g.has_impure_host());
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok());
         assert!(emit_lir(&f, Some(Label(0)), &mut pool, false).is_err());
     }
 
     #[test]
-    fn pipeline_clock_loop_stays_fuse_il() {
+    fn pipeline_clock_loop_takes_dense() {
         let src = r#"
 use clock::{mono_nanos};
 fn hot(int n) -> int {
@@ -2128,10 +2387,9 @@ fn main() {
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc
-                .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "I6 must not dense-specialize an impure clock loop"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3 clock+arith loop is dense; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

@@ -13,14 +13,14 @@ This table is `examples/perf/` plus a few numeric demos.
 |---|--------|------------|----------|
 | 1 | Straight-line below cost gate | `i + j * 2` (2 work ops) | stay fuse-IL |
 | 2 | Need float or i64 arith (or `i32`) | float compare-only | stay fuse-IL |
-| 3 | Non-numeric IL | `CALL` to a non-dense callee / non-allowlisted HostInvoke / heap index / class field / match / string / `FORMAT` | I4 barrier (string/format stay fuse-IL) |
+| 3 | Non-numeric IL | `TailCall` / two-slot `CALL` / I4 string HostInvoke / class field / match / string / `FORMAT` | I4 barrier (string/format stay fuse-IL). S3: one-word `CALL`, I6 HostInvoke, heap index |
 | 4 | Multi-word `RETURN` | two-slot Option/Result | P3 LIR (already on) |
 | 5 | Residual `Byte` / `Pow` / `AND`/`OR` | `operators_loop` | stay fuse-IL |
 
-**W4 allowlisted HostInvoke (inside dense):** infer accepts only these
-HostInvoke ids (layout must be boxed `0`; native id must be an inline
-`CONST`). User `CALL` is allowed only when the callee is already dense
-(COI-291 one-word ABI).
+**W4 allowlisted HostInvoke (inside dense):** LICM still hoists only these
+ids. S3 dense emit also reconstructs other I6-typed HostInvoke edges
+(box → call → unbox) except I4 `from_bytes` / `to_bytes`. User `CALL` is
+one-word: dense ABI map **or** open fuse-IL / LIR callee (S3).
 
 | Ids | Names |
 |-----|--------|
@@ -34,10 +34,10 @@ At those edges, dense emit **boxes** typed slots onto the Value stack,
 dense. Packed LA args stay `i64` Value words (heap pointers); math / axpy
 are scalar `f64` (axpy `n` is `i64`). No open-ended user methods.
 
-**W3 cost gate (no back-edge):** infer still requires numeric IL (no
-`CALL` to a non-dense callee / non-allowlisted HostInvoke / heap index /
-class / match / string / multi-word `RETURN` / residual `Byte` / `Pow` /
-`AND`/`OR`) and float
+**W3 cost gate (no back-edge):** infer still requires numeric IL (S3
+allows one-word `CALL`, I6 HostInvoke except I4 string bytes, and heap
+index; still refuse class field / match / string / multi-word `RETURN` /
+residual `Byte` / `Pow` / `AND`/`OR`) and float
 `+`/`-`/`*`/`/` or i64 `+`/`-`/`*`/`/`/`%` (or int/`float` `INC`/`DEC`).
 Compare-only still refuses. A body **without** a back-edge also needs
 `numeric_work_ops >= STRAIGHT_LINE_MIN_WORK_OPS` (**8**).
@@ -76,19 +76,19 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `hot` | `mir_dense_i64.hy` | dense | i64 +/− counted — **W2** |
 | `hot` | `mir_dense_straight.hy` | dense | no back-edge, ≥8 work ops — **W3** |
 | `hot` | `mir_dense_host.hy` | dense + HostInvoke | allowlisted `math_sin` in loop — **W4** |
-| `hot` / `kernel` | `mir_dense_call.hy` | dense + dense `CALL` | leaf-first typed CALL — **COI-291** |
+| `hot` / `kernel` | `mir_dense_call.hy` | dense + dense `CALL` | leaf-first typed CALL — **COI-291**; S3 also open one-word CALL |
 | `main` | `numeric.hy` | dense | i64 add — **W2** (side effect) |
 | `iv_mul` | `iv_mul_sr.hy` | dense | i64 mul — **W2** (side effect) |
 | `nested` | `licm_nested_chains.hy` | dense | i64 add — **W2** (side effect) |
 | `eval_a` | `nbody.hy` | dense | no back-edge, ≥8 work ops — **W3** |
-| `times_a` / `times_at` | `nbody.hy` | fuse-IL | user `CALL` + heap/index |
-| `sum` | `indexed_sum.hy` | fuse-IL | heap/index |
-| `fill` / `scan` | `vec_scan.hy` | fuse-IL | heap/index |
+| `times_a` / `times_at` | `nbody.hy` | fuse-IL | S3 leftover: heap-index + CALL (dense residuals unsound on `Vec`) |
+| `sum` | `indexed_sum.hy` | fuse-IL | S3 leftover: heap-index |
+| `fill` / `scan` | `vec_scan.hy` | fuse-IL | S3 leftover: heap-index / store |
 | `main` | `for_in_sum.hy` | fuse-IL | heap + `for` iterator |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | class/field + `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | `CALL` (recursion) |
-| `nsieve` | `nsieve.hy` | fuse-IL | heap/index |
+| `nsieve` | `nsieve.hy` | fuse-IL | heap-index + `Vec.push` |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes |
 | `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | heap / match / two-slot — P3 |
 | `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host |
@@ -98,9 +98,13 @@ does not rewrite those sources; `numeric` / `iv_mul_sr` / `licm_nested_chains`
 now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `mir_dense_straight.hy`. The W4 prove bench is `mir_dense_host.hy`
 (`sin` inside an otherwise dense loop). The COI-291 prove bench is
-`mir_dense_call.hy` (`hot` loops a dense `kernel`). User `CALL` to a
-non-dense callee (`times_a` → heap/`eval_a`, `tak` / `fib` recursion,
-`helper` in the negative test) still refuses.
+`mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
+`times_a` call `eval_a` only when the caller has no heap-index (dense
+index residuals are unsound on `Vec`; those bodies stay fuse-IL).
+Recursion (`tak` / `fib`) stays fuse-IL on the callee. In-loop
+`MakeArray` stays fuse-IL (invert+fuse). A live heap return
+(`return [i]`) plus a counted loop stays fuse-IL so invert+fuse
+remains observable.
 
 ## Language refuse → island (COI-292 I0)
 
@@ -110,11 +114,11 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | Feature | Today | Island |
 |---------|-------|--------|
 | Heap-ref / niche Option/Result *types* in SSA | layout exists (`HeapNiche`); SSA paints `i64`/`value` | **I1** — name + carry; no alloc specialize |
-| `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); dense still refuse | **I2** |
+| `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); **dense+match stays refuse** (stack match vs dense regs) | **I2** / S3 leftover |
 | Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
-| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; unmapped fuse-IL | **I5** / **S2a** / **S2b** / **S2c** |
-| HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; dense emit stays W4 | **I6** |
+| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; unmapped fuse-IL; in-loop Make* stays fuse-IL | **I5** / **S2a** / **S2b** / **S2c** |
+| HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; S3 dense emit reconstructs I6-typed hosts except I4 string bytes | **I6** / **S3** |
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
 | Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse) | **I8** |
 | Escaping classes, boxed nested enums, recursion | fuse-IL | stay refuse unless a later island says otherwise |

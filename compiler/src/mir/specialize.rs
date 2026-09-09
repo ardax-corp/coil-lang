@@ -1,6 +1,8 @@
 //! Try to replace a numeric IL body with dense MIR bytecode, or lift
 //! an eligible leftover body through MIR→LIR (I8).
 
+use common::Instruction;
+
 use crate::il::IlOp;
 
 use super::abi::{DenseAbi, DenseCallMap};
@@ -28,14 +30,22 @@ pub fn try_specialize_body(
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
-    // Heap / CALL to a non-dense callee / multi-word RETURN stay refuse.
-    // FORMAT / string ops stay fuse-IL (I4). Alloc / InitTyped take dense
-    // only when S2b maps exist (S2c); unmapped stays fuse-IL. Allowlisted
-    // HostInvoke (math / packed LA / simd_axpy_reduce) is W4. Impure
-    // HostInvoke / CALL stay barriers (I6); the W4 set is not grown for
-    // clocks / IO / FFI. Debugger-attached / -Og skip this entry
-    // (I7; `OptimizeOptions::mir_specialize`).
+    // S3: one-word CALL (dense map or open), I6 HostInvoke except I4
+    // string bytes, heap index / ArrayLen / StoreIndex. FORMAT / string
+    // ops stay fuse-IL (I4). Match stays LIR (dense+match is unsafe).
+    // Alloc / InitTyped take dense only when S2b maps exist (S2c).
+    // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
+    // Heap-index residuals next to dense regs are not yet sound on
+    // `Vec` (fill/sum checksums). Keep fuse-IL + invert+fuse (COI-87).
+    if super::infer::has_heap_index(ops) {
+        return None;
+    }
+    if super::infer::has_alloc_inside_loop(ops)
+        || (has_alloc && super::infer::has_back_edge(ops))
+    {
+        return None;
+    }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
         return None;
     }
@@ -53,6 +63,8 @@ pub fn try_specialize_body(
     hints.pool_ty = inferred.pool_ty;
     hints.calls = calls.clone();
     hints.allow_alloc = has_alloc;
+    hints.allow_index = true;
+    hints.allow_effects = true;
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params
         .as_ref()
@@ -69,6 +81,15 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
+    let stores_ssa = func
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter(|i| matches!(i, crate::mir::MirInst::StoreIndex { .. }))
+        .count();
+    if count_store_index(ops) > 0 && stores_ssa == 0 {
+        return None;
+    }
     let abi = DenseAbi::from_func_and_live_ins(&func, ops, &hints.slot_ty)?;
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
@@ -77,7 +98,45 @@ pub fn try_specialize_body(
     if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
         return Some((packed, abi));
     }
-    Some((emit_dense(&func, entry, pool, has_alloc).ok()?, abi))
+    let out = emit_dense(&func, entry, pool, has_alloc).ok()?;
+    // Heap writes have no SSA users; refuse if reconstruct dropped one.
+    if count_store_index(&out) < count_store_index(ops) {
+        return None;
+    }
+    // Const-fold must not erase every Index (for-in / invert+fuse leftover).
+    if count_index(ops) > 0 && count_index(&out) == 0 {
+        return None;
+    }
+    Some((out, abi))
+}
+
+fn count_store_index(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| match op {
+            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => true,
+            IlOp::Byte { byte, .. } => matches!(
+                *byte.bytecode(),
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            ),
+            _ => false,
+        })
+        .count()
+}
+
+fn count_index(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| match op {
+            IlOp::Index { .. }
+            | IlOp::IndexUnchecked { .. }
+            | IlOp::IndexPin { .. }
+            | IlOp::IndexPinUnchecked { .. } => true,
+            IlOp::Byte { byte, .. } => matches!(
+                *byte.bytecode(),
+                Instruction::Index | Instruction::IndexUnchecked
+            ),
+            _ => false,
+        })
+        .count()
 }
 
 /// IL→MIR→LIR for a leftover body after dense specialize misses (I8).
@@ -107,8 +166,8 @@ pub fn try_lower_abi_body_with(
 ) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
-    // Looping alloc bodies stay fuse-IL so invert+fuse (COI-87) remains;
-    // straight-line mapped leaves may reconstruct.
+    // In-loop Make* stays fuse-IL so invert+fuse (COI-87) remains;
+    // preheader alloc + leftover body may reconstruct when mapped.
     let has_alloc = ops.iter().any(refuses_alloc);
     if has_alloc && super::infer::has_back_edge(ops) {
         return None;
@@ -132,6 +191,7 @@ pub fn try_lower_abi_body_with(
     hints.unboxed_fields = unboxed_fields.to_vec();
     hints.allow_fields = !unboxed_fields.is_empty();
     hints.allow_alloc = has_alloc;
+    hints.allow_index = true;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     if !has_alloc {
         crate::mir::cse(&mut func);

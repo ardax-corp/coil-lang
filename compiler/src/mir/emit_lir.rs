@@ -517,6 +517,53 @@ fn emit_stored(
                 });
             }
         }
+        MirInst::Index {
+            dest,
+            array,
+            index,
+            unchecked,
+        } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            emit_stack(out, *index, func, plan, regs, pool, loc)?;
+            if *unchecked {
+                out.push(IlOp::IndexUnchecked { loc });
+            } else {
+                out.push(IlOp::Index { loc });
+            }
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::StoreIndex {
+            dest,
+            array,
+            index,
+            value,
+            unchecked,
+        } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            emit_stack(out, *index, func, plan, regs, pool, loc)?;
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let inst = if *unchecked {
+                Instruction::StoreIndexUnchecked
+            } else {
+                Instruction::StoreIndex
+            };
+            out.push(IlOp::byte(Byte::new(inst)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::ArrayLen { dest, array } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            out.push(IlOp::byte(Byte::new(Instruction::ArrayLen)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::HostInvoke { .. } | MirInst::Call { .. } => {
             return Err(LowerError::Refused(
                 "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
@@ -652,6 +699,65 @@ fn emit_stack(
                 slot: u32::from(regs[dest.index()]),
                 loc,
             });
+            Ok(())
+        }
+        MirInst::Index {
+            dest,
+            array,
+            index,
+            unchecked,
+        } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            emit_stack(out, *index, func, plan, regs, pool, loc)?;
+            if *unchecked {
+                out.push(IlOp::IndexUnchecked { loc });
+            } else {
+                out.push(IlOp::Index { loc });
+            }
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Dup { loc });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
+        MirInst::StoreIndex {
+            dest,
+            array,
+            index,
+            value,
+            unchecked,
+        } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            emit_stack(out, *index, func, plan, regs, pool, loc)?;
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            let inst = if *unchecked {
+                Instruction::StoreIndexUnchecked
+            } else {
+                Instruction::StoreIndex
+            };
+            out.push(IlOp::byte(Byte::new(inst)));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Dup { loc });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
+        MirInst::ArrayLen { dest, array } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            out.push(IlOp::byte(Byte::new(Instruction::ArrayLen)));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Dup { loc });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
             Ok(())
         }
         MirInst::HostInvoke { .. } | MirInst::Call { .. } => Err(LowerError::Refused(

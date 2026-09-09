@@ -2,7 +2,8 @@
 //!
 //! [`MirTy::Value`] is the boxed VM word — the interpreter path — and the
 //! lattice top. I1 names shipped one-word heap/niche ABIs so later islands
-//! can SSA them. Dense specialize still requires [`MirTy::is_numeric`].
+//! can SSA them. Dense specialize uses [`MirTy::is_word_lane`] (numeric
+//! plus `HeapRef`); niche stays LIR.
 
 use crate::typechecking::{Ty, ty as coil_ty, ty::is_option_ty};
 
@@ -54,6 +55,12 @@ impl MirTy {
     /// Dense / numeric SSA lane (`i32`/`i64`/`f32`/`f64`/`bool`).
     pub fn is_numeric(self) -> bool {
         matches!(self, Self::I32 | Self::I64 | Self::F32 | Self::F64 | Self::Bool)
+    }
+
+    /// One-word dense / CALL lane: numeric or a plain heap pointer (S3).
+    /// Niche Option/Result stays LIR.
+    pub fn is_word_lane(self) -> bool {
+        self.is_numeric() || self == Self::HeapRef
     }
 
     /// One-word heap pointer or shipped niche Option/Result (COI-92).

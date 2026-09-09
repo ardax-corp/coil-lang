@@ -12,10 +12,10 @@
 //! | Return | 1 | TOS after `RETURN`; caller `STORE`s into a typed dest |
 //! | Two-slot / niche | — | refuse (M4 / P3 LIR) |
 //!
-//! HostInvoke stays on the W4 allowlist (box → native → unbox). User `CALL`
-//! is allowed only when the callee already specialized to this ABI.
-//! Self- and mutual-recursion stay refuse until the callee is in the map
-//! (leaf-first). `TailCall` / `CallIndirect` refuse.
+//! HostInvoke: W4 still hoists; S3 emits other I6-typed hosts except I4
+//! string bytes. User `CALL` uses this map when the callee is already
+//! dense, or an open one-word ABI (S3). `TailCall` / `CallIndirect` refuse.
+//! HeapRef is a word lane.
 
 use std::collections::{HashMap, HashSet};
 
@@ -43,11 +43,11 @@ impl DenseAbi {
             return None;
         }
         let ret = func.ret_ty?;
-        if !ret.is_numeric() {
+        if !ret.is_word_lane() {
             return None;
         }
         let params: Vec<MirTy> = func.params.iter().map(|p| func.ty(*p)).collect();
-        if params.iter().any(|t| !t.is_numeric()) {
+        if params.iter().any(|t| !t.is_word_lane()) {
             return None;
         }
         Some(Self { params, ret })
@@ -123,7 +123,7 @@ pub fn live_in_params(ops: &[IlOp], slot_ty: &HashMap<u32, MirTy>) -> Option<Vec
     let mut params = Vec::with_capacity(max as usize + 1);
     for i in 0..=max {
         let ty = *slot_ty.get(&i)?;
-        if !ty.is_numeric() {
+        if !ty.is_word_lane() {
             return None;
         }
         params.push(ty);
@@ -182,13 +182,15 @@ mod tests {
     }
 
     #[test]
-    fn from_func_refuses_heap_word() {
+    fn from_func_accepts_heapref_word() {
         let mut b = MirBuilder::new("href");
         let p = b.add_param(MirTy::HeapRef).unwrap();
         b.set_ret_ty(MirTy::HeapRef);
         b.ret(Some(p)).unwrap();
         let f = b.finish().unwrap();
-        assert!(DenseAbi::from_func(&f).is_none());
+        let abi = DenseAbi::from_func(&f).expect("S3 HeapRef is a word lane");
+        assert_eq!(abi.params, vec![MirTy::HeapRef]);
+        assert_eq!(abi.ret, MirTy::HeapRef);
     }
 
     #[test]

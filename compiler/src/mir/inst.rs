@@ -292,6 +292,28 @@ pub enum MirInst {
         base: u32,
         index: u32,
     },
+    /// Heap index load (S3). `array` is `HeapRef`; `index` is `i64`.
+    /// Reconstructs `Index` / `IndexUnchecked` (pin forms lower to the
+    /// same unpinned residuals — pin slots do not survive dense Seek).
+    Index {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+        unchecked: bool,
+    },
+    /// Heap index store (S3). Dest is the stored value (VM leaves it TOS).
+    StoreIndex {
+        dest: ValueId,
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
+        unchecked: bool,
+    },
+    /// Structural `ArrayLen` (S3). Dest is `i64`.
+    ArrayLen {
+        dest: ValueId,
+        array: ValueId,
+    },
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
     /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
     /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
@@ -409,6 +431,9 @@ impl MirInst {
             | Self::MatchPayload { dest, .. }
             | Self::FieldLoad { dest, .. }
             | Self::FieldStore { dest, .. }
+            | Self::Index { dest, .. }
+            | Self::StoreIndex { dest, .. }
+            | Self::ArrayLen { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
             | Self::Deopt { dest, .. } => dest,
@@ -439,6 +464,14 @@ impl MirInst {
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::FieldLoad { object, .. } => vec![*object],
             Self::FieldStore { src, .. } => vec![*src],
+            Self::Index { array, index, .. } => vec![*array, *index],
+            Self::StoreIndex {
+                array,
+                index,
+                value,
+                ..
+            } => vec![*array, *index, *value],
+            Self::ArrayLen { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } => Vec::new(),
@@ -466,6 +499,21 @@ impl MirInst {
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::FieldLoad { object, .. } => *object = map(*object),
             Self::FieldStore { src, .. } => *src = map(*src),
+            Self::Index { array, index, .. } => {
+                *array = map(*array);
+                *index = map(*index);
+            }
+            Self::StoreIndex {
+                array,
+                index,
+                value,
+                ..
+            } => {
+                *array = map(*array);
+                *index = map(*index);
+                *value = map(*value);
+            }
+            Self::ArrayLen { array, .. } => *array = map(*array),
             Self::Alloc { elems, .. } => {
                 for v in elems.iter_mut() {
                     *v = map(*v);

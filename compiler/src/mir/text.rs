@@ -173,6 +173,30 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             base,
             index,
         } => write!(f, "{dest} = fieldstore {src}, {base}, {index}"),
+        MirInst::Index {
+            dest,
+            array,
+            index,
+            unchecked,
+        } => {
+            let name = if *unchecked { "index.u" } else { "index" };
+            write!(f, "{dest} = {name} {array}, {index}")
+        }
+        MirInst::StoreIndex {
+            dest,
+            array,
+            index,
+            value,
+            unchecked,
+        } => {
+            let name = if *unchecked {
+                "storeindex.u"
+            } else {
+                "storeindex"
+            };
+            write!(f, "{dest} = {name} {array}, {index}, {value}")
+        }
+        MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
         MirInst::Alloc { dest, kind, elems } => {
             write!(f, "{dest} = alloc.{}", kind.as_str())?;
             match *kind {
@@ -435,6 +459,38 @@ impl<'a> Parser<'a> {
                 base,
                 index,
             });
+        }
+        if op == "index" || op == "index.u" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = self.value()?;
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::Index {
+                dest,
+                array,
+                index,
+                unchecked: op.ends_with(".u"),
+            });
+        }
+        if op == "storeindex" || op == "storeindex.u" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let index = self.value()?;
+            self.expect(',')?;
+            let value = self.value()?;
+            ensure_ty(types, dest, peek_ty(types, value));
+            return Ok(MirInst::StoreIndex {
+                dest,
+                array,
+                index,
+                value,
+                unchecked: op.ends_with(".u"),
+            });
+        }
+        if op == "arraylen" {
+            let array = self.value()?;
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::ArrayLen { dest, array });
         }
         if op == "ineg" || op == "fneg" || op == "bnot" {
             let src = self.value()?;

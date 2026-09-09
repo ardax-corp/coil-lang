@@ -66,8 +66,8 @@ lowering. Unicode / regex stay out of MIR.
 | Language / IL feature | Today | Target |
 |-----------------------|-------|--------|
 | Numeric loops / W3 straight-line (`i32`/`i64`/`f32`/`f64`/`bool`) | dense (`DenseBin` …) after MIR CSE/LICM/peeps | stay dense (Low IR) |
-| Allowlisted HostInvoke inside numeric (W4) | dense + box/unbox at host edge | stay W4 (closed); I6 does not grow it for benches |
-| Dense→dense one-word `CALL` (COI-291) | dense | stay; two-slot / niche / recursion still refuse |
+| Allowlisted HostInvoke inside numeric (W4) | dense + box/unbox at host edge | W4 still hoists; S3 also emits other I6-typed hosts except I4 `from_bytes` / `to_bytes` |
+| One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3; two-slot / niche / `TailCall` still refuse; recursion stays on the callee |
 | Saxpy-reduce | HostInvoke `simd_axpy_reduce` (P12) | stay |
 | `Option<int>` / immediate-Ok `Result` / arity-2 immediate product leafs | P3 MIR→LIR when reconstruct ≤ opted fuse-IL; else fuse-IL | I2 for match; I1 names the layout only |
 | Heap `Option<T>` / heap-heap `Result<T,E>` (COI-92 niche words) | fuse-IL (`CONST 0` / `BITAND` / `BITOR`); layout already `HeapNiche` | I1 SSA types; I2 match; not dense |
@@ -76,11 +76,11 @@ lowering. Unicode / regex stay out of MIR.
 | `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | fuse-IL | stay refuse |
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |
-| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a live-heap `roots`; S2b frame maps; S2c dense / LIR when maps exist (heap index stays refuse until S3) | **I5** / **S2a** / **S2b** / **S2c** |
+| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a live-heap `roots`; S2b frame maps; S2c dense / LIR when maps exist. S3 tried dense `Index` / `StoreIndex` residuals — **unsound on `Vec`** (checksum); stay fuse-IL. Dense+match stays LIR (I2) | **I5** / **S2a** / **S2b** / **S2c** / **S3** |
 | `FORMAT` / string ops | fuse-IL (`IlOp::Byte` / `String` / `Print`) | **I4 barrier** — no MIR subset |
-| Non-allowlisted HostInvoke / IO / clocks / GC natives | SSA edge + barrier when `allow_effects`; production fuse-IL / refuse dense | **I6** |
+| Non-allowlisted HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
-| Recursion (`tak` / `fib`) | fuse-IL (`CALL` / `TailCall`) | stay refuse (leaf-first dense map) |
+| Recursion (`tak` / `fib`) | fuse-IL (`CALL` / `TailCall`) | stay refuse (no counted loop / below W3); S3 may dense a *caller* loop that `CALL`s them |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |
 

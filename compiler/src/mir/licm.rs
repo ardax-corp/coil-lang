@@ -219,10 +219,12 @@ fn hoistable(inst: &MirInst) -> bool {
         | MirInst::Unary { .. }
         | MirInst::Cast { .. } => true,
         MirInst::HostInvoke { native_id, .. } => super::effects::host_may_hoist(*native_id),
+        MirInst::Index { .. } | MirInst::ArrayLen { .. } => true,
         MirInst::Call { .. }
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
+        | MirInst::StoreIndex { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }
         | MirInst::Deopt { .. } => false,
