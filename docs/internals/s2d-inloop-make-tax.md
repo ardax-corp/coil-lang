@@ -3,10 +3,11 @@
 S2d ([PR #365](https://github.com/ardax-corp/coil-lang/pull/365)) kept
 **in-loop** `Make*` off dense after an ~18% regress. S2e
 ([COI-316](https://linear.app/ardax/issue/COI-316)) removes per-residual
-`Seek` restore and **enables** mapped in-loop Make* dense. Historical A/B
-below; S2e board at the end.
+`Seek` restore. In-loop Make* stays **refused**: Seek cut is real
+(pack `Seek` 3→1, bump 5→1) but dense is still 8–17% slower than
+fuse-IL. Historical A/B below; S2e board at the end.
 
-`COIL_S2D_DENSE_INLOOP=0` restores the S2d in-loop refuse (fuse-IL A/B).
+`COIL_S2D_DENSE_INLOOP=1` forces in-loop dense at compile time (A/B).
 
 ## Where the 18% came from
 
@@ -144,11 +145,34 @@ requirement — maps already root live heap slots. S2e deletes those Seeks.
 
 Pins stay fuse-IL: pin keys still do not survive the **prologue** Seek.
 
-In-loop mapped Make* is on by default. Next after this: SROA / hoist
+In-loop mapped Make* stays **off** by default. Next: SROA / hoist
 (COI-315), not more Seeks.
+
+## S2e board (coil-embed packaged, `COIL_AUTO_PAR=0`)
+
+Same runner (`target/release/coil-embed`). Fuse = tip compiler +
+`COIL_S2D_DENSE_INLOOP=0`. Dense = tip + `COIL_S2D_DENSE_INLOOP=1`.
+Checksums match parent: pack `2000000999999`, arith `6000004999997`,
+wide `125001500000`, store `1999999000000`, bump `200000`.
+
+| Body | fuse-IL | Seek-less dense | dense vs fuse | Seek (dense) |
+|------|---------|-----------------|---------------|--------------|
+| pack N=2e6 | 263.5 ± 3.9 ms | 297.8 ± 2.2 ms | **1.13× slower** | 1 (was 3) |
+| pack_arith | 279.5 ± 1.9 ms | 319.0 ± 3.0 ms | **1.14×** | 1 |
+| pack_wide N=5e5 | 86.5 ± 0.6 ms | 101.0 ± 0.4 ms | **1.17×** | 1 |
+| pack_store | 470.5 ± 2.8 ms | 507.5 ± 18.0 ms | **1.08×** | 1 (was 5) |
+| preheader bump | (already dense) | 7.4 ± 0.2 ms | — | 1 (was 5) |
+
+Flagships vs parent `35d98291`: **byte-identical** archives
+(`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`). Checksums
+625885 / 7 / 1900 / 135854 / 2178309.
+
+**Decision:** keep in-loop Make* refused. Remaining tax is residual
+`LOAD`/`STORE` boxing onto the dense frame vs invert+fuse
+`BinSlotImmStore`, not Seek. Preheader / S3b index bodies keep the
+Seek-less win (prologue `Seek` only).
 
 ## Flagships
 
 `nsieve` / `binary_trees` / `array_mut` / `gc_churn` do not take in-loop
-Make* dense (`Vec.push` / I4 / classes). S2e A/B uses the pack harness
-plus parent-tip embed on flagships (flat ±5%).
+Make* dense (`Vec.push` / I4 / classes).

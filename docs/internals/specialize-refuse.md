@@ -104,10 +104,10 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
 `times_a` call `eval_a` with unpinned dense Index residuals (S3b).
 Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped **preheader**
-`MakeArray` plus an index loop may take dense (S2d). Mapped in-loop `Make*`
-also takes dense after S2e dropped per-residual `Seek` restore
-([s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)). Compare-only leftovers
-may take LIR when maps exist and the cost gate holds.
+`MakeArray` plus an index loop may take dense (S2d). S2e dropped
+per-residual `Seek` restore; in-loop `Make*` still stays off dense
+(LOAD/STORE boxing; [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
+Compare-only leftovers may take LIR when maps exist and the cost gate holds.
 Const-index `s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
 loop and **no** earlier alloc stays fuse-IL so invert+fuse remains
 observable. Unmapped alloc, CALL+alloc (map lift refuses `CALL`), and
@@ -124,7 +124,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); **dense+match stays refuse** (stack match vs dense regs) | **I2** / S3 leftover |
 | Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
-| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; S2d mapped preheader Make*; S2e Seek-less residuals + mapped in-loop Make*; unmapped fuse-IL; post-loop-only `return [x]` fuse-IL | **I5** / **S2a** / **S2b** / **S2c** / **S2d** / **S2e** |
+| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; S2d mapped preheader Make*; S2e Seek-less residuals (in-loop Make* still refuse); unmapped fuse-IL; post-loop-only `return [x]` fuse-IL | **I5** / **S2a** / **S2b** / **S2c** / **S2d** / **S2e** |
 | HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; S3 dense emit reconstructs I6-typed hosts except I4 string bytes | **I6** / **S3** |
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
 | Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse) | **I8** |

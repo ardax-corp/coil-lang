@@ -30,9 +30,10 @@ and relocate mapped slots on collect.
   S2d ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
   lets **preheader** `Make*` + index loops take dense when maps exist.
   S2e ([COI-316](https://linear.app/ardax/issue/COI-316)) drops per-residual
-  `Seek` restore after stack residuals; mapped **in-loop** `Make*` then
-  takes dense (A/B: [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
-  Compare-only leftovers
+  `Seek` restore after stack residuals. Mapped **in-loop** `Make*` stays
+  off dense: Seek cut is not enough (LOAD/STORE boxing; A/B:
+  [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)). `COIL_S2D_DENSE_INLOOP=1`
+  is compile-time A/B only. Compare-only leftovers
   may take LIR. Draft lift keeps inferred param types (not forced `heapref`)
   and snapshots the stack-IL map **before** dense replace so `DenseBin`
   bodies still bind. Post-loop-only `return [x]` after a counted loop stays
@@ -55,14 +56,15 @@ and relocate mapped slots on collect.
 3. ~~**Specialize across GC**~~ — **S2c.** Mapped allocating bodies may
    take dense / LIR when otherwise eligible. Default remains refuse
    without maps.
-4. ~~**Looping alloc**~~ — **S2d / S2e.** Mapped preheader and in-loop
-   `Make*` + index may take dense. Per-residual `Seek` restore is gone
-   (StorePop already returns tell to the dense frame). Still refuse:
+4. ~~**Looping alloc**~~ — **S2d / S2e.** Mapped preheader `Make*` + index
+   may take dense. Per-residual `Seek` restore is gone (StorePop already
+   returns tell to the dense frame). In-loop `Make*` stays fuse-IL
+   (residual boxing still loses to invert+fuse). Still refuse:
    post-loop-only heap return (invert+fuse); unmapped alloc; CALL+alloc
    (map lift refuses user `CALL`); computed-element stack scalarize;
    compiler write-barrier opcodes; alloc sink / hoist of `Alloc` (LICM
-   keeps it in-loop — new object per trip). `COIL_S2D_DENSE_INLOOP=0`
-   restores the S2d in-loop refuse for A/B.
+   keeps it in-loop — new object per trip). `COIL_S2D_DENSE_INLOOP=1`
+   forces in-loop dense for A/B.
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 

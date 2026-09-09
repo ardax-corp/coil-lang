@@ -65,8 +65,8 @@ maps exist. S2d
 ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
 extends that to mapped **preheader** `Make*` + index (dense) and
 compare-only looping leftovers (LIR). S2e
-([COI-316](https://linear.app/ardax/issue/COI-316)) lets mapped **in-loop**
-`Make*` take dense once residuals no longer `Seek`-restore the frame.
+([COI-316](https://linear.app/ardax/issue/COI-316)) drops per-residual
+`Seek` restore; in-loop `Make*` stays off dense (boxing tax).
 Post-loop-only heap returns stay fuse-IL (invert+fuse). Unmapped allocating bodies stay fuse-IL. S3
 ([COI-308](https://linear.app/ardax/issue/COI-308/s3-widen-densemir-coverage-match-call-heap-index))
 widens dense coverage: one-word `CALL` beyond the dense map, and I6
