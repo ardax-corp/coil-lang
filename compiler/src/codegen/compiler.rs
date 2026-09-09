@@ -4278,7 +4278,7 @@ impl Compiler {
             .map(|(_, _, cname)| cname.as_str())
     }
 
-    /// Rematerialize an unboxed class at a named escape (S2j / S2g).
+    /// Fail-safe: rematerialize an unboxed class if a whole-object use slips through.
     fn emit_box_unboxed_class(
         &mut self,
         bytecode: &mut CodeBuf,

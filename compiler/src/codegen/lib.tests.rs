@@ -4653,9 +4653,9 @@ fn main() {
         assert!(!vm.panicked(), "bump(6)==28; opcodes={names:?}");
     }
 
-    /// S2j: private slots then one InitTyped at `return p`.
+    /// #134 / COI-84 pin: returning a named class stays heap `InitTyped`.
     #[test]
-    fn named_class_sroa_boxes_at_return_edge() {
+    fn named_class_sroa_return_stays_heap() {
         use common::Instruction;
         let src = r#"
 class Point {
@@ -4687,11 +4687,18 @@ fn main() {
             .expect("fill");
         let fill_bc = &bc[fill_off..];
         let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
-        let inits = fill_bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::InitTyped))
-            .count();
-        assert_eq!(inits, 1, "one box at return; opcodes={names:?}");
+        assert!(
+            fill_bc
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::InitTyped)),
+            "escaping return stays InitTyped; opcodes={names:?}"
+        );
+        assert!(
+            fill_bc
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::LoadField | Instruction::SetField)),
+            "escaping return keeps heap field ops; opcodes={names:?}"
+        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());

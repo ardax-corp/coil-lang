@@ -6561,8 +6561,7 @@ fn main() {
     );
 }
 
-/// Named locals keep a heap instance when they escape without a private
-/// field region, or when a private use follows the first named escape.
+/// #134 / COI-84 pin: a named class used as a whole object stays `InitTyped`.
 #[test]
 fn named_local_class_stays_heap_allocated() {
     let src = r#"

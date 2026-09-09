@@ -216,11 +216,10 @@ S2f:
   not slot-SROA'd. Remaining refuse: grow dest, private after escape,
   arity > 32, named class SROA in *this* array pass (S2j is separate),
   negative remainder, slot-SROA of computed elems.
-- **S2j (COI-320):** unique named `let p = new C(...)` with field
-  load/store unboxes into consecutive slots. A named escape after that
-  private region rematerializes one `InitTyped`. Still heap: `fn drop()`,
-  method `self`, aliases, nested captures, parameters, whole-object
-  compare, private use after the first escape. Hit: `s2j_class_sroa.hy`.
+- **S2j (COI-320):** unique **non-escaping** named `let p = new C(...)`
+  with field load/store unboxes into consecutive slots. Whole-object
+  use stays heap `InitTyped` (#134 pin). Still heap: `fn drop()`, method
+  `self`, aliases, nested captures, parameters. Hit: `s2j_class_sroa.hy`.
 
 `pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
 `[T; N]` and the only uses are computed-index load/store (`i % N`).
