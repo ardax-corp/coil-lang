@@ -4,13 +4,13 @@ coil can fork-join **independent parallel arms** (IPA) without a source-level
 `par` / `spawn` annotation. Two shapes qualify today:
 
 ```coil
-return fib(n - 1) + fib(n - 2);      // expression IPA — independent pure calls
+return fib(n - 1) + fib(n - 2);      // expression IPA: independent pure calls
 return sq(n) + sq(n - 1);            // helper arms (no self-recursion required)
-while i < 100 { acc = acc + f(i); i = i + 1; }   // loop IPA — iteration arms
+while i < 100 { acc = acc + f(i); i = i + 1; }   // loop IPA: iteration arms
 ```
 
-Both go through the same four gates — **purity**, **independence**,
-**profitability**, **semantic identity** — and both are recognized structurally.
+Both go through the same four gates (purity, independence, profitability,
+semantic identity) and both are recognized structurally.
 There are no function, module or program allowlists: a shape either proves out or
 stays sequential.
 

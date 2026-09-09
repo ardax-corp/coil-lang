@@ -31,10 +31,10 @@ Routing detail: [.cursor/skills/coil-contributor/SKILL.md](.cursor/skills/coil-c
 
 See [AGENTS.md](AGENTS.md). Highlights:
 
-- Append-only opcodes — new `Instruction` variants at the end only; bump archive **minor**, VM `promise!` ceiling, and `instruction_from_u8_covers_last_appended_variant`.
-- Virtual-module natives via `HostInvoke` — not new opcodes for `io` / `thread` / etc.
+- Append-only opcodes: new `Instruction` variants at the end only; bump archive minor, VM `promise!` ceiling, and `instruction_from_u8_covers_last_appended_variant`.
+- Virtual-module natives via `HostInvoke`, not new opcodes for `io` / `thread` / etc.
 - Language features need full HM integration, user-doc updates in [coil-website](https://github.com/ardax-corp/coil-website), internals updates here when needed, and a minimal runnable example.
-- **Method-based APIs** — prefer `impl` methods on classes over free functions for type-tied operations (stdlib, new surface). See [limitations.md](docs/internals/limitations.md) for codegen gaps on free generic enum returns.
+- Method-based APIs: prefer `impl` methods on classes over free functions for type-tied operations (stdlib, new surface). See [limitations.md](docs/internals/limitations.md) for codegen gaps on free generic enum returns.
 
 Known gaps and workarounds: [docs/internals/limitations.md](docs/internals/limitations.md).
 Opt prove rule: [optimization-roadmap.md](docs/internals/optimization-roadmap.md#hit-bench-prove-rule)
