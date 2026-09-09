@@ -2148,6 +2148,17 @@ fn main() {
                 .all(|b| *b.bytecode() != Instruction::MakeArray),
             "S2f SROA drops in-loop MakeArray; opcodes={names:?}"
         );
+        assert!(
+            pack_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S2k: pack select load takes dense; opcodes={names:?}"
+        );
+        let seek = pack_bc
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Seek)
+            .map(|b| b.operand_u32())
+            .max()
+            .unwrap_or(0);
+        assert!(seek <= 64, "S2k pack Seek {seek} overflows 64-slot frame");
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "pack checksum; opcodes={names:?}");
@@ -2217,10 +2228,68 @@ fn main() {
             "dense Seek {seek_hw} exceeds operand stack {}",
             p.operand_stack_slots()
         );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S2k: bump store-select takes dense; opcodes={names:?} seek={seek_hw}"
+        );
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "bump checksum; opcodes={names:?}");
+    }
+
+    #[test]
+    fn s2k_pack_store_select_takes_dense() {
+        let src = r#"
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        let xs = [0, 0, 0];
+        xs[i % 3] = i;
+        s = s + xs[i % 3];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    if pack(6) != 15 {
+        panic "pack_store checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile pack_store");
+        let symbols = p.program_debug().fn_symbols;
+        let pack = symbols
+            .iter()
+            .position(|s| s.name == "pack")
+            .expect("pack");
+        let start = symbols[pack].entry_pc as usize;
+        let end = symbols
+            .get(pack + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::MakeArray),
+            "S2k pack_store stays slots; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S2k pack_store select takes dense; opcodes={names:?}"
+        );
+        let seek = body
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Seek)
+            .map(|b| b.operand_u32())
+            .max()
+            .unwrap_or(0);
+        assert!(seek <= 64, "S2k pack_store Seek {seek} overflows 64-slot frame");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "pack_store checksum; opcodes={names:?}");
     }
 
     #[test]
