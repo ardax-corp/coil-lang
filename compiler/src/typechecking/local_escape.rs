@@ -1,9 +1,11 @@
 //! In-frame escape facts for ObjEnum / small class values.
 //!
-//! Fail-closed: a local is frame-local only when every use stays in this
-//! frame (local match / class field reads). Calls, returns, field stores,
-//! aggregates, host/FFI, coroutines, aliases, and nested captures poison it.
-//! Function parameters stay boxed (call ABI).
+//! Fail-closed: a local is frame-local when every *private* use stays in this
+//! frame (local match / class field load or store). A named escape (return,
+//! call-arg, aggregate, host/FFI) may still unbox if no private use follows
+//! it — codegen rematerializes `InitTyped` at that edge (S2j / S2g). Identity
+//! compare, method receivers, aliases, nested captures, `fn drop()`, and
+//! private use after an escape stay heap. Function parameters stay boxed.
 
 use std::collections::{HashMap, HashSet};
 
@@ -91,7 +93,15 @@ fn analyze_scope(checker: &mut Checker, ast: &Output<'_>) {
         return;
     }
     let mut escaped: HashSet<String> = HashSet::new();
-    scan_uses(checker, ast, &cands, &mut escaped, /*nested_fn*/ false);
+    let mut saw_escape: HashSet<String> = HashSet::new();
+    scan_uses(
+        checker,
+        ast,
+        &cands,
+        &mut escaped,
+        &mut saw_escape,
+        /*nested_fn*/ false,
+    );
     let mut used: HashSet<String> = HashSet::new();
     mark_safe_uses(checker, ast, &cands, &escaped, &mut used);
     for (name, cand) in &cands {
@@ -132,6 +142,7 @@ fn scan_uses(
     ast: &Output<'_>,
     cands: &HashMap<String, Candidate>,
     escaped: &mut HashSet<String>,
+    saw_escape: &mut HashSet<String>,
     nested_fn: bool,
 ) {
     match ast.1.as_ref() {
@@ -140,7 +151,7 @@ fn scan_uses(
         }
         | Expression::Lambda { body, .. }
         | Expression::TestCase { body, .. } => {
-            scan_uses(checker, body, cands, escaped, true);
+            scan_uses(checker, body, cands, escaped, saw_escape, true);
         }
         Expression::Match { scrutinee, arms } => {
             let s = peel(scrutinee);
@@ -149,10 +160,10 @@ fn scan_uses(
                     escaped.insert((*n).to_string());
                 }
             } else {
-                scan_uses(checker, scrutinee, cands, escaped, nested_fn);
+                scan_uses(checker, scrutinee, cands, escaped, saw_escape, nested_fn);
             }
             for arm in arms {
-                scan_uses(checker, &arm.body, cands, escaped, nested_fn);
+                scan_uses(checker, &arm.body, cands, escaped, saw_escape, nested_fn);
             }
         }
         Expression::Access(recv, _) => {
@@ -162,7 +173,9 @@ fn scan_uses(
                     escaped.insert((*n).to_string());
                 } else if cands.contains_key(*n) {
                     match ty_of(checker, r) {
-                        Some(ty) if checker.ty_is_class(&ty) => {}
+                        Some(ty) if checker.ty_is_class(&ty) => {
+                            note_private_use(*n, escaped, saw_escape);
+                        }
                         Some(_) => {
                             escaped.insert((*n).to_string());
                         }
@@ -172,17 +185,17 @@ fn scan_uses(
                     }
                 }
             } else {
-                scan_uses(checker, recv, cands, escaped, nested_fn);
+                scan_uses(checker, recv, cands, escaped, saw_escape, nested_fn);
             }
         }
         Expression::OptionalAccess(recv, _) => {
             poison_idents(recv, cands, escaped);
-            scan_uses(checker, recv, cands, escaped, nested_fn);
+            scan_uses(checker, recv, cands, escaped, saw_escape, nested_fn);
         }
         Expression::Assignment(lhs, rhs) => {
             if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
-                poison_idents(recv, cands, escaped);
-                scan_uses(checker, rhs, cands, escaped, nested_fn);
+                note_field_store(checker, recv, cands, escaped, saw_escape, nested_fn);
+                scan_uses(checker, rhs, cands, escaped, saw_escape, nested_fn);
             } else if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 if cands.contains_key(*n) {
                     let r = peel(rhs);
@@ -195,23 +208,23 @@ fn scan_uses(
                             escaped.insert((*src).to_string());
                         }
                     }
-                    scan_uses(checker, rhs, cands, escaped, nested_fn);
+                    scan_uses(checker, rhs, cands, escaped, saw_escape, nested_fn);
                 } else {
-                    scan_uses(checker, rhs, cands, escaped, nested_fn);
+                    scan_uses(checker, rhs, cands, escaped, saw_escape, nested_fn);
                 }
             } else {
-                scan_uses(checker, lhs, cands, escaped, nested_fn);
-                scan_uses(checker, rhs, cands, escaped, nested_fn);
+                scan_uses(checker, lhs, cands, escaped, saw_escape, nested_fn);
+                scan_uses(checker, rhs, cands, escaped, saw_escape, nested_fn);
             }
         }
         Expression::CompoundAssign(lhs, _, rhs) => {
             if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
-                poison_idents(recv, cands, escaped);
+                note_field_store(checker, recv, cands, escaped, saw_escape, nested_fn);
             } else {
                 poison_idents(lhs, cands, escaped);
             }
-            scan_uses(checker, lhs, cands, escaped, nested_fn);
-            scan_uses(checker, rhs, cands, escaped, nested_fn);
+            scan_uses(checker, lhs, cands, escaped, saw_escape, nested_fn);
+            scan_uses(checker, rhs, cands, escaped, saw_escape, nested_fn);
         }
         Expression::Call { name, args } => {
             let callee = peel(name);
@@ -222,11 +235,11 @@ fn scan_uses(
             }
             if let Some(args) = args {
                 for a in args {
-                    poison_idents(a, cands, escaped);
-                    scan_uses(checker, a, cands, escaped, nested_fn);
+                    mark_named_escape(a, cands, escaped, saw_escape, nested_fn);
+                    scan_uses(checker, a, cands, escaped, saw_escape, nested_fn);
                 }
             }
-            scan_uses(checker, name, cands, escaped, nested_fn);
+            scan_uses(checker, name, cands, escaped, saw_escape, nested_fn);
         }
         Expression::Return(inner)
         | Expression::ImplicitReturn(inner)
@@ -234,12 +247,32 @@ fn scan_uses(
         | Expression::Yield(inner)
         | Expression::YieldFrom(inner)
         | Expression::Try(inner) => {
-            poison_idents(inner, cands, escaped);
-            scan_uses(checker, inner, cands, escaped, nested_fn);
+            mark_named_escape(inner, cands, escaped, saw_escape, nested_fn);
+            scan_uses(checker, inner, cands, escaped, saw_escape, nested_fn);
+        }
+        Expression::Eq(a, b)
+        | Expression::Neq(a, b)
+        | Expression::Le(a, b)
+        | Expression::Gt(a, b)
+        | Expression::Leq(a, b)
+        | Expression::Geq(a, b) => {
+            for side in [a, b] {
+                if let Expression::Identifier(n) = peel(side).1.as_ref() {
+                    if cands.contains_key(*n) {
+                        escaped.insert((*n).to_string());
+                    }
+                } else {
+                    scan_uses(checker, side, cands, escaped, saw_escape, nested_fn);
+                }
+            }
         }
         Expression::Identifier(n) => {
             if cands.contains_key(*n) {
-                escaped.insert((*n).to_string());
+                if nested_fn {
+                    escaped.insert((*n).to_string());
+                } else {
+                    saw_escape.insert((*n).to_string());
+                }
             }
         }
         Expression::Fragment(items) if items.len() == 2 && binder_name(&items[0]).is_some() => {
@@ -252,45 +285,45 @@ fn scan_uses(
                     }
                 }
             }
-            scan_uses(checker, &items[1], cands, escaped, nested_fn);
+            scan_uses(checker, &items[1], cands, escaped, saw_escape, nested_fn);
         }
         Expression::Construct { fields, .. } => match fields {
             EnumConstructPayload::Unit => {}
             EnumConstructPayload::Tuple(args) => {
                 for a in args {
-                    poison_idents(a, cands, escaped);
-                    scan_uses(checker, a, cands, escaped, nested_fn);
+                    mark_named_escape(a, cands, escaped, saw_escape, nested_fn);
+                    scan_uses(checker, a, cands, escaped, saw_escape, nested_fn);
                 }
             }
             EnumConstructPayload::Record(parts) => {
                 for p in parts {
-                    poison_idents(&p.value, cands, escaped);
-                    scan_uses(checker, &p.value, cands, escaped, nested_fn);
+                    mark_named_escape(&p.value, cands, escaped, saw_escape, nested_fn);
+                    scan_uses(checker, &p.value, cands, escaped, saw_escape, nested_fn);
                 }
             }
         },
         Expression::Instantiate(_, Some(args)) => {
             for a in args {
-                poison_idents(a, cands, escaped);
-                scan_uses(checker, a, cands, escaped, nested_fn);
+                mark_named_escape(a, cands, escaped, saw_escape, nested_fn);
+                scan_uses(checker, a, cands, escaped, saw_escape, nested_fn);
             }
         }
         Expression::Array(items) | Expression::Tuple(items) | Expression::List(items) => {
             for item in items {
-                poison_idents(item, cands, escaped);
-                scan_uses(checker, item, cands, escaped, nested_fn);
+                mark_named_escape(item, cands, escaped, saw_escape, nested_fn);
+                scan_uses(checker, item, cands, escaped, saw_escape, nested_fn);
             }
         }
         Expression::Index(base, idx) => {
             poison_idents(base, cands, escaped);
-            scan_uses(checker, base, cands, escaped, nested_fn);
+            scan_uses(checker, base, cands, escaped, saw_escape, nested_fn);
             if let Some(idx) = idx {
-                poison_idents(idx, cands, escaped);
-                scan_uses(checker, idx, cands, escaped, nested_fn);
+                mark_named_escape(idx, cands, escaped, saw_escape, nested_fn);
+                scan_uses(checker, idx, cands, escaped, saw_escape, nested_fn);
             }
         }
         _ => walk_children(ast, &mut |child| {
-            scan_uses(checker, child, cands, escaped, nested_fn)
+            scan_uses(checker, child, cands, escaped, saw_escape, nested_fn)
         }),
     }
 }
@@ -332,6 +365,22 @@ fn mark_safe_uses(
             } else {
                 mark_safe_uses(checker, recv, cands, escaped, used);
             }
+        }
+        Expression::Assignment(lhs, rhs) | Expression::CompoundAssign(lhs, _, rhs) => {
+            if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
+                let r = peel(recv);
+                if let Expression::Identifier(n) = r.1.as_ref() {
+                    if cands.contains_key(*n) && !escaped.contains(*n) {
+                        used.insert((*n).to_string());
+                        if let Some(id) = nid(checker, r) {
+                            checker.frame_local.insert(id);
+                        }
+                    }
+                } else {
+                    mark_safe_uses(checker, recv, cands, escaped, used);
+                }
+            }
+            mark_safe_uses(checker, rhs, cands, escaped, used);
         }
         _ => walk_children(ast, &mut |child| {
             mark_safe_uses(checker, child, cands, escaped, used)
@@ -382,6 +431,72 @@ fn has_direct_match_construct(ast: &Output<'_>) -> bool {
             });
             found
         }
+    }
+}
+
+fn note_private_use(name: &str, escaped: &mut HashSet<String>, saw_escape: &HashSet<String>) {
+    if saw_escape.contains(name) {
+        escaped.insert(name.to_string());
+    }
+}
+
+fn note_field_store(
+    checker: &Checker,
+    recv: &Output<'_>,
+    cands: &HashMap<String, Candidate>,
+    escaped: &mut HashSet<String>,
+    saw_escape: &HashSet<String>,
+    nested_fn: bool,
+) {
+    let r = peel(recv);
+    if let Expression::Identifier(n) = r.1.as_ref() {
+        if cands.contains_key(*n) {
+            if nested_fn {
+                escaped.insert((*n).to_string());
+            } else {
+                match ty_of(checker, r) {
+                    Some(ty) if checker.ty_is_class(&ty) => {
+                        note_private_use(*n, escaped, saw_escape);
+                    }
+                    _ => {
+                        escaped.insert((*n).to_string());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Whole-object use that can rematerialize at the edge (S2j / S2g).
+fn mark_named_escape(
+    ast: &Output<'_>,
+    cands: &HashMap<String, Candidate>,
+    escaped: &mut HashSet<String>,
+    saw_escape: &mut HashSet<String>,
+    nested_fn: bool,
+) {
+    match peel(ast).1.as_ref() {
+        Expression::Identifier(n) if cands.contains_key(*n) => {
+            if nested_fn {
+                escaped.insert((*n).to_string());
+            } else {
+                saw_escape.insert((*n).to_string());
+            }
+        }
+        Expression::Access(recv, _) => {
+            let r = peel(recv);
+            if let Expression::Identifier(n) = r.1.as_ref() {
+                if cands.contains_key(*n) {
+                    return;
+                }
+            }
+            walk_children(ast, &mut |child| {
+                mark_named_escape(child, cands, escaped, saw_escape, nested_fn)
+            });
+        }
+        _ => walk_children(ast, &mut |child| {
+            mark_named_escape(child, cands, escaped, saw_escape, nested_fn)
+        }),
     }
 }
 
@@ -816,7 +931,7 @@ fn main() {
     }
 
     #[test]
-    fn field_store_escapes() {
+    fn field_store_is_frame_local() {
         let src = r#"
 class Point {
     pub x: int,
@@ -827,8 +942,57 @@ fn main() {
     p.x = 10;
 }
 "#;
-        assert_eq!(frame_local_count(src), 0, "field store must stay heap");
+        assert!(
+            frame_local_count(src) >= 2,
+            "non-escaping field store should unbox"
+        );
     }
+
+    #[test]
+    fn field_store_then_call_is_frame_local() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn take(Point q) -> int {
+    return q.x;
+}
+fn main() {
+    let p = new Point(1, 2);
+    p.x = 10;
+    let z = take(p);
+}
+"#;
+        assert!(
+            frame_local_count(src) >= 2,
+            "named escape after private stores still unboxes"
+        );
+    }
+
+    #[test]
+    fn private_use_after_escape_stays_heap() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn take(Point q) -> int {
+    return q.x;
+}
+fn main() {
+    let p = new Point(1, 2);
+    let z = take(p);
+    p.x = 10;
+}
+"#;
+        assert_eq!(
+            frame_local_count(src),
+            0,
+            "private store after call-arg escape must stay heap"
+        );
+    }
+
 
     #[test]
     fn method_receiver_escapes() {
