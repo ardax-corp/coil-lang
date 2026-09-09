@@ -711,23 +711,42 @@ fn is_numeric_work_op(op: &IlOp) -> bool {
 
 /// True when a jump targets an earlier label (counted / while loops).
 pub(crate) fn has_back_edge(ops: &[IlOp]) -> bool {
-    let mut seen = HashMap::new();
+    !loop_ranges(ops).is_empty()
+}
+
+/// Make* / InitTyped between a loop header and its back-edge (invert+fuse).
+/// Preheader alloc plus an index loop is not this — S3 may specialize those.
+pub(crate) fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
+    let loops = loop_ranges(ops);
+    if loops.is_empty() {
+        return false;
+    }
+    ops.iter().enumerate().any(|(i, op)| {
+        alloc_refuse_reason(op).is_some() && loops.iter().any(|&(h, j)| h <= i && i < j)
+    })
+}
+
+fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
+    let mut label_at = HashMap::new();
     for (i, op) in ops.iter().enumerate() {
         if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-            seen.entry(*id).or_insert(i);
+            label_at.entry(*id).or_insert(i);
         }
+    }
+    let mut ranges = Vec::new();
+    for (j, op) in ops.iter().enumerate() {
         if let IlOp::Jump {
             target: Label(id), ..
         } = op
         {
-            if let Some(&at) = seen.get(id) {
-                if at < i {
-                    return true;
+            if let Some(&h) = label_at.get(id) {
+                if h < j {
+                    ranges.push((h, j));
                 }
             }
         }
     }
-    false
+    ranges
 }
 
 fn push_map_alloc(stack: &mut Vec<Cell>, arity: usize) -> Result<(), LowerError> {

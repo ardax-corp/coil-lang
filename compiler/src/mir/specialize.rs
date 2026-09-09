@@ -1,6 +1,8 @@
 //! Try to replace a numeric IL body with dense MIR bytecode, or lift
 //! an eligible leftover body through MIR→LIR (I8).
 
+use common::Instruction;
+
 use crate::il::IlOp;
 
 use super::abi::{DenseAbi, DenseCallMap};
@@ -34,8 +36,9 @@ pub fn try_specialize_body(
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    // Looping alloc stays fuse-IL so invert+fuse (COI-87) remains (S2c).
-    if has_alloc && super::infer::has_back_edge(ops) {
+    // In-loop Make* stays fuse-IL so invert+fuse (COI-87) remains.
+    // Preheader alloc + index/store loop may take dense (S3).
+    if super::infer::has_alloc_inside_loop(ops) {
         return None;
     }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
@@ -81,7 +84,25 @@ pub fn try_specialize_body(
     if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
         return Some((packed, abi));
     }
-    Some((emit_dense(&func, entry, pool, has_alloc).ok()?, abi))
+    let out = emit_dense(&func, entry, pool, has_alloc).ok()?;
+    // Heap writes have no SSA users; refuse if reconstruct dropped one.
+    if count_store_index(&out) < count_store_index(ops) {
+        return None;
+    }
+    Some((out, abi))
+}
+
+fn count_store_index(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| match op {
+            IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => true,
+            IlOp::Byte { byte, .. } => matches!(
+                *byte.bytecode(),
+                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            ),
+            _ => false,
+        })
+        .count()
 }
 
 /// IL→MIR→LIR for a leftover body after dense specialize misses (I8).
@@ -111,10 +132,10 @@ pub fn try_lower_abi_body_with(
 ) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
-    // Looping alloc bodies stay fuse-IL so invert+fuse (COI-87) remains;
-    // straight-line mapped leaves may reconstruct.
+    // In-loop Make* stays fuse-IL so invert+fuse (COI-87) remains;
+    // preheader alloc + leftover body may reconstruct when mapped.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_alloc && super::infer::has_back_edge(ops) {
+    if super::infer::has_alloc_inside_loop(ops) {
         return None;
     }
     let maps_ok =
