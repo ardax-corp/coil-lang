@@ -204,3 +204,29 @@ S2f:
 `[T; N]` and the only uses are computed-index load/store (`i % N`).
 Computed *element* values (`i`, `i+1`) still materialize into slots;
 they do not stay heap. Escape / `vec_array.hy` still heap.
+
+Prove vs parent `3bcaf9e8` (same tip `coil run`, `COIL_AUTO_PAR=0`,
+hyperfine -w 2 -r 8). `coil-dissect --fn pack` / `bump`:
+
+| kernel | parent MakeArray | tip MakeArray | parent StoreIndex | tip StoreIndex |
+|---|---|---|---|---|
+| pack_store | **2** | **0** | 1 | 0 |
+| pack / pack_arith / pack_wide | 1 | 0 | 0 | 0 |
+| bump | 2 (dense) | 0 | 1 | 0 |
+
+`COIL_S2D_DENSE_INLOOP=1` matches tip (select bodies skip dense).
+
+| kernel | parent | tip | ratio |
+|---|---|---|---|
+| pack_store N=2e6 | 493.6 ± 1.4 ms | 121.6 ± 1.0 ms | **4.06×** |
+| pack N=2e6 | 286.1 ± 1.2 ms | 77.6 ± 1.0 ms | **3.69×** |
+| pack_arith | 306.9 ± 0.4 ms | 95.6 ± 1.0 ms | **3.21×** |
+| pack_wide N=5e5 | 92.8 ± 0.4 ms | 46.7 ± 0.3 ms | **1.99×** |
+| bump N=2e5 (time-only) | 7.6 ± 1.2 ms | 12.9 ± 0.2 ms | tip **1.71×** slower |
+
+Parent `pack_store` / `bump` return **0** (Index rematerializes zeros;
+`raise` hid it). Tip: `pack(6)==15`, `pack(2e6)==1999999000000`,
+`bump()==200000`. Do not use coil `n*(n-1)/2` at this magnitude.
+
+Flagship `.hyc` sha256 identical: `mandelbrot` / `tak` / `nsieve` /
+`binary_trees` / `fib`.
