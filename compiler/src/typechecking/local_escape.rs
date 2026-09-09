@@ -21,6 +21,7 @@ pub const MAX_UNBOX_SLOTS: usize = 32;
 struct Candidate {
     binder: NodeId,
     rhs: NodeId,
+    is_class: bool,
 }
 
 /// Fill [`Checker::frame_local`] for `ast` after inference.
@@ -127,7 +128,18 @@ fn collect_candidates(checker: &Checker, ast: &Output<'_>, cands: &mut HashMap<S
                 {
                     let ids = (nid(checker, &items[0]), nid(checker, rhs));
                     if let (Some(binder), Some(rhs_id)) = ids {
-                        cands.insert(name, Candidate { binder, rhs: rhs_id });
+                        let is_class = instantiate_is_unbox(checker, rhs)
+                            || ty_of(checker, rhs)
+                                .or_else(|| ty_of(checker, &items[0]))
+                                .is_some_and(|ty| checker.ty_is_class(&ty));
+                        cands.insert(
+                            name,
+                            Candidate {
+                                binder,
+                                rhs: rhs_id,
+                                is_class,
+                            },
+                        );
                     }
                 }
             }
@@ -171,17 +183,11 @@ fn scan_uses(
             if let Expression::Identifier(n) = r.1.as_ref() {
                 if nested_fn && cands.contains_key(*n) {
                     escaped.insert((*n).to_string());
-                } else if cands.contains_key(*n) {
-                    match ty_of(checker, r) {
-                        Some(ty) if checker.ty_is_class(&ty) => {
-                            note_private_use(*n, escaped, saw_escape);
-                        }
-                        Some(_) => {
-                            escaped.insert((*n).to_string());
-                        }
-                        None => {
-                            escaped.insert((*n).to_string());
-                        }
+                } else if let Some(cand) = cands.get(*n) {
+                    if cand.is_class {
+                        note_private_use(*n, escaped, saw_escape);
+                    } else {
+                        escaped.insert((*n).to_string());
                     }
                 }
             } else {
@@ -194,7 +200,7 @@ fn scan_uses(
         }
         Expression::Assignment(lhs, rhs) => {
             if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
-                note_field_store(checker, recv, cands, escaped, saw_escape, nested_fn);
+                note_field_store(recv, cands, escaped, saw_escape, nested_fn);
                 scan_uses(checker, rhs, cands, escaped, saw_escape, nested_fn);
             } else if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 if cands.contains_key(*n) {
@@ -219,7 +225,7 @@ fn scan_uses(
         }
         Expression::CompoundAssign(lhs, _, rhs) => {
             if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
-                note_field_store(checker, recv, cands, escaped, saw_escape, nested_fn);
+                note_field_store(recv, cands, escaped, saw_escape, nested_fn);
             } else {
                 poison_idents(lhs, cands, escaped);
             }
@@ -441,7 +447,6 @@ fn note_private_use(name: &str, escaped: &mut HashSet<String>, saw_escape: &Hash
 }
 
 fn note_field_store(
-    checker: &Checker,
     recv: &Output<'_>,
     cands: &HashMap<String, Candidate>,
     escaped: &mut HashSet<String>,
@@ -453,15 +458,10 @@ fn note_field_store(
         if cands.contains_key(*n) {
             if nested_fn {
                 escaped.insert((*n).to_string());
+            } else if cands.get(*n).is_some_and(|c| c.is_class) {
+                note_private_use(*n, escaped, saw_escape);
             } else {
-                match ty_of(checker, r) {
-                    Some(ty) if checker.ty_is_class(&ty) => {
-                        note_private_use(*n, escaped, saw_escape);
-                    }
-                    _ => {
-                        escaped.insert((*n).to_string());
-                    }
-                }
+                escaped.insert((*n).to_string());
             }
         }
     }
@@ -1007,6 +1007,34 @@ fn main() {
 }
 "#;
         assert_eq!(frame_local_count(src), 0, "method receiver must stay heap");
+    }
+
+    #[test]
+    fn while_field_store_is_frame_local() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn bump(int n) -> int {
+    let p = new Point(0, 1);
+    let i = 0;
+    while i < n {
+        p.x = p.x + p.y;
+        p.y = p.y + 1;
+        i = i + 1;
+    }
+    return p.x + p.y;
+}
+fn main() {
+    let _ = bump(6);
+}
+"#;
+        assert!(
+            frame_local_count(src) >= 2,
+            "loop field stores should unbox; count={}",
+            frame_local_count(src)
+        );
     }
 
     #[test]
