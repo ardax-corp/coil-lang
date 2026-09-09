@@ -2021,7 +2021,7 @@ fn main() {
     }
 
     #[test]
-    fn s3_vec_scan_fill_is_dense_with_pin() {
+    fn s3_vec_scan_fill_takes_v0_simd() {
         let src = r#"
 fn fill(Vec<int> v) -> int {
     let i = 0;
@@ -2051,10 +2051,8 @@ fn main() {
         let fill_bc = &bc[start..end];
         let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            fill_bc
-                .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S3 leftover: Vec store-index stays fuse-IL; opcodes={names:?}"
+            fill_bc.iter().any(|b| *b.bytecode() == Instruction::VStore),
+            "S5a V0: stride-1 fill emits VStore; opcodes={names:?}"
         );
         assert!(
             fill_bc.iter().any(|b| matches!(
@@ -2064,7 +2062,7 @@ fn main() {
                     | Instruction::StoreIndexPin
                     | Instruction::StoreIndexPinUnchecked
             )),
-            "fuse-IL fill must keep the heap store; opcodes={names:?}"
+            "scalar tail must keep a heap store; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
