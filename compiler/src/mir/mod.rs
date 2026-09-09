@@ -21,7 +21,8 @@
 //! heap-backed named class locals stay on [`crate::il`]. `FORMAT` /
 //! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
 //! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
-//! dense / LIR emit across alloc only when S2b maps exist (S2c). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
+//! dense / LIR emit across alloc only when S2b maps exist (S2c), including
+//! mapped in-loop / preheader `Make*` (S2d). Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
 //! allowlist stays closed. Debugger-attached compiles refuse dense /
 //! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
 //! accident.
@@ -2008,6 +2009,7 @@ fn main() {
 
     #[test]
     fn pipeline_makearray_and_new_stay_fuse_il() {
+        // In-loop MakeArray stays off dense (S2d rent); maps may still bind.
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0];
@@ -2022,7 +2024,9 @@ fn hot(int n) -> int {
     return s;
 }
 fn main() {
-    let _ = hot(3);
+    if hot(3) != 3 {
+        raise "hot checksum";
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
@@ -2038,19 +2042,18 @@ fn main() {
             .map(|s| s.entry_pc as usize)
             .unwrap_or(bc.len());
         let hot_bc = &bc[start..end];
+        let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
             hot_bc.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
-            "I5 keeps alloc on fuse-IL; opcodes={:?}",
-            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "in-loop MakeArray stays; opcodes={names:?}"
         );
         assert!(
-            hot_bc
-                .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "I5 must not dense-specialize an allocating loop"
+            hot_bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
+            "in-loop MakeArray stays off dense; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "hot checksum; opcodes={names:?}");
     }
 
     #[test]
@@ -2100,6 +2103,158 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s2d_mapped_looping_makearray_takes_dense() {
+        // Computed index keeps MakeArray (const-index mem_fwd would DCE it).
+        let src = r#"
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        let xs = [i, i + 1, i + 2];
+        s = s + xs[i % 3];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    if pack(4) != 9 {
+        raise "pack checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile pack");
+        assert!(
+            !p.stack_maps().is_empty(),
+            "S2d looping MakeArray should emit S2b maps: {:?}",
+            p.stack_maps()
+        );
+        let symbols = p.program_debug().fn_symbols;
+        let pack = symbols
+            .iter()
+            .position(|s| s.name == "pack")
+            .expect("pack");
+        let start = symbols[pack].entry_pc as usize;
+        let end = symbols
+            .get(pack + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let pack_bc = &bc[start..end];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            pack_bc.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
+            "S2d reconstructs in-loop MakeArray; opcodes={names:?}"
+        );
+        assert!(
+            pack_bc
+                .iter()
+                .all(|b| *b.bytecode() != Instruction::DenseBin),
+            "S2d keeps in-loop MakeArray off dense; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "pack checksum; opcodes={names:?}");
+    }
+
+    #[test]
+    fn s2d_mapped_preheader_array_mut_takes_dense() {
+        let src = r#"
+fn bump() -> int {
+    let arr = [0, 0, 0, 0];
+    let i = 0;
+    while i < 8 {
+        arr[i % 4] = arr[i % 4] + 1;
+        i = i + 1;
+    }
+    return arr[0] + arr[1] + arr[2] + arr[3];
+}
+fn main() {
+    if bump() != 8 {
+        raise "bump checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile bump");
+        let symbols = p.program_debug().fn_symbols;
+        let bump = symbols
+            .iter()
+            .position(|s| s.name == "bump")
+            .expect("bump");
+        let start = symbols[bump].entry_pc as usize;
+        let end = symbols
+            .get(bump + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::MakeArray),
+            "preheader MakeArray stays; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S2d mapped preheader alloc + index loop takes dense; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "bump checksum; opcodes={names:?}");
+    }
+
+    #[test]
+    fn s2d_mapped_looping_makearray_lir_when_compare_only() {
+        let src = r#"
+fn pick(int go, int k) -> int {
+    let xs = [1, 2, 3];
+    while go != 0 {
+        xs = [4, 5, 6];
+        go = 0;
+    }
+    return xs[k];
+}
+fn main() {
+    if pick(1, 1) != 5 || pick(0, 2) != 3 {
+        raise "pick checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile spin");
+        assert!(
+            !p.stack_maps().is_empty(),
+            "S2d compare-only looping alloc should map: {:?}",
+            p.stack_maps()
+        );
+        let symbols = p.program_debug().fn_symbols;
+        let pick = symbols
+            .iter()
+            .position(|s| s.name == "pick")
+            .expect("pick");
+        let start = symbols[pick].entry_pc as usize;
+        let end = symbols
+            .get(pick + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = body
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::MakeArray)
+            .count();
+        assert!(
+            makes >= 1,
+            "S2d keeps MakeArray for computed-index leftover; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
+            "compare-only looping alloc stays LIR; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "pick checksum; opcodes={names:?}");
     }
 
     #[test]

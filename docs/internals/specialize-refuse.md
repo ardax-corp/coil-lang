@@ -89,10 +89,12 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | class/field + `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | `CALL` (recursion) |
-| `nsieve` | `nsieve.hy` | fuse-IL | heap-index + `Vec.push` |
-| `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes |
+| `nsieve` | `nsieve.hy` | fuse-IL | heap-index + `Vec.push` (no `Make*`; S2d does not fire) |
+| `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | heap / match / two-slot — P3 |
-| `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host |
+| `array_mut` | `array_mut.hy` | fuse-IL | `main` + I4 write; S2d does not fire |
+| `bump` | `looping_makearray.hy` | dense | S2d preheader `MakeArray` + computed-index store |
+| `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host / class `new` |
 
 Stack-IL `cse_*` / `dest_prop_field_alias` stay fuse-IL (heap / field). W2
 does not rewrite those sources; `numeric` / `iv_mul_sr` / `licm_nested_chains`
@@ -101,10 +103,14 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 (`sin` inside an otherwise dense loop). The COI-291 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
 `times_a` call `eval_a` with unpinned dense Index residuals (S3b).
-Recursion (`tak` / `fib`) stays fuse-IL on the callee. In-loop
-`MakeArray` stays fuse-IL (invert+fuse). A live heap return
-(`return [i]`) plus a counted loop stays fuse-IL so invert+fuse
-remains observable.
+Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped **preheader**
+`MakeArray` plus an index loop may take dense (S2d). In-loop `Make*` stays
+off dense (Seek+alloc tax). Compare-only leftovers may take LIR when maps
+exist and the cost gate holds. Const-index `s += xs[0]` usually mem_fwd+DCE's
+the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
+loop and **no** earlier alloc stays fuse-IL so invert+fuse remains
+observable. Unmapped alloc, CALL+alloc (map lift refuses `CALL`), and
+`Vec.push` / class `new` loops stay fuse-IL.
 
 ## Language refuse → island (COI-292 I0)
 
@@ -117,7 +123,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); **dense+match stays refuse** (stack match vs dense regs) | **I2** / S3 leftover |
 | Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
-| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; unmapped fuse-IL; in-loop Make* stays fuse-IL | **I5** / **S2a** / **S2b** / **S2c** |
+| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; S2d mapped in-loop / preheader Make*; unmapped fuse-IL; post-loop-only `return [x]` fuse-IL | **I5** / **S2a** / **S2b** / **S2c** / **S2d** |
 | HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; S3 dense emit reconstructs I6-typed hosts except I4 string bytes | **I6** / **S3** |
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
 | Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse) | **I8** |

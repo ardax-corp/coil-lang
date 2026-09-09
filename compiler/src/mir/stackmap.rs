@@ -111,10 +111,9 @@ fn try_build_draft_err(
     let inferred = infer_stack_map(ops, pool.len(), entry_sp, &Default::default())
         .map_err(|e| e.to_string())?;
     let mut hints = LowerHints::new(name);
+    // Keep inferred param types (i64 `n` / index). Do not force HeapRef —
+    // that broke looping `i < n` and `xs[k]` (S2d).
     hints.slot_ty = inferred.slot_ty;
-    for i in 0..entry_sp {
-        hints.slot_ty.insert(i, MirTy::HeapRef);
-    }
     hints.pool = pool.to_vec();
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;

@@ -27,9 +27,15 @@ and relocate mapped slots on collect.
 - Dense specialize / MIR→LIR **may cross alloc** when
   [`has_real_maps`](../../compiler/src/mir/stackmap.rs) is true (S2c /
   [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
-  LIR-across-alloc stays off looping alloc (invert+fuse). Unmapped
-  allocating bodies stay fuse-IL. S3b heap-index takes dense unpinned
-  residuals plus `Seek` restore. Dense+match stays I2 LIR.
+  S2d ([COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts))
+  lets **preheader** `Make*` + index loops take dense when maps exist.
+  In-loop `Make*` stays off dense (Seek+alloc tax). Compare-only leftovers
+  may take LIR. Draft lift keeps inferred param types (not forced `heapref`)
+  and snapshots the stack-IL map **before** dense replace so `DenseBin`
+  bodies still bind. Post-loop-only `return [x]` after a counted loop stays
+  fuse-IL so invert+fuse (COI-87) remains. Unmapped allocating bodies stay
+  fuse-IL. S3b heap-index takes dense unpinned residuals plus `Seek`
+  restore. Dense+match stays I2 LIR.
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
   rewritten if a live object address changes. Unmapped alloc bodies stay
   fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
@@ -45,12 +51,19 @@ and relocate mapped slots on collect.
 3. ~~**Specialize across GC**~~ — **S2c.** Mapped allocating bodies may
    take dense / LIR when otherwise eligible. Default remains refuse
    without maps.
-4. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
+4. ~~**Looping alloc**~~ — **S2d.** Mapped preheader `Make*` + index
+   may take dense. In-loop `Make*` is LIR-or-fuse only (dense regresses).
+   Still refuse: post-loop-only heap return (invert+fuse); unmapped alloc;
+   CALL+alloc (map lift refuses user `CALL`); computed-element stack
+   scalarize; compiler write-barrier opcodes; alloc sink / hoist of
+   `Alloc` (LICM keeps it in-loop — new object per trip).
+5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 
-Write barriers (`GcBarrier` kind `write`) are named so later field
-stores can mark them. They are not implemented. I6 marks impure
-HostInvoke / CALL as effect barriers instead of growing GC maps.
+Write barriers (`GcBarrier` kind `write`) stay named only. S4 SATB
+already shades at VM field / vec stores; a compiler opcode would not
+pay rent. I6 marks impure HostInvoke / CALL as effect barriers instead
+of growing GC maps.
 
 See [mir-islands.md](mir-islands.md) (I5) and
 [specialize-refuse.md](specialize-refuse.md).

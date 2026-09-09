@@ -714,8 +714,9 @@ pub(crate) fn has_back_edge(ops: &[IlOp]) -> bool {
     !loop_ranges(ops).is_empty()
 }
 
-/// Make* / InitTyped between a loop header and its back-edge (invert+fuse).
-/// Preheader alloc plus an index loop is not this — S3 may specialize those.
+/// Make* / InitTyped between a loop header and its back-edge.
+/// Preheader alloc plus an index loop is not this — S2d may specialize those
+/// when S2b maps exist.
 pub(crate) fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
     let loops = loop_ranges(ops);
     if loops.is_empty() {
@@ -724,6 +725,29 @@ pub(crate) fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
     ops.iter().enumerate().any(|(i, op)| {
         alloc_refuse_reason(op).is_some() && loops.iter().any(|&(h, j)| h <= i && i < j)
     })
+}
+
+/// Every Make* / InitTyped sits after the last back-edge (`return [sum]`).
+/// Those bodies stay fuse-IL so COI-87 invert+fuse remains observable.
+pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
+    if has_alloc_inside_loop(ops) {
+        return false;
+    }
+    let loops = loop_ranges(ops);
+    if loops.is_empty() {
+        return false;
+    }
+    let last_back = loops.iter().map(|&(_, j)| j).max().unwrap_or(0);
+    let mut any = false;
+    for (i, op) in ops.iter().enumerate() {
+        if alloc_refuse_reason(op).is_some() {
+            any = true;
+            if i < last_back {
+                return false;
+            }
+        }
+    }
+    any
 }
 
 /// Heap-index / store / pin / ArrayLen — S3 may specialize these with maps.
