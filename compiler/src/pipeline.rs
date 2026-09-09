@@ -2117,11 +2117,26 @@ fn main() { add(1, 2); }
                     );
                 }
             }
+            let heap = bytecode[start..end].iter().any(|b| {
+                matches!(
+                    *b.bytecode(),
+                    Instruction::ArrayPin
+                        | Instruction::VLoad
+                        | Instruction::VStore
+                        | Instruction::VReduce
+                        | Instruction::Index
+                        | Instruction::IndexUnchecked
+                        | Instruction::StoreIndex
+                        | Instruction::StoreIndexUnchecked
+                )
+            });
             assert!(
+                heap,
+                "{name} should keep a heap-index residual (pin, V*, or Index); opcodes={:?}",
                 bytecode[start..end]
                     .iter()
-                    .any(|b| *b.bytecode() == Instruction::ArrayPin),
-                "{name} should emit ArrayPin in final bytecode"
+                    .map(|b| b.bytecode().mnemonic())
+                    .collect::<Vec<_>>()
             );
         }
     }
@@ -2443,8 +2458,15 @@ fn main() -> int {
                 .collect::<Vec<_>>()
         );
         assert!(
-            sum_body.iter().any(|b| is_pin(*b.bytecode())),
-            "non-yielding sibling scan_sum should still pin; body={:?}",
+            sum_body.iter().any(|b| is_pin(*b.bytecode())
+                || matches!(
+                    *b.bytecode(),
+                    Instruction::VReduce
+                        | Instruction::VLoad
+                        | Instruction::Index
+                        | Instruction::IndexUnchecked
+                )),
+            "non-yielding sibling scan_sum should pin or take dense/V1; body={:?}",
             sum_body
                 .iter()
                 .map(|b| b.bytecode().mnemonic())

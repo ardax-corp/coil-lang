@@ -81,8 +81,8 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `iv_mul` | `iv_mul_sr.hy` | dense | i64 mul — **W2** (side effect) |
 | `nested` | `licm_nested_chains.hy` | dense | i64 add — **W2** (side effect) |
 | `eval_a` | `nbody.hy` | dense | no back-edge, ≥8 work ops — **W3** |
-| `times_a` / `times_at` | `nbody.hy` | fuse-IL | S3 leftover: heap-index + CALL (dense residuals unsound on `Vec`) |
-| `sum` | `indexed_sum.hy` | fuse-IL | S3 leftover: heap-index |
+| `times_a` / `times_at` | `nbody.hy` | dense + open CALL + unpinned Index | S3b sound residuals |
+| `sum` | `indexed_sum.hy` | V1 `VReduce` (stride-1); gather stays dense Index | S5b / S3b |
 | `fill` / `scan` | `vec_scan.hy` | `fill`: V0 SIMD; `scan`: V1 `VReduce` | stride-1 store / add-reduce |
 | `axpy` / `checksum` | `vec_axpy.hy` | `axpy`: V1 `VFma`; `checksum`: V1 `VReduce` | conservative saxpy store |
 | `main` | `for_in_sum.hy` | fuse-IL | heap + `for` iterator |
@@ -100,8 +100,7 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 `mir_dense_straight.hy`. The W4 prove bench is `mir_dense_host.hy`
 (`sin` inside an otherwise dense loop). The COI-291 prove bench is
 `mir_dense_call.hy` (`hot` loops a dense `kernel`). S3 open CALL lets
-`times_a` call `eval_a` only when the caller has no heap-index (dense
-index residuals are unsound on `Vec`; those bodies stay fuse-IL).
+`times_a` call `eval_a` with unpinned dense Index residuals (S3b).
 Recursion (`tak` / `fib`) stays fuse-IL on the callee. In-loop
 `MakeArray` stays fuse-IL (invert+fuse). A live heap return
 (`return [i]`) plus a counted loop stays fuse-IL so invert+fuse

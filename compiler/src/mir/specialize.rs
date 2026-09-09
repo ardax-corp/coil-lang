@@ -34,16 +34,13 @@ pub fn try_specialize_body(
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
-    // S3: one-word CALL (dense map or open), I6 HostInvoke except I4
-    // string bytes, heap index / ArrayLen / StoreIndex. FORMAT / string
-    // ops stay fuse-IL (I4). Match stays LIR (dense+match is unsafe).
+    // S3/S3b: one-word CALL (dense map or open), I6 HostInvoke except I4
+    // string bytes, heap index / ArrayLen / StoreIndex (dense residuals
+    // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    // Heap-index + DenseBin residuals stay unsound on `Vec`. V0 may still
-    // take a closed `V*` rewrite (no dense+Index mix). Anything else stays
-    // fuse-IL + invert+fuse (COI-87).
-    let heap_index = super::infer::has_heap_index(ops);
+    // S3b: heap-index bodies may take V* first, then dense residuals.
     if super::infer::has_alloc_inside_loop(ops)
         || (has_alloc && super::infer::has_back_edge(ops))
     {
@@ -68,6 +65,7 @@ pub fn try_specialize_body(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     hints.allow_effects = true;
+    let _heap_index = super::infer::has_heap_index(ops);
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params
         .as_ref()
@@ -84,6 +82,7 @@ pub fn try_specialize_body(
     crate::mir::strength_reduce(&mut func);
     crate::mir::cse(&mut func);
     crate::mir::gvn(&mut func);
+    paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
         .blocks
         .iter()
@@ -108,9 +107,6 @@ pub fn try_specialize_body(
     if let Some(vecd) = super::vectorize::try_vectorize(&func, entry, pool, label_hi) {
         return Some((vecd, abi));
     }
-    if heap_index {
-        return None;
-    }
     let out = emit_dense(&func, entry, pool, has_alloc).ok()?;
     // Heap writes have no SSA users; refuse if reconstruct dropped one.
     if count_store_index(&out) < count_store_index(ops) {
@@ -121,6 +117,49 @@ pub fn try_specialize_body(
         return None;
     }
     Some((out, abi))
+}
+
+/// Index / open CALL dests default to i64 when the next IL is StorePop.
+/// Repaint from float uses so DenseBin / RETURN keep the Value bits.
+fn paint_index_dest_from_uses(func: &mut crate::mir::func::MirFunc) {
+    use crate::mir::inst::{MirInst, ValueId};
+    let mut paint = Vec::new();
+    for b in &func.blocks {
+        for inst in &b.insts {
+            match inst {
+                MirInst::Index { dest, .. } | MirInst::Call { dest, .. } => {
+                    paint.push(*dest);
+                }
+                _ => {}
+            }
+        }
+    }
+    if paint.is_empty() {
+        return;
+    }
+    let mut ty_of = vec![None; func.types.len()];
+    for b in &func.blocks {
+        for inst in &b.insts {
+            match inst {
+                MirInst::Bin { ty, lhs, rhs, .. } if ty.is_float() => {
+                    ty_of[lhs.index()] = Some(*ty);
+                    ty_of[rhs.index()] = Some(*ty);
+                }
+                MirInst::StoreIndex { value, .. } => {
+                    let vt = func.ty(*value);
+                    if vt.is_float() {
+                        ty_of[value.index()] = Some(vt);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for ValueId(id) in paint {
+        if let Some(ty) = ty_of.get(id as usize).copied().flatten() {
+            func.types[id as usize] = ty;
+        }
+    }
 }
 
 fn count_store_index(ops: &[IlOp]) -> usize {

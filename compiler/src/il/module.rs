@@ -110,10 +110,12 @@ impl IlModule {
     /// function's label with the same numeric id. Prologue/epilogue are copied
     /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
     pub fn to_flat(&self) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
+        let mut module = self.clone();
+        absorb_trailing_labels(&mut module);
         let mut out = Vec::new();
         // New ids must not overlap old Label/Jump/Entry ids still sitting on
         // cross-function CALL sites until the post-concat patch.
-        let mut next_label = self.max_code_label().saturating_add(1);
+        let mut next_label = module.max_code_label().saturating_add(1);
         let mut prior_labels = HashMap::new();
         let mut entry_labels = HashMap::new();
         let mut func_label_maps = Vec::new();
@@ -123,10 +125,10 @@ impl IlModule {
             out.extend(self.prologue.iter().cloned());
             segment_ranges.push((start, out.len()));
         }
-        for (i, body) in self.funcs.iter().enumerate() {
+        for (i, body) in module.funcs.iter().enumerate() {
             let start = out.len();
             let mut chunk = body.ops.clone();
-            if let Some(g) = self.glue.get(i) {
+            if let Some(g) = module.glue.get(i) {
                 chunk.extend(g.iter().cloned());
             }
             let old_entry = body.meta.entry.map(|Label(id)| id);
@@ -144,9 +146,9 @@ impl IlModule {
             out.extend(chunk);
             segment_ranges.push((start, out.len()));
         }
-        if !self.epilogue.is_empty() {
+        if !module.epilogue.is_empty() {
             let start = out.len();
-            out.extend(self.epilogue.iter().cloned());
+            out.extend(module.epilogue.iter().cloned());
             segment_ranges.push((start, out.len()));
         }
         let flat_label_ids: std::collections::HashSet<u32> =
@@ -374,6 +376,49 @@ fn lir_cost_slack(ops: &[IlOp]) -> usize {
         }
     }
     slack
+}
+
+/// Trailing `if { raise }` end-labels sit in epilogue (`emitting_range_to_raw`
+/// stops at the last code op). Attach only those binds that the last function
+/// jumps to and does not already define, so remap stays local and does not
+/// steal another function's entry (finalizer / static-init prologue).
+fn absorb_trailing_labels(module: &mut IlModule) {
+    let Some(last) = module.funcs.last_mut() else {
+        return;
+    };
+    use std::collections::HashSet;
+    let defined: HashSet<u32> = last
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    let needed: HashSet<u32> = last
+        .ops
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Jump { target, .. } => Some(target.0),
+            _ => None,
+        })
+        .filter(|id| !defined.contains(id))
+        .collect();
+    if needed.is_empty() {
+        return;
+    }
+    let mut kept = Vec::new();
+    let mut moved = Vec::new();
+    for op in module.epilogue.drain(..) {
+        match op {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) if needed.contains(&id) => {
+                moved.push(op);
+            }
+            other => kept.push(other),
+        }
+    }
+    last.ops.extend(moved);
+    module.epilogue = kept;
 }
 
 fn merge_remap_labels(prior: &mut HashMap<u32, u32>, local: HashMap<u32, u32>) {
@@ -818,6 +863,70 @@ mod tests {
         assert_eq!(
             entry_target, method_label,
             "unique non-entry CALL must follow the method body label"
+        );
+    }
+
+    /// `if x != 10 { raise }` binds `end_label` after the last RETURN, so the
+    /// label lives in epilogue. A prior dense body that reused emit id 8 must
+    /// not steal that jump (S3b reverse-index / times_a checksum OOB).
+    #[test]
+    fn to_flat_keeps_trailing_if_end_label_on_last_func() {
+        let loc = loc();
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("sum", Some(Label(3)), 0, 4),
+            ops: vec![
+                IlOp::Label(Label(3)),
+                IlOp::Label(Label(8)),
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("main", Some(Label(7)), 0, 3),
+            ops: vec![
+                IlOp::Label(Label(7)),
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfFalse,
+                    target: Label(8),
+                    loc,
+                    hint: Default::default(),
+                },
+                IlOp::Return { loc, ret_words: 1 },
+            ],
+        });
+        m.epilogue = vec![IlOp::Label(Label(8))];
+        let (flat, _, _) = m.to_flat();
+        let main_jmp = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Jump {
+                    target,
+                    kind: IlJumpKind::JumpIfFalse,
+                    ..
+                } => Some(target.0),
+                _ => None,
+            })
+            .expect("main JMPF");
+        let last_label = flat.iter().rev().find_map(|op| match op {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            _ => None,
+        });
+        assert_eq!(
+            Some(main_jmp),
+            last_label,
+            "main skip-raise must bind the trailing end-label, not sum's reused id 8"
+        );
+        let sum_mid = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .nth(1)
+            .expect("sum's second label");
+        assert_ne!(
+            main_jmp, sum_mid,
+            "main must not jump into sum's remapped Label(8)"
         );
     }
 

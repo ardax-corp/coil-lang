@@ -538,13 +538,13 @@ fn emit_vectorized(
             if inst.is_phi() {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+            emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
         }
     }
     // Bound may be an ArrayLen that SSA left in the exit block.
     if defined_in(func, spec.n) == Some(spec.exit) {
         let inst = def(func, spec.n)?;
-        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
     }
 
     out.push(IlOp::byte(
@@ -641,7 +641,7 @@ fn emit_vectorized(
         ) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
     }
     // IV step +1
     let one = {
@@ -674,7 +674,7 @@ fn emit_vectorized(
         if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
     }
     match func.block(spec.exit).term.as_ref()? {
         Terminator::Return { lo: Some(v), hi: None } => {
@@ -744,17 +744,17 @@ fn emit_reduced(
             if inst.is_phi() {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+            emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
         }
     }
     if defined_in(func, spec.n) == Some(spec.exit) {
         let inst = def(func, spec.n)?;
-        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
     }
     if defined_in(func, spec.acc_init) == Some(spec.header) {
         let inst = def(func, spec.acc_init)?;
         if !inst.is_phi() {
-            emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+            emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
         }
     }
 
@@ -852,7 +852,7 @@ fn emit_reduced(
         ) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
     }
     let acc_next_slot = regs[spec.acc_next.index()];
     if acc_next_slot != acc_slot {
@@ -890,7 +890,7 @@ fn emit_reduced(
         if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, pool, loc, false).ok()?;
+        emit_inst(&mut out, inst, func, &regs, pool, loc, false, None).ok()?;
     }
     match func.block(spec.exit).term.as_ref()? {
         Terminator::Return { lo: Some(v), hi: None } => {
