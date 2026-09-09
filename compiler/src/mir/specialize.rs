@@ -36,9 +36,14 @@ pub fn try_specialize_body(
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
-    // In-loop Make* stays fuse-IL so invert+fuse (COI-87) remains.
-    // Preheader alloc + index/store loop may take dense (S3).
-    if super::infer::has_alloc_inside_loop(ops) {
+    // In-loop Make* stays fuse-IL (invert+fuse). A live heap return
+    // (`return [i]`) plus a counted loop also stays fuse-IL unless the
+    // body is a heap-index / store loop (S3).
+    if super::infer::has_alloc_inside_loop(ops)
+        || (has_alloc
+            && super::infer::has_back_edge(ops)
+            && !super::infer::has_heap_index(ops))
+    {
         return None;
     }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
@@ -89,6 +94,10 @@ pub fn try_specialize_body(
     if count_store_index(&out) < count_store_index(ops) {
         return None;
     }
+    // Const-fold must not erase every Index (for-in / invert+fuse leftover).
+    if count_index(ops) > 0 && count_index(&out) == 0 {
+        return None;
+    }
     Some((out, abi))
 }
 
@@ -99,6 +108,22 @@ fn count_store_index(ops: &[IlOp]) -> usize {
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
                 Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+            ),
+            _ => false,
+        })
+        .count()
+}
+
+fn count_index(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| match op {
+            IlOp::Index { .. }
+            | IlOp::IndexUnchecked { .. }
+            | IlOp::IndexPin { .. }
+            | IlOp::IndexPinUnchecked { .. } => true,
+            IlOp::Byte { byte, .. } => matches!(
+                *byte.bytecode(),
+                Instruction::Index | Instruction::IndexUnchecked
             ),
             _ => false,
         })
@@ -135,7 +160,7 @@ pub fn try_lower_abi_body_with(
     // In-loop Make* stays fuse-IL so invert+fuse (COI-87) remains;
     // preheader alloc + leftover body may reconstruct when mapped.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if super::infer::has_alloc_inside_loop(ops) {
+    if has_alloc && super::infer::has_back_edge(ops) {
         return None;
     }
     let maps_ok =

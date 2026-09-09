@@ -27,8 +27,9 @@ and relocate mapped slots on collect.
 - Dense specialize / MIR→LIR **may cross alloc** when
   [`has_real_maps`](../../compiler/src/mir/stackmap.rs) is true (S2c /
   [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
-  LIR-across-alloc refuses Make* *inside* a loop (invert+fuse stays).
-  Preheader alloc plus an index/store loop may take dense when mapped.
+  LIR-across-alloc stays off looping alloc (invert+fuse). Dense may
+  cross a preheader/epilogue Make* only when the body is a heap-index
+  / store loop and maps exist.
   Unmapped allocating bodies stay fuse-IL. S3
   heap-index / `ArrayLen` / `StoreIndex` ride MIR exec (dense residual
   or LIR). Dense+match stays I2 LIR.
