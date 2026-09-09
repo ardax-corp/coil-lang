@@ -51,7 +51,7 @@ strict so ConstReturnImm fuse is not undone.
 | I2 | Match on niche / two-slot / boxed overlap | [COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir) / [COI-302](https://linear.app/ardax/issue/COI-302/after-unlock-i2-boxedconstructmatch-cost-gate) | JumpIfMatch-shaped control in MIR → LIR; arity 0 overlap + any tag; niche `LogNot` / two-slot tag `Br`; dense still refuses | this PR |
 | I3 | Non-escaping class fields | [COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir) | Field load/store using the existing local-escape sidecar; escaping named locals stay fuse-IL | on main (#344) |
 | I4 | String / format subset | [COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse) | **Hard refuse.** `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL; no subset, no vanity string bench | on main (#345) |
-| I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) | MakeArray / alloc edges; safepoint / root placeholders; refuse specialize across GC until maps exist | on main (#346) |
+| I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) / [COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc) | MakeArray / alloc edges; S2a live-root sidecar at `GcBarrier` / `Alloc`; refuse specialize across GC until S2b maps exist | I5 on main (#346); S2a this PR |
 | I6 | Effects / HostInvoke | [COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges) | Broader than W4 allowlist; purity sidecar drives barriers | on main (#347) |
 | I7 | Debugger / deopt | [COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir) | Deopt / stop metadata on MIR edges; VM debugger stays source of truth | on main (#348) |
 | I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) / [COI-301](https://linear.app/ardax/issue/COI-301/unlock-retarget-i8-shape-tests-broaden-lir-eligible) | More bodies enter MIR from IL→MIR lift — inferable leftovers (if/compare, store-only, tiny lets) plus I1–I3 / two-slot | on main (#349 / #350) |
@@ -76,7 +76,7 @@ lowering. Unicode / regex stay out of MIR.
 | `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | fuse-IL | stay refuse |
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |
-| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; emit still fuse-IL (no stack maps) | **I5** |
+| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a live-heap `roots`; emit still fuse-IL (no S2b maps) | **I5** / **S2a** |
 | `FORMAT` / string ops | fuse-IL (`IlOp::Byte` / `String` / `Print`) | **I4 barrier** — no MIR subset |
 | Non-allowlisted HostInvoke / IO / clocks / GC natives | SSA edge + barrier when `allow_effects`; production fuse-IL / refuse dense | **I6** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |

@@ -54,10 +54,13 @@ W4 HostInvoke for `from_bytes` / `to_bytes`. Unicode / regex are out of
 MIR.
 I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
 names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
-`GcBarrier` safepoint placeholders. Infer / specialize / `emit_lir` refuse
-those bodies so fuse-IL keeps the interpreter GC. Stack-map roadmap:
+`GcBarrier` safepoints. S2a
+([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
+fills live-heap `roots` (and IL slots when snapshotted). Infer /
+specialize / `emit_lir` refuse those bodies so fuse-IL keeps the
+interpreter GC. Stack-map roadmap:
 [mir-stack-maps.md](mir-stack-maps.md). Do not specialize or JIT across
-GC until maps exist.
+GC until S2b frame maps exist.
 
 ## P1 — dense exec (COI-268)
 
