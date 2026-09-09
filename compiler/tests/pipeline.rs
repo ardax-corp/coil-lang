@@ -8031,6 +8031,12 @@ fn example_vec_array_prints_zip_broadcast_pow() {
 }
 
 #[test]
+fn example_s2i_vec_array_checksums() {
+    let output = run_example("examples/perf/s2i_vec_array.hy");
+    assert_eq!(output, "");
+}
+
+#[test]
 fn example_vec_generic_prints_scale_and_shape_generic_add() {
     let output = run_example("examples/vec_generic.hy");
     assert_eq!(output, "24,55");

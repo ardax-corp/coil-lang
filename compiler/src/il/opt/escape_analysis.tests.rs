@@ -418,3 +418,43 @@ fn keeps_heap_when_elements_are_computed() {
     escape_analysis(&mut ops);
     assert!(has_make_array(&ops));
 }
+
+#[test]
+fn keeps_heap_when_computed_elems_escape() {
+    // S2i: observed/escape zip stays a heap object (no slot-SROA).
+    let mut ops = vec![
+        IlOp::Const { imm: 1, loc: loc() },
+        IlOp::Const { imm: 3, loc: loc() },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 2, loc: loc() },
+        IlOp::Const { imm: 4, loc: loc() },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc: loc(),
+        },
+        IlOp::MakeArray {
+            arity: 2,
+            loc: loc(),
+        },
+        IlOp::StorePop {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Return {
+            loc: loc(),
+            ret_words: 1,
+        },
+    ];
+    let info = analyze_escapes(&ops);
+    assert!(!is_stack_allocatable(&info.allocs[0]));
+    assert!(!info.allocs[0].box_at_escape);
+    escape_analysis(&mut ops);
+    assert!(has_make_array(&ops));
+}
