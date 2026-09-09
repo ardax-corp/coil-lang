@@ -64,6 +64,9 @@ beat Rust/`memcmp` slice equality.
   broadcast, and unary `-` when static length ≥ 8; smaller shapes still unroll)
 - MIR P12 — `simd_axpy_reduce` HostInvoke (**136**) from specialized counted
   saxpy-reduce loops (`compiler/src/mir/pack.rs`). Compiler rewrite only.
+- MIR S5a V0 — `VLoad` / `VStore` / `VBin` / `VMove` on stride-1 numeric
+  stores (`compiler/src/mir/vectorize.rs`). VM glue in `machine/src/simd.rs`
+  calls `coil_simd::lanes` only.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 

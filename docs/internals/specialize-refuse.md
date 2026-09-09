@@ -83,7 +83,7 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `eval_a` | `nbody.hy` | dense | no back-edge, ≥8 work ops — **W3** |
 | `times_a` / `times_at` | `nbody.hy` | fuse-IL | S3 leftover: heap-index + CALL (dense residuals unsound on `Vec`) |
 | `sum` | `indexed_sum.hy` | fuse-IL | S3 leftover: heap-index |
-| `fill` / `scan` | `vec_scan.hy` | fuse-IL | S3 leftover: heap-index / store |
+| `fill` / `scan` | `vec_scan.hy` | `fill`: V0 SIMD; `scan`: fuse-IL | scan is a reduction (V1); fill is stride-1 store |
 | `main` | `for_in_sum.hy` | fuse-IL | heap + `for` iterator |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | class/field + `CALL` |
@@ -122,6 +122,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
 | Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse) | **I8** |
 | Escaping classes, boxed nested enums, recursion | fuse-IL | stay refuse unless a later island says otherwise |
+| Compiler SIMD (`V*`) | stride-1 numeric store (no reduction) | **S5a V0** — refuse alloc/GC, match, impure CALL/host, debugger/`-Og`, heap in vregs |
 | Cranelift | parked (P5) | not an island |
 
 A/B: prefer `coil-embed`; flagships flat (±5%) or identical archives; no

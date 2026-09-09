@@ -270,6 +270,7 @@ impl IlModule {
                     body.meta.entry_sp,
                     pool,
                     &dense_calls,
+                    body.meta.entry,
                 ) {
                     if let Some(crate::il::Label(id)) = body.meta.entry {
                         dense_calls.insert(id, abi.clone());

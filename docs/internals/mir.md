@@ -275,6 +275,21 @@ stay on `DenseBin`. Const trip count `< 8` refuses. Hit bench:
 `ardax-corp/coil-simd` is not a separate GitHub package; kernels stay
 in-tree (same crate already used by `packed_la`).
 
+## S5a V0 — compiler-only SIMD opcodes (COI-310)
+
+After P12, a **single counted stride-1 numeric store** may emit `VLoad` /
+`VStore` / `VBin` / `VMove` (archive **minor 8**) instead of fuse-IL
+heap-index. Width is eight `i64`/`f64` lanes; handlers call
+`coil-simd::lanes`. No userland SIMD syntax.
+
+Hard refuse (same spirit as dense): alloc/GC in the region, `match`,
+impure `CALL` / HostInvoke, debugger / `-Og`, heap words in vregs,
+gather/scatter, loop-carried reductions (V1). Dense+Index mix stays
+fuse-IL. P12 HostInvoke packs are unchanged.
+
+Prove: `fill` in `examples/perf/vec_scan.hy` (`v[i] = i`). Flagships
+stay dense / fuse-IL.
+
 ## P3 — multi-word / niche as MIR→LIR (COI-270)
 
 LIR here is the existing **fuse-IL / stack IL**, not a new ISA. Review Board
