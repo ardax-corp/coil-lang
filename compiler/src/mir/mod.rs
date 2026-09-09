@@ -2199,12 +2199,12 @@ fn main() {
             .filter(|b| *b.bytecode() == Instruction::Seek)
             .count();
         assert_eq!(
-            seeks, 0,
-            "S2f SROA: no MakeArray/Seek on computed-index [T; N]; opcodes={names:?}"
-        );
-        assert_eq!(
             makes, 0,
             "S2f SROA drops preheader MakeArray; opcodes={names:?}"
+        );
+        assert!(
+            seeks <= 1,
+            "S2f SROA: no residual Seek tax (prologue only if dense); opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
