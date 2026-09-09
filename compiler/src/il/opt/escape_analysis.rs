@@ -1,15 +1,15 @@
 //! Fail-closed escape analysis for `MakeArray` → frame-slot scalarization.
 //!
-//! Heap arrays that never leave the function (no return, call, host, field
-//! store, or `ArrayPush`) are rewritten to consecutive locals **when every
-//! element is an immediate** (`Const` / pool / string). Computed elements
-//! (zip/broadcast `ADD`s, etc.) stay heap — exploding those miscompiled
-//! `examples/vec_array.hy`. Those slots are already GC roots. Named class
-//! SROA is out of scope.
+//! Immediate `MakeArray` locals (arity ≤ 32) become consecutive frame slots.
+//! Private `Index` / `len` / const `StoreIndex` stay slot ops. A **named**
+//! escape (return, call-arg, `ArrayPush` value, field store, HostInvoke /
+//! print) boxes once (`MakeArray` from slots) at that edge (S2g). Computed
+//! elements stay heap (`vec_array.hy`). Growing `ArrayPush` dest, private
+//! use after escape, unproven `xs[k]`, and named class SROA stay refused.
 
 use common::Instruction;
 
-use super::super::op::IlOp;
+use super::super::op::{EntryKind, IlOp};
 
 /// One `MakeArray` that was stored to a local.
 #[derive(Clone, Debug)]
@@ -18,6 +18,8 @@ pub struct AllocSite {
     pub arity: u32,
     pub store_slot: u32,
     pub escaped: bool,
+    /// Scalarize anyway; rewrite whole-array `LOAD`s to a slot `MakeArray`.
+    pub box_at_escape: bool,
 }
 
 /// Result of [`analyze_escapes`].
@@ -50,6 +52,7 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
                 arity: *arity,
                 store_slot: *slot,
                 escaped: !makearray_elems_are_immediate(ops, i, *arity),
+                box_at_escape: false,
             });
             i += 2;
             continue;
@@ -67,20 +70,30 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
             a.escaped = true;
             continue;
         }
+        if a.escaped {
+            continue;
+        }
         if slot_has_opaque_use(ops, a.store_slot, a.make_idx) {
             a.escaped = true;
             continue;
         }
-        if !all_uses_are_local_element_ops(ops, a) {
-            a.escaped = true;
+        match classify_site_uses(ops, a) {
+            SiteUses::Private => {}
+            SiteUses::BoxAtEscape => {
+                a.escaped = true;
+                a.box_at_escape = true;
+            }
+            SiteUses::Refuse => a.escaped = true,
         }
     }
     EscapeInfo { allocs }
 }
 
-/// True when the site is proven non-escaping and small enough to scalarize.
+/// True when the site can explode into slots (private or box-at-edge).
 pub fn is_stack_allocatable(site: &AllocSite) -> bool {
-    !site.escaped && site.arity >= 1 && site.arity <= MAX_STACK_ARITY
+    (!site.escaped || site.box_at_escape)
+        && site.arity >= 1
+        && site.arity <= MAX_STACK_ARITY
 }
 
 /// Scalarize every stack-allocatable `MakeArray` into consecutive locals.
@@ -117,14 +130,15 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
             i += 2;
             continue;
         }
-        if let IlOp::Load { slot, loc } = &ops[i]
-            && let Some((_, b, arity, _)) = map.iter().copied().find(|(s, _, _, _)| *s == *slot)
+        if let Some(slot) = load_of_single_slot(&ops[i])
+            && let Some((_, b, arity, _)) = map.iter().copied().find(|(s, _, _, _)| *s == slot)
         {
+            let loc = ops[i].loc();
             match classify_local_use(ops, i, arity) {
                 Some(LocalUse::Index { imm, consumed }) => {
                     out.push(IlOp::Load {
                         slot: b + imm as u32,
-                        loc: *loc,
+                        loc,
                     });
                     i += consumed;
                     continue;
@@ -132,7 +146,7 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
                 Some(LocalUse::Len { consumed }) => {
                     out.push(IlOp::Const {
                         imm: arity as i32,
-                        loc: *loc,
+                        loc,
                     });
                     i += consumed;
                     continue;
@@ -147,9 +161,20 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
                     out.push(IlOp::Dup { loc: vloc });
                     out.push(IlOp::StorePop {
                         slot: b + imm as u32,
-                        loc: *loc,
+                        loc,
                     });
                     i += consumed;
+                    continue;
+                }
+                None if named_escape_kind(ops, i) == Some(EscapeKind::Box) => {
+                    for k in 0..arity {
+                        out.push(IlOp::Load {
+                            slot: b + k,
+                            loc,
+                        });
+                    }
+                    out.push(IlOp::MakeArray { arity, loc });
+                    i += 1;
                     continue;
                 }
                 None => {}
@@ -182,33 +207,157 @@ enum LocalUse {
     },
 }
 
-fn all_uses_are_local_element_ops(ops: &[IlOp], site: &AllocSite) -> bool {
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EscapeKind {
+    Box,
+    Grow,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SiteUses {
+    Private,
+    BoxAtEscape,
+    Refuse,
+}
+
+fn classify_site_uses(ops: &[IlOp], site: &AllocSite) -> SiteUses {
     let mut i = 0;
-    let mut saw_use = false;
+    let mut saw_private = false;
+    let mut saw_escape = false;
     while i < ops.len() {
         if i == site.make_idx || i == site.make_idx + 1 {
             i += 1;
             continue;
         }
-        if let IlOp::Load { slot, .. } = &ops[i]
-            && *slot == site.store_slot
-        {
-            match classify_local_use(ops, i, site.arity) {
-                Some(u) => {
-                    saw_use = true;
-                    i += match u {
-                        LocalUse::Index { consumed, .. }
-                        | LocalUse::Len { consumed }
-                        | LocalUse::StoreIndex { consumed, .. } => consumed,
-                    };
-                    continue;
-                }
-                None => return false,
-            }
+        if load_of_single_slot(&ops[i]) != Some(site.store_slot) {
+            i += 1;
+            continue;
         }
-        i += 1;
+        if let Some(u) = classify_local_use(ops, i, site.arity) {
+            if saw_escape {
+                return SiteUses::Refuse;
+            }
+            saw_private = true;
+            i += match u {
+                LocalUse::Index { consumed, .. }
+                | LocalUse::Len { consumed }
+                | LocalUse::StoreIndex { consumed, .. } => consumed,
+            };
+            continue;
+        }
+        match named_escape_kind(ops, i) {
+            Some(EscapeKind::Box) => {
+                saw_escape = true;
+                i += 1;
+            }
+            Some(EscapeKind::Grow) | None => return SiteUses::Refuse,
+        }
     }
-    saw_use
+    if saw_escape {
+        SiteUses::BoxAtEscape
+    } else if saw_private {
+        SiteUses::Private
+    } else {
+        SiteUses::Refuse
+    }
+}
+
+fn load_of_single_slot(op: &IlOp) -> Option<u32> {
+    match op {
+        IlOp::Load { slot, .. } => Some(*slot),
+        IlOp::Byte { byte, .. }
+            if *byte.bytecode() == Instruction::LOAD && byte.load_store_count() == 1 =>
+        {
+            Some(byte.load_store_slot_at(0))
+        }
+        _ => None,
+    }
+}
+
+/// Whole-array `LOAD` consumed by a named edge (return / call / host / field /
+/// `ArrayPush` value). Growing `ArrayPush` dest is [`EscapeKind::Grow`].
+fn named_escape_kind(ops: &[IlOp], load_idx: usize) -> Option<EscapeKind> {
+    let n = ops.len();
+    if load_idx + 1 >= n {
+        return None;
+    }
+    let mut skips = 0usize;
+    let mut j = load_idx + 1;
+    while j < n && is_unit_push(&ops[j]) {
+        skips += 1;
+        j += 1;
+    }
+    if j >= n {
+        return None;
+    }
+    let consumer = &ops[j];
+    if is_return_op(consumer)
+        || is_call_op(consumer)
+        || is_host_observe(consumer)
+        || is_set_field(consumer)
+    {
+        return Some(EscapeKind::Box);
+    }
+    if is_array_push(consumer) {
+        return if skips == 0 {
+            Some(EscapeKind::Box)
+        } else {
+            Some(EscapeKind::Grow)
+        };
+    }
+    None
+}
+
+fn is_return_op(op: &IlOp) -> bool {
+    matches!(op, IlOp::Return { .. })
+        || op.as_plain_byte().is_some_and(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::RETURN | Instruction::ReturnPair
+            )
+        })
+}
+
+fn is_call_op(op: &IlOp) -> bool {
+    matches!(
+        op,
+        IlOp::Entry {
+            kind: EntryKind::Call | EntryKind::TailCall | EntryKind::MakeCoro,
+            ..
+        }
+    ) || op.as_plain_byte().is_some_and(|b| {
+        matches!(
+            *b.bytecode(),
+            Instruction::CALL | Instruction::TailCall | Instruction::MakeCoro
+        )
+    })
+}
+
+fn is_host_observe(op: &IlOp) -> bool {
+    matches!(op, IlOp::HostInvoke { .. } | IlOp::Print { .. })
+        || op.as_plain_byte().is_some_and(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::HostInvoke
+                    | Instruction::HostInvokeNiche
+                    | Instruction::PRINT
+                    | Instruction::FORMAT
+                    | Instruction::STRINGIFY
+            )
+        })
+}
+
+fn is_set_field(op: &IlOp) -> bool {
+    matches!(op, IlOp::SetField { .. })
+        || op
+            .as_plain_byte()
+            .is_some_and(|b| *b.bytecode() == Instruction::SetField)
+}
+
+fn is_array_push(op: &IlOp) -> bool {
+    op.as_plain_byte()
+        .is_some_and(|b| *b.bytecode() == Instruction::ArrayPush)
+        || matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayPush)
 }
 
 fn classify_local_use(ops: &[IlOp], load_idx: usize, arity: u32) -> Option<LocalUse> {
@@ -278,6 +427,10 @@ fn slot_has_opaque_use(ops: &[IlOp], slot: u32, make_idx: usize) -> bool {
                     Instruction::LOAD | Instruction::STORE | Instruction::StorePop
                 ) =>
             {
+                // Single-slot LOAD is a use walker site (private or box-at-edge).
+                if *byte.bytecode() == Instruction::LOAD && byte.load_store_count() == 1 {
+                    continue;
+                }
                 if (0..byte.load_store_count()).any(|k| byte.load_store_slot_at(k) == slot) {
                     return true;
                 }
