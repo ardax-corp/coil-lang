@@ -95,10 +95,9 @@ Both paths allocate **once per trip** (same `MakeArray` fast path). Fuse also
 builds `[i, i+1, i+2]` with two fused slot stores; dense materializes those as
 `DenseBin` then `LOAD`s them for `MakeArray`.
 
-`pack_store` is a worse SSA reconstruct: **two** `MakeArray`s per trip on
-**both** fuse and dense (StoreIndex result is a new object; the later Index
-rebuilds `[0,0,0]` instead of reading the stored array). Dense then pays **four
-loop Seeks**. Alloc dominates, so the Seek tax is a smaller fraction (**+6%**).
+`pack_store` **was** a worse SSA reconstruct: **two** `MakeArray`s per trip
+on both fuse and dense (Index rebuilt `[0,0,0]`). S2f SROAs that body
+(0 `MakeArray`). Historical mix below is parent / S2e.
 
 ## Cause ranking
 
@@ -189,11 +188,12 @@ fire).
 
 S2f:
 
-- **Landed:** slot-select SROA for non-escaping `[T; N]` computed index
-  (load / store / `+=` / `++`). `i % N` is treated as in-range.
-  MIR `sroa` rewrites a second `Alloc` of the same elems after
-  `StoreIndex` to the mutated array. MIR LICM may hoist invariant
-  `Alloc`/`GcBarrier` when the loop has no `StoreIndex` / `CALL`.
+- **Landed:** slot-select SROA for non-escaping `[T; N]` when the index
+  is proven (`i % N` or sidecar in-bounds). Binop lhs is spilled
+  (`expr_may_clobber`); select diamonds stay fuse-IL (dense reconstruct
+  drops last-arm stores). MIR `sroa` reuses the StoreIndex array.
+  MIR LICM may hoist invariant `Alloc`/`GcBarrier` when the loop has
+  no `StoreIndex` / `CALL`. Use `panic` (not `raise`) for checksums.
 - **Refused:** escaping / returned / call-arg / `ArrayPush` / field /
   host arrays; observed escape (`vec_array.hy`); arity > 32; named
   class SROA; negative `i % N` (last slot, not OOB); in-loop Make*

@@ -108,9 +108,9 @@ Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped **preheader**
 `MakeArray` plus an index loop may take dense (S2d). S2e dropped
 per-residual `Seek` restore; in-loop `Make*` still stays off dense
 (LOAD/STORE boxing; [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
-S2f scalarizes non-escaping `[T; N]` computed-index load/store (codegen
-select + MIR StoreIndex-array reuse). Escaping / observed / computed
-*elements* / arity > 32 stay heap.
+S2f scalarizes non-escaping `[T; N]` when the index is proven (`i % N`).
+Select diamonds stay fuse-IL. Escaping / observed / unproven `xs[k]` /
+arity > 32 stay heap.
 Compare-only leftovers may take LIR when maps exist and the cost gate holds.
 Const-index `s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
 loop and **no** earlier alloc stays fuse-IL so invert+fuse remains
