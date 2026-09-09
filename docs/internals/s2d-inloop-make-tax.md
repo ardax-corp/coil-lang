@@ -194,11 +194,16 @@ S2f:
   drops last-arm stores). MIR `sroa` reuses the StoreIndex array.
   MIR LICM may hoist invariant `Alloc`/`GcBarrier` when the loop has
   no `StoreIndex` / `CALL`. Use `panic` (not `raise`) for checksums.
-- **Refused:** escaping / returned / call-arg / `ArrayPush` / field /
-  host arrays; observed escape (`vec_array.hy`); arity > 32; named
+- **Refused:** growing `ArrayPush` dest; private use after an escape;
+  unproven `xs[k]`; observed escape (`vec_array.hy`); arity > 32; named
   class SROA; negative `i % N` (last slot, not OOB); in-loop Make*
   **dense** (S2e boxing tax). Non-escaping computed *elements*
   (`[i,i+1,i+2]`) still SROA into slots.
+- **S2g (COI-317):** a named escape (return, call-arg, `ArrayPush` *value*,
+  field store, HostInvoke / print) keeps slots in the private region and
+  emits one `MakeArray` at the edge. Multiple snapshot boxes are allowed
+  when no private use follows the first escape. Identity is not preserved
+  across edges (each box is a fresh heap object).
 
 `pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
 `[T; N]` and the only uses are computed-index load/store (`i % N`).

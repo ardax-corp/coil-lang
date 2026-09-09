@@ -411,14 +411,17 @@ from `cfg_gvn_with` when the flag is on.
 - **Input:** `MakeArray { arity: 1..=32 }; StorePop s` whose elements are
   immediates (`Const` / pool / string).
 - **Output:** Explodes the array into consecutive high frame slots; rewrites
-  local `Index` / `len` / `StoreIndex` of that local. Heap object gone. Slot
-  ids for other locals unchanged; new slots are GC roots.
-- **Refusals:** Return / call / `HostInvoke` / field store / `ArrayPush` /
-  computed elements / second store to `s` / opaque use / residual `Byte` use
-  that is not a local element op; arity 0 or > 32; frame would exceed slot 256.
-  Not named-local class SROA.
+  local `Index` / `len` / `StoreIndex` of that local. A named escape rewrites
+  the whole-array `LOAD` to `LOAD` slots + `MakeArray` (S2g). Slot ids for
+  other locals unchanged; new slots are GC roots.
+- **Refusals:** Growing `ArrayPush` dest; private use after an escape;
+  unproven `xs[k]`; computed elements; second store to `s`; opaque / residual
+  `Byte` use that is not a local element op or named edge; arity 0 or > 32;
+  frame would exceed slot 256. Not named-local class SROA.
 - **Tests:** `opt/escape_analysis.tests.rs` `scalarizes_non_escaping_index`,
-  `keeps_heap_when_array_is_returned`, `keeps_heap_when_passed_to_call`.
+  `boxes_at_return_edge`, `boxes_at_call_arg_edge`, `boxes_at_field_store_edge`,
+  `boxes_at_host_edge`, `boxes_array_push_value_not_dest`,
+  `refuses_array_push_grow_dest`, `refuses_private_use_after_escape`.
   Isolated flag: `isolated_optimize_flag_runs_pass`.
 
 ## `slot_promote`
