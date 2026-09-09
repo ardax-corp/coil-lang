@@ -52,9 +52,9 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
 
 /// Fill [`MirFunc::gc_roots`] and each `GcBarrier.roots` from SSA liveness.
 ///
-/// Roots are heap words live *after* the edge, plus the new `Alloc` dest.
-/// `GcBarrier` dest tokens are not roots. Barrier `roots` are metadata,
-/// not SSA uses.
+/// Roots are heap words live *after* the edge, the new `Alloc` dest, and
+/// heap words sitting in snapshotted IL slots. `GcBarrier` dest tokens
+/// are not roots. Barrier `roots` are metadata, not SSA uses.
 pub fn fill_live_roots(func: &mut MirFunc) {
     func.gc_roots.clear();
     if !func.has_gc_edge() {
@@ -69,6 +69,7 @@ pub fn fill_live_roots(func: &mut MirFunc) {
                 MirInst::Alloc { dest, .. } => {
                     let mut roots = live_heap(func, &live_after[bi][ii], &barrier_tokens);
                     roots.insert(*dest);
+                    roots.append(&mut slot_heap(func, *dest));
                     let set = finish_set(func, *dest, roots);
                     func.gc_roots.push(set);
                     prev_alloc = Some(*dest);
@@ -78,6 +79,7 @@ pub fn fill_live_roots(func: &mut MirFunc) {
                     if let Some(obj) = prev_alloc {
                         roots.insert(obj);
                     }
+                    roots.append(&mut slot_heap(func, *dest));
                     let set = finish_set(func, *dest, roots);
                     func.gc_roots.push(set);
                     prev_alloc = None;
@@ -121,6 +123,18 @@ fn apply_barrier_roots(func: &mut MirFunc) {
             }
         }
     }
+}
+
+fn slot_heap(func: &MirFunc, at: ValueId) -> BTreeSet<ValueId> {
+    let mut roots = BTreeSet::new();
+    if let Some(env) = func.slot_env.get(&at) {
+        for (_, v) in env {
+            if func.ty(*v).is_heap_word() {
+                roots.insert(*v);
+            }
+        }
+    }
+    roots
 }
 
 fn live_heap(
@@ -394,8 +408,11 @@ mod tests {
             IlOp::MakeArray { arity: 1, loc },
             IlOp::StorePop { slot: 1, loc },
             IlOp::Load { slot: 0, loc },
-            IlOp::Pop { loc },
             IlOp::Load { slot: 1, loc },
+            IlOp::Bin {
+                op: common::Instruction::EQ,
+                loc,
+            },
             IlOp::Return { loc, ret_words: 1 },
         ];
         let mut hints = LowerHints::new("keep_slot");
