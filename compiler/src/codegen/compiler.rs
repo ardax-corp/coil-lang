@@ -3221,6 +3221,7 @@ impl Compiler {
         }
         let mut bb = BlockBuilder::new();
         let join = bytecode.fresh_label();
+        let dest = self.alloc_temp_slot();
         if !proven {
             let oob = bytecode.fresh_label();
             bytecode.push_load(idx_slot);
@@ -3231,16 +3232,18 @@ impl Compiler {
             bytecode.push_const(n as i32);
             bytecode.push(Byte::new(Instruction::GEQ));
             bb.emit_jump_to(oob, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-            self.emit_stack_array_in_range_load(bytecode, &mut bb, join, base, n, idx_slot);
+            self.emit_stack_array_in_range_load(bytecode, &mut bb, join, base, n, idx_slot, dest);
             bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
             bb.bind_label(oob, bytecode.il_mut());
             self.emit_box_stack_array(bytecode, base, n);
             bytecode.push_load(idx_slot);
             bytecode.push_index();
+            bytecode.push_store_pop(dest);
         } else {
-            self.emit_stack_array_in_range_load(bytecode, &mut bb, join, base, n, idx_slot);
+            self.emit_stack_array_in_range_load(bytecode, &mut bb, join, base, n, idx_slot, dest);
         }
-        bb.bind_join_label(join, bytecode.il_mut());
+        bb.bind_label(join, bytecode.il_mut());
+        bytecode.push_load(dest);
     }
 
     fn emit_stack_array_in_range_load(
@@ -3251,23 +3254,24 @@ impl Compiler {
         base: u32,
         n: usize,
         idx_slot: u32,
+        dest: u32,
     ) {
-        if n == 1 {
-            bytecode.push_load(base);
-            return;
+        for k in 0..n {
+            if k + 1 < n {
+                let next = bytecode.fresh_label();
+                bytecode.push_load(idx_slot);
+                bytecode.push_const(k as i32);
+                bytecode.push(Byte::new(Instruction::EQ));
+                bb.emit_jump_to(next, BbJumpKind::JumpIfFalse, bytecode.il_mut());
+                bytecode.push_load(base + k as u32);
+                bytecode.push_store_pop(dest);
+                bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
+                bb.bind_label(next, bytecode.il_mut());
+            } else {
+                bytecode.push_load(base + k as u32);
+                bytecode.push_store_pop(dest);
+            }
         }
-        let last = n - 1;
-        for k in 0..last {
-            let next = bytecode.fresh_label();
-            bytecode.push_load(idx_slot);
-            bytecode.push_const(k as i32);
-            bytecode.push(Byte::new(Instruction::EQ));
-            bb.emit_jump_to(next, BbJumpKind::JumpIfFalse, bytecode.il_mut());
-            bytecode.push_load(base + k as u32);
-            bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
-            bb.bind_label(next, bytecode.il_mut());
-        }
-        bytecode.push_load(base + last as u32);
     }
 
     /// Computed-index store into a stack-array local (S2f SROA).
@@ -3296,24 +3300,21 @@ impl Compiler {
             bytecode.push_const(n as i32);
             bytecode.push(Byte::new(Instruction::GEQ));
             bb.emit_jump_to(oob, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-            self.emit_stack_array_in_range_store(
-                bytecode, &mut bb, join, base, n, idx_slot, val_slot, leave_value,
-            );
+            self.emit_stack_array_in_range_store(bytecode, &mut bb, join, base, n, idx_slot, val_slot);
             bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
             bb.bind_label(oob, bytecode.il_mut());
             self.emit_box_stack_array(bytecode, base, n);
             bytecode.push_load(idx_slot);
             bytecode.push_load(val_slot);
             bytecode.push(Byte::new(Instruction::StoreIndex));
-            if !leave_value {
-                bytecode.push_pop();
-            }
+            bytecode.push_pop();
         } else {
-            self.emit_stack_array_in_range_store(
-                bytecode, &mut bb, join, base, n, idx_slot, val_slot, leave_value,
-            );
+            self.emit_stack_array_in_range_store(bytecode, &mut bb, join, base, n, idx_slot, val_slot);
         }
-        bb.bind_join_label(join, bytecode.il_mut());
+        bb.bind_label(join, bytecode.il_mut());
+        if leave_value {
+            bytecode.push_load(val_slot);
+        }
     }
 
     fn emit_stack_array_in_range_store(
@@ -3325,35 +3326,22 @@ impl Compiler {
         n: usize,
         idx_slot: u32,
         val_slot: u32,
-        leave_value: bool,
     ) {
-        if n == 1 {
-            bytecode.push_load(val_slot);
-            bytecode.push_store_pop(base);
-            if leave_value {
+        for k in 0..n {
+            if k + 1 < n {
+                let next = bytecode.fresh_label();
+                bytecode.push_load(idx_slot);
+                bytecode.push_const(k as i32);
+                bytecode.push(Byte::new(Instruction::EQ));
+                bb.emit_jump_to(next, BbJumpKind::JumpIfFalse, bytecode.il_mut());
                 bytecode.push_load(val_slot);
-            }
-            return;
-        }
-        let last = n - 1;
-        for k in 0..last {
-            let next = bytecode.fresh_label();
-            bytecode.push_load(idx_slot);
-            bytecode.push_const(k as i32);
-            bytecode.push(Byte::new(Instruction::EQ));
-            bb.emit_jump_to(next, BbJumpKind::JumpIfFalse, bytecode.il_mut());
-            bytecode.push_load(val_slot);
-            bytecode.push_store_pop(base + k as u32);
-            if leave_value {
+                bytecode.push_store_pop(base + k as u32);
+                bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
+                bb.bind_label(next, bytecode.il_mut());
+            } else {
                 bytecode.push_load(val_slot);
+                bytecode.push_store_pop(base + k as u32);
             }
-            bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
-            bb.bind_label(next, bytecode.il_mut());
-        }
-        bytecode.push_load(val_slot);
-        bytecode.push_store_pop(base + last as u32);
-        if leave_value {
-            bytecode.push_load(val_slot);
         }
     }
 

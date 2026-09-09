@@ -4337,7 +4337,7 @@ fn pack(int n) -> int {
     return s;
 }
 fn main() {
-    if pack(6) != 15 {
+    if pack(3) != 3 || pack(6) != 15 {
         raise "pack_store sroa checksum";
     }
 }
@@ -4368,7 +4368,34 @@ fn main() {
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
-        assert!(!vm.panicked(), "pack(6)==15; opcodes={names:?}");
+        assert!(!vm.panicked(), "pack(3)==3 && pack(6)==15; opcodes={names:?}");
+    }
+
+    #[test]
+    fn stack_array_computed_elem_index_sroa_checksum() {
+        let src = r#"
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        let xs = [i, i + 1, i + 2];
+        s = s + xs[i % 3];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    if pack(4) != 9 || pack(6) != 21 {
+        raise "pack computed-elem checksum";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "pack [i,i+1,i+2] checksum");
     }
 
     /// Fixed `[T; N]` locals use consecutive LOAD/STORE for const indices;
