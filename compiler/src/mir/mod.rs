@@ -921,7 +921,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_refuses_call_to_non_dense_helper() {
+    fn pipeline_open_call_to_fuse_il_helper_is_dense() {
         let src = r#"
 fn mid(float x) -> float {
     let a = x * x + x;
@@ -943,23 +943,25 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile mid CALL refuse");
+        let (bc, constants) = p.compile_src(src).expect("compile mid CALL");
         let hot = p.function_offset("hot").expect("hot");
         let main = p.function_offset("main").expect("main");
         let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
         assert!(
-            !hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "CALL to a non-dense callee must refuse caller specialize"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3 open one-word CALL keeps the caller dense; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::CALL)
-                || bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
-            "site stays a direct CALL (or was tiny-inlined — then no DenseBin in hot)"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "dense caller still emits CALL"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]
-    fn pipeline_refuses_user_call_inside_numeric_loop() {
+    fn pipeline_open_call_to_recursive_helper_is_dense() {
         let src = r#"
 fn helper(float x, int k) -> float {
     if k <= 0 {
@@ -981,15 +983,21 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, _) = p.compile_src(src).expect("compile user CALL refuse");
+        let (bc, constants) = p.compile_src(src).expect("compile open CALL");
+        let hot = p.function_offset("hot").expect("hot");
+        let main = p.function_offset("main").expect("main");
+        let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
         assert!(
-            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "user CALL must refuse dense specialize"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3 open CALL densifies the loop; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
             bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
-            "negative W4 case keeps a direct CALL"
+            "recursive helper stays a direct CALL"
         );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }
 
     #[test]
@@ -1433,10 +1441,17 @@ fn main() {
             assert_eq!(f.ret_ty, Some(ty));
             assert_eq!(f.ret_layout, ty.layout());
             let mut pool = Vec::new();
-            assert!(
-                emit_dense(&f, Some(Label(0)), &mut pool, false).is_err(),
-                "I1 must not dense-specialize heap/niche"
-            );
+            if matches!(ty, MirTy::NicheOpt | MirTy::NicheRes) {
+                assert!(
+                    emit_dense(&f, Some(Label(0)), &mut pool, false).is_err(),
+                    "I1/I2 niche stays off dense"
+                );
+            } else {
+                assert!(
+                    emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok(),
+                    "S3 HeapRef is a dense word lane"
+                );
+            }
         }
     }
 
@@ -1955,7 +1970,49 @@ fn main() {
             pair_bc
                 .iter()
                 .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "S3: no dense+match; pair is LIR not dense+heap-index"
+            "S3: pair stays LIR MakeArray (not dense+match)"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn s3_index_loop_takes_dense() {
+        let src = r#"
+fn sum(Vec<int> arr) -> int {
+    let i = 0;
+    let s = 0;
+    while i < len(arr) {
+        s = s + arr[i];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let v: Vec<int> = Vec::from([1, 2, 3, 4]);
+    let _ = sum(v);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile index loop");
+        let sum = p.function_offset("sum").expect("sum");
+        let main = p.function_offset("main").expect("main");
+        let sum_bc = if sum < main { &bc[sum..main] } else { &bc[sum..] };
+        assert!(
+            sum_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3 heap-index loop is dense; opcodes={:?}",
+            sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            sum_bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+            )),
+            "dense reconstruct keeps Index; opcodes={:?}",
+            sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -2055,7 +2112,7 @@ fn main() {
     }
 
     #[test]
-    fn i6_clock_edge_visible_and_dense_refuses() {
+    fn i6_clock_edge_visible_and_s3_dense_emits() {
         let loc = loc();
         let ops = vec![
             IlOp::Label(Label(0)),
@@ -2073,7 +2130,7 @@ fn main() {
         let mut pool = Vec::new();
         assert!(
             super::infer::infer_numeric(&ops, 0, 0).is_err(),
-            "I6 dense infer still refuses non-W4 HostInvoke"
+            "clock-only body still misses the numeric work gate"
         );
         assert!(try_specialize_body(&ops, "clk", 0, &mut pool, &DenseCallMap::new()).is_none());
         let mut hints = LowerHints::new("clk");
@@ -2086,12 +2143,12 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert!(g.has_impure_host());
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok());
         assert!(emit_lir(&f, Some(Label(0)), &mut pool, false).is_err());
     }
 
     #[test]
-    fn pipeline_clock_loop_stays_fuse_il() {
+    fn pipeline_clock_loop_takes_dense() {
         let src = r#"
 use clock::{mono_nanos};
 fn hot(int n) -> int {
@@ -2128,10 +2185,9 @@ fn main() {
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc
-                .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "I6 must not dense-specialize an impure clock loop"
+            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "S3 clock+arith loop is dense; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

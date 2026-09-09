@@ -341,12 +341,18 @@ impl MirBuilder {
             )));
         }
         let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        if !abi.ret.is_word_lane() {
+            return Err(MirError::msg(format!("call dest is {}", abi.ret)));
+        }
         for (i, (&a, &ty)) in args.iter().zip(abi.params.iter()).enumerate() {
             if self.resolve_ty(a) != ty {
                 return Err(MirError::msg(format!(
                     "call arg {i} is {} vs {ty}",
                     self.resolve_ty(a)
                 )));
+            }
+            if !ty.is_word_lane() {
+                return Err(MirError::msg(format!("call arg {i} is {ty}")));
             }
         }
         let dest = self.alloc(abi.ret);
@@ -465,6 +471,80 @@ impl MirBuilder {
             src,
             base,
             index,
+        })?;
+        Ok(dest)
+    }
+
+    /// Heap index load (S3). `array` is `heapref`; `index` is `i64`.
+    pub fn ins_index(
+        &mut self,
+        array: ValueId,
+        index: ValueId,
+        dest_ty: MirTy,
+        unchecked: bool,
+    ) -> Result<ValueId, MirError> {
+        let at = self.resolve_ty(array);
+        if at != MirTy::HeapRef && at != MirTy::Value {
+            return Err(MirError::msg(format!("Index array is {at}")));
+        }
+        let it = self.resolve_ty(index);
+        if !it.is_int() {
+            return Err(MirError::msg(format!("Index index is {it}")));
+        }
+        if !dest_ty.is_word_lane() {
+            return Err(MirError::msg(format!("Index dest is {dest_ty}")));
+        }
+        let dest = self.alloc(dest_ty);
+        self.push(MirInst::Index {
+            dest,
+            array: self.resolve(array),
+            index: self.resolve(index),
+            unchecked,
+        })?;
+        Ok(dest)
+    }
+
+    /// Heap index store (S3). Dest is the stored value.
+    pub fn ins_store_index(
+        &mut self,
+        array: ValueId,
+        index: ValueId,
+        value: ValueId,
+        unchecked: bool,
+    ) -> Result<ValueId, MirError> {
+        let at = self.resolve_ty(array);
+        if at != MirTy::HeapRef && at != MirTy::Value {
+            return Err(MirError::msg(format!("StoreIndex array is {at}")));
+        }
+        let it = self.resolve_ty(index);
+        if !it.is_int() {
+            return Err(MirError::msg(format!("StoreIndex index is {it}")));
+        }
+        let vt = self.resolve_ty(value);
+        if !vt.is_word_lane() {
+            return Err(MirError::msg(format!("StoreIndex value is {vt}")));
+        }
+        let dest = self.alloc(vt);
+        self.push(MirInst::StoreIndex {
+            dest,
+            array: self.resolve(array),
+            index: self.resolve(index),
+            value: self.resolve(value),
+            unchecked,
+        })?;
+        Ok(dest)
+    }
+
+    /// Structural `ArrayLen` (S3).
+    pub fn ins_array_len(&mut self, array: ValueId) -> Result<ValueId, MirError> {
+        let at = self.resolve_ty(array);
+        if at != MirTy::HeapRef && at != MirTy::Value {
+            return Err(MirError::msg(format!("ArrayLen array is {at}")));
+        }
+        let dest = self.alloc(MirTy::I64);
+        self.push(MirInst::ArrayLen {
+            dest,
+            array: self.resolve(array),
         })?;
         Ok(dest)
     }

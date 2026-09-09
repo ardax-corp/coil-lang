@@ -32,26 +32,25 @@ pub fn emit_dense(
             "dense emit refuses Deopt (I7: VM debugger stays on fuse-IL)".into(),
         ));
     }
-    if func.has_impure_host() {
-        return Err(LowerError::Refused(
-            "dense emit refuses impure HostInvoke (I6: W4 allowlist stays closed)".into(),
-        ));
-    }
     if func.blocks.iter().any(|b| {
         b.insts.iter().any(|i| match i {
             MirInst::HostInvoke { native_id, .. } => {
-                super::host_allow::host_spec(*native_id).is_none()
+                !super::host_allow::dense_host_ok(*native_id)
             }
             _ => false,
         })
     }) {
         return Err(LowerError::Refused(
-            "dense emit refuses non-W4 HostInvoke (I6)".into(),
+            "dense emit refuses I4 string HostInvoke".into(),
         ));
     }
-    if !across_alloc && func.types.iter().any(|t| t.is_heap_word()) {
+    if func
+        .types
+        .iter()
+        .any(|t| matches!(t, MirTy::NicheOpt | MirTy::NicheRes))
+    {
         return Err(LowerError::Refused(
-            "dense emit refuses heap/niche SSA (I1 does not specialize those bodies)".into(),
+            "dense emit refuses niche SSA (I2 match stays LIR)".into(),
         ));
     }
     let (regs, scratch) = assign_regs(func)?;
@@ -406,6 +405,71 @@ fn emit_inst(
                 loc,
                 ret_words: 1,
             });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::Index {
+            dest,
+            array,
+            index,
+            unchecked,
+        } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[array.index()]),
+                loc,
+            });
+            out.push(IlOp::Load {
+                slot: u32::from(regs[index.index()]),
+                loc,
+            });
+            if *unchecked {
+                out.push(IlOp::IndexUnchecked { loc });
+            } else {
+                out.push(IlOp::Index { loc });
+            }
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::StoreIndex {
+            dest,
+            array,
+            index,
+            value,
+            unchecked,
+        } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[array.index()]),
+                loc,
+            });
+            out.push(IlOp::Load {
+                slot: u32::from(regs[index.index()]),
+                loc,
+            });
+            out.push(IlOp::Load {
+                slot: u32::from(regs[value.index()]),
+                loc,
+            });
+            let inst = if *unchecked {
+                Instruction::StoreIndexUnchecked
+            } else {
+                Instruction::StoreIndex
+            };
+            out.push(IlOp::byte(Byte::new(inst)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::ArrayLen { dest, array } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[array.index()]),
+                loc,
+            });
+            out.push(IlOp::byte(Byte::new(Instruction::ArrayLen)));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,

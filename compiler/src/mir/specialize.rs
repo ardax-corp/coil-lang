@@ -28,13 +28,11 @@ pub fn try_specialize_body(
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
     // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
-    // Heap / CALL to a non-dense callee / multi-word RETURN stay refuse.
-    // FORMAT / string ops stay fuse-IL (I4). Alloc / InitTyped take dense
-    // only when S2b maps exist (S2c); unmapped stays fuse-IL. Allowlisted
-    // HostInvoke (math / packed LA / simd_axpy_reduce) is W4. Impure
-    // HostInvoke / CALL stay barriers (I6); the W4 set is not grown for
-    // clocks / IO / FFI. Debugger-attached / -Og skip this entry
-    // (I7; `OptimizeOptions::mir_specialize`).
+    // S3: one-word CALL (dense map or open), I6 HostInvoke except I4
+    // string bytes, heap index / ArrayLen / StoreIndex. FORMAT / string
+    // ops stay fuse-IL (I4). Match stays LIR (dense+match is unsafe).
+    // Alloc / InitTyped take dense only when S2b maps exist (S2c).
+    // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
         return None;
@@ -53,6 +51,8 @@ pub fn try_specialize_body(
     hints.pool_ty = inferred.pool_ty;
     hints.calls = calls.clone();
     hints.allow_alloc = has_alloc;
+    hints.allow_index = true;
+    hints.allow_effects = true;
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params
         .as_ref()
@@ -132,6 +132,7 @@ pub fn try_lower_abi_body_with(
     hints.unboxed_fields = unboxed_fields.to_vec();
     hints.allow_fields = !unboxed_fields.is_empty();
     hints.allow_alloc = has_alloc;
+    hints.allow_index = true;
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     if !has_alloc {
         crate::mir::cse(&mut func);

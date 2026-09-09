@@ -37,7 +37,8 @@ impl MirInst {
             | Self::Alloc { .. }
             | Self::GcBarrier { .. }
             | Self::Deopt { .. }
-            | Self::FieldStore { .. } => true,
+            | Self::FieldStore { .. }
+            | Self::StoreIndex { .. } => true,
             _ => false,
         }
     }

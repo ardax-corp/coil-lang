@@ -119,6 +119,7 @@ fn try_build_draft_err(
     hints.pool_ty = inferred.pool_ty;
     hints.param_count = entry_sp;
     hints.allow_alloc = true;
+    hints.allow_index = true;
     hints.allow_match = true;
     hints.allow_effects = true;
     hints.unboxed_fields = unboxed_fields.to_vec();
