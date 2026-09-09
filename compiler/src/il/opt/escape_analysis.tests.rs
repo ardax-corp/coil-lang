@@ -88,9 +88,16 @@ fn scalarizes_non_escaping_index() {
 }
 
 #[test]
-fn keeps_heap_when_array_is_returned() {
+fn boxes_at_return_edge() {
     let mut ops = make_and_store(2, 0);
     ops.extend([
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Index { loc: loc() },
+        IlOp::Pop { loc: loc() },
         IlOp::Load {
             slot: 0,
             loc: loc(),
@@ -98,13 +105,22 @@ fn keeps_heap_when_array_is_returned() {
         IlOp::Return { loc: loc(), ret_words: 1},
     ]);
     let info = analyze_escapes(&ops);
-    assert!(!is_stack_allocatable(&info.allocs[0]));
+    assert!(info.allocs[0].box_at_escape);
+    assert!(is_stack_allocatable(&info.allocs[0]));
     allocate_on_stack(&mut ops, &info);
-    assert!(has_make_array(&ops));
+    let makes = ops
+        .iter()
+        .filter(|op| matches!(op, IlOp::MakeArray { .. }))
+        .count();
+    assert_eq!(makes, 1, "one box at return");
+    assert!(
+        matches!(ops.last(), Some(IlOp::Return { .. })),
+        "MakeArray stays on the return edge"
+    );
 }
 
 #[test]
-fn keeps_heap_when_passed_to_call() {
+fn boxes_at_call_arg_edge() {
     let mut ops = make_and_store(2, 0);
     ops.extend([
         IlOp::Load {
@@ -115,17 +131,25 @@ fn keeps_heap_when_passed_to_call() {
             kind: EntryKind::Call,
             arity: 1,
             target: Label(9),
-            loc: loc(), ret_words: 1,},
+            loc: loc(),
+            ret_words: 1,
+        },
         IlOp::Pop { loc: loc() },
         IlOp::Halt { loc: loc() },
     ]);
     let info = analyze_escapes(&ops);
-    assert!(!is_stack_allocatable(&info.allocs[0]));
-    assert!(has_make_array(&ops));
+    assert!(info.allocs[0].box_at_escape);
+    assert!(is_stack_allocatable(&info.allocs[0]));
+    allocate_on_stack(&mut ops, &info);
+    let makes = ops
+        .iter()
+        .filter(|op| matches!(op, IlOp::MakeArray { .. }))
+        .count();
+    assert_eq!(makes, 1, "one box at call");
 }
 
 #[test]
-fn keeps_heap_when_stored_to_field() {
+fn boxes_at_field_store_edge() {
     let mut ops = make_and_store(2, 1);
     ops.extend([
         IlOp::Load {
@@ -145,11 +169,19 @@ fn keeps_heap_when_stored_to_field() {
         IlOp::Halt { loc: loc() },
     ]);
     let info = analyze_escapes(&ops);
-    assert!(!is_stack_allocatable(&info.allocs[0]));
+    assert!(info.allocs[0].box_at_escape);
+    assert!(is_stack_allocatable(&info.allocs[0]));
+    allocate_on_stack(&mut ops, &info);
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, IlOp::MakeArray { .. }))
+            .count(),
+        1
+    );
 }
 
 #[test]
-fn keeps_heap_through_nested_call() {
+fn boxes_at_host_edge() {
     let mut ops = make_and_store(1, 0);
     ops.extend([
         IlOp::Load {
@@ -164,7 +196,85 @@ fn keeps_heap_through_nested_call() {
         IlOp::Pop { loc: loc() },
         IlOp::Halt { loc: loc() },
     ]);
-    assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
+    let info = analyze_escapes(&ops);
+    assert!(info.allocs[0].box_at_escape);
+    assert!(is_stack_allocatable(&info.allocs[0]));
+}
+
+#[test]
+fn boxes_array_push_value_not_dest() {
+    let mut ops = make_and_store(2, 0);
+    ops.extend([
+        IlOp::Load {
+            slot: 1,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::byte(Byte::new(Instruction::ArrayPush)),
+        IlOp::Pop { loc: loc() },
+        IlOp::Halt { loc: loc() },
+    ]);
+    let info = analyze_escapes(&ops);
+    assert!(info.allocs[0].box_at_escape);
+    allocate_on_stack(&mut ops, &info);
+    assert_eq!(
+        ops.iter()
+            .filter(|op| matches!(op, IlOp::MakeArray { .. }))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn refuses_array_push_grow_dest() {
+    let mut ops = make_and_store(2, 0);
+    ops.extend([
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 9, loc: loc() },
+        IlOp::byte(Byte::new(Instruction::ArrayPush)),
+        IlOp::Pop { loc: loc() },
+        IlOp::Halt { loc: loc() },
+    ]);
+    let info = analyze_escapes(&ops);
+    assert!(!info.allocs[0].box_at_escape);
+    assert!(!is_stack_allocatable(&info.allocs[0]));
+}
+
+#[test]
+fn refuses_private_use_after_escape() {
+    let mut ops = make_and_store(2, 0);
+    ops.extend([
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            arity: 1,
+            target: Label(9),
+            loc: loc(),
+            ret_words: 1,
+        },
+        IlOp::Pop { loc: loc() },
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Index { loc: loc() },
+        IlOp::Return {
+            loc: loc(),
+            ret_words: 1,
+        },
+    ]);
+    let info = analyze_escapes(&ops);
+    assert!(!is_stack_allocatable(&info.allocs[0]));
 }
 
 #[test]
