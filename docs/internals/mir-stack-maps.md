@@ -3,8 +3,10 @@
 I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
 makes **alloc edges visible** in the SSA sidecar (`Alloc` + `GcBarrier`).
 S2a ([COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc))
-fills **live-root lists** at those edges. It does **not** ship interpreter
-frame maps or rooted native/JIT.
+fills **live-root lists** at those edges.
+S2b ([COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc))
+encodes those roots as **slot / frame maps** the interpreter uses to root
+and relocate mapped slots on collect.
 
 ## What exists today
 
@@ -16,26 +18,29 @@ frame maps or rooted native/JIT.
   refs (params, prior allocs, niche words). `GcBarrier` dest is a token,
   not a second object. IL slots that held those values are recorded when
   the builder snapshotted `current_def` (`LiveRootSet.slots`).
+- [`try_build_draft`](../../compiler/src/mir/stackmap.rs) lifts allocating
+  fuse-IL leftovers (`allow_alloc`) and encodes S2a slots per alloc site.
+  After fuse/PC assign, [`bind_drafts`](../../compiler/src/mir/stackmap.rs)
+  attaches [`FrameStackMap`](../../common/src/stack_map.rs) rows to those
+  bodies. Compile-and-run installs them on the VM. `.hyc` load does **not**
+  require maps (no archive bump): older archives stay conservative-stack GC.
 - Dense specialize (`try_specialize_body`) still refuses allocating IL.
 - MIR→LIR (`try_lower_abi_body` / `emit_lir`) **bails to fuse-IL** when it
-  sees alloc or a GC edge (no S2b consumer yet).
-- The interpreter GC already walks VM frames. Fuse-IL bodies that allocate
-  stay on that path. Cranelift (P5) stays parked.
-
-This is an **honest refuse**: do not assume SSA `HeapRef` values are
-relocatable across a safepoint in a specialized or native body. Live-root
-lists are a sidecar only.
+  sees alloc or a GC edge. Specialize across GC is S2c.
+- The interpreter GC walks VM frames. Mapped slots are extra roots and are
+  rewritten if a live object address changes. Unmapped alloc bodies stay
+  fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
 
 ## Later (not this island)
 
-1. ~~**Live-root sidecar**~~ — **S2a (this note).** At each `GcBarrier` /
+1. ~~**Live-root sidecar**~~ — **S2a.** At each `GcBarrier` /
    `Alloc`, record which SSA values (and IL slots when known) are live
-   heap words. Still compile to fuse-IL until a consumer exists.
-2. **Slot / frame maps** — encode those roots for the interpreter or a
-   deopt edge ([mir-deopt.md](mir-deopt.md), I7) so a collect can update slots. Archive bump only if the
-   map is required at load. [COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc).
-3. **Specialize across GC** — only after (2), and only for a body that
-   actually emits the map. Default remains refuse.
+   heap words.
+2. ~~**Slot / frame maps**~~ — **S2b (this note).** Encode those roots
+   for the interpreter (and later deopt) so a collect can update slots.
+   Archive bump only if load-time requires maps — S2b does not.
+3. **Specialize across GC** — only after maps exist, and only for a body
+   that actually emits the map. Default remains refuse.
    [COI-307](https://linear.app/ardax/issue/COI-307).
 4. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.

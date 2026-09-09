@@ -6778,6 +6778,34 @@ fn gc_churn_example_checksum() {
 }
 
 #[test]
+fn s2b_maps_attach_to_alloc_keep_and_collect_survives() {
+    let src = r#"
+use gc::{collect};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn keep(xs: [int]) -> [int] {
+    let junk = [1, 2, 3];
+    collect();
+    return xs;
+}
+fn main() {
+    let a = [42, 7];
+    let b = keep(a);
+    write(stdout(), to_bytes(format("%i", b[0])));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    let maps = pipeline.stack_maps();
+    assert!(
+        maps.iter().any(|m| m.frame_slots.contains(&0) && !m.safepoints.is_empty()),
+        "keep() should have a mapped heap slot 0: {maps:?}"
+    );
+    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(out, "42");
+}
+
+#[test]
 fn result_heap_churn_example_checksum() {
     let src = include_str!("../../examples/perf/result_heap_churn.hy");
     let output = run_example_src(src);
