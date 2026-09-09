@@ -190,8 +190,8 @@ S2f:
 
 - **Landed:** slot-select SROA for non-escaping `[T; N]` when the index
   is proven (`i % N` or sidecar in-bounds). Binop lhs is spilled
-  (`expr_may_clobber`); select diamonds stay fuse-IL (dense reconstruct
-  drops last-arm stores). MIR `sroa` reuses the StoreIndex array.
+  (`expr_may_clobber`); S2k lets proven select diamonds take dense when
+  Seek fits the 64-slot prove frame. MIR `sroa` reuses the StoreIndex array.
   MIR LICM may hoist invariant `Alloc`/`GcBarrier` when the loop has
   no `StoreIndex` / `CALL`. Use `panic` (not `raise`) for checksums.
 - **Refused:** growing `ArrayPush` dest; private use after an escape;
@@ -220,6 +220,13 @@ S2f:
   with field load/store unboxes into consecutive slots. Whole-object
   use stays heap `InitTyped` (#134 pin). Still heap: `fn drop()`, method
   `self`, aliases, nested captures, parameters. Hit: `s2j_class_sroa.hy`.
+- **S2k (COI-321):** proven `i % N` load/store select (`pack` / `pack_store`
+  / `bump`) may emit dense. Latch coalesce only aliases `i` with `i+1`
+  when the increment is *in* the latch (CSE of `xs[1] = i+1` must not
+  clobber `i`). A terminator `Cmp` reused by a later diamond is stored,
+  not fused-only. Still fuse-IL: in-loop Make* (S2e), unproven `xs[k]`
+  OOB heap arm (S2h), Seek > 64, last-arm write count drop. Class SROA
+  stays I3 LIR (not EQ-select).
 
 `pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
 `[T; N]` and the only uses are computed-index load/store (`i % N`).
@@ -235,7 +242,8 @@ hyperfine -w 2 -r 8). `coil-dissect --fn pack` / `bump`:
 | pack / pack_arith / pack_wide | 1 | 0 | 0 | 0 |
 | bump | 2 (dense) | 0 | 1 | 0 |
 
-`COIL_S2D_DENSE_INLOOP=1` matches tip (select bodies skip dense).
+`COIL_S2D_DENSE_INLOOP=1` is still S2e in-loop Make* only. Proven
+select diamonds now take dense (S2k).
 
 | kernel | parent | tip | ratio |
 |---|---|---|---|
