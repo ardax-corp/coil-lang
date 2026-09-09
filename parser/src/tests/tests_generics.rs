@@ -1,7 +1,6 @@
     use super::*;
     use ast::Expression;
 
-    // ── helpers ────────────────────────────────────────────────────────────────
 
     macro_rules! decl_ast {
         ($case: literal) => {
@@ -28,7 +27,6 @@
         };
     }
 
-    // ── type_alias with type params ────────────────────────────────────────────
 
     /// `type Id<T> = T;` — Display round-trips correctly.
     #[test]
@@ -84,7 +82,6 @@
         }
     }
 
-    // ── fn with type params ────────────────────────────────────────────────────
 
     /// `fn id<T>(T x) -> T {}` — single unbounded type param.
     #[test]
@@ -150,7 +147,6 @@
         }
     }
 
-    // ── fn with no type params (regression: type_params is empty) ─────────────
 
     /// Plain `fn main() {}` still has an empty `type_params` list.
     #[test]
@@ -163,7 +159,6 @@
         }
     }
 
-    // ── where clause ──────────────────────────────────────────────────────────
 
     /// `fn f<A, B>(A x) -> B where Convert<A, B> {}` — multi-param where.
     #[test]
@@ -213,7 +208,6 @@
         assert!(s.starts_with("fn f<A, B>"), "got: {s}");
     }
 
-    // ── enum with type params ──────────────────────────────────────────────────
 
     /// `enum Option<T> { None, Some(T) }` — one type param.
     #[test]
@@ -248,7 +242,6 @@
         }
     }
 
-    // ── class with type params ─────────────────────────────────────────────────
 
     /// `class Box<T> { value: T, }` — one type param.
     #[test]
@@ -285,7 +278,6 @@
         }
     }
 
-    // ── inherent impl with type params ─────────────────────────────────────────
 
     /// `impl Cell<T> { fn get() -> T {} }` → `Implementation` with one type param.
     #[test]
@@ -332,7 +324,6 @@
         }
     }
 
-    // ── typeclass impl (primitive type args) ───────────────────────────────────
 
     #[test]
     fn typeclass_impl_uses_for_form() {
@@ -358,7 +349,6 @@
         );
     }
 
-    // ── typeclass decl ─────────────────────────────────────────────────────────
 
     /// `trait Eq<T> { fn eq(T a, T b) -> bool; }` — sig-only method.
     #[test]
@@ -463,7 +453,6 @@
         }
     }
 
-    // ── forall type annotations ────────────────────────────────────────────────
 
     /// `type F = forall T. T;` — single unbounded forall param in type alias.
     #[test]
@@ -532,7 +521,6 @@
         assert_eq!(stmt!("type F = forall T. T;"), "type F = forall T. T;");
     }
 
-    // ── Display round-trips for new forms ─────────────────────────────────────
 
     /// `type Id<T> = T;` (already tested above — extra sanity check).
     #[test]

@@ -1748,10 +1748,7 @@ impl<'pratt> Pratt<'pratt> {
             .then_ignore(op!(";"))
             .map_with(|name: &'pratt str, e| {
                 let noop_span = e.span();
-                // Noop wraps an Output, which wraps a Box<Expression>.
-                // We use a leaf Integer(0) as the inner expression.
-                // The pipeline doesn't traverse the body; the
-                // name is all that matters.
+                // Body is unused; pipeline only needs the module name.
                 let inner: Output = (noop_span, Box::new(Expression::Integer(0)));
                 let body: Output = (noop_span, Box::new(Expression::Noop(inner)));
                 (
@@ -1910,11 +1907,7 @@ impl<'pratt> Pratt<'pratt> {
                 },
             );
 
-        // Inline string-literal parser for the library name.
-        // We don't use `self.string()` because it returns an
-        // `Output` (wrapping the value in an `Expression`),
-        // but we just need the raw `String` for the library
-        // name (it's metadata, not a runtime expression).
+        // Library name as raw String metadata (not `self.string()` → Expression).
         let library_name = just('"')
             .ignore_then(self.string_lit_body())
             .then_ignore(just('"'))
@@ -2788,21 +2781,7 @@ impl<'pratt> Pratt<'pratt> {
                 let enum_name = if segments.len() == 1 {
                     segments.pop().unwrap()
                 } else {
-                    // Leak into arena-less `'pratt` by joining into a
-                    // single owned string stored via Box::leak for the
-                    // AST lifetime — the parser AST borrows from the
-                    // source, so multi-segment paths need a stable
-                    // string. Join with `::` into a Cow isn't available
-                    // here; use the source-backed approach: reconstruct
-                    // from the collected idents.
-                    //
-                    // `segments` are `&str` slices into the source, but
-                    // joining them requires an owned String. Store via
-                    // the expression's span by using a concatenated
-                    // owned string leaked for the duration of the parse
-                    // (same pattern as other temporary AST strings is
-                    // not used elsewhere — instead keep two-segment
-                    // form when possible).
+                    // Multi-segment path: leak joined `::` string for `'pratt` AST borrow.
                     let joined = segments.join("::");
                     Box::leak(joined.into_boxed_str()) as &str
                 };
