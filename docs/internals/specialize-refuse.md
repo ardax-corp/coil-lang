@@ -108,8 +108,8 @@ now meet the counted-i64 gate and emit dense. The W3 prove bench is
 Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped **preheader**
 `MakeArray` plus an index loop may take dense (S2d). S2e dropped
 per-residual `Seek` restore. S2l tries in-loop `Make*` dense after
-SROA/LICM and keeps it only when emit cost ≤ fuse-IL (LOAD/STORE boxing
-still loses; [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
+SROA/LICM and keeps it only when the reconstruct is Make*-free inside
+loops (residual boxing still loses; [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
 S2f scalarizes `[T; N]` when the index is proven (`i % N`).
 S2k lets those select diamonds take dense when reconstruct is sound
 (Seek ≤ 64, last-arm writes kept). S2g boxes at a named escape (return /
@@ -136,7 +136,7 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); **dense+match stays refuse** (stack match vs dense regs) | **I2** / S3 leftover |
 | Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
-| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; S2d mapped preheader Make*; S2e Seek-less residuals (in-loop Make* still refuse); S2f SROA / StoreIndex reuse / hoist of non-escaping Make*; S2g box at named escape edges; S2h unproven `xs[k]` OOB-safe select / heap pick; S2i observed/escape computed elems stay heap Index/StoreIndex; S2j named class field SROA (non-escaping only, `local_escape`); S2k proven select diamonds dense/LIR when Seek ≤ 64; S2l in-loop Make* dense only when SROA/hoist deletes it or emit cost ≤ fuse-IL; unmapped fuse-IL; post-loop-only `return [x]` fuse-IL | **I5** / **S2a** / **S2b** / **S2c** / **S2d** / **S2e** / **S2f** / **S2g** / **S2h** / **S2i** / **S2j** / **S2k** / **S2l** |
+| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; S2d mapped preheader Make*; S2e Seek-less residuals (in-loop Make* still refuse); S2f SROA / StoreIndex reuse / hoist of non-escaping Make*; S2g box at named escape edges; S2h unproven `xs[k]` OOB-safe select / heap pick; S2i observed/escape computed elems stay heap Index/StoreIndex; S2j named class field SROA (non-escaping only, `local_escape`); S2k proven select diamonds dense/LIR when Seek ≤ 64; S2l in-loop Make* dense only when SROA/hoist deletes it (residual in-loop Make* stays fuse-IL); unmapped fuse-IL; post-loop-only `return [x]` fuse-IL | **I5** / **S2a** / **S2b** / **S2c** / **S2d** / **S2e** / **S2f** / **S2g** / **S2h** / **S2i** / **S2j** / **S2k** / **S2l** |
 | HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; S3 dense emit reconstructs I6-typed hosts except I4 string bytes | **I6** / **S3** |
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
 | Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse) | **I8** |

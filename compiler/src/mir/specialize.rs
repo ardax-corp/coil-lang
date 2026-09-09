@@ -42,7 +42,8 @@ pub fn try_specialize_body(
     // S2e: residuals no longer Seek-restore. In-loop Make* still pays
     // LOAD/STORE boxing vs invert+fuse. S2l (COI-322): try dense so MIR
     // SROA / LICM can delete or hoist the alloc; keep it only when the
-    // reconstruct is ≤ fuse-IL (same Seek/StorePop weights as LIR).
+    // reconstruct is Make*-free inside loops. Residual in-loop Make* is
+    // a measured loser (op-count ≤ fuse still ~5% slower).
     // `COIL_S2D_DENSE_INLOOP=1` forces dense; `=0` restores the S2e refuse.
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
@@ -137,12 +138,12 @@ pub fn try_specialize_body(
     if select_cfg && !select_reconstruct_ok(ops, &out) {
         return None;
     }
-    // Residual in-loop Make* (SROA / hoist missed): keep dense only when
-    // it does not grow the body. Force-on skips the gate for A/B.
+    // Residual in-loop Make* still loses to invert+fuse (LOAD/STORE boxing;
+    // escape leftover ~5% on s2d_inloop_escape). Keep dense only when
+    // SROA / LICM deleted the in-loop alloc, or when force-on for A/B.
     if inloop_mode != DenseInloopMode::ForceOn
         && inloop_alloc
         && super::infer::has_alloc_inside_loop(&out)
-        && emit_replace_cost(&out) > emit_replace_cost(ops)
     {
         return None;
     }
@@ -162,18 +163,6 @@ fn dense_inloop_mode() -> DenseInloopMode {
         Some(v) if v == "0" => DenseInloopMode::ForceOff,
         Some(_) => DenseInloopMode::ForceOn,
     }
-}
-
-/// Same weights as `lir_emit_cost`: labels free, Seek/StorePop count 2.
-fn emit_replace_cost(ops: &[IlOp]) -> usize {
-    ops.iter()
-        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
-        .map(|op| match op {
-            IlOp::StorePop { .. } => 2,
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => 2,
-            _ => 1,
-        })
-        .sum()
 }
 
 /// Index / open CALL dests default to i64 when the next IL is StorePop.

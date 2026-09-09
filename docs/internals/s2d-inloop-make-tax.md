@@ -279,19 +279,19 @@ trip; invert+fuse stays cheaper than dense boxing.
 Default (`COIL_S2D_DENSE_INLOOP` unset):
 
 1. Do not refuse at infer. MIR SROA / LICM may delete or hoist the alloc.
-2. If the reconstruct still has Make* inside a loop, keep dense only
-   when `emit_replace_cost(dense) ≤ emit_replace_cost(fuse)` (Seek /
-   StorePop weight 2, labels free — same as LIR).
-3. Otherwise stay fuse-IL. `=1` / `=0` remain A/B overrides.
+2. If the reconstruct still has Make* inside a loop, stay fuse-IL.
+   An op-count ≤ fuse still boxed slower on the leftover kernel.
+3. `=1` / `=0` remain A/B overrides.
 
 Hit: `examples/perf/s2d_inloop_escape.hy` (`pack(n)` = `n²`; N=2e6
-checksum `4000000000000`).
+checksum `4000000000000`). Same `coil run`, `COIL_AUTO_PAR=0`,
+hyperfine -w 2 -r 8.
 
 | Body | Make* after S2k | Default | Force-dense vs fuse |
 |------|-----------------|---------|---------------------|
 | pack / arith / wide / store | 0 (SROA) | dense select (S2k) | n/a (already Make-free) |
 | preheader bump | 0 (SROA) | dense select (S2k) | n/a |
-| `s2d_inloop_escape` | 1 / trip | **fuse-IL** (cost-gate) | slower (boxing) — see prove board |
+| `s2d_inloop_escape` | 1 / trip | **fuse-IL** (cost-gate) | 294.0 ± 4.1 vs 280.7 ± 1.8 ms (**1.05× slower**) |
 
 **Remaining refuse:** residual escaping Make* (this gate), S2h OOB
 select+alloc on a 64-slot prove frame, post-loop-only `return [x]`,
