@@ -339,7 +339,7 @@ impl Compiler {
                     }
                 } else if self.checker.is_overloaded(&fqn_base) {
                     // Forward call inside an impl that later gained
-                    // more overloads — TC may not have recorded a
+                    // more overloads, TC may not have recorded a
                     // selection (set had size 1 at infer time).
                     // Prefer arg types so same-arity overloads match
                     // the checker path (`select_overload_for_args`).
@@ -393,7 +393,7 @@ impl Compiler {
                 };
                 if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn) {
                     let call_name = fqn.clone();
-                    // Inline `Vec::push` as ArrayPush — avoids CALL/frame for fill loops.
+                    // Inline `Vec::push` as ArrayPush, avoids CALL/frame for fill loops.
                     // Stage when the value may STORE/Seek (format, match, `new
                     // Class`, …): locals and the operand stack share memory, so
                     // leaving the vec under a clobbering emit drops the push.
@@ -449,7 +449,7 @@ impl Compiler {
                     // Stage the receiver into a temp *before* user args.
                     // Leaving it on the operand stack while arg staging
                     // `STORE`s into temps clobbers it (locals and the
-                    // operand stack share memory) — nested calls like
+                    // operand stack share memory), nested calls like
                     // `self.inner.put(x, true)` then mutate the wrong object.
                     bytecode.append(&mut self.do_compile(recv));
                     let recv_tmp = self.alloc_temp_slot();
@@ -683,7 +683,7 @@ impl Compiler {
             let n = self.resolve_free_fn(&identifier);
             // Non-entry modules register `ns::name`, but sibling
             // calls use the bare name. Typecheck inserts bare
-            // names so TC can pass while codegen misses — retry
+            // names so TC can pass while codegen misses, retry
             // the current module FQN before reporting unknown.
             let n = if self.functions.contains_key(&n)
                 || self.fn_entry_labels.contains_key(&n)
@@ -732,7 +732,7 @@ impl Compiler {
                 // Same discipline as HostInvoke: emit lib/fn_id first,
                 // then compile args onto `self.bytecode`. Nested IO
                 // HostInvoke writes directly to `self.bytecode` and
-                // returns an empty slice — staging args into a side
+                // returns an empty slice, staging args into a side
                 // Vec first left those bytes *before* the LOADs, so
                 // MakeTuple packed the wrong stack values.
                 let arity = if let Some(items) = args {
@@ -936,13 +936,8 @@ impl Compiler {
                     box_generic_args,
                 );
 
-                // ── Dictionary-passing calling convention ──────────────────
-                // For non-monomorphized generic calls, append one dict tuple
-                // per constraint after the value args. Each dict is a
-                // MakeTuple of method code offsets (CodePtr per method in
-                // declaration order). Builtin and user instances share this
-                // ABI; ground calls may still monomorphize away from the
-                // shared body. Dictionaries are for generic bodies only.
+                // Append one dict tuple per constraint (MakeTuple of CodePtrs).
+                // Ground calls may monomorphize away from the shared body.
                 let dict_count = if is_generic {
                     let (fixed, rest, pack_rest) =
                         self.split_call_args_for_rest(&lookup_name, arg_slice);
@@ -1093,7 +1088,7 @@ impl Compiler {
                 let value_arity = flat_args.len() as u32;
                 let mut arg_tys = Vec::new();
                 let polyfn_source = self.polyfn_sources.get(&identifier).cloned();
-                // Box for PolyFn locals — including those assigned from a
+                // Box for PolyFn locals, including those assigned from a
                 // call that returns a captured PolyFn (no polyfn_sources
                 // entry). Mono ObjFn / partials / lambdas stay unboxed.
                 let needs_arg_box = self.local_call_needs_arg_boxing(&identifier);
@@ -1232,7 +1227,7 @@ impl Compiler {
     }
 
     /// `true` when `name`'s two-word classification is safe to ignore here
-    /// (i.e. it stays one word — the common case). `false` when `name`
+    /// (i.e. it stays one word, the common case). `false` when `name`
     /// returns a known two-word layout: this call site takes its address
     /// (`CodePtr` / `MakePolyFn` / FFI callback / partial application),
     /// which needs the one-word ABI (task cut: `CallIndirect`, PolyFn,

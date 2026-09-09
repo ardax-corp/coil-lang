@@ -516,7 +516,7 @@
         code.push(Byte::new(Instruction::STRING).with_operand_u32(0));
         code.push(Byte::new(Instruction::MakeDict).with_operand_u32(1));
         code.push(store_pop(0));
-        // SetField pops name, target, value — push value, dict, key.
+        // SetField pops name, target, value, push value, dict, key.
         code.push(const_int(99));
         code.push(load(0));
         code.push(Byte::new(Instruction::STRING).with_operand_u32(0));
@@ -999,7 +999,7 @@
         ]);
         assert_eq!(vm.pop().as_int(), 4);
         // arity 4 must not bump the fixed-arity fast counter for this op.
-        // (Other setup may be zero — only this MakeTuple ran.)
+        // (Other setup may be zero, only this MakeTuple ran.)
         assert_eq!(make_fast_count(), 0);
     }
 
@@ -1107,7 +1107,7 @@
         let c = vm.pop().raw() as u64;
         assert_eq!(a, b);
         assert_eq!(b, c);
-        // One immortal alloc only — heap bytes should not grow per construct.
+        // One immortal alloc only, heap bytes should not grow per construct.
         let after = vm.heap().size();
         assert!(
             after > before,
@@ -1121,7 +1121,7 @@
         assert_eq!(after, after_more, "arity-0 MakeEnum must not re-allocate");
     }
 
-    /// Distinct tags must not share a singleton — the map is keyed by tag.
+    /// Distinct tags must not share a singleton, the map is keyed by tag.
     #[test]
     fn arity0_make_enum_distinct_tags_are_distinct_singletons() {
         let mut vm = Machine::<4>::default();
@@ -1427,7 +1427,7 @@
     }
 
     /// `BinSlotSlotStore` float `PowF` is the store-into-dest fuse of the same
-    /// bug — must write `2.0 ** 3.0` into slot 2, not leave a zero default.
+    /// bug, must write `2.0 ** 3.0` into slot 2, not leave a zero default.
     #[test]
     fn bin_slot_slot_store_powf_writes_dest() {
         let pool = [2.0f64.to_bits(), 3.0f64.to_bits()];
@@ -1513,7 +1513,7 @@
             o.mark_references(&heap, &mut gray);
         }
 
-        // Sweep — anything not marked is deallocated.
+        // Sweep, anything not marked is deallocated.
         unsafe {
             heap.sweep();
         }
@@ -1547,11 +1547,7 @@
         // Force frequent collections so dead enums are reclaimed.
         vm.heap_mut().set_gc_threshold_for_test(256);
 
-        // Build bytecode: CONST 0 (the sentinel int); then N
-        // iterations of `MAKE_ENUM 0 1` (an enum wrapping the
-        // sentinel); POP each result so the address is no
-        // longer on the stack. After POP, the enum is
-        // unreachable — the next GC cycle should free it.
+        // N make+POP cycles; GC should reclaim POPed enums (heap << N).
         let n: usize = 200;
         let mut bytecode: Vec<Byte> = Vec::with_capacity(n * 3 + 2);
         for _ in 0..n {
@@ -1563,8 +1559,6 @@
 
         vm.run(&bytecode);
 
-        // After running, the heap should contain FAR FEWER
-        // than N objects — GC reclaims POPed enums.
         let live_addrs: HashSet<u64> = vm.heap().into_iter().map(|o| o.addr()).collect();
 
         assert!(
@@ -1584,30 +1578,13 @@
         let mut vm = Machine::<256>::default();
         vm.heap_mut().set_gc_threshold_for_test(256);
 
-        // Build bytecode:
-        //   MAKE_ENUM 7 1 (the live root, payload = sentinel int)
-        //   loop 200 times:
-        //     MAKE_ENUM 0 1 (an unrelated enum — unreachable
-        //     after POP)
-        //     POP
-        //   HALT
-        //
-        // The live root's address sits on the operand stack
-        // for the entire program — so the GC must preserve
-        // it across every collection cycle.
+        // Live root (tag 7) stays on the stack while 200 unreachable enums
+        // are allocated and POP'd; GC must preserve the root across collections.
         let n: usize = 200;
         let mut bytecode: Vec<Byte> = Vec::with_capacity(n * 2 + 4);
         bytecode.push(const_int(0)); // sentinel payload
         bytecode.push(make_enum(7, 1)); // tag=7 sentinel, arity=1
         let root_addr = {
-            // We can't easily capture the address at codegen
-            // time (we'd need a DUP + something), so we'll
-            // just inspect the heap after the run instead.
-            // For now, leave the live root on the stack.
-            // Duplicate it so we still have it after we POP
-            // unrelated allocations... wait, no — the
-            // unrelated allocations are POPed, the root is
-            // NOT popped. Just leave it.
             vm.run(&[]); // dummy to silence unused
             0u64
         };
@@ -1618,27 +1595,13 @@
             bytecode.push(make_enum(0, 1));
             bytecode.push(Byte::new(Instruction::POP));
         }
-        // Now the live root is at the bottom of the stack,
-        // with n stale enums (already POPed) above it on
-        // nothing (they were popped off the stack but their
-        // allocations may still be on the heap until GC).
-        // HALT.
         bytecode.push(Byte::new(Instruction::HALT));
 
         vm.run(&bytecode);
 
-        // The live root should still be on the stack (we
-        // never POPed it). We can't easily inspect the stack
-        // from outside, but we CAN inspect the heap: after GC
-        // the heap should contain only the live root. The n
-        // unreachable enums should have been collected.
         let live_addrs: HashSet<u64> = vm.heap().into_iter().map(|o| o.addr()).collect();
 
-        // Bound: at most a small handful of objects — the
-        // live root (1) plus at most the threshold minus one
-        // (uncollected but unreachable) enums. The point is
-        // `live_addrs.len() < n` — without GC, it would be
-        // ~n+1.
+        // Without GC, heap size would be ~n+1.
         assert!(
             live_addrs.len() < n,
             "expected heap to be much smaller than n={}, got {}",
@@ -1646,7 +1609,6 @@
             live_addrs.len()
         );
 
-        // At least the live root should be present.
         assert!(
             !live_addrs.is_empty(),
             "expected at least one live object (the root enum)"
@@ -1681,10 +1643,6 @@
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         vm.with_output(TestOutputBuf(Arc::clone(&buf)));
 
-        // Build bytecode:
-        //   STRING table[0] == "hello"
-        //   PRINT
-        //   HALT
         let strings = vec!["hello".to_string()];
         let mut bytecode: Vec<Byte> = Vec::new();
         bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
@@ -1693,8 +1651,7 @@
 
         vm.run_with_pool(&bytecode, &[], &strings, 0);
 
-        // Drop the sink first so the `Rc` we hold is the
-        // only one (then we can move the `Vec` out).
+        // Drop the sink so the Arc we hold is unique before take.
         let _ = vm.restore_output();
 
         let bytes = take_test_output(buf);
@@ -1702,11 +1659,8 @@
         assert_eq!(s, "hello");
     }
 
-    /// Regression: `STRING` / `FORMAT` used to `intern` then maybe
-    /// `gc_collect` *before* pushing. The intern table is not a GC
-    /// root, so the fresh object could be swept and the pushed
-    /// pointer dangling — exposed by heavy `"%s%s"` concat (HTTP
-    /// showcase / string-table era).
+    /// `STRING` / `FORMAT` must root before GC: intern table is not a GC root,
+    /// so collect-before-push left a dangling pointer (heavy `"%s%s"` concat).
     #[test]
     fn string_literal_survives_gc_triggered_at_intern() {
         let mut vm = Machine::<16>::default();
@@ -1719,7 +1673,7 @@
         let mut bytecode: Vec<Byte> = Vec::with_capacity(n * 2 + 2);
         for i in 0..n {
             bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(i as u32));
-            // Drop earlier literals so only the newest is live — maximizes
+            // Drop earlier literals so only the newest is live, maximizes
             // chance the just-interned object is unmarked during GC.
             if i + 1 < n {
                 bytecode.push(Byte::new(Instruction::POP));
@@ -1737,7 +1691,7 @@
 
     /// Regression: `MakeEnum` used to allocate then maybe `gc_collect`
     /// *before* pushing. The fresh enum was not a stack root, so it (and
-    /// payload objects only reachable through it) could be swept — dangling
+    /// payload objects only reachable through it) could be swept, dangling
     /// `Result::Ok` after a heavy callee, seen as json `stringify` flaking
     /// on `[1,2,true]` under a cold heap.
     #[test]
@@ -1755,7 +1709,7 @@
         // Payload string for Result::Ok(s).
         bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
         bytecode.push(make_enum(0, 1)); // Ok(s)
-        // JumpIfMatch Ok — if the enum was swept, find_object fails and we
+        // JumpIfMatch Ok, if the enum was swept, find_object fails and we
         // fall through to panic.
         let jump_pc = bytecode.len();
         bytecode.push(jump_if_match(0, 0)); // pool[0] patched below
@@ -1813,7 +1767,7 @@
         bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(1));
         bytecode.push(Byte::new(Instruction::STORE).with_load_store_slot(0));
         for i in 0..n {
-            // format("%s%s", acc, p_i) — FORMAT pops args then format string.
+            // format("%s%s", acc, p_i), FORMAT pops args then format string.
             bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
             bytecode.push(Byte::new(Instruction::LOAD).with_load_store_slot(0));
             bytecode.push(Byte::new(Instruction::STRING).with_operand_u32((2 + i) as u32));
@@ -1873,7 +1827,7 @@
         assert_eq!(s, expect);
     }
 
-    /// STRINGIFY shares `push_interned_string` — GC at intern must not sweep
+    /// STRINGIFY shares `push_interned_string`, GC at intern must not sweep
     /// the fresh display string before it is stacked.
     #[test]
     fn stringify_survives_gc_triggered_at_intern() {
@@ -1924,7 +1878,7 @@
     }
 
     /// GetField must return heap-object field values (strings,
-    /// nested dicts, …) by address — not the `-1` sentinel used
+    /// nested dicts, …) by address, not the `-1` sentinel used
     /// for missing fields. Pre-P0 returned `-1` for `Member::Object`.
     #[test]
     fn get_field_returns_heap_object_field() {
@@ -1961,15 +1915,13 @@
     fn store_pop_writes_value_to_slot_and_pops() {
         let mut vm = Machine::<4>::default();
         vm.run(&[
-            // Push 42 onto the operand stack.
             const_int(42),
             // Pop 42, write to slot 0 (= frame.sp + 0 = 0).
             store_pop(0),
-            // Push slot 0 (= 42) back onto the stack.
             load(0),
             Byte::new(Instruction::HALT),
         ]);
-        // Top of stack should be 42 — proving both the
+        // Top of stack should be 42, proving both the
         // write-to-slot and the pop-and-write semantics.
         assert_eq!(vm.pop().as_int(), 42);
     }
@@ -2049,13 +2001,10 @@
     fn store_pop_writes_to_correct_slot_index() {
         let mut vm = Machine::<4>::default();
         vm.run(&[
-            // Push 99, store at slot 0.
             const_int(99),
             store_pop(0),
-            // Push 42, store at slot 2.
             const_int(42),
             store_pop(2),
-            // Push slot 2 (= 42) — the second binding.
             load(2),
             Byte::new(Instruction::HALT),
         ]);
@@ -2429,7 +2378,7 @@
         assert_eq!(out.as_int(), 42);
     }
 
-    /// `load_program` is the public entry used by `coil test` —
+    /// `load_program` is the public entry used by `coil test`, 
     /// without it, harness cases cannot `call_function` against compiled
     /// bytecode.
     #[test]
@@ -2485,9 +2434,9 @@
         // 0: CALL → 4
         // 1: CONST 1
         // 2: ADD
-        // 3: RETURN   (outer — captured by call_function)
+        // 3: RETURN   (outer, captured by call_function)
         // 4: CONST 7
-        // 5: RETURN   (inner — must unwind, not capture)
+        // 5: RETURN   (inner, must unwind, not capture)
         install_program(
             &mut vm,
             &[
@@ -2504,7 +2453,7 @@
     }
 
     /// Nested `call_function` (FFI callback reentrancy) must not clobber the
-    /// outer frame-depth target — outer RETURN still captures a non-default value.
+    /// outer frame-depth target, outer RETURN still captures a non-default value.
     #[test]
     #[cfg(not(target_os = "windows"))]
     fn nested_call_function_preserves_outer_return() {
@@ -2532,8 +2481,8 @@
             .register_ffi_function(lib_val, sig)
             .unwrap_or_else(|e| panic!("declare apply_cb: {e}"));
 
-        // 0: identity callback — LOAD 0; RETURN
-        // 2: outer — FfiInvoke apply_cb(callback@0, 21); POP Result; CONST 99; RETURN
+        // 0: identity callback, LOAD 0; RETURN
+        // 2: outer, FfiInvoke apply_cb(callback@0, 21); POP Result; CONST 99; RETURN
         install_program(
             &mut vm,
             &[
@@ -2919,7 +2868,7 @@
             load(0),
             Byte::new(Instruction::ResumeCoro).with_operand_u32(1),
             Byte::new(Instruction::HALT),
-            // 8: coroutine body — yield out, receive send, yield received value
+            // 8: coroutine body, yield out, receive send, yield received value
             const_int(100),
             Byte::new(Instruction::YieldCoro),
             store_pop(0),
@@ -2949,7 +2898,7 @@
             Byte::new(Instruction::ResumeCoro),
             store_pop(2), // second yield
             Byte::new(Instruction::HALT),
-            // 10: outer — yield from inner @ 17
+            // 10: outer, yield from inner @ 17
             make_coro(0, 17),
             Byte::new(Instruction::YieldFromCoro),
             const_int(0),
@@ -3100,12 +3049,11 @@
         assert_eq!(vm.pop().as_int(), 99);
     }
 
-    // ── Generics runtime opcode tests ────────────────────────────────────────
 
     /// `CallIndirect` pops a target offset from the stack and jumps to it,
     /// treating the remaining stack entries as the callee's arguments.
-    ///
-    /// Layout:
+        ///
+        /// Layout:
     ///   0: CONST 42        (arg0)
     ///   1: CONST 4         (target = bytecode offset 4)
     ///   2: CallIndirect    (arity=1)
@@ -3162,7 +3110,7 @@
     #[test]
     fn make_polyfn_allocates() {
         let mut vm = Machine::<8>::default();
-        // entry offset 0 — irrelevant for the allocation test.
+        // entry offset 0, irrelevant for the allocation test.
         vm.run(&[
             Byte::new(Instruction::MakePolyFn).with_operand_u32(0),
             Byte::new(Instruction::HALT),
@@ -3220,17 +3168,6 @@
     /// the application site supplies none.
     #[test]
     fn call_indirect_merges_captured_dicts_without_app_evidence() {
-        // Layout:
-        //  0: CONST 7            captured dict (immediate)
-        //  1: CodePtr 8          entry
-        //  2: MakePolyFnCapture  (1 slot)
-        //  3: StorePop 0         save PolyFn
-        //  4: CONST 42           value arg
-        //  5: LOAD 0             PolyFn
-        //  6: CallIndirect       value_arity=1, app_dict_arity=0
-        //  7: HALT
-        //  8: LOAD 1             callee reads captured dict
-        //  9: RETURN
         let mut vm = Machine::<16>::default();
         vm.run(&[
             const_int(7),
@@ -3247,21 +3184,11 @@
         assert_eq!(vm.pop().as_int(), 7);
     }
 
-    /// Phase 4: capture with every slot `Some` and `app_dict_arity=0` still
-    /// injects all dictionaries for the callee.
+    /// Capture with every slot `Some` and `app_dict_arity=0` still injects
+    /// all dictionaries for the callee.
     #[test]
     fn call_indirect_all_some_capture_slots_work_with_zero_app_dicts() {
-        // Two captured dicts (11, 22); callee returns dict1 + dict2 (slots 1, 2).
-        //  0: CONST 11
-        //  1: CONST 22
-        //  2: CodePtr entry
-        //  3: MakePolyFnCapture (2)
-        //  4: StorePop 0
-        //  5: CONST 1            value arg (unused by callee)
-        //  6: LOAD 0
-        //  7: CallIndirect value_arity=1, app_dict_arity=0
-        //  8: HALT
-        //  9: LOAD 1 / LOAD 2 / ADD / RETURN
+        // Captured dicts 11+22; callee returns dict1 + dict2 (slots 1, 2).
         let mut vm = Machine::<16>::default();
         vm.run(&[
             const_int(11),
@@ -3819,7 +3746,7 @@
             Byte::new(Instruction::LoadReturnSlot).with_operand_u32(1),
             // 7: n - 1 onto stack
             Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(sub, 0, 1),
-            // 8–10: acc + n → new_acc; stack = [n-1, new_acc]
+            // 8, 10: acc + n → new_acc; stack = [n-1, new_acc]
             Byte::new(Instruction::LOAD).with_operand_u32(1),
             Byte::new(Instruction::LOAD).with_operand_u32(0),
             Byte::new(Instruction::ADD),
@@ -3834,7 +3761,7 @@
     /// TailCall must not push frames: deep recursion stays within Machine::<64> frames.
     #[test]
     fn tail_call_does_not_grow_frame_stack() {
-        // sum_to(200, 0) via TailCall — if TailCall pushed frames like CALL,
+        // sum_to(200, 0) via TailCall, if TailCall pushed frames like CALL,
         // Machine::<64> would overflow the frame stack.
         let leq = Instruction::LEQ as u8;
         let sub = Instruction::SUB as u8;
@@ -4462,7 +4389,7 @@
     #[test]
     fn bin_slot_imm_store_extends_cursor_and_preserves_higher() {
         let add = Instruction::ADD as u8;
-        // dest=2, imm=1 — writes past the current cursor after a single local
+        // dest=2, imm=1, writes past the current cursor after a single local
         let packed = (2u64 << 32) | 1u64;
         let mut vm = Machine::<32>::default();
         vm.run_with_pool(
@@ -4560,7 +4487,7 @@
         assert!(vm.panicked());
     }
 
-    /// BinSlotSlotConstJmpt: ADDF(slots) > pool float — jump when true (escape break).
+    /// BinSlotSlotConstJmpt: ADDF(slots) > pool float, jump when true (escape break).
     #[test]
     fn bin_slot_slot_const_jmpt_addf_gtf() {
         let four = 4.0f64.to_bits();
@@ -4684,7 +4611,7 @@
         let fn_id = vm.register_fn(sig, |heap, args| {
             assert_eq!(args.len(), 2);
             let sum = args[0].as_int() + args[1].as_int();
-            // Allocate while the args slice is live — must not free the window.
+            // Allocate while the args slice is live, must not free the window.
             let (_obj, _) = heap.alloc(ObjString::from("scratch"), Object::String);
             Ok(Some(Value::from(sum)))
         });

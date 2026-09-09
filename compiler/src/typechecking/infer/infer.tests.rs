@@ -290,7 +290,6 @@
         c.take_messages()
     }
 
-    // ---- Literals ----
 
     #[test]
     fn integer_literal() {
@@ -313,7 +312,6 @@
         assert_ok("false", boolean());
     }
 
-    // ---- Identifier ----
 
     #[test]
     fn unknown_identifier_errors() {
@@ -331,7 +329,6 @@
         assert_eq!(ty, int());
     }
 
-    // ---- Variables and let ----
 
     #[test]
     fn let_with_annotation() {
@@ -340,7 +337,7 @@
 
     #[test]
     fn let_without_annotation_infers_from_value() {
-        // `let x = 42;` — x should be inferred as int.
+        // `let x = 42;` ,  x should be inferred as int.
         let (mut c, _) = check("let x = 42;");
         assert!(c.take_messages().is_empty());
         let scheme = c.env().lookup("x").unwrap();
@@ -350,7 +347,7 @@
 
     #[test]
     fn let_without_annotation_or_value_uses_fresh_var() {
-        // `let x;` — x is a fresh type variable (id is not stable across
+        // `let x;` ,  x is a fresh type variable (id is not stable across
         // builtin/prelude registration, so only the shape is checked).
         let (mut c, _) = check("let x;");
         assert!(c.take_messages().is_empty());
@@ -362,7 +359,6 @@
         );
     }
 
-    // ---- Assignment ----
 
     #[test]
     fn assignment_updates_existing_var() {
@@ -381,12 +377,11 @@
 
     #[test]
     fn assignment_mismatch_errors_but_continues() {
-        // x: int, then assign "hello" — should produce an error.
+        // x: int, then assign "hello" ,  should produce an error.
         let msgs = assert_messages("let x: int; x = \"hello\";");
         assert!(!msgs.is_empty());
     }
 
-    // ---- Arithmetic ----
 
     #[test]
     fn addition_of_ints_is_int() {
@@ -450,7 +445,6 @@
         assert_ok("5 | 3", int());
     }
 
-    // ---- Comparison ----
 
     #[test]
     fn equality_returns_bool() {
@@ -482,7 +476,6 @@
         assert_ok("2 >= 2", boolean());
     }
 
-    // ---- Logical ----
 
     #[test]
     fn logical_and_of_bools_is_bool() {
@@ -496,12 +489,11 @@
 
     #[test]
     fn logical_and_requires_bool() {
-        // 1 && 2 — int, not bool.
+        // 1 && 2 ,  int, not bool.
         let msgs = assert_messages("1 && 2;");
         assert!(!msgs.is_empty());
     }
 
-    // ---- Prefix ----
 
     #[test]
     fn negate_int() {
@@ -536,7 +528,6 @@
         assert!(!msgs.is_empty());
     }
 
-    // ---- Postfix ----
 
     #[test]
     fn inc_dec() {
@@ -545,7 +536,6 @@
         assert!(c.take_messages().is_empty());
     }
 
-    // ---- Call ----
 
     #[test]
     fn call_unknown_function_errors() {
@@ -559,7 +549,6 @@
         assert!(!msgs.is_empty());
     }
 
-    // ---- If ----
 
     #[test]
     fn if_single_branch() {
@@ -578,11 +567,6 @@
         assert!(!msgs.is_empty());
     }
 
-    // ---- Match (parser doesn't produce Match nodes yet, so the
-    //      handler is unreachable from real source). Tests for Match
-    //      are deferred until the parser learns the `match` keyword.
-
-    // ---- Loop ----
 
     #[test]
     fn while_loop_returns_unit() {
@@ -595,7 +579,6 @@
         assert!(!msgs.is_empty());
     }
 
-    // ---- Return ----
 
     #[test]
     fn return_inside_expression() {
@@ -603,7 +586,6 @@
         assert_ok("return 42", never());
     }
 
-    // ---- Block ----
 
     #[test]
     fn empty_block() {
@@ -615,7 +597,6 @@
         assert_ok("{ 1; 2; 3; }", int());
     }
 
-    // ---- String formatting ----
 
     #[test]
     fn write_all_with_string_bytes_ok() {
@@ -625,7 +606,6 @@
         );
     }
 
-    // ---- Defer ----
 
     #[test]
     fn defer_returns_unit() {
@@ -706,10 +686,8 @@ fn main() {
         );
     }
 
-    // ---- List literals ----
     //      Parser doesn't produce `List` nodes yet, so these are deferred.
 
-    // ---- Complex expressions ----
 
     #[test]
     fn nested_arithmetic() {
@@ -722,7 +700,6 @@ fn main() {
         assert_ok(src, int());
     }
 
-    // ---- Function declarations ----
 
     #[test]
     fn function_declaration_with_typed_args_and_return() {
@@ -741,7 +718,7 @@ fn main() {
 
     #[test]
     fn function_declaration_with_inferred_return() {
-        // No declared return type — should be inferred from the body.
+        // No declared return type ,  should be inferred from the body.
         let (mut c, _) = check("fn add(int a, int b) { return a + b; }");
         assert!(c.take_messages().is_empty());
         let scheme = c.env().lookup("add").unwrap();
@@ -827,7 +804,6 @@ use string::{format, to_bytes};
         assert!(!msgs.is_empty());
     }
 
-    // ---- Recursive functions (monomorphic recursion) ----
 
     #[test]
     fn recursive_fib() {
@@ -845,7 +821,6 @@ use string::{format, to_bytes};
         assert_eq!(ty, Ty::Fun(Box::new(int()), Box::new(int())));
     }
 
-    // ---- Class declarations ----
 
     #[test]
     fn class_registers_nominal_constructor() {
@@ -884,7 +859,7 @@ use string::{format, to_bytes};
 
     #[test]
     fn class_visibility_is_per_field() {
-        // First field is public, second is private — they're tracked
+        // First field is public, second is private ,  they're tracked
         // independently even though they live in the same class.
         let (mut c, _) = check("class Foo { pub a: int, b: int, pub c: int, }");
         let msgs = c.take_messages();
@@ -920,7 +895,6 @@ use string::{format, to_bytes};
         ));
     }
 
-    // ---- Impl blocks ----
 
     #[test]
     fn impl_binds_self_to_owner() {
@@ -991,7 +965,6 @@ use string::{format, to_bytes};
         );
     }
 
-    // ---- Instantiation ----
 
     #[test]
     fn instantiate_returns_class_type() {
@@ -1005,7 +978,6 @@ use string::{format, to_bytes};
         assert_eq!(ty, Ty::Con("Foo".into()));
     }
 
-    // ---- Combined: class + impl + instantiation ----
 
     #[test]
     fn class_impl_and_instantiate_combined() {
@@ -1032,7 +1004,6 @@ use string::{format, to_bytes};
         assert!(msgs.is_empty(), "{:?}", msgs);
     }
 
-    // ---- Phase 7: generic classes ----
 
     #[test]
     fn generic_class_new_infers_cell_int() {
@@ -1105,7 +1076,6 @@ use string::{format, to_bytes};
         assert!(!msgs.is_empty(), "expected ctor arity diagnostic");
     }
 
-    // ---- Recursive method (inside an impl) ----
 
     #[test]
     fn recursive_method_via_self_binding() {
@@ -1113,13 +1083,12 @@ use string::{format, to_bytes};
         // parser currently supports; use that for the branch.
         let src = "impl Counter { pub fn tick(int n) -> int { if n == 0 { return 0; } return tick(n - 1) + 1; } }";
         let (mut c, _) = check(src);
-        // We don't require no messages — the outer call site `tick(...)`
-        // may have residual issues — but the method should be registered.
+        // We don't require no messages ,  the outer call site `tick(...)`
+        // may have residual issues ,  but the method should be registered.
         let _ = c.take_messages();
         assert!(c.methods.get("Counter").unwrap().contains_key("tick"));
     }
 
-    // ---- Block returns last value ----
 
     #[test]
     fn nested_blocks_return_inner() {
@@ -1132,7 +1101,6 @@ use string::{format, to_bytes};
         assert_eq!(ty, int());
     }
 
-    // ---- Native registration ----
 
     #[test]
     fn register_native_adds_function_to_env() {
@@ -1178,7 +1146,6 @@ use string::{format, to_bytes};
         assert_eq!(ty, Ty::Con("Foo".into()));
     }
 
-    // ---- Recursion-depth guard ----
 
     #[test]
     fn infer_depth_guard_panics_with_expected_diagnostic_past_limit() {
@@ -1189,7 +1156,7 @@ use string::{format, to_bytes};
         // pathologically-deep program isn't a safe way to test this in
         // isolation. Seed `infer_depth` to the limit and confirm the very
         // next `infer` call panics with a clean diagnostic instead of
-        // recursing further — this is the same code path a real deeply
+        // recursing further ,  this is the same code path a real deeply
         // nested expression would hit.
         let mut c = Checker::new();
         let ast = Pratt::default().parse("1;").expect("trivial literal parses");
@@ -1254,7 +1221,6 @@ use string::{format, to_bytes};
         assert!(msgs.is_empty(), "{:?}", msgs);
     }
 
-    // ---- Diagnostics ----
     //
     // The following tests verify that emitted `Message`s are well-formed
     // for ariadne: each carries a clear headline, a primary label at
@@ -1315,22 +1281,10 @@ use string::{format, to_bytes};
 
     #[test]
     fn infinite_type_message_uses_clear_format() {
-        // It's hard to construct an infinite-type situation without
-        // recursive type syntax (e.g., `α = List<α>`), so this test
-        // just checks the format IF such a message ever fires. To make
-        // sure the path is exercised, we drive the checker through a
-        // recursive function declaration whose body returns the
-        // function itself with the wrong shape — that triggers an
-        // occurs check via the return-type unification.
-        //
-        // (If your checker ever changes the return path so this no
-        // longer fires an occurs check, drop this test — it's about
-        // message format, not behaviour.)
+        // Drive an occurs-check path; assert message format if it fires.
         let (mut c, _) = check("fn bad() { return bad; }");
         let msgs = c.take_messages();
-        // Either there's an infinite-type error, or the function is
-        // typeable. Both are fine — what we want to assert is the
-        // format IF the error fires.
+        // Either infinite-type or typeable is fine; check format only if present.
         if let Some(infinite) = msgs
             .iter()
             .find(|m| m.message().contains("Cannot construct infinite type"))
@@ -1344,7 +1298,7 @@ use string::{format, to_bytes};
 
     #[test]
     fn not_a_function_message_uses_cannot_call_format() {
-        // `let x = 5; x(2);` — `x` is an int, calling it is an error.
+        // `let x = 5; x(2);` ,  `x` is an int, calling it is an error.
         let (mut c, _) = check("let x = 5; x(2);");
         let msgs = c.take_messages();
         assert!(!msgs.is_empty(), "expected a message");
@@ -1452,7 +1406,7 @@ use string::{format, to_bytes};
         // `expected_ty_span_range` always returned `0..0`. After
         // threading `arm.body.0.into_range()` through `infer_pattern`,
         // the diagnostic for a wrong-arity pattern should anchor
-        // somewhere inside the source — NOT at byte 0.
+        // somewhere inside the source ,  NOT at byte 0.
         let src = "let x = Option::Some(1); match x { Option::Some(a, b) => 0 };";
         let (mut c, _) = check(src);
         let src_len = src.len();
@@ -1507,7 +1461,6 @@ use string::{format, to_bytes};
         assert_eq!(now_ty, string());
     }
 
-    // ---- Type cache ----
 
     #[test]
     fn free_fn_arg_node_ids_cached() {
@@ -1820,7 +1773,7 @@ use string::{format, to_bytes};
         // The cache holds a type per node that produces a value.
         // Declarations like `Variable` and `Comment` are side effects on
         // the env and don't produce a typed value, so they don't get a
-        // cache entry — but they're still visited by the pre-walk.
+        // cache entry ,  but they're still visited by the pre-walk.
         // The cache size should therefore be `<=` the pre-walk size.
         for src in &["42;", "1 + 2;", "let x = 1; x", "if true { 42; }"] {
             let (mut c, _) = check(src);
@@ -1838,7 +1791,6 @@ use string::{format, to_bytes};
         }
     }
 
-    // ---- Call with arguments ----
 
     #[test]
     fn unknown_call_argument_types_dont_crash() {
@@ -1846,11 +1798,7 @@ use string::{format, to_bytes};
         assert!(!msgs.is_empty());
     }
 
-    // ================================================================
-    // ---- Enums and pattern matching ----
-    // ================================================================
 
-    // ---- Enum registration ----
 
     #[test]
     fn enum_decl_registers_sum_type() {
@@ -1910,7 +1858,7 @@ use string::{format, to_bytes};
         let msgs = c.take_messages();
         assert!(msgs.is_empty(), "{:?}", msgs);
         // The recursive variant's payload should reference the
-        // enum by name (opaque) — the public `enum_variants` API
+        // enum by name (opaque) ,  the public `enum_variants` API
         // is the canonical interface to inspect this.
         let variants = c.enum_variants("Tree").expect("Tree not registered");
         let node_payload = variants
@@ -1976,17 +1924,8 @@ use string::{format, to_bytes};
 
     #[test]
     fn enum_decl_cache_aligned_with_id_table() {
-        // Regression test for the ID-alignment bug in
-        // `infer_enum_decl`: the pre-walk mints one ID for the
-        // `EnumDecl` node, one for each `EnumVariant` node, and one
-        // for each `Expression::Type` payload. The infer pass must
-        // consume exactly the same number of IDs (via `self.infer`)
-        // so the cache lines up with the id table.
-        //
-        // Concretely: `enum Color { Red, Green(int) }` produces
-        //   1 (EnumDecl) + 2 (variants) + 1 (Green's payload type) = 4
-        // pre-walk IDs, and `infer` must consume all 4. The cache
-        // therefore has the same length as the id table.
+        // `infer_enum_decl` must consume the same NodeIds as the pre-walk
+        // (EnumDecl + variants + payload Type nodes) so cache and id_table match.
         for src in &[
             "enum Color { Red, Green(int) }",
             "enum E { A, B, C }",
@@ -2018,7 +1957,6 @@ use string::{format, to_bytes};
         }
     }
 
-    // ---- Constructor calls ----
 
     #[test]
     fn constructor_call_with_wrong_arity_is_error() {
@@ -2071,7 +2009,6 @@ use string::{format, to_bytes};
         );
     }
 
-    // ---- Pattern matching ----
 
     #[test]
     fn match_with_all_variants_no_error() {
@@ -2168,7 +2105,7 @@ use string::{format, to_bytes};
         // Patterns can be nested; the inner sub-patterns are
         // checked against the corresponding payload types. We
         // wrap a value in a single-level enum so the inner
-        // pattern is `Wrap::Inner(int)` — the nested pattern
+        // pattern is `Wrap::Inner(int)` ,  the nested pattern
         // case. (Truly recursive `Option<Option<T>>` is not
         // constructible because `Option::Some` takes `int`
         // directly, so we use a custom enum that wraps a type
@@ -2189,7 +2126,6 @@ use string::{format, to_bytes};
         assert!(msgs.is_empty(), "{:?}", msgs);
     }
 
-    // ---- Format-string typecheck ----
 
     #[test]
     fn format_string_percent_i_requires_int() {
@@ -2335,7 +2271,6 @@ fn bad<T>(T x) { write(stdout(), to_bytes(format("%v", (x, 1)))); } fn main() { 
         );
     }
 
-    // ---- Inner-pattern reachability ----
 
     #[test]
     fn typechecker_does_not_report_unreachable_for_different_inner_patterns() {
@@ -2438,7 +2373,6 @@ fn main() {
         );
     }
 
-    // ---- Field access ----
 
     #[test]
     fn access_field_from_record_variant_returns_field_type() {
@@ -2461,7 +2395,7 @@ fn main() {
 
     #[test]
     fn access_field_from_non_record_produces_error() {
-        // `1.x` — the receiver is an `int`, not a sum. The typechecker
+        // `1.x` ,  the receiver is an `int`, not a sum. The typechecker
         // should emit a "Cannot access field" diagnostic and NOT
         // silently succeed.
         let msgs = assert_messages("1.x;");
@@ -2544,7 +2478,7 @@ fn main() {
 
     #[test]
     fn access_field_from_tuple_variant_produces_error() {
-        // `p.x` where `p` is bound to `Tuple::Wrap(1, 2)` — a
+        // `p.x` where `p` is bound to `Tuple::Wrap(1, 2)` ,  a
         // Tuple-shaped variant. The variant isn't a record, so we
         // emit a tailored "Cannot access field on non-record
         // variant" diagnostic that names the variant's shape.
@@ -2625,7 +2559,7 @@ fn main() {
     #[test]
     fn access_field_via_function_parameter_resolves() {
         // Field access on a function parameter whose type is
-        // annotated with the bare enum name `Point` — the
+        // annotated with the bare enum name `Point` ,  the
         // typechecker parses this as `Ty::Con("Point")` and
         // resolves it through the enum registry to find that
         // `Point::Point` is a record-shaped variant carrying `x`
@@ -2653,7 +2587,6 @@ fn main() {
         );
     }
 
-    // ---- Typed aggregates ----
 
     #[test]
     fn tuple_literal_infers_heterogeneous_product_type() {
@@ -2697,7 +2630,7 @@ fn main() {
 
     #[test]
     fn array_static_index_out_of_bounds_emits_diagnostic() {
-        // `let arr = [0, 1, 2]; arr[3]` — arr is `[int; 3]`,
+        // `let arr = [0, 1, 2]; arr[3]` ,  arr is `[int; 3]`,
         // accessing index 3 is OOB.
         let src = "fn main() { let arr = [0, 1, 2]; let _ = arr[3]; }";
         let (_c, msgs) = check_warn(src);
@@ -2707,7 +2640,7 @@ fn main() {
 
     #[test]
     fn array_constant_index_in_bounds_emits_no_diagnostic() {
-        // `arr[2]` on `[0, 1, 2]` is in bounds — no error.
+        // `arr[2]` on `[0, 1, 2]` is in bounds ,  no error.
         let src = "fn main() { let arr = [0, 1, 2]; let _ = arr[2]; }";
         let (_c, msgs) = check_warn(src);
         assert!(msgs.is_empty(), "unexpected: {:?}", msgs);
@@ -2716,7 +2649,7 @@ fn main() {
     #[test]
     fn array_runtime_index_emits_no_diagnostic() {
         // `arr[i]` on a static-length array, where `i` is a
-        // variable — no static check possible, no error.
+        // variable ,  no static check possible, no error.
         let src = "fn main() { let arr = [0, 1, 2]; let i = 1; let _ = arr[i]; }";
         let (_c, msgs) = check_warn(src);
         assert!(msgs.is_empty(), "unexpected: {:?}", msgs);
@@ -2855,7 +2788,7 @@ fn main() { size_of("hi"); }
 
     #[test]
     fn tuple_constant_index_oob_emits_diagnostic() {
-        // `let t = (1, 2); t[5]` — tuple length 2, index 5.
+        // `let t = (1, 2); t[5]` ,  tuple length 2, index 5.
         let src = "fn main() { let t = (1, 2); let _ = t[5]; }";
         let (_c, msgs) = check_warn(src);
         let found = msgs.iter().any(|m| m.message().contains("out of bounds"));
@@ -2893,7 +2826,7 @@ fn main() { size_of("hi"); }
 
     #[test]
     fn array_dynamic_length_param_lets_runtime_index() {
-        // Function param is dynamic-length — must allow any
+        // Function param is dynamic-length ,  must allow any
         // index.
         let src = "fn head([int] arr) -> int { return arr[0]; }";
         let (_c, msgs) = check_warn(src);
@@ -2902,7 +2835,7 @@ fn main() { size_of("hi"); }
 
     #[test]
     fn index_non_aggregate_emits_diagnostic() {
-        // `let x = 5; x[0]` — index on `int` is an error.
+        // `let x = 5; x[0]` ,  index on `int` is an error.
         let src = "fn main() { let x = 5; let _ = x[0]; }";
         let (_c, msgs) = check_warn(src);
         let found = msgs
@@ -2911,7 +2844,6 @@ fn main() { size_of("hi"); }
         assert!(found, "expected indexing-error, got: {:?}", msgs);
     }
 
-    // ---- Dict tests ----
 
     #[test]
     fn dict_literal_infers_record_type() {
@@ -2924,7 +2856,7 @@ fn main() { size_of("hi"); }
         let (mut c, _ty) = check("fn main() { let d = { foo: 42 }; }");
         let msgs = c.take_messages();
         assert!(msgs.is_empty(), "unexpected: {:?}", msgs);
-        // The side-table records `d`'s type — verify it.
+        // The side-table records `d`'s type ,  verify it.
         let d_ty = c.codegen_var_type("d").cloned();
         let d_pruned = d_ty.map(|t| crate::typechecking::subst::apply_ty_prune(c.subst(), &t));
         assert_eq!(
@@ -3175,7 +3107,6 @@ fn main() { size_of("hi"); }
         assert!(msgs.is_empty(), "unexpected: {:?}", msgs);
     }
 
-    // ---- Type alias tests ----
 
     #[test]
     fn type_alias_for_tuple_is_substituted() {
@@ -3538,7 +3469,7 @@ fn main() { size_of("hi"); }
         );
     }
 
-    /// Phase 5: `T: Ordered` implies `Equal` — `eq_val` resolves without
+    /// Phase 5: `T: Ordered` implies `Equal` ,  `eq_val` resolves without
     /// writing `T: Ordered + Equal`.
     #[test]
     fn implied_superclass_bound_allows_superclass_method() {
@@ -3829,15 +3760,12 @@ fn main() { size_of("hi"); }
         );
     }
 
-    // ============================================================
-    // ---- field_type_for tests ----
-    // ============================================================
     //
     // The `field_type_for` helper is the codegen-side complement
     // to `field_index_for`. It's queried by `receiver_type` when
     // resolving chained accesses (`p.x.v`). The helper reads from
     // the same `enum_payloads` registry that `field_index_for`
-    // reads from — so the tests below verify the data plumbing,
+    // reads from ,  so the tests below verify the data plumbing,
     // not the HM inference logic itself (that's already covered
     // by `access_field_*` tests above).
 
@@ -3858,7 +3786,7 @@ fn main() { size_of("hi"); }
     /// `field_type_for` returns `None` when the field name isn't
     /// declared by any record-shaped variant in the enum. Setup:
     /// `enum Inner { Inner { v: int } }`. Asking for `"missing"`
-    /// should yield `None` — the codegen's defensive `LoadField(0)`
+    /// should yield `None` ,  the codegen's defensive `LoadField(0)`
     /// fallback handles this case.
     #[test]
     fn field_type_for_returns_none_for_unknown_field() {
@@ -3873,7 +3801,7 @@ fn main() { size_of("hi"); }
 
     /// `field_type_for` returns `None` when the enum name isn't
     /// registered at all. This is the "type error already emitted
-    /// upstream" case — the codegen falls back to `LoadField(0)`.
+    /// upstream" case ,  the codegen falls back to `LoadField(0)`.
     #[test]
     fn field_type_for_returns_none_for_unknown_enum() {
         let (c, _) = check("enum Inner { Inner { v: int } }");
@@ -3921,7 +3849,7 @@ fn main() { size_of("hi"); }
         // `Ty::Sum { name: "Inner", .. }`). The codegen's
         // `extract_enum_name` handles both shapes via
         // `extract_enum_name(&t).map(|_| t)`. We don't pin the
-        // exact Ty here — we just verify the helper returns
+        // exact Ty here ,  we just verify the helper returns
         // *something* (not `None`) and that it's an enum
         // reference. Use `extract_enum_name` from the codegen
         // crate's perspective: the name should be "Inner".
@@ -4507,7 +4435,7 @@ fn main() {
         );
     }
 
-    /// Stubbing must not invent methods — missing inherent stays an error.
+    /// Stubbing must not invent methods ,  missing inherent stays an error.
     #[test]
     fn trait_impl_missing_inherent_method_still_errors() {
         let src = r#"
@@ -4544,7 +4472,7 @@ fn main() {
         );
     }
 
-    /// Forward stubs must carry real arity — extra args still reject.
+    /// Forward stubs must carry real arity ,  extra args still reject.
     #[test]
     fn trait_impl_inherent_method_arity_mismatch_still_errors() {
         let src = r#"
@@ -4673,7 +4601,7 @@ fn main() {
     }
 
     /// `return e;` inside an `async fn` unifies against the SAME
-    /// type as `yield e;` (not `unit`) — `resume` has a single
+    /// type as `yield e;` (not `unit`) ,  `resume` has a single
     /// static result type covering both the yielded values and the
     /// final completion value, so a `return` of a matching type
     /// typechecks cleanly.
@@ -4705,7 +4633,7 @@ fn main() {
     }
 
     /// A `return` with no preceding `yield` still pins the
-    /// coroutine's yield/resume type — `coroutine<int, unit>` here.
+    /// coroutine's yield/resume type ,  `coroutine<int, unit>` here.
     #[test]
     fn return_only_coroutine_infers_yield_type_from_return() {
         let src = "async fn coro() { return 42; } fn main() { let h = coro(); let x = resume h; }";
@@ -5340,7 +5268,7 @@ fn main() -> Result<(), Error> {
     }
 
     /// Variadic `declare` metadata stored on a class field must refine arity
-    /// (extra args ok) — same path codegen uses for `is_ffi_declare_variadic_for_fn_id`.
+    /// (extra args ok) ,  same path codegen uses for `is_ffi_declare_variadic_for_fn_id`.
     #[test]
     fn invoke_variadic_from_class_field_allows_extra_args() {
         let src = r#"
@@ -5455,7 +5383,6 @@ fn main() -> Result<(), Error> {
         );
     }
 
-    // ---- Error handling: raise / ? / ?? / ?. ----
 
     #[test]
     fn explicit_result_ok_return_accepted_in_result_mode() {
@@ -5677,7 +5604,6 @@ fn main() {
         );
     }
 
-    // ---- Virtual modules: prelude + ffi scope ----
 
     #[test]
     fn prelude_injects_option_without_import() {
@@ -5946,7 +5872,6 @@ fn main() {}
         );
     }
 
-    // ── Constraint discharge tests (Chunk A4) ─────────────────────────────────
 
     /// Calling a generic `fn add<T: Num>(T a, T b) -> T` with `int` arguments
     /// must succeed: `Num<int>` is a builtin instance.
@@ -6026,7 +5951,7 @@ fn main() { show(42); }
     }
 
     /// A generic function calling another generic function with the same
-    /// constraint must not emit a diagnostic — the constraint propagates.
+    /// constraint must not emit a diagnostic ,  the constraint propagates.
     ///
     /// `fn outer<T: Num>(T x) -> T { return add(x, x); }` is valid when
     /// `add<T: Num>` exists, because `outer`'s own `T: Num` bound covers
@@ -6525,7 +6450,6 @@ trait Pointer<P: * -> *> {
         );
     }
 
-    // ---- byte / [byte] ----
 
     #[test]
     fn byte_array_annotation_accepts_string_literal() {
@@ -6824,7 +6748,7 @@ fn main() {
 
     #[test]
     fn io_error_other_does_not_collide_until_imported() {
-        // IoError::Other must not reserve the constructor name globally —
+        // IoError::Other must not reserve the constructor name globally , 
         // user enums may use `Other` without `use io`.
         let (mut c, _) = check("enum Foo { Bar, Other } let x = Foo::Other;");
         let msgs = c.take_messages();
@@ -7039,9 +6963,8 @@ fn main() { let n = f(a: 1, 2, 3); }
         );
     }
 
-    // ── Arity overload tests ──────────────────────────────────────────────────
 
-    /// Two fixed-arity overloads with distinct arities — both register without
+    /// Two fixed-arity overloads with distinct arities ,  both register without
     /// error and calls dispatch to the right one.
     #[test]
     fn overload_two_fixed_arities_dispatch() {
@@ -7148,7 +7071,7 @@ fn main() {
         );
     }
 
-    /// Fixed N=1 vs rest with K=1 fixed prefix (N >= K) — overlap error.
+    /// Fixed N=1 vs rest with K=1 fixed prefix (N >= K) ,  overlap error.
     #[test]
     fn overload_fixed_vs_rest_overlap_when_n_ge_k() {
         let msgs = assert_messages(
@@ -7166,7 +7089,7 @@ fn main() { let a = f(1); }
         );
     }
 
-    /// Fixed N=1 vs rest with K=2 fixed prefix (N < K) — allowed.
+    /// Fixed N=1 vs rest with K=2 fixed prefix (N < K) ,  allowed.
     #[test]
     fn overload_fixed_vs_rest_allowed_when_n_lt_k() {
         let (mut c, _) = check(
@@ -8044,7 +7967,6 @@ fn main() {
         );
     }
 
-    // ---- Edge cases / caveat regression ----
 
     #[test]
     fn dynamic_int_slice_in_let_binding_errors() {

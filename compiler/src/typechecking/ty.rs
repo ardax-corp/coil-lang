@@ -308,7 +308,6 @@ impl Scheme {
     }
 }
 
-// --- Built-in type constructors (as static name strings) ---
 
 /// Name of the `int` type constructor.
 pub const INT: &str = "int";
@@ -805,7 +804,6 @@ pub fn schemaize_payload(
     }
 }
 
-// --- Free type variables ---
 
 /// Free type variables of a `Ty`.
 pub fn ftv_ty(ty: &Ty) -> HashSet<TyVarId> {
@@ -967,7 +965,6 @@ mod tests {
         assert_eq!(s.ty, int());
     }
 
-    // ---- Sum / Constructor ----
 
     #[test]
     fn ftv_of_sum_walks_variant_payloads() {
@@ -1020,7 +1017,6 @@ mod tests {
         assert!(ftv_ty(&sum).is_empty());
     }
 
-    // ---- EnumVariantPayloadTy ----
 
     #[test]
     fn payload_field_count_unit() {

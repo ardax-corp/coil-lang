@@ -5,7 +5,7 @@ use parser::Pratt;
 
 /// Parse `src`, run the HM checker, and return both the root type and
 /// the accumulated messages.
-///
+    ///
 /// Bare expression statements (`42;`) check as `unit`. Single-line bare
 /// expressions are wrapped in a probe function so golden tests observe the
 /// expression value type (matching the checker unit-test harness).
@@ -635,7 +635,6 @@ fn class_declaration_typechecks() {
     );
 }
 
-// ---- Sum types and pattern matching ----
 
 #[test]
 fn enum_decl_no_messages() {
@@ -846,7 +845,6 @@ fn multiparam_typeclass_cannot_be_bare_existential_type() {
     );
 }
 
-// ---- Record-shape diagnostics ----
 
 #[test]
 fn record_construct_missing_field_diagnostic() {
@@ -957,7 +955,6 @@ fn mixed_shape_enum_with_match_uses_correct_shape() {
     );
 }
 
-// ---- Field-access diagnostics ----
 
 #[test]
 fn access_field_on_non_record_produces_helpful_message() {

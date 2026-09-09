@@ -188,7 +188,7 @@ impl Compiler {
         let from_ident = ident.and_then(|n| self.unboxed_enum_info(n));
         let from_fact = self.node_is_frame_local(scrutinee) || self.node_is_frame_local(peeled);
         // A direct CALL of a known ≤2-word return layout leaves `[payload,
-        // tag]` the same way a frame-local Construct does — same lowering,
+        // tag]` the same way a frame-local Construct does, same lowering,
         // reused across the call boundary instead of just within a frame.
         let from_call = matches!(peeled.1.as_ref(), Expression::Call { .. })
             .then(|| self.expr_direct_call_two_word_kind(peeled))
@@ -693,7 +693,7 @@ impl Compiler {
             let tag_groups = group_arms_by_outer_tag(arms, &self.checker);
             // Forward pass emits JUMP_IF_MATCH for every non-last
             // group, and also for the last group when any group is
-            // multi-arm. Allocate labels for those targets — not
+            // multi-arm. Allocate labels for those targets, not
             // merely for `!is_last && Constructor` in source order
             // (that missed the last group's first arm when Err
             // followed two Ok arms, panicking at emit time).
@@ -716,7 +716,7 @@ impl Compiler {
             let seek_base = self.context.variables.len() as u32;
             self.bytecode.push_seek(seek_base);
 
-            // Compile scrutinee before choosing payload_base —
+            // Compile scrutinee before choosing payload_base
             // HostInvoke arg staging (`alloc_temp_slot`) grows
             // `variables`, and bindings must start *after* those
             // temps or Unpack/JumpIfMatch collide with them
@@ -744,7 +744,7 @@ impl Compiler {
 
             // First payload slot after locals + scrutinee temps.
             // JumpIfMatch/Unpack push payloads onto the stack
-            // above those locals, so bindings must start here —
+            // above those locals, so bindings must start here
             // not at the historical hardcoded slot 1.
             let payload_base = self.context.variables.len() as u32;
 
@@ -765,7 +765,7 @@ impl Compiler {
                     );
                 } else {
                     // Last group in a match with NO
-                    // multi-arm groups — emit the
+                    // multi-arm groups, emit the
                     // scrutinee-consumer for the
                     // last arm in source order (the
                     // last element of the last
@@ -803,12 +803,12 @@ impl Compiler {
                             );
                         }
                         Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
-                            // Wildcard arm — POP the
+                            // Wildcard arm, POP the
                             // scrutinee.
                             self.bytecode.push_pop();
                         }
                         Pattern::Binding { name } => {
-                            // Binding arm — scrutinee already sits at
+                            // Binding arm, scrutinee already sits at
                             // `payload_base` (shared stack/locals). No
                             // STORE opcode; reverse pass records the
                             // binding slot.
@@ -818,93 +818,22 @@ impl Compiler {
                 }
             }
 
-            // Step 3.5: For multi-arm groups WITH
-            // runtime tests, emit the inner-pattern
-            // test chain. This sits between the
-            // forward pass (JUMP_IF_MATCH
-            // dispatch + scrutinee-consumer) and the
-            // reverse pass (binding + body emission).
-            //
-            // Why this pass is needed: when two or
-            // more arms share the same OUTER variant
-            // tag but differ on an INNER sub-pattern
-            // (e.g. `Result::Ok(Option::Some(v))` vs
-            // `Result::Ok(Option::None)`), a single
-            // `JUMP_IF_MATCH` on the outer tag can't
-            // disambiguate between them — both arms
-            // match the outer tag. The inner-pattern
-            // test chain adds a second dispatch step
-            // (a runtime test on the inner payload)
-            // to pick the right arm.
-            //
-            // Layout for a 3-arm group
-            // `[arm_0, arm_1, arm_2]` sharing the
-            // outer tag:
-            //
-            //   [REBIND arm_0_label here]
-            //   POP/STORE for arm_0's sub-patterns
-            //   JMP → pass_label_0
-            //   POP/STORE for arm_1's sub-patterns
-            //   JMP → pass_label_1
-            //   POP/STORE for arm_2's sub-patterns
-            //   (no JMP — pass_label is None)
-            //   → arm_2 body (fall-through)
-            //   JMP → end_label
-            //   [bind pass_label_1 here] arm_1 body
-            //   JMP → end_label
-            //   [bind pass_label_0 here] arm_0 body
-            //   [end_label: RETURN]
-            //
-            // The REBIND of `arm_0_label` redirects
-            // the outer `JUMP_IF_MATCH` (emitted in
-            // the forward pass) from landing at the
-            // first arm's BODY to landing at the
-            // START of the test chain. Each non-last
-            // arm's `JMP → pass_label_N` then routes
-            // a successful test to the arm's body
-            // (bound later in the reverse pass). The
-            // last arm's test chain falls through to
-            // its body (no JMP needed).
-            //
-            // Multi-arm groups WITHOUT runtime tests
-            // (every sub-pattern is `Wildcard` /
-            // `Binding`, no nested `Constructor`) are
-            // unaffected — the existing
-            // first-arm-wins behavior is preserved.
-            // Single-arm groups are also unaffected.
+            // Shared outer tag + differing inner patterns: emit a test chain
+            // between JUMP_IF_MATCH and reverse binding. Rebind arm_0_label to
+            // the chain start; last arm falls through. Reverse pass must not
+            // re-emit POP/STORE for `test_chain_arms` (already consumed here).
             let mut pass_labels: HashMap<usize, Option<crate::block_builder::Label>> =
                 HashMap::new();
             let mut test_chain_first_arms: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
-            // All arms that participate in a test chain
-            // group . The reverse pass uses
-            // this set to decide whether to skip
-            // POP/STORE/UNPACK emission in
-            // `emit_pattern_binding` — the test chain
-            // pass already consumed the values, so the
-            // reverse pass should NOT re-emit them.
-            // `test_chain_first_arms` (above) only tracks
-            // the FIRST arm of each group (for label
-            // re-binding); `test_chain_arms` tracks ALL
-            // arms in all test chain groups.
+            // Arms whose bindings were emitted by the test chain (skip reverse POP/STORE).
             let mut test_chain_arms: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
-            // Per-arm binding map populated by
-            // `emit_inner_test` for arms in test chain
-            // groups. Keyed by arm_idx → name → slot.
-            // The reverse pass consults this map to
-            // install `self.context.match_bindings` for
-            // test chain arms, instead of re-emitting
-            // binding code (which would double-pop /
-            // double-store the payload values).
+            // arm_idx → name → slot from `emit_inner_test` (avoid double-bind in reverse).
             let mut match_bindings_per_arm: HashMap<usize, HashMap<String, u32>> =
                 HashMap::new();
 
             for group in &tag_groups {
-                // Only groups with multiple arms AND
-                // at least one arm with a runtime test
-                // trigger the new test-chain
-                // emission.
                 if group.arm_indices.len() <= 1 {
                     continue;
                 }
@@ -920,52 +849,23 @@ impl Compiler {
                 let first_arm_label = arm_labels[first_arm_idx]
                     .expect("non-last group's first arm must have a Label");
 
-                // REBIND the first arm's label so the
-                // outer JUMP_IF_MATCH lands at the
-                // test chain start, not at the arm
-                // body. `bind_label` is idempotent —
-                // calling it again would re-patch the
-                // JUMP_IF_MATCH, which is exactly
-                // what we want here.
+                // Rebind so JUMP_IF_MATCH lands at the test chain, not the body.
                 bb.bind_label(first_arm_label, self.bytecode.il_mut());
                 test_chain_first_arms.insert(first_arm_idx);
                 for &arm_idx in &group.arm_indices {
                     test_chain_arms.insert(arm_idx);
                 }
 
-                // Emit the test chain for each arm in
-                // source order. Every arm gets a
-                // `pass_label` JMP to its body —
-                // including the last arm in the group.
-                // Fall-through after the last arm is
-                // only safe when that arm's body is
-                // emitted immediately after the test
-                // chain (i.e. the group is source-last).
-                // With a later tag group (e.g. Ok/Ok
-                // then Err), fall-through would land in
-                // the wrong body's bytecode.
+                // Source order; every arm JMPs to its body via `pass_label`.
+                // Fall-through after the last arm is only safe when that body
+                // is emitted next (group is source-last); later tag groups make
+                // fall-through land in the wrong body.
                 for (rank, &arm_idx) in group.arm_indices.iter().enumerate() {
                     let is_last_in_group = rank == group.arm_indices.len() - 1;
 
                     let pass_label = Some(bb.fresh_label(self.bytecode.il_mut()));
 
-                    // `fail_label` is the NEXT arm's
-                    // body label (so the runtime
-                    // test can dispatch to the next
-                    // arm's test chain on failure).
-                    // For the LAST arm in the group
-                    // (and for any arm whose NEXT
-                    // sibling has no body label —
-                    // e.g. it's the last arm of the
-                    // entire match and was reached
-                    // by fall-through), fall back to
-                    // `end_label` so the jump is at
-                    // least well-formed (the
-                    // placeholder implementation
-                    // currently doesn't emit a JMP to
-                    // fail_label, but the operand
-                    // still needs to be consistent
-                    // with the placeholder value).
+                    // Fail → next arm's label, or `end_label` for the last arm.
                     let fail_label = if !is_last_in_group {
                         let next_arm_idx = group.arm_indices[rank + 1];
                         arm_labels[next_arm_idx].unwrap_or(end_label)
@@ -975,11 +875,6 @@ impl Compiler {
 
                     pass_labels.insert(arm_idx, pass_label);
 
-                    // Get the arm's payload (only
-                    // Constructor arms are candidates
-                    // for runtime tests, by the
-                    // definition of
-                    // `arm_has_runtime_test`).
                     let (enum_name, variant_name, payload) = match &arms[arm_idx].pattern.1 {
                         Pattern::Constructor {
                             enum_name,
@@ -1006,103 +901,31 @@ impl Compiler {
                 }
             }
 
-            // Step 4-8: emit each arm's binding code
-            // and body. We go in REVERSE source order
-            // so the bytecode layout is:
-            //   [last arm body]
-            //   [JMP end (skip remaining)]
-            //   [second-to-last arm body]
-            //   [JMP end]
-            //   ...
-            //   [first arm body]
-            //
-            // Each non-first arm body is preceded by
-            // JMP-to-end so it doesn't fall through
-            // into the next body.
-
-            // We process arms in reverse order so the
-            // LAST arm body comes first in the
-            // bytecode, then non-last arms with
-            // JMP-to-end after each.
+            // Reverse order: last arm body first; non-first arms JMP to end.
             for i in (0..arms.len()).rev() {
                 let arm = &arms[i];
                 let is_first = i == 0;
 
-                // If this arm has a pre-allocated
-                // `Label` (it's a non-last constructor
-                // arm), bind it to the current bytecode
-                // position. This patches the
-                // JUMP_IF_MATCH placeholder emitted in
-                // the forward pass.
-                //
-                // The `Label` is `Copy`, so the
-                // immutable borrow of `arm_labels`
-                // ends after this `if let` expression,
-                // and the mutable borrow of `bb` (via
-                // `bind_label`) starts fresh. No
-                // borrow conflict.
-                //
-                // Exception: for the FIRST arm of a
-                // test-chain group, the label was
-                // already REBOUND by the test chain
-                // pass to the test-chain start. We
-                // MUST NOT bind it again here — that
-                // would redirect the outer
-                // JUMP_IF_MATCH from the test-chain
-                // start back to the arm body,
-                // bypassing the test chain entirely.
-                // The reverse pass for this arm binds
-                // `pass_label_0` instead (the
-                // forward-fallthrough target emitted
-                // by `emit_inner_test`).
+                // Bind JUMP_IF_MATCH landing (skip test-chain first arms: already rebound).
                 if !test_chain_first_arms.contains(&i)
                     && let Some(label) = arm_labels[i]
                 {
                     bb.bind_label(label, self.bytecode.il_mut());
                 }
 
-                // For arms in test chain groups,
-                // bind the test chain's
-                // `pass_label` to the start of
-                // this arm's body. Every test-chain
-                // arm (including the last) gets a
-                // pass_label so dispatch works when
-                // another tag group follows.
                 if let Some(Some(label)) = pass_labels.get(&i) {
                     bb.bind_label(*label, self.bytecode.il_mut());
                 }
 
-                // Per-arm binding slots (`payload_base` = first
-                // payload). Payload order follows declaration
-                // order; record patterns may list fields in any
-                // source order.
+                // Per-arm binding slots (`payload_base` = first payload).
                 let mut arm_bindings: HashMap<String, u32> = HashMap::new();
                 let mut next_slot: u32 = payload_base;
-                // Test-chain arms: payload already on stack from
-                // the forward pass — use `consume_values = false`
-                // to record bindings without re-emitting UNPACK/POP.
+                // Test-chain: payload already on stack; `consume_values = false`.
                 let in_test_chain = test_chain_arms.contains(&i);
                 if let Some(bindings) = match_bindings_per_arm.get(&i) {
-                    // This arm is in a test chain
-                    // group AND the test chain recorded
-                    // bindings (Wildcard/Binding
-                    // sub-patterns at the OUTER level).
-                    // Use the recorded bindings and skip
-                    // the reverse-pass binding code
-                    // entirely.
                     arm_bindings = bindings.clone();
                 } else if in_test_chain {
-                    // Test chain arm without recorded
-                    // bindings — the test chain emitted
-                    // JUMP_IF_MATCH for nested
-                    // Constructor sub-patterns (no
-                    // STORE). Walk the pattern to RECORD
-                    // the bindings in `arm_bindings`
-                    // (the body needs them for
-                    // `Identifier` lookups), but with
-                    // `consume_values = false` so we
-                    // don't re-emit the bytecode (the
-                    // test chain handled the values).
+                    // Nested Constructor tests only: record bindings, no re-emit.
                     match &arm.pattern.1 {
                         Pattern::Binding { name } => {
                             arm_bindings.insert(name.to_string(), payload_base);
@@ -1112,21 +935,6 @@ impl Compiler {
                             variant_name,
                             ..
                         } => {
-                            // Test-chain arm: the test
-                            // chain pass already emitted
-                            // POP / STORE / JUMP_IF_MATCH
-                            // for the OUTER level. Walk
-                            // the pattern with
-                            // `consume_values = false` to
-                            // RECORD the bindings (the
-                            // body needs them for
-                            // `Identifier` lookups) but
-                            // skip the redundant bytecode
-                            // emission. The function
-                            // handles Tuple (UNPACK skip
-                            // + sub-pattern walk) and
-                            // Record (decl-order walk +
-                            // sub-pattern walk) internally.
                             let decl_order =
                                 self.checker.payload_tys_for(enum_name, variant_name);
                             emit_pattern_binding(
@@ -1137,23 +945,15 @@ impl Compiler {
                                 &decl_order,
                                 &mut self.bytecode,
                                 false,
-                                true, // is_outer = true (forward pass handled UNPACK/JUMP_IF_MATCH)
+                                true, // is_outer: forward pass handled UNPACK/JUMP_IF_MATCH
                             );
                         }
                         Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                     }
                 } else {
-                    // Not in a test chain: emit binding
-                    // code at the outer level (consume
-                    // the values via POP/STORE/UNPACK).
                     match &arm.pattern.1 {
                         Pattern::Binding { name } => {
-                            // Binding arm: the forward pass
-                            // already emitted STORE at
-                            // `payload_base` for the
-                            // scrutinee. Record the binding
-                            // here so the body's
-                            // `Identifier` lookup finds it.
+                            // Forward pass already STOREd scrutinee at `payload_base`.
                             arm_bindings.insert(name.to_string(), payload_base);
                         }
                         Pattern::Constructor {
@@ -1161,16 +961,6 @@ impl Compiler {
                             variant_name,
                             ..
                         } => {
-                            // Non-test-chain arm: emit full
-                            // binding code at the outer
-                            // level (consume the values via
-                            // POP/STORE/UNPACK). The
-                            // function handles Tuple (emit
-                            // UNPACK + sub-pattern walk) and
-                            // Record (decl-order walk + per-
-                            // field recursion — including
-                            // unbounded-depth nested record
-                            // patterns) internally.
                             let decl_order =
                                 self.checker.payload_tys_for(enum_name, variant_name);
                             emit_pattern_binding(
@@ -1181,20 +971,14 @@ impl Compiler {
                                 &decl_order,
                                 &mut self.bytecode,
                                 true,
-                                true, // is_outer = true (forward pass handled UNPACK/JUMP_IF_MATCH)
+                                true, // is_outer: forward pass handled UNPACK/JUMP_IF_MATCH
                             );
                         }
-                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
-                            // No bindings — the forward pass
-                            // already emitted POP for the
-                            // scrutinee.
-                        }
+                        Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                     }
-                } // close `else` for test chain arms
+                }
 
-                // Install this arm's bindings on top of any enclosing
-                // match so nested `match` bodies can still load outer
-                // pattern names. Inner names shadow.
+                // Nested matches keep outer bindings; inner names shadow.
                 let saved_bindings = self.push_match_bindings(arm_bindings);
                 let binding_slots: Vec<(String, u32)> = self
                     .context
@@ -1206,10 +990,7 @@ impl Compiler {
                 for (name, slot) in &binding_slots {
                     self.record_debug_local(name, *slot);
                 }
-                // JumpIfMatch/Unpack leave payloads at these slots via
-                // stack/locals overlap. Reserve them in `variables` so
-                // arm-body temps (`alloc_temp_slot`) cannot STORE over
-                // the bindings.
+                // Reserve payload slots so arm-body temps cannot STORE over bindings.
                 if let Some(max_slot) = max_binding_slot {
                     while (self.context.variables.len() as u32) <= max_slot {
                         let pad = format!("__match{}", self.context.variables.len());
@@ -1217,10 +998,7 @@ impl Compiler {
                     }
                 }
 
-                // Per-arm binding types override the flat
-                // `codegen_var_types` side-table so Access on
-                // a reused binding name (`p.y` vs `p.h`) sees
-                // this arm's payload type, not the last arm's.
+                // Per-arm types so Access on a reused binding name sees this arm's payload.
                 let mut arm_binding_tys = HashMap::new();
                 collect_pattern_binding_types(
                     &self.checker,
@@ -1234,9 +1012,7 @@ impl Compiler {
                 }
                 self.mono_codegen_var_types.push(arm_binding_tys);
 
-                // Emit the arm body unless it is the sole bound name
-                // (`Ok(x) => x`): JumpIfMatch already left the payload
-                // on the stack at the binding slot.
+                // Skip body for identity bind (`Ok(x) => x`): payload already at slot.
                 if !Self::match_arm_body_is_identity_binding(&arm.pattern.1, &arm.body) {
                     if self.match_tail_call {
                         let mut arm_bc = CodeBuf::new();

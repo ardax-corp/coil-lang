@@ -625,7 +625,6 @@ impl Object {
         }
     }
 
-    /// Return whether the object is marked.
     #[must_use]
     pub fn is_marked(&self) -> bool {
         match self {
@@ -725,7 +724,6 @@ impl Object {
         }
     }
 
-    /// Get the next object reference in the linked list.
     #[must_use]
     pub fn get_next(&self) -> Option<Self> {
         match self {
@@ -750,7 +748,6 @@ impl Object {
         }
     }
 
-    /// Set the next object reference in the linked list.
     pub fn set_next(&self, next: Option<Self>) {
         match self {
             Self::String(s) => s.set_next(next),
@@ -956,7 +953,7 @@ pub enum Member {
 }
 
 /// Max typed field count stored inside [`ObjInstance`] without a Rust `Vec`.
-///
+    ///
 /// Covers `gc_churn`'s two-field `Node` and other small classes. Each extra
 /// slot is `size_of::<Member>()` on every instance, including dict/`INIT`
 /// tables, so the cap stays at 2; larger classes spill.
@@ -1168,7 +1165,7 @@ impl GcSized for ObjInstance {
 }
 
 /// Max payload arity stored inside [`ObjEnum`] without a Rust `Vec`.
-///
+    ///
 /// Covers unary `Option`/`Result` and arity-2 `Tree::Node(Tree, Tree)`.
 /// Each extra slot is `size_of::<Member>()` on every enum, including those
 /// hot unary paths, so the cap stays at 2; larger variants spill.
@@ -1419,7 +1416,7 @@ impl Drop for ObjStream {
             // shutdown when the fd is still here, then free.
             slot.shutdown_then_free(self.handle.as_mut());
         }
-        // NativeHandle closes on drop; clear explicitly for clarity.
+        // NativeHandle closes on drop; clear so Drop does not double-close.
         self.handle.take();
         self.closed = true;
     }
@@ -1626,7 +1623,7 @@ pub struct FunctionSig {
     pub arity: usize,
     pub arg_types: Vec<FfiType>,
     pub ret_type: FfiType,
-    /// C-style varargs — CIF rebuilt per invoke with `Cif::new_variadic`.
+    /// C-style varargs, CIF rebuilt per invoke with `Cif::new_variadic`.
     pub variadic: bool,
 }
 
@@ -2265,7 +2262,7 @@ mod tests {
         heap.trace(&[enum_addr]);
         enum_obj.mark_references(&heap, &mut gray);
 
-        // 4. Sweep — anything not marked is deallocated.
+        // 4. Sweep, anything not marked is deallocated.
         unsafe { heap.sweep() };
 
         // 5. Both objects must still be alive.
@@ -2313,15 +2310,11 @@ mod tests {
         heap.trace(&[outer_addr]);
         outer_obj.mark_references(&heap, &mut gray);
 
-        // Drain the grey stack — each newly-marked object should
-        // also have its references traced. For the inner enum
-        // (empty payload) this is a no-op, but we still call it to
-        // exercise the arm.
+        // Drain grey stack (inner enum has empty payload; still exercise the arm).
         while let Some(obj) = gray.pop() {
             obj.mark_references(&heap, &mut gray);
         }
 
-        // Sweep.
         unsafe { heap.sweep() };
 
         // Both must survive.
@@ -2563,7 +2556,7 @@ mod tests {
             "after sweep, threshold must be live*growth so one survivor is quiet"
         );
         let quiet_size = heap.size();
-        // Grow past the rescaled threshold without roots — should_collect again.
+        // Grow past the rescaled threshold without roots, should_collect again.
         while !heap.should_collect() {
             let _ = heap.alloc(ObjString::from("pressure"), Object::String);
             // Guard against runaway if rescale broke (would never trip).
@@ -2766,7 +2759,7 @@ mod tests {
             !live.contains(&orphan_addr),
             "empty-root trace must not keep prior mark-set addresses alive"
         );
-        // `keep` was unmarked after sweep and not re-rooted — also gone.
+        // `keep` was unmarked after sweep and not re-rooted, also gone.
         assert!(!live.contains(&keep_addr));
     }
 }

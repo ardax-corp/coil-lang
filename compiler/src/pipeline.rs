@@ -165,7 +165,7 @@ impl Pipeline {
     }
 
     /// Register a native function's type signature (metadata
-    /// only — no VM closure). Embedders that supply their own
+    /// only, no VM closure). Embedders that supply their own
     /// closures should prefer [`Self::register_host_native`].
     #[cfg(any(test, feature = "vm-wire"))]
     pub fn register_native_function(&mut self, name: String, namespace: String, sig: FfiSignature) {
@@ -710,8 +710,8 @@ impl Pipeline {
     ///
     /// `use foo::bar;` and `mod foo;` are both
     /// discovered. `use foo::bar::*;` (glob) is the
-    /// same as `use foo::bar;` for discovery purposes
-    /// — we just need to load `foo::bar` so the
+    /// same as `use foo::bar;` for discovery purposes:
+    /// we just need to load `foo::bar` so the
     /// compiler can resolve the items.
     fn enqueue_uses(
         &mut self,
@@ -723,7 +723,7 @@ impl Pipeline {
         match ast.1.borrow() {
             Expression::Use { path, name, .. } => {
                 // Compiler virtual modules (`prelude`, `ffi`, …) are not
-                // `.hy` files — skip disk discovery for those paths.
+                // `.hy` files, skip disk discovery for those paths.
                 {
                     use crate::typechecking::VirtualModules;
                     let vm = VirtualModules::new();
@@ -1059,44 +1059,10 @@ impl Pipeline {
         true
     }
 
-    /// Discovery pass: walk the worklist front-to-back,
-    /// parsing each file and enqueueing its
-    /// `use`/`mod` dependencies. We don't compile
-    /// here — just build the complete worklist so
-    /// that the compilation pass can run in
-    /// dependency order.
-    ///
-    /// The `processed` set guards against re-enqueuing
-    /// (so the same file isn't discovered twice). The
-    /// `failed` flag is set if any file fails to parse.
+    /// Parse `use`/`mod` edges into the worklist (`processed` dedupes; `failed` on parse error).
     fn discover_all(&mut self) {
-        // Walk the worklist from the front, parsing each
-        // file to find its `use`/`mod` declarations.
-        // `enqueue_file` adds new dependencies to the back
-        // of the worklist and dedupes against `processed`,
-        // so each file is scanned exactly once.
-        //
-        // Each scanned item is RE-ENQUEUED at the back so
-        // the compile pass finds it. The trade-off:
-        // O(N) extra pops (one per scan) vs allocating
-        // a separate scan queue. For typical projects
-        // (<100 files) the O(N) cost is negligible.
-        //
-        // `enqueue_uses`'s re-enqueues of already-processed
-        // dependencies are no-ops, so the only repeated
-        // work would be re-parsing a file's `use`s. We
-        // skip that via `already_scanned` — a file's
-        // `use`s are walked exactly once.
-        //
-        // Termination: track the worklist length at the
-        // end of each pass. If it doesn't grow after a
-        // pass (i.e., `enqueue_uses` added nothing new),
-        // we're done. Each pass is at most one full
-        // rotation of the worklist (since new items are
-        // added to the BACK, the front gets recycled).
-        // So total work is O(N^2) worst case, but in
-        // practice O(N) for tree-shaped dependency
-        // graphs.
+        // Scan each worklist file once (`already_scanned`), re-enqueue at the
+        // back for the compile pass. `enqueue_file` dedupes via `processed`.
         let mut already_scanned: Vec<PathBuf> = Vec::new();
         loop {
             let item = match self.worklist.pop_front() {
@@ -1105,8 +1071,7 @@ impl Pipeline {
             };
             let file = item.file.clone();
             if already_scanned.contains(&file) {
-                // Re-enqueue at the back so the compile
-                // pass finds it. But don't re-scan.
+                // Already scanned; keep on worklist for the compile pass.
                 self.worklist.push_back(item);
                 if self
                     .worklist
@@ -1156,7 +1121,7 @@ impl Pipeline {
             // scanned. Length-stable checks alone are wrong:
             // scanning the first of two deps (`use a::*; use
             // b::*;`) adds nothing new while `b` is still
-            // unscanned — glob expansion then sees an empty
+            // unscanned, glob expansion then sees an empty
             // functions table for that module.
             if self
                 .worklist
@@ -1233,7 +1198,7 @@ impl Pipeline {
     pub fn compile(mut self, filename: String, output: String) {
         // Seed the worklist with the entry file. The
         // entry is treated specially (top-level
-        // namespace) — see `compile_file`.
+        // namespace), see `compile_file`.
         let entry = PathBuf::from(&filename);
         self.entry_file = Some(entry.clone());
         self.begin_compile_opt_stats();
@@ -1345,7 +1310,7 @@ impl Pipeline {
         self.begin_compile_opt_stats();
 
         // Discover disk modules (`io/sync.hy` in coil-stdlib, …) referenced by `use`
-        // before compiling the in-memory entry — same dependency order as
+        // before compiling the in-memory entry, same dependency order as
         // `compile_src_from_file`, without requiring a temp file.
         self.enqueue_uses(path, src, &ast);
         self.discover_all();
@@ -1742,7 +1707,7 @@ mod tests {
         let mut pipeline =
             Pipeline::with_reporter(ReportConfig::default(), Box::new(shared.clone()));
 
-        // Type mismatch on assignment — should surface via the pretty sink.
+        // Type mismatch on assignment, should surface via the pretty sink.
         let src = r#"
 fn main() {
     let x = 1;
@@ -1876,7 +1841,7 @@ fn main() {
         assert!(pipeline.had_errors());
     }
 
-    /// `Pipeline::with_reporter` must not pay for `Compiler::default` — that is
+    /// `Pipeline::with_reporter` must not pay for `Compiler::default`, that is
     /// the whole point of the OnceCell (run-path startup).
     #[test]
     fn construction_defers_compiler_until_first_use() {
@@ -1897,7 +1862,7 @@ fn main() {
     }
 
     /// Buffered standard-native ids must land in the typechecker map when the
-    /// compiler is first built — otherwise HostInvoke fn_ids drift from the VM.
+    /// compiler is first built, otherwise HostInvoke fn_ids drift from the VM.
     #[test]
     fn first_compiler_access_replays_pending_native_ids() {
         let pipeline = Pipeline::with_reporter(ReportConfig::default(), Box::new(std::io::sink()));
@@ -2061,7 +2026,7 @@ fn main() { add(1, 2); }
                 (s.name.clone(), s.entry_pc as usize, end)
             })
             .collect();
-        // Same seed on both sides — agreement is what the gate checks.
+        // Same seed on both sides, agreement is what the gate checks.
         let mut seeds = std::collections::HashMap::new();
         for (_, start, _) in &ranges {
             seeds.insert(*start, 0u32);

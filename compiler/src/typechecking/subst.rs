@@ -262,7 +262,6 @@ mod tests {
         Ty::Var(TyVarId(i))
     }
 
-    // ---- apply_ty ----
 
     #[test]
     fn apply_passes_through_constructor() {
@@ -351,7 +350,6 @@ mod tests {
         assert_eq!(apply_ty_prune(&s, &v(0)), int());
     }
 
-    // ---- apply_scheme ----
 
     #[test]
     fn apply_scheme_preserves_bounds() {
@@ -382,7 +380,6 @@ mod tests {
         assert_eq!(result.ty, Ty::Fun(Box::new(v(0)), Box::new(int())));
     }
 
-    // ---- compose ----
 
     #[test]
     fn compose_of_two_empties_is_empty() {
@@ -448,7 +445,6 @@ mod tests {
         assert_eq!(apply_ty(&composed, &v(0)), string());
     }
 
-    // ---- union ----
 
     #[test]
     fn union_combines_domains() {
@@ -468,7 +464,6 @@ mod tests {
         assert_eq!(apply_ty(&u, &v(0)), string());
     }
 
-    // ---- Subst helpers ----
 
     #[test]
     fn subst_singleton_len_and_get() {

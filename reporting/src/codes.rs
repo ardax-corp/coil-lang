@@ -12,10 +12,8 @@
 /// - `E09xx` — CLI / I/O / archive
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ErrorCode {
-    // --- Parse (E00xx) ---
     ParseError,
 
-    // --- Name resolution & types (E01xx) ---
     UnknownValue,
     UnknownFunction,
     TypeMismatch,
@@ -64,7 +62,6 @@ pub enum ErrorCode {
     /// Private field or inherent method used outside its type's `impl`.
     PrivateMember,
 
-    // --- Enums / match / constructs (E02xx) ---
     DuplicateEnum,
     DuplicateConstructor,
     UnknownEnum,
@@ -87,11 +84,9 @@ pub enum ErrorCode {
     /// `_` used as a whole match arm; catch-all is `default` only.
     UnderscoreMatchArm,
 
-    // --- Format / print (E03xx) ---
     FormatSpecifierMismatch,
     FormatArityMismatch,
 
-    // --- Aggregates / FFI (E04xx) ---
     IndexOutOfBounds,
     CannotIndex,
     ArrayElementMismatch,
@@ -111,7 +106,6 @@ pub enum ErrorCode {
     /// `dload` path is not a compile-time string (would leak the runtime allowlist).
     HostDloadNonConst,
 
-    // --- Codegen (E08xx) ---
     UnknownExpression,
     CodegenError,
     /// Recursive function depth cannot be proven; `#[max_depth(N)]` required.
@@ -121,7 +115,6 @@ pub enum ErrorCode {
     /// Monomorphization per-fn or total cap was hit; extra specs were not emitted.
     MonomorphizeCap,
 
-    // --- CLI / I/O (E09xx) ---
     IoError,
     ArchiveVersionMismatch,
     InvalidCliFlags,

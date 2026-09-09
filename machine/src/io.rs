@@ -707,7 +707,6 @@ pub(crate) fn stream_wait_handle(heap: &mut Heap, stream: Value) -> Result<WaitH
     })?
 }
 
-// ---- TCP ----
 
 pub fn tcp_connect(heap: &mut Heap, host: &str, port: i64) -> Result<Value, IoErrorTag> {
     tcp_connect_timeout(heap, host, port, 0)
@@ -971,7 +970,6 @@ pub fn tcp_shutdown(heap: &mut Heap, stream: Value, how: i64) -> Result<(), IoEr
     })?
 }
 
-// ---- UDP ----
 
 fn alloc_tuple2(heap: &mut Heap, a: Value, b: Value) -> Value {
     let (obj, _) = heap.alloc(

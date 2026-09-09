@@ -11,7 +11,6 @@ use crate::typechecking::ty::{int, Ty};
 use super::*;
 
 impl Checker {
-    // ---- Match ----
 
     pub(super) fn infer_match(&mut self, scrutinee: &Output, arms: &[MatchArm], range: Range<usize>) -> Ty {
         let scrutinee_ty = self.infer(scrutinee);
@@ -19,7 +18,7 @@ impl Checker {
 
         // Set up current_match_lhs for `Expression::Default`
         // (which Decision C preserves but is unreachable in real
-        // source — wildcard patterns never reach it).
+        // source, wildcard patterns never reach it).
         let prev = self.current_match_lhs.replace(scrutinee_ty.clone());
 
         let mut result_ty = Ty::Var(self.counter.fresh());
@@ -36,16 +35,9 @@ impl Checker {
         }
 
         for arm in arms {
-            // Step 1: each arm gets a fresh env frame so the
-            // pattern's bindings don't leak.
             self.push_scope();
 
-            // Step 2: type the pattern, binding variables. The
-            // pattern AST doesn't carry its own range today, so we
-            // pass the arm's body range as a reasonable proxy for
-            // error anchoring — it's close enough that ariadne
-            // points near the offending pattern instead of at byte
-            // 0 of the source.
+            // Pattern AST has no range; body range anchors diagnostics.
             let pattern_range = arm.pattern.0.into_range();
             if matches!(arm.pattern.1, Pattern::Wildcard) {
                 let mut msg = Message::error(
@@ -115,7 +107,6 @@ impl Checker {
                 }
             }
 
-            // Step 3: unify pattern type with scrutinee.
             self.unify(
                 &resolved_scrutinee,
                 &pat_ty,
@@ -123,11 +114,9 @@ impl Checker {
                 "match pattern against scrutinee",
             );
 
-            // Step 4: capture coverage info.
             let arm_cov = self.arm_coverage(&arm.pattern.1, &pattern_range);
             coverage.push(arm_cov);
 
-            // Step 5: infer body, unify with result.
             let body_ty = self.infer(&arm.body);
             if let Some((name, prev_cg)) = refined_scrut {
                 match prev_cg {
@@ -151,17 +140,12 @@ impl Checker {
                 );
             }
 
-            // Step 6: pop the per-arm env frame.
             self.pop_scope();
         }
 
         self.current_match_lhs = prev;
 
-        // Record for the post-pass exhaustiveness check. The
-        // scrutinee type stored here is the resolved (pruned)
-        // version at the time of the match; the post-pass will
-        // re-apply the current substitution to handle any
-        // variables bound by intervening code.
+        // Post-pass exhaustiveness re-applies the current subst to scrutinee_ty.
         self.pending_exhaustive.push(PendingExhaustive {
             scrutinee_ty: resolved_scrutinee,
             arms: coverage,
@@ -174,12 +158,12 @@ impl Checker {
     /// Type-check a pattern against an expected type, binding
     /// variables into the current env frame. Returns the pattern's
     /// type, which is the **expected** type (the sum type, not
-    /// the constructor type) — patterns desugar the scrutinee, so
+    /// the constructor type), patterns desugar the scrutinee, so
     /// the pattern's type IS the scrutinee's type. The tag
     /// matching (which determines whether the arm is reachable) is
     /// captured separately in [`ArmCoverage`].
     ///
-    /// `pattern_range` is the source range of the pattern itself —
+    /// `pattern_range` is the source range of the pattern itself
     /// or, when not available, a reasonable proxy (the arm's body
     /// range). It is used to anchor pattern-related diagnostics
     /// (`unknown constructor`, `wrong arity`) so ariadne points at
@@ -393,7 +377,7 @@ impl Checker {
                     }
                 }
 
-                // 4. The pattern's type is the *expected* type —
+                // 4. The pattern's type is the *expected* type
                 // patterns desugar the scrutinee, so the pattern
                 // returns whatever the scrutinee had. (If the
                 // scrutinee was a Ty::Constructor for a specific

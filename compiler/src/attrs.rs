@@ -1,5 +1,5 @@
 //! Attribute expansion (`#[derive(...)]`, user `attr`, etc.).
-//!
+    //!
 //! Runs before the ID pre-walk and typechecking: expands `#[derive]` into
 //! synthetic `TypeClassImpl` siblings. Compile-time FFI is `extern "lib" { fn …; }`
 //! only — `#[ffi]` is rejected.
@@ -2225,7 +2225,7 @@ fn expand_class<'a>(
 /// Auto-generate FQN-only `Show`/`String` when neither derive nor an explicit
 /// `impl` covers the type. Bodies return the type name as a string literal
 /// (same display as `typeof self` for non-generic types).
-///
+    ///
 /// Inserted beside the type so typecheck sees the instance before later
 /// `fn main` / statements. Script-style top-level match/expr after the type
 /// should use `fn main` — these impls bind function entries and would
@@ -2329,7 +2329,6 @@ fn class_field_names<'a>(fields: &[Output<'a>]) -> Vec<&'a str> {
         .collect()
 }
 
-// ── string interning for synthetic AST ──────────────────────────────────────
 
 fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
@@ -2368,7 +2367,7 @@ fn clone_attr_static(attr: &Attribute<'_>) -> Attribute<'static> {
 }
 
 /// Mint a unique span for each synthetic node.
-///
+    ///
 /// Sharing the owning `enum`/`class` span across every derived expression
 /// makes span-keyed codegen lookups (`lookup_for_codegen_span`, `%v` Show
 /// lowering) collide and pick up the declaration's `unit` type. Unique
@@ -2549,7 +2548,6 @@ fn block_lets_return<'a>(
     at(span, Expression::Block(items))
 }
 
-// ── Show (enum) ─────────────────────────────────────────────────────────────
 
 fn synth_show_enum<'a>(
     span: SimpleSpan,
@@ -2657,7 +2655,6 @@ fn show_variant_arm<'a>(
     }
 }
 
-// ── Eq (enum) ───────────────────────────────────────────────────────────────
 
 fn synth_eq_enum<'a>(
     span: SimpleSpan,
@@ -2971,7 +2968,6 @@ fn eq_variant_arm<'a>(
     }
 }
 
-// ── Ord (enum) ──────────────────────────────────────────────────────────────
 
 /// Expand `derive Ord` into the four comparison instances plus an empty
 /// `Ord` marker, matching the builtin `int`/`float` layout after PR #14
@@ -3202,7 +3198,6 @@ fn ord_payload_cmp<'a>(
     }
 }
 
-// ── Show / Eq / Ord (class) ─────────────────────────────────────────────────
 
 fn synth_show_class<'a>(span: SimpleSpan, name: &'a str, fields: &[&'a str]) -> Output<'a> {
     let p = leak(format!("__show_{}", name));
@@ -3301,7 +3296,6 @@ fn class_ord_body<'a>(
     acc
 }
 
-// ── Default / Hash / String / Serialize (derive MVP) ─────────────────────────
 
 fn int_zero<'a>(span: SimpleSpan) -> Output<'a> {
     at(span, Expression::Integer(0))

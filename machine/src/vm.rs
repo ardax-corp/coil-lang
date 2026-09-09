@@ -314,7 +314,7 @@ struct PendingIoWait {
 }
 
 /// One frame's pinned arrays, keyed by `ArrayPin` operand (local slot).
-///
+    ///
 /// Allocated lazily on first `ArrayPin`. Lookup is a vec index, not a hash.
 struct FramePins {
     /// `frames.len()` at first pin (TailCall keeps the same depth).
@@ -816,10 +816,6 @@ impl<const S: usize> Machine<S> {
         id
     }
 
-    // pub fn register(&mut self, name: usize, func: External) {
-    //     self.native.insert(name, func);
-    // }
-
     /// Free function so `execute` can borrow `frames` and `heap` separately.
     /// Delegates to [`Heap::find_object_by_addr`] (mapped slot + header kind).
     fn find_object_by_addr(heap: &Heap, addr: u64) -> Option<Object> {
@@ -827,7 +823,7 @@ impl<const S: usize> Machine<S> {
     }
 
     /// `ObjEnum` at an exact slot. Heap-heap Result `Err` (`pointer | 1`) is
-    /// not an enum cell — do not strip bit 0 here (GC marking already does).
+    /// not an enum cell, do not strip bit 0 here (GC marking already does).
     fn find_enum_exact(heap: &Heap, addr: u64) -> Option<crate::memory::Gc<crate::memory::ObjEnum>> {
         if addr & 1 != 0 {
             return None;
@@ -1328,7 +1324,7 @@ impl<const S: usize> Machine<S> {
 
     /// Intern `data`, push the GC pointer, then maybe collect.
     ///
-    /// The intern table is a cache, not a GC root — unmarked interned strings
+    /// The intern table is a cache, not a GC root, unmarked interned strings
     /// are swept. The new object must be on the operand stack before
     /// [`Self::gc_collect`] so it survives the cycle.
     fn push_interned_string(&mut self, data: String) {
@@ -1521,7 +1517,7 @@ impl<const S: usize> Machine<S> {
     }
 
     /// Register a function signature on a previously-loaded
-    /// userland library (host/test helper — userland code uses
+    /// userland library (host/test helper, userland code uses
     /// `DeclareFFI` at runtime).
     pub fn register_ffi_function(
         &mut self,
@@ -2032,7 +2028,7 @@ impl<const S: usize> Machine<S> {
         // still up. `Drop` still runs this as a safety net for embedders.
         self.run_remaining_finalizers();
         // Reactor pool threads hold their own `Arc<Reactor>` clone and poll
-        // forever unless told to stop — otherwise every program that spawns
+        // forever unless told to stop, otherwise every program that spawns
         // a coil thread leaks `worker_cap` OS threads for the rest of the
         // process. Skip if a detached job is still in flight (rare) rather
         // than abandon queued work; that reactor just leaks as before.
@@ -2286,9 +2282,7 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(raw));
                 }
                 Instruction::CodePtr => {
-                    // Absolute bytecode entry — same stack representation as an
-                    // integer constant so `CallIndirect` / dict `Index` can
-                    // treat it as a raw code offset.
+                    // Absolute CodePtr entry; same stack form as CALL target.
                     let offset = opcode.operand_u32() as i64;
                     self.stack.push(Value::from(offset));
                 }
@@ -2649,7 +2643,7 @@ impl<const S: usize> Machine<S> {
                 Instruction::INIT => {
                     let (_, mut r) = self.heap.alloc(ObjInstance::default(), Object::Instance);
                     let _ = r.as_mut();
-                    // Root before GC — same rule as `push_interned_string`.
+                    // Root before GC, same rule as `push_interned_string`.
                     self.stack.push(Value::from(r.as_ptr().addr() as u64));
                     self.maybe_gc_after_alloc();
                 }
@@ -2693,7 +2687,6 @@ impl<const S: usize> Machine<S> {
                         self.after_return(&mut ip, &mut sp);
                     }
                 }
-                // Fused `LOAD slot; CONST imm; <binop>` — compute in place
                 // (same shape as `BinSlotSlot`) to avoid two temp pushes.
                 Instruction::BinSlotImm => {
                     let (op, slot, imm) = opcode.bin_slot_imm_parts();
@@ -2703,7 +2696,6 @@ impl<const S: usize> Machine<S> {
                     let result = crate::fused::eval_bin(op, lhs, rhs, &self.heap);
                     self.stack.push(result);
                 }
-                // Fused `<cmp|cond>; JMPF/JMPT target`.
                 Instruction::CmpJmpf | Instruction::CmpJmpt => {
                     let (op, t) = opcode.cmp_jmpf_parts();
                     let target = if opcode.cmp_jmpf_is_pool() {
@@ -2750,7 +2742,7 @@ impl<const S: usize> Machine<S> {
                         set_jump_target(&mut ip, target, code);
                     }
                 }
-                // Fused `BinSlotSlot; JMPF/JMPT` — pool packs (target<<32)|b.
+                // Fused `BinSlotSlot; JMPF/JMPT`, pool packs (target<<32)|b.
                 Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
                     let (op, a, pool_idx) = opcode.bin_slot_slot_jmpf_parts();
                     promise!(pool_idx < constants.len());
@@ -2766,7 +2758,7 @@ impl<const S: usize> Machine<S> {
                         set_jump_target(&mut ip, target, code);
                     }
                 }
-                // Fused `LOAD src; CONST imm; <op>; STORE dest` — pool packs (dest<<32)|imm.
+                // Fused `LOAD src; CONST imm; <op>; STORE dest`, pool packs (dest<<32)|imm.
                 Instruction::BinSlotImmStore => {
                     let (op, slot, pool_idx) = opcode.bin_slot_imm_store_parts();
                     promise!(pool_idx < constants.len());
@@ -2785,7 +2777,6 @@ impl<const S: usize> Machine<S> {
                         self.stack.seek(dest_idx + 1);
                     }
                 }
-                // Fused `LOAD a; LOAD b; <op>; STORE dest`.
                 Instruction::BinSlotSlotStore => {
                     let (op, a, b, dest) = opcode.bin_slot_slot_store_parts();
                     promise!(sp + a < stack_cap);
@@ -2862,7 +2853,6 @@ impl<const S: usize> Machine<S> {
                             _ => String::new(),
                         }
                     };
-                    // Push `Result::Ok(handle)` or `Result::Err(ffi::Error)`.
                     match crate::ffi::resolve_library(
                         &path,
                         self.base_dir.as_deref(),
@@ -2942,7 +2932,7 @@ impl<const S: usize> Machine<S> {
                     let ret_tag_val = self.stack.pop();
                     let ret_type = Self::ffi_type_from_value(&ret_tag_val, &self.heap);
 
-                    // Pop the args tuple (next on the stack).
+                    // Pop args tuple, then name, then lib handle.
                     let args_tuple_val = self.stack.pop();
                     let args_tuple_addr = args_tuple_val.raw() as u64;
 
@@ -2956,10 +2946,8 @@ impl<const S: usize> Machine<S> {
                                 .collect(),
                             _ => Vec::new(),
                         };
-                    // Pop the name string.
                     let name_val = self.stack.pop();
                     let name = Self::object_string_value(&self.heap, &name_val);
-                    // Pop the lib handle.
                     let lib_val = self.stack.pop();
                     let lib_addr = lib_val.raw() as u64;
                     let lib_obj = self.userland_libraries.get(&lib_addr).cloned();
@@ -3097,7 +3085,7 @@ impl<const S: usize> Machine<S> {
                         ip.saturating_sub(1),
                     );
                 }
-                // Fused `BinSlotSlot <arith>; CONST pool; CmpJmpf/CmpJmpt` — no stack traffic.
+                // Fused `BinSlotSlot <arith>; CONST pool; CmpJmpf/CmpJmpt`, no stack traffic.
                 Instruction::BinSlotSlotConstJmpf => {
                     return self.runtime_panic(
                         "retired opcode BinSlotSlotConstJmpf",
@@ -3166,7 +3154,7 @@ impl<const S: usize> Machine<S> {
                     if arity == 0 {
                         let object = self.heap.immortal_unit_enum(tag);
                         self.stack.push(Value::from(object.addr()));
-                        // No alloc pressure — singleton is immortal.
+                        // No alloc pressure, singleton is immortal.
                         continue;
                     }
 
@@ -3495,7 +3483,7 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(Value::from(len as i64));
                 }
                 Instruction::DictEntries => {
-                    // Pop dict → push ObjArray of ObjTuple(2) (key, value).
+                    // Pop dict; push ObjArray of ObjTuple(2) (key, value).
                     let dict_val = self.stack.pop();
                     let dict_addr = dict_val.raw() as u64;
                     let mut pair_addrs: Vec<Value> = Vec::new();
@@ -3559,7 +3547,7 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::Unpack => {
                     // Pops enum scrutinee; pushes payload in declaration order
-                    // (stack/locals overlap — see STORE).
+                    // (stack/locals overlap, see STORE).
                     let arity = opcode.operand_u32() as usize;
 
                     promise!(self.stack.tell() > 0);
@@ -3649,10 +3637,9 @@ impl<const S: usize> Machine<S> {
                         }
                     }
                 }
-                // Deprecated discriminant alias of `STORE` (same handler).
+                // Deprecated STORE discriminant alias (same handler).
                 // Compiler never emits StorePop; kept for archived bytecode.
                 Instruction::StorePop => {
-                    // Deprecated alias of STORE — same packed multi-slot semantics.
                     let count = opcode.load_store_count();
                     for i in 0..count {
                         let slot = sp + opcode.load_store_slot_at(i) as usize;
@@ -3778,7 +3765,6 @@ impl<const S: usize> Machine<S> {
                     };
 
                     if let Some(gc) = fn_obj {
-                        // Pop application dictionaries first (unused for ObjFn).
                         for _ in 0..app_dict_arity {
                             let _ = self.stack.pop();
                         }
@@ -3836,7 +3822,6 @@ impl<const S: usize> Machine<S> {
                         let remaining_new = &new_args[arg_i..];
 
                         if fixed_filled < arity {
-                            // Still a partial — push updated ObjFn.
                             let partial = ObjFn {
                                 entry,
                                 arity: base.arity,
@@ -3881,7 +3866,7 @@ impl<const S: usize> Machine<S> {
                             };
                             call_args.push(rest_val);
                         } else if !remaining_new.is_empty() {
-                            // Too many args for a fixed fn — drop extras defensively.
+                            // Too many args for a fixed fn, drop extras defensively.
                         }
 
                         // Frame: [captures..., params...]
@@ -4078,7 +4063,7 @@ impl<const S: usize> Machine<S> {
                         let value = self.stack.pop();
                         let addr = value.raw() as u64;
                         captured_dicts[slot] = if addr == 0 {
-                            // Unresolved evidence — filled at CallIndirect.
+                            // Unresolved evidence, filled at CallIndirect.
                             None
                         } else if let Some(obj) = Self::find_object_by_addr(&self.heap, addr) {
                             Some(Member::Object(obj))

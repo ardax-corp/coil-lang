@@ -552,7 +552,6 @@ mod tests {
         Ty::Fun(Box::new(a), Box::new(b))
     }
 
-    // ---- Basic success cases ----
 
     #[test]
     fn unify_same_constructor_succeeds() {
@@ -605,7 +604,6 @@ mod tests {
         assert_eq!(apply_ty(&s, &v(1)), v(1));
     }
 
-    // ---- Failure: mismatch ----
 
     #[test]
     fn unify_different_constructors_is_mismatch() {
@@ -648,7 +646,6 @@ mod tests {
         assert!(matches!(err, UnifyError::Mismatch { .. }));
     }
 
-    // ---- Failure: occurs check ----
 
     #[test]
     fn occurs_check_rejects_alpha_equals_alpha_to_alpha() {
@@ -685,7 +682,6 @@ mod tests {
         assert_eq!(apply_ty(&s, &v(0)), fun(v(1), v(2)));
     }
 
-    // ---- Decomposition ----
 
     #[test]
     fn unify_fun_decomposes_into_args_and_return() {
@@ -724,7 +720,6 @@ mod tests {
         assert_eq!(apply_ty(&s, &v(2)), string());
     }
 
-    // ---- With existing substitution ----
 
     #[test]
     fn unify_with_existing_subst_extends_it() {
@@ -746,7 +741,6 @@ mod tests {
         assert_eq!(apply_ty(&s, &v(2)), string());
     }
 
-    // ---- Algorithm-W-like chaining ----
 
     #[test]
     fn chained_unifications_propagate_through_subst() {
@@ -783,7 +777,6 @@ mod tests {
         assert_eq!(apply_ty_prune(&s2, &v(1)), int());
     }
 
-    // ---- Idempotence invariant ----
 
     fn is_idempotent(s: &Subst) -> bool {
         for (var, ty) in s.iter() {
@@ -823,7 +816,6 @@ mod tests {
         );
     }
 
-    // ---- Sum / Constructor unification ----
 
     fn sum(name: &str, variants: Vec<(&str, EnumVariantPayloadTy)>) -> Ty {
         Ty::Sum {
@@ -1103,7 +1095,6 @@ mod tests {
         assert!(unify(&s, &s).is_ok());
     }
 
-    // ---- Phase 5: HKT App(Var) ↔ builtin Option/Result ----
 
     #[test]
     fn unify_app_var_with_option_sum_binds_constructor_head() {
@@ -1148,7 +1139,6 @@ mod tests {
         assert_eq!(apply_ty_prune(&s, &v(2)), string());
     }
 
-    // ---- Array length unification (E1) ----
 
     #[test]
     fn unify_static_array_lengths_equal_succeeds() {

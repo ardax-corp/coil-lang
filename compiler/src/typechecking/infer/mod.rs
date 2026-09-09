@@ -509,7 +509,6 @@ pub struct Checker {
     /// Span of a user-written `fn main` when present (conflict with test cases).
     main_decl_span: Option<Range<usize>>,
 
-    // ── Generics ──────────────────────────────────────────────────────────────
     /// Type parameters currently in scope (name → fresh TyVarId).
     /// Pushed when entering a generic function, popped on exit.
     type_params_in_scope: Vec<HashMap<String, TyVarId>>,
