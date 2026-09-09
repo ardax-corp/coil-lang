@@ -1,5 +1,5 @@
 //! Typeclass and instance registry for userland generics.
-//!
+    //!
 //! Stores the shapes of typeclasses (`Num<T>`, `Eq<T>`, …) and
 //! registered implementations (`impl Num<int>`, `impl Num<float>`, …).
 //! The [`Checker`](super::infer::Checker) owns one `Generics` value and
@@ -16,9 +16,7 @@ use std::ops::Range;
 /// Legacy alias — builtin enums live under [`PRELUDE_MODULE`].
 pub const BUILTIN_MODULE: &str = PRELUDE_MODULE;
 
-// ──────────────────────────────────────────────────────────────────────────────
 //  Public data types
-// ──────────────────────────────────────────────────────────────────────────────
 
 /// One method slot in a typeclass declaration.
 #[derive(Debug, Clone)]
@@ -31,19 +29,19 @@ pub struct TypeClassMethodDef {
 }
 
 /// The shape of a typeclass: its name, type parameters, and methods.
-///
+    ///
 /// E.g. `trait Num<T> { fn add(T a, T b) -> T; fn sub(…) -> T; }`
 /// is stored as:
 /// ```text
 /// TypeClassDef { name: "Num", type_params: ["T"],
 ///     methods: [TypeClassMethodDef { name: "add", has_default: false }, …] }
 /// ```
-///
+    ///
 /// Superclasses (Phase 5): `trait Ordered<T: Equal>` stores
 /// `superclasses: ["Equal"]`. Dictionary layout is flattened — subclass
 /// methods first, then each superclass’s methods in declaration order
 /// (transitively).
-///
+    ///
 /// Associated types: `trait Collect<C> { type Elem<A>; … }`
 /// stores structured declarations so generic associated types retain
 /// their own binders and kind.
@@ -180,13 +178,13 @@ impl TypeClassDef {
 }
 
 /// One registered typeclass instance (concrete type → implementation mapping).
-///
+    ///
 /// E.g. `impl Num<int> { fn add(…) { … } }` is stored as:
 /// ```text
 /// InstanceDef { class: "Num", args: [int()],
 ///     method_fqns: { "add" → "Num__int__add" } }
 /// ```
-///
+    ///
 /// Associated types: `impl Collect<Option<int>> { type Elem<A> = A; … }`
 /// stores `assoc_tys: { "Elem" → AssocTypeValue { … } }`.
 #[derive(Debug, Clone)]
@@ -206,9 +204,7 @@ pub struct InstanceDef {
     pub assoc_tys: HashMap<String, AssocTypeValue>,
 }
 
-// ──────────────────────────────────────────────────────────────────────────────
 //  Generics registry
-// ──────────────────────────────────────────────────────────────────────────────
 
 /// Registry of typeclasses and their instances, owned by [`Checker`].
 #[derive(Debug, Default)]
@@ -430,7 +426,6 @@ impl Generics {
 
         self.register_builtin_type_ctors();
 
-        // ---- Add / Sub / Mul / Div ----
         // Individual arithmetic traits so a type can implement only the
         // operations it supports. `Num` is a convenience supertrait that
         // implies all four (see below).
@@ -457,7 +452,6 @@ impl Generics {
             );
         }
 
-        // ---- Num ----
         // Convenience bundle: `T: Num` implies Add + Sub + Mul + Div via
         // the flattened superclass dictionary layout. Num itself has no
         // methods; call sites resolve operators through the op traits.
@@ -474,7 +468,6 @@ impl Generics {
             },
         );
 
-        // ---- Lt / Le / Gt / Ge ----
         // Individual ordering traits so a type can implement only the
         // comparisons it supports. `Ord` is a convenience supertrait that
         // implies all four (see below).
@@ -496,7 +489,6 @@ impl Generics {
             );
         }
 
-        // ---- Ord ----
         // Convenience bundle: `T: Ord` implies Lt + Le + Gt + Ge via the
         // flattened superclass dictionary layout. Ord itself has no methods.
         // Builtin Ord does not declare Eq as a superclass. User-defined
@@ -514,7 +506,6 @@ impl Generics {
             },
         );
 
-        // ---- Eq ----
         self.typeclasses.insert(
             "Eq".into(),
             TypeClassDef {
@@ -537,7 +528,6 @@ impl Generics {
             },
         );
 
-        // ---- Show ----
         self.typeclasses.insert(
             "Show".into(),
             TypeClassDef {
@@ -554,7 +544,6 @@ impl Generics {
             },
         );
 
-        // ---- Length ----
         // `len(x)` resolves through this trait for custom types; arrays,
         // tuples, and dicts keep a structural fast path in the checker.
         self.typeclasses.insert(
@@ -573,7 +562,6 @@ impl Generics {
             },
         );
 
-        // ---- Default / Hash / Serialize / Deserialize / Send / String / Sensitive ----
         // (#[derive] targets; see compiler/src/attrs.rs)
         self.typeclasses.insert(
             "Default".into(),
@@ -675,7 +663,6 @@ impl Generics {
             },
         );
 
-        // ---- Into ----
         // Multi-param conversion trait (auto-imported via prelude::ops).
         // `impl Into<T> for Self` → instance args [Self, T]; method
         // `into` has type `Self → T`. No builtin instances — users write
@@ -697,7 +684,6 @@ impl Generics {
             },
         );
 
-        // ---- Read / Write (IO stream traits; virtual `io` module) ----
         self.typeclasses.insert(
             "Read".into(),
             TypeClassDef {
@@ -737,7 +723,6 @@ impl Generics {
                 .collect()
         };
 
-        // ---- builtin instances: int / float arithmetic + ordering ----
         for ty in [int(), float()] {
             let ty_str = match &ty {
                 Ty::Con(n) if n == INT => "int",
@@ -776,7 +761,6 @@ impl Generics {
             }
         }
 
-        // ---- builtin instances: int / float Eq / Show ----
         self.instances.push(InstanceDef {
             class: "Eq".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -810,7 +794,6 @@ impl Generics {
             assoc_tys: HashMap::new(),
         });
 
-        // ---- string: Eq + Show ----
         self.instances.push(InstanceDef {
             class: "Eq".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -836,7 +819,6 @@ impl Generics {
             assoc_tys: HashMap::new(),
         });
 
-        // ---- bool: Eq + Show ----
         self.instances.push(InstanceDef {
             class: "Eq".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -854,7 +836,6 @@ impl Generics {
             assoc_tys: HashMap::new(),
         });
 
-        // ---- unit: Show ----
         self.instances.push(InstanceDef {
             class: "Show".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -864,7 +845,6 @@ impl Generics {
             assoc_tys: HashMap::new(),
         });
 
-        // ---- Hash for primitives (derive mixes via `field.hash()`) ----
         for (ty, ty_str) in [
             (int(), "int"),
             (float(), "float"),
@@ -883,7 +863,6 @@ impl Generics {
             });
         }
 
-        // ---- byte: Eq + Show + Ord (int opcodes; needed for `byte` ranges) ----
         self.instances.push(InstanceDef {
             class: "Eq".into(),
             defined_module: PRELUDE_OPS_MODULE.into(),
@@ -919,7 +898,6 @@ impl Generics {
             assoc_tys: HashMap::new(),
         });
 
-        // ---- primitive Into (casts via `into()` / `as`) ----
         let into_pairs: [(&str, Ty, &str, Ty); 6] = [
             ("int", int(), "float", float()),
             ("float", float(), "int", int()),
@@ -944,7 +922,6 @@ impl Generics {
             });
         }
 
-        // ---- Stream: Read + Write (methods lower to host natives) ----
         self.instances.push(InstanceDef {
             class: "Read".into(),
             defined_module: "io".into(),
@@ -962,7 +939,6 @@ impl Generics {
             assoc_tys: HashMap::new(),
         });
 
-        // ---- Iterator / IntoIterator (unified for-in protocol) ----
         // Carrier as first type param (same shape as Collect). Builtin
         // arrays/tuples/dicts/coroutines are synthesised at for-in sites
         // without a ground InstanceDef per T; users write ordinary `impl`.

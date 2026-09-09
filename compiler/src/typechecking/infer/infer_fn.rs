@@ -594,7 +594,6 @@ impl Checker {
             }
         }
 
-        // ── Overload-set registration ──────────────────────────────────────
         // Only genuine top-level user functions are registered here.
         // Trait / typeclass bodies suppress via `registering_overloadable_fn`.
         // Inherent `impl` methods register under `Owner::method` in `infer_impl`.

@@ -748,9 +748,7 @@ fn walk_tail_rec(
     }
 }
 
-// ---------------------------------------------------------------------------
 // Entry sites + const environments
-// ---------------------------------------------------------------------------
 
 /// Param-slot constants known for each function (from all agreeing call sites).
 type FnConstParams = HashMap<String, Vec<Option<i64>>>;

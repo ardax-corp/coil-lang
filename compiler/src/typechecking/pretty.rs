@@ -649,7 +649,6 @@ mod tests {
         );
     }
 
-    // ---- Sum / Constructor Display ----
 
     #[test]
     fn display_sum_with_no_payloads() {

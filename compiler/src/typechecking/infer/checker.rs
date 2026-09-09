@@ -42,7 +42,7 @@ mod host_caps;
 
 /// Max native recursion depth for [`Checker::infer`]. Chosen well under what
 /// a debug-build stack of a few MiB can hold even with `infer_inner`'s
-/// current per-call frame size — see docs/internals/limitations.md.
+/// current per-call frame size, see docs/internals/limitations.md.
 const INFER_RECURSION_LIMIT: u32 = 2000;
 
 /// Private unwind payload for [`Checker::infer`]'s recursion-limit panic.
@@ -60,10 +60,7 @@ enum BareCtor {
 impl Checker {
     pub fn new() -> Self {
         let mut env = Env::new();
-        // Always start with one frame so callers can `register_native`
-        // (and later `Compiler::register`) before `check_program` is
-        // ever called. `check_program` pushes a second frame so the
-        // first stays around for inspection.
+        // Start with one frame for register_native; check_program pushes a second.
         env.push();
         let mut def_interner = crate::typechecking::def_id::DefInterner::new();
         let current_module_id = def_interner.intern_module("");
@@ -217,7 +214,7 @@ impl Checker {
     fn register_builtin_enums(&mut self) {
         self.register_builtin_ffi_type();
         self.register_builtin_option_result();
-        // `IoError` is NOT registered here — it is not auto-imported.
+        // `IoError` is NOT registered here, it is not auto-imported.
         // Tags are installed on first `use io::…` that binds `IoError` or an IO fn.
     }
 
@@ -1390,10 +1387,7 @@ impl Checker {
         self.current_tuple_pack = None;
         self.spread_call_arity.clear();
         self.spread_expanded_bases.clear();
-        // Keep module-qualified overload families across multi-file
-        // `check_program` calls so importers can type-dispatch after deps
-        // were checked. Drop bare keys (entry registrations + prior `use`
-        // aliases) so they do not leak into the next module.
+        // Keep module-qualified overloads across files; drop bare keys so they do not leak.
         self.overload_sets.retain(|k, _| k.contains("::"));
         // Declaration/call span tables are per-module.
         self.selected_overloads_by_span.clear();
@@ -1487,13 +1481,13 @@ impl Checker {
 
         // Built-in enums survive the per-program enum reset.
         self.register_builtin_enums();
-        // `fn_param_names` was cleared above — reinstall Vec / Range method ABI.
+        // `fn_param_names` was cleared above, reinstall Vec / Range method ABI.
         self.register_builtin_vec();
         self.register_builtin_range();
         self.register_builtin_stream();
         self.register_builtin_call_sigs();
 
-        // Implicit `use prelude::*; use prelude::ops::*;` — FFI stays out.
+        // Implicit `use prelude::*; use prelude::ops::*;`, FFI stays out.
         self.inject_prelude_scope();
         self.disk_imports.clear();
         self.local_defs.clear();
@@ -1526,11 +1520,7 @@ impl Checker {
         self.module_locals
             .insert(self.current_module_id, self.local_defs.clone());
 
-        // Forward-declaration pre-pass: walk the AST once and
-        // register every `enum` declaration's shape. This must run
-        // before the main infer pass so constructor / match uses
-        // that appear textually before their enum declaration still
-        // resolve correctly.
+        // Register enum shapes before infer so early constructor/match uses resolve.
         if let Err(msgs) = self.pre_register_enums(ast) {
             self.messages.extend(msgs);
         }
@@ -1543,19 +1533,16 @@ impl Checker {
         // Top frame for natives/globals; left on stack after check_program.
         self.push_scope();
 
-        // Forward-declare module-level function signatures so `impl`
-        // methods that appear earlier in the file can call them.
+        // Forward-declare free fns so earlier `impl` methods can call them.
         self.pre_register_free_functions(ast);
-        // Trait instances before the main walk so `for x in` (and other
-        // uses) see `IntoIterator` / `Iterator` when `impl` is later in
-        // the file. Method bodies still typecheck in source order.
+        // Trait instances before the main walk so later `impl` still feeds `for x in`.
         self.pre_register_typeclass_impls(ast);
 
         let ty = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.infer(ast))) {
             Ok(ty) => ty,
             Err(payload) => {
                 // Only swallow our own recursion-limit signal (message
-                // already recorded in `infer`) — any other panic is a real
+                // already recorded in `infer`), any other panic is a real
                 // bug and must keep crashing loudly.
                 if payload.downcast_ref::<RecursionLimitExceeded>().is_none() {
                     std::panic::resume_unwind(payload);
@@ -1566,15 +1553,10 @@ impl Checker {
                 return Ty::Var(self.counter.fresh());
             }
         };
-        // NOTE: the frame is intentionally NOT popped — see the
-        // doc-comment above.
-
-        // Post-pass: run deferred exhaustiveness checks now that
-        // the substitution is closed and every scrutinee type can
-        // be fully resolved.
+        // Frame stays open; see doc-comment above.
         self.run_pending_exhaustiveness();
 
-        // `test("…") { … }` cases provide a virtual main — reject a
+        // `test("…") { … }` cases provide a virtual main, reject a
         // user-written `fn main` in the same file.
         if !self.test_case_names.is_empty()
             && let Some(span) = self.main_decl_span.clone()
@@ -1593,9 +1575,7 @@ impl Checker {
         crate::typechecking::index_facts::analyze_index_facts(self, ast);
         crate::typechecking::fn_value_escape::analyze_fn_value_escape(self, ast);
 
-        // Return the fully-resolved type so callers see e.g. `Foo`
-        // rather than `Var(0)` even when the type was inferred
-        // through let-binding + unify.
+        // Resolve through subst so callers see `Foo`, not `Var(0)`.
         apply_ty_prune(&self.subst, &ty)
     }
 
@@ -1720,7 +1700,7 @@ impl Checker {
     }
 
     /// Begin a `{ … }` block overlay for codegen var types. Function
-    /// frames must NOT use this — restoring across function `push_scope`
+    /// frames must NOT use this, restoring across function `push_scope`
     /// would revive an earlier function's parameter type over a later
     /// `let` of the same name (breaks escaped PolyFn typing).
     fn push_block_codegen_scope(&mut self) {
@@ -1735,7 +1715,7 @@ impl Checker {
                         self.codegen_var_types.insert(name, ty);
                     }
                     None => {
-                        // Binding introduced in this block — keep for
+                        // Binding introduced in this block, keep for
                         // post-check Access / LoadField.
                     }
                 }
@@ -1799,7 +1779,7 @@ impl Checker {
     }
 
     /// True when any parameter position in a (possibly quantified) function
-    /// type still contains an open type variable — the runtime value is a
+    /// type still contains an open type variable, the runtime value is a
     /// PolyFn that expects boxed args.
     fn fn_args_contain_type_param(ty: &Ty) -> bool {
         match ty {
@@ -2170,7 +2150,7 @@ impl Checker {
             );
         }
 
-        // Read::read / Write::write — stream IO groundwork.
+        // Read::read / Write::write, stream IO groundwork.
         {
             use crate::typechecking::ty::byte;
             let var = self.counter.fresh();
@@ -2304,7 +2284,7 @@ impl Checker {
         }
     }
 
-    /// Inner inference — does the actual dispatch but no caching.
+    /// Inner inference, does the actual dispatch but no caching.
     /// Every recursive call into a child still goes through
     /// [`infer`](Self::infer), so each child also gets cached.
     fn infer_inner(&mut self, expr: &Output, id: Option<NodeId>) -> Ty {
@@ -2312,7 +2292,6 @@ impl Checker {
         let child = expr.1.as_ref();
 
         match child {
-            // ---- Literals ----
             Expression::Integer(n) => {
                 // Under an expected `byte`, in-range integer literals type as
                 // `byte` so arithmetic like `return 1 + 1;` (expected byte)
@@ -2335,10 +2314,7 @@ impl Checker {
             }
             Expression::Float(_) => float(),
             Expression::String(s) => {
-                // Under an expected `byte`, a string literal whose UTF-8
-                // encoding is exactly one byte types as `byte`. Under an
-                // expected `[byte]` / `[byte; N]`, the whole literal becomes
-                // that byte array (length must match for fixed `N`).
+                // Expected `byte` / `[byte]` / `[byte; N]`: string lit may type as that byte shape.
                 if let Some(exp) = self.current_expected.clone() {
                     let exp = apply_ty_prune(&self.subst, &exp);
                     if Self::is_byte_ty(&exp) {
@@ -2352,7 +2328,6 @@ impl Checker {
             }
             Expression::Bool(_) => boolean(),
 
-            // ---- Names ----
             Expression::Identifier(name) => self.infer_identifier(name, id, range),
 
             // A bare type name (only valid as an annotation, but be
@@ -2364,21 +2339,16 @@ impl Checker {
                 Ty::Fun(Box::new(arg_ty), Box::new(ret_ty))
             }
 
-            // ---- Wrappers / no-ops ----
             Expression::Noop(_)
             | Expression::Comment(_)
             | Expression::Break
             | Expression::Continue => unit_ty(),
-            // Named call-site arg wrapper — type is the value's type.
+            // Named call-site arg: type is the value's type.
             Expression::NamedArg(_, value) => self.infer(value),
-            // `use` — virtual modules first, else disk-module function alias
+            // `use`: virtual modules first, else disk-module function alias.
             Expression::Use { path, name, alias } => self.infer_use_decl(path, name, alias, range),
             Expression::Module(_, _) => unit_ty(),
-            // FFI declaration block — register each function
-            // signature in the top frame (so subsequent calls
-            // can type-check) and return unit. The body is
-            // empty (FFI symbols are resolved at VM startup,
-            // not at compile time).
+            // FFI extern: register signatures in the top frame; body is empty.
             Expression::ExternBlock {
                 library,
                 declarations,
@@ -2391,11 +2361,8 @@ impl Checker {
                 unit_ty()
             }
 
-            // ---- Blocks ----
-            // Program runs in the current frame (the global frame from
-            // check_program). This is what makes top-level `let`
-            // bindings visible after inference. Block introduces its
-            // own scope.
+            // Program keeps the global frame so top-level `let` stays visible.
+            // Block introduces its own scope.
             Expression::Block(children) => {
                 self.push_scope();
                 self.push_block_codegen_scope();
@@ -2415,17 +2382,14 @@ impl Checker {
                 last_ty
             }
 
-            // ---- Fragments (from `let x = expr`) ----
             Expression::Fragment(children) => self.infer_fragment(children),
 
-            // ---- `let (a, b) = expr` / `let { x, y } = expr` ----
             Expression::LetDestructure { pattern, rhs } => {
                 let rhs_ty = self.infer(rhs);
                 let _ = self.infer_let_pattern(pattern, &rhs_ty, &rhs.0.into_range());
                 unit_ty()
             }
 
-            // ---- `let` / `const` ----
             Expression::Variable(name, ty_opt) => {
                 let var_ty = match ty_opt {
                     Some(ann) => self.parse_type_name(ann),
@@ -2456,7 +2420,6 @@ impl Checker {
                 unit_ty()
             }
 
-            // ---- Assignment / compound assignment / adjust ----
             Expression::CompoundAssign(target, op, value) => self.infer_compound_assign(target, op, value, id, range),
 
             Expression::Assignment(name, value) => {
@@ -2490,7 +2453,6 @@ impl Checker {
                 apply_ty_prune(&self.subst, &val_ty)
             }
 
-            // ---- Arithmetic / bitwise ----
             Expression::Range {
                 start,
                 end,
@@ -2508,7 +2470,6 @@ impl Checker {
             Expression::BitAnd(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "&"),
             Expression::BitOr(lhs, rhs) => self.infer_arith(lhs, rhs, id, range, "|"),
 
-            // ---- Logical ----
             Expression::And(lhs, rhs) | Expression::Or(lhs, rhs) => {
                 let lt = self.infer(lhs);
                 let rt = self.infer(rhs);
@@ -2517,7 +2478,6 @@ impl Checker {
                 boolean()
             }
 
-            // ---- Comparison ----
             Expression::Eq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Eq", "eq"),
             Expression::Neq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Eq", "ne"),
             Expression::Le(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Lt", "lt"),
@@ -2525,7 +2485,6 @@ impl Checker {
             Expression::Leq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Le", "le"),
             Expression::Geq(lhs, rhs) => self.infer_comparison(lhs, rhs, id, range, "Ge", "ge"),
 
-            // ---- Prefix / postfix ----
             Expression::Negate(e) => {
                 let inner = self.infer(e);
                 let pruned = apply_ty_prune(&self.subst, &inner);
@@ -2580,7 +2539,6 @@ impl Checker {
             }
             Expression::Call { name, args } => self.infer_call_expr(name, args, id, range),
 
-            // ---- Match / loop / if ----
             Expression::If(branches) => self.infer_if(branches),
             Expression::Branch(cond, body) => {
                 if let Some(c) = cond {
@@ -2596,7 +2554,7 @@ impl Checker {
                 body,
             } => {
                 if let Some(binding) = identifier {
-                    // `for x in expr { body }` — IntoIterator / Iterator protocol
+                    // `for x in expr { body }`, IntoIterator / Iterator protocol
                     // (builtin arrays, homogeneous tuples/dicts, coroutines, or
                     // user `impl`s). Bind `x : Item`.
                     let it = self.infer(iterable);
@@ -2628,15 +2586,8 @@ impl Checker {
                     }
                 }
             }
-            // ---- Return ----
             Expression::Return(e) | Expression::ImplicitReturn(e) => {
-                // Push the declared return type as expected so ground trait
-                // calls like `return c.into();` can pin `Into`'s target `T`
-                // before constraint discharge (same as annotated `let`).
-                // In result mode, bare `return v` expects the Ok payload. An
-                // explicit `return Result::Ok(v)` / `Result::Err(e)` expects
-                // the full Result when the Ok payload is not itself a Result
-                // (nested `Result<Result<…>, …>` still uses Ok as payload + wrap).
+                // Pin expected return for Into; Result mode: bare return → Ok payload, explicit Result → full type.
                 let prev_expected = self.current_expected.take();
                 let flat_explicit_result = self.fn_result_mode.as_ref().is_some_and(|(ok, _)| {
                     result_ok_err(ok).is_none() && Self::expr_is_explicit_result_construct(e)
@@ -2667,7 +2618,6 @@ impl Checker {
                 never()
             }
 
-            // ---- raise / ? / ?? / ?. ----
             Expression::Raise(e) => {
                 // `raise err?` parses as `raise (err?)` (postfix `?` binds
                 // tighter than the `raise` keyword). Point users at the
@@ -2699,7 +2649,7 @@ impl Checker {
             }
 
             Expression::Try(inner) => {
-                // `(raise err)?` — `raise` already diverges as Err.
+                // `(raise err)?`, `raise` already diverges as Err.
                 // Parens often wrap as `Group(Fragment([Raise]))`.
                 if Self::expr_is_raise(inner) {
                     return self.error_with_help(
@@ -2723,7 +2673,7 @@ impl Checker {
                     self.ensure_option_mode(&inner, &range);
                     inner
                 } else if matches!(resolved, Ty::Var(_)) {
-                    // Not yet pinned — assume Result and let later
+                    // Not yet pinned, assume Result and let later
                     // unifications fill Ok/Err (or fail).
                     let ok = Ty::Var(self.counter.fresh());
                     let err = Ty::Var(self.counter.fresh());
@@ -2829,11 +2779,10 @@ impl Checker {
                 self.resolve_type_projection(owner, name, &arg_tys, &range)
             }
 
-            // ---- Userland FFI builtins ----
             //
             // Legacy AST form (tests / older parsers). Prefer Call + `use ffi::{…}`.
             Expression::Dload(path) => self.infer_ffi_dload(std::slice::from_ref(path), range),
-            // `done(h)` — true when coroutine handle `h` is Done.
+            // `done(h)`, true when coroutine handle `h` is Done.
             Expression::Done(handle) => {
                 let handle_ty = self.infer(handle);
                 let y_var = Ty::Var(self.counter.fresh());
@@ -2855,9 +2804,8 @@ impl Checker {
             Expression::Array(items) => self.infer_array_literal(items, range),
             // Index: static-length OOB check for literal indices
             Expression::Index(target, index_expr) => self.infer_index_expr(target, index_expr, range),
-            // ---- Dict literals ----
             Expression::Dict(fields) => {
-                // Check for duplicate field names — diagnostic
+                // Check for duplicate field names, diagnostic
                 // is raised BEFORE we proceed (recovery: keep
                 // all fields, but emit once).
                 let mut seen: HashMap<String, ()> = HashMap::new();
@@ -2878,21 +2826,14 @@ impl Checker {
                     let fty_pruned = apply_ty_prune(&self.subst, &fty);
                     record_fields.push((f.name.to_string(), fty_pruned));
                 }
-                // Sort canonically by name for unification
-                // determinism (mirrors the existing record-
-                // variant treatment in `Ty::Sum`).
+                // Sort by name for unification determinism (same as sum records).
                 record_fields.sort_by(|a, b| a.0.cmp(&b.0));
                 crate::typechecking::ty::record(record_fields)
             }
-            // — registers a signature in the library and returns
-            // a function id (an `int`). We verify that each
-            // arg/ret position is an `FFIType::X` constructor
-            // application (otherwise the codegen won't know how
-            // to encode the type). Returns `int`.
+            // `declare`: args/ret must be `FFIType::X`; returns function id (`int`).
             Expression::Declare(args) => self.infer_ffi_declare(args, range),
             Expression::Invoke(args) => self.infer_ffi_invoke(args, range),
 
-            // ---- Defer / coroutines / list ----
             Expression::Defer { captures, body } => {
                 // Same explicit-capture isolation as lambdas: outer locals
                 // are invisible unless listed in `use (…)`.
@@ -2986,13 +2927,11 @@ impl Checker {
             }
             Expression::List(elements) => self.infer_list(elements, range),
 
-            // ---- Default arm ----
             Expression::Default(_) => self
                 .current_match_lhs
                 .clone()
                 .unwrap_or_else(|| Ty::Var(self.counter.fresh())),
 
-            // ---- Function declarations ----
             Expression::Function {
                 docs: _,
                 attrs,
@@ -3017,14 +2956,12 @@ impl Checker {
                 range,
             ),
 
-            // ---- Anonymous lambdas ----
             Expression::Lambda {
                 args,
                 captures,
                 body,
             } => self.infer_lambda(args, captures, body, range),
 
-            // ---- `test("…") { … }` harness cases ----
             Expression::TestCase { name, body } => self.infer_test_case(name, body, &range),
             Expression::Implementation {
                 what,
@@ -3076,7 +3013,6 @@ impl Checker {
             Expression::Instantiate(class_expr, args) => self.infer_instantiate(class_expr, args, range),
             Expression::Field { .. } => unit_ty(),
 
-            // ---- Enums / constructors / type aliases ----
             Expression::EnumDecl {
                 docs: _,
                 name,
@@ -3149,11 +3085,6 @@ impl Checker {
             }
             Expression::EnumVariant { payload, .. } => {
                 use parser::ast::EnumVariantPayload;
-                // The pre-walk mints an ID for every payload
-                // element. Recurse so this arm's ID consumption
-                // stays in lockstep. The actual payload parsing
-                // happens in `infer_enum_decl`, which knows the
-                // parent variant name and target arity.
                 match payload {
                     EnumVariantPayload::Unit => {}
                     EnumVariantPayload::Tuple(parts) => {
@@ -3175,7 +3106,6 @@ impl Checker {
                 fields,
             } => self.infer_construct(enum_name, variant_name, fields, range, id),
 
-            // ---- Generics ----
             Expression::TypeClass {
                 docs: _,
                 name,
@@ -3241,13 +3171,7 @@ impl Checker {
                 self.forall_type(params, |checker| checker.infer(ty))
             }
 
-            // ---- Fallback ----
-            //
             // `unreachable!` because the match above is exhaustive over every
-            // `Expression` variant. The arm is here so that adding a new variant
-            // produces a non-exhaustive match error here, instead of silently
-            // ignoring the new node. If you add a variant, handle it in the match
-            // above and remove this arm.
             #[allow(unreachable_patterns)]
             _ => unreachable!("all Expression variants must be handled above"),
         }
@@ -3400,8 +3324,7 @@ impl Checker {
     ) -> Ty {
         let module_ns = path.join("::");
         if name == "*" {
-            // Prelude is injected automatically; every other module —
-            // virtual or userland — requires explicit imports.
+            // Prelude is injected automatically; every other module,             // virtual or userland, requires explicit imports.
             let mod_label = if module_ns.is_empty() {
                 "<entry>".to_string()
             } else {
@@ -3462,7 +3385,7 @@ impl Checker {
                 self.overload_sets.insert(local.clone(), cands);
             }
         }
-        // Disk imports are file-level globals — track for lambda/defer
+        // Disk imports are file-level globals, track for lambda/defer
         // rebind after `take_and_isolate`.
         if name != "*" {
             self.disk_imports.insert(local);
@@ -3596,7 +3519,7 @@ impl Checker {
                 if self.classes.contains_key(name) {
                     return self.access_class_field(name, field, &[], range);
                 }
-                // Bare type name — resolve via the
+                // Bare type name, resolve via the
                 // checker's enum registry.
                 let variant_names = self.enums.get(name).cloned().unwrap_or_default();
                 let payloads = self.enum_payloads.get(name).cloned().unwrap_or_default();
@@ -3800,10 +3723,7 @@ impl Checker {
                 vec_element_ty(other).expect("checked").clone()
             }
             Ty::Tuple(tys) => {
-                // Tuple indexing: same diagnostic on constant
-                // out-of-bounds; dynamic fallback returns a
-                // fresh ty var (the runtime pushes -1i64 for
-                // OOB).
+                // Tuple index: constant OOB diagnostic; dynamic OOB → fresh ty (runtime -1).
                 if let Expression::Integer(idx) = index_expr.1.as_ref() {
                     let i = *idx;
                     if i < 0 || (i as usize) >= tys.len() {
@@ -3978,7 +3898,7 @@ impl Checker {
             };
 
             if matching.len() == 1 {
-                // Unique match — record and return its type.
+                // Unique match, record and return its type.
                 let candidate = matching[0].clone();
                 self.record_selected_overload(
                     id,
@@ -3987,10 +3907,7 @@ impl Checker {
                 );
                 return self.instantiate_ty(&candidate.scheme);
             } else if matching.len() > 1 || expected.is_none() {
-                // Multiple matches or no expected type — ambiguous.
-                // For the single-candidate case there is no ambiguity even
-                // without context, but we already checked `is_overloaded`
-                // (len > 1), so ambiguous.
+                // Overloaded: multiple matches or no expected type → ambiguous.
                 let arities: Vec<String> = candidates
                     .iter()
                     .map(|c| Self::overload_sig_label(c))
@@ -4008,10 +3925,7 @@ impl Checker {
                     )),
                 );
             }
-            // matching.len() == 0 with an expected type — no candidate
-            // unifies. Emit a dedicated diagnostic rather than falling
-            // through to the last-registered scheme (wrong codegen key /
-            // confusing TypeMismatch downstream).
+            // No overload candidate unifies with expected type: dedicated diagnostic (not last scheme).
             let arities: Vec<String> = candidates
                 .iter()
                 .map(|c| Self::overload_sig_label(c))
@@ -4120,7 +4034,7 @@ impl Checker {
                 }
             }
         }
-        // Method call: `recv.method(args)` — Access callee.
+        // Method call: `recv.method(args)`, Access callee.
         if let Expression::Access(recv, method) = name.1.as_ref() {
             let method_args = args.as_deref().unwrap_or(&[]);
             let method_has_named = method_args
@@ -4333,10 +4247,7 @@ impl Checker {
                     return result;
                 }
             }
-            // Inherent class methods win over ground trait methods
-            // (Rust-style): `impl Point { fn show() ... }` must not be
-            // shadowed by prelude `Show::show` when no Show instance
-            // exists for Point.
+            // Inherent class methods win over ground trait methods (Rust-style).
             let class_owner = self.class_owner_from_ty(&resolved);
             if let Some(owner) = class_owner.as_ref()
                 && self
@@ -4468,11 +4379,8 @@ impl Checker {
                 return result;
             }
 
-            // Ground trait method: `recv.into()` / `recv.show()` via a
-            // concrete instance (no open bound). Pin the return type from
-            // `current_expected` when present so `let y: T = x.into();`
-            // (or `return x.into();` under `-> T`) can select among
-            // multiple `Into` targets.
+            // Ground trait method via concrete instance; pin return from
+            // `current_expected` when present (`let y: T = x.into()`).
             if let Some((class, scheme)) =
                 self.ground_trait_method_for_receiver(method, &recv_ty)
             {
@@ -4795,7 +4703,6 @@ impl Checker {
             }
         }
 
-        // ── Overload-dispatch: select by argc + argument types ─────
         // Must happen before `has_named` and `fn_has_rest` branches so
         // the correct candidate's param_names / is_rest are used.
         if self.is_overloaded(&ident) {
@@ -4818,7 +4725,7 @@ impl Checker {
                 .select_overload_for_args(&ident, argc, &prelim_tys);
             match candidate_opt {
                 OverloadSelect::NoMatch => {
-                    // No candidate accepts this arity/types — emit a
+                    // No candidate accepts this arity/types, emit a
                     // "no overload" error listing the available arities.
                     let available: Vec<String> = self
                         .overload_candidates(&ident)
@@ -4896,7 +4803,7 @@ impl Checker {
         }
 
         // Named call-site args: skip trait UFCS and resolve an ordinary
-        // function (partial application is allowed — residual Fun is OK).
+        // function (partial application is allowed, residual Fun is OK).
         if has_named {
             let scheme = self.lookup_fn_scheme(&ident);
             let (fun_ty, fresh_constraints, fresh_mapping, original_scheme) = match scheme {
@@ -5154,10 +5061,7 @@ impl Checker {
             id,
             range.clone(),
         );
-        // Discharge trait constraints from the instantiated scheme.
-        // This verifies that each concrete type argument satisfies the
-        // required bound, or propagates the constraint if the caller is
-        // itself generic with the same bound.
+        // Discharge instantiated trait constraints (or propagate if caller shares the bound).
         if !fresh_constraints.is_empty() {
             self.discharge_constraints(id, &fresh_constraints, &range);
             if let Some(scheme) = original_scheme.as_ref() {
@@ -5173,9 +5077,7 @@ impl Checker {
         result
     }
 
-    // ============================================================
     //  Type cache and lookup
-    // ============================================================
 
     fn record_selected_overload(
         &mut self,
@@ -5317,9 +5219,7 @@ impl Checker {
         self.cache.len()
     }
 
-    // ============================================================
     //  Helpers
-    // ============================================================
 
     /// File-level imports (virtual + disk) are globals, not closure captures.
     /// Snapshot their schemes, drop them from `uncaptured`, then rebind after
@@ -5444,7 +5344,7 @@ impl Checker {
                             self.record_codegen_var_type(name.to_string(), pruned.clone());
                             self.maybe_record_polyfn_binding((child.0.start, child.0.end), &pruned);
                             // `let id = declare(...)` may wrap Declare/Call in
-                            // ExprStatement/Statement/`?` — unwrap before matching.
+                            // ExprStatement/Statement/`?`, unwrap before matching.
                             let init = unwrap_expr_wrappers(next);
                             let init = match init.1.as_ref() {
                                 Expression::Try(inner) => unwrap_expr_wrappers(inner),
@@ -5589,7 +5489,7 @@ impl Checker {
         if self.cmp_scalar_enum_with_backing(&lt, &rt) {
             return boolean();
         }
-        // `b == "/"` — single-byte string literal compares as `byte`.
+        // `b == "/"`, single-byte string literal compares as `byte`.
         if Self::is_byte_ty(&lt) && Self::is_string_ty(&rt) {
             if self.try_mark_string_literal_as_byte(rhs) {
                 return boolean();
@@ -5621,7 +5521,7 @@ impl Checker {
         boolean()
     }
 
-    /// Lazy `start..end` / `start..=end` — bounds unify to `T` with `T: Ord`.
+    /// Lazy `start..end` / `start..=end`, bounds unify to `T` with `T: Ord`.
     fn infer_range(
         &mut self,
         start: &Output,
@@ -5693,7 +5593,7 @@ impl Checker {
                     );
                     return false;
                 }
-                // Free var — pin to int (literals / unconstrained inference).
+                // Free var, pin to int (literals / unconstrained inference).
                 let _ = self.unify(elem, &int(), range, "range element type");
                 true
             }
@@ -5744,7 +5644,7 @@ impl Checker {
         if let Some(backing) = self.arith_scalar_enum_backing(&lp, &rp) {
             return backing;
         }
-        // Nominal `Matrix` — `*` is matmul (Mul), `+`/`-` are element-wise.
+        // Nominal `Matrix`, `*` is matmul (Mul), `+`/`-` are element-wise.
         // Must run before aggregate zip so nested-array data inside Matrix
         // is not treated as Hadamard product.
         if crate::typechecking::aggregate_arith::is_matrix_ty(&lp) || crate::typechecking::aggregate_arith::is_matrix_ty(&rp) {
@@ -5997,10 +5897,7 @@ impl Checker {
             );
         }
 
-        // Open element → bind op trait (Tier B).
-        // `%` / `**` intentionally skip trait binding — same as scalar
-        // `infer_arith` (no Mod/Pow trait dictionaries yet). Concrete
-        // `int`/`float` elements still typecheck via `is_numeric_elem`.
+        // Open elem → bind op trait; `%`/`**` skip (no Mod/Pow dicts); concrete int/float via is_numeric_elem.
         if let Ty::Var(v) = &elem {
             let (class, method) = match op {
                 "+" => ("Add", "add"),
@@ -6158,7 +6055,7 @@ impl Checker {
                 length: *length,
             };
         }
-        // Scalar path — leave to caller.
+        // Scalar path, leave to caller.
         pruned
     }
 
@@ -6208,7 +6105,7 @@ impl Checker {
 
     /// Warn when static dims exceed Approach A packed-opcode packing
     /// (`u8` for matrix dims, `u16` for `dot` length). Codegen still falls
-    /// back to scalar unroll — this is advisory, not a hard error.
+    /// back to scalar unroll, this is advisory, not a hard error.
     fn warn_packed_la_dim_limit(
         &mut self,
         kind: &crate::typechecking::aggregate_arith::LinearAlgebraKind,
@@ -6527,7 +6424,7 @@ impl Checker {
         list(first_ty)
     }
 
-    /// `len(x)` — prelude sugar for `x.len()` (structural ArrayLen / Length).
+    /// `len(x)`, prelude sugar for `x.len()` (structural ArrayLen / Length).
     fn infer_len_call(
         &mut self,
         args: Option<&[Output]>,
@@ -6592,7 +6489,7 @@ impl Checker {
         match strip_readonly(ty) {
             Ty::Array { .. } | Ty::Tuple(_) | Ty::Record { .. } => true,
             Ty::Con(name) if name == "string" || name == crate::typechecking::ty::STRING => true,
-            // `Vec<T>` shares the array runtime carrier — same ArrayLen path.
+            // `Vec<T>` shares the array runtime carrier, same ArrayLen path.
             other if vec_element_ty(other).is_some() => true,
             _ => false,
         }
@@ -6720,7 +6617,7 @@ impl Checker {
         result_app_ty(unit_ty(), string())
     }
 
-    /// `block_on(coro)` — drive `coroutine<Y>` / `coroutine<Y, unit>` to completion → `Y`.
+    /// `block_on(coro)`, drive `coroutine<Y>` / `coroutine<Y, unit>` to completion → `Y`.
     fn infer_block_on(&mut self, args: &[Output], range: Range<usize>) -> Ty {
         if args.len() != 1 {
             for arg in args {
@@ -6856,7 +6753,7 @@ impl Checker {
         float()
     }
 
-    /// `dot(a, b)` — equal-length homogeneous numeric vectors → scalar.
+    /// `dot(a, b)`, equal-length homogeneous numeric vectors → scalar.
     fn infer_dot(&mut self, args: &[Output], id: Option<NodeId>, range: Range<usize>) -> Ty {
         use crate::typechecking::aggregate_arith::{
             LinearAlgebraInfo, LinearAlgebraKind, classify_vector, elem_is_float, is_numeric_elem,
@@ -6938,7 +6835,7 @@ impl Checker {
         elem
     }
 
-    /// `cross(a, b)` — length-3 vectors → length-3 vector.
+    /// `cross(a, b)`, length-3 vectors → length-3 vector.
     fn infer_cross(&mut self, args: &[Output], id: Option<NodeId>, range: Range<usize>) -> Ty {
         use crate::typechecking::aggregate_arith::{
             LinearAlgebraInfo, LinearAlgebraKind, classify_vector, elem_is_float, is_numeric_elem,
@@ -7027,7 +6924,7 @@ impl Checker {
         }
     }
 
-    /// `matmul(A, B)` — nested static matrices `(m×k) × (k×n) → (m×n)`.
+    /// `matmul(A, B)`, nested static matrices `(m×k) × (k×n) → (m×n)`.
     fn infer_matmul(&mut self, args: &[Output], id: Option<NodeId>, range: Range<usize>) -> Ty {
         use crate::typechecking::aggregate_arith::{
             LinearAlgebraInfo, LinearAlgebraKind, classify_matrix, elem_is_float, is_numeric_elem,
@@ -7142,7 +7039,7 @@ impl Checker {
         }
     }
 
-    /// `matrix(rows)` — wrap nested static matrix data as `Matrix<Data>`.
+    /// `matrix(rows)`, wrap nested static matrix data as `Matrix<Data>`.
     fn infer_matrix_ctor(
         &mut self,
         args: &[Output],
@@ -7386,7 +7283,7 @@ impl Checker {
         }
     }
 
-    /// Unary `-` on a `Matrix` — element-wise negate of every cell.
+    /// Unary `-` on a `Matrix`, element-wise negate of every cell.
     fn infer_matrix_neg(&mut self, matrix_ty: Ty, id: Option<NodeId>, range: Range<usize>) -> Ty {
         use crate::typechecking::aggregate_arith::{
             LinearAlgebraInfo, LinearAlgebraKind, classify_matrix, elem_is_float, is_numeric_elem,
@@ -7511,7 +7408,7 @@ impl Checker {
                         break;
                     }
                     _ => {
-                        // We've run out of function parameters — the call
+                        // We've run out of function parameters, the call
                         // had more arguments than the function accepts.
                         let actual = format!("{}", apply_ty_prune(&self.subst, &pruned));
                         return self.error_with_help(
@@ -7992,7 +7889,7 @@ impl Checker {
         matches!(ty, Ty::Con(n) if n == crate::typechecking::ty::INT)
     }
 
-    /// `[byte]`, `[byte; N]`, or `Vec<byte>` — returns the length constraint when so.
+    /// `[byte]`, `[byte; N]`, or `Vec<byte>`, returns the length constraint when so.
     /// `Vec<byte>` is treated as dynamic length.
     fn is_byte_array_ty(ty: &Ty) -> Option<ArrayLength> {
         Self::is_byte_slice_ty(ty).or_else(|| {
@@ -8502,7 +8399,7 @@ impl Checker {
     ///
     /// 1. Resolve every argument under the current substitution.
     /// 2. If any arg is still open, check whether an active constraint covers
-    ///    the whole predicate (same class + args) — if so, forward the dict.
+    ///    the whole predicate (same class + args), if so, forward the dict.
     /// 3. When all args are concrete, look up `find_instance` with the N-ary
     ///    arg list (HKT heads rewritten via [`instance_lookup_args`]).
     ///
@@ -9478,7 +9375,7 @@ impl Checker {
                 self.forall_type(params, |checker| checker.parse_type_name(ty))
             }
             Expression::Array(items) => {
-                // `[T; N]` — parser emits `[Type(T), Integer(N)]` (or the
+                // `[T; N]`, parser emits `[Type(T), Integer(N)]` (or the
                 // legacy single-`Integer(N)` shape, which always meant
                 // `[int; N]`).
                 if items.len() == 2
@@ -9793,7 +9690,7 @@ impl Checker {
                 if let Some(value) = inst.assoc_tys.get(assoc) {
                     let ty = self.instantiate_assoc_value(value, args);
                     if found.is_some() {
-                        // Ambiguous across multiple instances — leave open.
+                        // Ambiguous across multiple instances, leave open.
                         found = None;
                         break;
                     }
@@ -9803,7 +9700,7 @@ impl Checker {
             if let Some(ty) = found {
                 return ty;
             }
-            // No unique ground instance — fresh var (caller may pin later).
+            // No unique ground instance, fresh var (caller may pin later).
             return Ty::Var(self.counter.fresh());
         }
 
@@ -9982,11 +9879,7 @@ impl Checker {
         Some(apply_ty_prune(&self.subst, &ty))
     }
 
-    // ============================================================
-    // ============================================================
     //  Native registration
-    // ============================================================
-    // ============================================================
 
     /// Register a native (built-in) function with the type system.
     ///
@@ -10643,7 +10536,7 @@ impl Checker {
                     self.infer_ffi_type_expr(item);
                 }
             }
-            // `FFIType::Int`, etc. — real Construct nodes; use normal infer
+            // `FFIType::Int`, etc., real Construct nodes; use normal infer
             // so enum constructor typing + child IDs stay aligned.
             _ => {
                 let _ = self.infer(expr);
@@ -10676,7 +10569,7 @@ impl Checker {
                                 t if t == tag::STRING => string(),
                                 t if t == tag::BOOL => boolean(),
                                 t if t == tag::VOID => unit_ty(),
-                                // int / int32 / ptr / … — treat as int at the
+                                // int / int32 / ptr / …, treat as int at the
                                 // language level (narrow C widths are ABI-only).
                                 _ => int(),
                             };
@@ -10692,7 +10585,6 @@ impl Checker {
         }
     }
 
-    // ============================================================
 
     /// Register a class: store its name and the (visibility, name,
     /// type) of each field. The class itself becomes a `Ty::Con(key)`
@@ -10895,11 +10787,9 @@ impl Checker {
         subst_ty_params(&fty, &map)
     }
 
-    // ============================================================
     //  Test harness cases
-    // ============================================================
 
-    /// Typecheck `test("desc") { body }` — name must be a string literal;
+    /// Typecheck `test("desc") { body }`, name must be a string literal;
     /// body runs in Result<(), string> mode.
     fn infer_test_case(&mut self, name: &Output, body: &Output, range: &Range<usize>) -> Ty {
         let name_ty = self.infer(name);
@@ -10940,9 +10830,7 @@ impl Checker {
         unit_ty()
     }
 
-    // ============================================================
     //  Functions (monomorphic recursion)
-    // ============================================================
 
     /// Free generic functions compile one shared body and box type-param
     /// arguments. `Option::Some(x)` then wraps that box, so a caller that
@@ -11264,7 +11152,7 @@ impl Checker {
 
     /// Select an overload by arity only (no argument types).
     ///
-    /// Returns [`None`] on no match **or** ambiguity — callers that need to
+    /// Returns [`None`] on no match **or** ambiguity, callers that need to
     /// distinguish those cases should use [`Self::select_overload_for_args`].
     pub fn select_overload(&self, fn_name: &str, argc: usize) -> Option<&OverloadCandidate> {
         match self.select_overload_for_args(fn_name, argc, &[]) {
@@ -11765,7 +11653,7 @@ impl Checker {
                 || fixed_count == 0);
 
         // `filled_mask` is a u64 on the VM stack (MakeFn / CallIndirect); cap
-        // fixed arity so bit shifts never wrap. Abort early — continuing would
+        // fixed arity so bit shifts never wrap. Abort early, continuing would
         // emit a truncated mask and mis-bind partials.
         if fixed_count > 64 {
             let msg = Message::error(
@@ -11823,7 +11711,7 @@ impl Checker {
                     } else if has_named {
                         // Named under-apply: leave a hole (partial).
                     } else {
-                        // Positional-only partial — stop before first hole.
+                        // Positional-only partial, stop before first hole.
                         break;
                     }
                 }
@@ -11943,9 +11831,7 @@ impl Checker {
         result
     }
 
-    // ============================================================
     //  Enums and pattern matching
-    // ============================================================
 
     /// Pre-pass: collect top-level `fn` parameter names (syntactic) for FFI
     /// call-site flow before main inference.
@@ -12177,7 +12063,7 @@ impl Checker {
             self.current_tuple_pack = None;
             let param_names: Vec<String> = arg_tys.iter().map(|(n, _)| n.clone()).collect();
             let fqn = format!("{}::{}", owner_key, name);
-            // FQN only — a bare `join` / `iter` key would shadow
+            // FQN only, a bare `join` / `iter` key would shadow
             // `use path::{join}` and other free-function imports.
             self.fn_param_names.insert(fqn.clone(), param_names);
             let has_rest = matches!(args.1.as_ref(), Expression::Fragment(children)
@@ -12969,7 +12855,7 @@ impl Checker {
                         self.pop_type_params_for_type_parsing(pushed);
                         return;
                     }
-                    // Prelude enum short name was rebound — drop the
+                    // Prelude enum short name was rebound, drop the
                     // compiler registration so the user enum can take over.
                     self.enums.remove(&name_str);
                     self.enum_tags.remove(&name_str);
@@ -13066,9 +12952,6 @@ impl Checker {
             }
 
             // Recurse into the same children that `id::pre_walk` would
-            // visit. We mirror the structure of `pre_walk_children`
-            // but only need to find nested EnumDecls — most
-            // branches can just walk their expression children.
             Expression::Noop(_)
             | Expression::Comment(_)
             | Expression::Integer(_)
@@ -13279,7 +13162,7 @@ impl Checker {
             Expression::Match { scrutinee, arms } => {
                 self.pre_register_enums_walk(scrutinee, errors);
                 for arm in arms {
-                    // Patterns are not expressions — no recursion
+                    // Patterns are not expressions, no recursion
                     // into the pattern body. (Constructor patterns
                     // contain only nested patterns.)
                     self.pre_register_enums_walk(&arm.body, errors);
@@ -13287,9 +13170,6 @@ impl Checker {
             }
 
             // The `EnumDecl` arm above handles every EnumDecl in
-            // the tree; no second arm is needed here. `EnumVariant`
-            // and `Construct` are still reachable (e.g. inside a
-            // function body) and just recurse.
             Expression::EnumVariant { .. } => {}
             Expression::Construct { .. } => {}
 
@@ -13308,7 +13188,7 @@ impl Checker {
                 }
             }
 
-            // New generic-system nodes — recurse into children.
+            // New generic-system nodes, recurse into children.
             Expression::Forall { ty, .. } => self.pre_register_enums_walk(ty, errors),
             Expression::TypeClass { methods, .. } => {
                 for m in methods {
@@ -13351,15 +13231,10 @@ impl Checker {
         }
     }
 
-    // ---- Enum declarations ----
 
     fn infer_enum_decl(&mut self, name: &str, variants: &[Output], _range: &Range<usize>) {
         use parser::ast::EnumVariantPayload;
         let name_str = self.qualify_module_name(name);
-        // Look up the pre-reserved shape. If missing, the
-        // pre-pass rejected this enum (duplicate / collision);
-        // the caller has already pushed a diagnostic. Just walk
-        // the children to keep IDs aligned.
         let pre_shape = match self.enums.get(&name_str).cloned() {
             Some(v) => v,
             None => {
@@ -13379,20 +13254,10 @@ impl Checker {
             }
         };
 
-        // Walk each variant. We delegate to `self.infer(v)` for the
-        // whole variant — its `EnumVariant` arm in `infer_inner`
-        // recurses into the payload children. That gives us
-        // exactly `1 + N` IDs per variant where N is the number
-        // of payload entries the pre-walk visited (1 per Tuple
-        // element, 1 per Record field's value, 0 for Unit). The
-        // pre-pass has already built the typed payload, so the
-        // infer recursion is purely for ID-alignment.
+        // Infer each variant for NodeId alignment; typed payload comes from the pre-pass.
         let mut built_variants: Vec<(String, EnumVariantPayloadTy)> = Vec::new();
         for (i, v) in variants.iter().enumerate() {
-            // Consume IDs for the variant itself + its payload
-            // before any early `continue`. The pre-walk visited
-            // this node and its payload regardless of whether we
-            // accept it.
+            // Consume IDs for variant + payload before any early continue.
             let _ = self.infer(v);
 
             if let Expression::EnumVariant {
@@ -13410,10 +13275,7 @@ impl Checker {
                     }
                 };
 
-                // Sanity: name + payload arity should match the
-                // pre-pass shape. If not, the pre-pass has already
-                // complained — skip registering this variant but
-                // keep IDs aligned (already done above).
+                // Skip if pre-pass already diagnosed a shape mismatch (IDs aligned above).
                 if pre_shape.get(i) != Some(&vname_str) {
                     continue;
                 }
@@ -13444,15 +13306,8 @@ impl Checker {
         self.env
             .insert_top(name_str.clone(), Scheme::mono(Ty::Con(name_str.clone())));
 
-        // Register each variant as a callable in the env. Use the
-        // qualified name `EnumName::VariantName` as the binding
-        // key — `Construct` looks up by qualified name in this
-        // map.
+        // Bind variants as `EnumName::VariantName` (Construct lookup key).
         for (i, (vname, payload_ty)) in built_variants.iter().enumerate() {
-            // Field count = 0 for Unit, N for Tuple/Record.
-            // Same arity, regardless of shape — the shape
-            // discrimination happens at call-site / pattern
-            // inference, not at the constructor's HM type.
             let arity = payload_ty.field_count();
             let ctor_ty = Ty::Constructor {
                 owner: Box::new(sum_ty.clone()),
@@ -13462,11 +13317,6 @@ impl Checker {
             let scheme = if arity == 0 {
                 Scheme::mono(ctor_ty)
             } else {
-                // Curried: arg1 -> arg2 -> ... -> Constructor.
-                // Field order matches declaration order for both
-                // Tuple and Record — codegen reorders record
-                // call sites to declaration order before pushing
-                // the MAKE_ENUM.
                 let arg_tys: Vec<Ty> = payload_ty.field_types().into_iter().cloned().collect();
                 let mut fun_ty = ctor_ty;
                 for arg_ty in arg_tys.iter().rev() {
@@ -13693,10 +13543,6 @@ impl Checker {
                 (args.len() == want, args.len() != want)
             }
             (EnumVariantPayloadTy::Record(_), EnumConstructPayload::Record(_)) => {
-                // Defer the arity check to the field-by-field
-                // pass below, which produces more specific
-                // diagnostics ("Missing field `x`" instead of
-                // "expects 2 arguments, got 1").
                 (true, false)
             }
             _ => (false, false),
@@ -13775,10 +13621,6 @@ impl Checker {
                 }
             }
             EnumConstructPayload::Record(parts) => {
-                // Build a name → value map for the call site, then
-                // walk the DECLARATION order. Each declared field
-                // must be supplied exactly once; the codegen
-                // reorders the bytecode accordingly.
                 let mut call_site: std::collections::HashMap<&str, &Output> =
                     std::collections::HashMap::with_capacity(parts.len());
                 for p in parts {
@@ -13795,7 +13637,7 @@ impl Checker {
                     }
                 }
                 let EnumVariantPayloadTy::Record(decl_fields) = &expected_payload else {
-                    // unreachable — shape_matches already proved it
+                    // unreachable, shape_matches already proved it
                     unreachable!();
                 };
                 for (decl_name, decl_ty) in decl_fields.iter() {
@@ -13974,7 +13816,7 @@ impl Checker {
             return Some(payload);
         }
         if self.is_poly_enum(enum_name) {
-            // Scrutinee not yet pinned — freshen an applied type and
+            // Scrutinee not yet pinned, freshen an applied type and
             // unify so bindings share type vars with the scrutinee.
             let owner = self.fresh_poly_app_ty(enum_name);
             self.unify(
@@ -14256,7 +14098,7 @@ impl Checker {
     /// Inspect the first non-trivial sub-pattern of a payload and
     /// report which inner tag (if any) it tests. Two arms of the
     /// same outer tag are reachable as long as their inner coverage
-    /// differs — e.g. `Result::Ok(Option::Some(v))` and
+    /// differs, e.g. `Result::Ok(Option::Some(v))` and
     /// `Result::Ok(Option::None)` are two distinct reachable arms.
     /// The codegen's inner `JUMP_IF_MATCH` test chain guarantees
     /// this at runtime; the typechecker just needs to stay out of
@@ -14357,7 +14199,7 @@ impl Checker {
                 payload,
                 ..
             } => {
-                // Imported short names resolve via env/FQN — same as
+                // Imported short names resolve via env/FQN, same as
                 // `infer_pattern` / `infer_construct`.
                 let enum_key = self
                     .resolve_enum_key(enum_name)
@@ -14392,22 +14234,12 @@ impl Checker {
     }
 
     /// Verify a single match site. Records diagnostics but does
-    /// not abort — error recovery continues.
+    /// not abort, error recovery continues.
     fn check_exhaustiveness(&mut self, pending: &PendingExhaustive) {
-        // Re-resolve the scrutinee under the current substitution
-        // so any variables bound between the match site and the
-        // post-pass are visible.
         let resolved = apply_ty_prune(&self.subst, &pending.scrutinee_ty);
 
-        // Track which (outer tag, inner coverage) pairs have been
-        // seen and whether a catch-all (`default` / binding) is
-        // present. Two arms with the same outer tag but DIFFERENT
-        // inner coverage (e.g. `Result::Ok(Option::Some(v))` vs
-        // `Result::Ok(Option::None)`) are both reachable — the
-        // codegen's inner `JUMP_IF_MATCH` chain dispatches between
-        // them at runtime. Only when both the outer tag AND the
-        // inner coverage match an earlier arm is the arm truly
-        // unreachable.
+        // Same outer tag + different inner coverage stays reachable (runtime
+        // JUMP_IF_MATCH chain). Duplicate (tag, inner) is unreachable.
         let mut seen: BTreeMap<u32, BTreeSet<CoverageTree>> = BTreeMap::new();
         let mut has_catchall = false;
         let mut keyword_catchalls: Vec<Range<usize>> = Vec::new();
@@ -14420,8 +14252,6 @@ impl Checker {
             } else if let Some(t) = arm.tag {
                 let inner_seen = seen.entry(t).or_default();
                 if !inner_seen.insert(arm.inner.clone()) {
-                    // Duplicate (tag, inner coverage) — this arm
-                    // is unreachable.
                     self.messages.push(Message::error(
                         ErrorCode::UnreachableArm,
                         "Unreachable arm: this pattern is matched by an earlier arm".to_string(),
@@ -14469,10 +14299,6 @@ impl Checker {
         };
 
         if let Some(variants) = variants {
-            // An outer tag is "covered" for the purpose of the
-            // non-exhaustive check if any arm with that tag
-            // exists. The inner coverage only matters for the
-            // duplicate-arm check above.
             let covered: BTreeSet<u32> = seen.into_keys().collect();
             let missing: Vec<String> = variants
                 .iter()
@@ -14600,9 +14426,6 @@ impl Checker {
         self.unify(&fmt_ty, &string(), &fmt.0.into_range(), "print format");
 
         // Pull the format string out of the literal so we can
-        // parse its specifiers. If the format isn't a string
-        // literal, skip validation (the user has a type error
-        // elsewhere; we shouldn't cascade).
         let fmt_str = match fmt.1.as_ref() {
             Expression::String(s) => Some(s.to_string()),
             _ => None,
@@ -14635,7 +14458,7 @@ impl Checker {
                             );
                             spec_index += 1;
                         } else {
-                            // Specifier with no arg — also an
+                            // Specifier with no arg, also an
                             // error.
                             let mut msg = Message::error(
                                 ErrorCode::GenericTypeError,
@@ -14661,10 +14484,7 @@ impl Checker {
                 }
             }
         } else if let Some(p) = params {
-            // No specifiers (or non-literal format) — type-check
-            // each param and discard (the VM still consumes the
-            // args at the bytecode level, even if the format
-            // string contains no specifiers).
+            // No format specifiers: still type-check args (VM consumes them).
             for arg in p {
                 let _ = self.infer(arg);
             }
@@ -14729,11 +14549,6 @@ impl Checker {
             return;
         }
 
-        // Concrete specifiers on an open type:
-        // - quantified type parameters (`fn f<T>(T x)`) must use `%v`
-        // - free inference vars (e.g. coroutine send) unify with the
-        //   specifier's expected type (same as using the value in a
-        //   typed context)
         if let Ty::Var(v) = arg_ty {
             let is_type_param = self
                 .type_params_in_scope
@@ -14846,11 +14661,7 @@ impl Checker {
         }
     }
 
-    // ============================================================
-    // ============================================================
     //  Codegen helpers
-    // ============================================================
-    // ============================================================
 
     /// Map surface enum paths (`ffi::types`, short `E`) to the registry key
     /// (`module::E` after COI-110).
@@ -14974,12 +14785,12 @@ impl Checker {
     /// as a list of `(field_name, field_type)` pairs in
     /// DECLARATION order. The codegen uses this to reorder record
     /// call-site fields to declaration order (the VM's
-    /// `MAKE_ENUM` pushes payload args in pop order — the first
+    /// `MAKE_ENUM` pushes payload args in pop order, the first
     /// popped is `payload[0]`).
     ///
     /// For Unit variants, returns an empty Vec. For Tuple
     /// variants, the field names are synthetic (`"0"`, `"1"`, …)
-    /// — see `EnumVariantPayloadTy::field_pairs`. For Record
+    ///, see `EnumVariantPayloadTy::field_pairs`. For Record
     /// variants, the field names are the declared names.
     pub fn payload_tys_for(&self, enum_name: &str, variant_name: &str) -> Vec<(String, Ty)> {
         let key = self.registry_enum_key(enum_name);
@@ -15000,7 +14811,7 @@ impl Checker {
     /// Field index in a record-shaped variant (codegen).
     ///
     /// When `specific_tag` is set (match-narrowed receiver), only that
-    /// variant is searched — required for shared tuple indices `"0"`, `"1"`, …
+    /// variant is searched, required for shared tuple indices `"0"`, `"1"`, …
     pub fn field_index_for(&self, enum_name: &str, field: &str) -> Option<(String, u16)> {
         self.field_index_for_tagged(enum_name, field, None)
     }
@@ -15398,7 +15209,7 @@ impl Checker {
     /// Allocate a synthetic static slot (e.g. `extern` library / fn-id handles).
     ///
     /// Reuses an existing index when `fqn` was already allocated. Unlike
-    /// [`Self::register_static_slot`], duplicates are not a type error — FFI
+    /// [`Self::register_static_slot`], duplicates are not a type error, FFI
     /// lowering may see the same library name across modules.
     pub fn alloc_synthetic_static_slot(&mut self, fqn: String, ty: Ty) -> u32 {
         if let Some(&(id, _)) = self.static_slots.get(&fqn) {
@@ -15505,7 +15316,6 @@ impl Checker {
         iterable_range: &Range<usize>,
         loop_range: &Range<usize>,
     ) -> Option<Ty> {
-        // ---- Builtin synthesis ----
         if let Some((item, kind)) = self.builtin_for_in_kind(te, iterable_range) {
             self.record_for_in_info(
                 loop_id,
@@ -15518,7 +15328,6 @@ impl Checker {
             return Some(item);
         }
 
-        // ---- User IntoIterator / Iterator ----
         match self.find_unique_instance("IntoIterator", &[te.clone()], iterable_range) {
             Ok(Some(into_inst)) => {
                 let item = into_inst
@@ -15674,7 +15483,7 @@ impl Checker {
         }
     }
 
-    /// `for` over `Range<T>` / `RangeInclusive<T>` — iteration needs a
+    /// `for` over `Range<T>` / `RangeInclusive<T>`, iteration needs a
     /// stepped numeric element (`int` / `byte` / `float`). Construction
     /// only requires `Ord`; non-steppable Ord types get a diagnostic.
     fn range_for_in_kind(
@@ -15811,7 +15620,7 @@ impl Checker {
         })
     }
 
-    /// Method FQN lookup helper — returns whether the method exists.
+    /// Method FQN lookup helper, returns whether the method exists.
     pub fn has_method(&self, owner: &str, method: &str) -> bool {
         let owner = self
             .resolve_class_key(owner)
@@ -15868,8 +15677,7 @@ impl Checker {
                 }
             }
             EnumConstructPayload::Record(parts) => {
-                // Static methods don't take record payloads as ctors —
-                // still infer children for ID alignment, then error.
+                // Static methods don't take record payloads as ctors,                 // still infer children for ID alignment, then error.
                 for p in parts {
                     let _ = self.infer(&p.value);
                 }
@@ -15914,7 +15722,7 @@ impl Checker {
             self.env
                 .insert_top(local.to_string(), Scheme::mono(Ty::Var(self.counter.fresh())));
         }
-        // Only the exact defining FQN — never a `::{local}` suffix heuristic
+        // Only the exact defining FQN, never a `::{local}` suffix heuristic
         // (another module's generic with the same short name would mis-tag).
         if self.generics.generic_fns.contains(fqn) {
             self.generics.generic_fns.insert(local.to_string());
@@ -16050,7 +15858,7 @@ impl Checker {
         let saved_idx = self.next_id_idx;
         let ty = self.infer_inner(expr, None);
         self.next_id_idx = saved_idx;
-        // Don't insert into cache — the ID we restored might be
+        // Don't insert into cache, the ID we restored might be
         // wrong for this AST node, and overwriting a correct entry
         // would be worse than skipping this insertion.
         ty

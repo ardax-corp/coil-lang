@@ -139,9 +139,7 @@ pub fn guards_hold(guards: &[ParGuard], args: &[i64]) -> bool {
     })
 }
 
-// ---------------------------------------------------------------------------
 // Structural work score
-// ---------------------------------------------------------------------------
 
 /// Fork-site nodes in the tree of `fib(n) = fib(n-1) + fib(n-2)`, the shape the
 /// threshold is calibrated on: `W(k) = 1 + W(k-1) + W(k-2)`, `W(k <= 1) = 0`,
@@ -378,9 +376,7 @@ pub fn collect_par_specialization_args(
     demanded
 }
 
-// ---------------------------------------------------------------------------
 // Fork-site detection
-// ---------------------------------------------------------------------------
 
 /// Parameters of the function currently being scanned.
 struct FnCtx<'a> {
@@ -956,9 +952,7 @@ fn callee_name<'a>(name: &'a Output<'a>) -> Option<&'a str> {
     }
 }
 
-// ---------------------------------------------------------------------------
 // Constant call-site collection
-// ---------------------------------------------------------------------------
 
 fn collect_const_calls(
     ast: &Output<'_>,

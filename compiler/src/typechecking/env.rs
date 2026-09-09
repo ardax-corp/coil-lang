@@ -1,5 +1,5 @@
 //! Scoped environments and scheme instantiation ([`instantiate_with_kinds`]).
-//!
+        //!
 //! Production does not let-generalize (not Algorithm W). Bindings are
 //! monomorphic unless syntax declares type parameters. `generalize` is
 //! test-only.
@@ -12,7 +12,7 @@ use super::ty::ftv_ty;
 
 /// A counter that mints fresh `TyVarId`s. Each call to [`TyVarCounter::fresh`]
 /// returns a distinct id.
-///
+        ///
 /// Used by [`instantiate_with_kinds`] and inference to mint fresh type variables.
 #[derive(Debug, Default, Clone)]
 pub struct TyVarCounter {
@@ -150,7 +150,7 @@ impl Env {
     }
 
     /// Insert a binding into the innermost frame.
-    ///
+        ///
     /// # Panics
     /// Panics if the env has no frames. Call [`push`](Self::push) first.
     pub fn insert_top(&mut self, name: impl Into<String>, scheme: Scheme) {
@@ -196,7 +196,7 @@ impl Env {
 }
 
 /// Quantify type variables free in `ty` but not in `env`.
-///
+        ///
 /// Not called on the typecheck path. Explicit `fn f<T>` / `class C<T>`
 /// build schemes from syntax; `let` bindings are [`Scheme::mono`].
 #[cfg(test)]
@@ -215,11 +215,11 @@ pub fn generalize(env: &Env, ty: &Ty) -> Scheme {
 
 /// Replace the quantified variables of `scheme` with fresh ones drawn
 /// from `counter`, returning the resulting monotype.
-///
+        ///
 /// The fresh variables are minted in the order they appear in
 /// `scheme.bounds`, so two instantiations of the same scheme produce
 /// different but consistently-ordered substitutions.
-///
+        ///
 /// Returns the instantiated type (constraints discarded — use
 /// [`instantiate_with_kinds`] when they matter).
 #[cfg(test)]
@@ -374,7 +374,6 @@ mod tests {
         Ty::Var(TyVarId(i))
     }
 
-    // ---- TyVarCounter ----
 
     #[test]
     fn counter_starts_at_zero() {
@@ -394,7 +393,6 @@ mod tests {
         assert_eq!(c.count(), 3);
     }
 
-    // ---- Env / Frame basics ----
 
     #[test]
     fn new_env_is_empty() {
@@ -478,7 +476,6 @@ mod tests {
         assert_eq!(env.lookup("x"), Some(&Scheme::mono(string())));
     }
 
-    // ---- Env::ftv ----
 
     #[test]
     fn ftv_empty_env_is_empty() {
@@ -518,7 +515,6 @@ mod tests {
         assert_eq!(ftv, HashSet::from([TyVarId(0), TyVarId(1), TyVarId(2)]));
     }
 
-    // ---- generalize ----
 
     #[test]
     fn generalize_no_vars_in_type_quantifies_nothing() {
@@ -572,7 +568,6 @@ mod tests {
         assert!(s.bounds.is_empty());
     }
 
-    // ---- instantiate ----
 
     #[test]
     fn instantiate_mono_scheme_returns_ty_unchanged() {
@@ -662,7 +657,6 @@ mod tests {
         assert_eq!(ty, expected);
     }
 
-    // ---- generalize (test-only; production never calls this) ----
 
     #[test]
     fn generalize_id_used_at_two_types() {
