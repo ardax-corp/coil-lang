@@ -31,6 +31,8 @@ pub struct Lowered {
     pub code_len: usize,
     /// Post-opt, pre-fuse ops when captured for the cursor_model gate.
     pub pre_fuse_ops: Option<Vec<IlOp>>,
+    /// S2b drafts (name + per-alloc slots) before PC bind.
+    pub stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
 }
 
 /// Intermediate slot before PC assignment. Jump targets stay symbolic.
@@ -168,6 +170,7 @@ pub(crate) fn lower_module_inner(
     let mut lowered = try_lower_optimized(&flat, pool)?;
     lowered.label_remap = label_remap;
     lowered.func_label_maps = func_label_maps;
+    lowered.stack_map_drafts = std::mem::take(&mut module.stack_map_drafts);
     if capture_ops {
         lowered.pre_fuse_ops = Some(flat);
     }
@@ -225,6 +228,7 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         label_remap: HashMap::new(),
         func_label_maps: Vec::new(),
         pre_fuse_ops: None,
+        stack_map_drafts: Vec::new(),
     })
 }
 

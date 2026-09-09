@@ -985,6 +985,8 @@ pub struct Compiler {
     retain_cursor_il: bool,
     /// Snapshot filled by finalize when [`Self::retain_cursor_il`] is set.
     cursor_il: Option<crate::il::tell::CursorIlSnap>,
+    /// S2b interpreter maps (empty when no alloc body lifted).
+    stack_maps: Vec<common::FrameStackMap>,
 }
 
 impl Default for Compiler {
@@ -1079,6 +1081,7 @@ impl Default for Compiler {
             inline_cost: inline_cost::InlineCostOptions::default(),
             retain_cursor_il: false,
             cursor_il: None,
+            stack_maps: Vec::new(),
         }
     }
 }

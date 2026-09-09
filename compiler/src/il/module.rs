@@ -36,6 +36,8 @@ pub struct IlModule {
     /// CALL/CodePtr rewrite to `IlOp::Entry` happens at emit time on `CodeBuf`;
     /// this map is retained for diagnostics and future module-level remapping.
     pub entry_at_offset: HashMap<usize, Label>,
+    /// S2b drafts filled during [`Self::optimize_and_flatten`].
+    pub stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
 }
 
 impl IlModule {
@@ -51,6 +53,7 @@ impl IlModule {
                 glue: Vec::new(),
                 epilogue: Vec::new(),
                 entry_at_offset: HashMap::new(),
+                stack_map_drafts: Vec::new(),
             };
         }
 
@@ -302,6 +305,23 @@ impl IlModule {
                 let fuse = lir_emit_cost(&body.ops);
                 if lir_emit_cost(&lir) <= fuse.saturating_add(lir_cost_slack(&body.ops)) {
                     body.ops = lir;
+                }
+            }
+        }
+
+        // S2b: encode S2a roots for allocating fuse-IL leftovers. Does not
+        // replace the body (dense / LIR still refuse).
+        self.stack_map_drafts.clear();
+        if opts.mir_specialize {
+            for body in &self.funcs {
+                if let Some(draft) = crate::mir::try_build_draft(
+                    &body.ops,
+                    &body.meta.name,
+                    body.meta.entry_sp,
+                    pool,
+                    &body.meta.unboxed_fields,
+                ) {
+                    self.stack_map_drafts.push(draft);
                 }
             }
         }

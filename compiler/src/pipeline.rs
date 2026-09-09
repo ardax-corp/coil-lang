@@ -205,7 +205,7 @@ impl Pipeline {
         constants: &[u64],
         strings: &[String],
     ) {
-        machine::wire_thread_program(
+        machine::wire_thread_program_with_maps(
             machine,
             bytecode,
             constants,
@@ -213,6 +213,7 @@ impl Pipeline {
             self.static_slot_count(),
             self.program_debug(),
             self.operand_stack_slots(),
+            self.stack_maps().to_vec(),
         );
     }
 
@@ -1586,6 +1587,11 @@ impl Pipeline {
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
         }
+    }
+
+    /// S2b maps from the last compile (in-memory; not required on `.hyc` load).
+    pub fn stack_maps(&self) -> &[common::FrameStackMap] {
+        self.compiler_lazy().stack_maps()
     }
 
     pub fn run(
