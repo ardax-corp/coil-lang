@@ -195,7 +195,7 @@ S2f:
   MIR LICM may hoist invariant `Alloc`/`GcBarrier` when the loop has
   no `StoreIndex` / `CALL`. Use `panic` (not `raise`) for checksums.
 - **Refused:** growing `ArrayPush` dest; private use after an escape;
-  unproven `xs[k]`; observed escape (`vec_array.hy`); arity > 32; named
+  unproven `xs[k]` as a raw slot; observed escape (`vec_array.hy`); arity > 32; named
   class SROA; negative `i % N` (last slot, not OOB); in-loop Make*
   **dense** (S2e boxing tax). Non-escaping computed *elements*
   (`[i,i+1,i+2]`) still SROA into slots.
@@ -204,6 +204,13 @@ S2f:
   emits one `MakeArray` at the edge. Multiple snapshot boxes are allowed
   when no private use follows the first escape. Identity is not preserved
   across edges (each box is a fresh heap object).
+- **S2h (COI-318):** unproven `xs[k]` is never a raw slot. Codegen `[T; N]`
+  locals take a weaker bound (`i % m` with `m <= N`, sidecar in-bounds, or
+  a runtime `0 <= k < N` check) and still SROA; the cold arm is heap
+  `Index` / `StoreIndex` so OOB panics. Leftover IL `MakeArray` + `xs[k]`
+  stays a heap object (checked Index). Remaining refuse: grow dest, private
+  after escape, arity > 32, named class SROA, negative remainder, observed
+  `vec_array.hy`.
 
 `pack` / `pack_arith` / `pack_wide` / `pack_store` SROA when the local is
 `[T; N]` and the only uses are computed-index load/store (`i % N`).
