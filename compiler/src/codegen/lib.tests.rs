@@ -4785,18 +4785,18 @@ fn main() {
         assert!(!vm.panicked(), "pack [i,i+1,i+2] checksum");
     }
 
-    /// S2i: observed zip of literals stays one heap MakeArray + Index (no
-    /// operand box, no slot-SROA of computed elems).
+    /// S2i: observed zip stays one heap MakeArray + Index (no operand box,
+    /// no slot-SROA of computed elems). `x` blocks ConstReturnImm fold.
     #[test]
     fn vec_array_observed_zip_stays_heap() {
         use common::Instruction;
         let src = r#"
-fn zip_sum() -> int {
-    let a = [1, 2] + [3, 4];
+fn zip_sum(int x) -> int {
+    let a = [x, x + 1] + [3, 4];
     return a[0] + a[1];
 }
 fn main() {
-    if zip_sum() != 10 {
+    if zip_sum(1) != 10 {
         panic "vec_array zip checksum";
     }
 }
@@ -4834,14 +4834,14 @@ fn main() {
     fn vec_array_stack_operand_zip_stays_heap() {
         use common::Instruction;
         let src = r#"
-fn zip_sum() -> int {
-    let xs = [1, 2];
+fn zip_sum(int x) -> int {
+    let xs = [x, x + 1];
     let ys = [3, 4];
     let a = xs + ys;
     return a[0] + a[1];
 }
 fn main() {
-    if zip_sum() != 10 {
+    if zip_sum(1) != 10 {
         panic "stack operand zip checksum";
     }
 }
@@ -4875,13 +4875,13 @@ fn main() {
     fn vec_array_heap_storeindex_checksum() {
         use common::Instruction;
         let src = r#"
-fn poke() -> int {
-    let a = [1, 2] + [3, 4];
-    a[0] = 9;
+fn poke(int x, int v) -> int {
+    let a = [x, x + 1] + [3, 4];
+    a[0] = v;
     return a[0] + a[1];
 }
 fn main() {
-    if poke() != 15 {
+    if poke(1, 9) != 15 {
         panic "heap StoreIndex checksum";
     }
 }

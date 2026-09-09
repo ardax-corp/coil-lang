@@ -59,19 +59,21 @@ test("unproven index load and store") {
 }
 
 test("observed zip stays heap") {
-    let a = [1, 2] + [3, 4];
+    let x = 1;
+    let a = [x, x + 1] + [3, 4];
     assert(a[0] == 4)?;
     assert(a[1] == 6)?;
-    a[0] = 9;
+    let v = 9;
+    a[0] = v;
     assert(a[0] + a[1] == 15)?;
-    let xs = [1, 2];
+    let xs = [x, x + 1];
     let ys = [3, 4];
     let z = xs + ys;
     assert(z[0] + z[1] == 10)?;
-    let b = [1, 2] + 3;
+    let b = [x, x + 1] + 3;
     assert(b[0] == 4)?;
     assert(b[1] == 5)?;
-    let c = [1, 2] ** 3;
+    let c = [x, x + 1] ** 3;
     assert(c[0] == 1)?;
     assert(c[1] == 8)?;
 }
