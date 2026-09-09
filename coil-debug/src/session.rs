@@ -1196,6 +1196,8 @@ fn main() {
                     | Instruction::VStore
                     | Instruction::VBin
                     | Instruction::VMove
+                    | Instruction::VReduce
+                    | Instruction::VFma
             )
         });
         assert!(!dense, "I7: debugger-attached must stay on fuse-IL");

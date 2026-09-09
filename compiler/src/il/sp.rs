@@ -180,7 +180,9 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::VLoad
         | Instruction::VStore
         | Instruction::VBin
-        | Instruction::VMove => Some(0),
+        | Instruction::VMove
+        | Instruction::VReduce
+        | Instruction::VFma => Some(0),
         Instruction::BinSlotImmJmpf
         | Instruction::BinSlotImmJmpt
         | Instruction::BinSlotSlotJmpf

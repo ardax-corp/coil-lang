@@ -2,7 +2,7 @@
 //! through [`coil_simd::lanes`]; this file only copies bits.
 
 use coil_simd::lanes::{self, LANES};
-use common::{Value, simd};
+use common::{dense, simd, Value};
 
 #[inline]
 fn as_f64(bits: &[u64; LANES]) -> [f64; LANES] {
@@ -122,5 +122,50 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
             o
         }
         _ => [0u64; LANES],
+    }
+}
+
+/// `acc ⊕ left-fold(lanes)` — float add is sequential (P11).
+#[inline]
+pub fn eval_vreduce(ty: u8, acc: Value, src: &[u64; LANES]) -> Value {
+    match ty {
+        dense::TY_I64 => {
+            let lanes = as_i64(src);
+            Value::from(lanes::fold_add_i64(acc.as_int(), &lanes))
+        }
+        dense::TY_F64 => {
+            let lanes = as_f64(src);
+            Value::from(lanes::fold_add_f64(acc.as_float(), &lanes))
+        }
+        _ => acc,
+    }
+}
+
+/// Conservative `dest = a * b + dest` (mul then add).
+#[inline]
+pub fn eval_vfma(
+    ty: u8,
+    a: &[u64; LANES],
+    b: &[u64; LANES],
+    dest: &[u64; LANES],
+) -> [u64; LANES] {
+    match ty {
+        dense::TY_I64 => {
+            let aa = as_i64(a);
+            let bb = as_i64(b);
+            let cc = as_i64(dest);
+            let mut o = [0i64; LANES];
+            lanes::fmadd_i64(&aa, &bb, &cc, &mut o);
+            from_i64(&o)
+        }
+        dense::TY_F64 => {
+            let aa = as_f64(a);
+            let bb = as_f64(b);
+            let cc = as_f64(dest);
+            let mut o = [0.0f64; LANES];
+            lanes::fmadd_f64(&aa, &bb, &cc, &mut o);
+            from_f64(&o)
+        }
+        _ => *dest,
     }
 }
