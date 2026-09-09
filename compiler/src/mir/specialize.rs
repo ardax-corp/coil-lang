@@ -233,9 +233,6 @@ pub fn try_lower_abi_body_with(
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
-    if has_sroa_select_cfg(ops) {
-        return None;
-    }
     let has_alloc = ops.iter().any(refuses_alloc);
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
@@ -290,16 +287,24 @@ fn has_sroa_select_cfg(ops: &[IlOp]) -> bool {
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue,
                 ..
-            } if i > 0 && is_eq_byte(&ops[i - 1]) => n += 1,
-            IlOp::Bin {
-                op: Instruction::EQ,
-                ..
-            } => n += 1,
+            } if eq_immediately_before(ops, i) => n += 1,
             IlOp::Byte { byte, .. } if fused_eq_jmp(byte) => n += 1,
             _ => {}
         }
     }
     n >= 2
+}
+
+fn eq_immediately_before(ops: &[IlOp], jump_i: usize) -> bool {
+    let mut i = jump_i;
+    while i > 0 {
+        i -= 1;
+        match &ops[i] {
+            IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
+            other => return is_eq_byte(other),
+        }
+    }
+    false
 }
 
 fn is_eq_byte(op: &IlOp) -> bool {

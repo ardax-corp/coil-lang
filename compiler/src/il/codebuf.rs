@@ -336,6 +336,12 @@ impl CodeBuf {
         }
     }
 
+    pub fn set_last_func_sroa_select(&mut self, yes: bool) {
+        if let Some(f) = self.funcs.last_mut() {
+            f.sroa_select = yes;
+        }
+    }
+
     pub fn funcs(&self) -> &[IlFunc] {
         &self.funcs
     }

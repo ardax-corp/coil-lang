@@ -3219,6 +3219,7 @@ impl Compiler {
         if n == 0 {
             return;
         }
+        self.emitted_sroa_select = true;
         let mut bb = BlockBuilder::new();
         let join = bytecode.fresh_label();
         let dest = self.alloc_temp_slot();
@@ -3288,6 +3289,7 @@ impl Compiler {
         if n == 0 {
             return;
         }
+        self.emitted_sroa_select = true;
         let mut bb = BlockBuilder::new();
         let join = bytecode.fresh_label();
         if !proven {
@@ -4265,6 +4267,9 @@ impl Compiler {
 
     /// Snapshot local_escape unbox ranges onto the last recorded `IlFunc` (I3).
     fn record_unboxed_class_fields(&mut self) {
+        self.bytecode
+            .set_last_func_sroa_select(self.emitted_sroa_select);
+        self.emitted_sroa_select = false;
         if self.context.unboxed_class_locals.is_empty() {
             return;
         }
