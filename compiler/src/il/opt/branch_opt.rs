@@ -32,8 +32,9 @@ fn code_label_id(op: &IlOp) -> Option<u32> {
 
 /// Remap labels in `ops` into a fresh id space starting at `*next_label`.
 ///
-/// Jump targets that refer to labels bound in earlier concatenated chunks
-/// are resolved via `prior_labels`. Cross-function `Entry` (CALL/CodePtr)
+/// Jump targets remap only when this chunk binds them. Do not fall back to
+/// `prior_labels` — that steals an earlier body's id when the bind sits in
+/// epilogue (trailing `if` end-label). Cross-function `Entry` (CALL/CodePtr)
 /// is patched separately from each function's recorded entry label.
 pub(crate) fn remap_label_space(
     ops: &[IlOp],

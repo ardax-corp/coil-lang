@@ -110,11 +110,12 @@ impl IlModule {
     /// function's label with the same numeric id. Prologue/epilogue are copied
     /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
     pub fn to_flat(&self) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
+        let mut module = self.clone();
+        absorb_trailing_labels(&mut module);
         let mut out = Vec::new();
-        absorb_trailing_labels(self);
         // New ids must not overlap old Label/Jump/Entry ids still sitting on
         // cross-function CALL sites until the post-concat patch.
-        let mut next_label = self.max_code_label().saturating_add(1);
+        let mut next_label = module.max_code_label().saturating_add(1);
         let mut prior_labels = HashMap::new();
         let mut entry_labels = HashMap::new();
         let mut func_label_maps = Vec::new();
@@ -124,10 +125,10 @@ impl IlModule {
             out.extend(self.prologue.iter().cloned());
             segment_ranges.push((start, out.len()));
         }
-        for (i, body) in self.funcs.iter().enumerate() {
+        for (i, body) in module.funcs.iter().enumerate() {
             let start = out.len();
             let mut chunk = body.ops.clone();
-            if let Some(g) = self.glue.get(i) {
+            if let Some(g) = module.glue.get(i) {
                 chunk.extend(g.iter().cloned());
             }
             let old_entry = body.meta.entry.map(|Label(id)| id);
@@ -145,9 +146,9 @@ impl IlModule {
             out.extend(chunk);
             segment_ranges.push((start, out.len()));
         }
-        if !self.epilogue.is_empty() {
+        if !module.epilogue.is_empty() {
             let start = out.len();
-            out.extend(self.epilogue.iter().cloned());
+            out.extend(module.epilogue.iter().cloned());
             segment_ranges.push((start, out.len()));
         }
         let flat_label_ids: std::collections::HashSet<u32> =
@@ -866,7 +867,6 @@ mod tests {
         );
     }
 
-    #[test]
     /// `if x != 10 { raise }` binds `end_label` after the last RETURN, so the
     /// label lives in epilogue. A prior dense body that reused emit id 8 must
     /// not steal that jump (S3b reverse-index / times_a checksum OOB).
@@ -915,7 +915,7 @@ mod tests {
         assert_eq!(
             Some(main_jmp),
             last_label,
-            "main skip-raise must bind the trailing end-label, not sum's reused id 8; flat={flat:?}"
+            "main skip-raise must bind the trailing end-label, not sum's reused id 8"
         );
         let sum_mid = flat
             .iter()
