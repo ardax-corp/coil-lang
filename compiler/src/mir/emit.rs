@@ -6,20 +6,25 @@ use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::func::MirFunc;
 use super::inst::{
-    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
+    BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
+    Terminator, ValueId,
 };
 use super::lower::LowerError;
 use super::ty::MirTy;
 
 /// Emit dense IL for `func`. Preserves `entry_label` so CALL targets stay valid.
+///
+/// `across_alloc` is S2c: emit `Make*` / `InitTyped` residuals at mapped
+/// GC edges. Default (`false`) still refuses.
 pub fn emit_dense(
     func: &MirFunc,
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
+    across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
-    if func.has_gc_edge() {
+    if func.has_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
-            "dense emit refuses Alloc/GcBarrier (I5: fuse-IL until S2c)".into(),
+            "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
     }
     if func.has_deopt_edge() {
@@ -44,7 +49,7 @@ pub fn emit_dense(
             "dense emit refuses non-W4 HostInvoke (I6)".into(),
         ));
     }
-    if func.types.iter().any(|t| t.is_heap_word()) {
+    if !across_alloc && func.types.iter().any(|t| t.is_heap_word()) {
         return Err(LowerError::Refused(
             "dense emit refuses heap/niche SSA (I1 does not specialize those bodies)".into(),
         ));
@@ -87,7 +92,7 @@ pub fn emit_dense(
             }) {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, pool, loc)?;
+            emit_inst(&mut out, inst, func, &regs, pool, loc, across_alloc)?;
         }
         emit_term(
             &mut out,
@@ -288,6 +293,7 @@ fn emit_inst(
     regs: &[u8],
     pool: &mut Vec<u64>,
     loc: DebugLoc,
+    across_alloc: bool,
 ) -> Result<(), LowerError> {
     match inst {
         MirInst::Const { dest, c } => {
@@ -415,10 +421,42 @@ fn emit_inst(
                 "dense emit refuses FieldLoad/FieldStore (I3 is MIR→LIR)".into(),
             ));
         }
-        MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses Alloc/GcBarrier (I5: fuse-IL until S2c)".into(),
-            ));
+        MirInst::Alloc { dest, kind, elems } => {
+            if !across_alloc {
+                return Err(LowerError::Refused(
+                    "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
+                ));
+            }
+            for e in elems {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[e.index()]),
+                    loc,
+                });
+            }
+            out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::GcBarrier { dest, .. } => {
+            if !across_alloc {
+                return Err(LowerError::Refused(
+                    "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
+                ));
+            }
+            if let Some(obj) = paired_alloc_dest(func, *dest) {
+                if regs[dest.index()] != regs[obj.index()] {
+                    out.push(IlOp::Load {
+                        slot: u32::from(regs[obj.index()]),
+                        loc,
+                    });
+                    out.push(IlOp::StorePop {
+                        slot: u32::from(regs[dest.index()]),
+                        loc,
+                    });
+                }
+            }
         }
         MirInst::Deopt { .. } => {
             return Err(LowerError::Refused(
@@ -720,11 +758,48 @@ fn cmp_kind(op: MirCmpOp, ty: MirTy) -> Result<u8, LowerError> {
         MirCmpOp::Ne => dense::CMP_NE,
     };
     let lane = match ty {
-        MirTy::I64 => dense::CMP_I64,
+        MirTy::I64 | MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => dense::CMP_I64,
         MirTy::F64 => dense::CMP_F64,
         MirTy::I32 => dense::CMP_I32,
         MirTy::F32 => dense::CMP_F32,
         _ => return Err(LowerError::Refused(format!("dense cmp {ty}"))),
     };
     Ok(dense::pack_cmp(lane, pred))
+}
+
+/// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`).
+pub(super) fn il_for_alloc(
+    kind: MirAllocKind,
+    arity: u32,
+    loc: DebugLoc,
+) -> Result<IlOp, LowerError> {
+    match kind {
+        MirAllocKind::Array => Ok(IlOp::MakeArray { arity, loc }),
+        MirAllocKind::Tuple => Ok(IlOp::MakeTuple { arity, loc }),
+        MirAllocKind::Enum { tag } => {
+            let tag = u16::try_from(tag).map_err(|_| LowerError::Refused("enum tag".into()))?;
+            let arity =
+                u16::try_from(arity).map_err(|_| LowerError::Refused("enum arity".into()))?;
+            Ok(IlOp::MakeEnum { tag, arity, loc })
+        }
+        MirAllocKind::Object { type_id, nfields } => Ok(IlOp::byte(
+            Byte::new(Instruction::InitTyped)
+                .with_operand_u32(common::pack_init_typed(type_id, nfields)),
+        )),
+    }
+}
+
+/// Alloc dest paired with a `GcBarrier` dest in the same block.
+pub(super) fn paired_alloc_dest(func: &MirFunc, barrier: ValueId) -> Option<ValueId> {
+    for block in &func.blocks {
+        let mut pending = None;
+        for inst in &block.insts {
+            match inst {
+                MirInst::Alloc { dest, .. } => pending = Some(*dest),
+                MirInst::GcBarrier { dest, .. } if *dest == barrier => return pending,
+                _ => pending = None,
+            }
+        }
+    }
+    None
 }

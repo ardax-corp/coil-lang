@@ -64,7 +64,7 @@ pub struct LowerHints {
     /// I3: Load/Store of those slots become FieldLoad/FieldStore.
     pub allow_fields: bool,
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` → Alloc +
-    /// GcBarrier with S2a live roots. Dense / LIR emit still refuse.
+    /// GcBarrier with S2a live roots. S2c emit needs maps.
     pub allow_alloc: bool,
     /// I6: type non-W4 HostInvoke (clocks / IO / GC / FFI names) as SSA
     /// edges. Dense emit still refuses anything outside W4.

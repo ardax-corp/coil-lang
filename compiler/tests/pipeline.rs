@@ -6810,6 +6810,33 @@ fn main() {
 }
 
 #[test]
+fn s2c_mapped_pair_runs_and_keeps_maps() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn pair(int a, int b) -> [int] {
+    return [a, b];
+}
+fn main() {
+    let xs = pair(3, 4);
+    write(stdout(), to_bytes(format("%i", xs[0] + xs[1])));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    assert!(
+        pipeline
+            .stack_maps()
+            .iter()
+            .any(|m| !m.safepoints.is_empty()),
+        "S2c pair/main should keep real maps: {:?}",
+        pipeline.stack_maps()
+    );
+    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(out, "7");
+}
+
+#[test]
 fn result_heap_churn_example_checksum() {
     let src = include_str!("../../examples/perf/result_heap_churn.hy");
     let output = run_example_src(src);

@@ -11,27 +11,30 @@ use common::{Byte, DebugLoc, Instruction};
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
-    coalesce_safe_latch_phis, emit_cond_jumps, is_fallthrough, max_label_hint,
-    term_cmp_dest,
+    coalesce_safe_latch_phis, emit_cond_jumps, il_for_alloc, is_fallthrough, max_label_hint,
+    paired_alloc_dest, term_cmp_dest,
 };
 use super::func::MirFunc;
 use super::inst::{
-    BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
-    ValueId,
+    BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
+    Terminator, ValueId,
 };
 use super::layout::MirLayout;
 use super::lower::LowerError;
 use super::ty::MirTy;
 
 /// Emit fuse-IL for `func`. Preserves `entry_label` so CALL targets stay valid.
+///
+/// `across_alloc` is S2c: reconstruct `Make*` / `InitTyped` when maps exist.
 pub fn emit_lir(
     func: &MirFunc,
     entry_label: Option<Label>,
     pool: &mut Vec<u64>,
+    across_alloc: bool,
 ) -> Result<Vec<IlOp>, LowerError> {
-    if func.has_gc_edge() {
+    if func.has_gc_edge() && !across_alloc {
         return Err(LowerError::Refused(
-            "MIR→LIR refuses Alloc/GcBarrier (I5: fuse-IL until S2c)".into(),
+            "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
     }
     if func.has_deopt_edge() {
@@ -519,10 +522,21 @@ fn emit_stored(
                 "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
             ));
         }
-        MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => {
-            return Err(LowerError::Refused(
-                "MIR→LIR refuses Alloc/GcBarrier (I5: fuse-IL until S2c)".into(),
-            ));
+        MirInst::Alloc { dest, kind, elems } => {
+            emit_alloc_stack(out, *kind, elems, func, plan, regs, pool, loc)?;
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::GcBarrier { dest, .. } => {
+            if let Some(obj) = paired_alloc_dest(func, *dest) {
+                emit_stack(out, obj, func, plan, regs, pool, loc)?;
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
         }
         MirInst::Deopt { .. } => {
             return Err(LowerError::Refused(
@@ -530,6 +544,23 @@ fn emit_stored(
             ));
         }
     }
+    Ok(())
+}
+
+fn emit_alloc_stack(
+    out: &mut Vec<IlOp>,
+    kind: MirAllocKind,
+    elems: &[ValueId],
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    for e in elems {
+        emit_stack(out, *e, func, plan, regs, pool, loc)?;
+    }
+    out.push(il_for_alloc(kind, elems.len() as u32, loc)?);
     Ok(())
 }
 
@@ -644,9 +675,22 @@ fn emit_stack(
         }
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
         MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
-        MirInst::Alloc { .. } | MirInst::GcBarrier { .. } => Err(LowerError::Refused(
-            "MIR→LIR refuses Alloc/GcBarrier (I5: fuse-IL until S2c)".into(),
-        )),
+        MirInst::Alloc { kind, elems, .. } => {
+            emit_alloc_stack(out, *kind, elems, func, plan, regs, pool, loc)
+        }
+        MirInst::GcBarrier { dest, .. } => {
+            if let Some(obj) = paired_alloc_dest(func, *dest) {
+                emit_stack(out, obj, func, plan, regs, pool, loc)
+            } else if plan.need_slot[dest.index()] {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+                Ok(())
+            } else {
+                Err(LowerError::Refused("GcBarrier has no alloc".into()))
+            }
+        }
         MirInst::Deopt { .. } => Err(LowerError::Refused(
             "MIR→LIR refuses Deopt (I7: bail to fuse-IL)".into(),
         )),

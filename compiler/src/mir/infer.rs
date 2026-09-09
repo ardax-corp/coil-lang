@@ -5,11 +5,11 @@
 //! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). Infer refuses user `CALL`
 //! unless the target is already in the dense ABI map (COI-291), plus
 //! non-allowlisted HostInvoke / heap index / class field / match / string /
-//! alloc (`MakeArray` / `InitTyped`) /
-//! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. W4 accepts
-//! allowlisted math / packed LA / `simd_axpy_reduce` HostInvokes. I6 types
-//! other hosts as SSA edges under `allow_effects`; dense infer stays W4.
-//! Compare-only stays fuse-IL.
+//! unmapped alloc (`MakeArray` / `InitTyped`) /
+//! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. S2c maps
+//! allow alloc on dense / LIR infer. W4 accepts allowlisted math / packed
+//! LA / `simd_axpy_reduce` HostInvokes. I6 types other hosts as SSA edges
+//! under `allow_effects`; dense infer stays W4. Compare-only stays fuse-IL.
 
 use std::collections::HashMap;
 
@@ -87,6 +87,25 @@ pub fn infer_numeric_with(
         InferMode::Dense,
         calls,
         &HashMap::new(),
+        false,
+    )
+}
+
+/// Dense infer that accepts `Make*` / `InitTyped` when S2b maps exist (S2c).
+pub fn infer_numeric_across_alloc(
+    ops: &[IlOp],
+    pool_len: usize,
+    param_count: u32,
+    calls: &DenseCallMap,
+) -> Result<Inferred, LowerError> {
+    infer_walk(
+        ops,
+        pool_len,
+        param_count,
+        InferMode::Dense,
+        calls,
+        &HashMap::new(),
+        true,
     )
 }
 
@@ -109,6 +128,24 @@ pub fn infer_lir_with_seed(
         InferMode::Lir,
         &DenseCallMap::new(),
         seed,
+        false,
+    )
+}
+
+/// LIR infer that accepts `Make*` / `InitTyped` when S2b maps exist (S2c).
+pub fn infer_lir_across_alloc(
+    ops: &[IlOp],
+    pool_len: usize,
+    param_count: u32,
+) -> Result<Inferred, LowerError> {
+    infer_walk(
+        ops,
+        pool_len,
+        param_count,
+        InferMode::Lir,
+        &DenseCallMap::new(),
+        &HashMap::new(),
+        true,
     )
 }
 
@@ -126,6 +163,7 @@ pub fn infer_stack_map(
         InferMode::Map,
         &DenseCallMap::new(),
         seed,
+        true,
     )
 }
 
@@ -141,6 +179,10 @@ impl InferMode {
     fn lir_shape(self) -> bool {
         matches!(self, Self::Lir | Self::Map)
     }
+
+    fn allows_alloc(self, across: bool) -> bool {
+        matches!(self, Self::Map) || across
+    }
 }
 
 fn infer_walk(
@@ -150,6 +192,7 @@ fn infer_walk(
     mode: InferMode,
     calls: &DenseCallMap,
     seed: &HashMap<u32, MirTy>,
+    allow_alloc: bool,
 ) -> Result<Inferred, LowerError> {
     if mode == InferMode::Dense && !has_back_edge(ops) {
         let work = numeric_work_ops(ops);
@@ -178,11 +221,11 @@ fn infer_walk(
                 });
             }
             IlOp::MakeArray { arity, .. } | IlOp::MakeTuple { arity, .. }
-                if mode == InferMode::Map =>
+                if mode.allows_alloc(allow_alloc) =>
             {
                 push_map_alloc(&mut stack, *arity as usize)?;
             }
-            IlOp::MakeEnum { arity, .. } if mode == InferMode::Map => {
+            IlOp::MakeEnum { arity, .. } if mode.allows_alloc(allow_alloc) => {
                 push_map_alloc(&mut stack, *arity as usize)?;
             }
             IlOp::StorePop { slot, .. } => {
@@ -355,7 +398,7 @@ fn infer_walk(
                 other if is_format_inst(other) => {
                     return Err(LowerError::Refused("format".into()));
                 }
-                other if mode == InferMode::Map && super::gc::is_alloc_inst(other) => {
+                other if mode.allows_alloc(allow_alloc) && super::gc::is_alloc_inst(other) => {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::HeapRef),
@@ -466,6 +509,28 @@ fn infer_walk(
                     });
                 }
             }
+            IlOp::MakeArray { arity, .. } | IlOp::MakeTuple { arity, .. }
+                if mode.allows_alloc(allow_alloc) =>
+            {
+                for _ in 0..*arity {
+                    let _ = stack.pop();
+                }
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::HeapRef),
+                    imm: None,
+                });
+            }
+            IlOp::MakeEnum { arity, .. } if mode.allows_alloc(allow_alloc) => {
+                for _ in 0..*arity {
+                    let _ = stack.pop();
+                }
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::HeapRef),
+                    imm: None,
+                });
+            }
             IlOp::StorePop { slot, .. } => {
                 if let Some(c) = stack.pop() {
                     if let Some(ty) = slot_ty.get(slot).copied() {
@@ -527,7 +592,10 @@ fn infer_walk(
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
     }
-    if mode == InferMode::Dense && slot_ty.values().any(|t| t.is_heap_word()) {
+    if mode == InferMode::Dense
+        && !allow_alloc
+        && slot_ty.values().any(|t| t.is_heap_word())
+    {
         return Err(LowerError::Refused(
             "dense infer refuses heap/niche slots (I1 carry is LIR/SSA only)".into(),
         ));
@@ -706,6 +774,19 @@ fn apply_bin(
         Instruction::Pow | Instruction::PowF | Instruction::AND | Instruction::OR
     ) {
         return Err(LowerError::Refused(format!("binop {}", inst.mnemonic())));
+    }
+    if is_cmp(inst)
+        && !is_float_inst(inst)
+        && (lhs.ty.is_some_and(MirTy::is_heap_word) || rhs.ty.is_some_and(MirTy::is_heap_word))
+    {
+        paint_keep_heap(slot_ty, pool_ty, lhs, MirTy::HeapRef)?;
+        paint_keep_heap(slot_ty, pool_ty, rhs, MirTy::HeapRef)?;
+        stack.push(Cell {
+            origin: Origin::Tmp,
+            ty: Some(MirTy::Bool),
+            imm: None,
+        });
+        return Ok(());
     }
     if matches!(
         inst,

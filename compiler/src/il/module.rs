@@ -309,8 +309,8 @@ impl IlModule {
             }
         }
 
-        // S2b: encode S2a roots for allocating fuse-IL leftovers. Does not
-        // replace the body (dense / LIR still refuse).
+        // S2b: encode S2a roots for allocating bodies (fuse-IL leftovers and
+        // S2c mapped dense / LIR). Bind after PC assign.
         self.stack_map_drafts.clear();
         if opts.mir_specialize {
             for body in &self.funcs {
