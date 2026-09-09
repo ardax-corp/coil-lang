@@ -168,19 +168,6 @@ impl<T: Default, const N: usize> ArrayVec<T, N> {
         }
     }
 
-    // pub fn insert(&mut self, index: usize, value: T) {
-    //     self.current = self.current.max(index + 1);
-    //
-    //     if likely(index < N) {
-    //         promise!(index < N);
-    //         self.storage[index] = value;
-    //     } else {
-    //         self.grow(index - N);
-    //         promise!(index - N < self.expansion.len());
-    //         self.expansion[index - N] = value;
-    //     }
-    // }
-
     #[inline]
     pub fn len(&self) -> usize {
         self.current
@@ -191,29 +178,9 @@ impl<T: Default, const N: usize> ArrayVec<T, N> {
         self.current == 0
     }
 
-    // pub fn iter(&self) -> Iter<T>{
-    //     promise!(self.current < N);
-    //
-    //     self.storage[0..self.current].iter()
-    // }
-    //
-    // pub fn iter_mut(&mut self) -> IterMut<T> {
-    //     promise!(self.current < N);
-    //
-    //     self.storage[0..self.current].iter_mut()
-    // }
-    //
-    // pub fn drain(&mut self) -> &[T] {
-    //     let cursor = self.current;
-    //     self.current = 0;
-    //
-    //     &self.storage[0..cursor]
-    // }
-
     #[inline]
     pub fn clear(&mut self) {
         self.current = 0;
-        // self.expansion.clear();
     }
 }
 
@@ -230,27 +197,6 @@ impl<T: Default, const N: usize> Index<usize> for ArrayVec<T, N> {
     }
 }
 
-// impl<T: Default + Copy, const N: usize> Index<Range<usize>>for ArrayVec<T, N> {
-//     type Output = ArrayVec<T, 16>;
-//     fn index(&self, index: Range<usize>) -> Self::Output {
-//         let mut v = ArrayVec::<T, 16>::default();
-//
-//         for n in index.start..index.end {
-//             v.push(self[n]);
-//         }
-//
-//         v
-//
-//         // if (index < N) {
-//         //     promise!(index < N);
-//         //     &self.storage[index]
-//         // } else {
-//         //     promise!(index - N < self.expansion.len());
-//         //     &self.expansion[index - N]
-//         // }
-//     }
-// }
-//
 impl<T: Default, const N: usize> IndexMut<usize> for ArrayVec<T, N> {
     fn index_mut(&mut self, index: usize) -> &mut Self::Output {
         self.current = self.current.max(index + 1);

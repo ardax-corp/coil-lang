@@ -74,32 +74,3 @@ pub fn unlikely(b: bool) -> bool {
 
     b
 }
-
-// #[repr(u8)]
-// pub enum Types {
-//     NUMBER = 0,
-//     STRING = 1,
-// }
-//
-// impl Into<u8> for Types {
-//     fn into(self) -> u8 {
-//         self as u8
-//     }
-// }
-//
-// #[repr(u8)]
-// pub enum Registers {
-//     RET = 254,
-// }
-//
-// impl Into<u8> for Registers {
-//     fn into(self) -> u8 {
-//         self as u8
-//     }
-// }
-//
-// impl Into<usize> for Registers {
-//     fn into(self) -> usize {
-//         (self as u8) as usize
-//     }
-// }
