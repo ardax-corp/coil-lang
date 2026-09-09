@@ -1,8 +1,7 @@
 // S2j: non-escaping named class field load/store SROA (no InitTyped).
 // bump(6): x=21 y=7 → 28.
 
-use io::{stdout};
-use io::sync::{write_all};
+use io::{stdout, write};
 use string::{format, to_bytes};
 
 class Point {
@@ -22,5 +21,5 @@ fn bump(int n) -> int {
 }
 
 fn main() {
-    write_all(stdout(), to_bytes(format("%i", bump(6))));
+    write(stdout(), to_bytes(format("%i", bump(6))));
 }
