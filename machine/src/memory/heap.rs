@@ -1,14 +1,32 @@
 //! Mark-and-sweep heap: intrusive object list, string interning, and GC.
+//!
+//! Interpreter collections use incremental tricolor mark + Yuasa SATB and a
+//! lazy sweep cursor. Explicit `Heap::collect` / `gc::collect` still drain a
+//! cycle to completion. Objects do not move.
 
 use std::alloc::Layout;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::ptr::{self, NonNull};
+
+use common::unlikely;
 
 use super::slab::Slab;
 use super::AddrHashBuilder;
 
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
+/// Gray objects scanned at one alloc safepoint (work-based pacing adds more).
+pub const GC_MARK_QUANTUM: usize = 128;
+/// Unmarked objects considered at one alloc safepoint during lazy sweep.
+pub const GC_SWEEP_QUANTUM: usize = 128;
+
+/// Incremental collector phase. `Idle` means the last cycle finished.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GcPhase {
+    Idle,
+    Marking,
+    Sweeping,
+}
 
 /// Managed heap. Objects are linked in an intrusive list for traversal.
 /// `Gc<T>` handles are copyable; the VM controls when objects become unreachable.
@@ -23,13 +41,17 @@ pub struct Heap {
     live_count: usize,
     /// Immortal arity-0 enum singletons keyed by tag (never swept).
     immortal_enums: HashMap<u32, Object, AddrHashBuilder>,
-    /// Reused mark-set across collections (avoids alloc per GC).
-    gc_mark_set: HashSet<u64, AddrHashBuilder>,
     /// Reused gray worklist / root buffers across collections.
     gc_gray: Vec<Object>,
     gc_root_objects: Vec<Object>,
     gc_roots: Vec<u64>,
     gc_dangling_strings: Vec<RefString>,
+    /// Incremental mark / lazy sweep (COI-309 S4).
+    gc_phase: GcPhase,
+    /// Next object to consider while sweeping; `None` when the cursor is idle.
+    gc_sweep_cursor: Option<Object>,
+    /// Predecessor of [`Self::gc_sweep_cursor`] for intrusive unlink.
+    gc_sweep_prev: Option<Object>,
     /// CString arena for the current FFI invoke (reset after each call).
     ffi_strings: Vec<std::ffi::CString>,
 }
@@ -45,11 +67,13 @@ impl Default for Heap {
             slab: Slab::new(),
             live_count: 0,
             immortal_enums: HashMap::default(),
-            gc_mark_set: HashSet::default(),
             gc_gray: Vec::new(),
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
             gc_dangling_strings: Vec::new(),
+            gc_phase: GcPhase::Idle,
+            gc_sweep_cursor: None,
+            gc_sweep_prev: None,
             ffi_strings: Vec::new(),
         }
     }
@@ -108,6 +132,10 @@ impl Heap {
         self.head = Some(object);
         self.alloc_bytes += size;
         self.live_count += 1;
+        // SATB: mutator-allocated objects during mark are black (not gray).
+        if self.gc_phase == GcPhase::Marking {
+            let _ = content.mark();
+        }
         crate::vm::note_heap_alloc();
         debug_assert!(
             self.find_object_by_addr(object.addr()).is_some(),
@@ -189,9 +217,189 @@ impl Heap {
     /// Otherwise, we'll deallocate objects that are in use and leave dangling
     /// pointers.
     pub unsafe fn sweep(&mut self) {
-        let mut prev_obj: Option<Object> = None;
-        let mut curr_obj = self.head;
+        if self.gc_phase == GcPhase::Sweeping {
+            self.finish_sweep();
+            return;
+        }
+        self.unlink_unmarked_interns();
+        self.gc_phase = GcPhase::Sweeping;
+        self.gc_sweep_prev = None;
+        self.gc_sweep_cursor = self.head;
+        self.finish_sweep();
+    }
 
+    #[inline]
+    pub fn gc_phase(&self) -> GcPhase {
+        self.gc_phase
+    }
+
+    #[inline]
+    pub fn gc_is_idle(&self) -> bool {
+        self.gc_phase == GcPhase::Idle
+    }
+
+    #[inline]
+    pub fn gc_is_marking(&self) -> bool {
+        self.gc_phase == GcPhase::Marking
+    }
+
+    #[inline]
+    pub fn gc_is_sweeping(&self) -> bool {
+        self.gc_phase == GcPhase::Sweeping
+    }
+
+    /// Shade `v` if a mark cycle is running (Yuasa SATB: log the overwritten pointer).
+    #[inline]
+    pub fn satb_shade_value(&mut self, v: Value) {
+        if unlikely(self.gc_phase == GcPhase::Marking) {
+            self.shade_value(v);
+        }
+    }
+
+    /// Shade a replaced instance/enum member during mark.
+    #[inline]
+    pub fn satb_shade_member(&mut self, member: Member) {
+        if unlikely(self.gc_phase != GcPhase::Marking) {
+            return;
+        }
+        match member {
+            Member::Object(o) => self.shade_object(o),
+            Member::Value(v) => self.shade_value(v),
+        }
+    }
+
+    /// Shade overwritten / dropped slot values (clear, bulk IO fill).
+    #[inline]
+    pub fn satb_shade_values(&mut self, vals: &[Value]) {
+        if unlikely(self.gc_phase != GcPhase::Marking) {
+            return;
+        }
+        for &v in vals {
+            self.shade_value(v);
+        }
+    }
+
+    fn shade_value(&mut self, v: Value) {
+        let addr = v.heap_addr();
+        if addr == 0 {
+            return;
+        }
+        if let Some(obj) = self.find_object_by_addr(addr) {
+            self.shade_object(obj);
+        }
+    }
+
+    fn shade_object(&mut self, obj: Object) {
+        let mut gray = std::mem::take(&mut self.gc_gray);
+        obj.mark(&mut gray);
+        self.gc_gray = gray;
+    }
+
+    /// Seed the gray list from `root_addrs` via O(1) slab lookup (no list walk).
+    pub fn begin_mark(&mut self, root_addrs: &[u64]) {
+        if self.gc_phase != GcPhase::Idle {
+            return;
+        }
+        self.gc_phase = GcPhase::Marking;
+        let mut gray = std::mem::take(&mut self.gc_gray);
+        gray.clear();
+        for &addr in root_addrs {
+            let addr = addr & !1;
+            if addr == 0 {
+                continue;
+            }
+            if let Some(obj) = self.find_object_by_addr(addr) {
+                obj.mark(&mut gray);
+            }
+        }
+        self.gc_gray = gray;
+    }
+
+    /// Scan up to `n` gray objects. Returns true when the worklist is empty.
+    pub fn mark_quantum(&mut self, n: usize) -> bool {
+        let mut gray = std::mem::take(&mut self.gc_gray);
+        let mut i = 0;
+        while i < n {
+            let Some(obj) = gray.pop() else {
+                break;
+            };
+            obj.mark_references(self, &mut gray);
+            i += 1;
+        }
+        let done = gray.is_empty();
+        self.gc_gray = gray;
+        done
+    }
+
+    pub fn begin_sweep(&mut self) {
+        if self.gc_phase == GcPhase::Sweeping {
+            return;
+        }
+        self.unlink_unmarked_interns();
+        self.gc_phase = GcPhase::Sweeping;
+        self.gc_sweep_prev = None;
+        self.gc_sweep_cursor = self.head;
+    }
+
+    /// Reclaim up to `n` unmarked objects. Returns true when sweep finished.
+    pub fn sweep_quantum(&mut self, n: usize) -> bool {
+        if self.gc_phase != GcPhase::Sweeping {
+            return true;
+        }
+        for _ in 0..n {
+            if self.gc_sweep_cursor.is_none() {
+                self.finish_sweep_cycle();
+                return true;
+            }
+            self.sweep_one();
+        }
+        if self.gc_sweep_cursor.is_none() {
+            self.finish_sweep_cycle();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Drain the remaining sweep cursor and rescale the byte threshold.
+    pub fn finish_sweep(&mut self) {
+        if self.gc_phase != GcPhase::Sweeping {
+            return;
+        }
+        while self.gc_sweep_cursor.is_some() {
+            self.sweep_one();
+        }
+        self.finish_sweep_cycle();
+    }
+
+    fn sweep_one(&mut self) {
+        let Some(curr_ref) = self.gc_sweep_cursor else {
+            return;
+        };
+        let next = curr_ref.get_next();
+        if curr_ref.is_marked() {
+            curr_ref.unmark();
+            self.gc_sweep_prev = self.gc_sweep_cursor;
+            self.gc_sweep_cursor = next;
+        } else {
+            unsafe { self.dealloc(curr_ref) };
+            self.gc_sweep_cursor = next;
+            if let Some(prev_ref) = self.gc_sweep_prev {
+                prev_ref.set_next(next);
+            } else {
+                self.head = self.gc_sweep_cursor;
+            }
+        }
+    }
+
+    fn finish_sweep_cycle(&mut self) {
+        self.gc_next_threshold = self.alloc_bytes.saturating_mul(self.gc_growth_factor);
+        self.gc_phase = GcPhase::Idle;
+        self.gc_sweep_cursor = None;
+        self.gc_sweep_prev = None;
+    }
+
+    fn unlink_unmarked_interns(&mut self) {
         let mut dangling_strings = std::mem::take(&mut self.gc_dangling_strings);
         dangling_strings.clear();
         for (k, ()) in self.strings.iter() {
@@ -202,25 +410,6 @@ impl Heap {
         for s in dangling_strings.drain(..) {
             self.strings.remove(s);
         }
-
-        while let Some(curr_ref) = curr_obj {
-            let next = curr_ref.get_next();
-            if curr_ref.is_marked() {
-                curr_ref.unmark();
-                prev_obj = curr_obj;
-                curr_obj = next;
-            } else {
-                unsafe { self.dealloc(curr_ref) };
-                curr_obj = next;
-                if let Some(prev_ref) = prev_obj {
-                    prev_ref.set_next(next);
-                } else {
-                    self.head = curr_obj;
-                }
-            }
-        }
-
-        self.gc_next_threshold = self.alloc_bytes * self.gc_growth_factor;
         self.gc_dangling_strings = dangling_strings;
     }
 
@@ -235,12 +424,25 @@ impl Heap {
         self.live_count
     }
 
-    /// True when live heap bytes exceed the collection threshold. [`Self::sweep`]
-    /// rescales the threshold to `live * GC_GROWTH_FACTOR`, so collection cost
-    /// stays proportional to the live set rather than to the allocation count.
+    /// True when idle and live heap bytes exceed the collection threshold.
+    /// Mid-cycle work is paced from the alloc safepoint, not a second start.
     #[inline]
     pub fn should_collect(&self) -> bool {
-        self.alloc_bytes > self.gc_next_threshold
+        self.gc_phase == GcPhase::Idle && self.alloc_bytes > self.gc_next_threshold
+    }
+
+    /// Gray / sweep objects to process at one safepoint (doubles under pressure).
+    #[inline]
+    pub fn gc_work_quantum(&self) -> usize {
+        let base = match self.gc_phase {
+            GcPhase::Sweeping => GC_SWEEP_QUANTUM,
+            GcPhase::Marking | GcPhase::Idle => GC_MARK_QUANTUM,
+        };
+        if self.alloc_bytes > self.gc_next_threshold {
+            base.saturating_mul(2)
+        } else {
+            base
+        }
     }
 
     /// Lower the byte threshold so the next [`Self::should_collect`] check
@@ -279,18 +481,16 @@ impl Heap {
     }
 
     pub fn trace(&mut self, values: &[u64]) {
-        self.gc_mark_set.clear();
-        self.gc_mark_set.extend(values.iter().copied());
         let mut gray = std::mem::take(&mut self.gc_gray);
         gray.clear();
-        let mut current = self.head;
-
-        while let Some(reference) = current {
-            if !reference.is_marked() && self.gc_mark_set.contains(&reference.addr()) {
-                reference.mark(&mut gray);
+        for &addr in values {
+            let addr = addr & !1;
+            if addr == 0 {
+                continue;
             }
-
-            current = reference.get_next();
+            if let Some(obj) = self.find_object_by_addr(addr) {
+                obj.mark(&mut gray);
+            }
         }
         gray.clear();
         self.gc_gray = gray;
@@ -309,34 +509,47 @@ impl Heap {
         }
     }
 
-    /// Mark `root_addrs` and walk children via [`Object::mark_references`].
-    pub fn mark_from_roots(&mut self, root_addrs: &[u64]) {
-        self.gc_mark_set.clear();
-        self.gc_mark_set.extend(root_addrs.iter().copied());
+    /// Push `root_addrs` onto the gray list without draining it (end-of-mark remark).
+    pub fn remark_roots(&mut self, root_addrs: &[u64]) {
         let mut gray = std::mem::take(&mut self.gc_gray);
-        gray.clear();
-        let mut current = self.head;
-        while let Some(reference) = current {
-            if !reference.is_marked() && self.gc_mark_set.contains(&reference.addr()) {
-                reference.mark(&mut gray);
+        for &addr in root_addrs {
+            let addr = addr & !1;
+            if addr == 0 {
+                continue;
             }
-            current = reference.get_next();
-        }
-        while let Some(obj) = gray.pop() {
-            obj.mark_references(self, &mut gray);
+            if let Some(obj) = self.find_object_by_addr(addr) {
+                obj.mark(&mut gray);
+            }
         }
         self.gc_gray = gray;
+    }
+
+    /// Mark `root_addrs` and walk children via [`Object::mark_references`].
+    ///
+    /// Seeds gray via slab lookup (not an O(heap) list scan).
+    pub fn mark_from_roots(&mut self, root_addrs: &[u64]) {
+        self.gc_gray.clear();
+        self.remark_roots(root_addrs);
+        while !self.mark_quantum(usize::MAX) {}
     }
 
     /// Complete collect without a `Machine`: mark `extra_roots` plus immortal
     /// enums, clear dead weaks, sweep.
     pub fn collect(&mut self, extra_roots: &[u64]) {
+        if self.gc_phase == GcPhase::Sweeping {
+            self.finish_sweep();
+        }
         let mut roots = self.take_gc_roots();
         roots.extend_from_slice(extra_roots);
-        self.mark_from_roots(&roots);
+        if self.gc_phase == GcPhase::Idle {
+            self.begin_mark(&roots);
+        } else {
+            self.mark_from_roots(&roots);
+        }
+        while !self.mark_quantum(usize::MAX) {}
         self.clear_dead_weaks();
-        // SAFETY: mark_from_roots marked every reachable object.
-        unsafe { self.sweep() };
+        self.begin_sweep();
+        self.finish_sweep();
         self.restore_gc_roots(roots);
     }
 
@@ -422,13 +635,20 @@ impl Heap {
 
     /// Write back scratch-buffer values into a live `ObjArray`.
     pub fn update_array_elements(&mut self, addr: u64, values: &[i64]) {
-        if let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) {
+        let Some(Object::Array(mut gc)) = self.find_object_by_addr(addr) else {
+            return;
+        };
+        let n = gc.as_ref().elements.len().min(values.len());
+        let mut olds = Vec::with_capacity(n);
+        {
             let arr = gc.as_mut();
-            for (i, &v) in values.iter().enumerate() {
-                if i < arr.elements.len() {
-                    arr.elements[i] = Value::from(v);
-                }
+            for (i, &v) in values.iter().take(n).enumerate() {
+                olds.push(arr.elements[i]);
+                arr.elements[i] = Value::from(v);
             }
+        }
+        for old in olds {
+            self.satb_shade_value(old);
         }
     }
 
@@ -2761,5 +2981,94 @@ mod tests {
         );
         // `keep` was unmarked after sweep and not re-rooted, also gone.
         assert!(!live.contains(&keep_addr));
+    }
+
+    #[test]
+    fn incremental_mark_seeds_via_lookup_not_list_scan() {
+        let mut heap = Heap::default();
+        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
+        let (drop_me, _) = heap.alloc(ObjString::from("drop"), Object::String);
+        heap.begin_mark(&[keep.addr()]);
+        assert_eq!(heap.gc_phase(), GcPhase::Marking);
+        assert!(keep.is_marked());
+        assert!(!drop_me.is_marked());
+        while !heap.mark_quantum(1) {}
+        heap.clear_dead_weaks();
+        heap.begin_sweep();
+        while !heap.sweep_quantum(1) {}
+        assert_eq!(heap.gc_phase(), GcPhase::Idle);
+        assert!(heap.find_object_by_addr(keep.addr()).is_some());
+        assert!(heap.find_object_by_addr(drop_me.addr()).is_none());
+    }
+
+    #[test]
+    fn satb_keeps_overwritten_pointer_this_cycle() {
+        let mut heap = Heap::default();
+        let (old, _) = heap.alloc(ObjString::from("old"), Object::String);
+        let (fresh, _) = heap.alloc(ObjString::from("fresh"), Object::String);
+        let inst = ObjInstance::with_slots(1, vec![Member::Object(old)]);
+        let (obj, mut gc) = heap.alloc(inst, Object::Instance);
+
+        heap.begin_mark(&[obj.addr()]);
+        // Overwrite before `obj` is scanned so only SATB keeps `old` gray.
+        heap.satb_shade_member(Member::Object(old));
+        gc.as_mut().set_slot(0, Member::Object(fresh));
+        while !heap.mark_quantum(64) {}
+        heap.clear_dead_weaks();
+        heap.begin_sweep();
+        heap.finish_sweep();
+
+        let live = live_object_addrs(&heap);
+        assert!(live.contains(&old.addr()), "SATB floating garbage this cycle");
+        assert!(live.contains(&fresh.addr()));
+        assert!(live.contains(&obj.addr()));
+
+        heap.collect(&[obj.addr()]);
+        let live = live_object_addrs(&heap);
+        assert!(
+            !live.contains(&old.addr()),
+            "overwritten pointer dies on the next cycle"
+        );
+        assert!(live.contains(&fresh.addr()));
+    }
+
+    #[test]
+    fn alloc_during_mark_is_black() {
+        let mut heap = Heap::default();
+        let (root, _) = heap.alloc(ObjString::from("root"), Object::String);
+        heap.begin_mark(&[root.addr()]);
+        let (baby, baby_gc) = heap.alloc(ObjString::from("baby"), Object::String);
+        assert!(baby_gc.is_marked());
+        while !heap.mark_quantum(64) {}
+        heap.clear_dead_weaks();
+        heap.begin_sweep();
+        heap.finish_sweep();
+        assert!(heap.find_object_by_addr(baby.addr()).is_some());
+        assert!(heap.find_object_by_addr(root.addr()).is_some());
+    }
+
+    #[test]
+    fn lazy_sweep_reclaims_across_quanta() {
+        let mut heap = Heap::default();
+        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
+        let mut dead = Vec::new();
+        for i in 0..8 {
+            let (o, _) = heap.alloc(ObjString::from(format!("d{i}").as_str()), Object::String);
+            dead.push(o.addr());
+        }
+        heap.mark_from_roots(&[keep.addr()]);
+        heap.begin_sweep();
+        assert_eq!(heap.gc_phase(), GcPhase::Sweeping);
+        let mut steps = 0;
+        while !heap.sweep_quantum(1) {
+            steps += 1;
+            assert!(steps < 64);
+        }
+        assert!(steps >= 1, "sweep must take more than one quantum");
+        assert_eq!(heap.gc_phase(), GcPhase::Idle);
+        assert!(heap.find_object_by_addr(keep.addr()).is_some());
+        for addr in dead {
+            assert!(heap.find_object_by_addr(addr).is_none());
+        }
     }
 }
