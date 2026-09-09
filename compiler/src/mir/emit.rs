@@ -416,18 +416,17 @@ fn emit_inst(
             index,
             unchecked,
         } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[array.index()]),
-                loc,
-            });
+            let arr = u32::from(regs[array.index()]);
+            out.push(IlOp::Load { slot: arr, loc });
+            out.push(IlOp::ArrayPin { slot: arr, loc });
             out.push(IlOp::Load {
                 slot: u32::from(regs[index.index()]),
                 loc,
             });
             if *unchecked {
-                out.push(IlOp::IndexUnchecked { loc });
+                out.push(IlOp::IndexPinUnchecked { slot: arr, loc });
             } else {
-                out.push(IlOp::Index { loc });
+                out.push(IlOp::IndexPin { slot: arr, loc });
             }
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
@@ -441,10 +440,9 @@ fn emit_inst(
             value,
             unchecked,
         } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[array.index()]),
-                loc,
-            });
+            let arr = u32::from(regs[array.index()]);
+            out.push(IlOp::Load { slot: arr, loc });
+            out.push(IlOp::ArrayPin { slot: arr, loc });
             out.push(IlOp::Load {
                 slot: u32::from(regs[index.index()]),
                 loc,
@@ -453,12 +451,11 @@ fn emit_inst(
                 slot: u32::from(regs[value.index()]),
                 loc,
             });
-            let inst = if *unchecked {
-                Instruction::StoreIndexUnchecked
+            if *unchecked {
+                out.push(IlOp::StoreIndexPinUnchecked { slot: arr, loc });
             } else {
-                Instruction::StoreIndex
-            };
-            out.push(IlOp::byte(Byte::new(inst)));
+                out.push(IlOp::StoreIndexPin { slot: arr, loc });
+            }
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,

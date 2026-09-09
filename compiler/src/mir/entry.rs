@@ -47,7 +47,7 @@ pub enum LirRefuse {
 /// `BITAND`/`BITOR`, or an inferable leftover (plain `if`/compare
 /// diamonds, store-only loops, tiny lets). Hard refuse stays I4
 /// string/FORMAT, I5 alloc without maps, HostInvoke/`CALL` (those stay
-/// dense), escaping fields. Heap index is S3 leftover (LIR). Boxed
+/// dense), heap index (dense-only), escaping fields. Boxed
 /// `JumpIfMatch` (arity 0 overlap, any tag)
 /// is I2 when reconstruct can model the taken payload.
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
@@ -99,14 +99,17 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
             | IlOp::IndexPinUnchecked { .. }
             | IlOp::StoreIndexPin { .. }
             | IlOp::StoreIndexPinUnchecked { .. }
-            | IlOp::ArrayPin { .. } => {}
+            | IlOp::ArrayPin { .. } => return Some(LirRefuse::Index),
             IlOp::Byte { byte, .. }
                 if matches!(
                     *byte.bytecode(),
                     Instruction::StoreIndex
                         | Instruction::StoreIndexUnchecked
                         | Instruction::ArrayLen
-                ) => {}
+                ) =>
+            {
+                return Some(LirRefuse::Index);
+            }
             op if refuses_string_or_format(op) => return Some(LirRefuse::String),
             op if refuses_alloc(op) && !maps_ok => return Some(LirRefuse::Alloc),
             IlOp::Jump {
@@ -163,23 +166,8 @@ fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
             IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => {
                 leftover = true;
             }
-            IlOp::Index { .. }
-            | IlOp::IndexUnchecked { .. }
-            | IlOp::IndexPin { .. }
-            | IlOp::IndexPinUnchecked { .. }
-            | IlOp::StoreIndexPin { .. }
-            | IlOp::StoreIndexPinUnchecked { .. }
-            | IlOp::ArrayPin { .. } => leftover = true,
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::StoreIndex
-                        | Instruction::StoreIndexUnchecked
-                        | Instruction::ArrayLen
-                ) =>
-            {
-                leftover = true;
-            }
+            // Index is dense-only (S3). LIR of tiny MakeArray+index drops
+            // packed LOAD / ArrayPin fuse-IL.
             IlOp::Byte { byte, .. } if super::gc::is_alloc_inst(*byte.bytecode()) => {
                 leftover = true;
             }

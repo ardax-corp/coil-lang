@@ -1977,6 +1977,42 @@ fn main() {
     }
 
     #[test]
+    fn s3_vec_scan_fill_is_dense_with_pin() {
+        let src = r#"
+fn fill(Vec<int> v) -> int {
+    let i = 0;
+    while i < len(v) {
+        v[i] = i;
+        i = i + 1;
+    }
+    return len(v);
+}
+fn main() {
+    let v: Vec<int> = Vec::from([1, 2, 3]);
+    let _ = fill(v);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile fill");
+        let fill = p.function_offset("fill").expect("fill");
+        let main = p.function_offset("main").expect("main");
+        let fill_bc = if fill < main { &bc[fill..main] } else { &bc[fill..] };
+        let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            fill_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "fill is dense; opcodes={names:?}"
+        );
+        assert!(
+            fill_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::ArrayPin),
+            "dense fill reconstructs ArrayPin; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
     fn s3_index_loop_takes_dense() {
         let src = r#"
 fn sum(Vec<int> arr) -> int {

@@ -34,6 +34,10 @@ pub fn try_specialize_body(
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // Debugger-attached / -Og skip this entry (I7).
     let has_alloc = ops.iter().any(refuses_alloc);
+    // Looping alloc stays fuse-IL so invert+fuse (COI-87) remains (S2c).
+    if has_alloc && super::infer::has_back_edge(ops) {
+        return None;
+    }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
         return None;
     }

@@ -390,7 +390,7 @@ pub(super) fn dce(func: &mut MirFunc) {
         changed = false;
         for block in &func.blocks {
             for inst in block.insts.iter().rev() {
-                if live.contains(&inst.dest()) {
+                if live.contains(&inst.dest()) || inst.is_effect_barrier() {
                     for o in inst.operands() {
                         if live.insert(o) {
                             changed = true;
@@ -403,7 +403,7 @@ pub(super) fn dce(func: &mut MirFunc) {
     for block in &mut func.blocks {
         block
             .insts
-            .retain(|i| i.is_phi() || live.contains(&i.dest()));
+            .retain(|i| i.is_phi() || i.is_effect_barrier() || live.contains(&i.dest()));
     }
 }
 
