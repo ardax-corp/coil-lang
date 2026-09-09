@@ -359,6 +359,30 @@ fn isolated_optimize_off_leaves_make_array() {
 }
 
 #[test]
+fn keeps_heap_for_unproven_index() {
+    // S2h: leftover MakeArray + `xs[k]` stays a heap object (checked Index).
+    let mut ops = make_and_store(2, 0);
+    ops.extend([
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 1,
+            loc: loc(),
+        },
+        IlOp::Index { loc: loc() },
+        IlOp::Return {
+            loc: loc(),
+            ret_words: 1,
+        },
+    ]);
+    assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
+    escape_analysis(&mut ops);
+    assert!(has_make_array(&ops));
+}
+
+#[test]
 fn keeps_heap_when_elements_are_computed() {
     // Zip/broadcast results are MakeArray of ADDs — fail-closed, stay heap.
     let mut ops = vec![
