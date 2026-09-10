@@ -1533,7 +1533,10 @@ pub(super) fn paired_alloc_dest(func: &MirFunc, barrier: ValueId) -> Option<Valu
         let mut pending = None;
         for inst in &block.insts {
             match inst {
-                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                MirInst::Alloc { dest, .. }
+                | MirInst::ArrayPush { dest, .. }
+                | MirInst::Format { dest, .. }
+                | MirInst::Stringify { dest, .. } => {
                     pending = Some(*dest)
                 }
                 MirInst::GcBarrier { dest, .. } if *dest == barrier => return pending,

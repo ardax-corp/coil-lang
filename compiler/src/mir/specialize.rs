@@ -37,7 +37,8 @@ pub fn try_specialize_body(
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`, heap
     // index / ArrayLen / StoreIndex (dense residuals after V*). FORMAT /
-    // STRING / PRINT / STRINGIFY stay off dense (Q9 R1 is MIR→LIR). Q6
+    // STRING / PRINT / STRINGIFY stay off dense (Q9 R1 is MIR→LIR; R3
+    // maps FORMAT / STRINGIFY). Q6
     // counted `for` is i64 + index.
     // Q8: niche / two-slot match may dense when the reconstruct beats
     // fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
@@ -348,7 +349,8 @@ fn emit_cost(ops: &[IlOp]) -> usize {
 /// uses this after stack-IL
 /// opts; `emit_lir` keeps single-use return/cmp values on the stack. Do
 /// not re-opt the reconstruct (`MOD` rematerializes). Call / host / box /
-/// I4 string/format may lift (Q9 R1). I5 alloc needs S2b maps ([`lir_eligible_with`]).
+/// I4 string/format may lift (Q9 R1). FORMAT / STRINGIFY need S2b maps
+/// (Q9 R3). I5 alloc needs S2b maps ([`lir_eligible_with`]).
 /// Keep/refuse is the LIR cost gate in `IlModule`, not a feature floor.
 pub fn try_lower_abi_body(
     ops: &[IlOp],

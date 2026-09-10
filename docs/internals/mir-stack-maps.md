@@ -13,7 +13,8 @@ and relocate mapped slots on collect.
 - `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` can lower to
   `MirInst::Alloc` (`heapref`) plus a `GcBarrier` safepoint.
   `ArrayPush` / `DenseArrayPush` lower to `MirInst::ArrayPush` plus a
-  barrier (B6 grow). `bind_drafts` counts those opcodes and `DenseMake`.
+  barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way (Q9 R3).
+  `bind_drafts` counts those opcodes and `DenseMake`.
 - [`fill_live_roots`](../../compiler/src/mir/gc.rs) (on `MirBuilder::finish`
   and text parse) sets `GcBarrier.roots` and `MirFunc.gc_roots` to the live
   heap-word SSA values at the edge: the new object plus other live heap
