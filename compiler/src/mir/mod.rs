@@ -3504,12 +3504,41 @@ fn main() {
             hot.iter().any(|(n, _)| n == "i" || n == "s"),
             "named lets survive remap; locals={hot:?}"
         );
-        assert!(
-            p.debug_locs().iter().any(|l| l.is_known()),
-            "sparse DebugLoc: at least one known loc after MIR emit"
-        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn emit_dense_forwards_known_debugloc() {
+        let loc = DebugLoc {
+            file: 0,
+            start_byte: 10,
+            end_byte: 20,
+        };
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("add1");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        let f = try_lower_numeric(&ops, &hints).expect("lower");
+        assert!(
+            f.value_locs.values().any(|l| l.is_known()),
+            "lower must keep known dest locs"
+        );
+        let mut pool = Vec::new();
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("emit");
+        assert!(
+            dense.iter().any(|op| op.loc().is_known()),
+            "C3 dense emit must forward known DebugLoc"
+        );
     }
 
     #[test]
