@@ -18,7 +18,8 @@ forever barriers.
 
 | Wall | Today | Commit |
 |------|-------|--------|
-| `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` / I4 `from_bytes` / `to_bytes` | fuse-IL | **Q9** |
+| I4 `from_bytes` / `to_bytes` (dense HostInvoke) | fuse-IL / I6 typed, off dense | **Q9** R2 |
+| Unicode / regex in SSA | out of MIR | later Q9 rung |
 | Mutual / two-slot recursive `CALL` | fuse-IL | later Q7 rung |
 | User `Iterator` / coro / dict / first-class range `for` | fuse-IL | later Q6 rung |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
@@ -46,7 +47,8 @@ Folded former floors:
 - **W4 HostInvoke id allowlists** — LICM hoists when purity bits say
   scalar-pure (`classify_host_name`) and the native is not heap-reading
   `packed_*`. Dense emit already reconstructs other I6-typed hosts except
-  I4 string bytes.
+  I4 string bytes (`from_bytes` / `to_bytes`). Q9 R1 reconstructs
+  `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` on MIR→LIR.
 
 Loops amortize prologue `Seek`; they skip the static straight-line compare
 unless the reconstruct is a select diamond or leftover in-loop `Make*`.
@@ -68,7 +70,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `times_a` / `times_at` | `nbody.hy` | dense + open CALL + Index | S3 / A2 |
 | `sum` / `fill` / `scan` / `axpy` | `indexed_sum.hy` / `vec_scan.hy` / `vec_axpy.hy` | `V*` / dense Index | S5 |
 | `sum` | `for_in_sum.hy` | `VReduce` / dense Index | **Q6** counted array |
-| `main` | `for_in_sum.hy` | fuse-IL | I4 format + `Vec.push` |
+| `main` | `for_in_sum.hy` | fuse-IL | format + `Vec.push` (cost / grow; Q9 R1 can lift format alone) |
 | `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
@@ -79,7 +81,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
 | `*_churn` / `option_int_churn` / `result_int_churn` | several | fuse-IL or LIR | two-slot `CALL` / `RETURN` still LIR; match diamond may dense |
 | `match_*` boxed enum | several | fuse-IL or LIR | boxed `JumpIfMatch` stays I2 LIR |
-| `array_mut` | `array_mut.hy` | fuse-IL | `main` + I4 write |
+| `array_mut` | `array_mut.hy` | fuse-IL | `main` + write / format (Q9 R1 does not densify) |
 | `bump` | `looping_makearray.hy` | dense or SROA | mapped preheader or slot SROA |
 | `pack` | `s2d_inloop_pack_store.hy` | dense SROA | computed-index select |
 | `pack` | `s2d_inloop_escape.hy` | dense-native or fuse-IL | A2 + cost gate |
