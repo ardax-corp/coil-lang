@@ -21,7 +21,7 @@ forever barriers.
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` / I4 `from_bytes` / `to_bytes` | fuse-IL | **Q9** |
 | Mutual / two-slot recursive `CALL` | fuse-IL | later Q7 rung |
 | User `Iterator` / coro / dict / first-class range `for` | fuse-IL | later Q6 rung |
-| Dense+match (stack match vs dense regs) | MIR→LIR (I2) | **Q8** |
+| Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
 | Debugger-attached / `-Og` | fuse-IL | **I7** (stays) |
 | Unmapped alloc / GC safepoint | fuse-IL | maps (I5 / S2b) |
@@ -76,12 +76,14 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | sibling `TailCall` (even/odd) | — | fuse-IL or dense | open one-word `TailCall` + cost gate |
 | `nsieve` | `nsieve.hy` | fuse-IL | `Vec.push` (no `Make*`) |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
-| `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | match / two-slot |
+| `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
+| `*_churn` / `option_int_churn` / `result_int_churn` | several | fuse-IL or LIR | two-slot `CALL` / `RETURN` still LIR; match diamond may dense |
+| `match_*` boxed enum | several | fuse-IL or LIR | boxed `JumpIfMatch` stays I2 LIR |
 | `array_mut` | `array_mut.hy` | fuse-IL | `main` + I4 write |
 | `bump` | `looping_makearray.hy` | dense or SROA | mapped preheader or slot SROA |
 | `pack` | `s2d_inloop_pack_store.hy` | dense SROA | computed-index select |
 | `pack` | `s2d_inloop_escape.hy` | dense-native or fuse-IL | A2 + cost gate |
-| `match_*` / `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | match / heap / host / `new` |
+| `dict_*` / `gc_churn` / `coro_ping` | several | fuse-IL | heap / host / `new` |
 
 S2f scalarizes `[T; N]` when the index is proven (`i % N`; **Q4**).
 S2g boxes once at a named escape (**Q1**). Grow on `[T; N]` is a type

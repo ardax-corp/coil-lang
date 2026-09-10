@@ -35,12 +35,14 @@ Language `int` / `float` / `bool` map to `i64` / `f64` / `bool`. I1
 ([COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice))
 adds `heapref` / `niche_opt` / `niche_res` under `value` so infer/lower can
 **carry** shipped heap and niche Option/Result words in SSA. Dense emit and
-`DenseAbi` still require numeric lanes only; allocating / escaping bodies
-stay fuse-IL. I2 ([COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir)
+`DenseAbi` take numeric, `HeapRef`, and niche word lanes; two-slot `RETURN`
+and allocating / escaping bodies stay fuse-IL or LIR. I2 ([COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir)
 / [COI-302](https://linear.app/ardax/issue/COI-302/after-unlock-i2-boxedconstructmatch-cost-gate))
 lowers niche / two-slot / boxed-overlap match (`LogNot` / tag `Br` /
-`JumpIfMatch` any tag, arity ≤ 1 including arity 0 overlap) through MIR→LIR.
-Dense emit still refuses those terminators.
+`JumpIfMatch` any tag, arity ≤ 1 including arity 0 overlap). **Q8**
+([COI-330](https://linear.app/ardax/issue/COI-330)) reconstructs niche /
+two-slot match as dense register `Br` (cost gate vs LIR/fuse). Boxed
+`JumpIfMatch` stays MIR→LIR.
 I3 ([COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir))
 lowers field load/store on **non-escaping** named class locals the
 local_escape sidecar already unboxed into consecutive slots
@@ -75,7 +77,8 @@ HostInvoke except I4 string bytes. Heap-index / `StoreIndex` take dense after V*
 the prologue frame high-water; S2e does not emit a per-residual `Seek`.
 Pin opcodes stay fuse-IL / proven stack-IL only — pin keys do not
 survive the dense prologue `Seek`.
-Dense+match stays I2 LIR (JumpIfMatch stack protocol vs dense regs).
+Boxed dense+match stays I2 LIR (JumpIfMatch stack protocol vs dense regs).
+Niche / two-slot match may dense (**Q8**).
 Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).
 
 ## P1 — dense exec (COI-268)
