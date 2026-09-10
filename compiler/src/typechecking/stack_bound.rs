@@ -26,11 +26,29 @@ const DEFAULT_FRAME_SLOTS: u32 = 16;
 
 /// Compute operand-stack slots from a max live-frame count.
 pub fn operand_slots_for_frames(max_frames: u32) -> u32 {
-    let need = max_frames
-        .saturating_mul(DEFAULT_FRAME_SLOTS)
-        .saturating_add(DEFAULT_FRAME_SLOTS);
+    operand_slots_for_frame_size(max_frames, DEFAULT_FRAME_SLOTS)
+}
+
+/// Like [`operand_slots_for_frames`], with a measured dense `Seek` width.
+pub fn operand_slots_for_frame_size(max_frames: u32, frame_slots: u32) -> u32 {
+    let frame = frame_slots.max(1);
+    let need = max_frames.saturating_mul(frame).saturating_add(frame);
     need.max(DEFAULT_OPERAND_STACK_SLOTS)
         .min(MAX_OPERAND_STACK_SLOTS)
+}
+
+/// Grow a typecheck-time stack bound when dense emit used a fatter frame.
+///
+/// Recovers `max_frames` from `current` (`frames × 16 + 16`) and reapplies
+/// `seek`. No-op when `seek` fits the 16-slot estimate.
+pub fn rescale_operand_slots_for_dense_seek(current: u32, seek: u32) -> u32 {
+    if seek <= DEFAULT_FRAME_SLOTS {
+        return current;
+    }
+    let frames = current
+        .saturating_sub(DEFAULT_FRAME_SLOTS)
+        / DEFAULT_FRAME_SLOTS;
+    operand_slots_for_frame_size(frames.max(1), seek).max(current)
 }
 
 /// Proven or attributed max live frames for one recursive function.
@@ -1590,6 +1608,15 @@ fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
 mod tests {
     use super::*;
     use parser::Pratt;
+
+    #[test]
+    fn rescale_grows_only_when_seek_exceeds_default_frame() {
+        assert_eq!(rescale_operand_slots_for_dense_seek(512, 15), 512);
+        assert_eq!(
+            rescale_operand_slots_for_dense_seek(512, 25),
+            operand_slots_for_frame_size(31, 25)
+        );
+    }
 
     fn parse(src: &str) -> Output<'static> {
         let owned = Box::leak(src.to_string().into_boxed_str());

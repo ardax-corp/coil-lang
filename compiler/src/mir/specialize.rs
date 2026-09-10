@@ -140,6 +140,8 @@ pub fn try_specialize_body(
     let loop_tax = super::infer::has_back_edge(ops)
         && !select_cfg
         && !(inloop_alloc && super::infer::has_alloc_inside_loop(&out));
+    // Q7 self-CALL is eligible; keep/refuse is still this cost compare.
+    // Skipping it shipped a 2× fib regress (Seek + STORE around CALL).
     if !loop_tax && emit_cost(&out) > emit_cost(ops) {
         return None;
     }

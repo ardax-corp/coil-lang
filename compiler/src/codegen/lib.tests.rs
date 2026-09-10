@@ -1606,6 +1606,7 @@ fn main() {
         );
         // Pure call arms leave both results on the operand stack (expr_depth
         // pads temps above the stacked lhs), so lower fuses ADD;RETURN.
+        // Tight recursive fib loses the dense cost gate (Q7).
         assert!(
             bc.iter()
                 .any(|b| *b.bytecode() == Instruction::BinReturn
@@ -1641,8 +1642,7 @@ fn main() {
              fn main() { return fib(10); }",
         );
         // Recursive arms must stack across CALL (no STORE between them) and
-        // join with BinReturn. Branch layout may park the base case after
-        // the hot path, so do not assume ConstReturnImm precedes the CALLs.
+        // join with BinReturn. Tight fib stays fuse-IL (Q7 cost gate).
         let call_pos: Vec<usize> = bc
             .iter()
             .enumerate()
@@ -6908,7 +6908,10 @@ fn main() { \
             has_fused
                 || bc.iter().any(|b| matches!(
                     *b.bytecode(),
-                    Instruction::ADD | Instruction::LEQ | Instruction::JMPF
+                    Instruction::ADD
+                        | Instruction::LEQ
+                        | Instruction::JMPF
+                        | Instruction::DenseBin
                 )),
             "expected fused superinstructions or fib arithmetic alongside PolyFn; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()

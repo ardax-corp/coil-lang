@@ -5,6 +5,9 @@ The VM pre-allocates an operand stack sized from this analysis:
 - non-recursive programs → [`DEFAULT_OPERAND_STACK_SLOTS`](../../compiler/src/typechecking/stack_bound.rs) (256)
 - proven / attributed recursion → `max_frames × 16 + 16` (clamped to
   [`MAX_OPERAND_STACK_SLOTS`](../../machine/src/lib.rs))
+- after dense specialize, if a recursive body `Seek`s more than 16 slots,
+  [`rescale_operand_slots_for_dense_seek`](../../compiler/src/typechecking/stack_bound.rs)
+  reapplies `max_frames × seek + seek` (Q7 `tak`)
 
 [`Machine::with_operand_capacity`](../../machine/src/vm.rs) builds the VM; reactor
 workers resize when a job needs a larger stack.

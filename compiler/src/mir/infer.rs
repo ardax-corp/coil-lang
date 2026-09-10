@@ -8,7 +8,8 @@
 //! `ArrayLen` / `StoreIndex` paint `heapref` lanes. Still refuse class
 //! field / match (dense) / string / unmapped alloc / multi-word `RETURN` /
 //! residual `Byte` / `Pow` / `AND`/`OR`. S2c maps allow alloc.
-//! Compare-only stays fuse-IL.
+//! Compare-only stays fuse-IL. Q7 unfuses convoy `LoadReturnSlot` /
+//! `ConstReturnImm` / `BinReturn` so one-word self-`CALL` can infer.
 
 use std::collections::HashMap;
 
@@ -455,7 +456,7 @@ fn infer_walk(
                 }
             }
             IlOp::Entry {
-                kind: EntryKind::Call,
+                kind: EntryKind::Call | EntryKind::TailCall,
                 arity,
                 target,
                 ret_words,
@@ -469,6 +470,32 @@ fn infer_walk(
                     *ret_words,
                     target.0,
                     calls,
+                )?;
+            }
+            // Convoy fused returns (Q7): same stack/types as Load/Const/Bin + RETURN.
+            IlOp::LoadReturnSlot { slot, .. } => {
+                stack.push(Cell {
+                    origin: Origin::Slot(*slot),
+                    ty: slot_ty.get(slot).copied(),
+                    imm: None,
+                });
+            }
+            IlOp::ConstReturnImm { imm, .. } => {
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::I64),
+                    imm: Some(i64::from(*imm)),
+                });
+            }
+            IlOp::BinReturn { op, .. } => {
+                apply_bin(
+                    &mut stack,
+                    &mut slot_ty,
+                    &mut pool_ty,
+                    *op,
+                    &mut has_i32,
+                    &mut has_float_arith,
+                    &mut has_i64_arith,
                 )?;
             }
             _ => {
@@ -620,7 +647,7 @@ fn infer_walk(
                 });
             }
             IlOp::Entry {
-                kind: EntryKind::Call,
+                kind: EntryKind::Call | EntryKind::TailCall,
                 arity,
                 ..
             } => {
@@ -632,6 +659,19 @@ fn infer_walk(
                     ty: None,
                     imm: None,
                 });
+            }
+            IlOp::LoadReturnSlot { slot, .. } => {
+                if let Some(c) = stack.pop() {
+                    if let Some(ty) = slot_ty.get(slot).copied() {
+                        let _ = paint(&mut slot_ty, &mut pool_ty, c, ty);
+                    }
+                }
+            }
+            IlOp::ConstReturnImm { .. } => {
+                let _ = stack.pop();
+            }
+            IlOp::BinReturn { .. } => {
+                let _ = stack.pop();
             }
             IlOp::Byte { byte, .. }
                 if matches!(

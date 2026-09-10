@@ -1124,6 +1124,47 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_recursive_work_loop_is_dense() {
+        // Tight tak/fib leafs lose the cost gate (Seek + STORE vs convoy
+        // fuse). A self-recursive body with a counted loop amortizes Seek
+        // and must stay dense + typed CALL (Q7).
+        let src = r#"
+fn rec(int n) -> int {
+    if n <= 0 {
+        return 1;
+    }
+    let i = 0;
+    let s = 0;
+    while i < 8 {
+        s = s + n * i;
+        i = i + 1;
+    }
+    return rec(n - 1) + s;
+}
+fn main() {
+    let _ = rec(6);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile rec");
+        let rec = p.function_offset("rec").expect("rec");
+        let main = p.function_offset("main").expect("main");
+        let rec_bc = if rec < main { &bc[rec..main] } else { &bc[rec..] };
+        assert!(
+            rec_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "Q7 recursive+loop callee must densify; opcodes={:?}",
+            rec_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            rec_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "typed recursive CALL must remain"
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
     fn pipeline_eval_a_follows_straight_line_work_gate() {
         let src = r#"
 fn eval_a(int i, int j) -> float {

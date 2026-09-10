@@ -6,7 +6,7 @@ use std::process::{Command, exit};
 use std::sync::Arc;
 
 use common::{
-    ARCHIVE_VERSION, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
+    ARCHIVE_VERSION, ArchivedArchivedProgram, Byte, Instruction, NativeLock, ProgramDebug,
     archive_version_compatible, default_natives_root, embedded_archive_slice,
     format_archive_version, read_embedded_native_lock, read_package_trailer,
 };
@@ -98,13 +98,34 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 /// Host capability flags are **not** stored in `.hyc` and are **not** re-applied
 /// here. If the bytecode has the op, it runs. `dload` still uses lock hash /
 /// trusted integrity when `dload_gate` is supplied. `coil.toml` is not consulted.
+/// `.hyc` / embed execute does not store the compiler stack bound. Dense
+/// recursive frames (`Seek` + `CALL`/`TailCall`, Q7) need more than 256
+/// slots, so grow to [`machine::MAX_OPERAND_STACK_SLOTS`] for those archives.
+pub fn archive_operand_slots(bytecode: &[Byte]) -> usize {
+    let has_seek = bytecode
+        .iter()
+        .any(|b| *b.bytecode() == Instruction::Seek);
+    let has_call = bytecode.iter().any(|b| {
+        matches!(
+            *b.bytecode(),
+            Instruction::CALL | Instruction::TailCall
+        )
+    });
+    if has_seek && has_call {
+        machine::MAX_OPERAND_STACK_SLOTS
+    } else {
+        machine::DEFAULT_OPERAND_STACK_SLOTS
+    }
+}
+
 pub fn execute_archived_program(
     loaded: &LoadedArchive,
     entry: Option<&Path>,
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
 ) -> bool {
-    let mut machine = Machine::<256>::with_operand_capacity(machine::DEFAULT_OPERAND_STACK_SLOTS);
+    let slots = archive_operand_slots(&loaded.bytecode);
+    let mut machine = Machine::<256>::with_operand_capacity(slots);
     wire_standard_host_natives(&mut machine);
     if let Some(gate) = dload_gate {
         machine.set_dload_gate(gate);
@@ -122,7 +143,7 @@ pub fn execute_archived_program(
         strings: Arc::from(loaded.strings.clone()),
         static_slot_count: loaded.static_slots,
         debug: loaded.debug.clone(),
-        operand_stack_slots: machine::DEFAULT_OPERAND_STACK_SLOTS as u32,
+        operand_stack_slots: slots as u32,
         stack_maps: Vec::new(),
     }));
     machine.set_program_debug(loaded.debug.clone());
@@ -333,6 +354,20 @@ mod tests {
         assert_eq!(
             helper.file_name().and_then(|n| n.to_str()),
             Some(expected.as_str())
+        );
+    }
+
+    #[test]
+    fn archive_stack_grows_for_dense_recursive_call() {
+        let seek = Byte::new(Instruction::Seek).with_operand_u32(25);
+        let call = Byte::new(Instruction::CALL);
+        assert_eq!(
+            archive_operand_slots(&[seek, call]),
+            machine::MAX_OPERAND_STACK_SLOTS
+        );
+        assert_eq!(
+            archive_operand_slots(&[seek]),
+            machine::DEFAULT_OPERAND_STACK_SLOTS
         );
     }
 }

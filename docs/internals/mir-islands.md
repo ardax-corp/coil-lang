@@ -70,7 +70,7 @@ out of MIR until a later cut. Spec:
 |-----------------------|-------|--------|
 | Numeric loops / straight-line (`i32`/`i64`/`f32`/`f64`/`bool`) | dense (`DenseBin` …) after MIR CSE/LICM/peeps when cost ≤ fuse-IL | stay dense (Low IR) |
 | HostInvoke inside numeric | dense + box/unbox at host edge; LICM hoists scalar-pure (purity bits); `packed_*` stays in-place | S3 emits I6-typed hosts except I4 `from_bytes` / `to_bytes` |
-| One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3; two-slot / niche / `TailCall` still refuse today; **Q7** commits near-term dense or LIR recursion / typed recursive CALL |
+| One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3 + **Q7** one-word self-recursive `CALL` / `TailCall` (`tak` / `fib`). Two-slot / niche / mutual still refuse; LIR still cannot reconstruct `CALL` |
 | Saxpy-reduce | HostInvoke `simd_axpy_reduce` (P12) | stay |
 | Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoad` / `VStore` / `VBin` / `VMove` (S5a V0) | stay |
 | Stride-1 add-reduce / conservative FMA | `VReduce` / `VFma` (S5b V1) | stay; no fast-math |
@@ -85,7 +85,7 @@ out of MIR until a later cut. Spec:
 | `FORMAT` / string ops | fuse-IL (`IlOp::Byte` / `String` / `Print`) | **I4** / **Q9** — reopened delivery ladder (today still fuse-IL) |
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
-| Recursion (`tak` / `fib`) | fuse-IL (`CALL` / `TailCall`) | today refuse on the callee; **Q7** commits dense/LIR recursion. S3 may already dense a *caller* loop that `CALL`s them |
+| Recursion (`tak` / `fib`) | fuse-IL on tight leafs; dense when cost ≤ fuse | **Q7** (this PR). Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense. `tak` / `fib` lose the cost gate (Seek + STORE). Mutual / two-slot stay refuse |
 | `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); `main` + format and user `Iterator` / coro / dict / first-class range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |

@@ -561,9 +561,10 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
                 | Instruction::BinSlotImmJmpf
                 | Instruction::BinSlotSlot
                 | Instruction::CmpJmpf
-                | Instruction::BinReturn
+                |             Instruction::BinReturn
                 | Instruction::ConstReturnImm
                 | Instruction::LoadReturnSlot
+                | Instruction::DenseBin
         )
     });
     assert!(

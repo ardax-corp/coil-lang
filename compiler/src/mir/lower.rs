@@ -459,6 +459,30 @@ fn emit_term(
         Some(IlOp::Return { .. }) | Some(IlOp::Halt { .. }) => {
             b.ret(tos.pop())?;
         }
+        Some(IlOp::LoadReturnSlot { slot, .. }) => {
+            let ty = hints.slot(*slot);
+            let v = b.use_local(LocalId(*slot), ty)?;
+            b.ret(Some(v))?;
+        }
+        Some(IlOp::ConstReturnImm { imm, .. }) => {
+            let c = match hints.default_int {
+                MirTy::I32 => MirConst::I32(*imm as i32),
+                _ => MirConst::I64(i64::from(*imm)),
+            };
+            let v = b.ins_const(c)?;
+            b.ret(Some(v))?;
+        }
+        Some(IlOp::BinReturn { op, .. }) => {
+            bin_stack(b, tos, *op)?;
+            b.ret(tos.pop())?;
+        }
+        Some(IlOp::Entry {
+            kind: EntryKind::TailCall,
+            ..
+        }) => {
+            // lower_op already emitted the CALL; TOS is the one-word result.
+            b.ret(tos.pop())?;
+        }
         Some(IlOp::Jump {
             kind: IlJumpKind::JumpIfMatch { tag, arity },
             target,
@@ -619,7 +643,12 @@ fn lower_op(
             Ok(())
         }
         IlOp::Byte { byte, .. } => lower_byte(b, tos, byte, next, hints),
-        IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. } => Ok(()),
+        IlOp::Jump { .. }
+        | IlOp::Return { .. }
+        | IlOp::Halt { .. }
+        | IlOp::LoadReturnSlot { .. }
+        | IlOp::ConstReturnImm { .. }
+        | IlOp::BinReturn { .. } => Ok(()),
         IlOp::HostInvoke { arity, layout, .. } => {
             if *layout != 0 {
                 return Err(LowerError::Refused("HostInvoke layout".into()));
@@ -646,7 +675,7 @@ fn lower_op(
             Err(LowerError::Refused("HostInvoke".into()))
         }
         IlOp::Entry {
-            kind: EntryKind::Call,
+            kind: EntryKind::Call | EntryKind::TailCall,
             arity,
             target,
             ret_words,
@@ -736,9 +765,6 @@ fn lower_op(
         | IlOp::StoreIndexPin { .. }
         | IlOp::StoreIndexPinUnchecked { .. }
         | IlOp::Entry { .. }
-        | IlOp::LoadReturnSlot { .. }
-        | IlOp::ConstReturnImm { .. }
-        | IlOp::BinReturn { .. }
         | IlOp::PrologueJmp { .. } => Err(LowerError::Refused(
             "non-numeric IL (classes/heap/calls stay on Value)".into(),
         )),
@@ -983,7 +1009,7 @@ fn map_bin(inst: Instruction) -> Option<MirBinOp> {
 fn use_result_ty(hints: &LowerHints, next: Option<&IlOp>, default: MirTy) -> MirTy {
     match next {
         Some(IlOp::StorePop { slot, .. }) => hints.slot(*slot),
-        Some(IlOp::Bin { op, .. }) => {
+        Some(IlOp::Bin { op, .. }) | Some(IlOp::BinReturn { op, .. }) => {
             if is_float_op(*op) {
                 MirTy::F64
             } else if matches!(
