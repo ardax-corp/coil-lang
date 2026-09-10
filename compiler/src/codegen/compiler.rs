@@ -3219,19 +3219,14 @@ impl Compiler {
     }
 
     /// Toward-zero `r = i % n` on TOS → Euclidean `r ∈ 0..n`.
+    /// Branchless: `r + (n & (r >> 63))` so select diamonds stay S2k-dense.
     fn emit_euclid_rem_fixup(&mut self, bytecode: &mut CodeBuf, n: i32) {
-        let mut bb = BlockBuilder::new();
-        let join = bytecode.fresh_label();
-        let neg = bytecode.fresh_label();
         bytecode.push(Byte::new(Instruction::DUPLICATE));
-        bytecode.push_const(0);
-        bytecode.push(Byte::new(Instruction::LE));
-        bb.emit_jump_to(neg, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-        bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
-        bb.bind_label(neg, bytecode.il_mut());
+        bytecode.push_const(63);
+        bytecode.push(Byte::new(Instruction::SHR));
         bytecode.push_const(n);
+        bytecode.push(Byte::new(Instruction::BITAND));
         bytecode.push(Byte::new(Instruction::ADD));
-        bb.bind_label(join, bytecode.il_mut());
     }
 
     /// Copy heap-array elements at `arr_slot` back into multi-slot locals `base..base+n`.
