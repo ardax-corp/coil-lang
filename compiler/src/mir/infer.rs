@@ -5,8 +5,9 @@
 //! body. Keep/refuse is the emit **cost gate** vs fuse-IL (not a work-op
 //! floor, and not a Q6–Q8 feature checklist). S3 / **Q7**: one-word
 //! `CALL` / `TailCall` infer without a dense callee map (open ABI until
-//! the map records the body). **B3** / **B7**: two-slot helper `CALL` /
-//! `RETURN` and sibling / mutual `TailCall` infer (self two-slot stays refuse).
+//! the map records the body). **B3** / **B7** / **C1**: multi-word helper,
+//! sibling / mutual `TailCall`, and self two-slot `CALL` / `RETURN` infer
+//! when `ret_words` is in [`super::abi::MAX_MODELED_RET_WORDS`].
 //! I6-typed HostInvoke including Q9 R2 `from_bytes` / `to_bytes`;
 //! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
 //! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on
@@ -174,7 +175,7 @@ enum InferMode {
     Dense,
     Lir,
     /// S2b sidecar: alloc / grow ops are `HeapRef`. One-word `CALL`
-    /// (Q7) and two-slot helper `CALL` (B3) type so CALL+alloc drafts bind.
+    /// (Q7) and multi-word `CALL` (B3 / C1) type so CALL+alloc drafts bind.
     Map,
 }
 
@@ -475,10 +476,12 @@ fn infer_walk(
                 }
                 // Peek: miss fallthrough is the linear walk.
             }
-            IlOp::Jump { .. } | IlOp::Return { ret_words: 1, .. } | IlOp::Halt { .. } => {}
-            IlOp::Return { ret_words, .. } if *ret_words == 2 => {}
-            IlOp::Return { ret_words, .. } if *ret_words != 1 => {
-                return Err(LowerError::Refused("multi-word return".into()));
+            IlOp::Jump { .. } | IlOp::Halt { .. } => {}
+            IlOp::Return { ret_words, .. } if super::abi::ret_words_ok(*ret_words) => {}
+            IlOp::Return { ret_words, .. } => {
+                return Err(LowerError::Refused(format!(
+                    "RETURN ret_words {ret_words}"
+                )));
             }
             IlOp::String { .. } if mode.allows_string() => {
                 stack.push(Cell {
@@ -509,7 +512,8 @@ fn infer_walk(
                 && (mode == InferMode::Dense
                     || mode == InferMode::Map
                     || (mode == InferMode::Lir
-                        && *ret_words == 2
+                        && super::abi::is_multi_word_ret(*ret_words)
+                        && super::abi::ret_words_ok(*ret_words)
                         && matches!(kind, EntryKind::Call))) =>
             {
                 apply_call(
@@ -745,7 +749,7 @@ fn infer_walk(
                     ty: None,
                     imm: None,
                 });
-                if *ret_words == 2 {
+                for _ in 1..*ret_words {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: None,
@@ -1235,8 +1239,8 @@ fn apply_call(
     target: u32,
     calls: &DenseCallMap,
 ) -> Result<(), LowerError> {
-    if ret_words != 1 && ret_words != 2 {
-        return Err(LowerError::Refused("CALL ret_words".into()));
+    if !super::abi::ret_words_ok(ret_words) {
+        return Err(LowerError::Refused(format!("CALL ret_words {ret_words}")));
     }
     let n = arity as usize;
     if stack.len() < n {
@@ -1259,22 +1263,29 @@ fn apply_call(
             ty: Some(abi.ret),
             imm: None,
         });
-        if ret_words == 2 {
+        if super::abi::is_multi_word_ret(ret_words) {
             stack.push(Cell {
                 origin: Origin::Tmp,
                 ty: abi.ret_hi,
                 imm: None,
             });
+            for _ in 2..ret_words {
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
         }
         return Ok(());
     }
-    // S3 / B3: open CALL — result typed from later use.
+    // S3 / B3 / C1: open CALL — result typed from later use.
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: None,
         imm: None,
     });
-    if ret_words == 2 {
+    for _ in 1..ret_words {
         stack.push(Cell {
             origin: Origin::Tmp,
             ty: None,

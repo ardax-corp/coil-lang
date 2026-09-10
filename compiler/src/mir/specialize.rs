@@ -50,11 +50,9 @@ pub fn try_specialize_body(
     // and cost ≤ fuse-IL. Post-loop-only `return [x]` stays fuse-IL
     // (COI-87 invert+fuse). Debugger-attached / -Og still enter (B8).
     // S2k: last-arm writes must survive; Seek size is a cost, not a cap.
-    // B7: sibling / mutual TailCall may lift (stack-arg protocol, reserved
-    // callee entry labels). Self two-slot CALL/RETURN stays fuse-IL.
-    if has_self_two_slot_call(ops, official_entry) {
-        return None;
-    }
+    // B7 / C1: sibling / mutual TailCall and self multi-word CALL/RETURN
+    // may lift (stack-arg protocol, reserved callee entry labels). N>2
+    // still refuses at infer/lower (`MAX_MODELED_RET_WORDS`).
     let select_cfg = has_sroa_select_cfg(ops);
     let has_alloc = ops.iter().any(refuses_alloc);
     let inloop_alloc = super::infer::has_alloc_inside_loop(ops);
@@ -251,22 +249,6 @@ fn paint_index_dest_from_uses(func: &mut crate::mir::func::MirFunc) {
             func.types[id as usize] = ty;
         }
     }
-}
-
-fn has_self_two_slot_call(ops: &[IlOp], self_entry: Option<Label>) -> bool {
-    let Some(entry) = self_entry else {
-        return false;
-    };
-    ops.iter().any(|op| {
-        matches!(
-            op,
-            IlOp::Entry {
-                target,
-                ret_words,
-                ..
-            } if *ret_words >= 2 && *target == entry
-        )
-    })
 }
 
 fn count_store_index(ops: &[IlOp]) -> usize {

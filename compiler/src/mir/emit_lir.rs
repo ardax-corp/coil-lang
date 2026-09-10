@@ -686,7 +686,7 @@ fn emit_lir_call(
         arity: args.len() as u32,
         target,
         loc,
-        ret_words: if dest_hi.is_some() { 2 } else { 1 },
+        ret_words: super::abi::ret_words_from_hi(dest_hi),
     });
     if let Some(hi) = dest_hi {
         out.push(IlOp::StorePop {
@@ -1039,14 +1039,10 @@ fn emit_term(
             }
         }
         Terminator::Return { lo, hi } => {
-            let ret_words = if hi.is_some() {
-                if func.ret_layout != MirLayout::TwoSlot {
-                    return Err(LowerError::Refused("pair return without twoslot".into()));
-                }
-                2
-            } else {
-                1
-            };
+            let ret_words = super::abi::ret_words_from_hi(*hi);
+            if super::abi::is_multi_word_ret(ret_words) && func.ret_layout != MirLayout::TwoSlot {
+                return Err(LowerError::Refused("pair return without twoslot".into()));
+            }
             if let Some(v) = lo {
                 emit_stack(out, *v, func, plan, regs, pool, loc)?;
             } else if ret_words == 1 {
