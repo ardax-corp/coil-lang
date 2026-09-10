@@ -740,9 +740,11 @@ impl Compiler {
         // direct-to-`self.bytecode` emitters (Print/Format/control flow) wrote.
         let bc_len = self.bytecode.len();
         let dbg_len = self.debug_locs.len();
+        let boxes = self.context.stack_array_box.clone();
         let _ = self.do_compile(ast);
         self.bytecode.truncate(bc_len);
         self.debug_locs.truncate(dbg_len);
+        self.context.stack_array_box = boxes;
     }
 
     fn discard_if_branch(&mut self, branch: &Output<'_>) {
@@ -1469,29 +1471,33 @@ impl Compiler {
         args: Option<&[Output<'_>]>,
         bytecode: &mut CodeBuf,
     ) -> bool {
-        let prefix = Self::emit_attempt_prefix(bytecode);
+        let attempt = self.begin_emit_attempt(bytecode);
         if self.try_inline_direct_call_into(fqn, args, bytecode) {
             return true;
         }
-        Self::restore_emit_attempt(bytecode, prefix);
+        self.restore_emit_attempt(bytecode, attempt);
         false
     }
 
-    /// Snapshot a speculative emit target so [`Self::restore_emit_attempt`] can
-    /// undo a refused attempt. `None` means it was empty (the common case).
-    fn emit_attempt_prefix(bytecode: &CodeBuf) -> Option<CodeBuf> {
-        if bytecode.is_empty() {
-            None
-        } else {
-            Some(bytecode.clone())
+    /// Snapshot a speculative emit so a refusal can undo both the buffer and
+    /// Q1 box-once cache (`stack_array_box` is written while compiling args).
+    fn begin_emit_attempt(&self, bytecode: &CodeBuf) -> EmitAttempt {
+        EmitAttempt {
+            bytecode: if bytecode.is_empty() {
+                None
+            } else {
+                Some(bytecode.clone())
+            },
+            stack_array_box: self.context.stack_array_box.clone(),
         }
     }
 
-    fn restore_emit_attempt(bytecode: &mut CodeBuf, prefix: Option<CodeBuf>) {
-        match prefix {
+    fn restore_emit_attempt(&mut self, bytecode: &mut CodeBuf, attempt: EmitAttempt) {
+        match attempt.bytecode {
             Some(p) => *bytecode = p,
             None => bytecode.clear(),
         }
+        self.context.stack_array_box = attempt.stack_array_box;
     }
 
     /// Resolve a function body byte span, including provisional self-bodies.
@@ -1592,13 +1598,8 @@ impl Compiler {
         let arg_slice = args.unwrap_or(&[]);
         // Q1: stack-array args box to one heap object. Tiny-inline remaps
         // callee Index as if the arg were scalar slots and breaks `test()`.
-        if arg_slice.iter().any(|a| {
-            let v = match a.1.as_ref() {
-                Expression::NamedArg(_, inner) => inner,
-                _ => a,
-            };
-            matches!(unwrap_expr_output(v).1.as_ref(), Expression::Identifier(n) if self.stack_array_info(n).is_some())
-        }) {
+        // Nested `observe(bounce(xs), …)` must not compile `xs` speculatively.
+        if arg_slice.iter().any(|a| self.expr_mentions_stack_array(a)) {
             return false;
         }
         let mut temps = Vec::new();
@@ -1692,13 +1693,13 @@ impl Compiler {
         args: Option<&[Output<'_>]>,
         bytecode: &mut CodeBuf,
     ) -> bool {
-        let prefix = Self::emit_attempt_prefix(bytecode);
+        let attempt = self.begin_emit_attempt(bytecode);
         if self.try_self_unroll_call_into(fqn, args, bytecode) {
             return true;
         }
         // The inner bail clears `bytecode` after flushing it into `self.bytecode`,
         // which would drop the caller's prefix along with the attempt.
-        Self::restore_emit_attempt(bytecode, prefix);
+        self.restore_emit_attempt(bytecode, attempt);
         false
     }
 
@@ -1771,7 +1772,7 @@ impl Compiler {
         target_offset: u32,
         is_indirect: bool,
     ) -> bool {
-        let prefix = Self::emit_attempt_prefix(bytecode);
+        let attempt = self.begin_emit_attempt(bytecode);
         let rollback = self.bytecode.len();
         if self.try_predicate_peel_call_into(fqn, args, bytecode, target_offset, is_indirect) {
             return true;
@@ -1780,7 +1781,7 @@ impl Compiler {
         // are defensive, but without this they would leave arg prep plus a
         // half-built diamond whose labels never bind.
         self.bytecode.truncate(rollback);
-        Self::restore_emit_attempt(bytecode, prefix);
+        self.restore_emit_attempt(bytecode, attempt);
         false
     }
 
@@ -1946,7 +1947,7 @@ impl Compiler {
         bytecode: &mut CodeBuf,
         target_offset: u32,
     ) -> bool {
-        let prefix = Self::emit_attempt_prefix(bytecode);
+        let attempt = self.begin_emit_attempt(bytecode);
         let rollback = self.bytecode.len();
         if self.try_remat_peel_call_into(fqn, args, bytecode, target_offset) {
             return true;
@@ -1954,7 +1955,7 @@ impl Compiler {
         // Every refusal is decided before the first emit; this only guards
         // against a future check slipping in after one.
         self.bytecode.truncate(rollback);
-        Self::restore_emit_attempt(bytecode, prefix);
+        self.restore_emit_attempt(bytecode, attempt);
         false
     }
 
@@ -3163,6 +3164,93 @@ impl Compiler {
 
     fn stack_array_info(&self, name: &str) -> Option<(u32, usize)> {
         self.context.stack_array_locals.get(name).copied()
+    }
+
+    /// Heap identity after the first whole-object escape (Q1).
+    fn stack_array_boxed_slot(&self, name: &str) -> Option<u32> {
+        self.context.stack_array_box.get(name).copied()
+    }
+
+    /// True when `expr` names a multi-slot `[T; N]` local (including nested).
+    fn expr_mentions_stack_array(&self, expr: &Output<'_>) -> bool {
+        let node = unwrap_expr_output(expr);
+        match node.1.as_ref() {
+            Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {
+                self.expr_mentions_stack_array(v)
+            }
+            Expression::Identifier(name) => self.stack_array_info(name).is_some(),
+            Expression::Call { name, args } => {
+                self.expr_mentions_stack_array(name)
+                    || args
+                        .as_ref()
+                        .is_some_and(|items| items.iter().any(|a| self.expr_mentions_stack_array(a)))
+            }
+            Expression::Index(arr, idx) => {
+                self.expr_mentions_stack_array(arr)
+                    || idx
+                        .as_ref()
+                        .is_some_and(|i| self.expr_mentions_stack_array(i))
+            }
+            Expression::Access(recv, _) | Expression::OptionalAccess(recv, _) => {
+                self.expr_mentions_stack_array(recv)
+            }
+            Expression::Negate(e)
+            | Expression::Not(e)
+            | Expression::LogicalNot(e)
+            | Expression::Positive(e)
+            | Expression::Cast(e, _)
+            | Expression::Try(e)
+            | Expression::Spread(e) => self.expr_mentions_stack_array(e),
+            Expression::Add(a, b)
+            | Expression::Sub(a, b)
+            | Expression::Mul(a, b)
+            | Expression::Div(a, b)
+            | Expression::Mod(a, b)
+            | Expression::Pow(a, b)
+            | Expression::Shl(a, b)
+            | Expression::Shr(a, b)
+            | Expression::Xor(a, b)
+            | Expression::And(a, b)
+            | Expression::BitAnd(a, b)
+            | Expression::Or(a, b)
+            | Expression::BitOr(a, b)
+            | Expression::Eq(a, b)
+            | Expression::Neq(a, b)
+            | Expression::Le(a, b)
+            | Expression::Leq(a, b)
+            | Expression::Gt(a, b)
+            | Expression::Geq(a, b) => {
+                self.expr_mentions_stack_array(a) || self.expr_mentions_stack_array(b)
+            }
+            Expression::Array(items) | Expression::Tuple(items) | Expression::List(items) => {
+                items.iter().any(|e| self.expr_mentions_stack_array(e))
+            }
+            _ => false,
+        }
+    }
+
+    fn emit_boxed_array_load(&mut self, bytecode: &mut CodeBuf, box_slot: u32, idx: &Output<'_>) {
+        bytecode.push_load(box_slot);
+        self.compile_array_index_expr(bytecode, idx);
+        bytecode.push_index();
+    }
+
+    fn emit_boxed_array_store(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        box_slot: u32,
+        idx: &Output<'_>,
+        leave_value: bool,
+    ) {
+        let tmp_val = self.alloc_temp_slot();
+        bytecode.push_store_pop(tmp_val);
+        bytecode.push_load(box_slot);
+        self.compile_array_index_expr(bytecode, idx);
+        bytecode.push_load(tmp_val);
+        bytecode.push(Byte::new(Instruction::StoreIndex));
+        if !leave_value {
+            bytecode.push_pop();
+        }
     }
 
     /// Whether a fixed `[T; N]` local should use multi-slot stack layout.
@@ -10688,6 +10776,12 @@ impl Compiler {
             }
             Expression::Index(arr, Some(idx)) => {
                 if let Expression::Identifier(name) = arr.1.as_ref()
+                    && let Some(box_slot) = self.stack_array_boxed_slot(name)
+                {
+                    self.emit_boxed_array_load(bytecode, box_slot, idx);
+                    return self.is_float_ty(target);
+                }
+                if let Expression::Identifier(name) = arr.1.as_ref()
                     && let Some((base, n)) = self.stack_array_info(name)
                     && let Expression::Integer(i) = idx.1.as_ref()
                     && *i >= 0
@@ -10749,6 +10843,12 @@ impl Compiler {
                 // discard_statement_value to keep or POP.
             }
             Expression::Index(arr, Some(idx)) => {
+                if let Expression::Identifier(name) = arr.1.as_ref()
+                    && let Some(box_slot) = self.stack_array_boxed_slot(name)
+                {
+                    self.emit_boxed_array_store(bytecode, box_slot, idx, leave_value_on_stack);
+                    return;
+                }
                 // Const store into a multi-slot stack array → direct STORE.
                 if let Expression::Identifier(name) = arr.1.as_ref()
                     && let Some((base, n)) = self.stack_array_info(name)
@@ -10882,6 +10982,15 @@ impl Compiler {
         }
 
         if let Expression::Index(arr, Some(idx)) = target.1.as_ref() {
+            if let Expression::Identifier(name) = arr.1.as_ref()
+                && let Some(box_slot) = self.stack_array_boxed_slot(name)
+            {
+                self.emit_boxed_array_load(bytecode, box_slot, idx);
+                bytecode.append(&mut self.do_compile(rhs));
+                bytecode.push(Byte::new(Self::binop_for_assign_op(op, false)));
+                self.emit_boxed_array_store(bytecode, box_slot, idx, false);
+                return;
+            }
             // Const index into a multi-slot stack array → read/op/write slots.
             // The heap path below boxes via Identifier escape and StoreIndex
             // would mutate only that temporary.
@@ -10973,6 +11082,29 @@ impl Compiler {
         };
 
         if let Expression::Index(arr, Some(idx)) = target.1.as_ref() {
+            if let Expression::Identifier(name) = arr.1.as_ref()
+                && let Some(box_slot) = self.stack_array_boxed_slot(name)
+            {
+                self.emit_boxed_array_load(bytecode, box_slot, idx);
+                let tmp_old = if !prefix {
+                    let t = self.alloc_temp_slot();
+                    bytecode.push(Byte::new(Instruction::DUPLICATE));
+                    bytecode.push_store_pop(t);
+                    t
+                } else {
+                    0
+                };
+                bytecode.push(Byte::new_with_value(
+                    Instruction::CONST,
+                    Value::from(delta).raw() as _,
+                ));
+                bytecode.push(Byte::new(Instruction::ADD));
+                self.emit_boxed_array_store(bytecode, box_slot, idx, prefix);
+                if !prefix {
+                    bytecode.push_load(tmp_old);
+                }
+                return;
+            }
             if let Expression::Identifier(name) = arr.1.as_ref()
                 && let Some((base, n)) = self.stack_array_info(name)
                 && let Expression::Integer(i) = idx.1.as_ref()

@@ -704,6 +704,12 @@ struct Context {
 }
 
 
+/// Speculative call-site emit: buffer prefix plus Q1 box-once cache.
+struct EmitAttempt {
+    bytecode: Option<CodeBuf>,
+    stack_array_box: HashMap<String, u32>,
+}
+
 /// Length of the CALL + JMP + HALT prologue every [`Compiler`] starts with.
 /// Multi-file linking treats `bytecode.len() <= PROLOGUE_BYTECODE_LEN` as a
 /// fresh compile (safe to clear the shared constant pool).
