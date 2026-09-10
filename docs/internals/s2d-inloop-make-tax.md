@@ -220,10 +220,10 @@ S2f:
   arity > 32, named class SROA in *this* array pass (S2j is separate),
   leftover grow dest). Indexing `i % N` is Q4 Euclidean. Computed zip
   results stay heap; observed immediate zip boxes once.
-- **S2j (COI-320):** unique **non-escaping** named `let p = new C(...)`
-  with field load/store unboxes into consecutive slots. Whole-object
-  use stays heap `InitTyped` (#134 pin). Still heap: `fn drop()`, method
-  `self`, aliases, nested captures, parameters. Hit: `s2j_class_sroa.hy`.
+- **S2j (COI-320) / Q2 (COI-324):** unique named `let p = new C(...)`
+  field-SROA into consecutive slots. Identity boxes **once** and reuses
+  that instance (not a fresh `InitTyped` per edge). Still heap-from-`new`:
+  `fn drop()`, parameters, arity 0 or > 32. Hit: `s2j_class_sroa.hy`.
 - **S2k (COI-321):** proven `i % N` load/store select (`pack` / `pack_store`
   / `bump`) may emit dense. Latch coalesce only aliases `i` with `i+1`
   when the increment is *in* the latch (CSE of `xs[1] = i+1` must not
