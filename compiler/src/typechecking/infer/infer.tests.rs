@@ -82,7 +82,7 @@ fn main() {
     fn fixed_array_grow_on_param_and_readonly() {
         assert_fixed_array_grow(
             r#"
-fn bump(xs: [int; 2]) {
+fn bump([int; 2] xs) {
     xs.push(1);
 }
 fn main() {
