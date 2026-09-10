@@ -30,10 +30,11 @@ const CORPUS: &[&str] = &[
 /// epilogue; `branch_opt` leaves `ValueUnderJmp` tag jumps in place).
 /// I8 leftover LIR (COI-301) retargets `functions.hy` (inferable diamonds).
 /// A3 (COI-336) drops the named-reason checklist; `functions.hy` keeps LIR
-/// when cost ≤ fuse (fingerprint 400). Q7 recursive `fib` loses that gate.
+/// when cost ≤ fuse (fingerprint 400). B2 convoys recursive `fib` (same
+/// length; opcode mix changes).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "259c7f7110e2abd1_622"),
-    ("functions.hy", "0a3d9586f49c21af_400"),
+    ("functions.hy", "806483c70f0a6d83_400"),
     ("loops.hy", "ecae1dcfae84aaed_274"),
     ("option_pair.hy", "1abbc7207ee1bcc6_397"),
     ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
