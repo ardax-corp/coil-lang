@@ -692,6 +692,8 @@ struct Context {
     /// Fixed `[T; N]` locals laid out as `N` consecutive frame slots:
     /// name → (base_slot, N). Escaping uses → `MakeArray`.
     stack_array_locals: HashMap<String, (u32, usize)>,
+    /// First whole-object escape of a stack array in this frame → box slot (Q1).
+    stack_array_box: HashMap<String, u32>,
 
     /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, enum_name).
     unboxed_enum_locals: HashMap<String, (u32, u32, String)>,
@@ -974,8 +976,6 @@ pub struct Compiler {
 
     /// Operand-stack capacity for the VM (from recursion-depth analysis).
     operand_stack_slots: u32,
-    /// Current function emitted S2f slot-select (copied onto [`IlFunc`]).
-    emitted_sroa_select: bool,
 
     /// IL optimization preset (COI-127).
     opt_options: crate::il::opt::OptimizeOptions,
@@ -1081,7 +1081,6 @@ impl Default for Compiler {
             loop_par_sites: crate::typechecking::LoopParSites::new(),
             loop_par_helpers: 0,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
-            emitted_sroa_select: false,
             opt_options: crate::il::opt::OptimizeOptions::default(),
             inline_cost: inline_cost::InlineCostOptions::default(),
             retain_cursor_il: false,
@@ -1107,6 +1106,7 @@ impl<'ctx> Context {
             // Fresh overlay so inner `let` / destructure can shadow outer names.
             block_bindings: Some(HashMap::new()),
             stack_array_locals: self.stack_array_locals.clone(),
+            stack_array_box: self.stack_array_box.clone(),
             unboxed_enum_locals: self.unboxed_enum_locals.clone(),
             unboxed_class_locals: self.unboxed_class_locals.clone(),
             prev: Some(Box::new(self.to_owned())),

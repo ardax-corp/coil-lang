@@ -3185,6 +3185,55 @@ impl Compiler {
         bytecode.push_make_array(n as u32);
     }
 
+    /// Q1: first whole-object escape boxes once; later edges reuse that identity.
+    fn emit_escape_stack_array(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        name: &str,
+        base: u32,
+        n: usize,
+    ) {
+        if let Some(&slot) = self.context.stack_array_box.get(name) {
+            bytecode.push_load(slot);
+            return;
+        }
+        self.emit_box_stack_array(bytecode, base, n);
+        let slot = self.alloc_temp_slot();
+        bytecode.push(Byte::new(Instruction::DUPLICATE));
+        bytecode.push_store_pop(slot);
+        self.context.stack_array_box.insert(name.to_string(), slot);
+    }
+
+    /// Index `i % m` (`m > 0`) is Euclidean into `0..m` (Q4).
+    fn compile_array_index_expr(&mut self, bytecode: &mut CodeBuf, index: &Output<'_>) {
+        bytecode.append(&mut self.do_compile(index));
+        let idx = unwrap_expr_output(index);
+        if let Expression::Mod(_, rhs) = idx.1.as_ref()
+            && let Expression::Integer(m) = unwrap_expr_output(rhs).1.as_ref()
+            && *m > 0
+        {
+            if *m <= i32::MAX as i64 {
+                self.emit_euclid_rem_fixup(bytecode, *m as i32);
+            }
+        }
+    }
+
+    /// Toward-zero `r = i % n` on TOS → Euclidean `r ∈ 0..n`.
+    fn emit_euclid_rem_fixup(&mut self, bytecode: &mut CodeBuf, n: i32) {
+        let mut bb = BlockBuilder::new();
+        let join = bytecode.fresh_label();
+        let neg = bytecode.fresh_label();
+        bytecode.push(Byte::new(Instruction::DUPLICATE));
+        bytecode.push_const(0);
+        bytecode.push(Byte::new(Instruction::LE));
+        bb.emit_jump_to(neg, BbJumpKind::JumpIfTrue, bytecode.il_mut());
+        bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(neg, bytecode.il_mut());
+        bytecode.push_const(n);
+        bytecode.push(Byte::new(Instruction::ADD));
+        bb.bind_label(join, bytecode.il_mut());
+    }
+
     /// Copy heap-array elements at `arr_slot` back into multi-slot locals `base..base+n`.
     ///
     /// Dynamic `StoreIndex` mutates an escaped `MakeArray` temporary; without
@@ -3219,7 +3268,6 @@ impl Compiler {
         if n == 0 {
             return;
         }
-        self.emitted_sroa_select = true;
         let mut bb = BlockBuilder::new();
         let join = bytecode.fresh_label();
         let dest = self.alloc_temp_slot();
@@ -3289,7 +3337,6 @@ impl Compiler {
         if n == 0 {
             return;
         }
-        self.emitted_sroa_select = true;
         let mut bb = BlockBuilder::new();
         let join = bytecode.fresh_label();
         if !proven {
@@ -4112,7 +4159,7 @@ impl Compiler {
             .is_some_and(|id| self.typed_sidecar.is_in_bounds_index(id))
     }
 
-    /// `i % m` with `0 < m <= n` is in-range for non-negative `i` (S2h weaker bound).
+    /// `i % m` with `0 < m <= n` is in-range (Q4 Euclidean rem → `0..m`).
     fn stack_array_mod_index_proven(index: &Output<'_>, n: usize) -> bool {
         if n == 0 {
             return false;
@@ -4221,12 +4268,12 @@ impl Compiler {
         };
         if proven && let Some(slot) = pin_slot {
             if self.expr_may_clobber_operand_stack(index) {
-                bytecode.append(&mut self.do_compile(index));
+                self.compile_array_index_expr(bytecode, index);
                 let idx_slot = self.alloc_temp_slot();
                 bytecode.push_store_pop(idx_slot);
                 bytecode.push_load(idx_slot);
             } else {
-                bytecode.append(&mut self.do_compile(index));
+                self.compile_array_index_expr(bytecode, index);
             }
             bytecode.push_index_pin_unchecked(slot);
             return;
@@ -4235,13 +4282,13 @@ impl Compiler {
         if self.expr_may_clobber_operand_stack(index) {
             let tgt_slot = self.alloc_temp_slot();
             bytecode.push_store_pop(tgt_slot);
-            bytecode.append(&mut self.do_compile(index));
+            self.compile_array_index_expr(bytecode, index);
             let idx_slot = self.alloc_temp_slot();
             bytecode.push_store_pop(idx_slot);
             bytecode.push_load(tgt_slot);
             bytecode.push_load(idx_slot);
         } else {
-            bytecode.append(&mut self.do_compile(index));
+            self.compile_array_index_expr(bytecode, index);
         }
         if proven {
             bytecode.push_index_unchecked();
@@ -4322,9 +4369,6 @@ impl Compiler {
 
     /// Snapshot local_escape unbox ranges onto the last recorded `IlFunc` (I3).
     fn record_unboxed_class_fields(&mut self) {
-        self.bytecode
-            .set_last_func_sroa_select(self.emitted_sroa_select);
-        self.emitted_sroa_select = false;
         if self.context.unboxed_class_locals.is_empty() {
             return;
         }
@@ -10629,7 +10673,7 @@ impl Compiler {
                 }
                 if let Some((base, n)) = self.stack_array_computed_info(arr) {
                     let proven = self.stack_array_index_proven(target, idx, n);
-                    bytecode.append(&mut self.do_compile(idx));
+                    self.compile_array_index_expr(bytecode, idx);
                     let idx_slot = self.alloc_temp_slot();
                     bytecode.push_store_pop(idx_slot);
                     self.emit_stack_array_select_load(bytecode, base, n, idx_slot, proven);
@@ -10707,7 +10751,7 @@ impl Compiler {
                         let proven = self.stack_array_index_proven(target, idx, n);
                         bytecode.push_store_pop(tmp_val);
                         let tmp_idx = self.alloc_temp_slot();
-                        bytecode.append(&mut self.do_compile(idx));
+                        self.compile_array_index_expr(bytecode, idx);
                         bytecode.push_store_pop(tmp_idx);
                         self.emit_stack_array_select_store(
                             bytecode,
@@ -10726,7 +10770,7 @@ impl Compiler {
                         let depth_on_entry = self.expr_depth;
                         bytecode.append(&mut self.do_compile(arr));
                         self.expr_depth = depth_on_entry + 1;
-                        bytecode.append(&mut self.do_compile(idx));
+                        self.compile_array_index_expr(bytecode, idx);
                         self.expr_depth = depth_on_entry;
                         bytecode.push_load(tmp_val);
                     } else {
@@ -10734,7 +10778,7 @@ impl Compiler {
                         let tmp_idx = self.alloc_temp_slot();
                         bytecode.append(&mut self.do_compile(arr));
                         bytecode.push_store_pop(tmp_arr);
-                        bytecode.append(&mut self.do_compile(idx));
+                        self.compile_array_index_expr(bytecode, idx);
                         bytecode.push_store_pop(tmp_idx);
                         bytecode.push_load(tmp_arr);
                         bytecode.push_load(tmp_idx);
@@ -10836,7 +10880,7 @@ impl Compiler {
             };
             if let Some((base, n)) = stack_info.filter(|(_, n)| *n >= 1 && *n <= 32) {
                 let proven = self.stack_array_index_proven(target, idx, n);
-                bytecode.append(&mut self.do_compile(idx));
+                self.compile_array_index_expr(bytecode, idx);
                 let tmp_idx = self.alloc_temp_slot();
                 bytecode.push_store_pop(tmp_idx);
                 self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
@@ -10853,7 +10897,7 @@ impl Compiler {
             let tmp_idx = self.alloc_temp_slot();
             bytecode.append(&mut self.do_compile(arr));
             bytecode.push_store_pop(tmp_arr);
-            bytecode.append(&mut self.do_compile(idx));
+            self.compile_array_index_expr(bytecode, idx);
             bytecode.push_store_pop(tmp_idx);
             bytecode.push_load(tmp_arr);
             bytecode.push_load(tmp_idx);
@@ -10925,7 +10969,7 @@ impl Compiler {
                 && n <= 32
             {
                 let proven = self.stack_array_index_proven(target, idx, n);
-                bytecode.append(&mut self.do_compile(idx));
+                self.compile_array_index_expr(bytecode, idx);
                 let tmp_idx = self.alloc_temp_slot();
                 bytecode.push_store_pop(tmp_idx);
                 self.emit_stack_array_select_load(bytecode, base, n, tmp_idx, proven);
@@ -10958,7 +11002,7 @@ impl Compiler {
             let tmp_idx = self.alloc_temp_slot();
             bytecode.append(&mut self.do_compile(arr));
             bytecode.push_store_pop(tmp_arr);
-            bytecode.append(&mut self.do_compile(idx));
+            self.compile_array_index_expr(bytecode, idx);
             bytecode.push_store_pop(tmp_idx);
             bytecode.push_load(tmp_arr);
             bytecode.push_load(tmp_idx);
@@ -12407,6 +12451,7 @@ impl Compiler {
                 // Fresh slot map per function (locals from 0/1); shared Interner left holes / garbage match binds.
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
                 let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
+                let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
                 let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
                 let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
@@ -12427,6 +12472,7 @@ impl Compiler {
                 self.push_const_env();
                 self.context.variables = Interner::default();
                 self.context.stack_array_locals.clear();
+                self.context.stack_array_box.clear();
                 self.context.unboxed_enum_locals.clear();
                 self.context.unboxed_class_locals.clear();
                 self.expr_depth = 0;
@@ -12509,6 +12555,7 @@ impl Compiler {
                 self.record_unboxed_class_fields();
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
+                self.context.stack_array_box = prev_stack_boxes;
                 self.context.unboxed_enum_locals = prev_unboxed_enum;
                 self.context.unboxed_class_locals = prev_unboxed_class;
                 self.polyfn_vars = prev_fn_polyfn_vars;
@@ -12678,7 +12725,7 @@ impl Compiler {
                     && n <= 32
                 {
                     let proven = self.stack_array_index_proven(ast, index, n);
-                    bytecode.append(&mut self.do_compile(index));
+                    self.compile_array_index_expr(&mut bytecode, index);
                     let idx_slot = self.alloc_temp_slot();
                     bytecode.push_store_pop(idx_slot);
                     self.emit_stack_array_select_load(
@@ -13243,8 +13290,8 @@ impl Compiler {
                     self.emit_box_unboxed_class(&mut bytecode, &cname, base, nfields);
                 } else if let Some(slot) = self.lookup_slot(n) {
                     if let Some((base, len)) = self.stack_array_info(n) {
-                        // Escape multi-slot local to a heap ObjArray.
-                        self.emit_box_stack_array(&mut bytecode, base, len);
+                        // Escape multi-slot local to a heap ObjArray (Q1 box-once).
+                        self.emit_escape_stack_array(&mut bytecode, n, base, len);
                     } else {
                         bytecode.push_load(slot);
                     }
@@ -14093,7 +14140,7 @@ impl Compiler {
                         self.append_binding_rhs(&mut bytecode, value);
                         let tmp_val = self.alloc_temp_slot();
                         bytecode.push_store_pop(tmp_val);
-                        bytecode.append(&mut self.do_compile(idx));
+                        self.compile_array_index_expr(&mut bytecode, idx);
                         let tmp_idx = self.alloc_temp_slot();
                         bytecode.push_store_pop(tmp_idx);
                         let proven = self.stack_array_index_proven(lhs, idx, n);
@@ -14118,7 +14165,7 @@ impl Compiler {
                         if Self::index_keeps_array_on_stack_safe(idx.1.as_ref()) {
                             bytecode.append(&mut self.do_compile(arr));
                             self.expr_depth = depth_on_entry + 1;
-                            bytecode.append(&mut self.do_compile(idx));
+                            self.compile_array_index_expr(&mut bytecode, idx);
                             self.expr_depth = depth_on_entry;
                             bytecode.push_load(tmp_val);
                         } else {
@@ -14126,7 +14173,7 @@ impl Compiler {
                             let tmp_idx = self.alloc_temp_slot();
                             bytecode.append(&mut self.do_compile(arr));
                             bytecode.push_store_pop(tmp_arr);
-                            bytecode.append(&mut self.do_compile(idx));
+                            self.compile_array_index_expr(&mut bytecode, idx);
                             bytecode.push_store_pop(tmp_idx);
                             bytecode.push_load(tmp_arr);
                             bytecode.push_load(tmp_idx);

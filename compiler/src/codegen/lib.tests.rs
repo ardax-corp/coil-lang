@@ -4604,6 +4604,68 @@ fn main() {
         assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
     }
 
+    /// Q1: two escape edges share one heap object (mutation is visible).
+    #[test]
+    fn stack_array_box_once_identity() {
+        use common::Instruction;
+        let src = r#"
+fn observe([int; 3] a, [int; 3] b) -> int {
+    a[0] = 99;
+    return b[0];
+}
+fn pack() -> int {
+    let xs = [1, 2, 3];
+    return observe(xs, xs);
+}
+fn main() {
+    if pack() != 99 {
+        panic "box-once identity";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let pack_bc = &bc[pack_off..];
+        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let makes = pack_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+            .count();
+        assert_eq!(makes, 1, "one box for two call-args; opcodes={names:?}");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "observe(xs, xs) sees one object; opcodes={names:?}");
+    }
+
+    /// Q4: indexing `i % N` maps negative remainders into `0..N`.
+    #[test]
+    fn stack_array_euclid_mod_index() {
+        let src = r#"
+fn main() {
+    let xs = [10, 20, 30];
+    let i = 0 - 1;
+    if xs[i % 3] != 30 {
+        panic "euclid rem";
+    }
+    xs[i % 3] = 7;
+    if xs[2] != 7 {
+        panic "euclid store";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "(-1) % 3 indexes slot 2");
+    }
+
     /// S2j: non-escaping named class field load/store — no InitTyped.
     #[test]
     fn named_class_sroa_field_store_checksum() {
