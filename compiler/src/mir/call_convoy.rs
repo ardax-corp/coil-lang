@@ -319,10 +319,7 @@ fn is_convoy_shape(
                 if block.id != home {
                     return false;
                 }
-                if !matches!(term, Terminator::Return { lo: Some(x), hi: None } if *x == v) {
-                    return false;
-                }
-                if !(is_call || is_join) {
+                if !return_keeps_tos(term, v, is_call, is_join, func, def, entry) {
                     return false;
                 }
                 saw = true;
@@ -330,6 +327,48 @@ fn is_convoy_shape(
         }
     }
     saw
+}
+
+/// One-word return of a self-`CALL` dest, or a modeled pair (`lo`/`hi`)
+/// from the same self-`CALL`. Join bins stay one-word (Q7 / B2).
+fn return_keeps_tos(
+    term: &Terminator,
+    v: ValueId,
+    is_call: bool,
+    is_join: bool,
+    func: &MirFunc,
+    def: &[Option<(BlockId, usize)>],
+    entry: Option<Label>,
+) -> bool {
+    match term {
+        Terminator::Return { lo: Some(x), hi: None } if *x == v => is_call || is_join,
+        Terminator::Return {
+            lo: Some(lo),
+            hi: Some(hi),
+        } if *lo == v || *hi == v => same_self_call_pair(func, def, *lo, *hi, entry),
+        _ => false,
+    }
+}
+
+fn same_self_call_pair(
+    func: &MirFunc,
+    def: &[Option<(BlockId, usize)>],
+    lo: ValueId,
+    hi: ValueId,
+    entry: Option<Label>,
+) -> bool {
+    let Some((b, i)) = def.get(lo.index()).copied().flatten() else {
+        return false;
+    };
+    matches!(
+        func.block(b).insts.get(i),
+        Some(MirInst::Call {
+            dest,
+            dest_hi: Some(h),
+            target,
+            ..
+        }) if Some(*target) == entry && *dest == lo && *h == hi
+    )
 }
 
 fn is_call_like(
