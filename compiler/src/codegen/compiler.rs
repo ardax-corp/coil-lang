@@ -3303,6 +3303,34 @@ impl Compiler {
         self.context.stack_array_box.insert(name.to_string(), slot);
     }
 
+    /// Lift `arity` TOS args above every cached `[T; N]` box so a dense callee
+    /// whose frame base is `tell - arity` cannot Seek/write the identity slot.
+    fn park_args_above_stack_array_boxes(&mut self, bytecode: &mut CodeBuf, arity: u32) {
+        if arity == 0 || self.context.stack_array_box.is_empty() {
+            return;
+        }
+        let Some(park) = self
+            .context
+            .stack_array_box
+            .values()
+            .copied()
+            .max()
+            .map(|s| s + 1)
+        else {
+            return;
+        };
+        let mut spilled = Vec::with_capacity(arity as usize);
+        for _ in 0..arity {
+            let tmp = self.alloc_temp_slot();
+            bytecode.push_store_pop(tmp);
+            spilled.push(tmp);
+        }
+        bytecode.push_seek(park);
+        for tmp in spilled.into_iter().rev() {
+            bytecode.push_load(tmp);
+        }
+    }
+
     /// Index `i % m` (`m > 0`) is Euclidean into `0..m` (Q4).
     /// Skip the fixup when the dividend is not statically negative so
     /// counted-loop `i % N` stays S2k-dense.
@@ -3745,7 +3773,9 @@ impl Compiler {
         let (fixed, rest, pack_rest) = self.split_call_args_for_rest(fn_name, args);
 
         if !pack_rest && Self::should_reorder_pure_call_args(&fixed) {
-            return self.emit_call_args_pure_first(&fixed, bytecode, box_generic);
+            let n = self.emit_call_args_pure_first(&fixed, bytecode, box_generic);
+            self.park_args_above_stack_array_boxes(bytecode, n);
+            return n;
         }
         // Two+ HostInvoke/format/match args leave values on the shared
         // operand/local stack; the next self-bytecode emit clobbers the prior
@@ -3757,7 +3787,9 @@ impl Compiler {
                 .count()
                 >= 2
         {
-            return self.emit_call_args_stage_self_bc(&fixed, bytecode, box_generic);
+            let n = self.emit_call_args_stage_self_bc(&fixed, bytecode, box_generic);
+            self.park_args_above_stack_array_boxes(bytecode, n);
+            return n;
         }
         // Binary staging (`at + len(n)`) STORE-seeks past live prior args and
         // buries them under the high-water mark. Stage every arg when any may
@@ -3767,7 +3799,9 @@ impl Compiler {
                 .iter()
                 .any(|a| self.expr_may_clobber_operand_stack(a))
         {
-            return self.emit_call_args_stage_all(&fixed, bytecode, box_generic);
+            let n = self.emit_call_args_stage_all(&fixed, bytecode, box_generic);
+            self.park_args_above_stack_array_boxes(bytecode, n);
+            return n;
         }
 
         for arg in &fixed {
@@ -3792,9 +3826,13 @@ impl Compiler {
             } else {
                 bytecode.push_make_array(rest.len() as u32);
             }
-            return (fixed.len() + 1) as u32;
+            let n = (fixed.len() + 1) as u32;
+            self.park_args_above_stack_array_boxes(bytecode, n);
+            return n;
         }
-        fixed.len() as u32
+        let n = fixed.len() as u32;
+        self.park_args_above_stack_array_boxes(bytecode, n);
+        n
     }
 
     /// True when multi-arg calls must evaluate into temps before the CALL.
