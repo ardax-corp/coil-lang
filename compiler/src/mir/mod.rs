@@ -1250,11 +1250,13 @@ fn main() {
         let even_end = odd.min(main);
         let even_bc = if even < even_end { &bc[even..even_end] } else { &bc[even..] };
         assert!(
-            !even_bc.iter().any(|b| matches!(
-                *b.bytecode(),
-                Instruction::DenseBin | Instruction::DensePush | Instruction::DenseConst
-            )),
-            "sibling TailCall must stay fuse-IL; opcodes={:?}",
+            even_bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
+            "sibling even/odd must keep TailCall; opcodes={:?}",
+            even_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            !even_bc.iter().any(|b| *b.bytecode() == Instruction::Seek),
+            "B7 TailCall stack-arg must not tax a param-only leaf with Seek; opcodes={:?}",
             even_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let slots = p.operand_stack_slots() as usize;
@@ -1345,17 +1347,69 @@ fn main() {
         let a_end = b.min(main);
         let a_bc = if a < a_end { &bc[a..a_end] } else { &bc[a..] };
         assert!(
-            !a_bc.iter().any(|b| matches!(
-                *b.bytecode(),
-                Instruction::DenseBin | Instruction::DensePush | Instruction::DenseConst
-            )),
-            "two-slot sibling TailCall must stay fuse-IL; opcodes={:?}",
+            a_bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
+            "two-slot sibling must keep TailCall; opcodes={:?}",
+            a_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            !a_bc.iter().any(|b| *b.bytecode() == Instruction::DensePush),
+            "B7 two-slot TailCall must not DensePush args; opcodes={:?}",
             a_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "bounce_a must run");
+    }
+
+    #[test]
+    fn pipeline_mutual_call_and_self_two_slot_stay_correct() {
+        let src = r#"
+fn ping(int n) -> int {
+    if n <= 0 {
+        return 0;
+    }
+    return 1 + pong(n - 1);
+}
+fn pong(int n) -> int {
+    if n <= 0 {
+        return 0;
+    }
+    return 1 + ping(n - 1);
+}
+fn countdown(Option<int> o) -> Option<int> {
+    return match o {
+        Option::None => Option::None,
+        Option::Some(x) => {
+            if x <= 0 {
+                Option::None
+            } else {
+                countdown(Option::Some(x - 1))
+            }
+        }
+    };
+}
+fn main() {
+    let _ = ping(4) + pong(3);
+    let r = countdown(Option::Some(3));
+    let _ = match r {
+        Option::None => 0,
+        Option::Some(v) => v,
+    };
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile B7 mutual / self two-slot");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::CALL)
+                || bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
+            "mutual / self two-slot must keep CALL or TailCall; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "ping/pong + countdown must run");
     }
 
     #[test]
