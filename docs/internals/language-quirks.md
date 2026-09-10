@@ -6,8 +6,8 @@ Locked **2026-09-10**. Source of truth: Linear project
 this note is [COI-331](https://linear.app/ardax/issue/COI-331)).
 
 This file is **spec**, not a compiler changelog. Implementation tickets are
-Q1–Q9 themselves. Do not treat today's S2g / I4 / dense refuse rows as
-overriding these decisions.
+Q1–Q9 themselves. Do not treat leftover I4 / dense refuse rows as
+overriding these decisions. Q1 box-once is implemented (codegen + IL).
 
 User-facing language docs live in
 [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`).
@@ -39,13 +39,16 @@ allowed only while the local is **proven non-escaping**. That rewrite is
 not a language-level value-array ABI.
 
 On the first escape, materialize **one** heap object and reuse it on every
-later escape edge. Value-array semantics and always-heap are non-goals.
+later escape edge. Later private index of that local goes through the
+boxed object (slots are only a pre-escape rewrite). Value-array semantics
+and always-heap are non-goals.
 
-**S2g today is out of spec.** S2g ([COI-317](https://linear.app/ardax/issue/COI-317))
-emits a fresh `MakeArray` per named escape and allows multiple snapshot
-boxes when no private use follows. That **fresh-box-per-edge** policy is
-wrong under Q1. Follow-up: materialize-once (A1 / COI-323). Until then,
-do not add more per-edge snapshot boxing.
+Compiler (A1 [COI-334](https://linear.app/ardax/issue/COI-334) + Q1
+[COI-323](https://linear.app/ardax/issue/COI-323)): codegen
+`emit_escape_stack_array` and IL `escape_analysis` box once. A refused
+tiny-inline / peel must not leave a stale box cache (that was a fresh
+`LOAD` of an unwritten slot). S2g's old fresh-`MakeArray`-per-edge policy
+is gone.
 
 ## Q2 — Named `new C` is a reference; invisible field-SROA
 

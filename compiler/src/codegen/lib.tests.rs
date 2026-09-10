@@ -4668,14 +4668,53 @@ fn observe([int; 3] a, [int; 3] b) -> int {
     a[0] = 99;
     return b[0];
 }
+class Holder {
+    pub a: [int; 3]
+}
 fn pack() -> int {
     let xs = [1, 2, 3];
     let a = give(xs);
     return observe(a, give(xs));
 }
+fn nested() -> int {
+    let xs = [1, 2, 3];
+    return observe(give(xs), give(xs));
+}
+fn field_and_call() -> int {
+    let xs = [1, 2, 3];
+    let h = new Holder([0, 0, 0]);
+    h.a = xs;
+    return observe(h.a, xs);
+}
+fn host_and_call() -> int {
+    let xs = [1, 2, 3];
+    let v = Vec::from(xs);
+    if v[0] + v[1] + v[2] != 6 {
+        panic "host copy";
+    }
+    return observe(xs, xs);
+}
+fn mutate_after() -> int {
+    let xs = [1, 2, 3];
+    let a = give(xs);
+    xs[0] = 77;
+    return a[0];
+}
 fn main() {
     if pack() != 99 {
         panic "box-once identity";
+    }
+    if nested() != 99 {
+        panic "nested bounce identity";
+    }
+    if field_and_call() != 99 {
+        panic "field+call identity";
+    }
+    if host_and_call() != 99 {
+        panic "host+call identity";
+    }
+    if mutate_after() != 77 {
+        panic "post-escape mutate";
     }
 }
 "#;
@@ -4685,20 +4724,33 @@ fn main() {
             .compiler_mut()
             .get_function("pack")
             .expect("pack");
-        let pack_bc = &bc[pack_off..];
-        let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
-        let makes = pack_bc
-            .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
-            .count();
-        assert!(
-            makes <= 1,
-            "at most one box for two call-args; opcodes={names:?}"
-        );
+        let nested_off = pipeline
+            .compiler_mut()
+            .get_function("nested")
+            .expect("nested");
+        let field_off = pipeline
+            .compiler_mut()
+            .get_function("field_and_call")
+            .expect("field_and_call");
+        for (fname, start, end) in [
+            ("pack", pack_off, nested_off),
+            ("nested", nested_off, field_off),
+        ] {
+            let fn_bc = &bc[start..end];
+            let names: Vec<_> = fn_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+            let makes = fn_bc
+                .iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+                .count();
+            assert_eq!(
+                makes, 1,
+                "{fname}: one box for two escapes; opcodes={names:?}"
+            );
+        }
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
-        assert!(!vm.panicked(), "observe(xs, xs) sees one object; opcodes={names:?}");
+        assert!(!vm.panicked(), "Q1 identity edges");
     }
 
     /// Q4: indexing `i % N` maps negative remainders into `0..N`.
