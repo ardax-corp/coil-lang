@@ -9,7 +9,8 @@ This file is **spec**, not a compiler changelog. Implementation tickets are
 Q1–Q9 themselves. Do not treat leftover I4 / dense refuse rows as
 overriding these decisions. Q1 box-once is implemented (codegen + IL). Q2 box-once is implemented
 (codegen field-SROA + identity cache). Q3 grow on `[T; N]` is a typechecker
-diagnostic (`FixedArrayGrow` / E0412).
+diagnostic (`FixedArrayGrow` / E0412). Q4 indexing `i % N` is Euclidean
+into `0..N` (codegen rem + SROA last-arm as spec).
 
 User-facing language docs live in
 [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`).
@@ -90,14 +91,27 @@ Compiler ([COI-325](https://linear.app/ardax/issue/COI-325)):
 ## Q4 — Indexing `i % N` maps into `0..N`
 
 When an index is written `i % N` (or equivalent) against a length-`N`
-array, the remainder is **defined** to land in `0..N`. Document
-Euclidean-or-equivalent (negative `i` is a valid index, not last-arm
-luck). SROA select / runtime must follow the spec; the old “negative
-remainder → last slot, not OOB” refuse is no longer the language rule
-for `%`.
+array, the remainder is **defined** to land in `0..N`. Negative `i` is a
+valid index. The mapping is Euclidean (or equivalent):
+
+- Non-index `%` stays toward-zero (`(-2) % 3 == -2`).
+- For an index, toward-zero `r = i % N` (`N > 0`) is rewritten to
+  Euclidean `r + (N & (r >> 63))`, i.e. `r < 0` then `r += N`.
+  Equivalently `((i % N) + N) % N`.
+- Examples: `(-1) % 3 → 2`, `(-2) % 3 → 1`, `(-3) % 3 → 0`.
+
+SROA select last-arm is slot `N-1` of that range — **spec**, not a soft
+refuse that dumped every negative remainder on the last slot (that was
+wrong for `(-2) % 3`). Skip the IL fixup only when the dividend is
+proven `>= 0` (counted-loop `i`); unknown / param / negative dividends
+always fix up.
 
 Plain `xs[k]` **without** `%` still panics OOB when `k` is outside
 `0..N`. Defined mod does not weaken unproven index checks.
+
+Compiler ([COI-326](https://linear.app/ardax/issue/COI-326)):
+`compile_array_index_expr` + sidecar `nonneg_expr`. Heap `Index` and
+SROA select share the same rem.
 
 ## Q5 — `panic` aborts; `raise` is catchable
 
