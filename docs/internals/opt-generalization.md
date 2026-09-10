@@ -177,6 +177,9 @@ regular reconstruct over bench-shaped peeps.
 Parked (not B*): boxed multi-payload match, residual `Byte`/`Pow`/bitwise,
 Cranelift P5, PGO.
 
+Post A0–C3 surface (tree-shake vs reorder vs leftover dense work):
+[post-mir-opt-surface.md](post-mir-opt-surface.md).
+
 ## Non-goals
 
 - Dual AST walkers / a second semantic IR
