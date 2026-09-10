@@ -148,7 +148,8 @@ pub fn try_specialize_body(
         && !select_cfg
         && !(inloop_alloc && super::infer::has_alloc_inside_loop(&out));
     // Q7 self-CALL is eligible; keep/refuse is still this cost compare.
-    // Skipping it shipped a 2× fib regress (Seek + STORE around CALL).
+    // B2 convoys CALL on the stack so tight fib/tak can win without
+    // skipping the gate (the old Seek + STORE reconstruct was ~2× fib).
     if !loop_tax && emit_cost(&out) > emit_cost(ops) {
         return None;
     }

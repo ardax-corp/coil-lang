@@ -503,7 +503,8 @@ fn emit_vectorized(
     pool: &mut Vec<u64>,
     label_hi: u32,
 ) -> Option<Vec<IlOp>> {
-    let (regs, scratch) = assign_regs(func).ok()?;
+    let need = vec![true; func.types.len()];
+    let (regs, scratch) = assign_regs(func, &need).ok()?;
     let i_slot = regs[spec.iv.index()];
     let n_slot = regs[spec.n.index()];
     let nvec = scratch;
@@ -710,7 +711,8 @@ fn emit_reduced(
     pool: &mut Vec<u64>,
     label_hi: u32,
 ) -> Option<Vec<IlOp>> {
-    let (regs, scratch) = assign_regs(func).ok()?;
+    let need = vec![true; func.types.len()];
+    let (regs, scratch) = assign_regs(func, &need).ok()?;
     let i_slot = regs[spec.iv.index()];
     let n_slot = regs[spec.n.index()];
     let acc_slot = regs[spec.acc.index()];

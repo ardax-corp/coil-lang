@@ -34,6 +34,7 @@
 
 mod abi;
 mod builder;
+mod call_convoy;
 mod cse;
 mod destprop;
 mod deopt;
@@ -1129,9 +1130,9 @@ fn main() {
 
     #[test]
     fn pipeline_recursive_work_loop_is_dense() {
-        // Tight tak/fib leafs lose the cost gate (Seek + STORE vs convoy
-        // fuse). A self-recursive body with a counted loop amortizes Seek
-        // and must stay dense + typed CALL (Q7).
+        // Tight tak/fib leafs convoy CALL on the operand stack (B2) so they
+        // can win the cost gate without a prologue Seek. A self-recursive
+        // body with a counted loop still densifies + typed CALL (Q7).
         let src = r#"
 fn rec(int n) -> int {
     if n <= 0 {
@@ -1166,6 +1167,58 @@ fn main() {
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_fib_leaf_convoys_call_without_seek() {
+        let src = r#"
+fn fib(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    let _ = fib(10);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile fib");
+        let fib = p.function_offset("fib").expect("fib");
+        let main = p.function_offset("main").expect("main");
+        let fib_bc = if fib < main { &bc[fib..main] } else { &bc[fib..] };
+        assert!(
+            !fib_bc.iter().any(|b| *b.bytecode() == Instruction::Seek),
+            "B2: param-only fib must not Seek; opcodes={:?}",
+            fib_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let call_pos: Vec<usize> = fib_bc
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| *b.bytecode() == Instruction::CALL)
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            call_pos.len() >= 2,
+            "fib must keep two recursive CALLs; opcodes={:?}",
+            fib_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let no_store_between = call_pos.windows(2).any(|w| {
+            !(w[0] + 1..w[1]).any(|i| {
+                matches!(
+                    *fib_bc[i].bytecode(),
+                    Instruction::STORE | Instruction::StorePop
+                )
+            })
+        });
+        assert!(
+            no_store_between,
+            "B2: recursive CALL results stay on the stack; opcodes={:?}",
+            fib_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "fib(10) must run");
     }
 
     #[test]

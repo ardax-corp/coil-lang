@@ -1606,7 +1606,8 @@ fn main() {
         );
         // Pure call arms leave both results on the operand stack (expr_depth
         // pads temps above the stacked lhs), so lower fuses ADD;RETURN.
-        // Tight recursive fib loses the dense cost gate (Q7).
+        // Tight recursive fib convoys CALL (B2) so fuse-select still
+        // sees ADD;RETURN / ConstReturnImm.
         assert!(
             bc.iter()
                 .any(|b| *b.bytecode() == Instruction::BinReturn
@@ -1642,7 +1643,7 @@ fn main() {
              fn main() { return fib(10); }",
         );
         // Recursive arms must stack across CALL (no STORE between them) and
-        // join with BinReturn. Tight fib stays fuse-IL (Q7 cost gate).
+        // join with BinReturn. B2 keeps that convoy on the dense path.
         let call_pos: Vec<usize> = bc
             .iter()
             .enumerate()
