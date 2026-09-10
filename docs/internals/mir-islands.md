@@ -93,7 +93,7 @@ HostInvoke. Unicode / regex stay out until R4. Ladder:
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 / R2 dense emit; LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
 | Recursion (`tak` / `fib`) | fuse-IL or dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene + **B2** CALL convoy. Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense without a prologue Seek on param-only leafs. Mutual / two-slot self-recursion stay refuse. Helper two-slot `CALL` / `RETURN` is **B3** |
-| `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); `main` + format and user `Iterator` / coro / dict / first-class range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
+| `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); **B5** first-class `let r = 0..n` locals (`for_in_range_value`); `main` + format and user `Iterator` / coro / dict / parameter range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |
 
