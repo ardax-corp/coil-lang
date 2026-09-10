@@ -2,10 +2,23 @@
 
 use std::collections::HashMap;
 
+use common::DebugLoc;
+
 use super::gc::LiveRootSet;
-use super::inst::{BlockId, LocalId, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, LocalId, MirDeoptKind, MirInst, Terminator, ValueId};
 use super::layout::MirLayout;
 use super::ty::MirTy;
+
+/// One leave / stop edge with live IL locals (I7 / C3). Sidecar only.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeoptSite {
+    pub kind: MirDeoptKind,
+    /// Dest of the leave inst; `None` for a terminator-only Stop.
+    pub at: Option<ValueId>,
+    pub loc: DebugLoc,
+    /// Live IL slot → SSA value at the edge (over-approx is safe).
+    pub slots: Vec<(LocalId, ValueId)>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MirBlock {
@@ -39,6 +52,14 @@ pub struct MirFunc {
     pub slot_env: HashMap<ValueId, Vec<(LocalId, ValueId)>>,
     /// Live heap words at each Alloc / GcBarrier (S2a).
     pub gc_roots: Vec<LiveRootSet>,
+    /// Dest → source loc from the IL op that produced it (C3 sparse DebugLoc).
+    pub value_locs: HashMap<ValueId, DebugLoc>,
+    /// Block terminator loc (Return / Jump / Br).
+    pub term_locs: HashMap<BlockId, DebugLoc>,
+    /// Last SSA def of each IL local after construction (named-let remap).
+    pub debug_slots: HashMap<LocalId, ValueId>,
+    /// Implicit + explicit leave / stop sites (I7 / C3). Not archive-encoded.
+    pub deopt_sites: Vec<DeoptSite>,
 }
 
 impl MirFunc {
@@ -54,7 +75,25 @@ impl MirFunc {
             types: Vec::new(),
             slot_env: HashMap::new(),
             gc_roots: Vec::new(),
+            value_locs: HashMap::new(),
+            term_locs: HashMap::new(),
+            debug_slots: HashMap::new(),
+            deopt_sites: Vec::new(),
         }
+    }
+
+    pub fn loc_of(&self, v: ValueId) -> DebugLoc {
+        self.value_locs
+            .get(&v)
+            .copied()
+            .unwrap_or_else(DebugLoc::unknown)
+    }
+
+    pub fn term_loc(&self, b: BlockId) -> DebugLoc {
+        self.term_locs
+            .get(&b)
+            .copied()
+            .unwrap_or_else(DebugLoc::unknown)
     }
 
     /// Sidecar row for the Alloc or GcBarrier whose dest is `at`.

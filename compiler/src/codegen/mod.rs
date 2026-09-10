@@ -1000,6 +1000,7 @@ pub struct Compiler {
     stack_maps: Vec<common::FrameStackMap>,
     /// Drafts before PC bind (tests / diagnostics).
     stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
+    deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
 }
 
 impl Default for Compiler {
@@ -1096,6 +1097,7 @@ impl Default for Compiler {
             cursor_il: None,
             stack_maps: Vec::new(),
             stack_map_drafts: Vec::new(),
+            deopt_map_drafts: Vec::new(),
         }
     }
 }

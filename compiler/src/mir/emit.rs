@@ -57,7 +57,6 @@ pub fn emit_dense(
     if gather > 0 {
         max_slot = max_slot.max(scratch.saturating_add(gather.saturating_sub(1)));
     }
-    let loc = DebugLoc::unknown();
     // Sibling / mutual CALL targets keep their official entry ids. Local
     // SSA labels must not reuse those ids or to_flat treats the TailCall
     // as intra-body (B2 even/odd break).
@@ -106,6 +105,7 @@ pub fn emit_dense(
             if is_tail_call_inst(block, inst) {
                 continue;
             }
+            let loc = func.loc_of(inst.dest());
             if let MirInst::Call {
                 dest,
                 dest_hi,
@@ -148,10 +148,24 @@ pub fn emit_dense(
             &mut next_label,
             &reserved,
             pool,
-            loc,
+            func.term_loc(block.id),
         )?;
     }
     Ok(out)
+}
+
+/// Named-let remap + deopt draft after the same register assign as emit.
+pub(super) fn dense_sidecars(
+    func: &MirFunc,
+    entry_label: Option<Label>,
+) -> (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap) {
+    let plan = ConvoyPlan::new(func, entry_label);
+    let (regs, _) = assign_regs(func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
+    let regs = coalesce_safe_latch_phis(func, regs);
+    (
+        super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
+        super::deopt::encode_draft(func, &regs, &plan.need_slot),
+    )
 }
 
 fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {

@@ -5,6 +5,8 @@
 
 use std::collections::HashMap;
 
+use common::DebugLoc;
+
 use super::func::{MirBlock, MirFunc};
 use super::inst::{
     BlockId, LocalId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator,
@@ -47,6 +49,8 @@ pub struct MirBuilder {
     pub allow_effects: bool,
     /// S2b: fill roots without SSA verify.
     pub skip_verify: bool,
+    /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
+    pub pending_loc: DebugLoc,
 }
 
 impl MirBuilder {
@@ -62,6 +66,7 @@ impl MirBuilder {
             finished: false,
             allow_effects: false,
             skip_verify: false,
+            pending_loc: DebugLoc::unknown(),
         }
     }
 
@@ -337,6 +342,9 @@ impl MirBuilder {
             layout,
             args,
         })?;
+        if !super::effects::host_is_pure(native_id) {
+            self.snapshot_slots(dest);
+        }
         Ok(dest)
     }
 
@@ -384,6 +392,7 @@ impl MirBuilder {
             target,
             args,
         })?;
+        self.snapshot_slots(dest);
         Ok((dest, dest_hi))
     }
 
@@ -652,6 +661,7 @@ impl MirBuilder {
     ) -> Result<ValueId, MirError> {
         let dest = self.alloc(MirTy::Bool);
         self.push(MirInst::Deopt { dest, kind, loc })?;
+        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -672,6 +682,7 @@ impl MirBuilder {
             dest,
             src: self.resolve(src),
         })?;
+        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -769,13 +780,44 @@ impl MirBuilder {
         self.seal_all();
         self.rewrite_subst();
         self.finished = true;
+        self.func.debug_slots = self.snapshot_debug_slots();
         if self.func.has_gc_edge() {
             super::gc::fill_live_roots(&mut self.func);
         }
+        super::deopt::fill_deopt_maps(&mut self.func);
         if !self.skip_verify {
             self.func.verify().map_err(MirError::msg)?;
         }
         Ok(self.func)
+    }
+
+    fn snapshot_debug_slots(&self) -> std::collections::HashMap<LocalId, ValueId> {
+        let mut out = std::collections::HashMap::new();
+        let ret_blocks: Vec<BlockId> = self
+            .func
+            .blocks
+            .iter()
+            .filter(|b| matches!(b.term, Some(Terminator::Return { .. })))
+            .map(|b| b.id)
+            .collect();
+        let prefer = if ret_blocks.is_empty() {
+            vec![self.func.entry]
+        } else {
+            ret_blocks
+        };
+        for b in prefer {
+            if let Some(env) = self.current_def.get(b.index()) {
+                for (&local, &val) in env {
+                    out.insert(local, self.resolve(val));
+                }
+            }
+        }
+        for env in &self.current_def {
+            for (&local, &val) in env {
+                out.entry(local).or_insert_with(|| self.resolve(val));
+            }
+        }
+        out
     }
 
     fn snapshot_slots(&mut self, at: ValueId) {
@@ -803,6 +845,13 @@ impl MirBuilder {
 
     fn push(&mut self, inst: MirInst) -> Result<(), MirError> {
         let b = self.cur()?;
+        let dest = inst.dest();
+        let dest_hi = match inst {
+            MirInst::Call {
+                dest_hi: Some(h), ..
+            } => Some(h),
+            _ => None,
+        };
         let block = self.func.block_mut(b);
         if block.term.is_some() {
             return Err(MirError::msg(format!("{b} already terminated")));
@@ -817,6 +866,10 @@ impl MirBuilder {
         } else {
             block.insts.push(inst);
         }
+        self.func.value_locs.insert(dest, self.pending_loc);
+        if let Some(h) = dest_hi {
+            self.func.value_locs.insert(h, self.pending_loc);
+        }
         Ok(())
     }
 
@@ -827,6 +880,7 @@ impl MirBuilder {
             return Err(MirError::msg(format!("{b} already terminated")));
         }
         block.term = Some(term);
+        self.func.term_locs.insert(b, self.pending_loc);
         Ok(())
     }
 

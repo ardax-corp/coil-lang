@@ -1595,6 +1595,23 @@ impl Pipeline {
         self.compiler_lazy().stack_maps()
     }
 
+    pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
+        self.compiler_lazy().deopt_map_drafts()
+    }
+
+    pub fn debug_locs(&self) -> &[common::DebugLoc] {
+        self.compiler_lazy().debug_locs()
+    }
+
+    #[cfg(any(test, feature = "dissect"))]
+    pub fn fn_debug_locals(&self) -> Vec<(String, Vec<(String, u32)>)> {
+        self.compiler_lazy()
+            .function_symbols()
+            .into_iter()
+            .map(|s| (s.name, s.locals))
+            .collect()
+    }
+
     pub fn run(
         self,
         filename: String,

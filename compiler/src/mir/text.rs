@@ -300,18 +300,8 @@ impl<'a> Parser<'a> {
         self.kw("func")?;
         self.expect('@')?;
         let name = self.ident()?;
-        let mut func = MirFunc {
-            name,
-            params: Vec::new(),
-            ret_ty: None,
-            ret_hi_ty: None,
-            ret_layout: super::layout::MirLayout::Word,
-            entry: BlockId(0),
-            blocks: Vec::new(),
-            types: Vec::new(),
-            slot_env: std::collections::HashMap::new(),
-            gc_roots: Vec::new(),
-        };
+        let mut func = MirFunc::new(name);
+        func.blocks.clear();
         self.expect('(')?;
         if !self.eat(')') {
             loop {

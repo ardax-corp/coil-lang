@@ -222,11 +222,15 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
             let op = &ops[i];
             let rest = &ops[i + 1..end];
             let next = first_emitting(rest);
+            b.pending_loc = op.loc();
             lower_op(&mut b, &mut tos, op, next, rest, hints)?;
             maybe_ins_deopt(&mut b, op, hints)?;
         }
         if b.func().block(bid).term.is_none() {
             let last = ops.get(end.saturating_sub(1));
+            if let Some(op) = last {
+                b.pending_loc = op.loc();
+            }
             emit_term(
                 &mut b,
                 &mut tos,
