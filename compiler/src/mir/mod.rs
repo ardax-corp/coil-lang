@@ -3053,7 +3053,7 @@ fn main() {
                 op,
                 IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT
             )),
-            "LIR reconstructs FORMAT; ops={lir:?}"
+            "LIR reconstructs FORMAT"
         );
         assert!(
             lir.iter().any(|op| matches!(op, IlOp::String { .. })),
