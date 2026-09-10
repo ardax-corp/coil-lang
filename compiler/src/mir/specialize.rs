@@ -50,12 +50,13 @@ pub fn try_specialize_body(
     // prove frame and last-arm writes survive reconstruct.
     let select_cfg = has_sroa_select_cfg(ops);
     let has_alloc = ops.iter().any(refuses_alloc);
-    // S2h OOB heap arm (MakeArray + Index) stays fuse-IL: dense Seek plus
-    // the existing frame overflows the 64-slot prove VM.
-    if select_cfg && has_alloc {
+    let inloop_alloc = super::infer::has_alloc_inside_loop(ops);
+    // S2h OOB heap arm (in-loop MakeArray + select) stays fuse-IL: dense Seek
+    // plus the existing frame overflows the 64-slot prove VM. Post-loop
+    // box-once is not a fuse-only brand — reconstruct + cost gate decide.
+    if select_cfg && inloop_alloc {
         return None;
     }
-    let inloop_alloc = super::infer::has_alloc_inside_loop(ops);
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
     }
@@ -245,7 +246,7 @@ pub fn try_lower_abi_body_with(
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_sroa_select_cfg(ops) && has_alloc {
+    if has_sroa_select_cfg(ops) && super::infer::has_alloc_inside_loop(ops) {
         return None;
     }
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
