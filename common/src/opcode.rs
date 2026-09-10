@@ -398,6 +398,10 @@ pub enum Instruction {
     /// Push consecutive frame slots onto the eval stack (CALL / HostInvoke
     /// ABI edge). `[15:8]` arity, `[7:0]` base slot.
     DensePush,
+    /// Dense `ArrayPush` (COI-344 B6). Stack-neutral grow.
+    /// Operand: `[23:16]` dest, `[15:8]` array slot, `[7:0]` value slot
+    /// (`dense_abc` flags unused). Dest receives the same array identity.
+    DenseArrayPush,
 }
 
 impl From<u8> for Instruction {
@@ -698,6 +702,7 @@ impl Instruction {
             Self::DenseArrayLen => "DenseArrayLen",
             Self::DenseMake => "DenseMake",
             Self::DensePush => "DensePush",
+            Self::DenseArrayPush => "DenseArrayPush",
         }
     }
 }
@@ -1706,13 +1711,15 @@ mod tests {
         assert_eq!(mk.dense_abc_parts(), (dense::MAKE_ARRAY, 9, 3, 4));
         let push = Byte::new(Instruction::DensePush).with_dense_move(2, 6);
         assert_eq!(push.dense_move_parts(), (2, 6));
+        let grow = Byte::new(Instruction::DenseArrayPush).with_dense_abc(0, 3, 1, 2);
+        assert_eq!(grow.dense_abc_parts(), (0, 3, 1, 2));
     }
 
     #[test]
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DensePush as u8;
+        let last = Instruction::DenseArrayPush as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
