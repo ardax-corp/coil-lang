@@ -49,8 +49,8 @@ tables shrink toward.
    a true language / runtime barrier. Q6–Q9 first rungs have landed
    (counted `for`, one-word recursive `CALL`, niche/two-slot dense+match,
    format LIR reconstruct); leftover shapes are **ladders** or **cost
-   gates**, not forever refuse.    Remaining walls: I7 native resume (C3 maps exist; P5 parked), leftover unmapped grow /
-   class edges, boxed multi-payload
+   gates**, not forever refuse. Remaining walls: I7 native resume (C3 maps
+   exist; P5 parked), leftover unmapped grow / class edges, boxed multi-payload
    match, residual `Byte`/`Pow`/bitwise. Everything else is
    **cost-gated**: lift, opt, emit, compare to fuse-IL. Do not add
    feature-shaped refuses (W3 work-op floors, Seek≤64 prove quirks,
@@ -176,6 +176,11 @@ regular reconstruct over bench-shaped peeps.
 
 Parked (not B*): boxed multi-payload match, residual `Byte`/`Pow`/bitwise,
 Cranelift P5, PGO.
+
+Post A0–C3 denser-MIR leftovers (keep-rate, class `new`, dense field, Q9
+`main`, `item_check`): [mir-dense-leftovers.md](mir-dense-leftovers.md).
+Tree-shake / BB reorder is a separate surface
+([#405](https://github.com/ardax-corp/coil-lang/pull/405)).
 
 ## Non-goals
 
