@@ -197,3 +197,7 @@ Pool workers pin a TLS local deque tagged with the owning reactor identity.
 `submit` / join-help only push or pop that deque when it belongs to the same
 reactor; otherwise work goes through the shared injector. That keeps concurrent
 `Machine`s (parallel tests) and nested reactors from cross-feeding jobs.
+
+IPA RSS / wall-time / `.hyc` vs `.hy` (isolate heaps, 8 MiB stacks, AlwaysPar
+trees, archive slot heuristic): [auto-par-rss.md](auto-par-rss.md). `COIL_AUTO_PAR`
+is compile-time only.
