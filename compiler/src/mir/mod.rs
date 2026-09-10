@@ -2327,6 +2327,91 @@ fn main() {
     }
 
     #[test]
+    fn b6_nsieve_binds_grow_maps() {
+        let src = r#"
+fn fill(int n) -> int {
+    let xs: Vec<int> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        xs.push(i);
+        i = i + 1;
+    }
+    return xs[n - 1];
+}
+fn main() {
+    if fill(4) != 3 {
+        panic "fill";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let _ = p.compile_src(src).expect("compile fill");
+        assert!(
+            p.stack_maps()
+                .iter()
+                .any(|m| !m.safepoints.is_empty()),
+            "B6 Vec.push should bind grow maps: {:?}",
+            p.stack_maps()
+        );
+    }
+
+    #[test]
+    fn b6_call_plus_makearray_binds_maps() {
+        let src = r#"
+fn leaf(int n) -> int {
+    return n + 1;
+}
+fn wrap(int n) -> [int] {
+    return [leaf(n), n];
+}
+fn main() {
+    let xs = wrap(2);
+    if xs[0] + xs[1] != 5 {
+        panic "wrap";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let _ = p.compile_src(src).expect("compile wrap");
+        assert!(
+            p.stack_maps()
+                .iter()
+                .any(|m| !m.safepoints.is_empty()),
+            "B6 CALL+MakeArray should bind maps: {:?}",
+            p.stack_maps()
+        );
+    }
+
+    #[test]
+    fn b6_recursive_make_enum_binds_maps() {
+        let src = r#"
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+#[max_depth(8)]
+fn bottom_up(int depth) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf();
+    }
+    return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
+}
+fn main() {
+    let _ = bottom_up(2);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let _ = p.compile_src(src).expect("compile bottom_up");
+        assert!(
+            p.stack_maps()
+                .iter()
+                .any(|m| !m.safepoints.is_empty()),
+            "B6 recursive MakeEnum should bind maps: {:?}",
+            p.stack_maps()
+        );
+    }
+
+    #[test]
     fn i5_init_typed_lowers_object_alloc() {
         let loc = loc();
         let ops = vec![

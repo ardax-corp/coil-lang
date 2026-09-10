@@ -6995,25 +6995,19 @@ fn b6_vec_push_maps_and_nsieve_checksum() {
 }
 
 #[test]
-fn b6_call_plus_make_enum_maps() {
+fn b6_call_plus_make_array_maps() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-enum Box {
-    Wrap(int),
-}
 fn leaf(int n) -> int {
     return n + 1;
 }
-fn wrap(int n) -> Box {
-    return Box::Wrap(leaf(n));
+fn wrap(int n) -> [int] {
+    return [leaf(n), n];
 }
 fn main() {
-    let b = wrap(2);
-    let v = match b {
-        Box::Wrap(x) => x,
-    };
-    write(stdout(), to_bytes(format("%i", v)));
+    let xs = wrap(2);
+    write(stdout(), to_bytes(format("%i", xs[0] + xs[1])));
 }
 "#;
     let mut pipeline = test_pipeline();
@@ -7023,11 +7017,11 @@ fn main() {
             .stack_maps()
             .iter()
             .any(|m| !m.safepoints.is_empty()),
-        "B6 CALL+MakeEnum should bind maps: {:?}",
+        "B6 CALL+MakeArray should bind maps: {:?}",
         pipeline.stack_maps()
     );
     let out = run_bytecode(bytecode, constants, &pipeline, None);
-    assert_eq!(out, "3");
+    assert_eq!(out, "5");
 }
 
 #[test]
