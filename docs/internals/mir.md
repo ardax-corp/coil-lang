@@ -24,8 +24,8 @@ the stack).
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
 | `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
-| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (W4 allowlisted HostInvoke box/unbox) |
-| `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit for two-slot leafs, I2 niche/two-slot/boxed-overlap match, and I3 unboxed class fields |
+| `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
+| `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
 | `mir::gvn` | Dominator GVN + fully-anticipated fork PRE; dense specialize only (not ABI LIR) |
 | `mir::licm` | Natural-loop hoist of invariant Const/arith/cmp/cast (float `Div` ok; int `Div`/`Rem` stay) |
@@ -50,7 +50,7 @@ refuses the new field ops.
 I4 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse))
 keeps `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` on fuse-IL. Infer,
 lower, and ABI-leaf refuse them. There is no string SSA subset and no
-W4 HostInvoke for `from_bytes` / `to_bytes`. Unicode / regex are out of
+dense HostInvoke for `from_bytes` / `to_bytes`. Unicode / regex are out of
 MIR.
 I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
 names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
@@ -120,7 +120,7 @@ hoisted consts. Hit bench: `examples/perf/mir_licm_divf.hy`.
 
 Specialize no longer refuses multi-header bodies: nested numeric loops
 (including flagship `mandelbrot`) can emit `DenseBin` when infer + lower
-succeed. Straight-line bodies need the W3 work-op gate
+succeed. Straight-line bodies lift and keep only when emit cost ≤ fuse-IL
 ([specialize-refuse.md](specialize-refuse.md)).
 
 ## W1 — float arith without requiring `*` (COI-287)
@@ -137,47 +137,37 @@ on a back-edge body that is otherwise numeric (no heap / `CALL` / multi-word
 `RETURN`). Compare-only stays fuse-IL. Hit bench:
 `examples/perf/mir_dense_i64.hy`.
 
-## W3 — cost-gated straight-line (COI-289)
+## W3 — cost-gated straight-line (COI-289 / A3)
 
-A no-back-edge numeric body specializes when `numeric_work_ops` is at least
-`STRAIGHT_LINE_MIN_WORK_OPS` (**8**): `Bin` / `BinSlotImm` / `BinSlotSlot`
-plus residual `INC`/`DEC`/`NEG`/`NEGF`/`CastIntToFloat`. Dense `Seek` + Value
-ABI is a per-CALL tax that loops amortize; tiny helpers stay fuse-IL.
+A no-back-edge numeric body may lift. Keep only when reconstruct cost ≤
+opted fuse-IL (`Seek` weighted by frame size). Dense `Seek` + Value ABI is
+a per-CALL tax that loops amortize; tiny helpers stay fuse-IL. There is
+no `work_ops ≥ 8` infer refuse.
 Hit bench: `examples/perf/mir_dense_straight.hy`.
 
-## W4 — allowlisted HostInvoke inside dense (COI-290)
+## W4 — HostInvoke inside dense (COI-290 / A3)
 
 Specialize no longer refuses a numeric body solely because it contains
-HostInvoke. The set is **closed** (see
-[specialize-refuse.md](specialize-refuse.md)):
+HostInvoke. LICM hoist is **purity bits** (scalar-pure math / axpy; not
+`packed_*` heap reads; not IO / clocks / GC). S3 dense emit reconstructs
+I6-typed hosts except I4 `from_bytes` / `to_bytes`. Precise float/heap
+types still live on math / packed / axpy specs.
 
-- packed LA **87–91** (`packed_dot` … `packed_vec_arith`)
-- frozen math **102–110** (`math_sin` … `math_pow`)
-- M1 math **125–135** (`math_atan` … `math_tanh`)
-- `simd_axpy_reduce` **136** (P12 may still replace a *whole* saxpy body)
-
-Clocks, IO, GC, and other natives still refuse dense infer. I6
+I6
 ([COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges))
-types those natives as SSA `HostInvoke` edges when `allow_effects` is
-set: the purity sidecar (`classify_host_name` / `host_effects`) marks
-math / packed / axpy **pure** (LICM may hoist W4 scalar math) and
-clocks / IO / GC / FFI **impure** (never hoist, never CSE). Dense emit
-still refuses anything outside this closed W4 set — no clock/IO
-allowlist growth. I7
+types natives as SSA `HostInvoke` edges when `allow_effects` is set. I7
 ([COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir))
 names `Deopt` stop / leave edges (`allow_deopt`). Debugger-attached
 and `-Og` skip dense + MIR→LIR so the VM debugger stays on fuse-IL
 ([mir-deopt.md](mir-deopt.md)). I8
 ([COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3))
-lifts leftover bodies through MIR→LIR (`lir_eligible`) when they have a
-named I1–I3 / two-slot reason or an inferable leftover (plain `if` /
-compare diamonds, store-only, tiny lets). I4 string/FORMAT, I5 alloc,
-and impure HostInvoke/`CALL` stay fuse-IL. User `CALL` is COI-291
-(below). Dense emit keeps `DenseBin` for the numeric region and at each
-allowlisted edge: `LOAD` args (Value words) → `CONST` id → `HostInvoke` →
-`STORE` dest, then more dense ops. P12 whole-body saxpy pack still runs
-first when the pattern matches (no inner host). Hit bench:
-`examples/perf/mir_dense_host.hy`.
+lifts leftover bodies through MIR→LIR when there is no hard refuse.
+I4 string/FORMAT, unmapped I5 alloc, and HostInvoke/`CALL` stay fuse-IL
+on the LIR path. User `CALL` is COI-291 (below). Dense emit keeps
+`DenseBin` for the numeric region and at each host edge: `LOAD` args
+(Value words) → `CONST` id → `HostInvoke` → `STORE` dest, then more
+dense ops. P12 whole-body saxpy pack still runs first when the pattern
+matches (no inner host). Hit bench: `examples/perf/mir_dense_host.hy`.
 
 ## M1–M3 — typed dense→dense CALL (COI-291)
 
