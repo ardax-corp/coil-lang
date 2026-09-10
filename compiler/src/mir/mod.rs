@@ -7,7 +7,7 @@
 //! I2 match / `JumpIfMatch` on niche, two-slot, and boxed-overlap payloads
 //! (COI-294 / COI-302), and
 //! I3 field load/store on non-escaping unboxed class locals (COI-295), and
-//! I4 hard refuse of `FORMAT` / general string ops (COI-296), and
+//! I4 / Q9 string / format SSA (COI-296 / COI-332) as a delivery ladder, and
 //! I5 alloc / GC-barrier edges (COI-300) with S2a live-root
 //! sidecar (COI-305) and S2b slot / frame maps (COI-306),
 //! I6 HostInvoke / CALL effect edges from the purity sidecar (COI-297), and
@@ -19,7 +19,8 @@
 //! 2). Dense→dense `CALL` uses the one-word typed ABI ([`abi`]; COI-291).
 //! Typed HostInvoke still boxes at the host edge. Escaping / heap-backed
 //! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
-//! `STRINGIFY` / `PRINT` stay fuse-IL (I4 / Q9). Allocating bodies may
+//! `STRINGIFY` / `PRINT` may enter MIR→LIR (I4 / Q9 R1); dense infer
+//! still refuses them. Allocating bodies may
 //! lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`; dense / LIR
 //! emit across alloc only when S2b maps exist (S2c), including mapped
 //! preheader `Make*` (S2d), Seek-less residuals (S2e), and S2f SROA /
@@ -3032,7 +3033,7 @@ fn main() {
     }
 
     #[test]
-    fn i4_format_and_string_stay_refused() {
+    fn i4_string_format_enter_lir_not_dense() {
         let loc = loc();
         let format_ops = vec![
             IlOp::Label(Label(0)),
@@ -3045,9 +3046,18 @@ fn main() {
             IlOp::Return { loc, ret_words: 1 },
         ];
         let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&format_ops, "fmt", 1, &mut pool)
+            .expect("Q9 R1 FORMAT enters MIR→LIR");
         assert!(
-            try_lower_abi_body(&format_ops, "fmt", 1, &mut pool).is_none(),
-            "FORMAT must not enter MIR→LIR"
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT
+            )),
+            "LIR reconstructs FORMAT; ops={lir:?}"
+        );
+        assert!(
+            lir.iter().any(|op| matches!(op, IlOp::String { .. })),
+            "LIR reconstructs STRING"
         );
         assert!(
             super::infer::infer_numeric(&format_ops, 0, 1).is_err(),
@@ -3058,10 +3068,20 @@ fn main() {
             IlOp::String { idx: 0, loc },
             IlOp::Return { loc, ret_words: 1 },
         ];
-        assert!(
-            try_lower_abi_body(&string_ops, "s", 0, &mut pool).is_none(),
-            "STRING must not enter MIR→LIR"
-        );
+        let s = try_lower_abi_body(&string_ops, "s", 0, &mut pool)
+            .expect("Q9 R1 STRING enters MIR→LIR");
+        assert!(s.iter().any(|op| matches!(op, IlOp::String { idx: 0, .. })));
+        let print_ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::String { idx: 1, loc },
+            IlOp::Print { loc },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let p = try_lower_abi_body(&print_ops, "hello", 0, &mut pool)
+            .expect("Q9 R1 PRINT enters MIR→LIR");
+        assert!(p.iter().any(|op| matches!(op, IlOp::Print { .. })));
+        assert!(p.iter().any(|op| matches!(op, IlOp::String { .. })));
     }
 
     #[test]
@@ -3426,14 +3446,18 @@ fn main() {
                     );
                     entered.push(body.meta.name.clone());
                 }
-                "wrap_res" => assert_eq!(refuse, Some(LirRefuse::String)),
+                "wrap_res" => {
+                    assert_eq!(refuse, None, "Q9 R1: STRING is not a LIR wall");
+                    assert!(lir.is_some(), "wrap_res must lower to LIR");
+                    entered.push(body.meta.name.clone());
+                }
                 "main" => assert_eq!(refuse, Some(LirRefuse::Call)),
                 _ => {}
             }
         }
         assert_eq!(
             entered.len(),
-            5,
+            6,
             "construct+match helpers must enter MIR: {entered:?}"
         );
 

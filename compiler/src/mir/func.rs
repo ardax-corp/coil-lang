@@ -475,6 +475,40 @@ impl MirFunc {
                     return Err(format!("{dest} Deopt dest is not bool"));
                 }
             }
+            MirInst::String { dest, .. } => {
+                if self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} String dest is not heapref"));
+                }
+            }
+            MirInst::Print { dest, src } => {
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} Print dest is not bool"));
+                }
+                if !self.ty(*src).is_specialized() {
+                    return Err(format!("{dest} Print src type"));
+                }
+            }
+            MirInst::Format { dest, fmt, args } => {
+                if self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} Format dest is not heapref"));
+                }
+                if self.ty(*fmt) != MirTy::HeapRef && self.ty(*fmt) != MirTy::Value {
+                    return Err(format!("{dest} Format fmt type"));
+                }
+                for (i, a) in args.iter().enumerate() {
+                    if !self.ty(*a).is_specialized() {
+                        return Err(format!("{dest} Format arg {i} type"));
+                    }
+                }
+            }
+            MirInst::Stringify { dest, src } => {
+                if self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} Stringify dest is not heapref"));
+                }
+                if !self.ty(*src).is_specialized() {
+                    return Err(format!("{dest} Stringify src type"));
+                }
+            }
             MirInst::Phi { dest, ty, args } => {
                 if self.ty(*dest) != *ty {
                     return Err(format!("{dest} phi type"));

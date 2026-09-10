@@ -227,6 +227,16 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             Ok(())
         }
         MirInst::Deopt { dest, kind, .. } => write!(f, "{dest} = deopt.{}", kind.as_str()),
+        MirInst::String { dest, idx } => write!(f, "{dest} = string {idx}"),
+        MirInst::Print { dest, src } => write!(f, "{dest} = print {src}"),
+        MirInst::Format { dest, fmt, args } => {
+            write!(f, "{dest} = format {fmt}")?;
+            for a in args {
+                write!(f, ", {a}")?;
+            }
+            Ok(())
+        }
+        MirInst::Stringify { dest, src } => write!(f, "{dest} = stringify {src}"),
         MirInst::Phi { dest, ty, args } => {
             write!(f, "{dest} = phi.{ty} [")?;
             for (i, (b, v)) in args.iter().enumerate() {
@@ -640,6 +650,30 @@ impl<'a> Parser<'a> {
                 kind,
                 loc: common::DebugLoc::unknown(),
             });
+        }
+        if op == "string" {
+            let idx = self.uint()? as u32;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::String { dest, idx });
+        }
+        if op == "print" {
+            let src = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::Print { dest, src });
+        }
+        if op == "format" {
+            let fmt = self.value()?;
+            let mut args = Vec::new();
+            while self.eat(',') {
+                args.push(self.value()?);
+            }
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::Format { dest, fmt, args });
+        }
+        if op == "stringify" {
+            let src = self.value()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::Stringify { dest, src });
         }
         Err(ParseError(format!("unknown op {op}")))
     }

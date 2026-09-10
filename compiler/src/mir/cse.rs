@@ -469,7 +469,11 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::ArrayLen { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }
-        | MirInst::Deopt { .. } => {
+        | MirInst::Deopt { .. }
+        | MirInst::String { .. }
+        | MirInst::Print { .. }
+        | MirInst::Format { .. }
+        | MirInst::Stringify { .. } => {
             return None
         }
     })

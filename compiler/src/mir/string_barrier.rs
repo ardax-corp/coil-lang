@@ -1,9 +1,9 @@
-//! I4 — `FORMAT` and general string ops are a hard MIR barrier.
+//! I4 / Q9 — string / format ladder (not a permanent MIR barrier).
 //!
-//! No string subset, no half-lifted Format, no unicode/regex in SSA. Fuse-IL
-//! keeps `STRING` / `FORMAT` / `STRINGIFY` / `PRINT`. `string::{from_bytes,
-//! to_bytes}` HostInvoke stays off dense (I4 / Q9; I6 types them as
-//! impure IO edges).
+//! R1: table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may enter
+//! MIR→LIR. Dense infer still refuses so numeric specialize is unchanged.
+//! `string::{from_bytes,to_bytes}` stay off dense (R2). Unicode / regex
+//! stay out.
 
 use common::Instruction;
 
@@ -14,9 +14,16 @@ pub fn is_format_inst(inst: Instruction) -> bool {
     matches!(inst, Instruction::FORMAT | Instruction::STRINGIFY)
 }
 
-/// IL that must not enter dense specialize or MIR→LIR (I4).
-pub fn refuses_string_or_format(op: &IlOp) -> bool {
-    refuse_reason(op).is_some()
+/// Table / print / format IL (R1 reconstruct set).
+pub fn is_string_il(op: &IlOp) -> bool {
+    match op {
+        IlOp::String { .. } | IlOp::Print { .. } => true,
+        IlOp::Byte { byte, .. } => matches!(
+            *byte.bytecode(),
+            Instruction::STRING | Instruction::PRINT | Instruction::FORMAT | Instruction::STRINGIFY
+        ),
+        _ => false,
+    }
 }
 
 /// Inventory label: `string/io` for table push / print, `format` for FORMAT.
@@ -24,8 +31,21 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
     match op {
         IlOp::String { .. } | IlOp::Print { .. } => Some("string/io"),
         IlOp::Byte { byte, .. } if is_format_inst(*byte.bytecode()) => Some("format"),
+        IlOp::Byte { byte, .. }
+            if matches!(
+                *byte.bytecode(),
+                Instruction::STRING | Instruction::PRINT
+            ) =>
+        {
+            Some("string/io")
+        }
         _ => None,
     }
+}
+
+/// Dense specialize still refuses I4 string / format (R1).
+pub fn refuses_dense_string(op: &IlOp) -> bool {
+    is_string_il(op)
 }
 
 #[cfg(test)]
@@ -38,7 +58,7 @@ mod tests {
     }
 
     #[test]
-    fn string_print_and_format_are_barriers() {
+    fn string_print_and_format_are_r1_il() {
         let loc = loc();
         assert_eq!(
             refuse_reason(&IlOp::String { idx: 0, loc }),
@@ -59,6 +79,8 @@ mod tests {
             }),
             Some("format")
         );
-        assert!(!refuses_string_or_format(&IlOp::Const { imm: 1, loc }));
+        assert!(is_string_il(&IlOp::String { idx: 0, loc }));
+        assert!(refuses_dense_string(&IlOp::Print { loc }));
+        assert!(!is_string_il(&IlOp::Const { imm: 1, loc }));
     }
 }

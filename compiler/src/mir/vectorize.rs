@@ -40,6 +40,10 @@ pub fn try_vectorize(
                     | MirInst::Deopt { .. }
                     | MirInst::Alloc { .. }
                     | MirInst::GcBarrier { .. }
+                    | MirInst::String { .. }
+                    | MirInst::Print { .. }
+                    | MirInst::Format { .. }
+                    | MirInst::Stringify { .. }
             )
         }) || matches!(b.term, Some(Terminator::JumpIfMatch { .. }))
     }) {

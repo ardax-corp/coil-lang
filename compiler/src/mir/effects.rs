@@ -42,7 +42,10 @@ impl MirInst {
             | Self::GcBarrier { .. }
             | Self::Deopt { .. }
             | Self::FieldStore { .. }
-            | Self::StoreIndex { .. } => true,
+            | Self::StoreIndex { .. }
+            | Self::Print { .. }
+            | Self::Format { .. }
+            | Self::Stringify { .. } => true,
             _ => false,
         }
     }

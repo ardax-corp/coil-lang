@@ -17,9 +17,12 @@ impl MirInst {
     pub fn deopt_kind(&self) -> Option<MirDeoptKind> {
         match self {
             Self::Deopt { kind, .. } => Some(*kind),
-            Self::Call { .. } | Self::Alloc { .. } | Self::GcBarrier { .. } => {
-                Some(MirDeoptKind::Deopt)
-            }
+            Self::Call { .. }
+            | Self::Alloc { .. }
+            | Self::GcBarrier { .. }
+            | Self::Print { .. }
+            | Self::Format { .. }
+            | Self::Stringify { .. } => Some(MirDeoptKind::Deopt),
             Self::HostInvoke { native_id, .. } if !host_is_pure(*native_id) => {
                 Some(MirDeoptKind::Deopt)
             }
@@ -35,8 +38,17 @@ pub fn boundary_for_op(op: &IlOp) -> Option<MirDeoptKind> {
         | IlOp::Entry { .. }
         | IlOp::MakeArray { .. }
         | IlOp::MakeTuple { .. }
-        | IlOp::MakeEnum { .. } => Some(MirDeoptKind::Deopt),
-        IlOp::Byte { byte, .. } if is_alloc_inst(*byte.bytecode()) => Some(MirDeoptKind::Deopt),
+        | IlOp::MakeEnum { .. }
+        | IlOp::Print { .. } => Some(MirDeoptKind::Deopt),
+        IlOp::Byte { byte, .. }
+            if is_alloc_inst(*byte.bytecode())
+                || matches!(
+                    *byte.bytecode(),
+                    common::Instruction::FORMAT | common::Instruction::STRINGIFY
+                ) =>
+        {
+            Some(MirDeoptKind::Deopt)
+        }
         IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. } => Some(MirDeoptKind::Stop),
         IlOp::StorePop { loc, .. } if loc.is_known() => Some(MirDeoptKind::Stop),
         _ => None,

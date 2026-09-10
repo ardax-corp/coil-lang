@@ -339,6 +339,28 @@ pub enum MirInst {
         kind: MirDeoptKind,
         loc: common::DebugLoc,
     },
+    /// Const string-table push (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
+    String {
+        dest: ValueId,
+        idx: u32,
+    },
+    /// `PRINT` (I4 / Q9 R1). Dest is a `bool` unit token. IO barrier.
+    Print {
+        dest: ValueId,
+        src: ValueId,
+    },
+    /// `FORMAT n` (I4 / Q9 R1). Dest / `fmt` are [`MirTy::HeapRef`].
+    /// Reconstructs the shipped opcode — not a second Format lowering.
+    Format {
+        dest: ValueId,
+        fmt: ValueId,
+        args: Vec<ValueId>,
+    },
+    /// `STRINGIFY` (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
+    Stringify {
+        dest: ValueId,
+        src: ValueId,
+    },
 }
 
 /// Heap object constructed by [`MirInst::Alloc`].
@@ -436,7 +458,11 @@ impl MirInst {
             | Self::ArrayLen { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
-            | Self::Deopt { dest, .. } => dest,
+            | Self::Deopt { dest, .. }
+            | Self::String { dest, .. }
+            | Self::Print { dest, .. }
+            | Self::Format { dest, .. }
+            | Self::Stringify { dest, .. } => dest,
         }
     }
 
@@ -474,7 +500,13 @@ impl MirInst {
             Self::ArrayLen { array, .. } => vec![*array],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
-            Self::Deopt { .. } => Vec::new(),
+            Self::Deopt { .. } | Self::String { .. } => Vec::new(),
+            Self::Print { src, .. } | Self::Stringify { src, .. } => vec![*src],
+            Self::Format { fmt, args, .. } => {
+                let mut v = vec![*fmt];
+                v.extend(args.iter().copied());
+                v
+            }
         }
     }
 
@@ -524,7 +556,14 @@ impl MirInst {
                     *v = map(*v);
                 }
             }
-            Self::Deopt { .. } => {}
+            Self::Deopt { .. } | Self::String { .. } => {}
+            Self::Print { src, .. } | Self::Stringify { src, .. } => *src = map(*src),
+            Self::Format { fmt, args, .. } => {
+                *fmt = map(*fmt);
+                for v in args.iter_mut() {
+                    *v = map(*v);
+                }
+            }
         }
     }
 }

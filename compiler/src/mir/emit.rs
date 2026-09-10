@@ -562,6 +562,14 @@ pub(super) fn emit_inst(
                 "dense emit refuses Deopt (I7: VM debugger stays on fuse-IL)".into(),
             ));
         }
+        MirInst::String { .. }
+        | MirInst::Print { .. }
+        | MirInst::Format { .. }
+        | MirInst::Stringify { .. } => {
+            return Err(LowerError::Refused(
+                "dense emit refuses I4 string/format (Q9 R1 is MIR→LIR)".into(),
+            ));
+        }
     }
     Ok(())
 }

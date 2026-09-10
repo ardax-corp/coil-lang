@@ -37,7 +37,7 @@ pub fn try_specialize_body(
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke except I4 string bytes, heap index / ArrayLen /
     // StoreIndex (dense residuals after V*). FORMAT / string ops stay
-    // fuse-IL (I4 / Q9). Q8: niche / two-slot match may dense when the
+    // off dense (I4 / Q9 R1 is MIR→LIR). Q8: niche / two-slot match may dense when the
     // reconstruct beats fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
     // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
@@ -324,7 +324,7 @@ fn emit_cost(ops: &[IlOp]) -> usize {
 /// compare-only). Production `IlModule` replace uses this after stack-IL
 /// opts; `emit_lir` keeps single-use return/cmp values on the stack. Do
 /// not re-opt the reconstruct (`MOD` rematerializes). Call / host / box /
-/// I4 stay fuse-IL. I5 alloc needs S2b maps ([`lir_eligible_with`]).
+/// I4 string/format may lift (Q9 R1). I5 alloc needs S2b maps ([`lir_eligible_with`]).
 /// Keep/refuse is the LIR cost gate in `IlModule`, not a feature floor.
 pub fn try_lower_abi_body(
     ops: &[IlOp],
@@ -372,6 +372,7 @@ pub fn try_lower_abi_body_with(
     hints.allow_fields = !unboxed_fields.is_empty();
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
+    hints.allow_string = ops.iter().any(super::string_barrier::is_string_il);
     let mut func = try_lower_numeric(ops, &hints).ok()?;
     if has_alloc {
         crate::mir::sroa(&mut func);
