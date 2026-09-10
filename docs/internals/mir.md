@@ -23,7 +23,7 @@ the stack).
 | `MirTy` | Lattice: `bottom ⊑ {i32⊑i64, f32⊑f64, bool, heap-ref, niche Option/Result} ⊑ value`. I1 names heap/niche words; dense still uses numeric lanes only ([mir-islands.md](mir-islands.md)). |
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
-| `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses classes / heap / calls |
+| `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses escaping classes / unmapped heap / two-slot `CALL`. One-word `CALL` (Q7) and niche / two-slot match (Q8) lower |
 | `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
@@ -86,8 +86,7 @@ Stack-map note: [mir-stack-maps.md](mir-stack-maps.md).
 ## P1 — dense exec (COI-268)
 
 Eligible numeric loops (float `+`/`-`/`*`/`/`, counted i64 `+`/`-`/`*`/`/`/`%`,
-or `i32`; no heap/calls; one or more back-edges) and W3 straight-line bodies
-at/above eight work ops emit:
+or `i32`; one or more back-edges) and cost-gated straight-line bodies emit:
 
 - `DenseBin` / `DenseConst` / `DenseMove` / `DenseUnary` / `DenseCast`
 - `Seek` to the typed slot high-water mark
@@ -138,8 +137,9 @@ loops emit `DenseBin`. `DIVF` already qualified before W1. Hit bench:
 ## W2 — counted i64 (COI-288)
 
 Infer’s dense gate also accepts i64 `+`/`-`/`*`/`/`/`%` (and int `INC`/`DEC`)
-on a back-edge body that is otherwise numeric (no heap / `CALL` / multi-word
-`RETURN`). Compare-only stays fuse-IL. Hit bench:
+on a back-edge body that is otherwise numeric (multi-word `RETURN` still
+refuses). Heap index and one-word `CALL` may lift (A2 / Q7). Compare-only
+stays fuse-IL. Hit bench:
 `examples/perf/mir_dense_i64.hy`.
 
 ## W3 — cost-gated straight-line (COI-289 / A3)

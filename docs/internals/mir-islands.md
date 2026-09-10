@@ -32,18 +32,20 @@ island does not fire there.
 **Register VM / Cranelift are later levers**, not prerequisites. Do not
 block islands on P5. Do not revive PGO.
 
-**I8 entry (post I1–I3 / A3).** After stack-IL opts, `IlModule` tries dense
-specialize, then IL→MIR→LIR when [`lir_eligible`](../../compiler/src/mir/entry.rs)
-has **no hard refuse**. Hard refuse today: unmapped I5 alloc, I6 `CALL` /
-HostInvoke (LIR emit cannot reconstruct), I4 `from_bytes` / `to_bytes`
-on dense (Q9 R1 reopened table `STRING` / `PRINT` / `FORMAT` /
-`STRINGIFY` on MIR→LIR — [q9-format-string.md](q9-format-string.md)),
-escaping fields, box, I2 multi-payload `Unpack`, I7 debugger-attached /
-`-Og`. Heap index is not a wall after A2. No dual AST walker. No
-work-op / Seek≤64 / HostInvoke **id** floors — those are purity bits +
-cost. Cost gate: replace when LIR emit ≤ opted fuse-IL, with +3 slack for
-I2 match / two-slot construct (runtime-neutral `Seek`). Leftover lets stay
-strict so ConstReturnImm fuse is not undone.
+**I8 entry (post I1–I3 / A3 / B1).** After stack-IL opts, `IlModule` tries
+dense specialize, then IL→MIR→LIR when [`lir_eligible`](../../compiler/src/mir/entry.rs)
+has **no LIR reconstruct wall**. Walls today: unmapped I5 alloc, I6 `CALL` /
+HostInvoke (LIR emit cannot reconstruct — Q7 densifies one-word self-`CALL`
+instead), I4 `from_bytes` / `to_bytes` on dense (Q9 R1 reopened table
+`STRING` / `PRINT` / `FORMAT` / `STRINGIFY` on MIR→LIR —
+[q9-format-string.md](q9-format-string.md)), escaping fields, box, I2
+multi-payload `Unpack`, I7 debugger-attached / `-Og`. Counted `for` (Q6)
+and niche / two-slot match (Q8) are lift + cost, not checklist refuses.
+Heap index is not a wall after A2. No dual AST walker. No work-op /
+Seek≤64 / HostInvoke **id** floors — those are purity bits + cost. Cost
+gate: replace when LIR emit ≤ opted fuse-IL, with +3 slack for I2 match /
+two-slot construct (runtime-neutral `Seek`). Leftover lets stay strict so
+ConstReturnImm fuse is not undone.
 
 ## Island ladder
 
@@ -57,7 +59,7 @@ strict so ConstReturnImm fuse is not undone.
 | I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) / [COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc) / [COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc) / [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist) / [COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts) | MakeArray / alloc edges; S2a live-root sidecar; S2b interpreter slot / frame maps; S2c specialize / LIR across alloc when maps exist; S2d mapped in-loop / preheader Make* | I5 / S2a–S2d on main |
 | I6 | Effects / HostInvoke | [COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges) | Broader than W4 allowlist; purity sidecar drives barriers | on main (#347) |
 | I7 | Debugger / deopt | [COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir) | Deopt / stop metadata on MIR edges; VM debugger stays source of truth | on main (#348) |
-| I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) / [COI-301](https://linear.app/ardax/issue/COI-301/unlock-retarget-i8-shape-tests-broaden-lir-eligible) / [COI-336](https://linear.app/ardax/issue/COI-336) A3 | Lift when there is no hard refuse; keep via cost gate (no work-op / Seek≤64 / host-id floors) | on main (#380); B0 audit [opt-generalization.md](opt-generalization.md) |
+| I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) / [COI-301](https://linear.app/ardax/issue/COI-301/unlock-retarget-i8-shape-tests-broaden-lir-eligible) / [COI-336](https://linear.app/ardax/issue/COI-336) A3 / [COI-339](https://linear.app/ardax/issue/COI-339) B1 | Lift when there is no LIR reconstruct wall; keep via cost gate (no work-op / Seek≤64 / host-id floors). Q6–Q8 first rungs are entry hygiene | on main (#380); B0 audit + B1 hygiene [opt-generalization.md](opt-generalization.md) |
 
 I4 was closed as a hard MIR barrier (#345). **Q9 R1** reopens it as a
 phased island: SSA + LIR reconstruct of the shipped string/format
@@ -88,7 +90,7 @@ not stalled. Unicode / regex stay out until a later cut. Ladder:
 | `FORMAT` / string ops | **Q9 R1** MIR→LIR (`String` / `Print` / `Format` / `Stringify`); dense infer still refuses; cost gate may keep fuse-IL | **I4** / **Q9** — [q9-format-string.md](q9-format-string.md) |
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
-| Recursion (`tak` / `fib`) | fuse-IL on tight leafs; dense when cost ≤ fuse | **Q7** (this PR). Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense. `tak` / `fib` lose the cost gate (Seek + STORE). Mutual / two-slot stay refuse |
+| Recursion (`tak` / `fib`) | fuse-IL on tight leafs; dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene. Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense. `tak` / `fib` lose the cost gate (Seek + STORE) — that Seek tax is **B2**, not an entry wall. Mutual / two-slot stay refuse |
 | `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); `main` + format and user `Iterator` / coro / dict / first-class range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |

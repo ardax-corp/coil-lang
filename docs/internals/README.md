@@ -10,9 +10,9 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
 | [Q6 iterator protocol](q6-iterator-protocol.md) | Near-term counted desugar for `for` (array / literal range); later rungs for user Iterator / coro |
 | [Q9 format / string](q9-format-string.md) | I4 reopen: SSA + LIR reconstruct of `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; later rungs for bytes / maps / unicode |
-| [Opt generalization](opt-generalization.md) | COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement; **B0** post-Q6–Q9 refuse audit + ranked B* |
+| [Opt generalization](opt-generalization.md) | COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement; **B0** audit + **B1** Q6–Q8 entry hygiene |
 | [MIR deopt / debugger](mir-deopt.md) | COI-299 I7: stop/deopt edges; VM debugger stays source of truth |
-| [Specialize refuse](specialize-refuse.md) | Hard walls vs Q6–Q9 ladders / cost gate; B0 revisit board in opt-generalization |
+| [Specialize refuse](specialize-refuse.md) | Hard walls vs Q6–Q9 ladders / cost gate; B1 entry hygiene; B2+ on the B0 board |
 | [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |

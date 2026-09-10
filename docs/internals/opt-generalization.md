@@ -82,6 +82,7 @@ S2f–S2l shape tickets collapse into one shared escape answer
 | **A3** | Broaden MIR entry; shrink refuse tables | [COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables) | yes |
 | **A4** | Measurement contract (below) | [COI-337](https://linear.app/ardax/issue/COI-337/a4-measurement-contract-natural-suites-embed) | continuous |
 | **B0** | Post-quirks refuse audit + ranked B* | [COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan) | docs only |
+| **B1** | Q6–Q8 MIR/dense entry hygiene | [COI-339](https://linear.app/ardax/issue/COI-339/b1-q6-q8-mirdense-entry-hygiene) | yes (eligibility + docs; no B2 Seek rewrite) |
 
 Order: A0 → A1 → A2 → A3. A4 applies to every generalization PR.
 B0 is the post-Q6–Q9 inventory; B1+ are ranked below (no impl in B0).
@@ -160,7 +161,7 @@ regular reconstruct over bench-shaped peeps.
 
 | # | Win | Why this rank | Prove / stay refuse |
 |---|-----|---------------|---------------------|
-| **B1** | Shrink leftover **entry** refuses for Q6–Q8 first rungs | Tables + `lir_eligible` / infer still speak of Q6–Q8 as walls in a few edges. Lift those shapes; keep via cost. Hygiene after #386–#388 — not a new island | Counted `for`, one-word rec `CALL`, niche/two-slot `Br`. Do not force `tak` / `fib` / boxed match |
+| **B1** | Shrink leftover **entry** refuses for Q6–Q8 first rungs | **Landed** ([COI-339](https://linear.app/ardax/issue/COI-339)): `lir_eligible` / infer / island copy treat counted `for`, one-word rec `CALL`, and niche/two-slot `Br` as lift→cost, not checklist walls. Cost gate spirit unchanged | Counted `for`, one-word rec `CALL`, niche/two-slot `Br`. Do not force `tak` / `fib` / boxed match |
 | **B2** | Q7 cost-gate lose on `fib` / `tak` | Eligible; reconstruct is denser-but-slower (Seek + `STORE` vs convoy fuse). Flagship archives identical today | Checksum + embed wall **≤ fuse**. No skip-the-gate. Regular CALL reconstruct, not a tak opcode |
 | **B3** | Two-slot `CALL` / `RETURN` (dense or LIR reconstruct) | Blocks `option_*` / `result_*` churn and Q8 leftovers. Same ABI hole as LIR `CALL` refuse | Churn helpers; flagships likely identical |
 | **B4** | **Q9 R2** — `string::{from_bytes,to_bytes}` dense HostInvoke | Next named rung on the I4 ladder. Maps/effects like other I6 | Unit reconstruct; dense infer may open this host only |
@@ -181,4 +182,4 @@ Cranelift P5, PGO.
 - PGO, score-chasing, or env-gated opts
 - Combining A0 with [language-quirks.md](language-quirks.md)
   ([COI-331](https://linear.app/ardax/issue/COI-331/q0-docs-language-quirksmd-locked-q1-q9))
-- B1+ compiler work in the B0 PR
+- B2+ compiler work in the B1 PR (Seek cost on `fib` / `tak`)
