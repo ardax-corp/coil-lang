@@ -293,7 +293,7 @@ hyperfine -w 2 -r 8.
 
 **Remaining refuse (pre-A2):** residual escaping Make* (this gate), S2h OOB
 select+alloc on a 64-slot prove frame, post-loop-only `return [x]`,
-unmapped alloc, grow dest, arity > 32, `Vec.push` / class `new` loops.
+leftover unmapped grow / class edges, grow dest on `[T; N]` (Q3), arity > 32. Mapped `Vec.push` is B6.
 
 ## A2 dense-native heap ops (COI-335)
 

@@ -88,7 +88,7 @@ HostInvoke. Unicode / regex stay out until R4. Ladder:
 | `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | fuse-IL | stay refuse |
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |
-| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a–S2l + **A2** dense-native `Index` / `Make*` / `DensePush`; keep when maps exist and cost ≤ fuse-IL. In-loop `Vec.push` / class `new` stay fuse-IL. Boxed match stays LIR (I2); niche / two-slot match may dense (**Q8**) | **I5** / **S2** / **A2** |
+| Heap index / `MakeArray` / alloc | SSA `Alloc` / `ArrayPush` + `GcBarrier` when `allow_alloc`; S2a–S2l + **A2** / **B6** dense-native `Index` / `Make*` / `DensePush` / `DenseArrayPush`; keep when maps exist and cost ≤ fuse-IL. Leftover unmapped grow / class edges stay fuse-IL. Boxed match stays LIR (I2); niche / two-slot match may dense (**Q8**) | **I5** / **S2** / **A2** / **B6** |
 | `FORMAT` / string ops | **Q9 R1** MIR→LIR (`String` / `Print` / `Format` / `Stringify`); dense infer still refuses table ops; **R2** densifies `from_bytes` / `to_bytes` HostInvoke; cost gate may keep fuse-IL | **I4** / **Q9** — [q9-format-string.md](q9-format-string.md) |
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 / R2 dense emit; LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |

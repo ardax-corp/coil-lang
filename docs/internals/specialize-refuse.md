@@ -25,7 +25,7 @@ rungs are **not** in this table — see ladders below and
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
 | Debugger-attached / `-Og` | fuse-IL | **I7** (stays) |
-| Unmapped alloc / GC safepoint | fuse-IL | maps (I5 / S2b) |
+| Unmapped alloc / GC safepoint | fuse-IL unless S2b draft binds | **B6** maps `ArrayPush` / CALL+`Make*`; leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
 | LIR one-word `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | I6 |
 | Two-slot self / mutual recursive `CALL` | fuse-IL | later Q7 / **B7** |
@@ -90,7 +90,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
 | sibling `TailCall` (even/odd) | — | fuse-IL or dense | open one-word `TailCall` + cost gate |
-| `nsieve` | `nsieve.hy` | fuse-IL | `Vec.push` (no `Make*`) |
+| `nsieve` | `nsieve.hy` | dense or fuse-IL | **B6** mapped `Vec.push`; keep when cost ≤ fuse |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
 | `*_churn` / `option_int_churn` / `result_int_churn` | several | dense, LIR, or fuse-IL | **B3** two-slot helper `CALL` / `RETURN`; cost gate vs fuse |
@@ -117,3 +117,6 @@ for the Q6–Q8 first rungs (tables + `lir_eligible` / infer). **B2**
 parking reconstruct so tight `fib` / `tak` can win the cost gate.
 **B3** ([COI-341](https://linear.app/ardax/issue/COI-341)) opens two-slot
 helper `CALL` / `RETURN` on dense and LIR; keep/refuse is still cost.
+**B6** ([COI-344](https://linear.app/ardax/issue/COI-344)) maps
+`ArrayPush` grow sites and CALL+alloc drafts; cost gate still refuses
+boxed reconstruct.
