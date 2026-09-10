@@ -98,6 +98,9 @@ pub fn emit_dense(
             }) {
                 continue;
             }
+            if is_tail_call_inst(block, inst) {
+                continue;
+            }
             emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, across_alloc)?;
         }
         emit_term(
@@ -646,6 +649,19 @@ fn emit_term(
                 ));
             }
             if let Some(v) = lo {
+                if let Some(MirInst::Call { dest, target, args }) = block.insts.last() {
+                    if *dest == *v {
+                        emit_dense_push(out, args, regs, scratch, loc)?;
+                        out.push(IlOp::Entry {
+                            kind: crate::il::EntryKind::TailCall,
+                            arity: args.len() as u32,
+                            target: *target,
+                            loc,
+                            ret_words: 1,
+                        });
+                        return Ok(());
+                    }
+                }
                 out.push(IlOp::Load {
                     slot: u32::from(regs[v.index()]),
                     loc,
@@ -903,6 +919,19 @@ fn gather_base(
     }
     let _ = loc;
     Ok(scratch)
+}
+
+fn is_tail_call_inst(block: &super::func::MirBlock, inst: &MirInst) -> bool {
+    let MirInst::Call { dest, .. } = inst else {
+        return false;
+    };
+    match block.term {
+        Some(Terminator::Return {
+            lo: Some(v),
+            hi: None,
+        }) if v == *dest => matches!(block.insts.last(), Some(MirInst::Call { dest: d, .. }) if d == dest),
+        _ => false,
+    }
 }
 
 fn emit_dense_push(

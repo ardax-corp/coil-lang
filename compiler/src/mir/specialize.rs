@@ -140,7 +140,9 @@ pub fn try_specialize_body(
     let loop_tax = super::infer::has_back_edge(ops)
         && !select_cfg
         && !(inloop_alloc && super::infer::has_alloc_inside_loop(&out));
-    if !loop_tax && emit_cost(&out) > emit_cost(ops) {
+    // Self-recursive CALL amortizes Seek the same way a back-edge does.
+    let recursive_tax = has_self_recursive_call(ops, official_entry);
+    if !loop_tax && !recursive_tax && emit_cost(&out) > emit_cost(ops) {
         return None;
     }
     Some((out, abi))
@@ -244,6 +246,31 @@ fn residual_heap_box(ops: &[IlOp]) -> bool {
         | IlOp::MakeTuple { .. }
         | IlOp::MakeEnum { .. } => true,
         IlOp::Byte { byte, .. } => is_stack_heap_op(*byte.bytecode()),
+        _ => false,
+    })
+}
+
+fn has_self_recursive_call(ops: &[IlOp], official_entry: Option<Label>) -> bool {
+    use crate::il::EntryKind;
+    let mut targets = std::collections::HashSet::new();
+    if let Some(Label(id)) = official_entry {
+        targets.insert(id);
+    }
+    if let Some(id) = ops.iter().find_map(|op| match op {
+        IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+        _ => None,
+    }) {
+        targets.insert(id);
+    }
+    if targets.is_empty() {
+        return false;
+    }
+    ops.iter().any(|op| match op {
+        IlOp::Entry {
+            kind: EntryKind::Call | EntryKind::TailCall,
+            target: Label(id),
+            ..
+        } => targets.contains(id),
         _ => false,
     })
 }

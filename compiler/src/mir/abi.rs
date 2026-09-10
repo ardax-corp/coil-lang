@@ -14,8 +14,9 @@
 //!
 //! HostInvoke: LICM hoists scalar-pure math; S3 emits I6-typed hosts except
 //! I4 string bytes. User `CALL` uses this map when the callee is already
-//! dense, or an open one-word ABI (S3). `TailCall` / `CallIndirect` refuse.
-//! HeapRef is a word lane.
+//! dense, or an open one-word ABI (S3). Q7 one-word self-`CALL` / `TailCall`
+//! use that open ABI. `CallIndirect` / two-slot still refuse. HeapRef is a
+//! word lane.
 
 use std::collections::{HashMap, HashSet};
 
@@ -34,6 +35,7 @@ pub struct DenseAbi {
 }
 
 /// Entry-label id → dense ABI. Built leaf-first during specialize.
+/// Q7 self-`CALL` uses the open one-word ABI until this map records the body.
 pub type DenseCallMap = HashMap<u32, DenseAbi>;
 
 impl DenseAbi {
@@ -78,7 +80,7 @@ pub fn live_in_params(ops: &[IlOp], slot_ty: &HashMap<u32, MirTy>) -> Option<Vec
             IlOp::StorePop { slot, .. } => {
                 stored.insert(*slot);
             }
-            IlOp::Load { slot, .. } => {
+            IlOp::Load { slot, .. } | IlOp::LoadReturnSlot { slot, .. } => {
                 if !stored.contains(slot) {
                     live.insert(*slot);
                 }
@@ -178,6 +180,31 @@ mod tests {
         assert_eq!(
             live_in_params(&ops, &slot_ty),
             Some(vec![MirTy::F64, MirTy::F64])
+        );
+    }
+
+    #[test]
+    fn live_in_params_counts_fused_return_slot() {
+        use crate::il::{IlOp, Label};
+        use common::DebugLoc;
+        let loc = DebugLoc::unknown();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 1, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Bin {
+                op: common::Instruction::GEQ,
+                loc,
+            },
+            IlOp::LoadReturnSlot { slot: 2, loc },
+        ];
+        let mut slot_ty = HashMap::new();
+        slot_ty.insert(0, MirTy::I64);
+        slot_ty.insert(1, MirTy::I64);
+        slot_ty.insert(2, MirTy::I64);
+        assert_eq!(
+            live_in_params(&ops, &slot_ty),
+            Some(vec![MirTy::I64, MirTy::I64, MirTy::I64])
         );
     }
 
