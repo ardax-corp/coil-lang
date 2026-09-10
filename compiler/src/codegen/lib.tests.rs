@@ -1604,27 +1604,25 @@ fn main() {
              } \
              fn main() { return fib(10); }",
         );
-        // Pure call arms leave both results on the operand stack (expr_depth
-        // pads temps above the stacked lhs), so lower fuses ADD;RETURN.
+        // Q7: one-word self-recursive fib is dense (typed CALL + DenseBin).
         assert!(
-            bc.iter()
-                .any(|b| *b.bytecode() == Instruction::BinReturn
-                    && b.bin_return_op() == Instruction::ADD as u8),
-            "expected fib tail BinReturn ADD; ops={:?}",
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "expected Q7 dense fib; ops={:?}",
             bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "expected typed recursive CALL"
         );
         assert!(
             bc.iter().any(|b| matches!(
                 *b.bytecode(),
-                Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt
+                Instruction::BinSlotImmJmpf
+                    | Instruction::BinSlotImmJmpt
+                    | Instruction::BinSlotSlotJmpt
+                    | Instruction::BinSlotSlotJmpf
             )),
             "expected fused n <= 2 guard (Jmpf or inverted Jmpt)"
-        );
-        assert!(
-            bc.iter()
-                .any(|b| *b.bytecode() == Instruction::ConstReturnImm && b.operand_u32() == 1),
-            "expected fused base-case ConstReturnImm; ops={:?}",
-            bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
         );
     }
 
@@ -1640,16 +1638,17 @@ fn main() {
              } \
              fn main() { return fib(10); }",
         );
-        // Recursive arms must stack across CALL (no STORE between them) and
-        // join with BinReturn. Branch layout may park the base case after
-        // the hot path, so do not assume ConstReturnImm precedes the CALLs.
+        // Q7 densifies this body: each recursive CALL stores its dest, then
+        // DenseBin adds. Fuse-IL BinReturn is the leftover when dense loses.
+        let dense = bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin)
+            && bc.iter().any(|b| *b.bytecode() == Instruction::CALL);
         let call_pos: Vec<usize> = bc
             .iter()
             .enumerate()
             .filter(|(_, b)| *b.bytecode() == Instruction::CALL)
             .map(|(i, _)| i)
             .collect();
-        let pair = call_pos.windows(2).find(|w| {
+        let stacked_bin_return = call_pos.windows(2).any(|w| {
             let (c0, c1) = (w[0], w[1]);
             !(c0 + 1..c1).any(|i| *bc[i].bytecode() == Instruction::STORE)
                 && bc[c1 + 1..]
@@ -1657,8 +1656,8 @@ fn main() {
                     .any(|b| *b.bytecode() == Instruction::BinReturn)
         });
         assert!(
-            pair.is_some(),
-            "expected two stacked recursive CALLs then BinReturn; ops={:?}",
+            dense || stacked_bin_return,
+            "expected dense recursive CALL or stacked CALL+BinReturn; ops={:?}",
             bc.iter().map(|b| *b.bytecode()).collect::<Vec<_>>()
         );
     }
@@ -6908,7 +6907,10 @@ fn main() { \
             has_fused
                 || bc.iter().any(|b| matches!(
                     *b.bytecode(),
-                    Instruction::ADD | Instruction::LEQ | Instruction::JMPF
+                    Instruction::ADD
+                        | Instruction::LEQ
+                        | Instruction::JMPF
+                        | Instruction::DenseBin
                 )),
             "expected fused superinstructions or fib arithmetic alongside PolyFn; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
