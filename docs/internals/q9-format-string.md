@@ -68,7 +68,8 @@ the same order as fuse-IL (`FORMAT` operand is arity).
 - `dense_host_ok` is true for `from_bytes` / `to_bytes` (I6 word edge;
   still off the W4 float allowlist). Impure IO — LICM does not hoist.
 - Unit: HostInvoke + `LOAD` reconstructs on dense emit; LIR emit still
-  refuses HostInvoke (same as other I6).
+  refuses HostInvoke (same as other I6). `from_bytes` keeps
+  `HOST_ENUM_LAYOUT_RESULT_NICHE` on the reconstructed operand.
 - `pipeline_to_bytes_loop_takes_dense` / `pipeline_from_bytes_loop_takes_dense`:
   a bytes-host + i64 add loop emits `HostInvoke` + `DenseBin`. STRING
   literals stay in `main`. Format loops stay fuse-IL.
