@@ -476,6 +476,7 @@ pub(super) fn emit_inst(
         MirInst::HostInvoke {
             dest,
             native_id,
+            layout,
             args,
         } => {
             // ABI edge: native id + DensePush args + HostInvoke + StorePop dest.
@@ -486,7 +487,7 @@ pub(super) fn emit_inst(
             emit_dense_push(out, args, regs, scratch, loc)?;
             out.push(IlOp::HostInvoke {
                 arity: args.len() as u32,
-                layout: 0,
+                layout: *layout,
                 loc,
             });
             out.push(IlOp::StorePop {

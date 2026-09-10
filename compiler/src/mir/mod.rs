@@ -3354,6 +3354,11 @@ fn main() {
     fn q9_r2_bytes_host_reconstructs_dense() {
         let loc = loc();
         for name in ["to_bytes", "from_bytes"] {
+            let layout = if name == "from_bytes" {
+                common::HOST_ENUM_LAYOUT_RESULT_NICHE as u8
+            } else {
+                0
+            };
             let ops = vec![
                 IlOp::Label(Label(0)),
                 IlOp::Const {
@@ -3363,7 +3368,7 @@ fn main() {
                 IlOp::Load { slot: 0, loc },
                 IlOp::HostInvoke {
                     arity: 1,
-                    layout: 0,
+                    layout,
                     loc,
                 },
                 IlOp::Return { loc, ret_words: 1 },
@@ -3380,9 +3385,13 @@ fn main() {
             let f = try_lower_numeric(&ops, &hints).expect(name);
             f.verify().unwrap();
             assert!(f.has_impure_host(), "{name} is IO");
+            let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect(name);
             assert!(
-                emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok(),
-                "{name} dense reconstruct"
+                dense.iter().any(|op| matches!(
+                    op,
+                    IlOp::HostInvoke { layout: l, .. } if *l == layout
+                )),
+                "{name} reconstructs HostInvoke layout {layout}"
             );
             assert!(
                 emit_lir(&f, Some(Label(0)), &mut pool, false).is_err(),
@@ -3438,7 +3447,7 @@ fn main() {
     fn pipeline_from_bytes_loop_takes_dense() {
         let src = r#"
 use string::{from_bytes, to_bytes};
-fn hot([byte] b, int n) -> int {
+fn hot(Vec<byte> b, int n) -> int {
     let i = 0;
     let acc = 0;
     while i < n {
@@ -3466,6 +3475,14 @@ fn main() {
             hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
             "R2 from_bytes+arith loop is dense; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            hot_bc.iter().any(|b| {
+                *b.bytecode() == Instruction::HostInvoke
+                    && common::host_invoke_enum_layout(b.operand_u32())
+                        == common::HOST_ENUM_LAYOUT_RESULT_NICHE
+            }),
+            "dense from_bytes must keep ResultNiche layout"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

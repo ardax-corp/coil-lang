@@ -120,6 +120,17 @@ pub fn dense_host_ok(id: u16) -> bool {
     host_edge_spec(id).is_some()
 }
 
+/// One-word host Option/Result layouts the dense edge can reconstruct.
+/// Reserved (3) stays boxed-or-refuse, not a niche word.
+pub fn dense_host_layout_ok(layout: u8) -> bool {
+    matches!(
+        layout as u32,
+        common::HOST_ENUM_LAYOUT_BOXED
+            | common::HOST_ENUM_LAYOUT_OPTION_NICHE
+            | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+    )
+}
+
 pub fn host_edge_spec_by_name(name: &str) -> Option<HostSpec> {
     HOST_NATIVES
         .iter()
@@ -168,6 +179,13 @@ mod tests {
         assert!(dense_host_ok(to.id));
         assert!(is_i4_bytes_host(from.id));
         assert!(is_i4_bytes_host(to.id));
+        assert!(dense_host_layout_ok(common::HOST_ENUM_LAYOUT_BOXED as u8));
+        assert!(dense_host_layout_ok(
+            common::HOST_ENUM_LAYOUT_RESULT_NICHE as u8
+        ));
+        assert!(!dense_host_layout_ok(
+            common::HOST_ENUM_LAYOUT_RESERVED as u8
+        ));
         assert_eq!(from.args, I64_1);
         assert_eq!(to.args, I64_1);
         assert_eq!(from.ret, MirTy::I64);

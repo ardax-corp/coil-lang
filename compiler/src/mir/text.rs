@@ -130,12 +130,17 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
         MirInst::HostInvoke {
             dest,
             native_id,
+            layout,
             args,
         } => {
             let name = super::host_allow::host_edge_spec(*native_id)
                 .map(|s| s.name)
                 .unwrap_or("unknown");
-            write!(f, "{dest} = host.{name}")?;
+            if *layout == 0 {
+                write!(f, "{dest} = host.{name}")?;
+            } else {
+                write!(f, "{dest} = host.{name}.L{layout}")?;
+            }
             for (i, a) in args.iter().enumerate() {
                 if i == 0 {
                     write!(f, " {a}")?;
@@ -588,6 +593,14 @@ impl<'a> Parser<'a> {
             return Ok(MirInst::Phi { dest, ty, args });
         }
         if let Some(name) = op.strip_prefix("host.") {
+            let (name, layout) = match name.rsplit_once(".L") {
+                Some((base, lay)) => (
+                    base,
+                    lay.parse::<u8>()
+                        .map_err(|_| ParseError(format!("host layout {lay}")))?,
+                ),
+                None => (name, 0u8),
+            };
             let spec = super::host_allow::host_edge_spec_by_name(name)
                 .ok_or_else(|| ParseError(format!("unknown host {name}")))?;
             let mut args = Vec::new();
@@ -604,6 +617,7 @@ impl<'a> Parser<'a> {
             return Ok(MirInst::HostInvoke {
                 dest,
                 native_id: spec.id,
+                layout,
                 args,
             });
         }

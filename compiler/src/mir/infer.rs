@@ -1244,7 +1244,7 @@ fn apply_call(
 }
 
 fn apply_host_map(stack: &mut Vec<Cell>, arity: u32, layout: u8) -> Result<(), LowerError> {
-    if layout != 0 {
+    if !super::host_allow::dense_host_layout_ok(layout) {
         return Err(LowerError::Refused("HostInvoke layout".into()));
     }
     let n = arity as usize;
@@ -1269,7 +1269,7 @@ fn apply_host(
     arity: u32,
     layout: u8,
 ) -> Result<(), LowerError> {
-    if layout != 0 {
+    if !super::host_allow::dense_host_layout_ok(layout) {
         return Err(LowerError::Refused("HostInvoke".into()));
     }
     let n = arity as usize;

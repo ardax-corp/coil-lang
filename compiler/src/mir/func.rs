@@ -340,6 +340,7 @@ impl MirFunc {
                 dest,
                 native_id,
                 args,
+                ..
             } => {
                 let Some(spec) = super::host_allow::host_edge_spec(*native_id) else {
                     return Err(format!("{dest} host {native_id} not a typed edge"));

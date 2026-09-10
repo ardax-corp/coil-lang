@@ -670,7 +670,7 @@ fn lower_op(
         | IlOp::ConstReturnImm { .. }
         | IlOp::BinReturn { .. } => Ok(()),
         IlOp::HostInvoke { arity, layout, .. } => {
-            if *layout != 0 {
+            if !super::host_allow::dense_host_layout_ok(*layout) {
                 return Err(LowerError::Refused("HostInvoke layout".into()));
             }
             let n = *arity as usize;
@@ -684,7 +684,7 @@ fn lower_op(
             args.reverse();
             let fn_v = tos.pop().expect("fn id");
             if let Some(id) = const_native_id(b, fn_v) {
-                tos.push(b.ins_host_invoke(id, args)?);
+                tos.push(b.ins_host_invoke_layout(id, args, *layout)?);
                 return Ok(());
             }
             if hints.allow_alloc && hints.allow_effects {

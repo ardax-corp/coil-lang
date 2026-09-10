@@ -294,6 +294,18 @@ impl MirBuilder {
         native_id: u16,
         args: Vec<ValueId>,
     ) -> Result<ValueId, MirError> {
+        self.ins_host_invoke_layout(native_id, args, 0)
+    }
+
+    pub fn ins_host_invoke_layout(
+        &mut self,
+        native_id: u16,
+        args: Vec<ValueId>,
+        layout: u8,
+    ) -> Result<ValueId, MirError> {
+        if !super::host_allow::dense_host_layout_ok(layout) {
+            return Err(MirError::msg(format!("host {native_id} layout {layout}")));
+        }
         let spec = if self.allow_effects {
             super::host_allow::host_edge_spec(native_id)
         } else {
@@ -322,6 +334,7 @@ impl MirBuilder {
         self.push(MirInst::HostInvoke {
             dest,
             native_id,
+            layout,
             args,
         })?;
         Ok(dest)
