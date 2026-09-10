@@ -47,7 +47,7 @@ pub fn try_specialize_body(
     // edge via DensePush. S2l: try dense so SROA / LICM can delete work;
     // keep residual in-loop Make* only when reconstruct is dense-native
     // and cost ≤ fuse-IL. Post-loop-only `return [x]` stays fuse-IL
-    // (COI-87 invert+fuse). Debugger-attached / -Og skip this entry (I7).
+    // (COI-87 invert+fuse). Debugger-attached / -Og still enter (B8).
     // S2k: last-arm writes must survive; Seek size is a cost, not a cap.
     // B7: sibling / mutual TailCall may lift (stack-arg protocol, reserved
     // callee entry labels). Self two-slot CALL/RETURN stays fuse-IL.

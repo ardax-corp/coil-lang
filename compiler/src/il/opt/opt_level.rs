@@ -172,7 +172,7 @@ fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
 /// Knobs that are not pass names.
 fn base_knobs(level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
-    o.mir_specialize = !matches!(level, OptLevel::Debug);
+    o.mir_specialize = true;
     o
 }
 
@@ -309,7 +309,7 @@ mod tests {
         assert!(o.algebraic && o.dead_block);
         assert!(!o.slot_promote && !o.slot_promote_tell);
         assert!(!o.escape_analysis && !o.ssa_gvn && !o.loop_unroll);
-        assert!(!o.mir_specialize);
+        assert!(o.mir_specialize);
         assert!(OptLevel::Standard.options().mir_specialize);
     }
 
