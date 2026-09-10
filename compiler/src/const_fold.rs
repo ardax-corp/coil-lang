@@ -510,6 +510,41 @@ pub fn body_has_loop_control<'a>(body: &Output<'a>) -> bool {
     body_has_loop_control_walk(body)
 }
 
+/// Body contains `continue` that belongs to this loop (nested `for`/`while` ignored).
+///
+/// Counted for-in can share the while-shaped latch when this is false.
+pub fn body_has_continue<'a>(body: &Output<'a>) -> bool {
+    body_has_continue_walk(body)
+}
+
+fn body_has_continue_walk<'a>(node: &Output<'a>) -> bool {
+    use parser::ast::Expression;
+    match node.1.as_ref() {
+        Expression::Continue => true,
+        Expression::Loop { .. } => false,
+        Expression::Block(children) | Expression::Fragment(children) => {
+            children.iter().any(body_has_continue_walk)
+        }
+        Expression::ExprStatement(inner)
+        | Expression::Statement(inner)
+        | Expression::Expr(inner)
+        | Expression::Group(inner) => body_has_continue_walk(inner),
+        Expression::If(branches) => branches.iter().any(|b| {
+            if let Expression::Branch(cond, body) = b.1.as_ref() {
+                cond.as_ref().is_some_and(body_has_continue_walk)
+                    || body_has_continue_walk(body)
+            } else {
+                false
+            }
+        }),
+        Expression::Match { scrutinee, arms } => {
+            body_has_continue_walk(scrutinee)
+                || arms.iter().any(|arm| body_has_continue_walk(&arm.body))
+        }
+        _ => false,
+    }
+}
+
 fn body_has_loop_control_walk<'a>(node: &Output<'a>) -> bool {
     use parser::ast::Expression;
     match node.1.as_ref() {
@@ -925,6 +960,36 @@ mod tests {
         assert_eq!(range_trip_count(&int_expr(0), &int_expr(3), false), Some(3));
         assert_eq!(range_trip_count(&int_expr(0), &int_expr(2), true), Some(3));
         assert_eq!(range_trip_count(&int_expr(0), &int_expr(9), false), None);
+    }
+
+    #[test]
+    fn body_has_continue_ignores_nested_loop() {
+        let nested = (
+            SimpleSpan::from(0..1),
+            Box::new(Expression::Block(vec![(
+                SimpleSpan::from(0..1),
+                Box::new(Expression::Loop {
+                    identifier: None,
+                    iterable: int_expr(1),
+                    body: (
+                        SimpleSpan::from(0..1),
+                        Box::new(Expression::Continue),
+                    ),
+                }),
+            )])),
+        );
+        assert!(
+            !body_has_continue(&nested),
+            "nested continue is not this loop's continue"
+        );
+        let own = (
+            SimpleSpan::from(0..1),
+            Box::new(Expression::Block(vec![(
+                SimpleSpan::from(0..1),
+                Box::new(Expression::Continue),
+            )])),
+        );
+        assert!(body_has_continue(&own));
     }
 
     #[test]
