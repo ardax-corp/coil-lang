@@ -2450,6 +2450,7 @@ fn main() {
                     | Instruction::StoreIndexUnchecked
                     | Instruction::StoreIndexPin
                     | Instruction::StoreIndexPinUnchecked
+                    | Instruction::DenseStoreIndex
             )),
             "scalar tail must keep a heap store; opcodes={names:?}"
         );

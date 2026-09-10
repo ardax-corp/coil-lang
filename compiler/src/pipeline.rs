@@ -2173,6 +2173,7 @@ fn main() { add(1, 2); }
                     | Instruction::StoreIndexUnchecked
                     | Instruction::StoreIndexPin
                     | Instruction::StoreIndexPinUnchecked
+                    | Instruction::DenseStoreIndex
             )),
             "from_file fill must keep StoreIndex; opcodes={names:?}"
         );
