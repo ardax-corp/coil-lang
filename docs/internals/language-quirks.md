@@ -8,7 +8,8 @@ this note is [COI-331](https://linear.app/ardax/issue/COI-331)).
 This file is **spec**, not a compiler changelog. Implementation tickets are
 Q1–Q9 themselves. Do not treat leftover I4 / dense refuse rows as
 overriding these decisions. Q1 box-once is implemented (codegen + IL). Q2 box-once is implemented
-(codegen field-SROA + identity cache).
+(codegen field-SROA + identity cache). Q3 grow on `[T; N]` is a typechecker
+diagnostic (`FixedArrayGrow` / E0412).
 
 User-facing language docs live in
 [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`).
@@ -78,9 +79,13 @@ identity still forces heap, but not a heap-from-`new` refuse.
 
 Fixed arrays do not grow. `ArrayPush` (or any grow) on `[T; N]` is a
 **type error**, not a silent specialize refuse and not a runtime no-op.
-Growable storage is `Vec`. Implementation is the typechecker / name
-resolution diagnostic (COI-325), plus fixing examples that push onto
-fixed arrays.
+Growable storage is `Vec`. Length-changing Vec methods (`push`, `insert`,
+`pop`, `remove`, `clear`, `reserve`) on a static array are refused in
+the typechecker (call site and method-as-value access), not later as a
+MIR / escape refuse.
+
+Compiler ([COI-325](https://linear.app/ardax/issue/COI-325)):
+`FixedArrayGrow` (E0412) with help `use Vec<T> for growable storage`.
 
 ## Q4 — Indexing `i % N` maps into `0..N`
 
