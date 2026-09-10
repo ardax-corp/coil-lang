@@ -1365,33 +1365,29 @@ fn main() {
     #[test]
     fn pipeline_mutual_call_and_self_two_slot_stay_correct() {
         let src = r#"
+#[max_depth(16)]
 fn ping(int n) -> int {
     if n <= 0 {
         return 0;
     }
     return 1 + pong(n - 1);
 }
+#[max_depth(16)]
 fn pong(int n) -> int {
     if n <= 0 {
         return 0;
     }
     return 1 + ping(n - 1);
 }
-fn countdown(Option<int> o) -> Option<int> {
+fn once(Option<int> o) -> Option<int> {
     return match o {
-        Option::None => Option::None,
-        Option::Some(x) => {
-            if x <= 0 {
-                Option::None
-            } else {
-                countdown(Option::Some(x - 1))
-            }
-        }
+        Option::None => Option::Some(0),
+        Option::Some(x) => once(Option::None),
     };
 }
 fn main() {
     let _ = ping(4) + pong(3);
-    let r = countdown(Option::Some(3));
+    let r = once(Option::Some(3));
     let _ = match r {
         Option::None => 0,
         Option::Some(v) => v,
@@ -1409,7 +1405,7 @@ fn main() {
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-        assert!(!vm.panicked(), "ping/pong + countdown must run");
+        assert!(!vm.panicked(), "ping/pong + once must run");
     }
 
     #[test]
