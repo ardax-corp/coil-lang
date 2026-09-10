@@ -121,6 +121,7 @@ Island inventory: [mir-islands.md](mir-islands.md). Dense refuse rows:
 | `panic` / `raise` | Checksum and CLI boards: `panic` (Q5). Opts must not rewrite `panic` into `raise`. |
 | Q6–Q9 | Update island / refuse copy as those tickets land. Until then, “today path” may still be fuse-IL, but the **target** is the commit, not a forever barrier. |
 
-Related opt notes: [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md) (S2f–S2l),
+Related opt notes: [opt-generalization.md](opt-generalization.md) (A0 doctrine),
+[s2d-inloop-make-tax.md](s2d-inloop-make-tax.md) (S2f–S2l),
 [optimization-roadmap.md](optimization-roadmap.md) (`escape_analysis`),
 [limitations.md](limitations.md) (COI-84 / S2j).

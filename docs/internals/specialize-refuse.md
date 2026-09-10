@@ -13,7 +13,7 @@ This table is `examples/perf/` plus a few numeric demos.
 |---|--------|------------|----------|
 | 1 | Straight-line below cost gate | `i + j * 2` (2 work ops) | stay fuse-IL |
 | 2 | Need float or i64 arith (or `i32`) | float compare-only | stay fuse-IL |
-| 3 | Non-numeric IL | `TailCall` / two-slot `CALL` / I4 string HostInvoke / class field / match / string / `FORMAT` | I4 barrier (string/format stay fuse-IL). S3: one-word `CALL`, I6 HostInvoke, heap index |
+| 3 | Non-numeric IL | `TailCall` / two-slot `CALL` / I4 string HostInvoke / class field / match / string / `FORMAT` | I4 today fuse-IL; **Q9** reopens I4 as a delivery ladder ([language-quirks.md](language-quirks.md)). S3: one-word `CALL`, I6 HostInvoke, heap index |
 | 4 | Multi-word `RETURN` | two-slot Option/Result | P3 LIR (already on) |
 | 5 | Residual `Byte` / `Pow` / `AND`/`OR` | `operators_loop` | stay fuse-IL |
 
@@ -85,10 +85,10 @@ W1: `DIVF` already set the old `has_fmul` flag; that flag is `ADDF` / `SUBF` /
 | `sum` | `indexed_sum.hy` | V1 `VReduce` (stride-1); gather stays dense Index | S5b / S3b |
 | `fill` / `scan` | `vec_scan.hy` | `fill`: V0 SIMD; `scan`: V1 `VReduce` | stride-1 store / add-reduce |
 | `axpy` / `checksum` | `vec_axpy.hy` | `axpy`: V1 `VFma`; `checksum`: V1 `VReduce` | conservative saxpy store |
-| `main` | `for_in_sum.hy` | fuse-IL | heap + `for` iterator |
+| `main` | `for_in_sum.hy` | fuse-IL | heap + `for` iterator — **Q6** commits a MIR-friendly protocol |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | class/field + `CALL` |
-| `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | `CALL` (recursion) |
+| `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | `CALL` (recursion) — **Q7** commits dense/LIR recursion |
 | `nsieve` | `nsieve.hy` | fuse-IL | heap-index + `Vec.push` (no `Make*`; S2d does not fire) |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | heap / match / two-slot — P3 |
@@ -110,15 +110,18 @@ Recursion (`tak` / `fib`) stays fuse-IL on the callee. Mapped **preheader**
 per-residual `Seek` restore. S2l tries in-loop `Make*` dense after
 SROA/LICM and keeps it only when the reconstruct is Make*-free inside
 loops (residual boxing still loses; [s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
-S2f scalarizes `[T; N]` when the index is proven (`i % N`).
+S2f scalarizes `[T; N]` when the index is proven (`i % N`; **Q4**
+defines that remainder into `0..N`).
 S2k lets those select diamonds take dense when reconstruct is sound
 (Seek ≤ 64, last-arm writes kept). S2g boxes at a named escape (return /
 call-arg / `ArrayPush` value / field / host) instead of refusing the
-body. S2h keeps unproven `xs[k]` off raw slots: codegen uses a weaker
+body — **today a fresh box per edge; Q1 requires box-once**
+([language-quirks.md](language-quirks.md)). S2h keeps unproven `xs[k]` off raw slots: codegen uses a weaker
 bound or runtime range-check + slot-select (OOB heap Index/StoreIndex);
 leftover MakeArray stays heap. S2i keeps observed zip/broadcast
 (`vec_array.hy`) as heap Index/StoreIndex (operands may be slots).
-Grow-`ArrayPush` / arity > 32 stay heap.
+Grow-`ArrayPush` / arity > 32 stay heap today; **Q3** makes grow on
+`[T; N]` a type error (`Vec` instead).
 Compare-only leftovers may take LIR when maps exist and the cost gate holds.
 Const-index `s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
 loop and **no** earlier alloc stays fuse-IL so invert+fuse remains
@@ -133,14 +136,14 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 | Feature | Today | Island |
 |---------|-------|--------|
 | Heap-ref / niche Option/Result *types* in SSA | layout exists (`HeapNiche`); SSA paints `i64`/`value` | **I1** — name + carry; no alloc specialize |
-| `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); **dense+match stays refuse** (stack match vs dense regs) | **I2** / S3 leftover |
-| Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3** |
-| `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4 barrier** — no subset |
-| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; S2d mapped preheader Make*; S2e Seek-less residuals (in-loop Make* still refuse); S2f SROA / StoreIndex reuse / hoist of non-escaping Make*; S2g box at named escape edges; S2h unproven `xs[k]` OOB-safe select / heap pick; S2i observed/escape computed elems stay heap Index/StoreIndex; S2j named class field SROA (non-escaping only, `local_escape`); S2k proven select diamonds dense/LIR when Seek ≤ 64; S2l in-loop Make* dense only when SROA/hoist deletes it (residual in-loop Make* stays fuse-IL); unmapped fuse-IL; post-loop-only `return [x]` fuse-IL | **I5** / **S2a** / **S2b** / **S2c** / **S2d** / **S2e** / **S2f** / **S2g** / **S2h** / **S2i** / **S2j** / **S2k** / **S2l** |
+| `match` / `JumpIfMatch` on niche / two-slot / boxed unary (any tag, arity ≤ 1 incl. overlap 0) | MIR→LIR (I2); **dense+match refuses today** (stack match vs dense regs) | **I2** / S3 leftover; **Q8** commits near-term dense+match |
+| Non-escaping class fields (local-escape sidecar) | MIR→LIR `FieldLoad` / `FieldStore` (unboxed slots); dense refuse | **I3**; **Q2** (S2j mirrors; COI-84 non-goal superseded for this narrow case) |
+| `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` | fuse-IL (dense + MIR→LIR refuse) | **I4** / **Q9** — reopened delivery ladder, not a permanent barrier |
+| `MakeArray` / alloc / GC safepoints | SSA `Alloc` + `GcBarrier`; S2a roots; S2b maps; S2c dense / LIR **only when maps exist**; S2d mapped preheader Make*; S2e Seek-less residuals (in-loop Make* still refuse); S2f SROA / StoreIndex reuse / hoist of non-escaping Make*; S2g box at named escape edges (**Q1**: box-once, not fresh-per-edge); S2h unproven `xs[k]` OOB-safe select / heap pick; S2i observed/escape computed elems stay heap Index/StoreIndex; S2j named class field SROA (non-escaping only, `local_escape`; **Q2**); S2k proven select diamonds dense/LIR when Seek ≤ 64; S2l in-loop Make* dense only when SROA/hoist deletes it (residual in-loop Make* stays fuse-IL); unmapped fuse-IL; post-loop-only `return [x]` fuse-IL | **I5** / **S2a** / **S2b** / **S2c** / **S2d** / **S2e** / **S2f** / **S2g** / **S2h** / **S2i** / **S2j** / **S2k** / **S2l** |
 | HostInvoke outside W4; purity-driven barriers | SSA `HostInvoke` + effect bits (`allow_effects`); LICM never hoists impure; S3 dense emit reconstructs I6-typed hosts except I4 string bytes | **I6** / **S3** |
 | Debugger / deopt edges | SSA `Deopt` + implicit leave; debugger-attached / `-Og` refuse specialize | **I7** |
-| Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse) | **I8** |
-| Escaping classes, boxed nested enums, recursion | fuse-IL | stay refuse unless a later island says otherwise |
+| Broader MIR emit entry | IL→MIR→LIR when `lir_eligible` (I1–I3 / two-slot / inferable leftover: if/compare, store-only, tiny let; I4–I7 refuse today) | **I8**; I4 target is Q9 |
+| Escaping classes, boxed nested enums, recursion | fuse-IL | recursion: **Q7**; `for`: **Q6**; else stay refuse unless a later island says otherwise |
 | Compiler SIMD (`V*`) | stride-1 store + add-reduce + conservative FMA | **S5a V0** / **S5b V1** — refuse alloc/GC, match, impure CALL/host, debugger/`-Og`, heap in vregs |
 | Cranelift | parked (P5) | not an island |
 
