@@ -105,7 +105,7 @@ titles can oversell.
 | **`dest_prop`** (`opt/dest_prop.rs`, [#318](https://github.com/ardax-corp/coil-lang/pull/318)) | After `copy_prop`: slot aliases (`LOAD src; STORE dest`) through `GetField` / `SetField` / `Make*` / `BoxValue` | Basic+. Does not clone `Const`/`BinSlot*`. Hit: `dest_prop_field_alias`. |
 | **`licm` + `strength_reduce`** ([#315](https://github.com/ardax-corp/coil-lang/pull/315)) | LICM iterates invariant expr chains; integer `i*c` → add recurrence after `loop_bounds` | Float affine `cast(i)` SR refused. Hit: `licm_nested_chains`, `iv_mul_sr`. |
 | **sibling / self `TailCall`** (codegen, [#316](https://github.com/ardax-corp/coil-lang/pull/316)) | Existing `TailCall` for cycle-only siblings (even/odd) and self-recursion; matching one- or two-word ABI | No InstCombine Call;Return peep. Hit: `tail_sibling`. Tail-only mutual depth is 1. |
-| **`escape_analysis`** | Immediate-only `MakeArray` (arity ≤ 32) → consecutive frame slots; S2g boxes at named escape edges | Growing `ArrayPush` dest, private-after-escape stay refused. Computed elems (`vec_array.hy`) stay heap Index/StoreIndex (S2i); operands may be S2f slots. Unproven `xs[k]`: leftover MakeArray stays heap; codegen `[T;N]` uses S2h OOB-safe select. Named class SROA is codegen / `local_escape` (S2j / COI-320). |
+| **`escape_analysis`** | Immediate-only `MakeArray` (arity ≤ 32) → consecutive frame slots; S2g boxes at named escape edges (**Q1**: spec is box-once; fresh-per-edge is out of spec) | Growing `ArrayPush` dest, private-after-escape stay refused today (**Q3**: grow on `[T; N]` is a type error). Computed elems (`vec_array.hy`) stay heap Index/StoreIndex (S2i); operands may be S2f slots. Unproven `xs[k]`: leftover MakeArray stays heap; codegen `[T;N]` uses S2h OOB-safe select. Named class SROA is codegen / `local_escape` (S2j / COI-320 / **Q2**). |
 | **`loop_bounds`** | Length invariance; `ArrayLen` + const-address hoists; proven counted / stride sites rewrite to `IndexUnchecked` / `StoreIndexUnchecked` (archive minor 12), then `IndexPin*` (minor 13). Sidecar `index_facts` extend Unchecked/pin to helpers, for-in, and `i += k` when `0 <= i < len` is proven | **`LEQ`/`GEQ` headers are not length proofs** (COI-85 / COI-98). Unproven, host, FFI, yield (`YieldCoro` / `YieldFromCoro`), growing-array, alias-push, and **impure** helper-call loops stay checked. Pure user helpers on `b[i]` are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)). Pins are not saved across yield or on `ObjCoroutine`. |
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
@@ -135,7 +135,7 @@ identical; flagships remain controls. Skip only on hit-bench wash or regress.
 **MIR language islands** ([mir-islands.md](mir-islands.md)) use a stricter
 rule: prove on real language surface + embed A/B; do **not** invent a
 synthetic hit bench whose only job is a score. Identical flagship archives
-are the expected I1 / I4 (barrier-only) outcome.
+are the expected I1 / I4-today (still fuse-IL; Q9 reopens I4) outcome.
 
 Landed hit benches: `iv_mul_sr`, `licm_nested_chains`, `tail_sibling`,
 `cse_index_recompute` / `cse_cast_recompute`, `dest_prop_field_alias`,

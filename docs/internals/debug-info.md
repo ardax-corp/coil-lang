@@ -26,6 +26,10 @@ Archive version is packed `major.minor`. Older `.hyc` files without `strings`,
 
 ## Runtime `panic` output
 
+`panic` **aborts the process**; `raise` is catchable (**Q5**,
+[language-quirks.md](language-quirks.md)). Checksum / CLI boards use
+`panic`.
+
 When a `panic` aborts the VM and the panic instruction has a known
 `DebugLoc`, the message is printed as:
 
