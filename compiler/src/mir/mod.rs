@@ -1124,6 +1124,75 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_recursive_fib_callee_is_dense() {
+        let src = r#"
+fn fib(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    let _ = fib(8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile fib");
+        let fib = p.function_offset("fib").expect("fib");
+        let main = p.function_offset("main").expect("main");
+        let fib_bc = if fib < main { &bc[fib..main] } else { &bc[fib..] };
+        assert!(
+            fib_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "Q7 fib callee must densify; opcodes={:?}",
+            fib_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            fib_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "typed recursive CALL must remain"
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_recursive_tak_callee_is_dense() {
+        let src = r#"
+#[max_depth(64)]
+fn tak(int x, int y, int z) -> int {
+    if y >= x {
+        return z;
+    }
+    return tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y));
+}
+fn main() {
+    let _ = tak(6, 4, 2);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile tak");
+        let tak = p.function_offset("tak").expect("tak");
+        let main = p.function_offset("main").expect("main");
+        let tak_bc = if tak < main { &bc[tak..main] } else { &bc[tak..] };
+        assert!(
+            tak_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "Q7 tak callee must densify; opcodes={:?}",
+            tak_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            tak_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "typed recursive CALL must remain"
+        );
+        assert!(
+            tak_bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
+            "outer tak site must stay TailCall"
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
     fn pipeline_eval_a_follows_straight_line_work_gate() {
         let src = r#"
 fn eval_a(int i, int j) -> float {
