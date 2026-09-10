@@ -1605,17 +1605,10 @@ fn main() {
             assert_eq!(f.ret_ty, Some(ty));
             assert_eq!(f.ret_layout, ty.layout());
             let mut pool = Vec::new();
-            if matches!(ty, MirTy::NicheOpt | MirTy::NicheRes) {
-                assert!(
-                    emit_dense(&f, Some(Label(0)), &mut pool, false).is_err(),
-                    "I1/I2 niche stays off dense"
-                );
-            } else {
-                assert!(
-                    emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok(),
-                    "S3 HeapRef is a dense word lane"
-                );
-            }
+            assert!(
+                emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok(),
+                "Q8: niche / HeapRef are dense word lanes"
+            );
         }
     }
 
@@ -1784,6 +1777,17 @@ fn main() {
             f.blocks.iter().any(|b| matches!(b.term, Some(Terminator::Br { .. }))),
             "niche sentinel is Br (LogNot)"
         );
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("Q8 niche Br");
+        assert!(
+            !dense.iter().any(|op| matches!(
+                op,
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfMatch { .. },
+                    ..
+                }
+            )),
+            "Q8 reconstruct must not re-emit stack JumpIfMatch"
+        );
     }
 
     #[test]
@@ -1869,6 +1873,87 @@ fn main() {
             lir.iter()
                 .any(|op| matches!(op, IlOp::Return { ret_words: 1, .. }))
         );
+        let mut hints = LowerHints::new("pair_match");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.slot_ty.insert(1, MirTy::I64);
+        hints.param_count = 2;
+        hints.allow_match = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower two-slot match");
+        f.verify().unwrap();
+        assert!(
+            f.blocks
+                .iter()
+                .any(|b| matches!(b.term, Some(Terminator::Br { .. }))),
+            "two-slot tag match is Br"
+        );
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool, false)
+            .expect("Q8 two-slot tag Br is dense");
+        assert!(
+            !dense.iter().any(|op| matches!(
+                op,
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfMatch { .. },
+                    ..
+                }
+            )),
+            "Q8 two-slot reconstruct is register Br, not JumpIfMatch"
+        );
+    }
+
+    #[test]
+    fn q8_niche_match_plus_arith_may_specialize() {
+        let loc = loc();
+        // match opt { Some(x) => x + 1, None => 0 } — i64 arith + niche Br.
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Dup { loc },
+            IlOp::LogNot { loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfTrue,
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(1)),
+            IlOp::Pop { loc },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let mut hints = LowerHints::new("niche_add");
+        hints.slot_ty.insert(0, MirTy::NicheOpt);
+        hints.param_count = 1;
+        hints.allow_match = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower Q8 niche+arith");
+        f.verify().unwrap();
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("Q8 emit");
+        assert!(
+            dense.iter().any(|op| matches!(
+                op,
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin
+            )),
+            "Q8 niche+arith uses DenseBin; ops={dense:?}"
+        );
+        assert!(
+            !dense.iter().any(|op| matches!(
+                op,
+                IlOp::Jump {
+                    kind: IlJumpKind::JumpIfMatch { .. },
+                    ..
+                }
+            )),
+            "no stack JumpIfMatch"
+        );
+        // Cost gate may still prefer fuse-IL (Seek tax). Reconstruct itself is dense.
+        let _ =
+            try_specialize_body(&ops, "niche_add", 1, &mut pool, &DenseCallMap::new(), None);
     }
 
     #[test]
@@ -3155,6 +3240,39 @@ fn main() {
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn q8_local_option_match_loop_checksum() {
+        let src = r#"
+fn acc(int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + match Option::Some(i) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = acc(4);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile Q8 local match");
+        assert!(
+            !bc.iter().any(|b| *b.bytecode() == Instruction::MakeEnum),
+            "local Option<int> match must stay two-slot; opcodes={:?}",
+            bc.iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "Q8 local match must run");
     }
 
     #[test]
