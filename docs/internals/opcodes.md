@@ -31,6 +31,10 @@ User code does not name these directly; the compiler emits them:
 | `VLoad` / `VStore` | Compiler-only 8-lane numeric heap access (COI-310). `[31:24]` ty (`TY_I64` / `TY_F64`), `[23:16]` vreg, `[15:8]` array slot, `[7:0]` index slot. No heap refs in vregs. Archive **minor 8**. |
 | `VBin` / `VMove` | 8-lane zip / splat / iota / neg via `coil-simd` (`VBin` packing matches `DenseBin`; splat `a` is a frame slot). `VMove` copies vregs. HostInvoke packs (P12) stay. |
 | `VReduce` / `VFma` | S5b V1 (archive **minor 9**). `VReduce`: `[31:24]` ty, `[23:16]` dest slot, `[15:8]` vsrc — `dest = fold_left_add(dest, lanes)` (float sequential). `VFma`: dest/a/b vregs — `v[dest] = v[a]*v[b] + v[dest]` mul-then-add (no hardware contract). |
+| `DenseIndex` / `DenseStoreIndex` | A2 (archive **minor 10**). Stack-neutral heap index / store. `[31:24]` flags (bit 0 = unchecked), `[23:16]` dest, `[15:8]` array, `[7:0]` index. `DenseStoreIndex` dest is the stored value. |
+| `DenseArrayLen` | `[15:8]` dest, `[7:0]` array. |
+| `DenseMake` | `MakeArray` / `MakeTuple` / `MakeEnum`. `[31:24]` kind (`0` array, `1` tuple, `2+tag` enum), `[23:16]` dest, `[15:8]` arity, `[7:0]` first element slot (consecutive). |
+| `DensePush` | CALL / HostInvoke ABI edge: push consecutive slots. `[15:8]` arity, `[7:0]` base. |
 
 ---
 

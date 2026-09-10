@@ -39,11 +39,11 @@ pub fn try_specialize_body(
     // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
     // Alloc / InitTyped take dense only when S2b maps exist (S2c).
     // S2d: mapped *preheader* Make* + index loop may take dense.
-    // S2e: residuals no longer Seek-restore. In-loop Make* still pays
-    // LOAD/STORE boxing vs invert+fuse. S2l (COI-322): try dense so MIR
-    // SROA / LICM can delete or hoist the alloc; keep it only when the
-    // reconstruct is Make*-free inside loops. Residual in-loop Make* is
-    // a measured loser (op-count ≤ fuse still ~5% slower).
+    // S2e: residuals no longer Seek-restore. A2 (COI-335): Index / Make*
+    // / ArrayLen / StoreIndex emit dense-native (no LOAD/StorePop). CALL
+    // / HostInvoke still box at the ABI edge via DensePush. S2l: try
+    // dense so SROA / LICM can delete work; keep in-loop Make* only when
+    // reconstruct is dense-native and cost ≤ fuse-IL.
     // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
     // Debugger-attached / -Og skip this entry (I7).
     // S2k: slot-select diamonds may take dense when Seek fits the 64-slot
@@ -134,11 +134,12 @@ pub fn try_specialize_body(
     if select_cfg && !select_reconstruct_ok(ops, &out) {
         return None;
     }
-    // Residual in-loop Make* still loses to invert+fuse (LOAD/STORE boxing;
-    // escape leftover ~5% on s2d_inloop_escape). Keep dense only when
-    // SROA / LICM deleted the in-loop alloc.
+    // In-loop Make*: keep dense only when heap ops are native and the
+    // reconstruct is not denser-but-slower (S2l / A2 cost gate).
     if inloop_alloc && super::infer::has_alloc_inside_loop(&out) {
-        return None;
+        if residual_heap_box(&out) || emit_cost(&out) > emit_cost(ops) {
+            return None;
+        }
     }
     Some((out, abi))
 }
@@ -192,7 +193,9 @@ fn count_store_index(ops: &[IlOp]) -> usize {
             IlOp::StoreIndexPin { .. } | IlOp::StoreIndexPinUnchecked { .. } => true,
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
-                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::DenseStoreIndex
             ),
             _ => false,
         })
@@ -208,11 +211,53 @@ fn count_index(ops: &[IlOp]) -> usize {
             | IlOp::IndexPinUnchecked { .. } => true,
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
-                Instruction::Index | Instruction::IndexUnchecked
+                Instruction::Index | Instruction::IndexUnchecked | Instruction::DenseIndex
             ),
             _ => false,
         })
         .count()
+}
+
+fn is_stack_heap_op(inst: Instruction) -> bool {
+    matches!(
+        inst,
+        Instruction::Index
+            | Instruction::IndexUnchecked
+            | Instruction::StoreIndex
+            | Instruction::StoreIndexUnchecked
+            | Instruction::ArrayLen
+            | Instruction::MakeArray
+            | Instruction::MakeTuple
+            | Instruction::MakeEnum
+            | Instruction::InitTyped
+    )
+}
+
+/// LOAD / StorePop around stack Index / Make* — the A2 tax we refuse to ship.
+fn residual_heap_box(ops: &[IlOp]) -> bool {
+    ops.iter().any(|op| match op {
+        IlOp::Index { .. }
+        | IlOp::IndexUnchecked { .. }
+        | IlOp::MakeArray { .. }
+        | IlOp::MakeTuple { .. }
+        | IlOp::MakeEnum { .. } => true,
+        IlOp::Byte { byte, .. } => is_stack_heap_op(*byte.bytecode()),
+        _ => false,
+    })
+}
+
+fn emit_cost(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .map(|op| match op {
+            IlOp::StorePop { .. } | IlOp::Load { .. } => 2,
+            IlOp::Byte { byte, .. } => match *byte.bytecode() {
+                Instruction::Seek | Instruction::LOAD | Instruction::StorePop => 2,
+                _ => 1,
+            },
+            _ => 1,
+        })
+        .sum()
 }
 
 /// IL→MIR→LIR for a leftover body after dense specialize misses (I8).
@@ -404,5 +449,43 @@ fn fused_eq_jmp(byte: &common::Byte) -> bool {
             byte.bin_slot_slot_jmpf_parts().0 == Instruction::EQ as u8
         }
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod cost_gate_tests {
+    use common::{Byte, DebugLoc, Instruction};
+
+    use crate::il::IlOp;
+
+    use super::{emit_cost, residual_heap_box};
+
+    fn loc() -> DebugLoc {
+        DebugLoc::unknown()
+    }
+
+    #[test]
+    fn residual_make_counts_as_boxed() {
+        let ops = [IlOp::MakeArray { arity: 2, loc: loc() }];
+        assert!(residual_heap_box(&ops));
+        let native = [IlOp::byte(
+            Byte::new(Instruction::DenseMake).with_dense_abc(0, 1, 2, 3),
+        )];
+        assert!(!residual_heap_box(&native));
+    }
+
+    #[test]
+    fn emit_cost_weights_load_store_above_dense() {
+        let boxed = [
+            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Index { loc: loc() },
+            IlOp::StorePop { slot: 2, loc: loc() },
+        ];
+        let native = [IlOp::byte(
+            Byte::new(Instruction::DenseIndex).with_dense_abc(0, 2, 0, 1),
+        )];
+        assert!(emit_cost(&native) < emit_cost(&boxed));
+        assert!(emit_cost(&native) <= emit_cost(&boxed));
     }
 }

@@ -2048,10 +2048,17 @@ fn main() {
         let hot_bc = &bc[start..end];
         let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         let has_make = hot_bc.iter().any(|b| *b.bytecode() == Instruction::MakeArray);
+        let has_dense_make = hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseMake);
         if has_make {
             assert!(
                 hot_bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
                 "residual MakeArray stays fuse-IL; opcodes={names:?}"
+            );
+        }
+        if has_dense_make {
+            assert!(
+                hot_bc.iter().all(|b| *b.bytecode() != Instruction::MakeArray),
+                "A2 DenseMake is not residual-boxed; opcodes={names:?}"
             );
         }
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -2060,8 +2067,9 @@ fn main() {
     }
 
     #[test]
-    fn s2l_inloop_escape_make_stays_fuse_il() {
-        // Escaping `[i, i+1]` cannot SROA. Win-or-gate keeps fuse-IL.
+    fn s2l_inloop_escape_make_stays_fuse_or_dense_native() {
+        // Escaping `[i, i+1]` cannot SROA. A2 keeps dense only when Make*
+        // is DenseMake (no LOAD/StorePop boxing); else fuse-IL.
         let src = r#"
 fn take([int] xs) -> int {
     return xs[0] + xs[1];
@@ -2098,12 +2106,21 @@ fn main() {
         let has_make = pack_bc
             .iter()
             .any(|b| *b.bytecode() == Instruction::MakeArray);
+        let has_dense_make = pack_bc
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseMake);
         if has_make {
             assert!(
                 pack_bc
                     .iter()
                     .all(|b| *b.bytecode() != Instruction::DenseBin),
-                "S2l: leftover in-loop Make* stays fuse-IL; opcodes={names:?}"
+                "S2l: boxed in-loop Make* stays fuse-IL; opcodes={names:?}"
+            );
+        }
+        if has_dense_make {
+            assert!(
+                pack_bc.iter().all(|b| *b.bytecode() != Instruction::MakeArray),
+                "A2: DenseMake must not also residual-box MakeArray; opcodes={names:?}"
             );
         }
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -2433,6 +2450,7 @@ fn main() {
                     | Instruction::StoreIndexUnchecked
                     | Instruction::StoreIndexPin
                     | Instruction::StoreIndexPinUnchecked
+                    | Instruction::DenseStoreIndex
             )),
             "scalar tail must keep a heap store; opcodes={names:?}"
         );
@@ -2476,6 +2494,7 @@ fn main() {
                     | Instruction::IndexUnchecked
                     | Instruction::IndexPin
                     | Instruction::IndexPinUnchecked
+                    | Instruction::DenseIndex
             )),
             "scalar tail keeps Index; opcodes={:?}",
             sum_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
@@ -2531,9 +2550,11 @@ fn main() {
         assert!(
             body.iter().any(|b| matches!(
                 *b.bytecode(),
-                Instruction::Index | Instruction::IndexUnchecked
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::DenseIndex
             )),
-            "S3b: unpinned Index residuals; opcodes={names:?}"
+            "S3b: dense-native or unpinned Index; opcodes={names:?}"
         );
         assert!(
             body.iter().all(|b| !matches!(
@@ -2611,6 +2632,7 @@ fn main() {
                     | Instruction::IndexUnchecked
                     | Instruction::IndexPin
                     | Instruction::IndexPinUnchecked
+                    | Instruction::DenseIndex
             )),
             "times_a keeps Index; opcodes={names:?}"
         );
@@ -2621,6 +2643,7 @@ fn main() {
                     | Instruction::StoreIndexUnchecked
                     | Instruction::StoreIndexPin
                     | Instruction::StoreIndexPinUnchecked
+                    | Instruction::DenseStoreIndex
             )),
             "times_a keeps StoreIndex; opcodes={names:?}"
         );

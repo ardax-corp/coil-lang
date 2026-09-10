@@ -31,7 +31,10 @@ pub struct LiveRootSet {
 
 /// Residual object-init opcodes (cold `IlOp::Byte`).
 pub fn is_alloc_inst(inst: Instruction) -> bool {
-    matches!(inst, Instruction::InitTyped | Instruction::INIT)
+    matches!(
+        inst,
+        Instruction::InitTyped | Instruction::INIT | Instruction::DenseMake
+    )
 }
 
 /// IL that is an alloc / GC safepoint (I5). Unmapped bodies still refuse.
@@ -45,7 +48,12 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
         IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => {
             Some("heap/aggregate")
         }
-        IlOp::Byte { byte, .. } if is_alloc_inst(*byte.bytecode()) => Some("heap/alloc"),
+        IlOp::Byte { byte, .. }
+            if is_alloc_inst(*byte.bytecode())
+                || *byte.bytecode() == Instruction::DenseMake =>
+        {
+            Some("heap/alloc")
+        }
         _ => None,
     }
 }

@@ -2128,6 +2128,8 @@ fn main() { add(1, 2); }
                         | Instruction::IndexUnchecked
                         | Instruction::StoreIndex
                         | Instruction::StoreIndexUnchecked
+                        | Instruction::DenseIndex
+                        | Instruction::DenseStoreIndex
                 )
             });
             assert!(
@@ -2171,6 +2173,7 @@ fn main() { add(1, 2); }
                     | Instruction::StoreIndexUnchecked
                     | Instruction::StoreIndexPin
                     | Instruction::StoreIndexPinUnchecked
+                    | Instruction::DenseStoreIndex
             )),
             "from_file fill must keep StoreIndex; opcodes={names:?}"
         );
@@ -2465,6 +2468,7 @@ fn main() -> int {
                         | Instruction::VLoad
                         | Instruction::Index
                         | Instruction::IndexUnchecked
+                        | Instruction::DenseIndex
                 )),
             "non-yielding sibling scan_sum should pin or take dense/V1; body={:?}",
             sum_body

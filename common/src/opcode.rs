@@ -379,6 +379,24 @@ pub enum Instruction {
     /// Compiler-only conservative FMA (COI-311). Same packing as [`Self::VBin`].
     /// `v[dest] = v[a] * v[b] + v[dest]` (mul then add; two IEEE roundings).
     VFma,
+
+    /// Dense heap index (COI-335). Stack-neutral.
+    /// Operand: `[31:24]` flags (bit 0 = unchecked), `[23:16]` dest,
+    /// `[15:8]` array slot, `[7:0]` index slot.
+    DenseIndex,
+    /// Dense heap store. Same packing as [`Self::DenseIndex`].
+    /// Dest slot holds the stored value (and is the SSA dest).
+    DenseStoreIndex,
+    /// Dense `ArrayLen`. `[15:8]` dest, `[7:0]` array slot.
+    DenseArrayLen,
+    /// Dense `MakeArray` / `MakeTuple` / `MakeEnum`. Stack-neutral.
+    /// Operand: `[31:24]` kind (`MAKE_ARRAY` / `MAKE_TUPLE` / `2+tag`),
+    /// `[23:16]` dest, `[15:8]` arity, `[7:0]` first element slot
+    /// (elements are consecutive).
+    DenseMake,
+    /// Push consecutive frame slots onto the eval stack (CALL / HostInvoke
+    /// ABI edge). `[15:8]` arity, `[7:0]` base slot.
+    DensePush,
 }
 
 impl From<u8> for Instruction {
@@ -467,6 +485,12 @@ pub mod dense {
     pub const UNARY_FNEG: u8 = 2;
     pub const CAST_I2F: u8 = 0;
     pub const CAST_SEXT: u8 = 1;
+
+    /// [`super::Instruction::DenseIndex`] / [`super::Instruction::DenseStoreIndex`] flag.
+    pub const HEAP_UNCHECKED: u8 = 1;
+    pub const MAKE_ARRAY: u8 = 0;
+    pub const MAKE_TUPLE: u8 = 1;
+    pub const MAKE_ENUM: u8 = 2;
 
     #[inline]
     pub const fn pack_cmp(lane: u8, pred: u8) -> u8 {
@@ -668,6 +692,11 @@ impl Instruction {
             Self::VMove => "VMove",
             Self::VReduce => "VReduce",
             Self::VFma => "VFma",
+            Self::DenseIndex => "DenseIndex",
+            Self::DenseStoreIndex => "DenseStoreIndex",
+            Self::DenseArrayLen => "DenseArrayLen",
+            Self::DenseMake => "DenseMake",
+            Self::DensePush => "DensePush",
         }
     }
 }
@@ -1670,13 +1699,19 @@ mod tests {
         assert_eq!(b.dense_abc_parts(), (dense::FMUL64, 3, 1, 2));
         let c = Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_F64, 4, 7, true);
         assert_eq!(c.dense_const_parts(), (dense::TY_F64, 4, 7, true));
+        let ix = Byte::new(Instruction::DenseIndex).with_dense_abc(dense::HEAP_UNCHECKED, 5, 1, 2);
+        assert_eq!(ix.dense_abc_parts(), (dense::HEAP_UNCHECKED, 5, 1, 2));
+        let mk = Byte::new(Instruction::DenseMake).with_dense_abc(dense::MAKE_ARRAY, 9, 3, 4);
+        assert_eq!(mk.dense_abc_parts(), (dense::MAKE_ARRAY, 9, 3, 4));
+        let push = Byte::new(Instruction::DensePush).with_dense_move(2, 6);
+        assert_eq!(push.dense_move_parts(), (2, 6));
     }
 
     #[test]
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::VFma as u8;
+        let last = Instruction::DensePush as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

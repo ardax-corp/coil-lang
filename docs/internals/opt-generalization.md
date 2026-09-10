@@ -40,7 +40,10 @@ tables shrink toward.
    That is the S2l spirit ([s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)):
    try the MIR path so SROA / LICM can delete work; keep it only when the
    reconstruct is cheaper or equal. Residual in-loop `Make*` that still
-   boxes via LOAD/STORE stays fuse-IL.
+   boxes via LOAD/STORE stays fuse-IL. A2 emits `DenseIndex` /
+   `DenseStoreIndex` / `DenseArrayLen` / `DenseMake` (stack-neutral) and
+   `DensePush` at CALL / HostInvoke edges; the cost gate still refuses a
+   boxed reconstruct that is denser-but-slower.
 
 5. **Refuse inventory shrinks to hard walls.** A hard wall is unsound or
    a true language / runtime barrier until a locked commit lands (Q6–Q9
@@ -70,7 +73,7 @@ S2f–S2l shape tickets collapse into one shared escape answer
 |---|------|-------|-------|
 | **A0** | This doctrine + A4 measurement | [COI-333](https://linear.app/ardax/issue/COI-333/a0-opt-generalization-doctrine-doc) | docs only |
 | **A1** | Unify `[T; N]` / SROA under Q1–Q4 | [COI-334](https://linear.app/ardax/issue/COI-334/a1-unify-tn-sroa-under-q1-q4) | yes |
-| **A2** | Dense-native heap ops (Index / Make / CALL) | [COI-335](https://linear.app/ardax/issue/COI-335/a2-dense-native-heap-ops-indexmakecall) | yes |
+| **A2** | Dense-native heap ops (Index / Make / CALL) | [COI-335](https://linear.app/ardax/issue/COI-335/a2-dense-native-heap-ops-indexmakecall) | yes (archive **4.10**) |
 | **A3** | Broaden MIR entry; shrink refuse tables | [COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables) | yes |
 | **A4** | Measurement contract (below) | [COI-337](https://linear.app/ardax/issue/COI-337/a4-measurement-contract-natural-suites-embed) | continuous |
 

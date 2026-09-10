@@ -291,10 +291,17 @@ hyperfine -w 2 -r 8.
 | preheader bump | 0 (SROA) | dense select (S2k) | n/a |
 | `s2d_inloop_escape` | 1 / trip | **fuse-IL** (win-or-gate) | 294.0 ± 4.1 vs 280.7 ± 1.8 ms (**1.05× slower**) |
 
-**Remaining refuse:** residual escaping Make* (this gate), S2h OOB
+**Remaining refuse (pre-A2):** residual escaping Make* (this gate), S2h OOB
 select+alloc on a 64-slot prove frame, post-loop-only `return [x]`,
 unmapped alloc, grow dest, arity > 32, `Vec.push` / class `new` loops.
-No further S2* tickets in the refuse queue.
+
+## A2 dense-native heap ops (COI-335)
+
+`DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` / `DenseMake` write
+frame slots (no LOAD/StorePop). CALL / HostInvoke gather with
+`DensePush` then the existing ABI op. The S2l gate now keeps in-loop
+Make* when the reconstruct is native **and** `emit_cost` ≤ fuse-IL;
+boxed residuals still refuse.
 
 Flagship `.hyc` sha256 identical vs parent `8ce0156f`: `mandelbrot` /
 `tak` / `nsieve` / `binary_trees` / `fib`. Checksums 625885 / 7 / 1900 /
