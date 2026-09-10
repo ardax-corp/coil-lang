@@ -49,8 +49,9 @@ tables shrink toward.
    a true language / runtime barrier. Q6–Q9 first rungs have landed
    (counted `for`, one-word recursive `CALL`, niche/two-slot dense+match,
    format LIR reconstruct); leftover shapes are **ladders** or **cost
-   gates**, not forever refuse. Remaining walls: I7 debugger / `-Og`,
-   leftover unmapped grow / class edges, boxed multi-payload
+   gates**, not forever refuse.    Remaining walls: native I7 resume maps (B8 ladders the
+   debugger-attached / `-Og` specialize refuse), leftover unmapped grow /
+   class edges, boxed multi-payload
    match, residual `Byte`/`Pow`/bitwise. Everything else is
    **cost-gated**: lift, opt, emit, compare to fuse-IL. Do not add
    feature-shaped refuses (W3 work-op floors, Seek≤64 prove quirks,
@@ -146,7 +147,7 @@ list. Q6–Q9 first rungs turned most of those named commits into
 | `for` / iterator (`for_in_sum`) | **Q6:** counted desugar — array / Vec / `[T; N]` / literal range helpers dense (`sum`, `for_in_range`). **B5:** first-class `let r = 0..n` locals unbox `[start,end]` (`for_in_range_value`). `main` + format / `Vec.push` stays fuse-IL. User `Iterator` / coro / dict / parameter range still refuse | Ladder (counted + local range) |
 | Dense+match (stack vs regs) | **Q8:** niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` stays I2 LIR. **B3:** two-slot `CALL` / `RETURN` may dense or LIR (cost gate) | Cost gate |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | Unchanged — fuse-IL | Hard wall (later island) |
-| Debugger-attached / `-Og` | Unchanged — skip dense + LIR ([mir-deopt.md](mir-deopt.md)) | Hard wall (**I7** stays) |
+| Debugger-attached / `-Og` | **B8:** may dense / LIR (cost gate). Emit skips `Deopt`. Native resume maps and named-local remap stay leftover ([mir-deopt.md](mir-deopt.md)) | Ladder (**I7** / **B8**) |
 | Unmapped alloc / GC safepoint | **B6:** `ArrayPush` / `DenseArrayPush` grow sites encode S2b maps; CALL+alloc drafts bind (one-word `CALL`). Cost gate still refuses boxed reconstruct. Multi-payload match stays a wall | Ladder + cost (maps); leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | Unchanged | Hard wall (later island) |
 | Compare-only (no arith) | Unchanged — fuse-IL or I8 LIR | Cost gate |
@@ -167,8 +168,8 @@ regular reconstruct over bench-shaped peeps.
 | **B4** | **Q9 R2** — `string::{from_bytes,to_bytes}` dense HostInvoke | **Landed** ([COI-342](https://linear.app/ardax/issue/COI-342)): I6 dense HostInvoke (box at the host edge). Table `STRING` / `FORMAT` stay off dense. Maps across format wait R3 | Unit reconstruct; dense loop + HostInvoke; format loop still fuse-IL |
 | **B5** | Q6 later rungs — first-class range, then user `Iterator` | **Landed** ([COI-343](https://linear.app/ardax/issue/COI-343)): unboxed `let r = 0..n` locals (no `GetField`). Parameter / heap dict range, user `next`, coro, dict stay refuse | `for_in_range_value`; no full trait rewrite |
 | **B6** | Unmapped alloc / grow / class `new` maps | **Landed** ([COI-344](https://linear.app/ardax/issue/COI-344)): `ArrayPush` is a mapped grow safepoint; `DenseArrayPush` (archive **4.11**) is the native reconstruct. Map lift types one-word `CALL` so CALL+`Make*` / `InitTyped` drafts bind. `binary_trees` `item_check` still fuse-IL (multi-payload match). Cost gate still refuses boxed reconstruct | `nsieve`; CALL+enum wrap; flagships flat |
-| **B7** | Mutual / sibling / self two-slot recursion | **This rung:** one-word and two-slot **sibling / mutual** `TailCall` may dense. Reconstruct puts TailCall args on TOS and reserves callee entry labels so `to_flat` does not treat a sibling jump as local (B2 break). B2 dest convoy stays self-`CALL` only. Leftover: **self two-slot** `CALL` / `RETURN` stays fuse-IL; LIR still cannot rebuild one-word `CALL` / `TailCall`; non-tail mutual may lose on DensePush / Seek | `tail_sibling.hy`; even/odd + bounce + a mutual pair; checksum; flagships flat. No new opcode |
-| **B8** | **I7** debugger-attached / `-Og` on MIR | True wall: VM debugger is fuse-IL. Deopt edges exist; emit still refuses. Needed before specialized bodies can be stepped | Debugger tests; no MIR stepping rewrite |
+| **B7** | Mutual / sibling / self two-slot recursion | **Landed** ([COI-345](https://linear.app/ardax/issue/COI-345)): one-word and two-slot **sibling / mutual** `TailCall` may dense. Reconstruct puts TailCall args on TOS and reserves callee entry labels so `to_flat` does not treat a sibling jump as local (B2 break). B2 dest convoy stays self-`CALL` only. Leftover: **self two-slot** `CALL` / `RETURN` stays fuse-IL; LIR still cannot rebuild one-word `CALL` / `TailCall`; non-tail mutual may lose on DensePush / Seek | `tail_sibling.hy`; even/odd + bounce + a mutual pair; checksum; flagships flat. No new opcode |
+| **B8** | **I7** debugger-attached / `-Og` on MIR | **This rung:** drop the blanket specialize refuse. Debugger-attached / `-Og` may dense / LIR; emit skips explicit `Deopt` (no archive encoding, no resume maps). VM debugger steps reconstruct. Leftover: native deopt maps, named-local remap, sparse MIR line locs | Debugger + `-Og` boards; fib `print n`; checksum; flagships identical on Standard |
 | **B9** | Q9 **R3–R4** — maps across `FORMAT`; unicode / regex only if an island says so | After R2. R1 already reconstructs table ops on LIR | No second Format lowering; no vanity string benches |
 
 Parked (not B*): boxed multi-payload match, residual `Byte`/`Pow`/bitwise,

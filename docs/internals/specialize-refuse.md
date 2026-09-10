@@ -23,7 +23,7 @@ rungs are **not** in this table — see ladders below and
 | User `Iterator` / coro / dict / parameter range `for` | fuse-IL | later Q6 rung |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
-| Debugger-attached / `-Og` | fuse-IL | **I7** (stays) |
+| Native deopt resume maps | not encoded; emit skips `Deopt` | **I7** leftover after **B8** |
 | Unmapped alloc / GC safepoint | fuse-IL unless S2b draft binds | **B6** maps `ArrayPush` / CALL+`Make*`; leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
 | LIR one-word `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | I6 |
@@ -126,3 +126,7 @@ boxed reconstruct.
 mutual `TailCall` (one-word and two-slot); keep/refuse is still cost.
 Self two-slot recursion stays fuse-IL. LIR still cannot reconstruct
 one-word `CALL` / `TailCall`.
+**B8** ([COI-346](https://linear.app/ardax/issue/COI-346)) drops the
+debugger-attached / `-Og` specialize refuse. Majority bodies may dense
+or LIR; the VM debugger steps the reconstruct. Leftover: native resume
+maps, named-local remap after SSA, sparse line locs on emit.
