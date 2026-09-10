@@ -4858,7 +4858,11 @@ fn main() {
             .compiler_mut()
             .get_function("fill")
             .expect("fill");
-        let fill_bc = &bc[fill_off..];
+        let main_off = pipeline
+            .compiler_mut()
+            .get_function("main")
+            .expect("main");
+        let fill_bc = &bc[fill_off..main_off];
         let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         let inits = fill_bc
             .iter()
@@ -4911,7 +4915,11 @@ fn main() {
             .compiler_mut()
             .get_function("hot")
             .expect("hot");
-        let hot_bc = &bc[hot_off..];
+        let main_off = pipeline
+            .compiler_mut()
+            .get_function("main")
+            .expect("main");
+        let hot_bc = &bc[hot_off..main_off];
         let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         let inits = hot_bc
             .iter()

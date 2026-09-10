@@ -14,9 +14,6 @@ use super::id::NodeId;
 use super::infer::Checker;
 use super::ty::{is_option_ty, is_result_ty, strip_readonly, Ty};
 
-/// Maximum payload arity / field count we will unbox into frame slots.
-pub const MAX_UNBOX_SLOTS: usize = 32;
-
 struct Candidate {
     binder: NodeId,
     rhs: NodeId,
@@ -622,14 +619,12 @@ fn is_unbox_ty(checker: &Checker, ty: &Ty) -> bool {
         let Some(name) = Checker::class_name_of_ty(ty) else {
             return false;
         };
-        if checker.class_has_drop(name) {
-            return false;
-        }
         if !matches!(ty, Ty::Con(_)) {
             return false;
         }
         let n = checker.class_fields(name).map(|f| f.len()).unwrap_or(0);
-        return n >= 1 && n <= MAX_UNBOX_SLOTS;
+        return crate::escape::ClassEscape::for_named_new(checker.class_has_drop(name), n)
+            .stack_allocatable();
     }
     let Some(name) = enum_name(ty) else {
         return false;

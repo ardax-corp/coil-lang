@@ -4744,15 +4744,16 @@ impl Compiler {
             let Some(name) = Checker::class_name_of_ty(ty) else {
                 return false;
             };
-            if self.checker.class_has_drop(name) {
-                return false;
-            }
             let n = self
                 .checker
                 .class_fields(name)
                 .map(|f| f.len())
                 .unwrap_or(0);
-            return n >= 1 && n <= 32;
+            return crate::escape::ClassEscape::for_named_new(
+                self.checker.class_has_drop(name),
+                n,
+            )
+            .stack_allocatable();
         }
         crate::typechecking::ty::is_option_ty(ty)
             || crate::typechecking::ty::is_result_ty(ty)
