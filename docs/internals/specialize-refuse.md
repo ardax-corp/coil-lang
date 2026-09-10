@@ -19,7 +19,7 @@ forever barriers.
 | Wall | Today | Commit |
 |------|-------|--------|
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` / I4 `from_bytes` / `to_bytes` | fuse-IL | **Q9** |
-| Recursion on the callee (`TailCall` / self-`CALL` that cannot reconstruct) | fuse-IL | **Q7** |
+| Mutual / two-slot recursive `CALL` | fuse-IL | later Q7 rung |
 | User `Iterator` / coro / dict / first-class range `for` | fuse-IL | later Q6 rung |
 | Dense+match (stack match vs dense regs) | MIR→LIR (I2) | **Q8** |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
@@ -72,7 +72,8 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
-| `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | recursion — **Q7** |
+| `tak` / `fib` | `tak.hy` / `fib.hy` | dense + recursive `CALL` | **Q7** one-word self-call |
+| sibling `TailCall` (even/odd) | — | fuse-IL or dense | open one-word `TailCall` + cost gate |
 | `nsieve` | `nsieve.hy` | fuse-IL | `Vec.push` (no `Make*`) |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `*_churn` / `option_*` / `result_*` | several | fuse-IL or LIR | match / two-slot |
