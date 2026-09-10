@@ -216,6 +216,7 @@ fn infer_walk(
     let mut has_float_arith = false;
     let mut has_i64_arith = false;
     let mut slot_imm: HashMap<u32, i64> = HashMap::new();
+    let reuse = mode == InferMode::Map;
 
     for op in ops {
         match op {
@@ -245,8 +246,8 @@ fn infer_walk(
                     slot_imm.remove(slot);
                 }
                 if let Some(ty) = c.ty {
-                    set_slot(&mut slot_ty, *slot, ty)?;
-                    paint(&mut slot_ty, &mut pool_ty, c, ty)?;
+                    set_slot_reuse(&mut slot_ty, *slot, ty, reuse)?;
+                    paint_slots(&mut slot_ty, &mut pool_ty, c, ty, reuse)?;
                 }
             }
             IlOp::Const { imm, .. } => stack.push(Cell {
@@ -390,7 +391,9 @@ fn infer_walk(
                         imm: None,
                     });
                 }
-                Instruction::Seek => {}
+                Instruction::Seek => {
+                    apply_seek(&mut stack, &slot_ty, byte.operand_u32())?;
+                }
                 Instruction::Unpack => {
                     let arity = byte.operand_u32();
                     if arity > 1 {
@@ -764,6 +767,9 @@ fn infer_walk(
                     imm: None,
                 });
             }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
+                let _ = apply_seek(&mut stack, &slot_ty, byte.operand_u32());
+            }
             IlOp::GetField { .. } => {
                 let _ = stack.pop();
                 let _ = stack.pop();
@@ -1024,6 +1030,29 @@ fn apply_format(
     }
 }
 
+fn apply_seek(
+    stack: &mut Vec<Cell>,
+    slot_ty: &HashMap<u32, MirTy>,
+    tell: u32,
+) -> Result<(), LowerError> {
+    // Ctor box: POP then `Seek tmp+1` so TOS is the InitTyped object. Loop /
+    // prologue Seek only re-anchors tell — do not treat those as a load
+    // (that joined bool latch slots with HeapRef).
+    if !stack.is_empty() || tell == 0 {
+        return Ok(());
+    }
+    let slot = tell - 1;
+    if slot_ty.get(&slot) != Some(&MirTy::HeapRef) {
+        return Ok(());
+    }
+    stack.push(Cell {
+        origin: Origin::Slot(slot),
+        ty: Some(MirTy::HeapRef),
+        imm: None,
+    });
+    Ok(())
+}
+
 fn apply_get_field(
     stack: &mut Vec<Cell>,
     slot_ty: &mut HashMap<u32, MirTy>,
@@ -1035,8 +1064,8 @@ fn apply_get_field(
     let obj = stack
         .pop()
         .ok_or_else(|| LowerError::Refused("GetField stack".into()))?;
-    paint(slot_ty, pool_ty, obj, MirTy::HeapRef)?;
-    paint(slot_ty, pool_ty, name, MirTy::HeapRef)?;
+    paint_slots(slot_ty, pool_ty, obj, MirTy::HeapRef, true)?;
+    paint_slots(slot_ty, pool_ty, name, MirTy::HeapRef, true)?;
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: None,
@@ -1053,7 +1082,7 @@ fn apply_load_field(
     let obj = stack
         .pop()
         .ok_or_else(|| LowerError::Refused("LoadField stack".into()))?;
-    paint(slot_ty, pool_ty, obj, MirTy::HeapRef)?;
+    paint_slots(slot_ty, pool_ty, obj, MirTy::HeapRef, true)?;
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: None,
@@ -1072,12 +1101,12 @@ fn apply_set_field(
         let name = stack
             .pop()
             .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
-        paint(slot_ty, pool_ty, name, MirTy::HeapRef)?;
+        paint_slots(slot_ty, pool_ty, name, MirTy::HeapRef, true)?;
     }
     let obj = stack
         .pop()
         .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
-    paint(slot_ty, pool_ty, obj, MirTy::HeapRef)?;
+    paint_slots(slot_ty, pool_ty, obj, MirTy::HeapRef, true)?;
     let _ = index;
     Ok(())
 }
@@ -1501,8 +1530,18 @@ fn paint(
     cell: Cell,
     ty: MirTy,
 ) -> Result<(), LowerError> {
+    paint_slots(slot_ty, pool_ty, cell, ty, false)
+}
+
+fn paint_slots(
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    cell: Cell,
+    ty: MirTy,
+    reuse: bool,
+) -> Result<(), LowerError> {
     match cell.origin {
-        Origin::Slot(s) => set_slot(slot_ty, s, ty),
+        Origin::Slot(s) => set_slot_reuse(slot_ty, s, ty, reuse),
         Origin::Pool(i) => {
             let i = i as usize;
             if i >= pool_ty.len() {
@@ -1522,6 +1561,15 @@ fn paint(
 }
 
 fn set_slot(map: &mut HashMap<u32, MirTy>, slot: u32, ty: MirTy) -> Result<(), LowerError> {
+    set_slot_reuse(map, slot, ty, false)
+}
+
+fn set_slot_reuse(
+    map: &mut HashMap<u32, MirTy>,
+    slot: u32,
+    ty: MirTy,
+    reuse: bool,
+) -> Result<(), LowerError> {
     match map.get(&slot).copied() {
         None => {
             map.insert(slot, ty);
@@ -1532,6 +1580,10 @@ fn set_slot(map: &mut HashMap<u32, MirTy>, slot: u32, ty: MirTy) -> Result<(), L
             let j = old.join(ty);
             if j.is_specialized() {
                 map.insert(slot, j);
+                Ok(())
+            } else if reuse {
+                // Map drafts: ctor temps recycle as i64/bool after the object is stored.
+                map.insert(slot, ty);
                 Ok(())
             } else {
                 Err(LowerError::Refused(format!(

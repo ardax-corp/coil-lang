@@ -4047,9 +4047,34 @@ fn main() {
 
     #[test]
     fn pipeline_field_hot_binds_maps_stays_fuse_il() {
-        let src = include_str!("../../../examples/perf/field_hot.hy");
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+impl Point {
+    pub fn sum() -> int {
+        return self.x + self.y;
+    }
+}
+fn hot() -> int {
+    let p = new Point(3, 4);
+    let i = 0;
+    let acc = 0;
+    while i < 4 {
+        acc = acc + p.sum() + p.x;
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    if hot() != 40 {
+        panic "hot checksum";
+    }
+}
+"#;
         let mut p = crate::Pipeline::new();
-        let (bc, constants) = p.compile_src(src).expect("compile field_hot");
+        let (bc, constants) = p.compile_src(src).expect("compile field_hot board");
         assert!(
             p.stack_maps()
                 .iter()
@@ -4058,7 +4083,7 @@ fn main() {
             p.stack_maps()
         );
         let symbols = p.program_debug().fn_symbols;
-        for name in ["main", "Point::sum", "Point::twice_x"] {
+        for name in ["hot", "Point::sum"] {
             let Some(i) = symbols.iter().position(|s| s.name == name) else {
                 continue;
             };
@@ -4077,8 +4102,11 @@ fn main() {
             );
         }
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::GetField),
-            "escaping GetField stays; opcodes={:?}",
+            bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::GetField | Instruction::LoadField | Instruction::SetField
+            )),
+            "escaping field ops stay fuse-IL; opcodes={:?}",
             bc.iter()
                 .map(|b| b.bytecode().mnemonic())
                 .collect::<Vec<_>>()

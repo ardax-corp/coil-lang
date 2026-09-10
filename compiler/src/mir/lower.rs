@@ -936,6 +936,16 @@ fn lower_byte(
         Instruction::SetField if hints.allow_heap_fields => {
             lower_heap_set_field(b, tos, common::set_field_slot_index(byte.operand_u32()))
         }
+        Instruction::Seek if hints.allow_heap_fields => {
+            let n = byte.operand_u32();
+            if tos.is_empty() && n > 0 {
+                let slot = n - 1;
+                if hints.slot_ty.get(&slot) == Some(&MirTy::HeapRef) {
+                    tos.push(b.use_local(LocalId(slot), MirTy::HeapRef)?);
+                }
+            }
+            Ok(())
+        }
         Instruction::Seek if hints.allow_match => Ok(()),
         inst if is_alloc_inst(inst) && hints.allow_alloc => {
             let (type_id, nfields) = if inst == Instruction::InitTyped {

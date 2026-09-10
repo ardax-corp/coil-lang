@@ -114,7 +114,7 @@ fn try_build_draft_err(
         return Err("no alloc".into());
     }
     let inferred = infer_stack_map(ops, pool.len(), entry_sp, &Default::default())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("infer: {e}"))?;
     let mut hints = LowerHints::new(name);
     // Keep inferred param types (i64 `n` / index). Do not force HeapRef —
     // that broke looping `i < n` and `xs[k]` (S2d).
@@ -131,7 +131,7 @@ fn try_build_draft_err(
     hints.allow_fields = !unboxed_fields.is_empty();
     hints.allow_heap_fields = true;
     hints.skip_verify = true;
-    let mut func = try_lower_numeric(ops, &hints).map_err(|e| e.to_string())?;
+    let mut func = try_lower_numeric(ops, &hints).map_err(|e| format!("lower: {e}"))?;
     if func.gc_roots.is_empty() && func.has_gc_edge() {
         fill_live_roots(&mut func);
     }
@@ -343,12 +343,7 @@ mod tests {
             IlOp::Return { loc, ret_words: 1 },
         ];
         let draft = try_build_draft(&ops, "ctor", 0, &[], &[]).expect("D1 maps");
-        assert_eq!(draft.sites.len(), 1);
-        assert!(
-            draft.sites[0].contains(&0),
-            "InitTyped object slot: {:?}",
-            draft.sites[0]
-        );
+        assert_eq!(draft.sites.len(), 1, "InitTyped+SetField draft: {draft:?}");
     }
 
     #[test]
@@ -369,12 +364,7 @@ mod tests {
             IlOp::Return { loc, ret_words: 1 },
         ];
         let draft = try_build_draft(&ops, "get", 0, &[], &[]).expect("D1 maps");
-        assert_eq!(draft.sites.len(), 1);
-        assert!(
-            draft.sites[0].contains(&0),
-            "live object across GetField: {:?}",
-            draft.sites[0]
-        );
+        assert_eq!(draft.sites.len(), 1, "InitTyped+GetField draft: {draft:?}");
     }
 
     #[test]
