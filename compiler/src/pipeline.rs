@@ -2246,6 +2246,9 @@ fn main() { add(1, 2); }
                 })
             })
             .count();
+        let dense = bytecode
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseStoreIndex);
         let bc_pins = bytecode
             .iter()
             .filter(|b| {
@@ -2255,19 +2258,26 @@ fn main() { add(1, 2); }
                 )
             })
             .count();
-        assert!(
-            il_index_pins >= 1,
-            "retained IL should contain IndexPin*; il_index_pins={il_index_pins}"
-        );
-        assert!(
-            il_pins >= 1,
-            "retained IL should contain StoreIndexPin*; il_pins={il_pins} il_index_pins={il_index_pins} stats={:?}",
-            crate::last_bounds_stats()
-        );
-        assert_eq!(
-            bc_pins, il_pins,
-            "bytecode should preserve StoreIndexPin* count; il={il_pins} bc={bc_pins}"
-        );
+        if dense {
+            assert_eq!(
+                bc_pins, 0,
+                "D0 dense nsieve cannot keep pin keys; bc_pins={bc_pins}"
+            );
+        } else {
+            assert!(
+                il_index_pins >= 1,
+                "retained IL should contain IndexPin*; il_index_pins={il_index_pins}"
+            );
+            assert!(
+                il_pins >= 1,
+                "retained IL should contain StoreIndexPin*; il_pins={il_pins} il_index_pins={il_index_pins} stats={:?}",
+                crate::last_bounds_stats()
+            );
+            assert_eq!(
+                bc_pins, il_pins,
+                "bytecode should preserve StoreIndexPin* count; il={il_pins} bc={bc_pins}"
+            );
+        }
     }
 
     #[test]

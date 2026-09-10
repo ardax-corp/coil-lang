@@ -3300,7 +3300,9 @@ fn nsieve(int n) -> int {
     return count;
 }
 fn main() {
-    let _ = nsieve(16);
+    if nsieve(16) != 6 {
+        panic "nsieve";
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
@@ -3317,35 +3319,41 @@ fn main() {
             .unwrap_or(bc.len());
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
-        let dense = body.iter().any(|b| *b.bytecode() == Instruction::DenseBin);
-        let has_store = body.iter().any(|b| {
-            matches!(
-                *b.bytecode(),
-                Instruction::StoreIndex
-                    | Instruction::StoreIndexUnchecked
-                    | Instruction::StoreIndexPin
-                    | Instruction::StoreIndexPinUnchecked
-            )
-        });
-        let has_index = body.iter().any(|b| {
-            matches!(
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "D0: nsieve keeps dense after lift; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| matches!(
                 *b.bytecode(),
                 Instruction::Index
                     | Instruction::IndexUnchecked
-                    | Instruction::IndexPin
-                    | Instruction::IndexPinUnchecked
-            )
-        });
-        assert!(
-            !dense,
-            "S3 leftover: nsieve stays fuse-IL; opcodes={names:?}"
+                    | Instruction::DenseIndex
+            )),
+            "nsieve keeps Index; opcodes={names:?}"
         );
         assert!(
-            has_store && has_index,
-            "nsieve keeps index/store; opcodes={names:?}"
+            body.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::DenseStoreIndex
+            )),
+            "nsieve keeps StoreIndex; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+                    | Instruction::ArrayPin
+            )),
+            "dense Seek cannot keep pin keys; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "nsieve checksum; opcodes={names:?}");
     }
 
     #[test]
