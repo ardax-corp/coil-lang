@@ -3338,4 +3338,125 @@ fn main() {
             "last arm must keep y + 2"
         );
     }
+
+    #[test]
+    fn q6_for_in_array_sum_takes_vreduce() {
+        let src = r#"
+fn sum(Vec<int> arr) -> int {
+    let acc = 0;
+    for x in arr {
+        acc = acc + x;
+    }
+    return acc;
+}
+fn main() {
+    let v: Vec<int> = Vec::from([1, 2, 3, 4]);
+    if sum(v) != 10 {
+        panic "for-in checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile for-in sum");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols.iter().position(|s| s.name == "sum").expect("sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::VReduce),
+            "Q6 counted for-in should VReduce; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::Index
+                    | Instruction::IndexUnchecked
+                    | Instruction::IndexPin
+                    | Instruction::IndexPinUnchecked
+                    | Instruction::DenseIndex
+            )),
+            "scalar tail keeps Index; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "for-in checksum");
+    }
+
+    #[test]
+    fn q6_for_in_range_sum_takes_dense() {
+        let src = r#"
+fn range_sum(int n) -> int {
+    let acc = 0;
+    for x in 0..n {
+        acc = acc + x;
+    }
+    return acc;
+}
+fn main() {
+    if range_sum(5) != 10 {
+        panic "range checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile range for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "range_sum")
+            .expect("range_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "Q6 literal range for-in should DenseBin; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::MakeDict | Instruction::GetField | Instruction::STRING
+            )),
+            "literal 0..n must not box a range dict; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "range checksum");
+    }
+
+    #[test]
+    fn q6_for_in_range_assign_to_x_keeps_trip_count() {
+        let src = r#"
+fn trips() -> int {
+    let n = 0;
+    for x in 0..3 {
+        x = 100;
+        n = n + 1;
+    }
+    return n;
+}
+fn main() {
+    if trips() != 3 {
+        panic "range assign checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile range assign");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "range assign checksum");
+    }
 }

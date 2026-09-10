@@ -86,7 +86,7 @@ out of MIR until a later cut. Spec:
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
 | Recursion (`tak` / `fib`) | fuse-IL (`CALL` / `TailCall`) | today refuse on the callee; **Q7** commits dense/LIR recursion. S3 may already dense a *caller* loop that `CALL`s them |
-| `for` / iterators | fuse-IL (`for_in_sum`) | **Q6** — MIR-friendly protocol; not a permanent fuse-IL ceiling |
+| `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); `main` + format and user `Iterator` / coro / dict / first-class range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |
 

@@ -10070,9 +10070,16 @@ impl Compiler {
         let _ = self.next_emit_id();
         let binding_slot = self.alloc_binding_slot(binding_name);
 
+        // Counted protocol: no `continue` → while-shaped latch (body==latch)
+        // so MIR vectorize / dense can match `while i < len`.
+        let split_continue = crate::const_fold::body_has_continue(body);
         let mut bb = BlockBuilder::new();
         let top_label = bb.fresh_label(self.bytecode.il_mut());
-        let continue_label = bb.fresh_label(self.bytecode.il_mut());
+        let continue_label = if split_continue {
+            Some(bb.fresh_label(self.bytecode.il_mut()))
+        } else {
+            None
+        };
         let exit_label = bb.fresh_label(self.bytecode.il_mut());
         bb.bind_label(top_label, self.bytecode.il_mut());
 
@@ -10093,7 +10100,8 @@ impl Compiler {
         }
         self.bytecode.push_store_pop(binding_slot);
 
-        self.loop_stack.push((continue_label, exit_label));
+        self.loop_stack
+            .push((continue_label.unwrap_or(top_label), exit_label));
         self.loop_bbs.push(bb);
         let mut body_bc = self.do_compile(body);
         self.bytecode.append(&mut body_bc);
@@ -10104,7 +10112,9 @@ impl Compiler {
         self.loop_stack
             .pop()
             .expect("loop label stack balanced for for-in array");
-        bb.bind_label(continue_label, self.bytecode.il_mut());
+        if let Some(continue_label) = continue_label {
+            bb.bind_label(continue_label, self.bytecode.il_mut());
+        }
         // idx = idx + 1
         self.bytecode.push_load(idx_slot);
         self.bytecode.push_const(1);
@@ -10189,10 +10199,11 @@ impl Compiler {
         let cur_slot = self.alloc_temp_slot();
         let end_slot = self.alloc_temp_slot();
 
-        match iterable.1.as_ref() {
+        // Pratt often wraps `0..n` in Expr/Group. Peel so the counted
+        // locals path runs; first-class range values stay dict+GetField.
+        match unwrap_expr_output(iterable).1.as_ref() {
             Expression::Range { start, end, .. } => {
-                // Consume the Range node's ID (pre-walk: Range → start → end).
-                let _ = self.next_emit_id();
+                self.skip_emit_ids_to_unwrapped(iterable);
                 let mut start_bc = self.do_compile(start);
                 self.bytecode.append(&mut start_bc);
                 self.bytecode.push_store_pop(cur_slot);
@@ -10222,16 +10233,29 @@ impl Compiler {
 
         // Consume binding Identifier NodeId (iterable → binding → body).
         let _ = self.next_emit_id();
+        let alias_iv = !crate::const_fold::body_assigns_ident(body, binding_name);
         let binding_slot = self.alloc_binding_slot(binding_name);
+        if alias_iv {
+            // `x` is the IV (while-shaped). A copy DestProp-kills the increment.
+            self.bytecode.push_load(cur_slot);
+            self.bytecode.push_store_pop(binding_slot);
+            // After the preheader copy, step and cond use the named slot.
+        }
+        let iv_slot = if alias_iv { binding_slot } else { cur_slot };
 
+        let split_continue = crate::const_fold::body_has_continue(body);
         let mut bb = BlockBuilder::new();
         let top_label = bb.fresh_label(self.bytecode.il_mut());
-        let continue_label = bb.fresh_label(self.bytecode.il_mut());
+        let continue_label = if split_continue {
+            Some(bb.fresh_label(self.bytecode.il_mut()))
+        } else {
+            None
+        };
         let exit_label = bb.fresh_label(self.bytecode.il_mut());
         bb.bind_label(top_label, self.bytecode.il_mut());
 
         // cond: cur < end  (half-open) or cur <= end (inclusive)
-        self.bytecode.push_load(cur_slot);
+        self.bytecode.push_load(iv_slot);
         self.bytecode.push_load(end_slot);
         self.bytecode.push(Byte::new(if float {
             if inclusive {
@@ -10246,11 +10270,13 @@ impl Compiler {
         }));
         bb.emit_jump_to(exit_label, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
 
-        // x = cur
-        self.bytecode.push_load(cur_slot);
-        self.bytecode.push_store_pop(binding_slot);
+        if !alias_iv {
+            self.bytecode.push_load(cur_slot);
+            self.bytecode.push_store_pop(binding_slot);
+        }
 
-        self.loop_stack.push((continue_label, exit_label));
+        self.loop_stack
+            .push((continue_label.unwrap_or(top_label), exit_label));
         self.loop_bbs.push(bb);
         let mut body_bc = self.do_compile(body);
         self.bytecode.append(&mut body_bc);
@@ -10261,9 +10287,11 @@ impl Compiler {
         self.loop_stack
             .pop()
             .expect("loop label stack balanced for for-in range");
-        bb.bind_label(continue_label, self.bytecode.il_mut());
+        if let Some(continue_label) = continue_label {
+            bb.bind_label(continue_label, self.bytecode.il_mut());
+        }
         // cur = cur + 1  (or + 1.0 for float)
-        self.bytecode.push_load(cur_slot);
+        self.bytecode.push_load(iv_slot);
         if float {
             let bits = Value::from(1.0_f64).raw() as u64;
             let idx = self.intern_constant(bits);
@@ -10273,7 +10301,7 @@ impl Compiler {
             self.bytecode.push_const(1);
             self.bytecode.push(Byte::new(Instruction::ADD));
         }
-        self.bytecode.push_store_pop(cur_slot);
+        self.bytecode.push_store_pop(iv_slot);
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
