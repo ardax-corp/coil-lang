@@ -1198,6 +1198,11 @@ fn main() {
                     | Instruction::VMove
                     | Instruction::VReduce
                     | Instruction::VFma
+                    | Instruction::DenseIndex
+                    | Instruction::DenseStoreIndex
+                    | Instruction::DenseArrayLen
+                    | Instruction::DenseMake
+                    | Instruction::DensePush
             )
         });
         assert!(!dense, "I7: debugger-attached must stay on fuse-IL");
