@@ -45,10 +45,10 @@ pub fn emit_dense(
             "dense emit refuses I4 string HostInvoke".into(),
         ));
     }
-    let plan = ConvoyPlan::new(func);
+    let plan = ConvoyPlan::new(func, entry_label);
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
     let regs = coalesce_safe_latch_phis(func, regs);
-    let gather = gather_window(func);
+    let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
         .iter()
@@ -113,6 +113,7 @@ pub fn emit_dense(
                     func,
                     &plan,
                     &regs,
+                    scratch,
                     pool,
                     loc,
                 )?;
@@ -734,6 +735,7 @@ fn emit_term(
                             func,
                             plan,
                             regs,
+                            scratch,
                             pool,
                             loc,
                         )?;
@@ -1073,11 +1075,12 @@ fn cmp_kind(op: MirCmpOp, ty: MirTy) -> Result<u8, LowerError> {
     Ok(dense::pack_cmp(lane, pred))
 }
 
-fn gather_window(func: &MirFunc) -> u8 {
+fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
     let mut n = 0u8;
     for b in &func.blocks {
         for inst in &b.insts {
             let w = match inst {
+                MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
                 MirInst::HostInvoke { args, .. } => args.len(),
                 MirInst::Alloc { elems, .. } => elems.len(),
                 _ => 0,
@@ -1137,9 +1140,28 @@ fn emit_call(
     func: &MirFunc,
     plan: &ConvoyPlan,
     regs: &[u8],
+    scratch: u8,
     pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
+    if !plan.is_self_call(target) {
+        stacked.clear();
+        emit_dense_push(out, args, regs, scratch, loc)?;
+        out.push(IlOp::Entry {
+            kind,
+            arity: args.len() as u32,
+            target,
+            loc,
+            ret_words: 1,
+        });
+        if kind != crate::il::EntryKind::TailCall && plan.needs_slot(dest) {
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        return Ok(());
+    }
     emit_args_on_stack(out, stacked, args, func, plan, regs, pool, loc)?;
     out.push(IlOp::Entry {
         kind,

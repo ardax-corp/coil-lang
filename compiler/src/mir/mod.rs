@@ -1222,6 +1222,46 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_sibling_tail_even_odd_stays_correct() {
+        let src = r#"
+fn even(int n) -> int {
+    if n == 0 {
+        return 1;
+    }
+    return odd(n - 1);
+}
+fn odd(int n) -> int {
+    if n == 0 {
+        return 0;
+    }
+    return even(n - 1);
+}
+fn main() {
+    let _ = even(10) + odd(10) + even(1) + odd(1);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile sibling tail");
+        let even = p.function_offset("even").expect("even");
+        let odd = p.function_offset("odd").expect("odd");
+        let main = p.function_offset("main").expect("main");
+        let even_end = odd.min(main);
+        let even_bc = if even < even_end { &bc[even..even_end] } else { &bc[even..] };
+        assert!(
+            !even_bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::DenseBin | Instruction::DensePush | Instruction::DenseConst
+            )),
+            "sibling TailCall must stay fuse-IL; opcodes={:?}",
+            even_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "even/odd sibling TailCall must run");
+    }
+
+    #[test]
     fn pipeline_eval_a_follows_straight_line_work_gate() {
         let src = r#"
 fn eval_a(int i, int j) -> float {
