@@ -4720,19 +4720,30 @@ fn main() {
 "#;
         let mut pipeline = crate::Pipeline::new();
         let (bc, constants) = pipeline.compile_src(src).expect("compile");
-        for fname in ["pack", "nested"] {
-            let off = pipeline
-                .compiler_mut()
-                .get_function(fname)
-                .unwrap_or_else(|| panic!("{fname}"));
-            let fn_bc = &bc[off..];
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let nested_off = pipeline
+            .compiler_mut()
+            .get_function("nested")
+            .expect("nested");
+        let field_off = pipeline
+            .compiler_mut()
+            .get_function("field_and_call")
+            .expect("field_and_call");
+        for (fname, start, end) in [
+            ("pack", pack_off, nested_off),
+            ("nested", nested_off, field_off),
+        ] {
+            let fn_bc = &bc[start..end];
             let names: Vec<_> = fn_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
             let makes = fn_bc
                 .iter()
                 .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
                 .count();
-            assert!(
-                makes == 1,
+            assert_eq!(
+                makes, 1,
                 "{fname}: one box for two escapes; opcodes={names:?}"
             );
         }

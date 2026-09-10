@@ -12872,8 +12872,11 @@ impl Compiler {
                 bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(3));
             }
             Expression::Index(target, Some(index)) => {
-                // Const index into a multi-slot stack array → direct LOAD.
                 if let Expression::Identifier(name) = target.1.as_ref()
+                    && let Some(box_slot) = self.stack_array_boxed_slot(name)
+                {
+                    self.emit_boxed_array_load(&mut bytecode, box_slot, index);
+                } else if let Expression::Identifier(name) = target.1.as_ref()
                     && let Some((base, n)) = self.stack_array_info(name)
                     && let Expression::Integer(idx) = index.1.as_ref()
                     && *idx >= 0
@@ -14284,6 +14287,11 @@ impl Compiler {
                 }
                 Expression::Index(arr, Some(idx)) => {
                     if let Expression::Identifier(name) = arr.1.as_ref()
+                        && let Some(box_slot) = self.stack_array_boxed_slot(name)
+                    {
+                        self.append_binding_rhs(&mut bytecode, value);
+                        self.emit_boxed_array_store(&mut bytecode, box_slot, idx, true);
+                    } else if let Expression::Identifier(name) = arr.1.as_ref()
                         && let Some((base, n)) = self.stack_array_info(name)
                         && let Expression::Integer(i) = idx.1.as_ref()
                         && *i >= 0
