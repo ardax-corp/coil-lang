@@ -19,8 +19,7 @@ rungs are **not** in this table — see ladders below and
 
 | Wall | Today | Commit |
 |------|-------|--------|
-| I4 `from_bytes` / `to_bytes` (dense HostInvoke) | fuse-IL / I6 typed, off dense | **Q9** R2 |
-| Unicode / regex in SSA | out of MIR | later Q9 rung |
+| Unicode / regex in SSA | out of MIR | later Q9 rung (R4 / B9) |
 | Mutual / two-slot recursive `CALL` | fuse-IL | later Q7 rung |
 | User `Iterator` / coro / dict / first-class range `for` | fuse-IL | later Q6 rung |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
@@ -40,6 +39,7 @@ rungs are **not** in this table — see ladders below and
 | Two-slot helper `CALL` / `RETURN` | **B3** eligible | Cost gate; LIR reconstructs width-2 `CALL`; dense may keep |
 | Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
 | `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR | Cost gate; dense infer still refuses |
+| `from_bytes` / `to_bytes` | **Q9** R2 I6 dense HostInvoke | Cost gate; box at the host edge; LIR still cannot reconstruct HostInvoke |
 | Compare-only (no float/i64/i32 arith) | I8 LIR or fuse-IL | Cost gate |
 
 Post-loop-only `return [x]` stays fuse-IL so invert+fuse (COI-87) stays
@@ -59,9 +59,9 @@ Folded former floors:
   are a soundness check, not a prove-frame cap.
 - **W4 HostInvoke id allowlists** — LICM hoists when purity bits say
   scalar-pure (`classify_host_name`) and the native is not heap-reading
-  `packed_*`. Dense emit already reconstructs other I6-typed hosts except
-  I4 string bytes (`from_bytes` / `to_bytes`). Q9 R1 reconstructs
-  `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` on MIR→LIR.
+  `packed_*`. Dense emit reconstructs I6-typed hosts, including Q9 R2
+  `from_bytes` / `to_bytes`. Q9 R1 reconstructs `STRING` / `PRINT` /
+  `FORMAT` / `STRINGIFY` on MIR→LIR.
 
 Loops amortize prologue `Seek`; they skip the static straight-line compare
 unless the reconstruct is a select diamond or leftover in-loop `Make*`.

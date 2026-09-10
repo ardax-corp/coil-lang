@@ -35,9 +35,10 @@ pub fn try_specialize_body(
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32. A
     // back-edge or a straight-line numeric body may lift; keep/refuse is
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
-    // open), I6 HostInvoke except I4 string bytes, heap index / ArrayLen /
-    // StoreIndex (dense residuals after V*). FORMAT / string ops stay
-    // off dense (I4 / Q9 R1 is MIR→LIR). Q6 counted `for` is i64 + index.
+    // open), I6 HostInvoke including Q9 R2 `from_bytes` / `to_bytes`, heap
+    // index / ArrayLen / StoreIndex (dense residuals after V*). FORMAT /
+    // STRING / PRINT / STRINGIFY stay off dense (Q9 R1 is MIR→LIR). Q6
+    // counted `for` is i64 + index.
     // Q8: niche / two-slot match may dense when the reconstruct beats
     // fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
     // dense only when S2b maps exist (S2c). S2d: mapped *preheader*

@@ -13,8 +13,8 @@
 //! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
 //! | Two-slot return | 2 | `[payload, tag]` / `[a, b]` (B3; cost gate vs fuse) |
 //!
-//! HostInvoke: LICM hoists scalar-pure math; S3 emits I6-typed hosts except
-//! I4 string bytes. User `CALL` uses this map when the callee is already
+//! HostInvoke: LICM hoists scalar-pure math; S3 / Q9 R2 emit I6-typed hosts
+//! including `from_bytes` / `to_bytes`. User `CALL` uses this map when the callee is already
 //! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
 //! self-`CALL` / `TailCall` use the open one-word ABI. Two-slot self /
 //! mutual recursion stay refuse (later Q7 / B7). `CallIndirect` stays refuse.

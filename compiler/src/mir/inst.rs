@@ -261,6 +261,8 @@ pub enum MirInst {
     HostInvoke {
         dest: ValueId,
         native_id: u16,
+        /// `common::HOST_ENUM_LAYOUT_*` packed on reconstruct.
+        layout: u8,
         args: Vec<ValueId>,
     },
     /// Dense / LIR `CALL` (COI-291 / B3). Args stay on the operand stack

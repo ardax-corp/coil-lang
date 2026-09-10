@@ -2,8 +2,8 @@
 //!
 //! R1: table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may enter
 //! MIR→LIR. Dense infer still refuses so numeric specialize is unchanged.
-//! `string::{from_bytes,to_bytes}` stay off dense (R2). Unicode / regex
-//! stay out.
+//! `string::{from_bytes,to_bytes}` are I6 dense HostInvoke (R2). Unicode /
+//! regex stay out (R4 / B9).
 
 use common::Instruction;
 
@@ -43,7 +43,8 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
     }
 }
 
-/// Dense specialize still refuses I4 string / format (R1).
+/// Dense specialize still refuses table `STRING` / `PRINT` / `FORMAT` /
+/// `STRINGIFY` (R1). Byte hosts are HostInvoke, not this set.
 pub fn refuses_dense_string(op: &IlOp) -> bool {
     is_string_il(op)
 }

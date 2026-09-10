@@ -47,7 +47,9 @@ pub enum LirRefuse {
 /// — Q7 densifies one-word self-`CALL` instead), escaping fields, box,
 /// multi-payload `Unpack` / `JumpIfMatch` arity > 1. Counted `for` (Q6)
 /// and niche / two-slot match arity ≤ 1 (Q8) are not LIR walls. Q9 R1:
-/// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Heap index /
+/// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Q9 R2 densifies
+/// `from_bytes` / `to_bytes` HostInvoke (LIR still cannot reconstruct
+/// HostInvoke). Heap index /
 /// `ArrayLen` / `StoreIndex` may lift (A2).
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 /// S2c: mapped alloc is not a hard refuse ([`lir_eligible_with`]).

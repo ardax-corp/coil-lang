@@ -1,7 +1,7 @@
 //! I6 — HostInvoke / CALL effect edges from the typechecker purity sidecar.
 //!
-//! Dense emit reconstructs I6-typed HostInvoke edges except I4 string
-//! bytes. Impure edges are LICM/CSE barriers and never hoist. LICM hoist
+//! Dense emit reconstructs I6-typed HostInvoke edges, including Q9 R2
+//! `from_bytes` / `to_bytes`. Impure edges are LICM/CSE barriers and never hoist. LICM hoist
 //! is purity bits (plus heap-read), not a HostInvoke id allowlist.
 
 use crate::typechecking::purity::{classify_host_name, EffectFlags};
@@ -72,6 +72,12 @@ mod tests {
         assert!(host_effects(CLOCK_SLEEP_MS_ID).contains(EffectFlags::HOST));
         assert!(!host_is_pure(6)); // write
         assert!(host_effects(6).contains(EffectFlags::IO));
+        assert!(!host_is_pure(10)); // from_bytes
+        assert!(!host_is_pure(11)); // to_bytes
+        assert!(host_effects(10).contains(EffectFlags::IO));
+        assert!(host_effects(11).contains(EffectFlags::IO));
+        assert!(!host_may_hoist(10));
+        assert!(!host_may_hoist(11));
         assert!(!host_is_pure(100)); // gc_collect
         assert!(host_effects(100).contains(EffectFlags::GC));
     }

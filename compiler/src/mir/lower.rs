@@ -73,8 +73,7 @@ pub struct LowerHints {
     pub allow_alloc: bool,
     /// S3: `Index` / `StoreIndex` / `ArrayLen` / `ArrayPin`.
     pub allow_index: bool,
-    /// I6: type HostInvoke (clocks / IO / GC / FFI names) as SSA edges.
-    /// Dense emit keeps I4 string bytes off.
+    /// I6: type HostInvoke (clocks / IO / GC / FFI / Q9 R2 bytes) as SSA edges.
     pub allow_effects: bool,
     /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
     /// Production specialize leaves this off; emit still refuses.
@@ -671,7 +670,7 @@ fn lower_op(
         | IlOp::ConstReturnImm { .. }
         | IlOp::BinReturn { .. } => Ok(()),
         IlOp::HostInvoke { arity, layout, .. } => {
-            if *layout != 0 {
+            if !super::host_allow::dense_host_layout_ok(*layout) {
                 return Err(LowerError::Refused("HostInvoke layout".into()));
             }
             let n = *arity as usize;
@@ -685,7 +684,7 @@ fn lower_op(
             args.reverse();
             let fn_v = tos.pop().expect("fn id");
             if let Some(id) = const_native_id(b, fn_v) {
-                tos.push(b.ins_host_invoke(id, args)?);
+                tos.push(b.ins_host_invoke_layout(id, args, *layout)?);
                 return Ok(());
             }
             if hints.allow_alloc && hints.allow_effects {

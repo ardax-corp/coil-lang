@@ -52,10 +52,11 @@ refuses the new field ops.
 I4 / Q9 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse),
 [COI-332](https://linear.app/ardax/issue/COI-332))
 names `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` as SSA (R1) and
-reconstructs them on MIR→LIR. Dense infer still refuses so numeric
-specialize is unchanged. There is no second Format lowering and no
-dense HostInvoke for `from_bytes` / `to_bytes` yet. Unicode / regex are
-out of MIR. Ladder: [q9-format-string.md](q9-format-string.md).
+reconstructs them on MIR→LIR. Dense infer still refuses table ops so
+numeric specialize is unchanged. **R2** densifies `from_bytes` /
+`to_bytes` as I6 HostInvoke (box at the host edge). There is no second
+Format lowering. Unicode / regex are out of MIR. Ladder:
+[q9-format-string.md](q9-format-string.md).
 I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
 names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 `GcBarrier` safepoints. S2a
@@ -74,7 +75,7 @@ compare-only looping leftovers (LIR). S2e
 Post-loop-only heap returns stay fuse-IL (invert+fuse). Unmapped allocating bodies stay fuse-IL. S3
 ([COI-308](https://linear.app/ardax/issue/COI-308/s3-widen-densemir-coverage-match-call-heap-index))
 widens dense coverage: one-word `CALL` beyond the dense map, and I6
-HostInvoke except I4 string bytes. Heap-index / `StoreIndex` take dense after V* miss (S3b): unpinned
+HostInvoke including Q9 R2 `from_bytes` / `to_bytes`. Heap-index / `StoreIndex` take dense after V* miss (S3b): unpinned
 `Index` / `StoreIndex` / `ArrayLen`. Residual `StorePop` leaves tell at
 the prologue frame high-water; S2e does not emit a per-residual `Seek`.
 Pin opcodes stay fuse-IL / proven stack-IL only — pin keys do not
@@ -155,7 +156,7 @@ Hit bench: `examples/perf/mir_dense_straight.hy`.
 Specialize no longer refuses a numeric body solely because it contains
 HostInvoke. LICM hoist is **purity bits** (scalar-pure math / axpy; not
 `packed_*` heap reads; not IO / clocks / GC). S3 dense emit reconstructs
-I6-typed hosts except I4 `from_bytes` / `to_bytes`. Precise float/heap
+I6-typed hosts including Q9 R2 `from_bytes` / `to_bytes`. Precise float/heap
 types still live on math / packed / axpy specs.
 
 I6
