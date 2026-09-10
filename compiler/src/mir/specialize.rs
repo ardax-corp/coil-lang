@@ -3,7 +3,7 @@
 
 use common::Instruction;
 
-use crate::il::{IlOp, Label};
+use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::abi::{DenseAbi, DenseCallMap};
 use super::emit::emit_dense;
@@ -72,7 +72,11 @@ pub fn try_specialize_body(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     hints.allow_effects = true;
-    hints.allow_match = true;
+    hints.allow_match = match_shaped_il(ops)
+        || inferred
+            .slot_ty
+            .values()
+            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
     let _heap_index = super::infer::has_heap_index(ops);
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params
@@ -148,6 +152,53 @@ pub fn try_specialize_body(
         return None;
     }
     Some((out, abi))
+}
+
+/// Q8: JumpIfMatch / last-arm Unpack, or fuse-IL tag/niche peek (`DUP` +
+/// `EQ`/`LogNot` + cond jump). Do not treat every stack-carrying diamond
+/// as match — that densifies `if !flag` and drops LogNotJmpt.
+fn match_shaped_il(ops: &[IlOp]) -> bool {
+    let mut i = 0;
+    while i < ops.len() {
+        match &ops[i] {
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { arity, .. },
+                ..
+            } if *arity <= 1 => return true,
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => return true,
+            IlOp::Dup { .. } => {
+                if peek_tag_or_niche_test(&ops[i + 1..]) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+fn peek_tag_or_niche_test(ops: &[IlOp]) -> bool {
+    match ops {
+        [IlOp::LogNot { .. }, IlOp::Jump { kind, .. }, ..]
+            if matches!(
+                kind,
+                IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse
+            ) =>
+        {
+            true
+        }
+        [IlOp::Const { .. }, IlOp::Bin { op, .. }, IlOp::Jump { kind, .. }, ..]
+            if matches!(*op, Instruction::EQ | Instruction::NEQ)
+                && matches!(
+                    kind,
+                    IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse
+                ) =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Index / open CALL dests default to i64 when the next IL is StorePop.

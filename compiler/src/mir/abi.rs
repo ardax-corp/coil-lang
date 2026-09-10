@@ -42,7 +42,7 @@ pub type DenseCallMap = HashMap<u32, DenseAbi>;
 impl DenseAbi {
     /// Word-layout numeric params + one specialized return. Two-slot refuses.
     pub fn from_func(func: &MirFunc) -> Option<Self> {
-        if func.ret_layout != MirLayout::Word {
+        if !matches!(func.ret_layout, MirLayout::Word | MirLayout::HeapNiche) {
             return None;
         }
         let ret = func.ret_ty?;
