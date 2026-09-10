@@ -86,8 +86,8 @@ escaped `self`.
 HeapField. Maps first (this ticket); native reconstruct is D2 so the
 cost gate can keep.
 
-**Perf surface:** `examples/perf/field_hot.hy` (maps bind; body stays
-fuse-IL). Escaping `new` + `take`. Not `nsieve`. Not trees walk.
+**Perf surface:** `examples/perf/field_hot.hy` (`hot` maps, stays fuse-IL;
+printing `main` stays unmapped). Escaping `new` + `take`. Not `nsieve`.
 
 **Effort:** done. D2 is medium + archive minor if a new dense field op.
 
@@ -103,7 +103,7 @@ fuse-IL). Escaping `new` + `take`. Not `nsieve`. Not trees walk.
 **Hunch that does not hold:** “I3 field-SROA will densify `field_hot`.”
 `field_hot` calls methods on a live object (`self` identity). Q2 boxes
 once. I3 is non-escaping locals only. `perf_field_hot_reuses_repeated_string_keys`
-still requires `GetField`.
+still requires `GetField`/`LoadField`.
 
 **Blocker:** no dense field opcode / Object `DenseMake`; LIR field reconstruct
 only for unboxed slots. Coupled to (2): maps first, then native ops so the

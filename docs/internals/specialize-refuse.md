@@ -92,7 +92,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range_param.hy` | dense counted i64 | **C2** Range parameter |
 | `range_sum` | `for_in_range_ret.hy` | dense counted i64 | **C2** returned Range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
-| `main` | `field_hot.hy` | fuse-IL + maps | **D1** InitTyped+GetField maps; HeapField LIR wall; cost gate |
+| `hot` | `field_hot.hy` | fuse-IL + maps | **D1** InitTyped+GetField maps; HeapField LIR wall; cost gate; `main` prints |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
 | sibling `TailCall` (even/odd) | `tail_sibling.hy` | dense or fuse-IL | **B7** stack-arg `TailCall` + cost gate |
 | self two-slot `CALL` / `RETURN` | `self_two_slot.hy` / `option_self_call.hy` | dense, LIR, or fuse-IL | **C1** dest + `dest_hi`; cost gate vs fuse |

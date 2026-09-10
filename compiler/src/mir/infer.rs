@@ -305,6 +305,7 @@ fn infer_walk(
                     &mut has_i32,
                     &mut has_float_arith,
                     &mut has_i64_arith,
+                    reuse,
                 )?;
             }
             IlOp::BinSlotImm { op, slot, .. } => {
@@ -319,7 +320,7 @@ fn infer_walk(
                 if is_int_arith(inst) {
                     has_i64_arith = true;
                 }
-                set_slot(&mut slot_ty, u32::from(*slot), ty)?;
+                set_slot_reuse(&mut slot_ty, u32::from(*slot), ty, reuse)?;
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
@@ -338,8 +339,8 @@ fn infer_walk(
                 if is_int_arith(inst) {
                     has_i64_arith = true;
                 }
-                set_slot(&mut slot_ty, u32::from(*a), ty)?;
-                set_slot(&mut slot_ty, u32::from(*b), ty)?;
+                set_slot_reuse(&mut slot_ty, u32::from(*a), ty, reuse)?;
+                set_slot_reuse(&mut slot_ty, u32::from(*b), ty, reuse)?;
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
@@ -436,7 +437,7 @@ fn infer_walk(
                     } else {
                         has_i64_arith = true;
                     }
-                    set_slot(&mut slot_ty, slot as u32, ty)?;
+                    set_slot_reuse(&mut slot_ty, slot as u32, ty, reuse)?;
                 }
                 Instruction::STRING if mode.allows_string() => {
                     stack.push(Cell {
@@ -582,6 +583,7 @@ fn infer_walk(
                     &mut has_i32,
                     &mut has_float_arith,
                     &mut has_i64_arith,
+                    reuse,
                 )?;
             }
             _ => {
@@ -1249,6 +1251,7 @@ fn apply_bin(
     has_i32: &mut bool,
     has_float_arith: &mut bool,
     has_i64_arith: &mut bool,
+    reuse: bool,
 ) -> Result<(), LowerError> {
     let rhs = stack
         .pop()
@@ -1300,8 +1303,8 @@ fn apply_bin(
     if is_int_arith(inst) {
         *has_i64_arith = true;
     }
-    paint(slot_ty, pool_ty, lhs, ty)?;
-    paint(slot_ty, pool_ty, rhs, ty)?;
+    paint_slots(slot_ty, pool_ty, lhs, ty, reuse)?;
+    paint_slots(slot_ty, pool_ty, rhs, ty, reuse)?;
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
@@ -1560,10 +1563,6 @@ fn paint_slots(
     }
 }
 
-fn set_slot(map: &mut HashMap<u32, MirTy>, slot: u32, ty: MirTy) -> Result<(), LowerError> {
-    set_slot_reuse(map, slot, ty, false)
-}
-
 fn set_slot_reuse(
     map: &mut HashMap<u32, MirTy>,
     slot: u32,
@@ -1582,7 +1581,7 @@ fn set_slot_reuse(
                 map.insert(slot, j);
                 Ok(())
             } else if reuse {
-                // Map drafts: ctor temps recycle as i64/bool after the object is stored.
+                // Map drafts: temps recycle as i64/bool after the object is stored.
                 map.insert(slot, ty);
                 Ok(())
             } else {
