@@ -4604,6 +4604,58 @@ fn main() {
         assert!(!vm.panicked(), "pack(6)==12; opcodes={names:?}");
     }
 
+    /// Q1: `test()` harness + box-once call-arg (no tiny-inline of `[T; N]`).
+    #[test]
+    fn stack_array_test_harness_call_arg() {
+        let src = r#"
+fn sum3([int; 3] xs) -> int {
+    return xs[0] + xs[1] + xs[2];
+}
+test("fixed local escapes to callee") {
+    let a = [4, 5, 6];
+    a[1] = 50;
+    assert(sum3(a) == 60)?;
+    assert(a[1] == 50)?;
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        pipeline.set_include_tests(true);
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let cases = pipeline.test_cases().to_vec();
+        assert_eq!(cases.len(), 1);
+        let mut machine = machine::Machine::<256>::default();
+        pipeline.wire_host_natives(&mut machine);
+        machine.init_static_slots(pipeline.static_slot_count());
+        machine.load_program(&bc, &constants, pipeline.strings());
+        let ret = machine.call_function(cases[0].1, &[]);
+        assert!(!machine.panicked(), "test panic");
+        assert!(machine.result_is_ok(ret), "sum3(a)==60 in test()");
+    }
+
+    #[test]
+    fn stack_array_test_harness_zip_locals() {
+        let src = r#"
+test("zip locals") {
+    let x = 1;
+    let xs = [x, x + 1];
+    let ys = [3, 4];
+    let z = xs + ys;
+    assert(z[0] + z[1] == 10)?;
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        pipeline.set_include_tests(true);
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let cases = pipeline.test_cases().to_vec();
+        let mut machine = machine::Machine::<256>::default();
+        pipeline.wire_host_natives(&mut machine);
+        machine.init_static_slots(pipeline.static_slot_count());
+        machine.load_program(&bc, &constants, pipeline.strings());
+        let ret = machine.call_function(cases[0].1, &[]);
+        assert!(!machine.panicked(), "test panic");
+        assert!(machine.result_is_ok(ret), "z[0]+z[1]==10");
+    }
+
     /// Q1: two escape edges share one heap object (mutation is visible).
     #[test]
     fn stack_array_box_once_identity() {

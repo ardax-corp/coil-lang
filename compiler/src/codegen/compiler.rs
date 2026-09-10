@@ -1590,6 +1590,17 @@ impl Compiler {
             return false;
         }
         let arg_slice = args.unwrap_or(&[]);
+        // Q1: stack-array args box to one heap object. Tiny-inline remaps
+        // callee Index as if the arg were scalar slots and breaks `test()`.
+        if arg_slice.iter().any(|a| {
+            let v = match a.1.as_ref() {
+                Expression::NamedArg(_, inner) => inner,
+                _ => a,
+            };
+            matches!(unwrap_expr_output(v).1.as_ref(), Expression::Identifier(n) if self.stack_array_info(n).is_some())
+        }) {
+            return false;
+        }
         let mut temps = Vec::new();
         let flat = self.flatten_call_args_for_emit(arg_slice);
         for arg in &flat {
@@ -12361,11 +12372,15 @@ impl Compiler {
                                     is_binding = true;
                                 } else if rhs_is_match {
                                     self.emit_binding_rhs(&children[1]);
+                                    self.context.stack_array_locals.remove(&name);
+                                    self.context.stack_array_box.remove(&name);
                                     let slot = self.alloc_binding_slot(&name);
                                     self.bytecode.push_store_pop(slot);
                                     is_binding = true;
                                 } else {
                                     self.append_binding_rhs(&mut bytecode, &children[1]);
+                                    self.context.stack_array_locals.remove(&name);
+                                    self.context.stack_array_box.remove(&name);
                                     let slot = self.alloc_binding_slot(&name);
                                     bytecode.push_store_pop(slot);
                                     is_binding = true;
@@ -14485,9 +14500,13 @@ impl Compiler {
                 self.test_cases.push((desc, offset));
 
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
+                let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
+                let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
                 let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
                 self.context.variables = Interner::default();
+                self.context.stack_array_locals.clear();
+                self.context.stack_array_box.clear();
 
                 let prev_result_mode = self.compiling_result_mode;
                 let prev_result_ok_is_result = self.compiling_result_ok_is_result;
@@ -14530,6 +14549,8 @@ impl Compiler {
                 self.compiling_try_fail = prev_try_fail;
                 self.field_key_slots = prev_field_keys;
                 self.context.variables = prev_fn_vars;
+                self.context.stack_array_locals = prev_stack_arrays;
+                self.context.stack_array_box = prev_stack_boxes;
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
             }
