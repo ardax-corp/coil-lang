@@ -4303,14 +4303,18 @@ let n = len(a); \
         );
 
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::ArrayPush)),
-            "expected `a.push(3)` thunk to emit ArrayPush"
+            bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ArrayPush | Instruction::DenseArrayPush
+            )),
+            "expected `a.push(3)` to emit ArrayPush or DenseArrayPush"
         );
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::ArrayLen)),
-            "expected `len(a)` to emit ArrayLen"
+            bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::ArrayLen | Instruction::DenseArrayLen
+            )),
+            "expected `len(a)` to emit ArrayLen or DenseArrayLen"
         );
         assert!(
             bc.iter()
