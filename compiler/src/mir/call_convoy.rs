@@ -7,10 +7,9 @@
 //! param slots are live.
 
 use super::func::MirFunc;
-use super::inst::{BlockId, MirInst, Terminator, ValueId};
+use super::inst::{BlockId, MirConst, MirInst, Terminator, ValueId};
 
 pub(super) struct ConvoyPlan {
-    pub convoy: Vec<bool>,
     pub need_slot: Vec<bool>,
     pub def: Vec<Option<(BlockId, usize)>>,
 }
@@ -75,20 +74,19 @@ impl ConvoyPlan {
             if fused[i] || convoy[i] {
                 continue;
             }
+            if rematerialize_const(func, &def[i]) {
+                continue;
+            }
             if def[i].is_some() || def_block[i].is_some() {
                 need_slot[i] = true;
             }
         }
 
+        let _ = convoy;
         Self {
-            convoy,
             need_slot,
             def,
         }
-    }
-
-    pub fn is_convoy(&self, v: ValueId) -> bool {
-        self.convoy.get(v.index()).copied().unwrap_or(false)
     }
 
     pub fn needs_slot(&self, v: ValueId) -> bool {
@@ -210,6 +208,19 @@ fn is_convoy_shape(
         }
     }
     saw
+}
+
+fn rematerialize_const(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
+    let Some((bid, idx)) = *def else {
+        return false;
+    };
+    matches!(
+        func.block(bid).insts.get(idx),
+        Some(MirInst::Const {
+            c: MirConst::I64(_) | MirConst::I32(_) | MirConst::Bool(_),
+            ..
+        })
+    )
 }
 
 fn consumer_keeps_tos(inst: &MirInst, convoy: &[bool]) -> bool {

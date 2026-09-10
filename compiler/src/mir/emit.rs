@@ -118,7 +118,7 @@ pub fn emit_dense(
                 )?;
                 continue;
             }
-            if plan.is_convoy(inst.dest()) {
+            if !plan.needs_slot(inst.dest()) {
                 continue;
             }
             emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, across_alloc)?;
@@ -276,8 +276,11 @@ fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
 pub(super) fn emit_br_cond(
     out: &mut Vec<IlOp>,
     block: &super::func::MirBlock,
+    func: &MirFunc,
+    plan: &ConvoyPlan,
     regs: &[u8],
     cond: ValueId,
+    pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     if let Some(MirInst::Cmp {
@@ -285,14 +288,38 @@ pub(super) fn emit_br_cond(
     }) = block.insts.iter().find(|inst| {
         matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
     }) {
+        if plan.needs_slot(*lhs)
+            && let Some(imm) = tree_i16(func, plan, *rhs)
+        {
+            out.push(IlOp::BinSlotImm {
+                op: stack_cmp_op(*op, *ty)? as u8,
+                slot: regs[lhs.index()],
+                imm,
+                loc,
+            });
+            return Ok(());
+        }
         out.push(IlOp::Load {
             slot: u32::from(regs[lhs.index()]),
             loc,
         });
-        out.push(IlOp::Load {
-            slot: u32::from(regs[rhs.index()]),
-            loc,
-        });
+        if plan.needs_slot(*rhs) {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[rhs.index()]),
+                loc,
+            });
+        } else {
+            emit_stack_value(
+                out,
+                &mut Vec::new(),
+                *rhs,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            )?;
+        }
         out.push(IlOp::Bin {
             op: stack_cmp_op(*op, *ty)?,
             loc,
@@ -645,7 +672,7 @@ fn emit_term(
         } => {
             let t_moves = phi_moves(func, block.id, *taken, regs, scratch);
             let f_moves = phi_moves(func, block.id, *not_taken, regs, scratch);
-            emit_br_cond(out, block, regs, *cond, loc)?;
+            emit_br_cond(out, block, func, plan, regs, *cond, pool, loc)?;
             if t_moves.is_empty() && f_moves.is_empty() {
                 emit_cond_jumps(
                     out,
