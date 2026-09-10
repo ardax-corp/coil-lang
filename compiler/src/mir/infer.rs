@@ -1,13 +1,14 @@
 //! Infer specialized slot types from pre-fuse IL (refuse heap / Value).
 //!
 //! Dense eligibility: float `+/−/×/÷`, i64 `+/−/×/÷/%` (or int `INC`/`DEC`),
-//! or unused `has_i32`, plus either a back-edge **or** a straight-line body
-//! that meets [`STRAIGHT_LINE_MIN_WORK_OPS`] (W3). S3: one-word `CALL` is
-//! ok without a dense callee map; I6-typed HostInvoke except I4 string
-//! bytes; heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes.
-//! Still refuse class field / match (dense) / string / unmapped alloc /
-//! multi-word `RETURN` / residual `Byte` / `Pow` / `AND`/`OR`. S2c maps
-//! allow alloc. Compare-only stays fuse-IL.
+//! or unused `has_i32`, plus a back-edge **or** a straight-line numeric
+//! body. Straight-line keep/refuse is the emit **cost gate** vs fuse-IL
+//! (not a work-op floor). S3: one-word `CALL` is ok without a dense callee
+//! map; I6-typed HostInvoke except I4 string bytes; heap index /
+//! `ArrayLen` / `StoreIndex` paint `heapref` lanes. Still refuse class
+//! field / match (dense) / string / unmapped alloc / multi-word `RETURN` /
+//! residual `Byte` / `Pow` / `AND`/`OR`. S2c maps allow alloc.
+//! Compare-only stays fuse-IL.
 
 use std::collections::HashMap;
 
@@ -22,17 +23,9 @@ use super::gc::refuse_reason as alloc_refuse_reason;
 use super::string_barrier::{is_format_inst, refuse_reason};
 use super::ty::MirTy;
 
-/// Minimum numeric work ops for a no-back-edge body to take dense specialize.
-///
-/// Loops amortize dense `Seek` + Value ABI at CALL/RETURN over many trips.
-/// A straight-line helper pays that tax once per CALL. Two-to-four-op
-/// helpers (`i + j * 2`) stay cheaper as fuse-IL. Eight work ops is past
-/// that handful and is the smallest integer that still leaves `eval_a`-sized
-/// kernels optional after stack-IL opts (below → refuse).
-pub const STRAIGHT_LINE_MIN_WORK_OPS: usize = 8;
-
 /// Bin / slot-bin plus residual INC/DEC/NEG/NEGF/`CastIntToFloat`.
-/// Load / Store / Const / control do not count.
+/// Load / Store / Const / control do not count. Size metric only;
+/// keep/refuse for straight-line dense is [`super::specialize`] cost vs fuse.
 pub fn numeric_work_ops(ops: &[IlOp]) -> usize {
     ops.iter().filter(|op| is_numeric_work_op(op)).count()
 }
@@ -192,14 +185,6 @@ fn infer_walk(
     seed: &HashMap<u32, MirTy>,
     allow_alloc: bool,
 ) -> Result<Inferred, LowerError> {
-    if mode == InferMode::Dense && !has_back_edge(ops) {
-        let work = numeric_work_ops(ops);
-        if work < STRAIGHT_LINE_MIN_WORK_OPS {
-            return Err(LowerError::Refused(format!(
-                "straight-line work {work} < {STRAIGHT_LINE_MIN_WORK_OPS}"
-            )));
-        }
-    }
     let mut slot_ty: HashMap<u32, MirTy> = seed.clone();
     let mut pool_ty = vec![None; pool_len];
     let mut stack: Vec<Cell> = Vec::new();

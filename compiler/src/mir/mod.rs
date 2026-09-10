@@ -17,16 +17,15 @@
 //! Specialized numeric loops lower to dense 3-address opcodes. Leftover
 //! bodies that [`entry`] accepts lift through MIR→LIR (`RETURN` width 1 or
 //! 2). Dense→dense `CALL` uses the one-word typed ABI ([`abi`]; COI-291).
-//! Allowlisted HostInvoke (W4) still boxes at the host edge. Escaping /
-//! heap-backed named class locals stay on [`crate::il`]. `FORMAT` /
-//! `STRING` / `STRINGIFY` / `PRINT` stay fuse-IL (I4). Allocating bodies
-//! may lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`;
-//! dense / LIR emit across alloc only when S2b maps exist (S2c), including
-//! mapped preheader `Make*` (S2d), Seek-less residuals (S2e), and S2f
-//! SROA / StoreIndex-array reuse. Impure HostInvoke / CALL are SSA barriers (I6); W4 dense
-//! allowlist stays closed. Debugger-attached compiles refuse dense /
-//! MIR→LIR (I7). I8 entry is infer+lower, not a two-slot/match/field
-//! accident.
+//! Typed HostInvoke still boxes at the host edge. Escaping / heap-backed
+//! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
+//! `STRINGIFY` / `PRINT` stay fuse-IL (I4 / Q9). Allocating bodies may
+//! lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`; dense / LIR
+//! emit across alloc only when S2b maps exist (S2c), including mapped
+//! preheader `Make*` (S2d), Seek-less residuals (S2e), and S2f SROA /
+//! StoreIndex-array reuse. Impure HostInvoke / CALL are SSA barriers
+//! (I6); LICM hoist uses purity bits. Debugger-attached compiles refuse
+//! dense / MIR→LIR (I7). I8 entry is lift + cost gate after hard walls.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;
@@ -71,9 +70,7 @@ pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
 };
-pub use infer::{
-    STRAIGHT_LINE_MIN_WORK_OPS, infer_lir_with_seed, infer_stack_map, numeric_work_ops,
-};
+pub use infer::{infer_lir_with_seed, infer_stack_map, numeric_work_ops};
 pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;
@@ -892,7 +889,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_refuses_straight_line_below_work_gate() {
+    fn pipeline_refuses_straight_line_when_cost_loses() {
         let src = r#"
 fn eval_a(int i, int j) -> int {
     return i + j * 2;
@@ -905,7 +902,7 @@ fn main() {
         let (bc, constants) = p.compile_src(src).expect("compile below-gate i64");
         assert!(
             !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "straight-line below STRAIGHT_LINE_MIN_WORK_OPS stays fuse-IL"
+            "tiny straight-line helper loses the dense cost gate vs fuse-IL"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -950,11 +947,10 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile above-gate kernel");
-        assert_eq!(STRAIGHT_LINE_MIN_WORK_OPS, 8);
         assert_eq!(numeric_work_ops(&[]), 0);
         assert!(
             bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "straight-line above work-op gate must emit DenseBin"
+            "straight-line kernel that beats fuse-IL cost must emit DenseBin"
         );
         assert!(
             !bc.iter().any(|b| matches!(
@@ -1144,7 +1140,7 @@ fn main() {
         let dense = bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin);
         assert!(
             dense,
-            "nbody eval_a meets STRAIGHT_LINE_MIN_WORK_OPS and emits DenseBin"
+            "nbody eval_a beats the dense cost gate and emits DenseBin"
         );
     }
 

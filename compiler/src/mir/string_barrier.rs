@@ -2,8 +2,8 @@
 //!
 //! No string subset, no half-lifted Format, no unicode/regex in SSA. Fuse-IL
 //! keeps `STRING` / `FORMAT` / `STRINGIFY` / `PRINT`. `string::{from_bytes,
-//! to_bytes}` HostInvoke stays off the W4 allowlist (I6 types them as
-//! impure IO edges, not dense).
+//! to_bytes}` HostInvoke stays off dense (I4 / Q9; I6 types them as
+//! impure IO edges).
 
 use common::Instruction;
 

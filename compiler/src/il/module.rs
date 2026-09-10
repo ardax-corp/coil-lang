@@ -369,7 +369,7 @@ fn lir_emit_cost(ops: &[IlOp]) -> usize {
             IlOp::Byte { byte, .. }
                 if matches!(*byte.bytecode(), common::Instruction::Seek) =>
             {
-                2
+                2 + (byte.operand_u32() as usize) / 16
             }
             _ => 1,
         })

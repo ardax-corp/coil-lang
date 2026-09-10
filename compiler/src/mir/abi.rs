@@ -12,8 +12,8 @@
 //! | Return | 1 | TOS after `RETURN`; caller `STORE`s into a typed dest |
 //! | Two-slot / niche | — | refuse (M4 / P3 LIR) |
 //!
-//! HostInvoke: W4 still hoists; S3 emits other I6-typed hosts except I4
-//! string bytes. User `CALL` uses this map when the callee is already
+//! HostInvoke: LICM hoists scalar-pure math; S3 emits I6-typed hosts except
+//! I4 string bytes. User `CALL` uses this map when the callee is already
 //! dense, or an open one-word ABI (S3). `TailCall` / `CallIndirect` refuse.
 //! HeapRef is a word lane.
 
