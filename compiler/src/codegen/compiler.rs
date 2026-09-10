@@ -15862,6 +15862,21 @@ impl Compiler {
             &entries,
         );
 
+        let dense_seek = self
+            .bytecode
+            .as_slice()
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Seek)
+            .map(|b| b.operand_u32())
+            .max()
+            .unwrap_or(0);
+        if !self.recursive_fns.is_empty() && dense_seek > 16 {
+            self.operand_stack_slots =
+                crate::typechecking::rescale_operand_slots_for_dense_seek(
+                    self.operand_stack_slots,
+                    dense_seek,
+                );
+        }
         self.operand_stack_slots = self
             .operand_stack_slots
             .min(crate::typechecking::MAX_OPERAND_STACK_SLOTS);
