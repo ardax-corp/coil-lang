@@ -63,9 +63,10 @@ GVN has two layers under the COI-82 ceiling — neither is real SSA slot rename.
 **MakeArray frame scalarization (Q1 / COI-334).** One escape answer
 (`compiler/src/escape.rs` + IL `escape_analysis`): non-escaping `[T; N]` /
 `MakeArray` → consecutive frame slots (arity ≤ 32); named escape → **box
-once** and reuse that heap identity (codegen + IL). Computed elems follow
-the same rule (S2i): private → slots; observed/escape → box-once. Zip
-operands that are literals or stack-array locals still load slots. Unproven
+once** and reuse that heap identity (codegen + IL). Immediate elems SROA;
+computed zip/ADD elems stay heap Index/StoreIndex (S2i — same escape
+answer, not a `vec_array` type refuse) so sibling zips do not share slots.
+Zip operands that are literals or stack-array locals still load slots. Unproven
 `xs[k]` on a codegen `[T; N]` local uses a runtime `0 <= k < N` check then
 slot-select; the cold arm is heap `Index` / `StoreIndex` (S2h). Leftover IL
 `MakeArray` plus unproven `xs[k]` stays heap. Growing `ArrayPush` dest and

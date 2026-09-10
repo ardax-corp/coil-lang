@@ -383,8 +383,9 @@ fn keeps_heap_for_unproven_index() {
 }
 
 #[test]
-fn scalarizes_private_computed_elems() {
-    // S2i rule: non-escaping computed elems SROA into slots (not a vec_array refuse).
+fn private_computed_elems_stay_heap() {
+    // Zip/ADD elems share one escape rule with immediates, but stay heap:
+    // slot-SROA of computed MakeArray aliases sibling zips across stores.
     let mut ops = vec![
         IlOp::Const { imm: 1, loc: loc() },
         IlOp::Const { imm: 3, loc: loc() },
@@ -414,9 +415,104 @@ fn scalarizes_private_computed_elems() {
         IlOp::Index { loc: loc() },
         IlOp::Return { loc: loc(), ret_words: 1},
     ];
-    assert!(is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
+    assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
     escape_analysis(&mut ops);
-    assert!(!has_make_array(&ops));
+    assert!(has_make_array(&ops));
+}
+
+#[test]
+fn computed_storeindex_stays_heap() {
+    let mut ops = vec![
+        IlOp::Const { imm: 1, loc: loc() },
+        IlOp::Const { imm: 3, loc: loc() },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 2, loc: loc() },
+        IlOp::Const { imm: 4, loc: loc() },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc: loc(),
+        },
+        IlOp::MakeArray {
+            arity: 2,
+            loc: loc(),
+        },
+        IlOp::StorePop {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Const { imm: 9, loc: loc() },
+        IlOp::byte(Byte::new(Instruction::StoreIndex)),
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Index { loc: loc() },
+        IlOp::Return {
+            loc: loc(),
+            ret_words: 1,
+        },
+    ];
+    assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
+    escape_analysis(&mut ops);
+    assert!(has_make_array(&ops));
+}
+
+#[test]
+fn box_snapshot_of_mutated_slots_stays_heap() {
+    let mut ops = vec![
+        IlOp::Const { imm: 4, loc: loc() },
+        IlOp::StorePop {
+            slot: 1,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 50, loc: loc() },
+        IlOp::StorePop {
+            slot: 1,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 1,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 2,
+            loc: loc(),
+        },
+        IlOp::MakeArray {
+            arity: 3,
+            loc: loc(),
+        },
+        IlOp::StorePop {
+            slot: 3,
+            loc: loc(),
+        },
+        IlOp::Load {
+            slot: 3,
+            loc: loc(),
+        },
+        IlOp::Const { imm: 0, loc: loc() },
+        IlOp::Index { loc: loc() },
+        IlOp::Return {
+            loc: loc(),
+            ret_words: 1,
+        },
+    ];
+    assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
+    escape_analysis(&mut ops);
+    assert!(has_make_array(&ops));
 }
 
 #[test]

@@ -119,8 +119,9 @@ uses reconstruct + cost. S2g **boxes once** at a named escape (return /
 call-arg / `ArrayPush` value / field / host) and reuses that identity
 (Q1 / [language-quirks.md](language-quirks.md)). S2h keeps unproven `xs[k]` off raw slots: codegen uses a weaker
 bound or runtime range-check + slot-select (OOB heap Index/StoreIndex);
-leftover MakeArray stays heap. S2i is the same escape rule: private
-computed elems SROA; observed/escape boxes once (not a `vec_array` exception).
+leftover MakeArray stays heap. S2i uses the same escape answer: immediate
+elems SROA / box-once; computed zip/ADD elems stay heap Index/StoreIndex
+(not a `vec_array` type refuse).
 Grow on `[T; N]` is a type error (Q3); leftover grow dest / arity > 32 stay heap.
 Compare-only leftovers may take LIR when maps exist and the cost gate holds.
 Const-index `s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted

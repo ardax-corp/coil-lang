@@ -1,9 +1,9 @@
 //! Fail-closed escape analysis for `MakeArray` → frame-slot scalarization.
 //!
 //! Shared verdict is [`crate::escape::ArrayEscape`] (Q1): non-escaping →
-//! slots; escaping → **box once** and reuse that identity. Computed elems
-//! follow the same rule (S2i): private → slots; observed/escape → box-once
-//! or heap Index/StoreIndex — not a `vec_array` special case. Growing
+//! slots; escaping → **box once** and reuse that identity. Immediate elems
+//! SROA; computed zip/ADD elems stay heap (same Index/StoreIndex rule, not
+//! a `vec_array` type refuse) so sibling zips do not share slots. Growing
 //! `ArrayPush` dest and private use after escape stay heap (Q3 grow is a
 //! type error on `[T; N]`). Named class SROA is codegen / `local_escape`
 //! (S2j / Q2). Unproven `xs[k]` on leftover heap `MakeArray` stays heap
@@ -96,12 +96,26 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
             continue;
         }
         match classify_site_uses(ops, a) {
-            SiteUses::Private => {}
+            SiteUses::Private => {
+                // Computed elems stay heap unless they are immediates.
+                // Slot-SROA of zip/ADD results aliases sibling zips and
+                // named locals across assert joins (dest-prop / slot reuse).
+                if !makearray_elems_are_immediate(ops, a.make_idx, a.arity) {
+                    a.escaped = true;
+                }
+            }
             SiteUses::BoxAtEscape => {
                 a.escaped = true;
                 a.box_at_escape = true;
             }
             SiteUses::Refuse => a.escaped = true,
+        }
+        // Q1 box snapshot: MakeArray of LOADs from slots that are also stored
+        // (codegen `[T; N]` locals). Exploding that copy lets dest-prop mix
+        // the snapshot with the mutable slots.
+        if makearray_is_mutated_slot_snapshot(ops, a.make_idx, a.arity) {
+            a.escaped = true;
+            a.box_at_escape = false;
         }
     }
     EscapeInfo { allocs }
@@ -417,6 +431,41 @@ fn classify_local_use(ops: &[IlOp], load_idx: usize, arity: u32) -> Option<Local
         });
     }
     None
+}
+
+fn makearray_elems_are_immediate(ops: &[IlOp], make_idx: usize, arity: u32) -> bool {
+    let n = arity as usize;
+    if make_idx < n {
+        return false;
+    }
+    ops[make_idx - n..make_idx].iter().all(|op| {
+        matches!(
+            op,
+            IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. }
+        )
+    })
+}
+
+fn slot_has_store(ops: &[IlOp], slot: u32) -> bool {
+    ops.iter().any(|op| match op {
+        IlOp::StorePop { slot: s, .. } if *s == slot => true,
+        IlOp::Byte { byte, .. }
+            if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop) =>
+        {
+            (0..byte.load_store_count()).any(|k| byte.load_store_slot_at(k) == slot)
+        }
+        _ => false,
+    })
+}
+
+fn makearray_is_mutated_slot_snapshot(ops: &[IlOp], make_idx: usize, arity: u32) -> bool {
+    let n = arity as usize;
+    if make_idx < n {
+        return false;
+    }
+    ops[make_idx - n..make_idx].iter().any(|op| {
+        load_of_single_slot(op).is_some_and(|s| slot_has_store(ops, s))
+    })
 }
 
 fn slot_has_opaque_use(ops: &[IlOp], slot: u32, make_idx: usize) -> bool {

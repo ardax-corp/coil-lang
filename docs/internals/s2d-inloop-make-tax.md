@@ -202,8 +202,8 @@ S2f:
   private use after an escape; unproven `xs[k]` as a raw slot; arity > 32;
   named class SROA in this array pass (S2j is `local_escape`); in-loop
   Make* **dense** when reconstruct still allocates (S2l). Indexing
-  `i % N` is Euclidean `0..N` (Q4). Private computed elems SROA; observed
-  zip/broadcast boxes once (S2i rules).
+  `i % N` is Euclidean `0..N` (Q4). Immediate elems SROA; computed zip/ADD
+  elems stay heap (S2i). Observed/escape of immediates boxes once.
 - **S2g (COI-317 / COI-334):** a named escape keeps slots in the private
   region and **boxes once**; later edges reuse that heap identity (Q1).
   Fresh-per-edge snapshots are gone. Private use after the first escape
@@ -218,8 +218,8 @@ S2f:
   that are literals or stack-array locals load slots (S2f); the result is
   not slot-SROA'd. Remaining refuse: grow dest, private after escape,
   arity > 32, named class SROA in *this* array pass (S2j is separate),
-  leftover grow dest). Indexing `i % N` is Q4 Euclidean. Private computed
-  elems SROA; observed zip boxes once.
+  leftover grow dest). Indexing `i % N` is Q4 Euclidean. Computed zip
+  results stay heap; observed immediate zip boxes once.
 - **S2j (COI-320):** unique **non-escaping** named `let p = new C(...)`
   with field load/store unboxes into consecutive slots. Whole-object
   use stays heap `InitTyped` (#134 pin). Still heap: `fn drop()`, method
