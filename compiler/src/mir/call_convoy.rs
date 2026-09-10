@@ -57,7 +57,7 @@ impl ConvoyPlan {
                 if func.params.iter().any(|p| p.index() == i) {
                     continue;
                 }
-                if !is_convoy_shape(func, ValueId(i as u32), &def, &def_block, &convoy, &fused)
+                if !is_convoy_shape(func, ValueId(i as u32), &def, &def_block, &convoy)
                 {
                     continue;
                 }
@@ -78,6 +78,14 @@ impl ConvoyPlan {
                 continue;
             }
             if def[i].is_some() || def_block[i].is_some() {
+                need_slot[i] = true;
+            }
+        }
+        for i in 0..n {
+            if !rematerialize_const(func, &def[i]) {
+                continue;
+            }
+            if const_used_by_stored(func, ValueId(i as u32), &need_slot) {
                 need_slot[i] = true;
             }
         }
@@ -167,18 +175,19 @@ fn is_convoy_shape(
     def: &[Option<(BlockId, usize)>],
     def_block: &[Option<BlockId>],
     convoy: &[bool],
-    fused: &[bool],
 ) -> bool {
     let Some(home) = def_block[v.index()] else {
         return false;
     };
-    match def[v.index()].and_then(|(b, i)| func.block(b).insts.get(i)) {
+    let kind = def[v.index()].and_then(|(b, i)| func.block(b).insts.get(i));
+    match kind {
         Some(MirInst::Const { .. } | MirInst::Bin { .. } | MirInst::Call { .. }) => {}
         _ => return false,
     }
-    if fused[v.index()] {
-        return false;
-    }
+    let is_call = matches!(kind, Some(MirInst::Call { .. }));
+    let is_join = matches!(kind, Some(MirInst::Bin { lhs, rhs, .. }) if {
+        is_call_like(func, def, *lhs, convoy) || is_call_like(func, def, *rhs, convoy)
+    });
     let mut saw = false;
     for block in &func.blocks {
         for inst in &block.insts {
@@ -189,7 +198,7 @@ fn is_convoy_shape(
                 if block.id != home {
                     return false;
                 }
-                if !consumer_keeps_tos(inst, convoy) {
+                if !consumer_keeps_tos(func, inst, convoy) {
                     return false;
                 }
                 saw = true;
@@ -203,11 +212,44 @@ fn is_convoy_shape(
                 if !matches!(term, Terminator::Return { lo: Some(x), hi: None } if *x == v) {
                     return false;
                 }
+                if !(is_call || is_join) {
+                    return false;
+                }
                 saw = true;
             }
         }
     }
     saw
+}
+
+fn is_call_like(
+    func: &MirFunc,
+    def: &[Option<(BlockId, usize)>],
+    v: ValueId,
+    convoy: &[bool],
+) -> bool {
+    if convoy.get(v.index()).copied().unwrap_or(false) {
+        return matches!(
+            def[v.index()].and_then(|(b, i)| func.block(b).insts.get(i)),
+            Some(MirInst::Call { .. } | MirInst::Bin { .. })
+        );
+    }
+    matches!(
+        def[v.index()].and_then(|(b, i)| func.block(b).insts.get(i)),
+        Some(MirInst::Call { .. })
+    )
+}
+
+fn const_used_by_stored(func: &MirFunc, v: ValueId, need_slot: &[bool]) -> bool {
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if inst.operands().contains(&v) && need_slot.get(inst.dest().index()).copied().unwrap_or(false)
+            {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn rematerialize_const(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
@@ -223,10 +265,66 @@ fn rematerialize_const(func: &MirFunc, def: &Option<(BlockId, usize)>) -> bool {
     )
 }
 
-fn consumer_keeps_tos(inst: &MirInst, convoy: &[bool]) -> bool {
+fn consumer_keeps_tos(func: &MirFunc, inst: &MirInst, convoy: &[bool]) -> bool {
     match inst {
         MirInst::Call { .. } => true,
-        MirInst::Bin { dest, .. } => convoy[dest.index()],
+        MirInst::Bin { dest, .. } if convoy[dest.index()] || join_bin(func, *dest, convoy) => {
+            true
+        }
         _ => false,
     }
+}
+
+fn join_bin(func: &MirFunc, dest: ValueId, convoy: &[bool]) -> bool {
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if inst.dest() != dest {
+                continue;
+            }
+            let MirInst::Bin { lhs, rhs, .. } = inst else {
+                return false;
+            };
+            if !(convoy.get(lhs.index()).copied().unwrap_or(false)
+                || convoy.get(rhs.index()).copied().unwrap_or(false)
+                || matches!(
+                    block.insts.iter().find(|i| i.dest() == *lhs || i.dest() == *rhs),
+                    Some(MirInst::Call { .. })
+                ))
+            {
+                // Call operands may be defined earlier in this or another block.
+                let mut has_call = false;
+                for b in &func.blocks {
+                    for i in &b.insts {
+                        if matches!(i, MirInst::Call { dest: d, .. } if *d == *lhs || *d == *rhs) {
+                            has_call = true;
+                        }
+                    }
+                }
+                if !has_call && !convoy.get(lhs.index()).copied().unwrap_or(false)
+                    && !convoy.get(rhs.index()).copied().unwrap_or(false)
+                {
+                    return false;
+                }
+            }
+            let mut only_ret = false;
+            for b in &func.blocks {
+                for other in &b.insts {
+                    if other.operands().contains(&dest) {
+                        return false;
+                    }
+                }
+                if let Some(Terminator::Return { lo: Some(v), hi: None }) = &b.term {
+                    if *v == dest {
+                        only_ret = true;
+                    }
+                } else if let Some(term) = &b.term {
+                    if term_uses(term).contains(&dest) {
+                        return false;
+                    }
+                }
+            }
+            return only_ret;
+        }
+    }
+    false
 }
