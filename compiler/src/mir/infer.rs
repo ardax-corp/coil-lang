@@ -5,11 +5,13 @@
 //! body. Straight-line keep/refuse is the emit **cost gate** vs fuse-IL
 //! (not a work-op floor). S3: one-word `CALL` is ok without a dense callee
 //! map; I6-typed HostInvoke except I4 string bytes; heap index /
-//! `ArrayLen` / `StoreIndex` paint `heapref` lanes. Still refuse class
-//! field / match (dense) / string / unmapped alloc / multi-word `RETURN` /
-//! residual `Byte` / `Pow` / `AND`/`OR`. S2c maps allow alloc.
-//! Compare-only stays fuse-IL. Q7 unfuses convoy `LoadReturnSlot` /
-//! `ConstReturnImm` / `BinReturn` so one-word self-`CALL` can infer.
+//! `ArrayLen` / `StoreIndex` paint `heapref` lanes. Q8: niche slots and
+//! arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` may infer (dense reconstruct
+//! is register `Br`, not stack JumpIfMatch). Still refuse class field /
+//! string / unmapped alloc / multi-word `RETURN` / residual `Byte` /
+//! `Pow` / `AND`/`OR`. S2c maps allow alloc. Compare-only stays fuse-IL.
+//! Q7 unfuses convoy `LoadReturnSlot` / `ConstReturnImm` / `BinReturn`
+//! so one-word self-`CALL` can infer.
 
 use std::collections::HashMap;
 
@@ -170,6 +172,11 @@ enum InferMode {
 impl InferMode {
     fn lir_shape(self) -> bool {
         matches!(self, Self::Lir | Self::Map)
+    }
+
+    /// Q8: dense infer accepts niche / two-slot match ops (arity ≤ 1).
+    fn allows_match(self) -> bool {
+        matches!(self, Self::Dense | Self::Lir | Self::Map)
     }
 
     fn allows_alloc(self, across: bool) -> bool {
@@ -367,8 +374,8 @@ fn infer_walk(
                         imm: None,
                     });
                 }
-                Instruction::Seek if mode.lir_shape() => {}
-                Instruction::Unpack if mode.lir_shape() => {
+                Instruction::Seek if mode.allows_match() => {}
+                Instruction::Unpack if mode.allows_match() => {
                     let arity = byte.operand_u32();
                     if arity > 1 {
                         return Err(LowerError::Refused("Unpack arity > 1 (I2)".into()));
@@ -429,7 +436,7 @@ fn infer_walk(
                 kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
                 ..
             } => {
-                if !mode.lir_shape() {
+                if !mode.allows_match() {
                     return Err(LowerError::Refused("match".into()));
                 }
                 if *arity > 1 {
@@ -695,15 +702,6 @@ fn infer_walk(
 
     for i in 0..param_count {
         slot_ty.entry(i).or_insert(MirTy::I64);
-    }
-    if mode == InferMode::Dense
-        && slot_ty
-            .values()
-            .any(|t| matches!(t, MirTy::NicheOpt | MirTy::NicheRes))
-    {
-        return Err(LowerError::Refused(
-            "dense infer refuses niche slots (I2 match stays LIR)".into(),
-        ));
     }
     if mode == InferMode::Dense && !has_float_arith && !has_i32 && !has_i64_arith {
         return Err(LowerError::Refused(

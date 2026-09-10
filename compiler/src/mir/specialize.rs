@@ -37,7 +37,8 @@ pub fn try_specialize_body(
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke except I4 string bytes, heap index / ArrayLen /
     // StoreIndex (dense residuals after V*). FORMAT / string ops stay
-    // fuse-IL (I4 / Q9). Match stays LIR (Q8). Alloc / InitTyped take
+    // fuse-IL (I4 / Q9). Q8: niche / two-slot match may dense when the
+    // reconstruct beats fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
     // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. CALL / HostInvoke box at the ABI
@@ -71,6 +72,7 @@ pub fn try_specialize_body(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     hints.allow_effects = true;
+    hints.allow_match = true;
     let _heap_index = super::infer::has_heap_index(ops);
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params

@@ -2,8 +2,8 @@
 //!
 //! [`MirTy::Value`] is the boxed VM word — the interpreter path — and the
 //! lattice top. I1 names shipped one-word heap/niche ABIs so later islands
-//! can SSA them. Dense specialize uses [`MirTy::is_word_lane`] (numeric
-//! plus `HeapRef`); niche stays LIR.
+//! can SSA them. Dense specialize uses [`MirTy::is_word_lane`] (numeric,
+//! `HeapRef`, and niche Option/Result words). Two-slot returns stay LIR.
 
 use crate::typechecking::{Ty, ty as coil_ty, ty::is_option_ty};
 
@@ -57,10 +57,9 @@ impl MirTy {
         matches!(self, Self::I32 | Self::I64 | Self::F32 | Self::F64 | Self::Bool)
     }
 
-    /// One-word dense / CALL lane: numeric or a plain heap pointer (S3).
-    /// Niche Option/Result stays LIR.
+    /// One-word dense / CALL lane: numeric, heap pointer, or niche word (Q8).
     pub fn is_word_lane(self) -> bool {
-        self.is_numeric() || self == Self::HeapRef
+        self.is_numeric() || self.is_heap_word()
     }
 
     /// One-word heap pointer or shipped niche Option/Result (COI-92).
@@ -248,6 +247,8 @@ mod tests {
         assert!(!MirTy::HeapRef.is_numeric());
         assert!(!MirTy::NicheOpt.is_numeric());
         assert!(MirTy::I64.is_numeric());
+        assert!(MirTy::NicheOpt.is_word_lane());
+        assert!(MirTy::NicheRes.is_word_lane());
         assert_eq!(MirTy::HeapRef.join(MirTy::NicheOpt), MirTy::Value);
         assert_eq!(MirTy::HeapRef.meet(MirTy::NicheRes), MirTy::Bottom);
         assert!(MirTy::HeapRef.le(MirTy::Value));
