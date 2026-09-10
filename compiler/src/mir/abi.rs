@@ -16,8 +16,9 @@
 //! HostInvoke: LICM hoists scalar-pure math; S3 / Q9 R2 emit I6-typed hosts
 //! including `from_bytes` / `to_bytes`. User `CALL` uses this map when the callee is already
 //! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
-//! self-`CALL` / `TailCall` use the open one-word ABI. Two-slot self /
-//! mutual recursion stay refuse (later Q7 / B7). `CallIndirect` stays refuse.
+//! self-`CALL` / `TailCall` use the open one-word ABI. **B7** sibling /
+//! mutual `TailCall` uses the same open ABI; keep/refuse is the cost
+//! gate. Self two-slot recursion stays refuse. `CallIndirect` stays refuse.
 //! HeapRef and niche words are one-word lanes (Q8).
 
 use std::collections::{HashMap, HashSet};

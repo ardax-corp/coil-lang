@@ -3831,6 +3831,37 @@ fn attr_test_fn_discovered_by_harness() {
 }
 
 #[test]
+fn tail_sibling_hy_harness_cases_pass() {
+    let mut pipeline = test_pipeline();
+    pipeline.set_include_tests(true);
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("tests/positive/tail_sibling.hy"),
+    )
+    .expect("read tail_sibling.hy");
+    let (bytecode, constants) = pipeline
+        .compile_src(&src)
+        .expect("compile tail_sibling.hy");
+    let cases = pipeline.test_cases().to_vec();
+    assert_eq!(
+        cases.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+        ["sibling tail even/odd", "two-word sibling tail"]
+    );
+    for (name, offset) in &cases {
+        let mut machine = Machine::<128>::default();
+        pipeline.wire_host_natives(&mut machine);
+        machine.load_program(&bytecode, &constants, pipeline.strings());
+        let ret = machine.call_function(*offset, &[]);
+        assert!(
+            !machine.panicked() && machine.result_is_ok(ret),
+            "{name} must pass"
+        );
+    }
+}
+
+#[test]
 fn example_perf_tak_prints_expected() {
     let output = run_example("examples/perf/tak.hy");
     assert_eq!(output, "7");

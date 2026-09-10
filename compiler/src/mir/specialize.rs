@@ -3,7 +3,7 @@
 
 use common::Instruction;
 
-use crate::il::{EntryKind, IlJumpKind, IlOp, Label};
+use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::abi::{DenseAbi, DenseCallMap};
 use super::emit::emit_dense;
@@ -49,11 +49,9 @@ pub fn try_specialize_body(
     // and cost ≤ fuse-IL. Post-loop-only `return [x]` stays fuse-IL
     // (COI-87 invert+fuse). Debugger-attached / -Og skip this entry (I7).
     // S2k: last-arm writes must survive; Seek size is a cost, not a cap.
-    // B7: sibling / mutual TailCall stays fuse-IL. B2 convoy is self-CALL only.
-    // Two-slot self-recursion stays a later Q7 rung.
-    if has_sibling_tail_call(ops, official_entry)
-        || has_self_two_slot_call(ops, official_entry)
-    {
+    // B7: sibling / mutual TailCall may lift (stack-arg protocol, reserved
+    // callee entry labels). Self two-slot CALL/RETURN stays fuse-IL.
+    if has_self_two_slot_call(ops, official_entry) {
         return None;
     }
     let select_cfg = has_sroa_select_cfg(ops);
@@ -266,22 +264,6 @@ fn has_self_two_slot_call(ops: &[IlOp], self_entry: Option<Label>) -> bool {
                 ret_words,
                 ..
             } if *ret_words >= 2 && *target == entry
-        )
-    })
-}
-
-fn has_sibling_tail_call(ops: &[IlOp], self_entry: Option<Label>) -> bool {
-    let Some(entry) = self_entry else {
-        return false;
-    };
-    ops.iter().any(|op| {
-        matches!(
-            op,
-            IlOp::Entry {
-                kind: EntryKind::TailCall,
-                target,
-                ..
-            } if *target != entry
         )
     })
 }

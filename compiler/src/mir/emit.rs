@@ -1,10 +1,12 @@
 //! Lower verified numeric MIR to dense bytecode (`IlOp` residuals + labels).
 
+use std::collections::HashSet;
+
 use common::{dense, Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
-use super::call_convoy::ConvoyPlan;
+use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -61,18 +63,25 @@ pub fn emit_dense(
         max_slot = max_slot.max(scratch.saturating_add(gather.saturating_sub(1)));
     }
     let loc = DebugLoc::unknown();
+    // Sibling / mutual CALL targets keep their official entry ids. Local
+    // SSA labels must not reuse those ids or to_flat treats the TailCall
+    // as intra-body (B2 even/odd break).
+    let reserved: HashSet<u32> = func
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter_map(|inst| match inst {
+            MirInst::Call { target, .. } if Some(*target) != entry_label => Some(target.0),
+            _ => None,
+        })
+        .collect();
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {
         if b.id == func.entry {
-            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| {
-                let l = Label(next_label);
-                next_label += 1;
-                l
-            });
+            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| take_label(&mut next_label, &reserved));
         } else {
-            block_lab[b.id.index()] = Label(next_label);
-            next_label += 1;
+            block_lab[b.id.index()] = take_label(&mut next_label, &reserved);
         }
     }
 
@@ -142,11 +151,21 @@ pub fn emit_dense(
             scratch,
             &block_lab,
             &mut next_label,
+            &reserved,
             pool,
             loc,
         )?;
     }
     Ok(out)
+}
+
+fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {
+    while reserved.contains(next) {
+        *next = next.saturating_add(1);
+    }
+    let id = *next;
+    *next = next.saturating_add(1);
+    Label(id)
 }
 
 pub(super) fn max_label_hint(entry: Option<Label>) -> u32 {
@@ -677,6 +696,7 @@ fn emit_term(
     scratch: u8,
     block_lab: &[Label],
     next_label: &mut u32,
+    reserved: &HashSet<u32>,
     pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
@@ -714,8 +734,7 @@ fn emit_term(
                     loc,
                 );
             } else {
-                let f_lab = Label(*next_label);
-                *next_label += 1;
+                let f_lab = take_label(next_label, reserved);
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
                     target: f_lab,
@@ -812,6 +831,7 @@ fn emit_term(
                 scratch,
                 block_lab,
                 next_label,
+                reserved,
                 loc,
             )?;
         }
@@ -975,6 +995,7 @@ fn emit_dense_jump_if_match(
     scratch: u8,
     block_lab: &[Label],
     next_label: &mut u32,
+    reserved: &HashSet<u32>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     let st = func.ty(scrutinee);
@@ -1028,8 +1049,7 @@ fn emit_dense_jump_if_match(
         emit_cond_jumps(out, func, block.id, true_dest, false_dest, block_lab, loc);
         return Ok(());
     }
-    let f_lab = Label(*next_label);
-    *next_label += 1;
+    let f_lab = take_label(next_label, reserved);
     out.push(IlOp::Jump {
         kind: IlJumpKind::JumpIfFalse,
         target: f_lab,
@@ -1118,6 +1138,9 @@ fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
     let mut n = 0u8;
     for b in &func.blocks {
         for inst in &b.insts {
+            if is_tail_call_inst(b, inst) {
+                continue;
+            }
             let w = match inst {
                 MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
                 MirInst::HostInvoke { args, .. } => args.len(),
@@ -1156,23 +1179,6 @@ fn gather_base(
     Ok(scratch)
 }
 
-fn is_tail_call_inst(block: &super::func::MirBlock, inst: &MirInst) -> bool {
-    let MirInst::Call { dest, dest_hi, .. } = inst else {
-        return false;
-    };
-    match block.term {
-        Some(Terminator::Return { lo: Some(v), hi })
-            if v == *dest && hi == *dest_hi =>
-        {
-            matches!(
-                block.insts.last(),
-                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
-            )
-        }
-        _ => false,
-    }
-}
-
 fn emit_call(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1189,6 +1195,19 @@ fn emit_call(
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     let ret_words = if dest_hi.is_some() { 2 } else { 1 };
+    // TailCall (self or sibling): args on the operand stack, then jump.
+    // Do not DensePush / convoy a foreign CALL dest as a self-return (B2).
+    if kind == crate::il::EntryKind::TailCall {
+        emit_args_on_stack(out, stacked, args, func, plan, regs, pool, loc)?;
+        out.push(IlOp::Entry {
+            kind,
+            arity: args.len() as u32,
+            target,
+            loc,
+            ret_words,
+        });
+        return Ok(());
+    }
     if !plan.is_self_call(target) {
         stacked.clear();
         emit_dense_push(out, args, regs, scratch, loc)?;
@@ -1199,9 +1218,7 @@ fn emit_call(
             loc,
             ret_words,
         });
-        if kind != crate::il::EntryKind::TailCall {
-            store_or_stack_call(out, stacked, dest, dest_hi, plan, regs, loc);
-        }
+        store_or_stack_call(out, stacked, dest, dest_hi, plan, regs, loc);
         return Ok(());
     }
     emit_args_on_stack(out, stacked, args, func, plan, regs, pool, loc)?;

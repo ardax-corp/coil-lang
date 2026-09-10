@@ -1,11 +1,11 @@
 //! Lower pre-fuse stack IL into numeric SSA.
 //!
 //! Fuse-select remains the production bytecode lowerer. This path is an
-//! optional sidecar: escaping classes, unmapped heap, mutual
-//! `CALL`, and residual `Byte` (except a small numeric set) refuse so the
-//! existing `Value` interpreter is unchanged. One-word `CALL` (Q7),
-//! two-slot `CALL` / `RETURN` (B3), and niche / two-slot match (Q8) lower;
-//! keep/refuse is the cost gate. Self / sibling two-slot recursion stay refuse.
+//! optional sidecar: escaping classes, leftover unmapped heap, and residual
+//! `Byte` (except a small numeric set) refuse so the existing `Value`
+//! interpreter is unchanged. One-word `CALL` (Q7), two-slot `CALL` /
+//! `RETURN` (B3 / B7), and niche / two-slot match (Q8) lower; keep/refuse
+//! is the cost gate.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -59,8 +59,8 @@ pub struct LowerHints {
     /// CALL-edge arity: slots `0..param_count` are live-in params (Value ABI).
     pub param_count: u32,
     /// Leaf-first dense callees (COI-291). Empty still allows an open
-    /// one-word `CALL` / `TailCall` (S3 / Q7); two-slot open CALL (B3).
-    /// Mutual / two-slot self-recursion stay refuse at specialize.
+    /// one-word `CALL` / `TailCall` (S3 / Q7) and two-slot open CALL
+    /// (B3 / B7 sibling and mutual TailCall).
     pub calls: DenseCallMap,
     /// I2: `JumpIfMatch` / `Unpack` / `Seek` and stack-carrying CFG edges.
     pub allow_match: bool,
