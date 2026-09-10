@@ -76,7 +76,7 @@ pub struct LowerHints {
     /// I6: type HostInvoke (clocks / IO / GC / FFI / Q9 R2 bytes) as SSA edges.
     pub allow_effects: bool,
     /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
-    /// Production specialize leaves this off; emit still refuses.
+    /// Production specialize leaves this off; emit skips the markers.
     pub allow_deopt: bool,
     /// Q9 R1: `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` → SSA.
     pub allow_string: bool,

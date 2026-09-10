@@ -344,8 +344,8 @@ pub enum MirInst {
         roots: Vec<ValueId>,
     },
     /// Debugger stop / deopt boundary (I7). Dest is a `bool` token.
-    /// VM debugger on fuse-IL stays the v1 stop engine; this names the
-    /// edge a later native tier must leave or pause at.
+    /// Sidecar only — emit skips this inst. Names the edge a later
+    /// native tier must leave or pause at.
     Deopt {
         dest: ValueId,
         kind: MirDeoptKind,
