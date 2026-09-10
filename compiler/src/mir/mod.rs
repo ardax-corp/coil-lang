@@ -1939,7 +1939,7 @@ fn main() {
                 op,
                 IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin
             )),
-            "Q8 niche+arith uses DenseBin; ops={dense:?}"
+            "Q8 niche+arith uses DenseBin"
         );
         assert!(
             !dense.iter().any(|op| matches!(
