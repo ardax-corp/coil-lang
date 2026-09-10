@@ -221,7 +221,12 @@ impl EmitPlan {
                 continue;
             }
             if def[i].is_some() || def_block[i].is_some() {
-                need_slot[i] = true;
+                let print_tok = def[i].is_some_and(|(b, k)| {
+                    matches!(func.block(b).insts.get(k), Some(MirInst::Print { .. }))
+                });
+                if !print_tok {
+                    need_slot[i] = true;
+                }
             }
         }
 
@@ -590,6 +595,44 @@ fn emit_stored(
                 "MIR→LIR refuses Deopt (I7: bail to fuse-IL)".into(),
             ));
         }
+        MirInst::String { dest, idx } => {
+            out.push(IlOp::String { idx: *idx, loc });
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
+        MirInst::Print { src, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::Print { loc });
+        }
+        MirInst::Format { dest, fmt, args } => {
+            emit_stack(out, *fmt, func, plan, regs, pool, loc)?;
+            for a in args {
+                emit_stack(out, *a, func, plan, regs, pool, loc)?;
+            }
+            out.push(IlOp::byte(
+                Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32),
+            ));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
+        MirInst::Stringify { dest, src } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::byte(Byte::new(Instruction::STRINGIFY)));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
     }
     Ok(())
 }
@@ -800,6 +843,30 @@ fn emit_stack(
         MirInst::Deopt { .. } => Err(LowerError::Refused(
             "MIR→LIR refuses Deopt (I7: bail to fuse-IL)".into(),
         )),
+        MirInst::String { idx, .. } => {
+            out.push(IlOp::String { idx: *idx, loc });
+            Ok(())
+        }
+        MirInst::Print { src, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::Print { loc });
+            Ok(())
+        }
+        MirInst::Format { fmt, args, .. } => {
+            emit_stack(out, *fmt, func, plan, regs, pool, loc)?;
+            for a in args {
+                emit_stack(out, *a, func, plan, regs, pool, loc)?;
+            }
+            out.push(IlOp::byte(
+                Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32),
+            ));
+            Ok(())
+        }
+        MirInst::Stringify { src, .. } => {
+            emit_stack(out, *src, func, plan, regs, pool, loc)?;
+            out.push(IlOp::byte(Byte::new(Instruction::STRINGIFY)));
+            Ok(())
+        }
     }
 }
 

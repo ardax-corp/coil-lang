@@ -74,6 +74,8 @@ pub struct LowerHints {
     /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
     /// Production specialize leaves this off; emit still refuses.
     pub allow_deopt: bool,
+    /// Q9 R1: `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` → SSA.
+    pub allow_string: bool,
     /// S2b map lift: skip SSA verify so mixed heap/i64 returns still encode slots.
     pub skip_verify: bool,
 }
@@ -96,6 +98,7 @@ impl Default for LowerHints {
             allow_index: false,
             allow_effects: false,
             allow_deopt: false,
+            allow_string: false,
             skip_verify: false,
         }
     }
@@ -768,8 +771,19 @@ fn lower_op(
         | IlOp::PrologueJmp { .. } => Err(LowerError::Refused(
             "non-numeric IL (classes/heap/calls stay on Value)".into(),
         )),
+        IlOp::String { idx, .. } if hints.allow_string => {
+            tos.push(b.ins_string(*idx)?);
+            Ok(())
+        }
+        IlOp::Print { .. } if hints.allow_string => {
+            let src = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("PRINT stack".into()))?;
+            let _ = b.ins_print(src)?;
+            Ok(())
+        }
         IlOp::String { .. } | IlOp::Print { .. } => Err(LowerError::Refused(format!(
-            "I4 {} barrier",
+            "I4 {} (allow_string off)",
             refuse_reason(op).expect("string/print")
         ))),
     }
@@ -866,6 +880,20 @@ fn lower_byte(
             tos.push(after);
             Ok(())
         }
+        Instruction::STRING if hints.allow_string => {
+            tos.push(b.ins_string(byte.operand_u32())?);
+            Ok(())
+        }
+        Instruction::PRINT if hints.allow_string => {
+            let src = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("PRINT stack".into()))?;
+            let _ = b.ins_print(src)?;
+            Ok(())
+        }
+        inst if is_format_inst(inst) && hints.allow_string => {
+            lower_format(b, tos, byte, inst)
+        }
         inst if is_format_inst(inst) => Err(LowerError::Refused("format".into())),
         Instruction::Unpack if hints.allow_match => {
             let arity = byte.operand_u32();
@@ -896,6 +924,41 @@ fn lower_byte(
             "residual byte {}",
             other.mnemonic()
         ))),
+    }
+}
+
+fn lower_format(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    byte: &common::Byte,
+    inst: Instruction,
+) -> Result<(), LowerError> {
+    match inst {
+        Instruction::STRINGIFY => {
+            let src = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("STRINGIFY stack".into()))?;
+            tos.push(b.ins_stringify(src)?);
+            Ok(())
+        }
+        Instruction::FORMAT => {
+            let n = byte.operand_u32() as usize;
+            if n == 0 {
+                return Ok(());
+            }
+            if tos.len() < n + 1 {
+                return Err(LowerError::Refused("FORMAT stack".into()));
+            }
+            let mut args = Vec::with_capacity(n);
+            for _ in 0..n {
+                args.push(tos.pop().expect("arity checked"));
+            }
+            args.reverse();
+            let fmt = tos.pop().expect("fmt");
+            tos.push(b.ins_format(fmt, args)?);
+            Ok(())
+        }
+        _ => Err(LowerError::Refused("format".into())),
     }
 }
 
@@ -1307,7 +1370,7 @@ mod tests {
     }
 
     #[test]
-    fn lowering_refuses_format_and_string() {
+    fn lowering_refuses_format_and_string_without_allow() {
         let loc = loc();
         let err =
             try_lower_numeric(&[IlOp::String { idx: 0, loc }], &LowerHints::new("s")).unwrap_err();
@@ -1321,5 +1384,29 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, LowerError::Refused(ref m) if m.contains("format")));
+    }
+
+    #[test]
+    fn lowering_string_print_with_allow() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::String { idx: 0, loc },
+            IlOp::Print { loc },
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("hello");
+        hints.allow_string = true;
+        let f = try_lower_numeric(&ops, &hints).expect("R1 string+print");
+        f.verify().unwrap();
+        assert!(f.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::String { idx: 0, .. }))
+        }));
+        assert!(f.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| matches!(i, MirInst::Print { .. }))
+        }));
     }
 }

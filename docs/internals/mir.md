@@ -49,11 +49,13 @@ local_escape sidecar already unboxed into consecutive slots
 (`FieldLoad` / `FieldStore`). Escaping / heap-backed named locals
 (`InitTyped` / `GetField` / `LoadField`) stay fuse-IL. Dense emit
 refuses the new field ops.
-I4 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse))
-keeps `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` on fuse-IL. Infer,
-lower, and ABI-leaf refuse them. There is no string SSA subset and no
-dense HostInvoke for `from_bytes` / `to_bytes`. Unicode / regex are out of
-MIR.
+I4 / Q9 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse),
+[COI-332](https://linear.app/ardax/issue/COI-332))
+names `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` as SSA (R1) and
+reconstructs them on MIR→LIR. Dense infer still refuses so numeric
+specialize is unchanged. There is no second Format lowering and no
+dense HostInvoke for `from_bytes` / `to_bytes` yet. Unicode / regex are
+out of MIR. Ladder: [q9-format-string.md](q9-format-string.md).
 I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
 names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
 `GcBarrier` safepoints. S2a
@@ -165,8 +167,8 @@ and `-Og` skip dense + MIR→LIR so the VM debugger stays on fuse-IL
 ([mir-deopt.md](mir-deopt.md)). I8
 ([COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3))
 lifts leftover bodies through MIR→LIR when there is no hard refuse.
-I4 string/FORMAT, unmapped I5 alloc, and HostInvoke/`CALL` stay fuse-IL
-on the LIR path. User `CALL` is COI-291 (below). Dense emit keeps
+Unmapped I5 alloc and HostInvoke/`CALL` stay fuse-IL on the LIR path.
+Q9 R1 string/format may lift. User `CALL` is COI-291 (below). Dense emit keeps
 `DenseBin` for the numeric region and at each host edge: `LOAD` args
 (Value words) → `CONST` id → `HostInvoke` → `STORE` dest, then more
 dense ops. P12 whole-body saxpy pack still runs first when the pattern

@@ -257,7 +257,11 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::FieldStore { .. }
         | MirInst::StoreIndex { .. }
         | MirInst::Alloc { .. }
-        | MirInst::Deopt { .. } => false,
+        | MirInst::Deopt { .. }
+        | MirInst::Print { .. }
+        | MirInst::Format { .. }
+        | MirInst::Stringify { .. } => false,
+        MirInst::String { .. } => true,
     }
 }
 

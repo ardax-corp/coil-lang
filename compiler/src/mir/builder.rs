@@ -604,6 +604,66 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Const string-table push (I4 / Q9 R1).
+    pub fn ins_string(&mut self, idx: u32) -> Result<ValueId, MirError> {
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::String { dest, idx })?;
+        Ok(dest)
+    }
+
+    /// `PRINT` (I4 / Q9 R1). Dest is an unused `bool` token.
+    pub fn ins_print(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        if !self.resolve_ty(src).is_specialized() {
+            return Err(MirError::msg(format!("Print src is {}", self.resolve_ty(src))));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Print {
+            dest,
+            src: self.resolve(src),
+        })?;
+        Ok(dest)
+    }
+
+    /// `FORMAT n` (I4 / Q9 R1). `fmt` is the format-string heap word.
+    pub fn ins_format(&mut self, fmt: ValueId, args: Vec<ValueId>) -> Result<ValueId, MirError> {
+        let ft = self.resolve_ty(fmt);
+        if ft != MirTy::HeapRef && ft != MirTy::Value {
+            return Err(MirError::msg(format!("Format fmt is {ft}")));
+        }
+        let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
+        for (i, &a) in args.iter().enumerate() {
+            if !self.resolve_ty(a).is_specialized() {
+                return Err(MirError::msg(format!(
+                    "Format arg {i} is {}",
+                    self.resolve_ty(a)
+                )));
+            }
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::Format {
+            dest,
+            fmt: self.resolve(fmt),
+            args,
+        })?;
+        Ok(dest)
+    }
+
+    /// `STRINGIFY` (I4 / Q9 R1).
+    pub fn ins_stringify(&mut self, src: ValueId) -> Result<ValueId, MirError> {
+        if !self.resolve_ty(src).is_specialized() {
+            return Err(MirError::msg(format!(
+                "Stringify src is {}",
+                self.resolve_ty(src)
+            )));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::Stringify {
+            dest,
+            src: self.resolve(src),
+        })?;
+        Ok(dest)
+    }
+
     pub fn branch(
         &mut self,
         cond: ValueId,

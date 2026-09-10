@@ -5,8 +5,8 @@
 //! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift when there is
 //!    no hard refuse; `IlModule` keeps the reconstruct only when cost ≤ fuse.
 //!
-//! Hard refuse is walls (I4 strings / Q9, unmapped alloc, CALL / Host,
-//! escaping fields, box, multi-payload match). Heap index is not a wall
+//! Hard refuse is walls (unmapped alloc, CALL / Host, escaping fields,
+//! box, multi-payload match). Heap index is not a wall
 //! after A2. Fuse-IL stays the fallback. There is no second AST walker.
 
 use common::Instruction;
@@ -14,13 +14,10 @@ use common::Instruction;
 use crate::il::IlOp;
 
 use super::gc::refuses_alloc;
-use super::string_barrier::refuses_string_or_format;
 
 /// Why a leftover body stays fuse-IL instead of MIR→LIR.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LirRefuse {
-    /// I4: `FORMAT` / `STRING` / `STRINGIFY` / `PRINT`.
-    String,
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`.
     Alloc,
     /// I6: user `CALL` / `TailCall` / other `Entry`.
@@ -39,10 +36,11 @@ pub enum LirRefuse {
 
 /// Production LIR entry after dense specialize misses.
 ///
-/// Eligible when there is no hard refuse. Hard refuse stays I4
-/// string/FORMAT (Q9), I5 alloc without maps, HostInvoke/`CALL` (LIR
-/// emit cannot reconstruct those), escaping fields, box, multi-payload
-/// match. Heap index / `ArrayLen` / `StoreIndex` may lift (A2).
+/// Eligible when there is no hard refuse. Hard refuse stays I5 alloc
+/// without maps, HostInvoke/`CALL` (LIR emit cannot reconstruct those),
+/// escaping fields, box, multi-payload match. Q9 R1: `STRING` / `PRINT`
+/// / `FORMAT` / `STRINGIFY` may lift. Heap index / `ArrayLen` /
+/// `StoreIndex` may lift (A2).
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 /// S2c: mapped alloc is not a hard refuse ([`lir_eligible_with`]).
 pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
@@ -80,7 +78,6 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 return Some(LirRefuse::HeapField);
             }
             IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => return Some(LirRefuse::Box),
-            op if refuses_string_or_format(op) => return Some(LirRefuse::String),
             op if refuses_alloc(op) && !maps_ok => return Some(LirRefuse::Alloc),
             IlOp::Jump {
                 kind: crate::il::IlJumpKind::JumpIfMatch { arity, .. },

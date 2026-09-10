@@ -178,7 +178,7 @@ this docs PR. They **do** change how island / refuse docs may speak:
 | Q6 | Counted desugar for array / Vec / `[T; N]` / literal range (`for_in_sum` / `for_in_range`). User `Iterator` / coro / dict / first-class range still fuse-IL | Phased ladder. Not a permanent fuse-IL ceiling. See [q6-iterator-protocol.md](q6-iterator-protocol.md). |
 | Q7 | One-word self-`CALL` / `TailCall` may enter dense | Landed as a cost-gated path (not a hard wall). Tight `tak` / `fib` stay fuse-IL. LIR `CALL` still refuse. |
 | Q8 | Landed: niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` stays I2 LIR. Two-slot `CALL` / `RETURN` stay LIR | Near-term dense+match for niche / two-slot, not only I2 LIR. |
-| Q9 | I4 closed as a **hard MIR barrier** | **I4 reopened** as a phased delivery ladder. Full format / string on MIR. Avoid a half-format second lowering. Phase so numeric / array work is not stalled. |
+| Q9 | **R1 landed:** `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` are SSA + MIR→LIR. Dense infer still refuses. `from_bytes` / `to_bytes` / unicode / regex later | Phased ladder. Full format / string on MIR. No half-format second lowering. See [q9-format-string.md](q9-format-string.md). |
 
 Island inventory: [mir-islands.md](mir-islands.md). Dense refuse rows:
 [specialize-refuse.md](specialize-refuse.md).

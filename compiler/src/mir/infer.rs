@@ -8,8 +8,10 @@
 //! `ArrayLen` / `StoreIndex` paint `heapref` lanes. Q8: niche slots and
 //! arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` may infer (dense reconstruct
 //! is register `Br`, not stack JumpIfMatch). Still refuse class field /
-//! string / unmapped alloc / multi-word `RETURN` / residual `Byte` /
-//! `Pow` / `AND`/`OR`. S2c maps allow alloc. Compare-only stays fuse-IL.
+//! unmapped alloc / multi-word `RETURN` / residual `Byte` /
+//! `Pow` / `AND`/`OR`. Q9 R1: LIR infer accepts `STRING` / `PRINT` /
+//! `FORMAT` / `STRINGIFY`; dense infer still refuses them. S2c maps
+//! allow alloc. Compare-only stays fuse-IL.
 //! Q7 unfuses convoy `LoadReturnSlot` / `ConstReturnImm` / `BinReturn`
 //! so one-word self-`CALL` can infer.
 
@@ -181,6 +183,11 @@ impl InferMode {
 
     fn allows_alloc(self, across: bool) -> bool {
         matches!(self, Self::Map) || across
+    }
+
+    /// Q9 R1: leftover LIR / map lift may type string / format IL.
+    fn allows_string(self) -> bool {
+        matches!(self, Self::Lir | Self::Map)
     }
 }
 
@@ -415,6 +422,21 @@ fn infer_walk(
                     }
                     set_slot(&mut slot_ty, slot as u32, ty)?;
                 }
+                Instruction::STRING if mode.allows_string() => {
+                    stack.push(Cell {
+                        origin: Origin::Tmp,
+                        ty: Some(MirTy::HeapRef),
+                        imm: None,
+                    });
+                }
+                Instruction::PRINT if mode.allows_string() => {
+                    stack
+                        .pop()
+                        .ok_or_else(|| LowerError::Refused("PRINT stack".into()))?;
+                }
+                other if is_format_inst(other) && mode.allows_string() => {
+                    apply_format(&mut stack, byte.operand_u32(), other)?;
+                }
                 other if is_format_inst(other) => {
                     return Err(LowerError::Refused("format".into()));
                 }
@@ -454,6 +476,18 @@ fn infer_walk(
             IlOp::Return { ret_words, .. } if *ret_words == 2 && mode.lir_shape() => {}
             IlOp::Return { ret_words, .. } if *ret_words != 1 => {
                 return Err(LowerError::Refused("multi-word return".into()));
+            }
+            IlOp::String { .. } if mode.allows_string() => {
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::HeapRef),
+                    imm: None,
+                });
+            }
+            IlOp::Print { .. } if mode.allows_string() => {
+                stack
+                    .pop()
+                    .ok_or_else(|| LowerError::Refused("PRINT stack".into()))?;
             }
             IlOp::HostInvoke { arity, layout, .. } => {
                 if mode == InferMode::Map {
@@ -620,6 +654,14 @@ fn infer_walk(
             IlOp::ArrayPin { .. } => {
                 let _ = stack.pop();
             }
+            IlOp::String { .. } => stack.push(Cell {
+                origin: Origin::Tmp,
+                ty: Some(MirTy::HeapRef),
+                imm: None,
+            }),
+            IlOp::Print { .. } => {
+                let _ = stack.pop();
+            }
             IlOp::HostInvoke { arity, .. } => {
                 for _ in 0..(*arity as usize + 1) {
                     let _ = stack.pop();
@@ -629,6 +671,24 @@ fn infer_walk(
                     ty: None,
                     imm: None,
                 });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STRING => {
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::HeapRef),
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. }
+                if matches!(
+                    *byte.bytecode(),
+                    Instruction::FORMAT | Instruction::STRINGIFY
+                ) =>
+            {
+                let _ = apply_format(&mut stack, byte.operand_u32(), *byte.bytecode());
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::PRINT => {
+                let _ = stack.pop();
             }
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen => {
                 let _ = stack.pop();
@@ -819,6 +879,43 @@ fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
         }
     }
     ranges
+}
+
+fn apply_format(
+    stack: &mut Vec<Cell>,
+    n: u32,
+    inst: Instruction,
+) -> Result<(), LowerError> {
+    match inst {
+        Instruction::STRINGIFY => {
+            stack
+                .pop()
+                .ok_or_else(|| LowerError::Refused("STRINGIFY stack".into()))?;
+            stack.push(Cell {
+                origin: Origin::Tmp,
+                ty: Some(MirTy::HeapRef),
+                imm: None,
+            });
+            Ok(())
+        }
+        Instruction::FORMAT if n == 0 => Ok(()),
+        Instruction::FORMAT => {
+            let take = n as usize + 1;
+            if stack.len() < take {
+                return Err(LowerError::Refused("FORMAT stack".into()));
+            }
+            for _ in 0..take {
+                let _ = stack.pop();
+            }
+            stack.push(Cell {
+                origin: Origin::Tmp,
+                ty: Some(MirTy::HeapRef),
+                imm: None,
+            });
+            Ok(())
+        }
+        _ => Err(LowerError::Refused("format".into())),
+    }
 }
 
 fn push_map_alloc(stack: &mut Vec<Cell>, arity: usize) -> Result<(), LowerError> {
