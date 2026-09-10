@@ -1,7 +1,8 @@
 // C2: free-fn Range param and returned Range for-in.
 fn sum_param(Range<int> r) -> int {
+    let iter = r;
     let acc = 0;
-    for x in r {
+    for x in iter {
         acc = acc + x;
     }
     return acc;
@@ -20,8 +21,9 @@ fn sum_ret(int n) -> int {
 }
 
 fn sum_inc(RangeInclusive<int> r) -> int {
+    let iter = r;
     let acc = 0;
-    for x in r {
+    for x in iter {
         acc = acc + x;
     }
     return acc;

@@ -160,7 +160,7 @@ fn ty_is_closed(ty: &Ty) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{option_ty, result_ty, STRING};
+    use crate::typechecking::ty::{option_ty, range_inclusive_ty, range_ty, result_ty, STRING};
 
     fn checker() -> Checker {
         Checker::new()
@@ -336,13 +336,13 @@ fn shape() -> Shape {
     fn numeric_range_is_two_word() {
         let c = checker();
         assert_eq!(
-            two_word_return_enum(&c, &super::ty::range_ty(Ty::Con(INT.into()))),
+            two_word_return_enum(&c, &range_ty(Ty::Con(INT.into()))),
             Some(TWO_WORD_RANGE_KIND.to_string())
         );
         assert_eq!(
             two_word_return_enum(
                 &c,
-                &super::ty::range_inclusive_ty(Ty::Con(FLOAT.into()))
+                &range_inclusive_ty(Ty::Con(FLOAT.into()))
             ),
             Some(TWO_WORD_RANGE_INCLUSIVE_KIND.to_string())
         );
@@ -352,7 +352,7 @@ fn shape() -> Shape {
     fn string_range_stays_boxed() {
         let c = checker();
         assert_eq!(
-            two_word_return_enum(&c, &super::ty::range_ty(Ty::Con(STRING.into()))),
+            two_word_return_enum(&c, &range_ty(Ty::Con(STRING.into()))),
             None
         );
     }

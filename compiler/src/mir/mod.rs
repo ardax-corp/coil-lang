@@ -4403,8 +4403,9 @@ fn main() {
     fn q6_for_in_range_param_sum_takes_dense() {
         let src = r#"
 fn range_sum(Range<int> r) -> int {
+    let iter = r;
     let acc = 0;
-    for x in r {
+    for x in iter {
         acc = acc + x;
     }
     return acc;

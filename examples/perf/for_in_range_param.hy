@@ -4,8 +4,9 @@ use io::sync::{write_all};
 use string::{format, to_bytes};
 
 fn range_sum(Range<int> r) -> int {
+    let iter = r;
     let acc = 0;
-    for x in r {
+    for x in iter {
         acc = acc + x;
     }
     return acc;

@@ -37,9 +37,11 @@ type level). Runtime lowering:
    Same counted latch as (2). Escape (`to_vec`, pass as a value, method
    `self`) still boxes `{start,end,inclusive}`.
 4. **Parameter / returned numeric Range** (C2) — free-fn params and
-   direct `CALL`/`RETURN` use the same `[start, end]` pair. `for x in r`
-   and `for x in make(n)` stay counted. Escaped fn values, inherent
-   methods, and heap-field dicts still `GetField`.
+   direct `CALL`/`RETURN` use the same `[start, end]` pair. A local bind
+   (`let iter = r`) then uses the B5 counted latch. `for x in make(n)`
+   and `let r = make(n)` stay counted. Escaped fn values, inherent
+   methods, and heap-field dicts still `GetField`. Bare `for x in r` on
+   a live-in param pair can DestProp-peel back onto entry slots.
 5. **Tuple** — temp array, then (1).
 6. **Dict / coro / user `Iterator`** — existing protocol. Stay fuse-IL
    until a later rung (match / CALL / resume).

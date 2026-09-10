@@ -3810,7 +3810,7 @@ impl Compiler {
         let (fixed, rest, pack_rest) = self.split_call_args_for_rest(fn_name, args);
 
         if !pack_rest && !box_generic && self.callee_has_unboxed_range_params(fn_name) {
-            return self.emit_call_args_range_pairs(&fixed, bytecode);
+            return self.emit_call_args_range_pairs(fn_name, &fixed, bytecode);
         }
 
         if !pack_rest && Self::should_reorder_pure_call_args(&fixed) {
@@ -3879,19 +3879,62 @@ impl Compiler {
     /// Stage CALL args, expanding numeric Range values to `[start, end]`.
     fn emit_call_args_range_pairs(
         &mut self,
+        fn_name: &str,
         args: &[Output<'_>],
         bytecode: &mut CodeBuf,
     ) -> u32 {
+        let lookup = strip_overload_key(fn_name);
+        let param_tys = self
+            .checker
+            .fn_param_tys(fn_name)
+            .or_else(|| self.checker.fn_param_tys(lookup))
+            .unwrap_or_default();
+        let needs_stage = args.iter().any(|a| {
+            let value = match a.1.as_ref() {
+                Expression::NamedArg(_, v) => v,
+                _ => a,
+            };
+            self.expr_may_clobber_operand_stack(value)
+        });
+        if !needs_stage {
+            let mut n = 0u32;
+            for (i, arg) in args.iter().enumerate() {
+                let value = match arg.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => arg,
+                };
+                let range = param_tys
+                    .get(i)
+                    .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                    .or_else(|| {
+                        self.codegen_expr_ty(value)
+                            .as_ref()
+                            .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                    });
+                if range.is_some() {
+                    self.emit_range_pair_from_expr(bytecode, value);
+                    n += 2;
+                } else {
+                    self.append_with_existential_pack(bytecode, value);
+                    n += 1;
+                }
+            }
+            return n;
+        }
         let mut loads: Vec<u32> = Vec::new();
-        for arg in args {
+        for (i, arg) in args.iter().enumerate() {
             let value = match arg.1.as_ref() {
                 Expression::NamedArg(_, v) => v,
                 _ => arg,
             };
-            let range = self
-                .codegen_expr_ty(value)
-                .as_ref()
+            let range = param_tys
+                .get(i)
                 .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                .or_else(|| {
+                    self.codegen_expr_ty(value)
+                        .as_ref()
+                        .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                })
                 .or_else(|| {
                     self.codegen_expr_ty(arg)
                         .as_ref()
