@@ -158,6 +158,10 @@ pub fn try_specialize_body(
     if !loop_tax && emit_cost(&out) > emit_cost(ops) {
         return None;
     }
+    // Two-slot CALL/RETURN must not grow a boxed reconstruct (C1).
+    if count_make_enum(&out) > count_make_enum(ops) {
+        return None;
+    }
     Some((out, abi))
 }
 
@@ -249,6 +253,16 @@ fn paint_index_dest_from_uses(func: &mut crate::mir::func::MirFunc) {
             func.types[id as usize] = ty;
         }
     }
+}
+
+fn count_make_enum(ops: &[IlOp]) -> usize {
+    ops.iter()
+        .filter(|op| match op {
+            IlOp::MakeEnum { .. } => true,
+            IlOp::Byte { byte, .. } => *byte.bytecode() == Instruction::MakeEnum,
+            _ => false,
+        })
+        .count()
 }
 
 fn count_store_index(ops: &[IlOp]) -> usize {
@@ -400,6 +414,9 @@ pub fn try_lower_abi_body_with(
         }
     }
     if has_sroa_select_cfg(ops) && !select_reconstruct_ok(ops, &out) {
+        return None;
+    }
+    if count_make_enum(&out) > count_make_enum(ops) {
         return None;
     }
     Some(out)

@@ -1437,10 +1437,11 @@ fn walk(int n) -> Option<int> {
         return Option::Some(0);
     }
     let r = walk(n - 1);
-    return match r {
-        Option::Some(x) => Option::Some(x + 1),
-        Option::None => Option::None,
+    let x = match r {
+        Option::Some(v) => v,
+        Option::None => 0,
     };
+    return Option::Some(x + 1);
 }
 #[max_depth(32)]
 fn walk_tail(int n, int acc) -> Option<int> {
@@ -1484,20 +1485,28 @@ fn main() {
         let walk = p.function_offset("walk").expect("walk");
         let walk_tail = p.function_offset("walk_tail").expect("walk_tail");
         let main = p.function_offset("main").expect("main");
-        let walk_end = walk_tail.min(main);
-        let walk_bc = if walk < walk_end {
-            &bc[walk..walk_end]
-        } else {
-            &bc[walk..]
+        let slice = |start: usize| {
+            let end = [walk, walk_tail, main, bc.len()]
+                .into_iter()
+                .filter(|&o| o > start)
+                .min()
+                .unwrap_or(bc.len());
+            &bc[start..end]
         };
+        let walk_bc = slice(walk);
         let walk_ops: Vec<_> = walk_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
-        let _lifted = walk_bc.iter().any(|b| {
-            matches!(
-                *b.bytecode(),
-                Instruction::DenseBin | Instruction::DenseConst | Instruction::DensePush
-            )
-        });
-        let _ = (walk_ops, _lifted);
+        assert!(
+            walk_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::CALL && b.call_ret_words() >= 2),
+            "walk must keep self two-slot CALL; opcodes={walk_ops:?}"
+        );
+        let tail_bc = slice(walk_tail);
+        let tail_ops: Vec<_> = tail_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            tail_bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
+            "walk_tail must keep TailCall; opcodes={tail_ops:?}"
+        );
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

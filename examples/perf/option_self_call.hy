@@ -11,10 +11,11 @@ fn walk(int n) -> Option<int> {
         return Option::Some(0);
     }
     let r = walk(n - 1);
-    return match r {
-        Option::Some(x) => Option::Some(x + 1),
-        Option::None => Option::None,
+    let x = match r {
+        Option::Some(v) => v,
+        Option::None => 0,
     };
+    return Option::Some(x + 1);
 }
 
 fn hot(int n, int iters) -> int {
