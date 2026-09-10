@@ -30,13 +30,13 @@ fn sum_inc(RangeInclusive<int> r) -> int {
 }
 
 test("param range for-in") {
-    assert_eq(sum_param(0..5), 10);
+    assert(sum_param(0..5) == 10)?;
 }
 
 test("returned range for-in") {
-    assert_eq(sum_ret(5), 10);
+    assert(sum_ret(5) == 10)?;
 }
 
 test("inclusive range param") {
-    assert_eq(sum_inc(0..=4), 10);
+    assert(sum_inc(0..=4) == 10)?;
 }
