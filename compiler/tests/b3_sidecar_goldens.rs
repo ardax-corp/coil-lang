@@ -29,9 +29,11 @@ const CORPUS: &[&str] = &[
 /// Try/Result flatten retargets `assert(...)?` and two-slot `?` (shared fail
 /// epilogue; `branch_opt` leaves `ValueUnderJmp` tag jumps in place).
 /// I8 leftover LIR (COI-301) retargets `functions.hy` (inferable diamonds).
+/// A3 (COI-336) drops the named-reason checklist; `functions.hy` keeps LIR
+/// when cost ≤ fuse (fingerprint 400).
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "259c7f7110e2abd1_622"),
-    ("functions.hy", "67ec3975be57626d_397"),
+    ("functions.hy", "0a3d9586f49c21af_400"),
     ("loops.hy", "ecae1dcfae84aaed_274"),
     ("option_pair.hy", "1abbc7207ee1bcc6_397"),
     ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
