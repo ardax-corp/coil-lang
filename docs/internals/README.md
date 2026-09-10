@@ -6,10 +6,11 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 |----------|----------|
 | [Pipeline](pipeline.md) | Parse → typecheck → codegen → archive → execute |
 | [Numeric MIR](mir.md) | COI-267/268: SSA sidecar + dense numeric bytecode (Value ABI at edges) |
-| [MIR language islands](mir-islands.md) | COI-292 I0: islands vs full-MIR rewrite; I1–I8 ladder; I8 IL→MIR entry; I4 FORMAT/string hard refuse; A/B rules |
+| [MIR language islands](mir-islands.md) | COI-292 I0: islands vs full-MIR rewrite; I1–I8 ladder; I8 IL→MIR entry; I4 FORMAT/string **reopened** under Q9 (delivery ladder); A/B rules |
+| [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
 | [Opt generalization](opt-generalization.md) | COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement (embed, natural suites) |
 | [MIR deopt / debugger](mir-deopt.md) | COI-299 I7: stop/deopt edges; VM debugger stays source of truth |
-| [Specialize refuse](specialize-refuse.md) | Dense refuse inventory (W0–W3); language features still fuse-IL; island targets |
+| [Specialize refuse](specialize-refuse.md) | Dense refuse inventory (W0–W3); language features still fuse-IL; island targets; Q6–Q9 commits |
 | [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |

@@ -208,7 +208,10 @@ S2f:
   field store, HostInvoke / print) keeps slots in the private region and
   emits one `MakeArray` at the edge. Multiple snapshot boxes are allowed
   when no private use follows the first escape. Identity is not preserved
-  across edges (each box is a fresh heap object).
+  across edges (each box is a fresh heap object). **Out of spec under
+  Q1** ([language-quirks.md](language-quirks.md)): escape must **box
+  once** and reuse heap identity. Fresh-per-edge is a bug relative to
+  the 2026-09-10 lock, not a language rule.
 - **S2h (COI-318):** unproven `xs[k]` is never a raw slot. Codegen `[T; N]`
   locals take a weaker bound (`i % m` with `m <= N`, sidecar in-bounds, or
   a runtime `0 <= k < N` check) and still SROA; the cold arm is heap
@@ -219,7 +222,8 @@ S2f:
   that are literals or stack-array locals load slots (S2f); the result is
   not slot-SROA'd. Remaining refuse: grow dest, private after escape,
   arity > 32, named class SROA in *this* array pass (S2j is separate),
-  negative remainder, slot-SROA of computed elems.
+  negative remainder (Q4 defined `i % N` is the language rule;
+  implementation still pending), slot-SROA of computed elems.
 - **S2j (COI-320):** unique **non-escaping** named `let p = new C(...)`
   with field load/store unboxes into consecutive slots. Whole-object
   use stays heap `InitTyped` (#134 pin). Still heap: `fn drop()`, method
