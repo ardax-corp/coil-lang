@@ -9912,6 +9912,18 @@ impl Checker {
         Some(apply_ty_prune(&self.subst, &ty))
     }
 
+    /// Resolved parameter types in declaration order (curried `Fun` peel).
+    pub fn fn_param_tys(&self, fn_name: &str) -> Option<Vec<Ty>> {
+        let scheme = self.lookup_fn_scheme(fn_name)?;
+        let mut ty = apply_ty_prune(&self.subst, &scheme.ty);
+        let mut params = Vec::new();
+        while let Ty::Fun(p, next) = ty {
+            params.push(*p);
+            ty = *next;
+        }
+        Some(params)
+    }
+
     //  Native registration
 
     /// Register a native (built-in) function with the type system.

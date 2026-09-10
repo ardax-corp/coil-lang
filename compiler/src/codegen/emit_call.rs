@@ -822,6 +822,7 @@ impl Compiler {
 
                 if pair_kind.is_none()
                     && !is_generic_src
+                    && !self.callee_has_unboxed_range_params(&lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
                     && self.try_emit_inline_direct_call(&n, Some(arg_slice), &mut bytecode)
@@ -833,6 +834,7 @@ impl Compiler {
                 // nested self-calls remain CALL/Entry.
                 if pair_kind.is_none()
                     && !is_generic_src
+                    && !self.callee_has_unboxed_range_params(&lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
                     && self.try_emit_self_unroll_call(&n, Some(arg_slice), &mut bytecode)
@@ -845,6 +847,7 @@ impl Compiler {
                 if let Some(off) = target_offset
                     && !is_generic_src
                     && !is_instance_method_fqn(&self.checker, &lookup_name)
+                    && !self.callee_has_unboxed_range_params(&lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
                     && self.try_emit_remat_peel_call(
@@ -863,6 +866,7 @@ impl Compiler {
                 if let Some(off) = target_offset
                     && pair_kind.is_none()
                     && !is_generic_src
+                    && !self.callee_has_unboxed_range_params(&lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
                     && self.try_emit_predicate_peel_call(
@@ -909,7 +913,10 @@ impl Compiler {
                             }
                         });
                 if let Some(off) = target_offset
-                    && let Some(mask) = fill_mask.filter(|_| pair_kind.is_none())
+                    && let Some(mask) = fill_mask.filter(|_| {
+                        pair_kind.is_none()
+                            && !self.callee_has_unboxed_range_params(&lookup_name)
+                    })
                 {
                     // Emit filled values in declaration order (already
                     // the order of `flat_arg_slice` after named reorder at TC).

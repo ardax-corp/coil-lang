@@ -12,8 +12,8 @@
 
 use super::infer::Checker;
 use super::ty::{
-    is_option_ty, is_result_ty, option_inner, result_ok_err, strip_readonly, Ty, BOOL, BYTE,
-    FLOAT, INT,
+    is_option_ty, is_result_ty, option_inner, range_app, result_ok_err, strip_readonly, Ty, BOOL,
+    BYTE, FLOAT, INT,
 };
 
 /// Kind string for a two-slot arity-2 immediate product. Not a user enum;
@@ -53,6 +53,12 @@ pub fn range_kind(inclusive: bool) -> &'static str {
     }
 }
 
+/// `Some(kind)` when `ty` is a numeric `Range` / `RangeInclusive` two-slot pair.
+pub fn two_word_range_kind(ty: &Ty) -> Option<&'static str> {
+    let (elem, inclusive) = range_app(ty)?;
+    is_immediate(elem).then(|| range_kind(inclusive))
+}
+
 /// `Some(kind)` when direct `CALL`/`RETURN` of a function returning `ty`
 /// can move two words instead of boxing. Enum kinds are the enum name
 /// (`[payload, tag]`); [`TWO_WORD_PRODUCT_KIND`] is an arity-2 immediate
@@ -62,6 +68,9 @@ pub fn two_word_return_enum(checker: &Checker, ty: &Ty) -> Option<String> {
     let ty = strip_readonly(ty);
     if !ty_is_closed(ty) {
         return None;
+    }
+    if let Some(kind) = two_word_range_kind(ty) {
+        return Some(kind.to_string());
     }
     if let Ty::Tuple(items) = ty {
         if items.len() == 2 && items.iter().all(is_immediate) {
@@ -321,5 +330,30 @@ fn shape() -> Shape {
         assert!(!is_range_kind(TWO_WORD_PRODUCT_KIND));
         assert_eq!(range_kind_inclusive(range_kind(false)), Some(false));
         assert_eq!(range_kind_inclusive(range_kind(true)), Some(true));
+    }
+
+    #[test]
+    fn numeric_range_is_two_word() {
+        let c = checker();
+        assert_eq!(
+            two_word_return_enum(&c, &super::ty::range_ty(Ty::Con(INT.into()))),
+            Some(TWO_WORD_RANGE_KIND.to_string())
+        );
+        assert_eq!(
+            two_word_return_enum(
+                &c,
+                &super::ty::range_inclusive_ty(Ty::Con(FLOAT.into()))
+            ),
+            Some(TWO_WORD_RANGE_INCLUSIVE_KIND.to_string())
+        );
+    }
+
+    #[test]
+    fn string_range_stays_boxed() {
+        let c = checker();
+        assert_eq!(
+            two_word_return_enum(&c, &super::ty::range_ty(Ty::Con(STRING.into()))),
+            None
+        );
     }
 }
