@@ -28,6 +28,7 @@ rungs are **not** in this table — see ladders below and
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
 | LIR one-word `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | I6 |
 | LIR one-word sibling `TailCall` | fuse-IL (dense may still emit) | I6 |
+| Self two-slot recursive `CALL` | fuse-IL | leftover after **B7** |
 
 ## Ladders / cost-gated (were A3 walls)
 
@@ -35,7 +36,8 @@ rungs are **not** in this table — see ladders below and
 |-------|-------------|------|
 | Counted `for` (array / Vec / `[T; N]` / literal range) | **Q6** dense helpers | Cost gate; `main` + format / grow still fuse-IL |
 | One-word self-`CALL` / `TailCall` | **Q7** eligible | Cost gate; **B2** convoy reconstruct (no Seek tax on param-only leafs) |
-| Sibling / mutual `TailCall` / self two-slot | **B7** eligible | Cost gate; TailCall stack-arg protocol (not B2 dest convoy) |
+| Sibling / mutual `TailCall` | **B7** eligible | Cost gate; stack-arg + reserved callee entry labels |
+| Self two-slot `CALL` / `RETURN` | fuse-IL | leftover after B7 |
 | Two-slot helper `CALL` / `RETURN` | **B3** eligible | Cost gate; LIR reconstructs width-2 `CALL`; dense may keep |
 | Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
 | `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR | Cost gate; dense infer still refuses |
@@ -121,5 +123,6 @@ helper `CALL` / `RETURN` on dense and LIR; keep/refuse is still cost.
 `ArrayPush` grow sites and CALL+alloc drafts; cost gate still refuses
 boxed reconstruct.
 **B7** ([COI-345](https://linear.app/ardax/issue/COI-345)) opens sibling /
-mutual `TailCall` and self two-slot `CALL` / `RETURN`; keep/refuse is
-still cost. LIR still cannot reconstruct one-word `CALL` / `TailCall`.
+mutual `TailCall` (one-word and two-slot); keep/refuse is still cost.
+Self two-slot recursion stays fuse-IL. LIR still cannot reconstruct
+one-word `CALL` / `TailCall`.

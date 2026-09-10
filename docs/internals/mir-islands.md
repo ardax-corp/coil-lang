@@ -76,7 +76,7 @@ HostInvoke. Unicode / regex stay out until R4. Ladder:
 |-----------------------|-------|--------|
 | Numeric loops / straight-line (`i32`/`i64`/`f32`/`f64`/`bool`) | dense (`DenseBin` …) after MIR CSE/LICM/peeps when cost ≤ fuse-IL | stay dense (Low IR) |
 | HostInvoke inside numeric | dense + box/unbox at host edge; LICM hoists scalar-pure (purity bits); `packed_*` stays in-place | S3 / Q9 R2 emit I6-typed hosts including `from_bytes` / `to_bytes` |
-| One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3 + **Q7** one-word self-recursive `CALL` / `TailCall` (`tak` / `fib`). **B7** sibling / mutual `TailCall` and self two-slot may dense. LIR still cannot reconstruct one-word `CALL` |
+| One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3 + **Q7** one-word self-recursive `CALL` / `TailCall` (`tak` / `fib`). **B7** sibling / mutual `TailCall` may dense. Self two-slot stays fuse-IL. LIR still cannot reconstruct one-word `CALL` |
 | Saxpy-reduce | HostInvoke `simd_axpy_reduce` (P12) | stay |
 | Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoad` / `VStore` / `VBin` / `VMove` (S5a V0) | stay |
 | Stride-1 add-reduce / conservative FMA | `VReduce` / `VFma` (S5b V1) | stay; no fast-math |
@@ -92,7 +92,7 @@ HostInvoke. Unicode / regex stay out until R4. Ladder:
 | `FORMAT` / string ops | **Q9 R1** MIR→LIR (`String` / `Print` / `Format` / `Stringify`); dense infer still refuses table ops; **R2** densifies `from_bytes` / `to_bytes` HostInvoke; cost gate may keep fuse-IL | **I4** / **Q9** — [q9-format-string.md](q9-format-string.md) |
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 / R2 dense emit; LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
-| Recursion (`tak` / `fib`) | fuse-IL or dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene + **B2** CALL convoy + **B7** sibling / mutual `TailCall` and self two-slot. Convoy fused returns unfuse; one-word self-`CALL` dest convoy stays self-only. Helper two-slot `CALL` / `RETURN` is **B3** |
+| Recursion (`tak` / `fib`) | fuse-IL or dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene + **B2** CALL convoy + **B7** sibling / mutual `TailCall`. Convoy fused returns unfuse; one-word self-`CALL` dest convoy stays self-only. Helper two-slot `CALL` / `RETURN` is **B3**. Self two-slot stays fuse-IL |
 | `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); **B5** first-class `let r = 0..n` locals (`for_in_range_value`); `main` + format and user `Iterator` / coro / dict / parameter range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |
