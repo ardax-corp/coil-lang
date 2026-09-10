@@ -20,7 +20,7 @@ forever barriers.
 |------|-------|--------|
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` / I4 `from_bytes` / `to_bytes` | fuse-IL | **Q9** |
 | Recursion on the callee (`TailCall` / self-`CALL` that cannot reconstruct) | fuse-IL | **Q7** |
-| `for` / iterator protocol (`for_in_sum`) | fuse-IL | **Q6** |
+| User `Iterator` / coro / dict / first-class range `for` | fuse-IL | later Q6 rung |
 | Dense+match (stack match vs dense regs) | MIR→LIR (I2) | **Q8** |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
 | Debugger-attached / `-Og` | fuse-IL | **I7** (stays) |
@@ -67,7 +67,9 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `eval_a` | `nbody.hy` | dense | straight-line wins cost |
 | `times_a` / `times_at` | `nbody.hy` | dense + open CALL + Index | S3 / A2 |
 | `sum` / `fill` / `scan` / `axpy` | `indexed_sum.hy` / `vec_scan.hy` / `vec_axpy.hy` | `V*` / dense Index | S5 |
-| `main` | `for_in_sum.hy` | fuse-IL | **Q6** |
+| `sum` | `for_in_sum.hy` | `VReduce` / dense Index | **Q6** counted array |
+| `main` | `for_in_sum.hy` | fuse-IL | I4 format + `Vec.push` |
+| `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | recursion — **Q7** |
