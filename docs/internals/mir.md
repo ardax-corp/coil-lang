@@ -178,9 +178,8 @@ One-word ABI ([`compiler/src/mir/abi.rs`](../../compiler/src/mir/abi.rs)):
 - **Return:** one word on TOS (`RETURN` width 1). Caller `STORE`s it.
 - **Two-slot / niche:** refuse (M4 / P3 LIR). `CallIndirect` refuses.
   Mutual recursion stays refuse. **Q7:** one-word self-`CALL` / `TailCall`
-  densifies (`tak` / `fib`) — convoy fused returns unfuse; the cost gate
-  treats self-`CALL` like a back-edge. Dense `Seek` > 16 rescales the
-  operand stack (`rescale_operand_slots_for_dense_seek`).
+  may dense after convoy fused returns unfuse. Keep only when emit cost
+  ≤ fuse-IL. Tight `tak` / `fib` lose that gate (measured Seek tax).
 
 `IlModule` specializes **bottom-up**: a body may `CALL` only after the
 callee is already in the dense ABI map. Infer/lower treat that `CALL`

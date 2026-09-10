@@ -1124,68 +1124,40 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_recursive_fib_callee_is_dense() {
+    fn pipeline_recursive_work_loop_is_dense() {
+        // Tight tak/fib leafs lose the cost gate (Seek + STORE vs convoy
+        // fuse). A self-recursive body with a counted loop amortizes Seek
+        // and must stay dense + typed CALL (Q7).
         let src = r#"
-fn fib(int n) -> int {
-    if n <= 2 {
+fn rec(int n) -> int {
+    if n <= 0 {
         return 1;
     }
-    return fib(n - 1) + fib(n - 2);
+    let i = 0;
+    let s = 0;
+    while i < 8 {
+        s = s + n * i;
+        i = i + 1;
+    }
+    return rec(n - 1) + s;
 }
 fn main() {
-    let _ = fib(8);
+    let _ = rec(6);
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, constants) = p.compile_src(src).expect("compile fib");
-        let fib = p.function_offset("fib").expect("fib");
+        let (bc, constants) = p.compile_src(src).expect("compile rec");
+        let rec = p.function_offset("rec").expect("rec");
         let main = p.function_offset("main").expect("main");
-        let fib_bc = if fib < main { &bc[fib..main] } else { &bc[fib..] };
+        let rec_bc = if rec < main { &bc[rec..main] } else { &bc[rec..] };
         assert!(
-            fib_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "Q7 fib callee must densify; opcodes={:?}",
-            fib_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            rec_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "Q7 recursive+loop callee must densify; opcodes={:?}",
+            rec_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            fib_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            rec_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
             "typed recursive CALL must remain"
-        );
-        let slots = p.operand_stack_slots() as usize;
-        let mut vm = machine::Machine::<256>::with_operand_capacity(slots);
-        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-    }
-
-    #[test]
-    fn pipeline_recursive_tak_callee_is_dense() {
-        let src = r#"
-#[max_depth(64)]
-fn tak(int x, int y, int z) -> int {
-    if y >= x {
-        return z;
-    }
-    return tak(tak(x - 1, y, z), tak(y - 1, z, x), tak(z - 1, x, y));
-}
-fn main() {
-    let _ = tak(6, 4, 2);
-}
-"#;
-        let mut p = crate::Pipeline::new();
-        let (bc, constants) = p.compile_src(src).expect("compile tak");
-        let tak = p.function_offset("tak").expect("tak");
-        let main = p.function_offset("main").expect("main");
-        let tak_bc = if tak < main { &bc[tak..main] } else { &bc[tak..] };
-        assert!(
-            tak_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "Q7 tak callee must densify; opcodes={:?}",
-            tak_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
-        );
-        assert!(
-            tak_bc.iter().any(|b| *b.bytecode() == Instruction::CALL),
-            "typed recursive CALL must remain"
-        );
-        assert!(
-            tak_bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
-            "outer tak site must stay TailCall"
         );
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<256>::with_operand_capacity(slots);

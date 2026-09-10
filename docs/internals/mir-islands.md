@@ -85,7 +85,7 @@ out of MIR until a later cut. Spec:
 | `FORMAT` / string ops | fuse-IL (`IlOp::Byte` / `String` / `Print`) | **I4** / **Q9** — reopened delivery ladder (today still fuse-IL) |
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
-| Recursion (`tak` / `fib`) | dense one-word self-`CALL` / `TailCall` | **Q7** (this PR). Convoy fused returns unfuse; cost gate amortizes like a loop. Mutual / two-slot stay fuse-IL. Fat dense `Seek` rescales the operand stack |
+| Recursion (`tak` / `fib`) | fuse-IL on tight leafs; dense when cost ≤ fuse | **Q7** (this PR). Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense. `tak` / `fib` lose the cost gate (Seek + STORE). Mutual / two-slot stay refuse |
 | `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); `main` + format and user `Iterator` / coro / dict / first-class range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |

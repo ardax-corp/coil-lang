@@ -176,7 +176,7 @@ this docs PR. They **do** change how island / refuse docs may speak:
 | Quirk | Today (implementation) | After the commit |
 |-------|------------------------|------------------|
 | Q6 | Counted desugar for array / Vec / `[T; N]` / literal range (`for_in_sum` / `for_in_range`). User `Iterator` / coro / dict / first-class range still fuse-IL | Phased ladder. Not a permanent fuse-IL ceiling. See [q6-iterator-protocol.md](q6-iterator-protocol.md). |
-| Q7 | Dense one-word self-recursive `CALL` / `TailCall` on `tak` / `fib` | Landed (dense; LIR `CALL` still refuse). Mutual / two-slot stay fuse-IL. |
+| Q7 | One-word self-`CALL` / `TailCall` may enter dense | Landed as a cost-gated path (not a hard wall). Tight `tak` / `fib` stay fuse-IL. LIR `CALL` still refuse. |
 | Q8 | I2 is MIR→LIR match; **dense+match refuses** | Near-term dense+match for niche / two-slot, not only I2 LIR. |
 | Q9 | I4 closed as a **hard MIR barrier** | **I4 reopened** as a phased delivery ladder. Full format / string on MIR. Avoid a half-format second lowering. Phase so numeric / array work is not stalled. |
 

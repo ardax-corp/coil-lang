@@ -72,7 +72,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
-| `tak` / `fib` | `tak.hy` / `fib.hy` | dense + recursive `CALL` | **Q7** one-word self-call |
+| `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | **Q7** eligible; cost gate loses (Seek tax) |
 | sibling `TailCall` (even/odd) | — | fuse-IL or dense | open one-word `TailCall` + cost gate |
 | `nsieve` | `nsieve.hy` | fuse-IL | `Vec.push` (no `Make*`) |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
