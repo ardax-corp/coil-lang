@@ -486,43 +486,6 @@ mod cost_gate_tests {
             Byte::new(Instruction::DenseIndex).with_dense_abc(0, 2, 0, 1),
         )];
         assert!(emit_cost(&native) < emit_cost(&boxed));
-    }
-}
-
-#[cfg(test)]
-mod cost_gate_tests {
-    use common::{Byte, DebugLoc, Instruction};
-
-    use crate::il::IlOp;
-
-    use super::{emit_cost, residual_heap_box};
-
-    fn loc() -> DebugLoc {
-        DebugLoc::unknown()
-    }
-
-    #[test]
-    fn residual_make_counts_as_boxed() {
-        let ops = [IlOp::MakeArray { arity: 2, loc: loc() }];
-        assert!(residual_heap_box(&ops));
-        let native = [IlOp::byte(
-            Byte::new(Instruction::DenseMake).with_dense_abc(0, 1, 2, 3),
-        )];
-        assert!(!residual_heap_box(&native));
-    }
-
-    #[test]
-    fn emit_cost_weights_load_store_above_dense() {
-        let boxed = [
-            IlOp::Load { slot: 0, loc: loc() },
-            IlOp::Load { slot: 1, loc: loc() },
-            IlOp::Index { loc: loc() },
-            IlOp::StorePop { slot: 2, loc: loc() },
-        ];
-        let native = [IlOp::byte(
-            Byte::new(Instruction::DenseIndex).with_dense_abc(0, 2, 0, 1),
-        )];
-        assert!(emit_cost(&native) < emit_cost(&boxed));
         assert!(emit_cost(&native) <= emit_cost(&boxed));
     }
 }
