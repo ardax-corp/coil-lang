@@ -48,7 +48,6 @@ pub fn emit_lir(
         .map(|(i, _)| regs[i])
         .max()
         .unwrap_or(0);
-    let loc = DebugLoc::unknown();
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {
@@ -77,17 +76,20 @@ pub fn emit_lir(
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
-        consume_match_tos(&mut out, func, block.id, &plan, &regs, loc);
+        let term_loc = func.term_loc(block.id);
+        consume_match_tos(&mut out, func, block.id, &plan, &regs, term_loc);
         for inst in &block.insts {
             if inst.is_phi() {
                 continue;
             }
+            let loc = func.loc_of(inst.dest());
             if let MirInst::MatchPayload { dest, .. } = inst {
                 if is_jim_term_payload(func, *dest) || plan.tree[dest.index()] {
                     continue;
                 }
-                out.push(IlOp::byte(
+                out.push(IlOp::from_plain_byte(
                     Byte::new(Instruction::Unpack).with_operand_u32(1),
+                    loc,
                 ));
                 if plan.need_slot[dest.index()] {
                     out.push(IlOp::StorePop {
@@ -116,10 +118,22 @@ pub fn emit_lir(
             &block_lab,
             &mut next_label,
             pool,
-            loc,
+            term_loc,
         )?;
     }
     Ok(out)
+}
+
+pub(super) fn lir_sidecars(
+    func: &MirFunc,
+) -> (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap) {
+    let plan = EmitPlan::new(func);
+    let (regs, _) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
+    let regs = coalesce_safe_latch_phis(func, regs);
+    (
+        super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
+        super::deopt::encode_draft(func, &regs, &plan.need_slot),
+    )
 }
 
 struct EmitPlan {
@@ -497,7 +511,7 @@ fn emit_stored(
             ..
         } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            push_cast(out, *kind)?;
+            push_cast(out, *kind, loc)?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -567,7 +581,7 @@ fn emit_stored(
             } else {
                 Instruction::StoreIndex
             };
-            out.push(IlOp::byte(Byte::new(inst)));
+            out.push(IlOp::from_plain_byte(Byte::new(inst), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -575,7 +589,7 @@ fn emit_stored(
         }
         MirInst::ArrayLen { dest, array } => {
             emit_stack(out, *array, func, plan, regs, pool, loc)?;
-            out.push(IlOp::byte(Byte::new(Instruction::ArrayLen)));
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::ArrayLen), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -588,7 +602,7 @@ fn emit_stored(
         } => {
             emit_stack(out, *array, func, plan, regs, pool, loc)?;
             emit_stack(out, *value, func, plan, regs, pool, loc)?;
-            out.push(IlOp::byte(Byte::new(Instruction::ArrayPush)));
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::ArrayPush), loc));
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -642,8 +656,9 @@ fn emit_stored(
             for a in args {
                 emit_stack(out, *a, func, plan, regs, pool, loc)?;
             }
-            out.push(IlOp::byte(
+            out.push(IlOp::from_plain_byte(
                 Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32),
+                loc,
             ));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::StorePop {
@@ -654,7 +669,7 @@ fn emit_stored(
         }
         MirInst::Stringify { dest, src } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::byte(Byte::new(Instruction::STRINGIFY)));
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
@@ -801,7 +816,7 @@ fn emit_stack(
         }
         MirInst::Cast { kind, src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            push_cast(out, *kind)
+            push_cast(out, *kind, loc)
         }
         MirInst::Phi { dest, .. } => {
             out.push(IlOp::Load {
@@ -847,7 +862,7 @@ fn emit_stack(
             } else {
                 Instruction::StoreIndex
             };
-            out.push(IlOp::byte(Byte::new(inst)));
+            out.push(IlOp::from_plain_byte(Byte::new(inst), loc));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::Dup { loc });
                 out.push(IlOp::StorePop {
@@ -859,7 +874,7 @@ fn emit_stack(
         }
         MirInst::ArrayLen { dest, array } => {
             emit_stack(out, *array, func, plan, regs, pool, loc)?;
-            out.push(IlOp::byte(Byte::new(Instruction::ArrayLen)));
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::ArrayLen), loc));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::Dup { loc });
                 out.push(IlOp::StorePop {
@@ -876,7 +891,7 @@ fn emit_stack(
         } => {
             emit_stack(out, *array, func, plan, regs, pool, loc)?;
             emit_stack(out, *value, func, plan, regs, pool, loc)?;
-            out.push(IlOp::byte(Byte::new(Instruction::ArrayPush)));
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::ArrayPush), loc));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::Dup { loc });
                 out.push(IlOp::StorePop {
@@ -900,8 +915,9 @@ fn emit_stack(
                 return Ok(());
             }
             // Last-arm `Unpack`: miss TOS is still the scrutinee.
-            out.push(IlOp::byte(
+            out.push(IlOp::from_plain_byte(
                 Byte::new(Instruction::Unpack).with_operand_u32(1),
+                loc,
             ));
             Ok(())
         }
@@ -938,14 +954,15 @@ fn emit_stack(
             for a in args {
                 emit_stack(out, *a, func, plan, regs, pool, loc)?;
             }
-            out.push(IlOp::byte(
+            out.push(IlOp::from_plain_byte(
                 Byte::new(Instruction::FORMAT).with_operand_u32(args.len() as u32),
+                loc,
             ));
             Ok(())
         }
         MirInst::Stringify { src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
-            out.push(IlOp::byte(Byte::new(Instruction::STRINGIFY)));
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::STRINGIFY), loc));
             Ok(())
         }
     }
@@ -954,15 +971,15 @@ fn emit_stack(
 fn push_unary(out: &mut Vec<IlOp>, op: MirUnaryOp, ty: MirTy, loc: DebugLoc) {
     match (op, ty.is_float()) {
         (MirUnaryOp::Not, _) => out.push(IlOp::LogNot { loc }),
-        (MirUnaryOp::Neg, true) => out.push(IlOp::byte(Byte::new(Instruction::NEGF))),
-        (MirUnaryOp::Neg, false) => out.push(IlOp::byte(Byte::new(Instruction::NEG))),
+        (MirUnaryOp::Neg, true) => out.push(IlOp::from_plain_byte(Byte::new(Instruction::NEGF), loc)),
+        (MirUnaryOp::Neg, false) => out.push(IlOp::from_plain_byte(Byte::new(Instruction::NEG), loc)),
     }
 }
 
-fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind) -> Result<(), LowerError> {
+fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind, loc: DebugLoc) -> Result<(), LowerError> {
     match kind {
         MirCastKind::IntToFloat => {
-            out.push(IlOp::byte(Byte::new(Instruction::CastIntToFloat)));
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::CastIntToFloat), loc));
             Ok(())
         }
         MirCastKind::Sext => Err(LowerError::Refused("lir sext".into())),

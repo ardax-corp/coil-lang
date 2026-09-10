@@ -103,6 +103,7 @@ breakpoints (`setFunctionBreakpoints`) are more reliable when line info is spars
   Stops remain on reconstructed bytecode (fuse-IL, LIR, or dense).
   Function breakpoints and `stepi` work on specialized bodies.
   **MIR `Deopt` metadata is unused** by `coil-debug` / DAP — emit skips
-  those insts (no resume maps). Named `let` slots can be stale after SSA
-  remap; params usually keep their slots. See
+  those insts. **C3** keeps compiler-internal resume maps and remaps
+  named `let` slots after SSA register assign; params stay identity.
+  Line locs on dense / LIR reconstruct are still sparse. See
   [mir-deopt.md](mir-deopt.md).

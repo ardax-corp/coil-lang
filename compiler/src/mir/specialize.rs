@@ -5,7 +5,10 @@ use common::Instruction;
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
+use std::collections::HashMap;
+
 use super::abi::{DenseAbi, DenseCallMap};
+use super::deopt::DraftDeoptMap;
 use super::emit::emit_dense;
 use super::emit_lir::emit_lir;
 use super::entry::lir_eligible_with;
@@ -13,6 +16,13 @@ use super::gc::refuses_alloc;
 use super::infer::{infer_lir, infer_lir_across_alloc, infer_numeric_across_alloc, infer_numeric_with};
 use super::lower::{try_lower_numeric, LowerHints};
 use super::stackmap::has_real_maps;
+
+/// C3 sidecar from a dense / LIR replace (named lets + deopt maps).
+#[derive(Clone, Debug, Default)]
+pub struct BodySidecar {
+    pub debug_slot_remap: HashMap<u32, u32>,
+    pub deopt: Option<DraftDeoptMap>,
+}
 
 /// `official_entry` is `IlFunc.meta.entry` (CALL target). New labels must
 /// not reuse that id or concat lands calls on a loop header.
@@ -30,6 +40,26 @@ pub fn try_specialize_body(
     pool: &mut Vec<u64>,
     calls: &DenseCallMap,
     official_entry: Option<Label>,
+) -> Option<(Vec<IlOp>, DenseAbi)> {
+    try_specialize_body_side(
+        ops,
+        name,
+        entry_sp,
+        pool,
+        calls,
+        official_entry,
+        &mut BodySidecar::default(),
+    )
+}
+
+pub fn try_specialize_body_side(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &mut Vec<u64>,
+    calls: &DenseCallMap,
+    official_entry: Option<Label>,
+    side: &mut BodySidecar,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
     // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32. A
@@ -102,6 +132,7 @@ pub fn try_specialize_body(
     crate::mir::gvn(&mut func);
     // S2f: reuse the mutated array after StoreIndex (drop rematerialized Alloc).
     crate::mir::sroa(&mut func);
+    super::deopt::fill_deopt_maps(&mut func);
     paint_index_dest_from_uses(&mut func);
     let stores_ssa = func
         .blocks
@@ -121,6 +152,9 @@ pub fn try_specialize_body(
     });
     let label_hi = crate::il::opt::max_code_label(ops)
         .max(official_entry.map(|Label(id)| id).unwrap_or(0));
+    let (remap, deopt) = super::emit::dense_sidecars(&func, entry);
+    side.debug_slot_remap = remap;
+    side.deopt = Some(deopt);
     if let Some(packed) = super::pack::try_axpy_pack(&func, entry, pool) {
         return Some((packed, abi));
     }
@@ -366,6 +400,17 @@ pub fn try_lower_abi_body_with(
     pool: &mut Vec<u64>,
     unboxed_fields: &[(u32, u32)],
 ) -> Option<Vec<IlOp>> {
+    try_lower_abi_body_side(ops, name, entry_sp, pool, unboxed_fields, &mut BodySidecar::default())
+}
+
+pub fn try_lower_abi_body_side(
+    ops: &[IlOp],
+    name: &str,
+    entry_sp: u32,
+    pool: &mut Vec<u64>,
+    unboxed_fields: &[(u32, u32)],
+    side: &mut BodySidecar,
+) -> Option<Vec<IlOp>> {
     // I8: any inferable unfused body, not only two-slot / match / field accidents.
     // S2c: allocating leftovers need a real S2b draft; else fuse-IL.
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
@@ -401,10 +446,14 @@ pub fn try_lower_abi_body_with(
     } else {
         crate::mir::cse(&mut func);
     }
+    super::deopt::fill_deopt_maps(&mut func);
     let entry = ops.iter().find_map(|op| match op {
         IlOp::Label(l) | IlOp::JoinLabel(l) => Some(*l),
         _ => None,
     });
+    let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
+    side.debug_slot_remap = remap;
+    side.deopt = Some(deopt);
     let out = emit_lir(&func, entry, pool, has_alloc).ok()?;
     if has_alloc {
         let before = ops.iter().filter(|o| refuses_alloc(o)).count();

@@ -23,7 +23,8 @@ rungs are **not** in this table — see ladders below and
 | User `Iterator` / coro / dict / heap-field range `for` | fuse-IL | later Q6 rung |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
-| Native deopt resume maps | not encoded; emit skips `Deopt` | **I7** leftover after **B8** |
+| Native deopt resume maps | compiler sidecar (`DraftDeoptMap`); not archived; emit skips `Deopt` | **I7** / **C3** — maps exist; P5 resume leftover |
+| Incomplete deopt maps (stack-only / convoy TOS) | native must refuse | **C3** leftover |
 | Unmapped alloc / GC safepoint | fuse-IL unless S2b draft binds | **B6** maps `ArrayPush` / CALL+`Make*`; leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
 | LIR one-word `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | I6 |
@@ -133,8 +134,9 @@ N>2 stays refuse (`MAX_MODELED_RET_WORDS`). LIR still cannot reconstruct
 one-word `CALL` / `TailCall`.
 **B8** ([COI-346](https://linear.app/ardax/issue/COI-346)) drops the
 debugger-attached / `-Og` specialize refuse. Majority bodies may dense
-or LIR; the VM debugger steps the reconstruct. Leftover: native resume
-maps, named-local remap after SSA, sparse line locs on emit.
+or LIR; the VM debugger steps the reconstruct. **C3** records resume
+maps and remaps named lets; leftover: P5 native resume, incomplete
+convoy maps, per-PC locals, codegen-unknown line locs.
 **B9** ([COI-347](https://linear.app/ardax/issue/COI-347)) maps
 `FORMAT` / `STRINGIFY` (Q9 R3). Dense infer still refuses table ops.
 Leftover: unicode / regex in SSA (R4).

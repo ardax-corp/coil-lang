@@ -57,7 +57,6 @@ pub fn emit_dense(
     if gather > 0 {
         max_slot = max_slot.max(scratch.saturating_add(gather.saturating_sub(1)));
     }
-    let loc = DebugLoc::unknown();
     // Sibling / mutual CALL targets keep their official entry ids. Local
     // SSA labels must not reuse those ids or to_flat treats the TailCall
     // as intra-body (B2 even/odd break).
@@ -106,6 +105,7 @@ pub fn emit_dense(
             if is_tail_call_inst(block, inst) {
                 continue;
             }
+            let loc = func.loc_of(inst.dest());
             if let MirInst::Call {
                 dest,
                 dest_hi,
@@ -148,10 +148,24 @@ pub fn emit_dense(
             &mut next_label,
             &reserved,
             pool,
-            loc,
+            func.term_loc(block.id),
         )?;
     }
     Ok(out)
+}
+
+/// Named-let remap + deopt draft after the same register assign as emit.
+pub(super) fn dense_sidecars(
+    func: &MirFunc,
+    entry_label: Option<Label>,
+) -> (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap) {
+    let plan = ConvoyPlan::new(func, entry_label);
+    let (regs, _) = assign_regs(func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
+    let regs = coalesce_safe_latch_phis(func, regs);
+    (
+        super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
+        super::deopt::encode_draft(func, &regs, &plan.need_slot),
+    )
 }
 
 fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {
@@ -416,6 +430,7 @@ pub(super) fn emit_inst(
     loc: DebugLoc,
     across_alloc: bool,
 ) -> Result<(), LowerError> {
+    let byte = |b: Byte| IlOp::from_plain_byte(b, loc);
     match inst {
         MirInst::Const { dest, c } => {
             out.push(emit_const(*c, regs[dest.index()], pool, loc)?);
@@ -428,7 +443,7 @@ pub(super) fn emit_inst(
             rhs,
         } => {
             let kind = bin_kind(*op, *ty)?;
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseBin).with_dense_abc(
                     kind,
                     regs[dest.index()],
@@ -445,7 +460,7 @@ pub(super) fn emit_inst(
             rhs,
         } => {
             let kind = cmp_kind(*op, *ty)?;
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseCmp).with_dense_abc(
                     kind,
                     regs[dest.index()],
@@ -460,7 +475,7 @@ pub(super) fn emit_inst(
                 (MirUnaryOp::Neg, t) if t.is_float() => dense::UNARY_FNEG,
                 (MirUnaryOp::Neg, _) => dense::UNARY_NEG,
             };
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseUnary).with_dense_unary(
                     kind,
                     regs[dest.index()],
@@ -478,7 +493,7 @@ pub(super) fn emit_inst(
                 MirCastKind::IntToFloat => dense::CAST_I2F,
                 MirCastKind::Sext => dense::CAST_SEXT,
             };
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseCast).with_dense_unary(
                     k,
                     regs[dest.index()],
@@ -537,7 +552,7 @@ pub(super) fn emit_inst(
             } else {
                 0
             };
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseIndex).with_dense_abc(
                     flags,
                     regs[dest.index()],
@@ -556,7 +571,7 @@ pub(super) fn emit_inst(
             let d = regs[dest.index()];
             let v = regs[value.index()];
             if d != v {
-                out.push(IlOp::byte(
+                out.push(byte(
                     Byte::new(Instruction::DenseMove).with_dense_move(d, v),
                 ));
             }
@@ -565,7 +580,7 @@ pub(super) fn emit_inst(
             } else {
                 0
             };
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseStoreIndex).with_dense_abc(
                     flags,
                     d,
@@ -575,7 +590,7 @@ pub(super) fn emit_inst(
             ));
         }
         MirInst::ArrayLen { dest, array } => {
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseArrayLen)
                     .with_dense_move(regs[dest.index()], regs[array.index()]),
             ));
@@ -590,7 +605,7 @@ pub(super) fn emit_inst(
                     "dense emit refuses ArrayPush without S2b maps (B6)".into(),
                 ));
             }
-            out.push(IlOp::byte(
+            out.push(byte(
                 Byte::new(Instruction::DenseArrayPush).with_dense_abc(
                     0,
                     regs[dest.index()],
@@ -628,7 +643,7 @@ pub(super) fn emit_inst(
                     .map_err(|_| LowerError::Refused("DenseMake arity".into()))?;
                 let slots: Vec<u8> = elems.iter().map(|e| regs[e.index()]).collect();
                 let base = gather_base(out, &slots, scratch, loc)?;
-                out.push(IlOp::byte(
+                out.push(byte(
                     Byte::new(Instruction::DenseMake).with_dense_abc(
                         make_kind,
                         regs[dest.index()],
@@ -891,12 +906,13 @@ fn emit_const(
     c: MirConst,
     dest: u8,
     pool: &mut Vec<u64>,
-    _loc: DebugLoc,
+    loc: DebugLoc,
 ) -> Result<IlOp, LowerError> {
+    let byte = |b: Byte| IlOp::from_plain_byte(b, loc);
     match c {
         MirConst::I64(v) => {
             if let Ok(imm) = i16::try_from(v) {
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
+                Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
                     dense::TY_I64,
                     dest,
                     imm as u16,
@@ -904,7 +920,7 @@ fn emit_const(
                 )))
             } else {
                 let idx = intern_pool(pool, v as u64)?;
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
+                Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
                     dense::TY_I64,
                     dest,
                     idx,
@@ -914,7 +930,7 @@ fn emit_const(
         }
         MirConst::I32(v) => {
             if let Ok(imm) = i16::try_from(v) {
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
+                Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
                     dense::TY_I32,
                     dest,
                     imm as u16,
@@ -922,7 +938,7 @@ fn emit_const(
                 )))
             } else {
                 let idx = intern_pool(pool, v as u64)?;
-                Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
+                Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
                     dense::TY_I32,
                     dest,
                     idx,
@@ -932,7 +948,7 @@ fn emit_const(
         }
         MirConst::F64(bits) => {
             let idx = intern_pool(pool, bits)?;
-            Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
+            Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
                 dense::TY_F64,
                 dest,
                 idx,
@@ -941,14 +957,14 @@ fn emit_const(
         }
         MirConst::F32(bits) => {
             let idx = intern_pool(pool, u64::from(bits))?;
-            Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
+            Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
                 dense::TY_F32,
                 dest,
                 idx,
                 true,
             )))
         }
-        MirConst::Bool(v) => Ok(IlOp::byte(Byte::new(Instruction::DenseConst).with_dense_const(
+        MirConst::Bool(v) => Ok(byte(Byte::new(Instruction::DenseConst).with_dense_const(
             dense::TY_BOOL,
             dest,
             u16::from(v),

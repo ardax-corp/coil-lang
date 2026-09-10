@@ -12,6 +12,22 @@ type FinalizeIlOut = Option<crate::dissect::IlSnapshot>;
 #[cfg(not(any(test, feature = "dissect")))]
 type FinalizeIlOut = ();
 
+fn apply_debug_slot_remaps(
+    locals: &mut HashMap<String, HashMap<String, u32>>,
+    remaps: &HashMap<String, HashMap<u32, u32>>,
+) {
+    for (fn_name, slots) in locals.iter_mut() {
+        let Some(remap) = remaps.get(fn_name) else {
+            continue;
+        };
+        for slot in slots.values_mut() {
+            if let Some(&new) = remap.get(slot) {
+                *slot = new;
+            }
+        }
+    }
+}
+
 /// Lowered form of a [`ParCombine`](crate::typechecking::ParCombine): the single
 /// instruction that folds the joined arm results once they are all on the stack.
 enum ParCombinePlan {
@@ -132,6 +148,11 @@ impl Compiler {
 
     pub fn stack_map_drafts(&self) -> &[crate::mir::DraftFrameMap] {
         &self.stack_map_drafts
+    }
+
+    /// I7 / C3 deopt resume drafts (empty when no specialized body).
+    pub fn deopt_map_drafts(&self) -> &[crate::mir::DraftDeoptMap] {
+        &self.deopt_map_drafts
     }
 
     /// Function entry symbols for panic backtraces (sorted by `entry_pc`).
@@ -16191,6 +16212,8 @@ impl Compiler {
             .map(|(n, pc)| (n.clone(), *pc as u32))
             .collect();
         self.stack_map_drafts = lowered.stack_map_drafts.clone();
+        self.deopt_map_drafts = lowered.deopt_map_drafts.clone();
+        apply_debug_slot_remaps(&mut self.fn_debug_locals, &lowered.debug_slot_remaps);
         self.stack_maps = crate::mir::bind_drafts(
             &lowered.stack_map_drafts,
             self.bytecode.as_slice(),

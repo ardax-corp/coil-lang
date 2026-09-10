@@ -72,8 +72,9 @@ pub use destprop::destprop;
 pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
 pub use entry::{lir_eligible, lir_refuse, LirRefuse};
-pub use func::{MirBlock, MirFunc};
+pub use func::{DeoptSite, MirBlock, MirFunc};
 pub use gc::{fill_live_roots, LiveRootSet};
+pub use deopt::{DraftDeoptMap, DraftDeoptSite};
 pub use stackmap::{bind_drafts, try_build_draft, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
@@ -84,7 +85,10 @@ pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;
 pub use lower::{LowerError, LowerHints, try_lower_numeric};
-pub use specialize::{try_lower_abi_body, try_lower_abi_body_with, try_specialize_body};
+pub use specialize::{
+    try_lower_abi_body, try_lower_abi_body_side, try_lower_abi_body_with, try_specialize_body,
+    try_specialize_body_side, BodySidecar,
+};
 pub use sroa::sroa;
 pub use strength::strength_reduce;
 pub use text::{ParseError, parse_func};
@@ -3455,6 +3459,86 @@ fn main() {
         );
         let mut vm_og = machine::Machine::<64>::with_operand_capacity(64);
         vm_og.run_raw(&bc_og, &constants_og, og.strings(), og.static_slot_count());
+    }
+
+    #[test]
+    fn c3_deopt_maps_named_lets_and_sparse_locs() {
+        let src = r#"
+fn hot(int n) -> int {
+    let i = 0;
+    let s = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let _ = hot(8);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        p.set_debugger_attached(true);
+        let (bc, constants) = p.compile_src(src).expect("compile");
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "C3 board must dense; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let drafts = p.deopt_map_drafts();
+        assert!(
+            drafts.iter().any(|d| d.name.contains("hot") && !d.sites.is_empty()),
+            "C3 deopt maps on hot; drafts={drafts:?}"
+        );
+        let locals = p.fn_debug_locals();
+        let hot = locals
+            .iter()
+            .find(|(n, _)| n.contains("hot"))
+            .map(|(_, l)| l.as_slice())
+            .unwrap_or(&[]);
+        assert!(
+            hot.iter().any(|(n, _)| n == "n"),
+            "param n stays named; locals={hot:?}"
+        );
+        assert!(
+            hot.iter().any(|(n, _)| n == "i" || n == "s"),
+            "named lets survive remap; locals={hot:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn emit_dense_forwards_known_debugloc() {
+        let loc = DebugLoc {
+            file: 0,
+            start_byte: 10,
+            end_byte: 20,
+        };
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("add1");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        let f = try_lower_numeric(&ops, &hints).expect("lower");
+        assert!(
+            f.value_locs.values().any(|l| l.is_known()),
+            "lower must keep known dest locs"
+        );
+        let mut pool = Vec::new();
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("emit");
+        assert!(
+            dense.iter().any(|op| op.loc().is_known()),
+            "C3 dense emit must forward known DebugLoc"
+        );
     }
 
     #[test]

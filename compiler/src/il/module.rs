@@ -38,6 +38,10 @@ pub struct IlModule {
     pub entry_at_offset: HashMap<usize, Label>,
     /// S2b drafts filled during [`Self::optimize_and_flatten`].
     pub stack_map_drafts: Vec<crate::mir::DraftFrameMap>,
+    /// I7 / C3 deopt resume drafts (compiler-internal; not archived).
+    pub deopt_map_drafts: Vec<crate::mir::DraftDeoptMap>,
+    /// Original IL slot → reconstruct slot after dense / LIR (named lets).
+    pub debug_slot_remaps: HashMap<String, HashMap<u32, u32>>,
 }
 
 impl IlModule {
@@ -54,6 +58,8 @@ impl IlModule {
                 epilogue: Vec::new(),
                 entry_at_offset: HashMap::new(),
                 stack_map_drafts: Vec::new(),
+                deopt_map_drafts: Vec::new(),
+                debug_slot_remaps: HashMap::new(),
             };
         }
 
@@ -280,19 +286,29 @@ impl IlModule {
         }
         let mut dense_calls = crate::mir::DenseCallMap::new();
         let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
+        let mut side_remaps = HashMap::<String, HashMap<u32, u32>>::new();
+        let mut side_deopts = Vec::new();
         while !pending.is_empty() && opts.mir_specialize {
             let mut next = Vec::new();
             let mut progressed = false;
             for i in pending.iter().copied() {
                 let body = &mut self.funcs[i];
-                if let Some((dense, abi)) = crate::mir::try_specialize_body(
+                let mut side = crate::mir::BodySidecar::default();
+                if let Some((dense, abi)) = crate::mir::try_specialize_body_side(
                     &body.ops,
                     &body.meta.name,
                     body.meta.entry_sp,
                     pool,
                     &dense_calls,
                     body.meta.entry,
+                    &mut side,
                 ) {
+                    if !side.debug_slot_remap.is_empty() {
+                        side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
+                    }
+                    if let Some(deopt) = side.deopt {
+                        side_deopts.push(deopt);
+                    }
                     if let Some(crate::il::Label(id)) = body.meta.entry {
                         dense_calls.insert(id, abi.clone());
                     }
@@ -315,21 +331,31 @@ impl IlModule {
                 break;
             }
             let body = &mut self.funcs[i];
-            if let Some(lir) = crate::mir::try_lower_abi_body_with(
+            let mut side = crate::mir::BodySidecar::default();
+            if let Some(lir) = crate::mir::try_lower_abi_body_side(
                 &body.ops,
                 &body.meta.name,
                 body.meta.entry_sp,
                 pool,
                 &body.meta.unboxed_fields,
+                &mut side,
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
                 let fuse = lir_emit_cost(&body.ops);
                 if lir_emit_cost(&lir) <= fuse.saturating_add(lir_cost_slack(&body.ops)) {
+                    if !side.debug_slot_remap.is_empty() {
+                        side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
+                    }
+                    if let Some(deopt) = side.deopt {
+                        side_deopts.push(deopt);
+                    }
                     body.ops = lir;
                 }
             }
         }
+        self.debug_slot_remaps.extend(side_remaps);
+        self.deopt_map_drafts.extend(side_deopts);
 
         // S2b: prefer a draft from the final body (fuse-IL / LIR). Dense
         // keep the pre-MIR snapshot so looping Make* still bind.
