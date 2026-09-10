@@ -177,6 +177,13 @@ regular reconstruct over bench-shaped peeps.
 Parked (not B*): boxed multi-payload match, residual `Byte`/`Pow`/bitwise,
 Cranelift P5, PGO.
 
+Post A0–C3 denser-MIR leftovers (D0 keep-rate, class `new`, dense field, Q9
+`main`, `item_check`): [mir-dense-leftovers.md](mir-dense-leftovers.md).
+**D0** ([COI-354](https://linear.app/ardax/issue/COI-354)): `nsieve` keeps
+dense-native after lift (`slot_env` follows trivial-phi subst). Cost gate
+unchanged. Tree-shake / BB reorder is a separate surface
+([#405](https://github.com/ardax-corp/coil-lang/pull/405)).
+
 ## Non-goals
 
 - Dual AST walkers / a second semantic IR

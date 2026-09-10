@@ -1046,6 +1046,12 @@ impl MirBuilder {
         for p in &mut self.func.params {
             *p = map(*p);
         }
+        // Trivial-phi subst must follow into IL slot snapshots (D0).
+        for env in self.func.slot_env.values_mut() {
+            for (_, v) in env.iter_mut() {
+                *v = map(*v);
+            }
+        }
     }
 }
 
@@ -1090,6 +1096,49 @@ mod tests {
                 .any(|i| matches!(i, MirInst::Phi { .. })),
             "join must have a phi: {f:?}"
         );
+        f.verify().unwrap();
+    }
+
+    #[test]
+    fn array_push_loop_slot_env_survives_trivial_phi() {
+        use crate::mir::inst::{MirAllocKind, MirBinOp, MirCmpOp, MirConst, MirGcKind};
+        let mut b = MirBuilder::new("grow");
+        let n = b.add_param(MirTy::I64).unwrap();
+        b.def_local(LocalId(0), n).unwrap();
+        let empty = b.ins_alloc(MirAllocKind::Array, Vec::new()).unwrap();
+        let g0 = b
+            .ins_gc_barrier(MirGcKind::Safepoint, vec![empty])
+            .unwrap();
+        b.def_local(LocalId(1), g0).unwrap();
+        let i0 = b.ins_const(MirConst::I64(0)).unwrap();
+        b.def_local(LocalId(2), i0).unwrap();
+        let header = b.create_block();
+        let body = b.create_block();
+        let exit = b.create_block();
+        b.jump(header).unwrap();
+
+        b.switch_to_block(header);
+        let i = b.use_local(LocalId(2), MirTy::I64).unwrap();
+        let c = b.ins_cmp(MirCmpOp::Lt, i, n).unwrap();
+        b.branch(c, body, exit).unwrap();
+
+        b.switch_to_block(body);
+        let xs = b.use_local(LocalId(1), MirTy::HeapRef).unwrap();
+        let one = b.ins_const(MirConst::I64(1)).unwrap();
+        let grown = b.ins_array_push(xs, one).unwrap();
+        let g = b
+            .ins_gc_barrier(MirGcKind::Safepoint, vec![grown])
+            .unwrap();
+        b.def_local(LocalId(1), g).unwrap();
+        let i1 = b.ins_binop(MirBinOp::Add, i, one).unwrap();
+        b.def_local(LocalId(2), i1).unwrap();
+        b.jump(header).unwrap();
+
+        b.switch_to_block(exit);
+        let out = b.use_local(LocalId(1), MirTy::HeapRef).unwrap();
+        b.ret(Some(out)).unwrap();
+
+        let f = b.finish().unwrap();
         f.verify().unwrap();
     }
 

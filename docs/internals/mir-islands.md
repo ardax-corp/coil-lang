@@ -100,6 +100,8 @@ HostInvoke. **Q9 R3** maps `FORMAT` / `STRINGIFY`. Unicode / regex stay out unti
 | Cranelift / native | parked (P5) | not an island delivery vehicle |
 
 Dense refuse rows that stay current: [specialize-refuse.md](specialize-refuse.md).
+Post-C3 denser leftovers (D0 `nsieve` keep, class field, multi-payload match):
+[mir-dense-leftovers.md](mir-dense-leftovers.md).
 
 ## A/B rules (every island PR)
 

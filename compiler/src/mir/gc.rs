@@ -155,15 +155,31 @@ fn apply_barrier_roots(func: &mut MirFunc) {
 }
 
 fn slot_heap(func: &MirFunc, at: ValueId) -> BTreeSet<ValueId> {
+    let defined = defined_ssa(func);
     let mut roots = BTreeSet::new();
     if let Some(env) = func.slot_env.get(&at) {
         for (_, v) in env {
-            if func.ty(*v).is_heap_word() {
+            if defined.contains(v) && func.ty(*v).is_heap_word() {
                 roots.insert(*v);
             }
         }
     }
     roots
+}
+
+fn defined_ssa(func: &MirFunc) -> HashSet<ValueId> {
+    let mut s = HashSet::new();
+    for &p in &func.params {
+        s.insert(p);
+    }
+    for b in &func.blocks {
+        for inst in &b.insts {
+            for d in inst.dests() {
+                s.insert(d);
+            }
+        }
+    }
+    s
 }
 
 fn live_heap(
