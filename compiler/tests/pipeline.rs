@@ -2934,6 +2934,39 @@ fn example_for_in_custom_prints_012() {
     assert_eq!(output, "012");
 }
 
+#[test]
+fn example_perf_for_in_sum_prints_checksum() {
+    let output = run_example("examples/perf/for_in_sum.hy");
+    assert_eq!(output, "12884115456");
+}
+
+#[test]
+fn example_perf_for_in_range_prints_checksum() {
+    let output = run_example("examples/perf/for_in_range.hy");
+    assert_eq!(output, "12884115456");
+}
+
+#[test]
+fn for_in_continue_skips_body_and_still_increments() {
+    let output = run_example_src(
+        r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let s = 0;
+    for x in [1, 2, 3, 4] {
+        if x == 2 {
+            continue;
+        }
+        s = s + x;
+    }
+    write(stdout(), to_bytes(format("%i", s)));
+}
+"#,
+    );
+    assert_eq!(output, "8");
+}
+
 /// Impl methods are defined after the `for` user; CALL must not pack PC 0.
 #[test]
 fn for_in_impl_after_loop_still_iterates() {
