@@ -1433,6 +1433,23 @@ impl<const S: usize> Machine<S> {
         }
     }
 
+    /// In-place `Vec` / array grow. Returns false when `target` is not an array.
+    fn array_push_value(&mut self, target: Value, value: Value) -> bool {
+        let target_addr = target.raw() as u64;
+        let Some(crate::memory::Object::Array(mut gc)) =
+            Self::find_object_by_addr(&self.heap, target_addr)
+        else {
+            return false;
+        };
+        let old_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
+        gc.as_mut().elements.push(value);
+        let new_bytes = gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
+        if old_bytes != new_bytes {
+            self.heap.account_resize(old_bytes, new_bytes);
+        }
+        true
+    }
+
     /// Incremental GC work after an allocation safepoint.
     #[inline]
     fn maybe_gc_after_alloc(&mut self, ip: usize) {
@@ -2506,7 +2523,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::DensePush as u8);
+            promise!(*bc as u8 <= Instruction::DenseArrayPush as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3862,6 +3879,20 @@ impl<const S: usize> Machine<S> {
                         self.stack.push(self.stack[sp + base + i]);
                     }
                 }
+                Instruction::DenseArrayPush => {
+                    let (_, dest, arr, val) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + arr < stack_cap);
+                    promise!(sp + val < stack_cap);
+                    let target_val = self.stack[sp + arr];
+                    let value = self.stack[sp + val];
+                    if !self.array_push_value(target_val, value) {
+                        return self
+                            .runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
+                    }
+                    self.stack[sp + dest] = target_val;
+                    self.maybe_gc_after_alloc(ip);
+                }
                 Instruction::ArrayPush => {
                     // Stack discipline matches `StoreIndex`: codegen emits
                     // `array` then `value`, so dispatch pops value first,
@@ -3869,23 +3900,12 @@ impl<const S: usize> Machine<S> {
                     // address for chaining (`push(push(a, 1), 2)`).
                     let value = self.stack.pop();
                     let target_val = self.stack.pop();
-                    let target_addr = target_val.raw() as u64;
-                    if let Some(crate::memory::Object::Array(mut gc)) =
-                        Self::find_object_by_addr(&self.heap, target_addr)
-                    {
-                        let old_bytes =
-                            gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
-                        gc.as_mut().elements.push(value);
-                        let new_bytes =
-                            gc.as_ref().elements.capacity() * std::mem::size_of::<Value>();
-                        if old_bytes != new_bytes {
-                            self.heap.account_resize(old_bytes, new_bytes);
-                        }
-                    } else {
+                    if !self.array_push_value(target_val, value) {
                         return self
                             .runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
                     }
                     self.stack.push(target_val);
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::ArrayLen => {
                     let target_val = self.stack.pop();

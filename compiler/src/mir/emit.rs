@@ -566,6 +566,25 @@ pub(super) fn emit_inst(
                     .with_dense_move(regs[dest.index()], regs[array.index()]),
             ));
         }
+        MirInst::ArrayPush {
+            dest,
+            array,
+            value,
+        } => {
+            if !across_alloc {
+                return Err(LowerError::Refused(
+                    "dense emit refuses ArrayPush without S2b maps (B6)".into(),
+                ));
+            }
+            out.push(IlOp::byte(
+                Byte::new(Instruction::DenseArrayPush).with_dense_abc(
+                    0,
+                    regs[dest.index()],
+                    regs[array.index()],
+                    regs[value.index()],
+                ),
+            ));
+        }
         MirInst::MatchPayload { dest, scrutinee, .. } => {
             let st = func.ty(*scrutinee);
             if !matches!(st, MirTy::NicheOpt | MirTy::NicheRes) {
@@ -1506,7 +1525,9 @@ pub(super) fn paired_alloc_dest(func: &MirFunc, barrier: ValueId) -> Option<Valu
         let mut pending = None;
         for inst in &block.insts {
             match inst {
-                MirInst::Alloc { dest, .. } => pending = Some(*dest),
+                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                    pending = Some(*dest)
+                }
                 MirInst::GcBarrier { dest, .. } if *dest == barrier => return pending,
                 _ => pending = None,
             }

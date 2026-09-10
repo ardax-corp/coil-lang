@@ -152,9 +152,9 @@ pub fn try_specialize_body(
     // Straight-line / leftover reconstruct: never denser-but-slower.
     // Loops amortize prologue Seek; they skip this static compare unless
     // the body is a select diamond or still has in-loop Make*.
-    let loop_tax = super::infer::has_back_edge(ops)
-        && !select_cfg
-        && !(inloop_alloc && super::infer::has_alloc_inside_loop(&out));
+    // Native in-loop Make* / ArrayPush amortize prologue Seek (A2 / B6).
+    // Boxed leftover reconstruct is already refused above.
+    let loop_tax = super::infer::has_back_edge(ops) && !select_cfg;
     // Q7 self-CALL is eligible; keep/refuse is still this cost compare.
     // B2 convoys CALL on the stack so tight fib/tak can win without
     // skipping the gate (the old Seek + STORE reconstruct was ~2× fib).

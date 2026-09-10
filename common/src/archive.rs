@@ -59,10 +59,11 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///     add and mul-then-add FMA; `coil-simd` lanes; no fast-math.
 /// 10 — dense-native heap ops (COI-335): `DenseIndex` / `DenseStoreIndex`
 ///     / `DenseArrayLen` / `DenseMake` / `DensePush`.
+/// 11 — dense-native `Vec` grow (COI-344 B6): `DenseArrayPush`.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 10;
+pub const ARCHIVE_MINOR: u16 = 11;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -347,9 +348,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 10);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 10));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.10");
+        assert_eq!(ARCHIVE_MINOR, 11);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 11));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.11");
     }
 
     #[test]

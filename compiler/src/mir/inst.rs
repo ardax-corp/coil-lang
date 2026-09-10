@@ -319,6 +319,13 @@ pub enum MirInst {
         dest: ValueId,
         array: ValueId,
     },
+    /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
+    /// Always a GC safepoint; pair with [`Self::GcBarrier`].
+    ArrayPush {
+        dest: ValueId,
+        array: ValueId,
+        value: ValueId,
+    },
     /// Heap allocation (I5). Dest is [`MirTy::HeapRef`]. Always a GC
     /// safepoint; pair with [`Self::GcBarrier`]. S2a records live heap
     /// words on the barrier and [`crate::mir::func::MirFunc::gc_roots`].
@@ -461,6 +468,7 @@ impl MirInst {
             | Self::Index { dest, .. }
             | Self::StoreIndex { dest, .. }
             | Self::ArrayLen { dest, .. }
+            | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
             | Self::Deopt { dest, .. }
@@ -484,7 +492,10 @@ impl MirInst {
 
     /// Allocation or GC safepoint — specialize / native must not cross.
     pub fn is_gc_edge(&self) -> bool {
-        matches!(self, Self::Alloc { .. } | Self::GcBarrier { .. })
+        matches!(
+            self,
+            Self::Alloc { .. } | Self::ArrayPush { .. } | Self::GcBarrier { .. }
+        )
     }
 
     /// Explicit I7 stop / deopt inst.
@@ -514,6 +525,7 @@ impl MirInst {
                 ..
             } => vec![*array, *index, *value],
             Self::ArrayLen { array, .. } => vec![*array],
+            Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
             Self::Deopt { .. } | Self::String { .. } => Vec::new(),
@@ -562,6 +574,10 @@ impl MirInst {
                 *value = map(*value);
             }
             Self::ArrayLen { array, .. } => *array = map(*array),
+            Self::ArrayPush { array, value, .. } => {
+                *array = map(*array);
+                *value = map(*value);
+            }
             Self::Alloc { elems, .. } => {
                 for v in elems.iter_mut() {
                     *v = map(*v);

@@ -256,6 +256,7 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
         | MirInst::StoreIndex { .. }
+        | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::Deopt { .. }
         | MirInst::Print { .. }

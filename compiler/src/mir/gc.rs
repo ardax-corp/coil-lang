@@ -2,7 +2,8 @@
 //!
 //! `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` lower to
 //! [`crate::mir::MirInst::Alloc`] plus a [`crate::mir::MirInst::GcBarrier`]
-//! safepoint. [`fill_live_roots`] records live heap-word SSA values (and IL
+//! safepoint. `ArrayPush` lowers to [`crate::mir::MirInst::ArrayPush`]
+//! plus a barrier (B6 grow). [`fill_live_roots`] records live heap-word SSA values (and IL
 //! slots when the builder snapshotted them). Dense specialize and MIR→LIR
 //! sidecar. S2c may emit dense / LIR across alloc when S2b maps exist.
 //!
@@ -54,6 +55,14 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
         {
             Some("heap/alloc")
         }
+        IlOp::Byte { byte, .. }
+            if matches!(
+                *byte.bytecode(),
+                Instruction::ArrayPush | Instruction::DenseArrayPush
+            ) =>
+        {
+            Some("heap/grow")
+        }
         _ => None,
     }
 }
@@ -74,7 +83,7 @@ pub fn fill_live_roots(func: &mut MirFunc) {
         let mut prev_alloc: Option<ValueId> = None;
         for (ii, inst) in block.insts.iter().enumerate() {
             match inst {
-                MirInst::Alloc { dest, .. } => {
+                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
                     let mut roots = live_heap(func, &live_after[bi][ii], &barrier_tokens);
                     roots.insert(*dest);
                     roots.append(&mut slot_heap(func, *dest));
@@ -326,6 +335,14 @@ mod tests {
             Some("heap/alloc")
         );
         assert!(!refuses_alloc(&IlOp::Const { imm: 1, loc }));
+        assert_eq!(
+            refuse_reason(&IlOp::byte(Byte::new(Instruction::ArrayPush))),
+            Some("heap/grow")
+        );
+        assert_eq!(
+            refuse_reason(&IlOp::byte(Byte::new(Instruction::DenseArrayPush))),
+            Some("heap/grow")
+        );
     }
 
     #[test]

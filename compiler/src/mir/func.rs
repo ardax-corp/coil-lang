@@ -418,6 +418,18 @@ impl MirFunc {
                     return Err(format!("{dest} ArrayLen dest type"));
                 }
             }
+            MirInst::ArrayPush {
+                dest,
+                array,
+                value,
+            } => {
+                if self.ty(*array) != MirTy::HeapRef || self.ty(*dest) != MirTy::HeapRef {
+                    return Err(format!("{dest} ArrayPush array type"));
+                }
+                if !self.ty(*value).is_word_lane() {
+                    return Err(format!("{dest} ArrayPush value type"));
+                }
+            }
             MirInst::MatchPayload {
                 dest,
                 scrutinee,

@@ -211,6 +211,11 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
         MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
+        MirInst::ArrayPush {
+            dest,
+            array,
+            value,
+        } => write!(f, "{dest} = arraypush {array}, {value}"),
         MirInst::Alloc { dest, kind, elems } => {
             write!(f, "{dest} = alloc.{}", kind.as_str())?;
             match *kind {
@@ -523,6 +528,17 @@ impl<'a> Parser<'a> {
             let array = self.value()?;
             ensure_ty(types, dest, MirTy::I64);
             return Ok(MirInst::ArrayLen { dest, array });
+        }
+        if op == "arraypush" {
+            let array = self.value()?;
+            self.expect(',')?;
+            let value = self.value()?;
+            ensure_ty(types, dest, MirTy::HeapRef);
+            return Ok(MirInst::ArrayPush {
+                dest,
+                array,
+                value,
+            });
         }
         if op == "ineg" || op == "fneg" || op == "bnot" {
             let src = self.value()?;

@@ -36,7 +36,9 @@ pub fn encode_draft(func: &MirFunc) -> Option<DraftFrameMap> {
         let mut pending_alloc: Option<ValueId> = None;
         for inst in &block.insts {
             match inst {
-                MirInst::Alloc { dest, .. } => pending_alloc = Some(*dest),
+                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                    pending_alloc = Some(*dest)
+                }
                 MirInst::GcBarrier { dest, .. } => {
                     let mut slots: BTreeSet<u16> = BTreeSet::new();
                     if let Some(a) = pending_alloc.take() {
@@ -154,6 +156,9 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
             | Instruction::MakeEnum
             | Instruction::InitTyped
             | Instruction::INIT
+            | Instruction::ArrayPush
+            | Instruction::DenseMake
+            | Instruction::DenseArrayPush
     )
 }
 
@@ -280,6 +285,45 @@ mod tests {
         assert_eq!(maps[0].safepoints[0].pc, 1);
         assert_eq!(maps[0].safepoints[0].slots, vec![0]);
         assert_eq!(maps[0].frame_slots, vec![0]);
+    }
+
+    #[test]
+    fn try_build_draft_from_array_push() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::byte(Byte::new(Instruction::ArrayPush)),
+            IlOp::StorePop { slot: 0, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let draft = try_build_draft(&ops, "grow", 1, &[], &[]).expect("map");
+        assert_eq!(draft.sites.len(), 1);
+        assert!(
+            draft.sites[0].contains(&0),
+            "live vec slot: {:?}",
+            draft.sites[0]
+        );
+    }
+
+    #[test]
+    fn bind_pairs_dense_make_and_array_push() {
+        let draft = DraftFrameMap {
+            name: "grow".into(),
+            sites: vec![vec![0], vec![0]],
+            frame_slots: vec![0],
+        };
+        let bytecode = vec![
+            Byte::new(Instruction::DenseMake).with_dense_abc(0, 1, 1, 2),
+            Byte::new(Instruction::DenseArrayPush).with_dense_abc(0, 0, 0, 1),
+        ];
+        let maps = bind_drafts(&[draft], &bytecode, &[("grow".into(), 0)]);
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].safepoints.len(), 2);
+        assert_eq!(maps[0].safepoints[0].pc, 0);
+        assert_eq!(maps[0].safepoints[1].pc, 1);
     }
 
     #[test]

@@ -35,6 +35,7 @@ User code does not name these directly; the compiler emits them:
 | `DenseArrayLen` | `[15:8]` dest, `[7:0]` array. |
 | `DenseMake` | `MakeArray` / `MakeTuple` / `MakeEnum`. `[31:24]` kind (`0` array, `1` tuple, `2+tag` enum), `[23:16]` dest, `[15:8]` arity, `[7:0]` first element slot (consecutive). |
 | `DensePush` | CALL / HostInvoke ABI edge: push consecutive slots. `[15:8]` arity, `[7:0]` base. |
+| `DenseArrayPush` | B6 (archive **minor 11**). Stack-neutral `Vec` / array grow. `[23:16]` dest, `[15:8]` array, `[7:0]` value (`dense_abc` flags unused). Dest is the same array identity. |
 
 ---
 

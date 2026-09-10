@@ -12,6 +12,8 @@ and relocate mapped slots on collect.
 
 - `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` can lower to
   `MirInst::Alloc` (`heapref`) plus a `GcBarrier` safepoint.
+  `ArrayPush` / `DenseArrayPush` lower to `MirInst::ArrayPush` plus a
+  barrier (B6 grow). `bind_drafts` counts those opcodes and `DenseMake`.
 - [`fill_live_roots`](../../compiler/src/mir/gc.rs) (on `MirBuilder::finish`
   and text parse) sets `GcBarrier.roots` and `MirFunc.gc_roots` to the live
   heap-word SSA values at the edge: the new object plus other live heap
@@ -38,8 +40,9 @@ and relocate mapped slots on collect.
   may take LIR. Draft lift keeps inferred param types (not forced `heapref`)
   and snapshots the stack-IL map **before** dense replace so `DenseBin`
   bodies still bind. Post-loop-only `return [x]` after a counted loop stays
-  fuse-IL so invert+fuse (COI-87) remains. Unmapped allocating bodies stay
-  fuse-IL. S3b heap-index takes dense unpinned residuals; S2e leaves tell
+  fuse-IL so invert+fuse (COI-87) remains.   Unmapped allocating bodies stay
+  fuse-IL. B6 maps `ArrayPush` and lets map lift type one-word `CALL` so
+  CALL+alloc drafts bind (no silent refuse). S3b heap-index takes dense unpinned residuals; S2e leaves tell
   at the StorePop frame high-water (prologue `Seek` only). Dense+match
   stays I2 LIR.
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
@@ -61,9 +64,9 @@ and relocate mapped slots on collect.
    may take dense. Per-residual `Seek` restore is gone (StorePop already
    returns tell to the dense frame).    Residual in-loop `Make*` stays
    fuse-IL unless SROA/LICM deletes it (S2l). Still refuse: post-loop-only heap return
-   (invert+fuse); unmapped alloc; CALL+alloc (map lift refuses user
-   `CALL`); computed-element stack scalarize; compiler write-barrier
-   opcodes; growing `ArrayPush` dest.
+   (invert+fuse); leftover unmapped grow / class edges; mutual / two-slot
+   recursive `CALL`; computed-element stack scalarize; compiler write-barrier
+   opcodes. Mapped `ArrayPush` / CALL+`Make*` is B6.
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 
