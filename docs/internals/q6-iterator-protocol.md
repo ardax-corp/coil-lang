@@ -34,11 +34,14 @@ type level). Runtime lowering:
    drop the increment. Assignment to `x` keeps a per-trip copy.
 3. **First-class range value** (`let r = 0..n; for x in r`) — unboxed
    `[start, end]` locals (inclusive lives in `Range` vs `RangeInclusive`).
-   Same counted latch as (2). Escape (`to_vec`, pass as a value) still
-   boxes `{start,end,inclusive}`. Parameter / heap dict ranges still
-   `GetField`.
-4. **Tuple** — temp array, then (1).
-5. **Dict / coro / user `Iterator`** — existing protocol. Stay fuse-IL
+   Same counted latch as (2). Escape (`to_vec`, pass as a value, method
+   `self`) still boxes `{start,end,inclusive}`.
+4. **Parameter / returned numeric Range** (C2) — free-fn params and
+   direct `CALL`/`RETURN` use the same `[start, end]` pair. `for x in r`
+   and `for x in make(n)` stay counted. Escaped fn values, inherent
+   methods, and heap-field dicts still `GetField`.
+5. **Tuple** — temp array, then (1).
+6. **Dict / coro / user `Iterator`** — existing protocol. Stay fuse-IL
    until a later rung (match / CALL / resume).
 
 No new opcode. No env toggle. Keep/refuse is checksum + cost gate.
@@ -51,6 +54,10 @@ No new opcode. No env toggle. Keep/refuse is checksum + cost gate.
   i64.
 - `examples/perf/for_in_range_value.hy` — first-class `let r = 0..n`
   helper is the same dense counted i64 (B5).
+- `examples/perf/for_in_range_param.hy` — `Range<int>` parameter helper
+  is the same dense counted i64 (C2).
+- `examples/perf/for_in_range_ret.hy` — returned `Range<int>` bind is
+  the same dense counted i64 (C2).
 
 Flagships do not need this island.
 
@@ -60,7 +67,8 @@ Ranked as **B5** in [opt-generalization.md](opt-generalization.md) B0
 (after B1 entry hygiene and B3 two-slot CALL):
 
 - First-class range unpack without I4 `STRING` / heap `GetField` — **landed**
-  for unboxed locals (`let r = 0..n`). Parameter / returned dict ranges
-  still `GetField`.
+  for unboxed locals (`let r = 0..n`). **C2** lands free-fn param /
+  returned numeric Range as two-slot `[start, end]`. Heap-field dicts,
+  escaped fn values, and method `self` still `GetField`.
 - User `Iterator::next` on MIR (needs Q8 dense+match or LIR + CALL)
 - Coro / dict for-in

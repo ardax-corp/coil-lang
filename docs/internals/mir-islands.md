@@ -94,7 +94,7 @@ HostInvoke. **Q9 R3** maps `FORMAT` / `STRINGIFY`. Unicode / regex stay out unti
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 / R2 dense emit; LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` may dense / LIR (**B8**); emit skips explicit `Deopt`; no native resume maps | **I7** + **B8** |
 | Recursion (`tak` / `fib`) | fuse-IL or dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene + **B2** CALL convoy + **B7** sibling / mutual `TailCall` + **C1** self two-slot. Convoy fused returns unfuse; one-word self-`CALL` dest convoy stays self-only; pair dests from the same self-`CALL` may convoy. Helper two-slot is **B3** |
-| `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); **B5** first-class `let r = 0..n` locals (`for_in_range_value`); `main` + format and user `Iterator` / coro / dict / parameter range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
+| `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); **B5** first-class `let r = 0..n` locals (`for_in_range_value`); **C2** free-fn param / returned numeric Range (`for_in_range_param` / `for_in_range_ret`); `main` + format and user `Iterator` / coro / dict / heap-field range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |
 
