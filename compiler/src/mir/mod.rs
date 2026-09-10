@@ -2326,6 +2326,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn i5_init_typed_lowers_object_alloc() {
         let loc = loc();
         let ops = vec![

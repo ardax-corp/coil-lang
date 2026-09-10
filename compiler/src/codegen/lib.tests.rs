@@ -4299,6 +4299,7 @@ fn main() { let h = tick(2); write(stdout(), to_bytes(format(\"%i\", resume h)))
 let a = Vec::from([1, 2]); \
 a.push(3); \
 let n = len(a); \
+if n != 3 { panic \"len\"; } \
 }",
         );
 
