@@ -2924,7 +2924,7 @@ fn main() {
         }),
         "expected FixedArrayGrow (E0412), got: {:?}",
         msgs.iter()
-            .map(|m| (m.code(), m.message(), m.help().cloned()))
+            .map(|m| (m.code(), m.message(), m.help().clone()))
             .collect::<Vec<_>>()
     );
 }

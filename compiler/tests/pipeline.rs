@@ -256,7 +256,7 @@ fn main() {
         pipeline
             .messages()
             .iter()
-            .map(|m| (m.code(), m.message(), m.help().cloned()))
+            .map(|m| (m.code(), m.message(), m.help().clone()))
             .collect::<Vec<_>>()
     );
 }
