@@ -27,15 +27,23 @@ test("negative rem store that is not last-arm luck") {
     assert(xs[2] == 30)?;
 }
 
-fn at([int; 3] xs, int i) -> int {
-    return xs[i % 3];
+fn sink([int; 3] xs) {}
+
+test("local dividend uses Euclidean rem") {
+    let xs = [10, 20, 30];
+    let i = 0 - 2;
+    assert(xs[i % 3] == 20)?;
+    i = 0 - 5;
+    assert(xs[i % 3] == 20)?;
 }
 
-test("param dividend uses Euclidean rem") {
+test("escaped heap index uses Euclidean rem") {
     let xs = [10, 20, 30];
-    assert(at(xs, 0 - 1) == 30)?;
-    assert(at(xs, 0 - 2) == 20)?;
-    assert(at(xs, 0 - 5) == 20)?;
+    sink(xs);
+    let i = 0 - 2;
+    assert(xs[i % 3] == 20)?;
+    i = 0 - 1;
+    assert(xs[i % 3] == 30)?;
 }
 
 test("plain index without rem still OOB-safe for in-range") {

@@ -4783,20 +4783,24 @@ fn main() {
         assert!(!vm.panicked(), "Euclidean rem, not last-arm luck");
     }
 
-    /// Q4: unknown / param dividend still Euclidean (not last-arm refuse).
+    /// Q4: unknown local dividend (`let i = 0-2`) is Euclidean, not last-arm.
     #[test]
-    fn heap_param_euclid_mod_index() {
+    fn local_var_euclid_mod_index() {
         let src = r#"
-fn at([int; 3] xs, int i) -> int {
-    return xs[i % 3];
-}
+fn sink([int; 3] xs) {}
 fn main() {
     let xs = [10, 20, 30];
-    if at(xs, 0 - 2) != 20 {
-        panic "param euclid -2";
+    let i = 0 - 2;
+    if xs[i % 3] != 20 {
+        panic "local euclid -2";
     }
-    if at(xs, 0 - 1) != 30 {
-        panic "param euclid -1";
+    sink(xs);
+    if xs[i % 3] != 20 {
+        panic "heap euclid -2";
+    }
+    i = 0 - 5;
+    if xs[i % 3] != 20 {
+        panic "heap euclid -5";
     }
 }
 "#;
@@ -4805,7 +4809,7 @@ fn main() {
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
-        assert!(!vm.panicked(), "param i % 3 is Euclidean");
+        assert!(!vm.panicked(), "local/heap i % 3 is Euclidean");
     }
 
     /// S2j: non-escaping named class field load/store — no InitTyped.
