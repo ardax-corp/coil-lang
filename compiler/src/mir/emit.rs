@@ -55,7 +55,14 @@ pub fn emit_dense(
     }
     let (regs, scratch) = assign_regs(func)?;
     let regs = coalesce_safe_latch_phis(func, regs);
-    let max_reg = regs.iter().copied().max().unwrap_or(0).max(scratch);
+    let gather = gather_window(func);
+    let max_reg = regs
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0)
+        .max(scratch)
+        .saturating_add(gather);
     let loc = DebugLoc::unknown();
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
@@ -91,7 +98,7 @@ pub fn emit_dense(
             }) {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, pool, loc, across_alloc)?;
+            emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, across_alloc)?;
         }
         emit_term(
             &mut out,
@@ -325,6 +332,7 @@ pub(super) fn emit_inst(
     inst: &MirInst,
     func: &MirFunc,
     regs: &[u8],
+    scratch: u8,
     pool: &mut Vec<u64>,
     loc: DebugLoc,
     across_alloc: bool,
@@ -405,17 +413,12 @@ pub(super) fn emit_inst(
             native_id,
             args,
         } => {
-            // Box typed slots → Value stack, HostInvoke, unbox into dest.
+            // ABI edge: native id + DensePush args + HostInvoke + StorePop dest.
             out.push(IlOp::Const {
                 imm: i32::from(*native_id),
                 loc,
             });
-            for a in args {
-                out.push(IlOp::Load {
-                    slot: u32::from(regs[a.index()]),
-                    loc,
-                });
-            }
+            emit_dense_push(out, args, regs, scratch, loc)?;
             out.push(IlOp::HostInvoke {
                 arity: args.len() as u32,
                 layout: 0,
@@ -427,12 +430,8 @@ pub(super) fn emit_inst(
             });
         }
         MirInst::Call { dest, target, args } => {
-            for a in args {
-                out.push(IlOp::Load {
-                    slot: u32::from(regs[a.index()]),
-                    loc,
-                });
-            }
+            // ABI edge: DensePush args + CALL + StorePop dest.
+            emit_dense_push(out, args, regs, scratch, loc)?;
             out.push(IlOp::Entry {
                 kind: crate::il::EntryKind::Call,
                 arity: args.len() as u32,
@@ -451,27 +450,19 @@ pub(super) fn emit_inst(
             index,
             unchecked,
         } => {
-            // Unpinned residuals: pin keys sit in dense slots and do not
-            // survive prologue Seek / CALL tell. StorePop leaves tell at
-            // the frame high-water (one result then dest store); S2e does
-            // not Seek-restore after residuals.
-            out.push(IlOp::Load {
-                slot: u32::from(regs[array.index()]),
-                loc,
-            });
-            out.push(IlOp::Load {
-                slot: u32::from(regs[index.index()]),
-                loc,
-            });
-            if *unchecked {
-                out.push(IlOp::IndexUnchecked { loc });
+            let flags = if *unchecked {
+                dense::HEAP_UNCHECKED
             } else {
-                out.push(IlOp::Index { loc });
-            }
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+                0
+            };
+            out.push(IlOp::byte(
+                Byte::new(Instruction::DenseIndex).with_dense_abc(
+                    flags,
+                    regs[dest.index()],
+                    regs[array.index()],
+                    regs[index.index()],
+                ),
+            ));
         }
         MirInst::StoreIndex {
             dest,
@@ -480,39 +471,32 @@ pub(super) fn emit_inst(
             value,
             unchecked,
         } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[array.index()]),
-                loc,
-            });
-            out.push(IlOp::Load {
-                slot: u32::from(regs[index.index()]),
-                loc,
-            });
-            out.push(IlOp::Load {
-                slot: u32::from(regs[value.index()]),
-                loc,
-            });
-            let inst = if *unchecked {
-                Instruction::StoreIndexUnchecked
+            let d = regs[dest.index()];
+            let v = regs[value.index()];
+            if d != v {
+                out.push(IlOp::byte(
+                    Byte::new(Instruction::DenseMove).with_dense_move(d, v),
+                ));
+            }
+            let flags = if *unchecked {
+                dense::HEAP_UNCHECKED
             } else {
-                Instruction::StoreIndex
+                0
             };
-            out.push(IlOp::byte(Byte::new(inst)));
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+            out.push(IlOp::byte(
+                Byte::new(Instruction::DenseStoreIndex).with_dense_abc(
+                    flags,
+                    d,
+                    regs[array.index()],
+                    regs[index.index()],
+                ),
+            ));
         }
         MirInst::ArrayLen { dest, array } => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[array.index()]),
-                loc,
-            });
-            out.push(IlOp::byte(Byte::new(Instruction::ArrayLen)));
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+            out.push(IlOp::byte(
+                Byte::new(Instruction::DenseArrayLen)
+                    .with_dense_move(regs[dest.index()], regs[array.index()]),
+            ));
         }
         MirInst::MatchPayload { .. } => {
             return Err(LowerError::Refused(
@@ -530,17 +514,27 @@ pub(super) fn emit_inst(
                     "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
                 ));
             }
-            for e in elems {
-                out.push(IlOp::Load {
-                    slot: u32::from(regs[e.index()]),
+            if let Some(make_kind) = dense_make_kind(*kind)? {
+                let arity = u8::try_from(elems.len())
+                    .map_err(|_| LowerError::Refused("DenseMake arity".into()))?;
+                let slots: Vec<u8> = elems.iter().map(|e| regs[e.index()]).collect();
+                let base = gather_base(out, &slots, scratch, loc)?;
+                out.push(IlOp::byte(
+                    Byte::new(Instruction::DenseMake).with_dense_abc(
+                        make_kind,
+                        regs[dest.index()],
+                        arity,
+                        base,
+                    ),
+                ));
+            } else {
+                emit_dense_push(out, elems, regs, scratch, loc)?;
+                out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
                     loc,
                 });
             }
-            out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
         }
         MirInst::GcBarrier { dest, .. } => {
             if !across_alloc {
@@ -868,6 +862,83 @@ fn cmp_kind(op: MirCmpOp, ty: MirTy) -> Result<u8, LowerError> {
         _ => return Err(LowerError::Refused(format!("dense cmp {ty}"))),
     };
     Ok(dense::pack_cmp(lane, pred))
+}
+
+fn gather_window(func: &MirFunc) -> u8 {
+    let mut n = 0u8;
+    for b in &func.blocks {
+        for inst in &b.insts {
+            let w = match inst {
+                MirInst::Call { args, .. } | MirInst::HostInvoke { args, .. } => args.len(),
+                MirInst::Alloc { elems, .. } => elems.len(),
+                _ => 0,
+            };
+            n = n.max(u8::try_from(w).unwrap_or(u8::MAX));
+        }
+    }
+    n
+}
+
+fn gather_base(
+    out: &mut Vec<IlOp>,
+    slots: &[u8],
+    scratch: u8,
+    loc: DebugLoc,
+) -> Result<u8, LowerError> {
+    if slots.is_empty() {
+        return Ok(0);
+    }
+    if slots.windows(2).all(|w| w[1] == w[0].saturating_add(1)) {
+        return Ok(slots[0]);
+    }
+    for (i, &src) in slots.iter().enumerate() {
+        let dest = scratch
+            .checked_add(i as u8)
+            .ok_or_else(|| LowerError::Refused("dense gather overflow".into()))?;
+        if dest != src {
+            out.push(IlOp::byte(
+                Byte::new(Instruction::DenseMove).with_dense_move(dest, src),
+            ));
+        }
+    }
+    let _ = loc;
+    Ok(scratch)
+}
+
+fn emit_dense_push(
+    out: &mut Vec<IlOp>,
+    args: &[ValueId],
+    regs: &[u8],
+    scratch: u8,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if args.is_empty() {
+        return Ok(());
+    }
+    let arity = u8::try_from(args.len()).map_err(|_| LowerError::Refused("DensePush arity".into()))?;
+    let slots: Vec<u8> = args.iter().map(|a| regs[a.index()]).collect();
+    let base = gather_base(out, &slots, scratch, loc)?;
+    out.push(IlOp::byte(
+        Byte::new(Instruction::DensePush).with_dense_move(arity, base),
+    ));
+    Ok(())
+}
+
+fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
+    match kind {
+        MirAllocKind::Array => Ok(Some(dense::MAKE_ARRAY)),
+        MirAllocKind::Tuple => Ok(Some(dense::MAKE_TUPLE)),
+        MirAllocKind::Enum { tag } => {
+            let packed = u32::from(dense::MAKE_ENUM)
+                .checked_add(tag)
+                .ok_or_else(|| LowerError::Refused("DenseMake enum tag".into()))?;
+            if packed > 255 {
+                return Ok(None);
+            }
+            Ok(Some(packed as u8))
+        }
+        MirAllocKind::Object { .. } => Ok(None),
+    }
 }
 
 /// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`).
