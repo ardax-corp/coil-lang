@@ -26,7 +26,8 @@ array lit   [1, 2, 3]
 tuple       (a, b)
 dict        { key: val, … }
 enum ctor   Status.Ok, Option.Some(x), Color.Red
-raise       raise "msg"
+raise       raise "msg"        // catchable Result.Err (not process abort)
+panic       panic "msg"        // abort process; CLI/embed exit 1 (Q5)
 try?        expr?              // Result early return
 default     expr ?? default
 optional    expr?.field
@@ -81,6 +82,9 @@ match opt {
 Constructor names are per-enum. Qualified form is canonical (`Status.Ok`, `Result.Ok(x)`, `Option.Some(x)`). Bare `Some`/`None`/`Ok`/`Err` is prelude sugar only when a single in-scope enum owns that case; otherwise it is a compile error and you must write `Enum.Case`.
 
 `assert(cond)?` in tests — returns `Result<(), string>`.
+
+`raise` is catchable (`Err` + return). `panic` aborts; checksum / CLI boards
+use `panic` so a `try`/`?` cannot swallow the failure (Q5).
 
 ## Module resolution
 

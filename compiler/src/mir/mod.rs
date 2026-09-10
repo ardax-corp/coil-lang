@@ -704,7 +704,7 @@ fn main() {
         i = i + 1;
     }
     if s != 120 {
-        raise "fill simd checksum";
+        panic "fill simd checksum";
     }
 }
 "#;
@@ -751,7 +751,7 @@ fn scan(Vec<int> v) -> int {
 fn main() {
     let v: Vec<int> = Vec::from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
     if scan(v) != 120 {
-        raise "scan simd checksum";
+        panic "scan simd checksum";
     }
 }
 "#;
@@ -786,7 +786,7 @@ fn main() {
     let y: Vec<float> = Vec::from([1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]);
     let z = axpy(2.0, x, y);
     if z != 3.0 {
-        raise "axpy simd checksum";
+        panic "axpy simd checksum";
     }
 }
 "#;
@@ -2025,7 +2025,7 @@ fn hot(int n) -> int {
 }
 fn main() {
     if hot(3) != 3 {
-        raise "hot checksum";
+        panic "hot checksum";
     }
 }
 "#;
@@ -2469,7 +2469,7 @@ fn sum(Vec<int> arr) -> int {
 fn main() {
     let v: Vec<int> = Vec::from([1, 2, 3, 4]);
     if sum(v) != 10 {
-        raise "indexed_sum checksum";
+        panic "indexed_sum checksum";
     }
 }
 "#;
@@ -2517,7 +2517,7 @@ fn sum(Vec<int> arr) -> int {
 fn main() {
     let v: Vec<int> = Vec::from([1, 2, 3, 4]);
     if sum(v) != 10 {
-        raise "reverse-index checksum";
+        panic "reverse-index checksum";
     }
 }
 "#;
@@ -2595,7 +2595,7 @@ fn main() {
     let out: Vec<float> = Vec::from([0.0, 0.0]);
     let x = times_a(v, out);
     if x != 2.0 {
-        raise "times_a checksum";
+        panic "times_a checksum";
     }
 }
 "#;

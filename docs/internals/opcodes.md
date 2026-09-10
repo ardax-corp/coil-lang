@@ -14,7 +14,7 @@ User code does not name these directly; the compiler emits them:
 | `OptionNicheToHeap` / `HeapOptionToNiche` | Tombstone (archive major 4); panics if executed |
 | `PairToHeap` / `HeapToPair` | Tombstone (archive major 4); panics if executed |
 | `ReturnPair` | Tombstone (archive major 4); panics if executed |
-| `Panic` | Abort after writing `panic: <msg>` |
+| `Panic` | Language `panic`: write `panic: <msg>`, set `Machine::panicked`, abort the VM (Q5). Not `raise` (that is `Err` + `RETURN`). |
 | `FloatChainStore` | Tombstone (not emitted; panics on major 4) |
 | `BinSlotSlotConstJmpf` | Tombstone (not emitted; panics on major 4) |
 | `CmpJmpt` / `BinSlotImmJmpt` / `LogNotJmpt` / `BinSlotSlotJmpt` / `BinSlotSlotConstJmpt` | Jump-if-true twins of the `*Jmpf` family (same packing; fused invert of `*Jmpf; JMP`) |

@@ -61,7 +61,7 @@ hyperfine -w 2 -r 8 "$CUR run pack.parent.hyc" "$CUR run pack.tip.hyc"
 | `s2d_inloop_pack_arith` extra `*3+1` | `6000004999997` | 294.4 ± 1.9 ms | 338.8 ± 3.0 ms | **1.15×** |
 | `s2d_inloop_pack_wide` N=5e5 arity-8 | `125001500000` | 89.6 ± 0.5 ms | 105.5 ± 1.9 ms | **1.18×** |
 | `s2d_inloop_pack_store` Make+StoreIndex+Index | `1999999000000` | 487.4 ± 3.4 ms | 516.9 ± 0.9 ms | **1.06×** |
-| `s2d_preheader_bump` (landed hit) | `200000` (raise) | 8.5 ± 0.3 ms | 7.4 ± 0.2 ms | **1.14× faster** |
+| `s2d_preheader_bump` (landed hit) | `200000` (panic) | 8.5 ± 0.3 ms | 7.4 ± 0.2 ms | **1.14× faster** |
 
 Tip vs parent archives are **byte-identical** on every in-loop kernel
 (`sha256` match). LIR does not replace fuse-IL for these bodies

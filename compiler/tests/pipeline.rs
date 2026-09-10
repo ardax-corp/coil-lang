@@ -602,6 +602,31 @@ fn main() {
 }
 
 #[test]
+fn raise_from_main_does_not_set_panicked() {
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(
+            r#"
+fn main() {
+    raise "boom";
+}
+"#,
+        )
+        .expect("raise in main should compile (Result mode)");
+    let mut machine = Machine::<128>::default();
+    machine.run_raw(
+        &bytecode,
+        &constants,
+        pipeline.strings(),
+        pipeline.static_slot_count(),
+    );
+    assert!(
+        !machine.panicked(),
+        "Q5: raise is catchable Result.Err, not a process abort"
+    );
+}
+
+#[test]
 fn example_coalesce_prints_bar_hi_7_9() {
     let output = run_example("examples/coalesce.hy");
     assert_eq!(output, "bar,hi,7,9");

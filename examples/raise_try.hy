@@ -1,4 +1,4 @@
-// raise + ? with inferred Result return.
+// raise + ? with inferred Result return (catchable; not process abort — Q5).
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};

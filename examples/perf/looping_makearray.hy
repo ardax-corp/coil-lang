@@ -1,5 +1,5 @@
 // S2d: preheader MakeArray + computed-index store (maps + dense).
-// 200000 stores; checksum 200000 (raise on mismatch).
+// 200000 stores; checksum 200000 (panic on mismatch).
 fn bump() -> int {
     let arr = [0, 0, 0, 0];
     let i = 0;

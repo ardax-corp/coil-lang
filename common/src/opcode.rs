@@ -215,6 +215,7 @@ pub enum Instruction {
     MakePolyFnCapture,
 
     /// Panic: pop string message, write `panic: <msg>` to output, abort the VM.
+    /// Language `panic` only — `raise` is catchable `Err` + RETURN (Q5).
     /// Appended after `MakePolyFnCapture` (Phase prelude::test).
     Panic,
 
