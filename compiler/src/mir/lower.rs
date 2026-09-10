@@ -1,8 +1,10 @@
 //! Lower pre-fuse stack IL into numeric SSA.
 //!
 //! Fuse-select remains the production bytecode lowerer. This path is an
-//! optional sidecar: classes, heap, non-dense user calls, and residual `Byte` (except a
-//! small numeric set) refuse so the existing `Value` interpreter is unchanged.
+//! optional sidecar: escaping classes, unmapped heap, two-slot / mutual
+//! `CALL`, and residual `Byte` (except a small numeric set) refuse so the
+//! existing `Value` interpreter is unchanged. One-word `CALL` (Q7) and
+//! niche / two-slot match (Q8) lower; keep/refuse is the cost gate.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -55,7 +57,8 @@ pub struct LowerHints {
     pub pool_ty: Vec<Option<MirTy>>,
     /// CALL-edge arity: slots `0..param_count` are live-in params (Value ABI).
     pub param_count: u32,
-    /// Leaf-first dense callees (COI-291). Empty → user `CALL` still refuses.
+    /// Leaf-first dense callees (COI-291). Empty still allows an open
+    /// one-word `CALL` / `TailCall` (S3 / Q7); two-slot / mutual stay refuse.
     pub calls: DenseCallMap,
     /// I2: `JumpIfMatch` / `Unpack` / `Seek` and stack-carrying CFG edges.
     pub allow_match: bool,

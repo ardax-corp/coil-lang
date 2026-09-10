@@ -37,8 +37,9 @@ pub fn try_specialize_body(
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke except I4 string bytes, heap index / ArrayLen /
     // StoreIndex (dense residuals after V*). FORMAT / string ops stay
-    // off dense (I4 / Q9 R1 is MIR→LIR). Q8: niche / two-slot match may dense when the
-    // reconstruct beats fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
+    // off dense (I4 / Q9 R1 is MIR→LIR). Q6 counted `for` is i64 + index.
+    // Q8: niche / two-slot match may dense when the reconstruct beats
+    // fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
     // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. CALL / HostInvoke box at the ABI
