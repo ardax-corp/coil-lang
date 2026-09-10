@@ -17,7 +17,8 @@
 //! Specialized numeric loops lower to dense 3-address opcodes. Leftover
 //! bodies that [`entry`] accepts lift through MIR→LIR (`RETURN` width 1 or
 //! 2). Dense / LIR `CALL` uses the one-word or two-slot typed ABI
-//! ([`abi`]; COI-291 / B3).
+//! ([`abi`]; COI-291 / B3 / C1). SSA models dest + `dest_hi`; N>2 refuses
+//! at that cap (same field, extra dests later).
 //! Typed HostInvoke still boxes at the host edge. Escaping / heap-backed
 //! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
 //! `STRINGIFY` / `PRINT` may enter MIR→LIR (I4 / Q9 R1); dense infer
@@ -1425,6 +1426,82 @@ fn main() {
         let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "ping/pong must run");
+    }
+
+    #[test]
+    fn pipeline_self_two_slot_call_return_checksum() {
+        let src = r#"
+#[max_depth(32)]
+fn walk(int n) -> Option<int> {
+    if n <= 0 {
+        return Option::Some(0);
+    }
+    let r = walk(n - 1);
+    return match r {
+        Option::Some(x) => Option::Some(x + 1),
+        Option::None => Option::None,
+    };
+}
+#[max_depth(32)]
+fn walk_tail(int n, int acc) -> Option<int> {
+    if n <= 0 {
+        return Option::Some(acc);
+    }
+    return walk_tail(n - 1, acc + 1);
+}
+fn main() {
+    let a = match walk(6) {
+        Option::Some(x) => x,
+        Option::None => -1,
+    };
+    let b = match walk_tail(6, 0) {
+        Option::Some(x) => x,
+        Option::None => -1,
+    };
+    if a != 6 {
+        panic("walk");
+    }
+    if b != 6 {
+        panic("walk_tail");
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile C1 self two-slot");
+        assert!(
+            bc.iter().any(|b| {
+                (*b.bytecode() == Instruction::CALL && b.call_ret_words() >= 2)
+                    || *b.bytecode() == Instruction::TailCall
+            }),
+            "self two-slot must keep CALL/TailCall; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter().any(|b| *b.bytecode() == Instruction::MakeEnum),
+            "self two-slot must not box; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let walk = p.function_offset("walk").expect("walk");
+        let walk_tail = p.function_offset("walk_tail").expect("walk_tail");
+        let main = p.function_offset("main").expect("main");
+        let walk_end = walk_tail.min(main);
+        let walk_bc = if walk < walk_end {
+            &bc[walk..walk_end]
+        } else {
+            &bc[walk..]
+        };
+        let walk_ops: Vec<_> = walk_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let _lifted = walk_bc.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::DenseBin | Instruction::DenseConst | Instruction::DensePush
+            )
+        });
+        let _ = (walk_ops, _lifted);
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "walk/walk_tail checksum");
     }
 
     #[test]
