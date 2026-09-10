@@ -696,6 +696,7 @@ impl MirBuilder {
             fmt: self.resolve(fmt),
             args,
         })?;
+        self.snapshot_slots(dest);
         Ok(dest)
     }
 
@@ -712,6 +713,7 @@ impl MirBuilder {
             dest,
             src: self.resolve(src),
         })?;
+        self.snapshot_slots(dest);
         Ok(dest)
     }
 

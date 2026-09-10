@@ -15,7 +15,8 @@
 //! field / unmapped alloc / residual `Byte` /
 //! `Pow` / `AND`/`OR`. Q9 R1: LIR infer accepts `STRING` / `PRINT` /
 //! `FORMAT` / `STRINGIFY`; dense infer still refuses those table ops.
-//! R2 opens `from_bytes` / `to_bytes` HostInvoke on dense. S2c maps
+//! R2 opens `from_bytes` / `to_bytes` HostInvoke on dense. R3 maps
+//! `FORMAT` / `STRINGIFY` like I5 alloc. S2c maps
 //! allow alloc. Compare-only stays fuse-IL. Q7 unfuses convoy
 //! `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` so one-word
 //! self-`CALL` can infer.
@@ -186,7 +187,7 @@ impl InferMode {
         matches!(self, Self::Map) || across
     }
 
-    /// Q9 R1: leftover LIR / map lift may type string / format IL.
+    /// Q9 R1 / R3: leftover LIR / map lift may type string / format IL.
     fn allows_string(self) -> bool {
         matches!(self, Self::Lir | Self::Map)
     }

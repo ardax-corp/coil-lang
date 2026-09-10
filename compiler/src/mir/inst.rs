@@ -363,12 +363,14 @@ pub enum MirInst {
     },
     /// `FORMAT n` (I4 / Q9 R1). Dest / `fmt` are [`MirTy::HeapRef`].
     /// Reconstructs the shipped opcode — not a second Format lowering.
+    /// Allocating safepoint (R3); pair with [`Self::GcBarrier`].
     Format {
         dest: ValueId,
         fmt: ValueId,
         args: Vec<ValueId>,
     },
     /// `STRINGIFY` (I4 / Q9 R1). Dest is [`MirTy::HeapRef`].
+    /// Allocating safepoint (R3); pair with [`Self::GcBarrier`].
     Stringify {
         dest: ValueId,
         src: ValueId,
@@ -494,7 +496,11 @@ impl MirInst {
     pub fn is_gc_edge(&self) -> bool {
         matches!(
             self,
-            Self::Alloc { .. } | Self::ArrayPush { .. } | Self::GcBarrier { .. }
+            Self::Alloc { .. }
+                | Self::ArrayPush { .. }
+                | Self::Format { .. }
+                | Self::Stringify { .. }
+                | Self::GcBarrier { .. }
         )
     }
 

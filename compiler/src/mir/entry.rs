@@ -47,7 +47,8 @@ pub enum LirRefuse {
 /// — Q7 densifies one-word self-`CALL` instead), escaping fields, box,
 /// multi-payload `Unpack` / `JumpIfMatch` arity > 1. Counted `for` (Q6)
 /// and niche / two-slot match arity ≤ 1 (Q8) are not LIR walls. Q9 R1:
-/// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Q9 R2 densifies
+/// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Q9 R3 maps
+/// `FORMAT` / `STRINGIFY` (unmapped format is an alloc wall). Q9 R2 densifies
 /// `from_bytes` / `to_bytes` HostInvoke (LIR still cannot reconstruct
 /// HostInvoke). Heap index /
 /// `ArrayLen` / `StoreIndex` may lift (A2).
@@ -276,6 +277,23 @@ mod tests {
         assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
         assert_eq!(lir_refuse_with(&ops, &[], true), None);
         assert!(lir_eligible_with(&ops, &[], true));
+    }
+
+    #[test]
+    fn q9_r3_mapped_format_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Label(Label(0)),
+            IlOp::String { idx: 0, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::FORMAT).with_operand_u32(1),
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_with(&ops, &[], true), None);
     }
 
     #[test]

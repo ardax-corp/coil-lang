@@ -21,7 +21,8 @@
 //! Typed HostInvoke still boxes at the host edge. Escaping / heap-backed
 //! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
 //! `STRINGIFY` / `PRINT` may enter MIR→LIR (I4 / Q9 R1); dense infer
-//! still refuses those table ops. `from_bytes` / `to_bytes` are I6 dense
+//! still refuses those table ops. `FORMAT` / `STRINGIFY` take I5-style
+//! maps (Q9 R3). `from_bytes` / `to_bytes` are I6 dense
 //! HostInvoke (Q9 R2). Allocating bodies may
 //! lower to `Alloc` + `GcBarrier` SSA with live-heap `roots`; dense / LIR
 //! emit across alloc only when S2b maps exist (S2c), including mapped
@@ -3466,6 +3467,10 @@ fn main() {
             IlOp::Return { loc, ret_words: 1 },
         ];
         let mut pool = Vec::new();
+        assert!(
+            super::stackmap::try_build_draft(&format_ops, "fmt", 1, &[], &[]).is_some(),
+            "R3 FORMAT encodes maps"
+        );
         let lir = try_lower_abi_body(&format_ops, "fmt", 1, &mut pool)
             .expect("Q9 R1 FORMAT enters MIR→LIR");
         assert!(
@@ -3537,14 +3542,59 @@ fn main() {
         let hot_bc = &bc[start..end];
         assert!(
             hot_bc.iter().any(|b| *b.bytecode() == Instruction::FORMAT),
-            "I4 keeps FORMAT on fuse-IL; opcodes={:?}",
+            "R3 keeps FORMAT reconstruct; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
             hot_bc
                 .iter()
                 .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "I4 must not dense-specialize a FORMAT loop"
+            "R3 must not dense-specialize a FORMAT loop"
+        );
+        assert!(
+            p.stack_maps()
+                .iter()
+                .any(|m| m.safepoints.iter().any(|s| {
+                    hot_bc
+                        .get((s.pc as usize).saturating_sub(start))
+                        .is_some_and(|b| *b.bytecode() == Instruction::FORMAT)
+                })),
+            "R3 binds FORMAT safepoints: {:?}",
+            p.stack_maps()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_format_loop_maps_live_string() {
+        let src = r#"
+use string::{format};
+fn hot(string keep, int n) -> string {
+    let i = 0;
+    while i < n {
+        let _ = format("%s %i", keep, i);
+        i = i + 1;
+    }
+    return keep;
+}
+fn main() {
+    let _ = hot("k", 3);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile mapped format");
+        assert!(
+            p.stack_maps().iter().any(|m| {
+                m.safepoints
+                    .iter()
+                    .any(|s| s.slots.contains(&0) && {
+                        let i = s.pc as usize;
+                        i < bc.len() && *bc[i].bytecode() == Instruction::FORMAT
+                    })
+            }),
+            "live string slot 0 must be rooted at FORMAT: {:?}",
+            p.stack_maps()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

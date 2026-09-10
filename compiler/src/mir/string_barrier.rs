@@ -2,8 +2,9 @@
 //!
 //! R1: table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may enter
 //! MIR→LIR. Dense infer still refuses so numeric specialize is unchanged.
-//! `string::{from_bytes,to_bytes}` are I6 dense HostInvoke (R2). Unicode /
-//! regex stay out (R4 / B9).
+//! `string::{from_bytes,to_bytes}` are I6 dense HostInvoke (R2).
+//! R3: `FORMAT` / `STRINGIFY` are I5-style mapped GC safepoints.
+//! Unicode / regex stay out (R4).
 
 use common::Instruction;
 
@@ -12,6 +13,20 @@ use crate::il::IlOp;
 /// Residual format / stringify opcodes (cold `IlOp::Byte`).
 pub fn is_format_inst(inst: Instruction) -> bool {
     matches!(inst, Instruction::FORMAT | Instruction::STRINGIFY)
+}
+
+/// Allocating format IL (`FORMAT n>0` / `STRINGIFY`). Table `STRING` /
+/// `PRINT` are not safepoints.
+pub fn is_format_il(op: &IlOp) -> bool {
+    match op {
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STRINGIFY => true,
+        IlOp::Byte { byte, .. }
+            if *byte.bytecode() == Instruction::FORMAT && byte.operand_u32() > 0 =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Table / print / format IL (R1 reconstruct set).
@@ -83,5 +98,14 @@ mod tests {
         assert!(is_string_il(&IlOp::String { idx: 0, loc }));
         assert!(refuses_dense_string(&IlOp::Print { loc }));
         assert!(!is_string_il(&IlOp::Const { imm: 1, loc }));
+        assert!(is_format_il(&IlOp::Byte {
+            byte: Byte::new(Instruction::FORMAT).with_operand_u32(1),
+            loc,
+        }));
+        assert!(!is_format_il(&IlOp::Byte {
+            byte: Byte::new(Instruction::FORMAT).with_operand_u32(0),
+            loc,
+        }));
+        assert!(!is_format_il(&IlOp::String { idx: 0, loc }));
     }
 }

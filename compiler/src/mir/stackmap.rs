@@ -36,7 +36,10 @@ pub fn encode_draft(func: &MirFunc) -> Option<DraftFrameMap> {
         let mut pending_alloc: Option<ValueId> = None;
         for inst in &block.insts {
             match inst {
-                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                MirInst::Alloc { dest, .. }
+                | MirInst::ArrayPush { dest, .. }
+                | MirInst::Format { dest, .. }
+                | MirInst::Stringify { dest, .. } => {
                     pending_alloc = Some(*dest)
                 }
                 MirInst::GcBarrier { dest, .. } => {
@@ -123,6 +126,7 @@ fn try_build_draft_err(
     hints.allow_index = true;
     hints.allow_match = true;
     hints.allow_effects = true;
+    hints.allow_string = ops.iter().any(super::string_barrier::is_string_il);
     hints.unboxed_fields = unboxed_fields.to_vec();
     hints.allow_fields = !unboxed_fields.is_empty();
     hints.skip_verify = true;
@@ -159,6 +163,8 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
             | Instruction::ArrayPush
             | Instruction::DenseMake
             | Instruction::DenseArrayPush
+            | Instruction::FORMAT
+            | Instruction::STRINGIFY
     )
 }
 
@@ -324,6 +330,45 @@ mod tests {
         assert_eq!(maps[0].safepoints.len(), 2);
         assert_eq!(maps[0].safepoints[0].pc, 0);
         assert_eq!(maps[0].safepoints[1].pc, 1);
+    }
+
+    #[test]
+    fn try_build_draft_from_format_keeps_live_slot() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::String { idx: 0, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::byte(Byte::new(Instruction::FORMAT).with_operand_u32(1)),
+            IlOp::StorePop { slot: 1, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let draft = try_build_draft(&ops, "fmt", 1, &[], &[]).expect("map");
+        assert_eq!(draft.sites.len(), 1);
+        assert!(
+            draft.sites[0].contains(&0),
+            "live string slot: {:?}",
+            draft.sites[0]
+        );
+    }
+
+    #[test]
+    fn bind_pairs_format_pc() {
+        let draft = DraftFrameMap {
+            name: "fmt".into(),
+            sites: vec![vec![0]],
+            frame_slots: vec![0],
+        };
+        let bytecode = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::FORMAT).with_operand_u32(1),
+            Byte::new(Instruction::RETURN),
+        ];
+        let maps = bind_drafts(&[draft], &bytecode, &[("fmt".into(), 0)]);
+        assert_eq!(maps.len(), 1);
+        assert_eq!(maps[0].safepoints[0].pc, 1);
+        assert_eq!(maps[0].safepoints[0].slots, vec![0]);
     }
 
     #[test]

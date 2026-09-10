@@ -981,7 +981,8 @@ fn lower_format(
             let src = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("STRINGIFY stack".into()))?;
-            tos.push(b.ins_stringify(src)?);
+            let obj = b.ins_stringify(src)?;
+            tos.push(b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])?);
             Ok(())
         }
         Instruction::FORMAT => {
@@ -998,7 +999,8 @@ fn lower_format(
             }
             args.reverse();
             let fmt = tos.pop().expect("fmt");
-            tos.push(b.ins_format(fmt, args)?);
+            let obj = b.ins_format(fmt, args)?;
+            tos.push(b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])?);
             Ok(())
         }
         _ => Err(LowerError::Refused("format".into())),
@@ -1453,6 +1455,41 @@ mod tests {
     }
 
     #[test]
+    fn lowering_format_pairs_gc_barrier() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::String { idx: 0, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Byte {
+                byte: common::Byte::new(Instruction::FORMAT).with_operand_u32(1),
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("fmt");
+        hints.allow_string = true;
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        let f = try_lower_numeric(&ops, &hints).expect("R3 format+barrier");
+        f.verify().unwrap();
+        assert!(f.has_gc_edge());
+        assert!(f.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| matches!(i, MirInst::Format { .. }))
+        }));
+        assert!(f.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    MirInst::GcBarrier {
+                        kind: MirGcKind::Safepoint,
+                        ..
+                    }
+                )
+            })
+        }));
+    }
+
     fn lowering_string_print_with_allow() {
         let loc = loc();
         let ops = vec![

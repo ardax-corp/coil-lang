@@ -3,7 +3,8 @@
 //! `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` lower to
 //! [`crate::mir::MirInst::Alloc`] plus a [`crate::mir::MirInst::GcBarrier`]
 //! safepoint. `ArrayPush` lowers to [`crate::mir::MirInst::ArrayPush`]
-//! plus a barrier (B6 grow). [`fill_live_roots`] records live heap-word SSA values (and IL
+//! plus a barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way
+//! (Q9 R3). [`fill_live_roots`] records live heap-word SSA values (and IL
 //! slots when the builder snapshotted them). Dense specialize and MIR→LIR
 //! sidecar. S2c may emit dense / LIR across alloc when S2b maps exist.
 //!
@@ -38,7 +39,7 @@ pub fn is_alloc_inst(inst: Instruction) -> bool {
     )
 }
 
-/// IL that is an alloc / GC safepoint (I5). Unmapped bodies still refuse.
+/// IL that is an alloc / GC safepoint (I5 / Q9 R3). Unmapped bodies still refuse.
 pub fn refuses_alloc(op: &IlOp) -> bool {
     refuse_reason(op).is_some()
 }
@@ -63,6 +64,14 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
         {
             Some("heap/grow")
         }
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::STRINGIFY => {
+            Some("heap/format")
+        }
+        IlOp::Byte { byte, .. }
+            if *byte.bytecode() == Instruction::FORMAT && byte.operand_u32() > 0 =>
+        {
+            Some("heap/format")
+        }
         _ => None,
     }
 }
@@ -83,7 +92,10 @@ pub fn fill_live_roots(func: &mut MirFunc) {
         let mut prev_alloc: Option<ValueId> = None;
         for (ii, inst) in block.insts.iter().enumerate() {
             match inst {
-                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                MirInst::Alloc { dest, .. }
+                | MirInst::ArrayPush { dest, .. }
+                | MirInst::Format { dest, .. }
+                | MirInst::Stringify { dest, .. } => {
                     let mut roots = live_heap(func, &live_after[bi][ii], &barrier_tokens);
                     roots.insert(*dest);
                     roots.append(&mut slot_heap(func, *dest));
@@ -342,6 +354,19 @@ mod tests {
         assert_eq!(
             refuse_reason(&IlOp::byte(Byte::new(Instruction::DenseArrayPush))),
             Some("heap/grow")
+        );
+        assert_eq!(
+            refuse_reason(&IlOp::byte(
+                Byte::new(Instruction::FORMAT).with_operand_u32(1)
+            )),
+            Some("heap/format")
+        );
+        assert!(!refuses_alloc(&IlOp::byte(
+            Byte::new(Instruction::FORMAT).with_operand_u32(0)
+        )));
+        assert_eq!(
+            refuse_reason(&IlOp::byte(Byte::new(Instruction::STRINGIFY))),
+            Some("heap/format")
         );
     }
 
