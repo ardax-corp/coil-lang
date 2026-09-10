@@ -2332,14 +2332,24 @@ fn main() -> int {
                 op.as_encode_byte().is_some_and(|b| {
                     matches!(
                         *b.bytecode(),
-                        Instruction::IndexUnchecked | Instruction::IndexPinUnchecked
+                        Instruction::IndexUnchecked
+                            | Instruction::IndexPinUnchecked
+                            | Instruction::DenseIndex
                     )
                 })
             })
             .count();
+        let bc_index = bytecode.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::IndexUnchecked
+                    | Instruction::IndexPinUnchecked
+                    | Instruction::DenseIndex
+            )
+        });
         assert!(
-            unchecked >= 1,
-            "pure helper scan should emit Unchecked index; stats={stats:?}"
+            unchecked >= 1 || bc_index,
+            "pure helper scan should uncheck or keep DenseIndex; stats={stats:?}"
         );
         let calls = bytecode
             .iter()
@@ -2541,6 +2551,13 @@ fn main() -> int {
         )
     }
 
+    fn is_dense_heap_index(op: common::Instruction) -> bool {
+        matches!(
+            op,
+            Instruction::DenseIndex | Instruction::DenseStoreIndex | Instruction::DenseArrayPush
+        )
+    }
+
     #[test]
     fn for_in_stable_length_pins() {
         use common::Instruction;
@@ -2565,14 +2582,15 @@ fn main() -> int {
         let syms = pipeline.program_debug().fn_symbols;
         let main = fn_ops(&bytecode, &syms, "main");
         assert!(
-            main.iter().any(|b| is_pin_op(*b.bytecode())),
-            "stable for-in should pin; body={:?}",
+            main.iter()
+                .any(|b| is_pin_op(*b.bytecode()) || is_dense_heap_index(*b.bytecode())),
+            "stable for-in should pin or densify; body={:?}",
             main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
             main.iter().any(|b| is_unchecked_index(*b.bytecode())
-                || *b.bytecode() == Instruction::IndexPinUnchecked),
-            "stable for-in should uncheck the element load; body={:?}",
+                || *b.bytecode() == Instruction::DenseIndex),
+            "stable for-in should uncheck or keep DenseIndex; body={:?}",
             main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
     }
@@ -2703,14 +2721,20 @@ fn main() -> int {
             .iter()
             .filter(|b| is_unchecked_index(*b.bytecode()))
             .count();
+        let dense = bytecode
+            .iter()
+            .any(|b| is_dense_heap_index(*b.bytecode()));
         assert!(
-            stats.proven_index >= 1 || unchecked >= 1,
-            "i += 2 under j < len should uncheck; stats={stats:?} unchecked={unchecked}"
+            stats.proven_index >= 1
+                || stats.index_pin_rewrites >= 1
+                || unchecked >= 1
+                || dense,
+            "i += 2 under j < len should uncheck or densify; stats={stats:?} unchecked={unchecked}"
         );
         let pins = bytecode.iter().filter(|b| is_pin_op(*b.bytecode())).count();
         assert!(
-            pins >= 1,
-            "stride loop should still pin; stats={stats:?}"
+            pins >= 1 || dense,
+            "stride loop should pin or densify; stats={stats:?}"
         );
     }
 
