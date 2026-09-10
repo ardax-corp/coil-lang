@@ -11,7 +11,6 @@
     use parser::Pratt;
 
     #[test]
-    #[test]
     fn fixed_array_push_is_type_error() {
         let src = r#"
 fn main() {
@@ -32,6 +31,7 @@ fn main() {
         );
     }
 
+    #[test]
     fn error_with_labels_records_secondary_spans() {
         let mut c = Checker::new();
         let _ = c.error_with_labels(

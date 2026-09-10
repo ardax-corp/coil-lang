@@ -460,7 +460,7 @@ fn boxes_once_when_computed_elems_escape() {
         .iter()
         .filter(|op| matches!(op, IlOp::MakeArray { .. }))
         .count();
-    assert_eq!(makes, 1, "one box at return; ops={ops:?}");
+    assert_eq!(makes, 1, "one box at return");
 }
 
 #[test]
@@ -495,5 +495,5 @@ fn boxes_once_across_two_escape_edges() {
         .iter()
         .filter(|op| matches!(op, IlOp::MakeArray { .. }))
         .count();
-    assert_eq!(makes, 1, "Q1 box-once; ops={ops:?}");
+    assert_eq!(makes, 1, "Q1 box-once");
 }
