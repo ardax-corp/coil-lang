@@ -1490,6 +1490,7 @@ mod tests {
         }));
     }
 
+    #[test]
     fn lowering_string_print_with_allow() {
         let loc = loc();
         let ops = vec![
