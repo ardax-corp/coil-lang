@@ -28,8 +28,8 @@ rungs are **not** in this table — see ladders below and
 | Debugger-attached / `-Og` | fuse-IL | **I7** (stays) |
 | Unmapped alloc / GC safepoint | fuse-IL | maps (I5 / S2b) |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
-| Two-slot `CALL` / `RETURN` (LIR reconstruct) | LIR / fuse-IL | B3 |
-| LIR `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | B3 / I6 |
+| LIR one-word `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | I6 |
+| Two-slot self / mutual recursive `CALL` | fuse-IL | later Q7 / **B7** |
 
 ## Ladders / cost-gated (were A3 walls)
 
@@ -37,6 +37,7 @@ rungs are **not** in this table — see ladders below and
 |-------|-------------|------|
 | Counted `for` (array / Vec / `[T; N]` / literal range) | **Q6** dense helpers | Cost gate; `main` + format / grow still fuse-IL |
 | One-word self-`CALL` / `TailCall` | **Q7** eligible | Cost gate; **B2** convoy reconstruct (no Seek tax on param-only leafs) |
+| Two-slot helper `CALL` / `RETURN` | **B3** eligible | Cost gate; LIR reconstructs width-2 `CALL`; dense may keep |
 | Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
 | `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR | Cost gate; dense infer still refuses |
 | Compare-only (no float/i64/i32 arith) | I8 LIR or fuse-IL | Cost gate |
@@ -91,7 +92,8 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `nsieve` | `nsieve.hy` | fuse-IL | `Vec.push` (no `Make*`) |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
-| `*_churn` / `option_int_churn` / `result_int_churn` | several | fuse-IL or LIR | two-slot `CALL` / `RETURN` still LIR; match diamond may dense |
+| `*_churn` / `option_int_churn` / `result_int_churn` | several | dense, LIR, or fuse-IL | **B3** two-slot helper `CALL` / `RETURN`; cost gate vs fuse |
+| `hot` / match+call | `option_match_call.hy` | dense or LIR | **B3** two-slot CALL + Q8 `Br` |
 | `match_*` boxed enum | several | fuse-IL or LIR | boxed `JumpIfMatch` stays I2 LIR |
 | `array_mut` | `array_mut.hy` | fuse-IL | `main` + write / format (Q9 R1 does not densify) |
 | `bump` | `looping_makearray.hy` | dense or SROA | mapped preheader or slot SROA |
@@ -112,3 +114,5 @@ Post-Q6–Q9 ranked revisit: [opt-generalization.md](opt-generalization.md) B0
 for the Q6–Q8 first rungs (tables + `lir_eligible` / infer). **B2**
 ([COI-340](https://linear.app/ardax/issue/COI-340)) is the Seek / frame
 parking reconstruct so tight `fib` / `tak` can win the cost gate.
+**B3** ([COI-341](https://linear.app/ardax/issue/COI-341)) opens two-slot
+helper `CALL` / `RETURN` on dense and LIR; keep/refuse is still cost.

@@ -23,7 +23,7 @@ the stack).
 | `MirTy` | Lattice: `bottom ⊑ {i32⊑i64, f32⊑f64, bool, heap-ref, niche Option/Result} ⊑ value`. I1 names heap/niche words; dense still uses numeric lanes only ([mir-islands.md](mir-islands.md)). |
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
-| `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses escaping classes / unmapped heap / two-slot `CALL`. One-word `CALL` (Q7) and niche / two-slot match (Q8) lower |
+| `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses escaping classes / unmapped heap / mutual `CALL`. One-word `CALL` (Q7), two-slot helper `CALL` / `RETURN` (B3), and niche / two-slot match (Q8) lower |
 | `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
@@ -348,7 +348,7 @@ returns keep `hi = None`. Numeric ops stay `MirTy::{I64,F64,Bool}`; the
 layout sits on `MirFunc::ret_layout`.
 
 `try_lower_numeric` accepts `ret_words == 2` (payload then tag on the IL
-stack). Dense `infer_numeric` still refuses that shape.
+stack). Dense infer accepts that shape (B3); keep/refuse is the cost gate.
 
 ### LIR emit
 
