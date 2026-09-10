@@ -1,9 +1,9 @@
-//! W4 allowlist plus I6 typed HostInvoke edges.
+//! Precise HostInvoke types (math / packed LA / axpy) plus I6 edges.
 //!
-//! W4 stays the hoist allowlist (math / packed LA / axpy). S3 dense emit
-//! also reconstructs other I6-typed HostInvoke edges (box → call → unbox)
-//! except I4 `from_bytes` / `to_bytes`. Impure hosts are LICM barriers.
-//! User `CALL` is one-word (dense map or open fuse-IL / LIR callee).
+//! LICM hoist uses purity bits ([`super::effects::host_may_hoist`]), not
+//! these id ranges. S3 dense emit reconstructs I6-typed HostInvoke edges
+//! (box → call → unbox) except I4 `from_bytes` / `to_bytes`. User `CALL`
+//! is one-word (dense map or open fuse-IL / LIR callee).
 
 use common::{
     HOST_NATIVES, MATH_ATAN_ID, MATH_POW_ID, MATH_SIN_ID, MATH_TANH_ID, PACKED_DOT_ID,
@@ -12,15 +12,13 @@ use common::{
 
 use super::ty::MirTy;
 
-/// Type and hoist rules for one allowlisted HostInvoke.
+/// Typed HostInvoke edge (precise math / packed / axpy, or I6 i64 words).
 #[derive(Clone, Copy, Debug)]
 pub struct HostSpec {
     pub id: u16,
     pub name: &'static str,
     pub args: &'static [MirTy],
     pub ret: MirTy,
-    /// Scalar-pure: LICM may hoist (math + saxpy-reduce). Packed LA stays.
-    pub hoistable: bool,
 }
 
 const F64: MirTy = MirTy::F64;
@@ -52,9 +50,10 @@ fn i64_args(arity: u8) -> Option<&'static [MirTy]> {
     })
 }
 
-/// Look up a dense-allowlisted HostInvoke. `None` → infer/lower refuse.
+/// Precise types for math / packed LA / axpy. Other natives use
+/// [`host_edge_spec`] (i64 Value words).
 pub fn host_spec(id: u16) -> Option<HostSpec> {
-    let (args, ret, hoistable) = match id {
+    let (args, ret) = match id {
         MATH_SIN_ID..=MATH_POW_ID | MATH_ATAN_ID..=MATH_TANH_ID => {
             let arity = HOST_NATIVES.get(id as usize)?.arity;
             let args = match arity {
@@ -62,14 +61,14 @@ pub fn host_spec(id: u16) -> Option<HostSpec> {
                 2 => MATH2,
                 _ => return None,
             };
-            (args, F64, true)
+            (args, F64)
         }
-        SIMD_AXPY_REDUCE_ID => (AXPY, F64, true),
-        PACKED_DOT_ID => (HEAP3, F64, false),
+        SIMD_AXPY_REDUCE_ID => (AXPY, F64),
+        PACKED_DOT_ID => (HEAP3, F64),
         common::PACKED_MATMUL_ID | common::PACKED_MATRIX_ZIP_ID | PACKED_VEC_ARITH_ID => {
-            (HEAP3, I64, false)
+            (HEAP3, I64)
         }
-        common::PACKED_MATRIX_NEG_ID => (HEAP2, I64, false),
+        common::PACKED_MATRIX_NEG_ID => (HEAP2, I64),
         _ => return None,
     };
     let name = HOST_NATIVES.get(id as usize)?.name;
@@ -78,7 +77,6 @@ pub fn host_spec(id: u16) -> Option<HostSpec> {
         name,
         args,
         ret,
-        hoistable,
     })
 }
 
@@ -106,7 +104,6 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
         name: native.name,
         args,
         ret: I64,
-        hoistable: false,
     })
 }
 
@@ -168,7 +165,7 @@ mod tests {
         let clock = host_edge_spec(common::CLOCK_MONO_NANOS_ID).expect("clock edge");
         assert!(clock.args.is_empty());
         assert_eq!(clock.ret, MirTy::I64);
-        assert!(!clock.hoistable);
+        assert!(!crate::mir::effects::host_may_hoist(common::CLOCK_MONO_NANOS_ID));
         assert!(host_edge_spec_by_name("write").is_some());
         assert!(host_edge_spec_by_name("from_bytes").is_some());
     }

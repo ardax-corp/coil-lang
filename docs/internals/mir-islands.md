@@ -32,17 +32,16 @@ island does not fire there.
 **Register VM / Cranelift are later levers**, not prerequisites. Do not
 block islands on P5. Do not revive PGO.
 
-**I8 entry (post I1–I3).** After stack-IL opts, `IlModule` tries dense
-specialize, then IL→MIR→LIR for leftovers that [`lir_eligible`](../../compiler/src/mir/entry.rs)
-accepts for a **named reason**: two-slot `RETURN`, I2 match, I3 unboxed
-fields, I1 niche `BITAND`/`BITOR`, or an inferable leftover (plain
-`if`/compare diamonds, store-only loops, tiny lets). Hard refuse today: I4
-strings (Q9 **reopens** I4 as a delivery ladder — see
-[language-quirks.md](language-quirks.md)), I5 alloc, I6 `CALL` /
-HostInvoke, heap index / escaping fields, I2 multi-payload `Unpack`, I7
-debugger-attached / `-Og`. No dual AST walker.
-Cost gate: replace when LIR emit ≤ opted fuse-IL, with +3 slack for I2
-match / two-slot construct (runtime-neutral `Seek`). Leftover lets stay
+**I8 entry (post I1–I3 / A3).** After stack-IL opts, `IlModule` tries dense
+specialize, then IL→MIR→LIR when [`lir_eligible`](../../compiler/src/mir/entry.rs)
+has **no hard refuse**. Hard refuse today: I4 strings (Q9 **reopens** I4
+as a delivery ladder — see [language-quirks.md](language-quirks.md)),
+unmapped I5 alloc, I6 `CALL` / HostInvoke (LIR emit cannot reconstruct),
+escaping fields, box, I2 multi-payload `Unpack`, I7 debugger-attached /
+`-Og`. Heap index is not a wall after A2. No dual AST walker. No
+work-op / Seek≤64 / HostInvoke **id** floors — those are purity bits +
+cost. Cost gate: replace when LIR emit ≤ opted fuse-IL, with +3 slack for
+I2 match / two-slot construct (runtime-neutral `Seek`). Leftover lets stay
 strict so ConstReturnImm fuse is not undone.
 
 ## Island ladder
@@ -57,7 +56,7 @@ strict so ConstReturnImm fuse is not undone.
 | I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) / [COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc) / [COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc) / [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist) / [COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts) | MakeArray / alloc edges; S2a live-root sidecar; S2b interpreter slot / frame maps; S2c specialize / LIR across alloc when maps exist; S2d mapped in-loop / preheader Make* | I5 / S2a–S2c on main; S2d this PR |
 | I6 | Effects / HostInvoke | [COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges) | Broader than W4 allowlist; purity sidecar drives barriers | on main (#347) |
 | I7 | Debugger / deopt | [COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir) | Deopt / stop metadata on MIR edges; VM debugger stays source of truth | on main (#348) |
-| I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) / [COI-301](https://linear.app/ardax/issue/COI-301/unlock-retarget-i8-shape-tests-broaden-lir-eligible) | More bodies enter MIR from IL→MIR lift — inferable leftovers (if/compare, store-only, tiny lets) plus I1–I3 / two-slot | on main (#349 / #350) |
+| I8 | Broaden MIR emit | [COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3) / [COI-301](https://linear.app/ardax/issue/COI-301/unlock-retarget-i8-shape-tests-broaden-lir-eligible) / [COI-336](https://linear.app/ardax/issue/COI-336) A3 | Lift when there is no hard refuse; keep via cost gate (no work-op / Seek≤64 / host-id floors) | this PR |
 
 I4 was closed as a hard MIR barrier (#345). **Q9 (2026-09-10) reopens
 it** as a phased island: full format/string on MIR, not a permanent
@@ -69,8 +68,8 @@ out of MIR until a later cut. Spec:
 
 | Language / IL feature | Today | Target |
 |-----------------------|-------|--------|
-| Numeric loops / W3 straight-line (`i32`/`i64`/`f32`/`f64`/`bool`) | dense (`DenseBin` …) after MIR CSE/LICM/peeps | stay dense (Low IR) |
-| Allowlisted HostInvoke inside numeric (W4) | dense + box/unbox at host edge | W4 still hoists; S3 also emits other I6-typed hosts except I4 `from_bytes` / `to_bytes` |
+| Numeric loops / straight-line (`i32`/`i64`/`f32`/`f64`/`bool`) | dense (`DenseBin` …) after MIR CSE/LICM/peeps when cost ≤ fuse-IL | stay dense (Low IR) |
+| HostInvoke inside numeric | dense + box/unbox at host edge; LICM hoists scalar-pure (purity bits); `packed_*` stays in-place | S3 emits I6-typed hosts except I4 `from_bytes` / `to_bytes` |
 | One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3; two-slot / niche / `TailCall` still refuse today; **Q7** commits near-term dense or LIR recursion / typed recursive CALL |
 | Saxpy-reduce | HostInvoke `simd_axpy_reduce` (P12) | stay |
 | Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoad` / `VStore` / `VBin` / `VMove` (S5a V0) | stay |
@@ -82,9 +81,9 @@ out of MIR until a later cut. Spec:
 | `match` / `JumpIfMatch` on boxed multi-payload (`Unpack` arity > 1) / user polymorphism | fuse-IL | stay refuse |
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |
-| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a live-heap `roots`; S2b frame maps; S2c dense / LIR when maps exist; S2d mapped preheader Make*; S2e Seek-less residuals; S2l in-loop Make* dense only when SROA/hoist deletes the in-loop alloc. S3b emits unpinned `Index` / `StoreIndex` / `ArrayLen` (pins unsound next to dense prologue `Seek`). In-loop `Vec.push` / class `new` stay fuse-IL. Dense+match stays LIR (I2) | **I5** / **S2a** / **S2b** / **S2c** / **S2d** / **S2e** / **S2l** / **S3** / **S3b** |
+| Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a–S2l + **A2** dense-native `Index` / `Make*` / `DensePush`; keep when maps exist and cost ≤ fuse-IL. In-loop `Vec.push` / class `new` stay fuse-IL. Dense+match stays LIR (I2) | **I5** / **S2** / **A2** |
 | `FORMAT` / string ops | fuse-IL (`IlOp::Byte` / `String` / `Print`) | **I4** / **Q9** — reopened delivery ladder (today still fuse-IL) |
-| Non-allowlisted HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
+| Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
 | Recursion (`tak` / `fib`) | fuse-IL (`CALL` / `TailCall`) | today refuse on the callee; **Q7** commits dense/LIR recursion. S3 may already dense a *caller* loop that `CALL`s them |
 | `for` / iterators | fuse-IL (`for_in_sum`) | **Q6** — MIR-friendly protocol; not a permanent fuse-IL ceiling |

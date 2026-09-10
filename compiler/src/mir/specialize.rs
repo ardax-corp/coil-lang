@@ -32,29 +32,22 @@ pub fn try_specialize_body(
     official_entry: Option<Label>,
 ) -> Option<(Vec<IlOp>, DenseAbi)> {
     // Nested / multi-header numeric loops are eligible (flagship mandelbrot).
-    // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32, plus a
-    // back-edge or a straight-line body at/above STRAIGHT_LINE_MIN_WORK_OPS.
-    // S3/S3b: one-word CALL (dense map or open), I6 HostInvoke except I4
-    // string bytes, heap index / ArrayLen / StoreIndex (dense residuals
-    // after V*). FORMAT / string ops stay fuse-IL (I4). Match stays LIR.
-    // Alloc / InitTyped take dense only when S2b maps exist (S2c).
-    // S2d: mapped *preheader* Make* + index loop may take dense.
-    // S2e: residuals no longer Seek-restore. A2 (COI-335): Index / Make*
-    // / ArrayLen / StoreIndex emit dense-native (no LOAD/StorePop). CALL
-    // / HostInvoke still box at the ABI edge via DensePush. S2l: try
-    // dense so SROA / LICM can delete work; keep in-loop Make* only when
-    // reconstruct is dense-native and cost ≤ fuse-IL.
-    // Post-loop-only `return [x]` stays fuse-IL (COI-87 invert+fuse).
-    // Debugger-attached / -Og skip this entry (I7).
-    // S2k: slot-select diamonds may take dense when Seek fits the 64-slot
-    // prove frame and last-arm writes survive reconstruct.
+    // Infer requires float +/−/×/÷, counted i64 +/−/×/÷/%, or i32. A
+    // back-edge or a straight-line numeric body may lift; keep/refuse is
+    // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
+    // open), I6 HostInvoke except I4 string bytes, heap index / ArrayLen /
+    // StoreIndex (dense residuals after V*). FORMAT / string ops stay
+    // fuse-IL (I4 / Q9). Match stays LIR (Q8). Alloc / InitTyped take
+    // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
+    // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
+    // StoreIndex emit dense-native. CALL / HostInvoke box at the ABI
+    // edge via DensePush. S2l: try dense so SROA / LICM can delete work;
+    // keep residual in-loop Make* only when reconstruct is dense-native
+    // and cost ≤ fuse-IL. Post-loop-only `return [x]` stays fuse-IL
+    // (COI-87 invert+fuse). Debugger-attached / -Og skip this entry (I7).
+    // S2k: last-arm writes must survive; Seek size is a cost, not a cap.
     let select_cfg = has_sroa_select_cfg(ops);
     let has_alloc = ops.iter().any(refuses_alloc);
-    // S2h OOB heap arm (MakeArray + Index) stays fuse-IL: dense Seek plus
-    // the existing frame overflows the 64-slot prove VM.
-    if select_cfg && has_alloc {
-        return None;
-    }
     let inloop_alloc = super::infer::has_alloc_inside_loop(ops);
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
@@ -134,12 +127,21 @@ pub fn try_specialize_body(
     if select_cfg && !select_reconstruct_ok(ops, &out) {
         return None;
     }
-    // In-loop Make*: keep dense only when heap ops are native and the
-    // reconstruct is not denser-but-slower (S2l / A2 cost gate).
-    if inloop_alloc && super::infer::has_alloc_inside_loop(&out) {
-        if residual_heap_box(&out) || emit_cost(&out) > emit_cost(ops) {
-            return None;
-        }
+    // In-loop Make*: keep dense only when heap ops are native (S2l / A2).
+    if inloop_alloc
+        && super::infer::has_alloc_inside_loop(&out)
+        && residual_heap_box(&out)
+    {
+        return None;
+    }
+    // Straight-line / leftover reconstruct: never denser-but-slower.
+    // Loops amortize prologue Seek; they skip this static compare unless
+    // the body is a select diamond or still has in-loop Make*.
+    let loop_tax = super::infer::has_back_edge(ops)
+        && !select_cfg
+        && !(inloop_alloc && super::infer::has_alloc_inside_loop(&out));
+    if !loop_tax && emit_cost(&out) > emit_cost(ops) {
+        return None;
     }
     Some((out, abi))
 }
@@ -252,7 +254,8 @@ fn emit_cost(ops: &[IlOp]) -> usize {
         .map(|op| match op {
             IlOp::StorePop { .. } | IlOp::Load { .. } => 2,
             IlOp::Byte { byte, .. } => match *byte.bytecode() {
-                Instruction::Seek | Instruction::LOAD | Instruction::StorePop => 2,
+                Instruction::Seek => 2 + (byte.operand_u32() as usize) / 16,
+                Instruction::LOAD | Instruction::StorePop => 2,
                 _ => 1,
             },
             _ => 1,
@@ -263,10 +266,11 @@ fn emit_cost(ops: &[IlOp]) -> usize {
 /// IL→MIR→LIR for a leftover body after dense specialize misses (I8).
 ///
 /// Dense stays off (`infer_numeric` still refuses `ret_words == 2` and
-/// below-W3 / compare-only). Production `IlModule` replace uses this after
-/// stack-IL opts; `emit_lir` keeps single-use return/cmp values on the
-/// stack. Do not re-opt the reconstruct (`MOD` rematerializes). Call /
-/// host / box / I4 stay fuse-IL. I5 alloc needs S2b maps ([`lir_eligible_with`]).
+/// compare-only). Production `IlModule` replace uses this after stack-IL
+/// opts; `emit_lir` keeps single-use return/cmp values on the stack. Do
+/// not re-opt the reconstruct (`MOD` rematerializes). Call / host / box /
+/// I4 stay fuse-IL. I5 alloc needs S2b maps ([`lir_eligible_with`]).
+/// Keep/refuse is the LIR cost gate in `IlModule`, not a feature floor.
 pub fn try_lower_abi_body(
     ops: &[IlOp],
     name: &str,
@@ -290,9 +294,6 @@ pub fn try_lower_abi_body_with(
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_sroa_select_cfg(ops) && has_alloc {
-        return None;
-    }
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
         return None;
     }
@@ -340,28 +341,10 @@ pub fn try_lower_abi_body_with(
     Some(out)
 }
 
-/// Prove-frame cap used by `Machine::<64>` MIR tests and S2k accept.
-const SELECT_OPERAND_STACK_CAP: u32 = 64;
-
-/// Seek must fit the 64-slot prove frame. Last-arm writes must remain as
-/// `StorePop` (LIR) or `DenseMove` (dense phi copies).
+/// Last-arm writes must remain as `StorePop` (LIR) or `DenseMove` (dense
+/// phi copies). Seek frame size is measured in [`emit_cost`], not capped.
 fn select_reconstruct_ok(src: &[IlOp], out: &[IlOp]) -> bool {
-    if max_seek(out) > SELECT_OPERAND_STACK_CAP {
-        return false;
-    }
     last_arm_writes(out) >= last_arm_writes(src)
-}
-
-fn max_seek(ops: &[IlOp]) -> u32 {
-    ops.iter()
-        .filter_map(|op| match op {
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
-                Some(byte.operand_u32())
-            }
-            _ => None,
-        })
-        .max()
-        .unwrap_or(0)
 }
 
 fn last_arm_writes(ops: &[IlOp]) -> usize {
@@ -487,5 +470,16 @@ mod cost_gate_tests {
         )];
         assert!(emit_cost(&native) < emit_cost(&boxed));
         assert!(emit_cost(&native) <= emit_cost(&boxed));
+    }
+
+    #[test]
+    fn emit_cost_weights_seek_by_frame_size() {
+        let small = [IlOp::byte(
+            Byte::new(Instruction::Seek).with_operand_u32(8),
+        )];
+        let large = [IlOp::byte(
+            Byte::new(Instruction::Seek).with_operand_u32(80),
+        )];
+        assert!(emit_cost(&large) > emit_cost(&small));
     }
 }

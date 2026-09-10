@@ -37,7 +37,7 @@ must not run while a debug controller is attached.
 - Debugger UX / DAP / line-table changes
 - Full MIR stepping
 - Archive / opcode bump
-- Growing the W4 dense allowlist
+- Growing HostInvoke **id** allowlists (hoist is purity bits)
 - I8 entry (see [mir-islands.md](mir-islands.md); this island only names edges)
 
 See [mir-islands.md](mir-islands.md), [specialize-refuse.md](specialize-refuse.md),

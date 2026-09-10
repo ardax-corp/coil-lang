@@ -1,12 +1,13 @@
 //! I8 — which leftover bodies enter MIR→LIR after dense specialize.
 //!
 //! Production is two-phase after stack-IL opts (`IlModule`):
-//! 1. [`crate::mir::try_specialize_body`] — numeric loop / W3 dense.
-//! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift when
-//!    [`lir_eligible`].
+//! 1. [`crate::mir::try_specialize_body`] — numeric dense + cost gate.
+//! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift when there is
+//!    no hard refuse; `IlModule` keeps the reconstruct only when cost ≤ fuse.
 //!
-//! Entry needs a **named reason** (not “infer succeeded”). Fuse-IL stays
-//! default. There is no second AST walker.
+//! Hard refuse is walls (I4 strings / Q9, unmapped alloc, CALL / Host,
+//! escaping fields, box, multi-payload match). Heap index is not a wall
+//! after A2. Fuse-IL stays the fallback. There is no second AST walker.
 
 use common::Instruction;
 
@@ -24,10 +25,8 @@ pub enum LirRefuse {
     Alloc,
     /// I6: user `CALL` / `TailCall` / other `Entry`.
     Call,
-    /// I6: HostInvoke (W4 is dense-only).
+    /// I6: HostInvoke (dense reconstructs; LIR emit does not).
     Host,
-    /// Heap index / pin.
-    Index,
     /// Escaping / heap-backed field ops.
     HeapField,
     /// `BoxValue` / `UnboxValue`.
@@ -36,20 +35,14 @@ pub enum LirRefuse {
     Match,
     /// `Unpack` arity > 1.
     Unpack,
-    /// No I1–I3 / two-slot / compare-control reason.
-    NoReason,
 }
 
 /// Production LIR entry after dense specialize misses.
 ///
-/// Eligible when there is no hard refuse **and** a named reason:
-/// two-slot `RETURN`, I2 match, I3 unboxed fields, I1 niche
-/// `BITAND`/`BITOR`, or an inferable leftover (plain `if`/compare
-/// diamonds, store-only loops, tiny lets). Hard refuse stays I4
-/// string/FORMAT, I5 alloc without maps, HostInvoke/`CALL` (those stay
-/// dense), heap index (dense-only), escaping fields. Boxed
-/// `JumpIfMatch` (arity 0 overlap, any tag)
-/// is I2 when reconstruct can model the taken payload.
+/// Eligible when there is no hard refuse. Hard refuse stays I4
+/// string/FORMAT (Q9), I5 alloc without maps, HostInvoke/`CALL` (LIR
+/// emit cannot reconstruct those), escaping fields, box, multi-payload
+/// match. Heap index / `ArrayLen` / `StoreIndex` may lift (A2).
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 /// S2c: mapped alloc is not a hard refuse ([`lir_eligible_with`]).
 pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
@@ -74,14 +67,8 @@ pub fn lir_refuse_with(
     unboxed_fields: &[(u32, u32)],
     maps_ok: bool,
 ) -> Option<LirRefuse> {
-    if let Some(r) = hard_refuse(ops, maps_ok) {
-        return Some(r);
-    }
-    if lir_reason(ops, unboxed_fields) {
-        None
-    } else {
-        Some(LirRefuse::NoReason)
-    }
+    let _ = unboxed_fields;
+    hard_refuse(ops, maps_ok)
 }
 
 fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
@@ -93,23 +80,6 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 return Some(LirRefuse::HeapField);
             }
             IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => return Some(LirRefuse::Box),
-            IlOp::Index { .. }
-            | IlOp::IndexUnchecked { .. }
-            | IlOp::IndexPin { .. }
-            | IlOp::IndexPinUnchecked { .. }
-            | IlOp::StoreIndexPin { .. }
-            | IlOp::StoreIndexPinUnchecked { .. }
-            | IlOp::ArrayPin { .. } => return Some(LirRefuse::Index),
-            IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::StoreIndex
-                        | Instruction::StoreIndexUnchecked
-                        | Instruction::ArrayLen
-                ) =>
-            {
-                return Some(LirRefuse::Index);
-            }
             op if refuses_string_or_format(op) => return Some(LirRefuse::String),
             op if refuses_alloc(op) && !maps_ok => return Some(LirRefuse::Alloc),
             IlOp::Jump {
@@ -130,160 +100,6 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
         }
     }
     None
-}
-
-/// I8 reasons — I1–I3 / two-slot plus inferable leftovers (compare/`if`,
-/// store-only, tiny lets). Hard refuse still wins.
-fn lir_reason(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
-    let mut ret2 = false;
-    let mut match_shaped = false;
-    let mut field_use = false;
-    let mut niche_word = false;
-    let mut leftover = false;
-    for op in ops {
-        match op {
-            IlOp::Return { ret_words, .. } if *ret_words >= 2 => ret2 = true,
-            IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfMatch { .. },
-                ..
-            } => match_shaped = true,
-            IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
-                ..
-            } => leftover = true,
-            IlOp::StorePop { slot, .. } => {
-                leftover = true;
-                if slot_in_unboxed_fields(*slot, unboxed_fields) {
-                    field_use = true;
-                }
-            }
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
-                match_shaped = true;
-            }
-            IlOp::Load { slot, .. } if slot_in_unboxed_fields(*slot, unboxed_fields) => {
-                field_use = true;
-            }
-            IlOp::MakeArray { .. } | IlOp::MakeTuple { .. } | IlOp::MakeEnum { .. } => {
-                leftover = true;
-            }
-            // Index is dense-only (S3). LIR of tiny MakeArray+index drops
-            // packed LOAD / ArrayPin fuse-IL.
-            IlOp::Byte { byte, .. } if super::gc::is_alloc_inst(*byte.bytecode()) => {
-                leftover = true;
-            }
-            IlOp::Const { .. } => leftover = true,
-            IlOp::Bin { op, .. } if is_compare(*op) => leftover = true,
-            IlOp::Bin { op, .. } if matches!(*op, Instruction::BITAND | Instruction::BITOR) => {
-                // I1 heap-niche bits: `ptr | 1` / `ptr & 1` (tag 0/1).
-                if body_has_tag_imm(ops) {
-                    niche_word = true;
-                }
-            }
-            IlOp::BinSlotImm { op, imm, .. }
-                if matches!(
-                    Instruction::from(*op),
-                    Instruction::BITAND | Instruction::BITOR
-                ) && (*imm == 0 || *imm == 1) =>
-            {
-                niche_word = true;
-            }
-            IlOp::BinSlotImm { op, .. } if is_compare(Instruction::from(*op)) => leftover = true,
-            IlOp::BinSlotSlot { op, .. }
-                if matches!(
-                    Instruction::from(*op),
-                    Instruction::BITAND | Instruction::BITOR
-                ) && body_has_tag_imm(ops) =>
-            {
-                niche_word = true;
-            }
-            IlOp::BinSlotSlot { op, .. } if is_compare(Instruction::from(*op)) => leftover = true,
-            _ => {}
-        }
-    }
-    ret2 || match_shaped || field_use || niche_word || leftover || adjacent_match_probe(ops)
-}
-
-fn is_compare(op: Instruction) -> bool {
-    matches!(
-        op,
-        Instruction::EQ
-            | Instruction::NEQ
-            | Instruction::LE
-            | Instruction::LEQ
-            | Instruction::LEF
-            | Instruction::LEQF
-            | Instruction::GT
-            | Instruction::GEQ
-            | Instruction::GTF
-            | Instruction::GEQF
-    )
-}
-
-fn body_has_tag_imm(ops: &[IlOp]) -> bool {
-    ops.iter()
-        .any(|op| matches!(op, IlOp::Const { imm: 0 | 1, .. }))
-}
-
-fn slot_in_unboxed_fields(slot: u32, fields: &[(u32, u32)]) -> bool {
-    fields
-        .iter()
-        .any(|&(base, n)| slot >= base && slot < base + n)
-}
-
-/// Niche `DUP; LogNot; JMPx` or two-slot `DUP; CONST 0|1; EQ; JMPx`.
-fn adjacent_match_probe(ops: &[IlOp]) -> bool {
-    let solid: Vec<&IlOp> = ops
-        .iter()
-        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
-        .collect();
-    for w in solid.windows(3) {
-        if matches!(w[0], IlOp::Dup { .. })
-            && matches!(w[1], IlOp::LogNot { .. })
-            && is_cond_jump(w[2])
-        {
-            return true;
-        }
-    }
-    for w in solid.windows(4) {
-        if matches!(w[0], IlOp::Dup { .. })
-            && is_tag_imm(w[1])
-            && is_eq_or_bitand(w[2])
-            && is_cond_jump(w[3])
-        {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_cond_jump(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Jump {
-            kind: crate::il::IlJumpKind::JumpIfFalse | crate::il::IlJumpKind::JumpIfTrue,
-            ..
-        }
-    )
-}
-
-fn is_tag_imm(op: &IlOp) -> bool {
-    matches!(op, IlOp::Const { imm: 0 | 1, .. })
-}
-
-fn is_eq_or_bitand(op: &IlOp) -> bool {
-    match op {
-        IlOp::Bin { op, .. } => matches!(
-            *op,
-            Instruction::EQ | Instruction::NEQ | Instruction::BITAND
-        ),
-        IlOp::BinSlotImm { op, .. } | IlOp::BinSlotSlot { op, .. } => {
-            matches!(
-                Instruction::from(*op),
-                Instruction::EQ | Instruction::NEQ | Instruction::BITAND
-            )
-        }
-        _ => false,
-    }
 }
 
 #[cfg(test)]
@@ -426,5 +242,18 @@ mod tests {
         assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
         assert_eq!(lir_refuse_with(&ops, &[], true), None);
         assert!(lir_eligible_with(&ops, &[], true));
+    }
+
+    #[test]
+    fn i8_heap_index_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Load { slot: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Index { loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
     }
 }

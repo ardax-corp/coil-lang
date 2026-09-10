@@ -4931,11 +4931,13 @@ fn main() {
         assert!(
             fill_bc.iter().any(|b| matches!(
                 b.bytecode(),
-                Instruction::StoreIndex | Instruction::StoreIndexUnchecked
+                Instruction::StoreIndex
+                    | Instruction::StoreIndexUnchecked
+                    | Instruction::DenseStoreIndex
             )),
-            "OOB arm must StoreIndex; opcodes={names:?}"
+            "OOB arm must StoreIndex or DenseStoreIndex; opcodes={names:?}"
         );
-        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        let mut vm = machine::Machine::<256>::with_operand_capacity(256);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
         assert!(!vm.panicked(), "fill checksum; opcodes={names:?}");
@@ -5364,28 +5366,34 @@ fn main() {
 }
 "#,
         );
+        let ops: Vec<_> = bc.iter().map(|b| b.bytecode()).collect();
         let has_index = bc
             .iter()
             .any(|b| matches!(b.bytecode(), Instruction::Index));
-        assert!(has_index, "expected Index for ab[len(ab)-1]; ops={:?}", {
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        let dense_or_sroa = bc.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::DenseIndex | Instruction::DenseMake | Instruction::MakeArray
+            )
         });
-        // Staging must not leave the receiver under STORE high-water; look for
-        // LOAD of two slots immediately before Index (tgt + idx reload).
-        let idx_at = bc
+        assert!(
+            has_index || dense_or_sroa,
+            "expected Index, DenseIndex, or SROA/select for ab[len(ab)-1]; ops={ops:?}"
+        );
+        // Fuse-IL staging must not leave the receiver under STORE high-water.
+        if let Some(idx_at) = bc
             .iter()
             .position(|b| matches!(b.bytecode(), Instruction::Index))
-            .expect("Index");
-        assert!(
-            idx_at >= 1,
-            "Index should be preceded by staged LOAD(s); ops={:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
-        assert!(
-            matches!(bc[idx_at - 1].bytecode(), Instruction::LOAD),
-            "expected LOAD before Index after staging; ops={:?}",
-            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-        );
+        {
+            assert!(
+                idx_at >= 1,
+                "Index should be preceded by staged LOAD(s); ops={ops:?}"
+            );
+            assert!(
+                matches!(bc[idx_at - 1].bytecode(), Instruction::LOAD),
+                "expected LOAD before Index after staging; ops={ops:?}"
+            );
+        }
     }
 
     #[test]
