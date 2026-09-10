@@ -65,6 +65,11 @@ pub fn try_specialize_body(
         return None;
     }
     let mut hints = LowerHints::new(name);
+    hints.allow_match = match_shaped_il(ops)
+        || inferred
+            .slot_ty
+            .values()
+            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
     hints.slot_ty = inferred.slot_ty;
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
@@ -72,11 +77,6 @@ pub fn try_specialize_body(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     hints.allow_effects = true;
-    hints.allow_match = match_shaped_il(ops)
-        || inferred
-            .slot_ty
-            .values()
-            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
     let _heap_index = super::infer::has_heap_index(ops);
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params
