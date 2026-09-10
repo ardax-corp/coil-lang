@@ -26,7 +26,10 @@
 //! preheader `Make*` (S2d), Seek-less residuals (S2e), and S2f SROA /
 //! StoreIndex-array reuse. Impure HostInvoke / CALL are SSA barriers
 //! (I6); LICM hoist uses purity bits. Debugger-attached compiles refuse
-//! dense / MIR→LIR (I7). I8 entry is lift + cost gate after hard walls.
+//! dense / MIR→LIR (I7). I8 entry is lift + cost gate after LIR
+//! reconstruct walls. Q6 counted `for`, Q7 one-word rec `CALL`, and Q8
+//! niche / two-slot `Br` are hygiene (lift, then cost) — not checklist
+//! refuses.
 #![cfg_attr(not(test), allow(dead_code, unused_imports))]
 
 mod abi;

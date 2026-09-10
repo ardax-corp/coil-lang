@@ -258,7 +258,9 @@ impl IlModule {
 
         // After stack-IL LICM/CSE so 4.0/2.0 live in the preheader.
         // Leaf-first: a caller may take dense once every callee it CALLs is dense.
-        // I8: leftovers then try IL→MIR→LIR (`lir_eligible`); fuse-IL if refuse.
+        // I8: leftovers then try IL→MIR→LIR (`lir_eligible`); fuse-IL if
+        // a LIR reconstruct wall hits. Q6–Q8 first rungs enter dense +
+        // cost; they are not LIR walls.
         // S2d: snapshot maps from stack-IL before dense replace (dense residuals
         // cannot re-infer). Re-lift after LIR / fuse-IL when that succeeds.
         self.stack_map_drafts.clear();

@@ -2,18 +2,20 @@
 //!
 //! Dense eligibility: float `+/−/×/÷`, i64 `+/−/×/÷/%` (or int `INC`/`DEC`),
 //! or unused `has_i32`, plus a back-edge **or** a straight-line numeric
-//! body. Straight-line keep/refuse is the emit **cost gate** vs fuse-IL
-//! (not a work-op floor). S3: one-word `CALL` is ok without a dense callee
-//! map; I6-typed HostInvoke except I4 string bytes; heap index /
-//! `ArrayLen` / `StoreIndex` paint `heapref` lanes. Q8: niche slots and
-//! arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` may infer (dense reconstruct
-//! is register `Br`, not stack JumpIfMatch). Still refuse class field /
-//! unmapped alloc / multi-word `RETURN` / residual `Byte` /
+//! body. Keep/refuse is the emit **cost gate** vs fuse-IL (not a work-op
+//! floor, and not a Q6–Q8 feature checklist). S3 / **Q7**: one-word
+//! `CALL` / `TailCall` infer without a dense callee map (open ABI until
+//! the map records the body). I6-typed HostInvoke except I4 string bytes;
+//! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
+//! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on
+//! every mode (dense reconstruct is register `Br`). Counted `for` (Q6)
+//! is ordinary i64 + index IL — no extra refuse. Still refuse class
+//! field / unmapped alloc / multi-word `RETURN` / residual `Byte` /
 //! `Pow` / `AND`/`OR`. Q9 R1: LIR infer accepts `STRING` / `PRINT` /
 //! `FORMAT` / `STRINGIFY`; dense infer still refuses them. S2c maps
-//! allow alloc. Compare-only stays fuse-IL.
-//! Q7 unfuses convoy `LoadReturnSlot` / `ConstReturnImm` / `BinReturn`
-//! so one-word self-`CALL` can infer.
+//! allow alloc. Compare-only stays fuse-IL. Q7 unfuses convoy
+//! `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` so one-word
+//! self-`CALL` can infer.
 
 use std::collections::HashMap;
 
@@ -167,18 +169,14 @@ pub fn infer_stack_map(
 enum InferMode {
     Dense,
     Lir,
-    /// S2b sidecar: alloc ops are `HeapRef`; still refuse user `CALL`.
+    /// S2b sidecar: alloc ops are `HeapRef`. User `CALL` still fails
+    /// this walk (LIR / map cannot reconstruct CALL — B3, not Q7).
     Map,
 }
 
 impl InferMode {
     fn lir_shape(self) -> bool {
         matches!(self, Self::Lir | Self::Map)
-    }
-
-    /// Q8: dense infer accepts niche / two-slot match ops (arity ≤ 1).
-    fn allows_match(self) -> bool {
-        matches!(self, Self::Dense | Self::Lir | Self::Map)
     }
 
     fn allows_alloc(self, across: bool) -> bool {
@@ -381,8 +379,8 @@ fn infer_walk(
                         imm: None,
                     });
                 }
-                Instruction::Seek if mode.allows_match() => {}
-                Instruction::Unpack if mode.allows_match() => {
+                Instruction::Seek => {}
+                Instruction::Unpack => {
                     let arity = byte.operand_u32();
                     if arity > 1 {
                         return Err(LowerError::Refused("Unpack arity > 1 (I2)".into()));
@@ -458,9 +456,6 @@ fn infer_walk(
                 kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
                 ..
             } => {
-                if !mode.allows_match() {
-                    return Err(LowerError::Refused("match".into()));
-                }
                 if *arity > 1 {
                     return Err(LowerError::Refused(
                         "JumpIfMatch arity > 1 (keep fuse-IL)".into(),

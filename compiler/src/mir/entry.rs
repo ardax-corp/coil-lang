@@ -5,9 +5,13 @@
 //! 2. [`crate::mir::try_lower_abi_body_with`] — IL→MIR lift when there is
 //!    no hard refuse; `IlModule` keeps the reconstruct only when cost ≤ fuse.
 //!
-//! Hard refuse is walls (unmapped alloc, CALL / Host, escaping fields,
-//! box, multi-payload match). Heap index is not a wall
-//! after A2. Fuse-IL stays the fallback. There is no second AST walker.
+//! Hard refuse is **LIR reconstruct** walls: unmapped alloc, `CALL` /
+//! HostInvoke (emit cannot rebuild those), escaping fields, box,
+//! multi-payload match. Q6 counted `for`, Q7 one-word dense `CALL`, and
+//! Q8 niche / two-slot `Br` are not walls — they lift on the dense path;
+//! keep/refuse is the cost gate. LIR still cannot reconstruct `CALL`
+//! (B3). Heap index is not a wall after A2. Fuse-IL stays the fallback.
+//! There is no second AST walker.
 
 use common::Instruction;
 
@@ -20,7 +24,8 @@ use super::gc::refuses_alloc;
 pub enum LirRefuse {
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`.
     Alloc,
-    /// I6: user `CALL` / `TailCall` / other `Entry`.
+    /// I6: user `CALL` / `TailCall` / other `Entry` (LIR reconstruct wall;
+    /// Q7 one-word self-`CALL` is dense + cost, not this refuse).
     Call,
     /// I6: HostInvoke (dense reconstructs; LIR emit does not).
     Host,
@@ -36,11 +41,13 @@ pub enum LirRefuse {
 
 /// Production LIR entry after dense specialize misses.
 ///
-/// Eligible when there is no hard refuse. Hard refuse stays I5 alloc
-/// without maps, HostInvoke/`CALL` (LIR emit cannot reconstruct those),
-/// escaping fields, box, multi-payload match. Q9 R1: `STRING` / `PRINT`
-/// / `FORMAT` / `STRINGIFY` may lift. Heap index / `ArrayLen` /
-/// `StoreIndex` may lift (A2).
+/// Eligible when there is no **LIR reconstruct** wall. Walls stay I5
+/// alloc without maps, HostInvoke/`CALL` (LIR emit cannot rebuild those
+/// — Q7 densifies one-word self-`CALL` instead), escaping fields, box,
+/// multi-payload `Unpack` / `JumpIfMatch` arity > 1. Counted `for` (Q6)
+/// and niche / two-slot match arity ≤ 1 (Q8) are not LIR walls. Q9 R1:
+/// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Heap index /
+/// `ArrayLen` / `StoreIndex` may lift (A2).
 /// `IlModule` still replaces only when LIR cost ≤ opted fuse-IL.
 /// S2c: mapped alloc is not a hard refuse ([`lir_eligible_with`]).
 pub fn lir_eligible(ops: &[IlOp], unboxed_fields: &[(u32, u32)]) -> bool {
@@ -248,6 +255,47 @@ mod tests {
             IlOp::Load { slot: 0, loc },
             IlOp::Load { slot: 1, loc },
             IlOp::Index { loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
+    }
+
+    #[test]
+    fn q6_counted_index_loop_is_not_a_lir_wall() {
+        let loc = loc();
+        let ops = [
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Index { loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(0),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
+    }
+
+    #[test]
+    fn q8_jump_if_match_arity1_is_not_a_lir_wall() {
+        let loc = loc();
+        let ops = [
+            IlOp::Load { slot: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
             IlOp::Return { loc, ret_words: 1 },
         ];
         assert_eq!(lir_refuse(&ops, &[]), None);
