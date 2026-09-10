@@ -327,7 +327,7 @@ mod dce;
 mod dest_prop;
 mod instcombine;
 mod early_cse;
-mod escape_analysis;
+pub(crate) mod escape_analysis;
 mod invariant_store_elim;
 mod loop_unroll;
 mod slot_promote;

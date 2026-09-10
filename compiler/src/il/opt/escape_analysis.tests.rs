@@ -383,8 +383,8 @@ fn keeps_heap_for_unproven_index() {
 }
 
 #[test]
-fn keeps_heap_when_elements_are_computed() {
-    // Zip/broadcast results are MakeArray of ADDs — fail-closed, stay heap.
+fn scalarizes_private_computed_elems() {
+    // S2i rule: non-escaping computed elems SROA into slots (not a vec_array refuse).
     let mut ops = vec![
         IlOp::Const { imm: 1, loc: loc() },
         IlOp::Const { imm: 3, loc: loc() },
@@ -414,14 +414,14 @@ fn keeps_heap_when_elements_are_computed() {
         IlOp::Index { loc: loc() },
         IlOp::Return { loc: loc(), ret_words: 1},
     ];
-    assert!(!is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
+    assert!(is_stack_allocatable(&analyze_escapes(&ops).allocs[0]));
     escape_analysis(&mut ops);
-    assert!(has_make_array(&ops));
+    assert!(!has_make_array(&ops));
 }
 
 #[test]
-fn keeps_heap_when_computed_elems_escape() {
-    // S2i: observed/escape zip stays a heap object (no slot-SROA).
+fn boxes_once_when_computed_elems_escape() {
+    // S2i: observed zip boxes once at the escape (same Q1 rule as immediates).
     let mut ops = vec![
         IlOp::Const { imm: 1, loc: loc() },
         IlOp::Const { imm: 3, loc: loc() },
@@ -453,8 +453,47 @@ fn keeps_heap_when_computed_elems_escape() {
         },
     ];
     let info = analyze_escapes(&ops);
-    assert!(!is_stack_allocatable(&info.allocs[0]));
-    assert!(!info.allocs[0].box_at_escape);
+    assert!(is_stack_allocatable(&info.allocs[0]));
+    assert!(info.allocs[0].box_at_escape);
     escape_analysis(&mut ops);
-    assert!(has_make_array(&ops));
+    let makes = ops
+        .iter()
+        .filter(|op| matches!(op, IlOp::MakeArray { .. }))
+        .count();
+    assert_eq!(makes, 1, "one box at return; ops={ops:?}");
+}
+
+#[test]
+fn boxes_once_across_two_escape_edges() {
+    let mut ops = make_and_store(2, 0);
+    ops.extend([
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            arity: 1,
+            target: Label(9),
+            loc: loc(),
+            ret_words: 1,
+        },
+        IlOp::Pop { loc: loc() },
+        IlOp::Load {
+            slot: 0,
+            loc: loc(),
+        },
+        IlOp::Return {
+            loc: loc(),
+            ret_words: 1,
+        },
+    ]);
+    let info = analyze_escapes(&ops);
+    assert!(info.allocs[0].box_at_escape);
+    allocate_on_stack(&mut ops, &info);
+    let makes = ops
+        .iter()
+        .filter(|op| matches!(op, IlOp::MakeArray { .. }))
+        .count();
+    assert_eq!(makes, 1, "Q1 box-once; ops={ops:?}");
 }

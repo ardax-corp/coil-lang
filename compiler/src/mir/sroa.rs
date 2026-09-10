@@ -1,4 +1,4 @@
-//! S2f: reuse the StoreIndex array instead of rematerializing `Alloc`.
+//! S2f / Q1: reuse the StoreIndex array instead of rematerializing `Alloc`.
 //!
 //! Stack-IL / codegen already SROAs non-escaping `[T; N]` locals. Dense /
 //! leftover reconstruct can still emit a second `Alloc` of the same elems
