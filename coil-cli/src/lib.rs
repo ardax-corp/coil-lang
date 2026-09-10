@@ -356,4 +356,18 @@ mod tests {
             Some(expected.as_str())
         );
     }
+
+    #[test]
+    fn archive_stack_grows_for_dense_recursive_call() {
+        let seek = Byte::new(Instruction::Seek).with_operand_u32(25);
+        let call = Byte::new(Instruction::CALL);
+        assert_eq!(
+            archive_operand_slots(&[seek, call]),
+            machine::MAX_OPERAND_STACK_SLOTS
+        );
+        assert_eq!(
+            archive_operand_slots(&[seek]),
+            machine::DEFAULT_OPERAND_STACK_SLOTS
+        );
+    }
 }
