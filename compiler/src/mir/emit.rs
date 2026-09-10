@@ -102,12 +102,19 @@ pub fn emit_dense(
             if is_tail_call_inst(block, inst) {
                 continue;
             }
-            if let MirInst::Call { dest, target, args } = inst {
+            if let MirInst::Call {
+                dest,
+                dest_hi,
+                target,
+                args,
+            } = inst
+            {
                 emit_call(
                     &mut out,
                     &mut stacked,
                     crate::il::EntryKind::Call,
                     *dest,
+                    *dest_hi,
                     *target,
                     args,
                     func,
@@ -487,20 +494,22 @@ pub(super) fn emit_inst(
                 loc,
             });
         }
-        MirInst::Call { dest, target, args } => {
-            // ABI edge: DensePush args + CALL + StorePop dest.
+        MirInst::Call {
+            dest,
+            dest_hi,
+            target,
+            args,
+        } => {
             emit_dense_push(out, args, regs, scratch, loc)?;
+            let ret_words = if dest_hi.is_some() { 2 } else { 1 };
             out.push(IlOp::Entry {
                 kind: crate::il::EntryKind::Call,
                 arity: args.len() as u32,
                 target: *target,
                 loc,
-                ret_words: 1,
+                ret_words,
             });
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+            store_call_dests(out, *dest, *dest_hi, regs, loc);
         }
         MirInst::Index {
             dest,
@@ -717,19 +726,21 @@ fn emit_term(
             }
         }
         Terminator::Return { lo, hi } => {
-            if hi.is_some() {
-                return Err(LowerError::Refused(
-                    "dense emit is one-word Value ABI (P3 uses LIR)".into(),
-                ));
-            }
             if let Some(v) = lo {
-                if let Some(MirInst::Call { dest, target, args }) = block.insts.last() {
-                    if *dest == *v {
+                if let Some(MirInst::Call {
+                    dest,
+                    dest_hi,
+                    target,
+                    args,
+                }) = block.insts.last()
+                {
+                    if *dest == *v && *dest_hi == *hi {
                         emit_call(
                             out,
                             stacked,
                             crate::il::EntryKind::TailCall,
                             *dest,
+                            *dest_hi,
                             *target,
                             args,
                             func,
@@ -746,10 +757,18 @@ fn emit_term(
             } else {
                 out.push(IlOp::Const { imm: 0, loc });
             }
-            out.push(IlOp::Return {
-                loc,
-                ret_words: 1,
-            });
+            if let Some(h) = hi {
+                emit_stack_value(out, stacked, *h, func, plan, regs, pool, loc)?;
+                out.push(IlOp::Return {
+                    loc,
+                    ret_words: 2,
+                });
+            } else {
+                out.push(IlOp::Return {
+                    loc,
+                    ret_words: 1,
+                });
+            }
         }
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
@@ -1118,14 +1137,18 @@ fn gather_base(
 }
 
 fn is_tail_call_inst(block: &super::func::MirBlock, inst: &MirInst) -> bool {
-    let MirInst::Call { dest, .. } = inst else {
+    let MirInst::Call { dest, dest_hi, .. } = inst else {
         return false;
     };
     match block.term {
-        Some(Terminator::Return {
-            lo: Some(v),
-            hi: None,
-        }) if v == *dest => matches!(block.insts.last(), Some(MirInst::Call { dest: d, .. }) if d == dest),
+        Some(Terminator::Return { lo: Some(v), hi })
+            if v == *dest && hi == *dest_hi =>
+        {
+            matches!(
+                block.insts.last(),
+                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
+            )
+        }
         _ => false,
     }
 }
@@ -1135,6 +1158,7 @@ fn emit_call(
     stacked: &mut Vec<ValueId>,
     kind: crate::il::EntryKind,
     dest: ValueId,
+    dest_hi: Option<ValueId>,
     target: crate::il::Label,
     args: &[ValueId],
     func: &MirFunc,
@@ -1144,6 +1168,7 @@ fn emit_call(
     pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
+    let ret_words = if dest_hi.is_some() { 2 } else { 1 };
     if !plan.is_self_call(target) {
         stacked.clear();
         emit_dense_push(out, args, regs, scratch, loc)?;
@@ -1152,13 +1177,10 @@ fn emit_call(
             arity: args.len() as u32,
             target,
             loc,
-            ret_words: 1,
+            ret_words,
         });
-        if kind != crate::il::EntryKind::TailCall && plan.needs_slot(dest) {
-            out.push(IlOp::StorePop {
-                slot: u32::from(regs[dest.index()]),
-                loc,
-            });
+        if kind != crate::il::EntryKind::TailCall {
+            store_or_stack_call(out, stacked, dest, dest_hi, plan, regs, loc);
         }
         return Ok(());
     }
@@ -1168,7 +1190,7 @@ fn emit_call(
         arity: args.len() as u32,
         target,
         loc,
-        ret_words: 1,
+        ret_words,
     });
     let arity = args.len();
     if stacked.len() >= arity {
@@ -1179,15 +1201,47 @@ fn emit_call(
     if kind == crate::il::EntryKind::TailCall {
         return Ok(());
     }
-    if plan.needs_slot(dest) {
+    store_or_stack_call(out, stacked, dest, dest_hi, plan, regs, loc);
+    Ok(())
+}
+
+fn store_call_dests(
+    out: &mut Vec<IlOp>,
+    dest: ValueId,
+    dest_hi: Option<ValueId>,
+    regs: &[u8],
+    loc: DebugLoc,
+) {
+    if let Some(hi) = dest_hi {
         out.push(IlOp::StorePop {
-            slot: u32::from(regs[dest.index()]),
+            slot: u32::from(regs[hi.index()]),
             loc,
         });
-    } else {
-        stacked.push(dest);
     }
-    Ok(())
+    out.push(IlOp::StorePop {
+        slot: u32::from(regs[dest.index()]),
+        loc,
+    });
+}
+
+fn store_or_stack_call(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    dest: ValueId,
+    dest_hi: Option<ValueId>,
+    plan: &ConvoyPlan,
+    regs: &[u8],
+    loc: DebugLoc,
+) {
+    let park = plan.needs_slot(dest) || dest_hi.is_some_and(|h| plan.needs_slot(h));
+    if park {
+        store_call_dests(out, dest, dest_hi, regs, loc);
+        return;
+    }
+    stacked.push(dest);
+    if let Some(hi) = dest_hi {
+        stacked.push(hi);
+    }
 }
 
 fn emit_args_on_stack(
@@ -1248,7 +1302,7 @@ fn emit_stack_value(
         } => {
             emit_stack_bin(out, stacked, *op, *ty, *lhs, *rhs, *dest, func, plan, regs, pool, loc)
         }
-        MirInst::Call { dest, .. } if *dest == v => {
+        MirInst::Call { dest, dest_hi, .. } if *dest == v || *dest_hi == Some(v) => {
             out.push(IlOp::Load {
                 slot: u32::from(regs[v.index()]),
                 loc,

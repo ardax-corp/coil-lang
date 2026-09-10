@@ -263,11 +263,13 @@ pub enum MirInst {
         native_id: u16,
         args: Vec<ValueId>,
     },
-    /// Dense→dense `CALL` (COI-291). Args stay on the operand stack
-    /// (LOAD / BinSlotImm convoy); one-word `Entry`. `STORE` only when the
-    /// dest is live in a slot. Same bits as the callee's slots `0..n`.
+    /// Dense / LIR `CALL` (COI-291 / B3). Args stay on the operand stack
+    /// (LOAD / BinSlotImm convoy). One-word `Entry` uses `dest` only;
+    /// two-slot `[payload, tag]` sets `dest_hi`. `STORE` only when a dest
+    /// is live in a slot. Same bits as the callee's slots `0..n`.
     Call {
         dest: ValueId,
+        dest_hi: Option<ValueId>,
         target: crate::il::Label,
         args: Vec<ValueId>,
     },
@@ -465,6 +467,17 @@ impl MirInst {
             | Self::Format { dest, .. }
             | Self::Stringify { dest, .. } => dest,
         }
+    }
+
+    /// `dest` plus a two-slot CALL tag / second word when present.
+    pub fn dests(&self) -> impl Iterator<Item = ValueId> {
+        let hi = match *self {
+            Self::Call {
+                dest_hi: Some(h), ..
+            } => Some(h),
+            _ => None,
+        };
+        std::iter::once(self.dest()).chain(hi)
     }
 
     /// Allocation or GC safepoint — specialize / native must not cross.

@@ -1,10 +1,11 @@
 //! Lower pre-fuse stack IL into numeric SSA.
 //!
 //! Fuse-select remains the production bytecode lowerer. This path is an
-//! optional sidecar: escaping classes, unmapped heap, two-slot / mutual
+//! optional sidecar: escaping classes, unmapped heap, mutual
 //! `CALL`, and residual `Byte` (except a small numeric set) refuse so the
-//! existing `Value` interpreter is unchanged. One-word `CALL` (Q7) and
-//! niche / two-slot match (Q8) lower; keep/refuse is the cost gate.
+//! existing `Value` interpreter is unchanged. One-word `CALL` (Q7),
+//! two-slot `CALL` / `RETURN` (B3), and niche / two-slot match (Q8) lower;
+//! keep/refuse is the cost gate. Self / sibling two-slot recursion stay refuse.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -58,7 +59,8 @@ pub struct LowerHints {
     /// CALL-edge arity: slots `0..param_count` are live-in params (Value ABI).
     pub param_count: u32,
     /// Leaf-first dense callees (COI-291). Empty still allows an open
-    /// one-word `CALL` / `TailCall` (S3 / Q7); two-slot / mutual stay refuse.
+    /// one-word `CALL` / `TailCall` (S3 / Q7); two-slot open CALL (B3).
+    /// Mutual / two-slot self-recursion stay refuse at specialize.
     pub calls: DenseCallMap,
     /// I2: `JumpIfMatch` / `Unpack` / `Seek` and stack-carrying CFG edges.
     pub allow_match: bool,
@@ -219,8 +221,9 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
         }
         for i in start..end {
             let op = &ops[i];
-            let next = first_emitting(&ops[i + 1..end]);
-            lower_op(&mut b, &mut tos, op, next, hints)?;
+            let rest = &ops[i + 1..end];
+            let next = first_emitting(rest);
+            lower_op(&mut b, &mut tos, op, next, rest, hints)?;
             maybe_ins_deopt(&mut b, op, hints)?;
         }
         if b.func().block(bid).term.is_none() {
@@ -484,10 +487,21 @@ fn emit_term(
         }
         Some(IlOp::Entry {
             kind: EntryKind::TailCall,
+            ret_words,
             ..
         }) => {
-            // lower_op already emitted the CALL; TOS is the one-word result.
-            b.ret(tos.pop())?;
+            // lower_op already emitted the CALL; TOS is the result word(s).
+            if *ret_words >= 2 {
+                let hi = tos
+                    .pop()
+                    .ok_or_else(|| LowerError::Refused("tail ret2 tag".into()))?;
+                let lo = tos
+                    .pop()
+                    .ok_or_else(|| LowerError::Refused("tail ret2 payload".into()))?;
+                b.ret_pair(lo, hi)?;
+            } else {
+                b.ret(tos.pop())?;
+            }
         }
         Some(IlOp::Jump {
             kind: IlJumpKind::JumpIfMatch { tag, arity },
@@ -560,6 +574,7 @@ fn lower_op(
     tos: &mut Vec<ValueId>,
     op: &IlOp,
     next: Option<&IlOp>,
+    rest: &[IlOp],
     hints: &LowerHints,
 ) -> Result<(), LowerError> {
     match op {
@@ -687,8 +702,8 @@ fn lower_op(
             ret_words,
             ..
         } => {
-            if *ret_words != 1 {
-                return Err(LowerError::Refused("dense CALL is one-word".into()));
+            if *ret_words != 1 && *ret_words != 2 {
+                return Err(LowerError::Refused("CALL ret_words".into()));
             }
             let n = *arity as usize;
             if tos.len() < n {
@@ -699,10 +714,17 @@ fn lower_op(
                 args.push(tos.pop().expect("arity checked"));
             }
             args.reverse();
-            let dest_ty = use_result_ty(hints, next, MirTy::I64);
+            let (dest_ty, dest_hi_ty) = if *ret_words == 2 {
+                two_slot_call_tys(hints, rest)
+            } else {
+                (use_result_ty(hints, next, MirTy::I64), None)
+            };
             let abi = if let Some(abi) = hints.calls.get(&target.0) {
                 if abi.params.len() != n {
                     return Err(LowerError::Refused("CALL arity".into()));
+                }
+                if (*ret_words == 2) != abi.ret_hi.is_some() {
+                    return Err(LowerError::Refused("CALL ret width".into()));
                 }
                 abi.clone()
             } else {
@@ -710,12 +732,20 @@ fn lower_op(
                 if !dest_ty.is_word_lane() || params.iter().any(|t| !t.is_word_lane()) {
                     return Err(LowerError::Refused("CALL".into()));
                 }
+                if dest_hi_ty.is_some_and(|t| !t.is_word_lane()) {
+                    return Err(LowerError::Refused("CALL hi".into()));
+                }
                 DenseAbi {
                     params,
                     ret: dest_ty,
+                    ret_hi: dest_hi_ty,
                 }
             };
-            tos.push(b.ins_call(*target, args, &abi)?);
+            let (lo, hi) = b.ins_call(*target, args, &abi)?;
+            tos.push(lo);
+            if *ret_words == 2 {
+                tos.push(hi.ok_or_else(|| LowerError::Refused("CALL hi dest".into()))?);
+            }
             Ok(())
         }
         IlOp::Index { .. } if hints.allow_index => lower_index(b, tos, next, hints, false),
@@ -1070,6 +1100,29 @@ fn map_bin(inst: Instruction) -> Option<MirBinOp> {
         Instruction::SHR => MirBinOp::Shr,
         _ => return None,
     })
+}
+
+/// After a two-slot CALL the IL stack is `[payload, tag]`. The first
+/// `StorePop` is the tag; the second is the payload.
+fn two_slot_call_tys(hints: &LowerHints, rest: &[IlOp]) -> (MirTy, Option<MirTy>) {
+    let mut stores = Vec::new();
+    for op in rest {
+        match op {
+            IlOp::Label(_) | IlOp::JoinLabel(_) => continue,
+            IlOp::StorePop { slot, .. } => {
+                stores.push(*slot);
+                if stores.len() == 2 {
+                    break;
+                }
+            }
+            _ => break,
+        }
+    }
+    if stores.len() == 2 {
+        (hints.slot(stores[1]), Some(hints.slot(stores[0])))
+    } else {
+        (MirTy::I64, Some(MirTy::I64))
+    }
 }
 
 fn use_result_ty(hints: &LowerHints, next: Option<&IlOp>, default: MirTy) -> MirTy {

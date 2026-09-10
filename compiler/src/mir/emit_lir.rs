@@ -147,8 +147,10 @@ impl EmitPlan {
         }
         for block in &func.blocks {
             for (i, inst) in block.insts.iter().enumerate() {
-                def[inst.dest().index()] = Some((block.id, i));
-                def_block[inst.dest().index()] = Some(block.id);
+                for d in inst.dests() {
+                    def[d.index()] = Some((block.id, i));
+                    def_block[d.index()] = Some(block.id);
+                }
                 if inst.is_phi() {
                     for v in inst.operands() {
                         phi_in[v.index()] = true;
@@ -226,6 +228,21 @@ impl EmitPlan {
                 });
                 if !print_tok {
                     need_slot[i] = true;
+                }
+            }
+        }
+        for block in &func.blocks {
+            for inst in &block.insts {
+                if let MirInst::Call {
+                    dest,
+                    dest_hi: Some(hi),
+                    ..
+                } = inst
+                {
+                    need_slot[dest.index()] = true;
+                    need_slot[hi.index()] = true;
+                    tree[dest.index()] = false;
+                    tree[hi.index()] = false;
                 }
             }
         }
@@ -569,10 +586,18 @@ fn emit_stored(
                 loc,
             });
         }
-        MirInst::HostInvoke { .. } | MirInst::Call { .. } => {
+        MirInst::HostInvoke { .. } => {
             return Err(LowerError::Refused(
-                "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
+                "MIR→LIR leafs do not emit HostInvoke (dense W4)".into(),
             ));
+        }
+        MirInst::Call {
+            dest,
+            dest_hi,
+            target,
+            args,
+        } => {
+            emit_lir_call(out, *dest, *dest_hi, *target, args, func, plan, regs, pool, loc)?;
         }
         MirInst::Alloc { dest, kind, elems } => {
             emit_alloc_stack(out, *kind, elems, func, plan, regs, pool, loc)?;
@@ -633,6 +658,43 @@ fn emit_stored(
                 });
             }
         }
+    }
+    Ok(())
+}
+
+fn emit_lir_call(
+    out: &mut Vec<IlOp>,
+    dest: ValueId,
+    dest_hi: Option<ValueId>,
+    target: crate::il::Label,
+    args: &[ValueId],
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    for a in args {
+        emit_stack(out, *a, func, plan, regs, pool, loc)?;
+    }
+    out.push(IlOp::Entry {
+        kind: crate::il::EntryKind::Call,
+        arity: args.len() as u32,
+        target,
+        loc,
+        ret_words: if dest_hi.is_some() { 2 } else { 1 },
+    });
+    if let Some(hi) = dest_hi {
+        out.push(IlOp::StorePop {
+            slot: u32::from(regs[hi.index()]),
+            loc,
+        });
+    }
+    if plan.need_slot[dest.index()] {
+        out.push(IlOp::StorePop {
+            slot: u32::from(regs[dest.index()]),
+            loc,
+        });
     }
     Ok(())
 }

@@ -5,12 +5,13 @@
 //! body. Keep/refuse is the emit **cost gate** vs fuse-IL (not a work-op
 //! floor, and not a Q6–Q8 feature checklist). S3 / **Q7**: one-word
 //! `CALL` / `TailCall` infer without a dense callee map (open ABI until
-//! the map records the body). I6-typed HostInvoke except I4 string bytes;
+//! the map records the body). **B3**: two-slot `CALL` / `RETURN` infer
+//! (self / mutual two-slot recursion still refuse at specialize). I6-typed HostInvoke except I4 string bytes;
 //! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
 //! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on
 //! every mode (dense reconstruct is register `Br`). Counted `for` (Q6)
 //! is ordinary i64 + index IL — no extra refuse. Still refuse class
-//! field / unmapped alloc / multi-word `RETURN` / residual `Byte` /
+//! field / unmapped alloc / residual `Byte` /
 //! `Pow` / `AND`/`OR`. Q9 R1: LIR infer accepts `STRING` / `PRINT` /
 //! `FORMAT` / `STRINGIFY`; dense infer still refuses them. S2c maps
 //! allow alloc. Compare-only stays fuse-IL. Q7 unfuses convoy
@@ -468,7 +469,7 @@ fn infer_walk(
                 // Peek: miss fallthrough is the linear walk.
             }
             IlOp::Jump { .. } | IlOp::Return { ret_words: 1, .. } | IlOp::Halt { .. } => {}
-            IlOp::Return { ret_words, .. } if *ret_words == 2 && mode.lir_shape() => {}
+            IlOp::Return { ret_words, .. } if *ret_words == 2 => {}
             IlOp::Return { ret_words, .. } if *ret_words != 1 => {
                 return Err(LowerError::Refused("multi-word return".into()));
             }
@@ -492,12 +493,17 @@ fn infer_walk(
                 }
             }
             IlOp::Entry {
-                kind: EntryKind::Call | EntryKind::TailCall,
+                kind,
                 arity,
                 target,
                 ret_words,
                 ..
-            } if mode == InferMode::Dense => {
+            } if matches!(kind, EntryKind::Call | EntryKind::TailCall)
+                && (mode == InferMode::Dense
+                    || (mode.lir_shape()
+                        && *ret_words == 2
+                        && matches!(kind, EntryKind::Call))) =>
+            {
                 apply_call(
                     &mut stack,
                     &mut slot_ty,
@@ -711,6 +717,7 @@ fn infer_walk(
             IlOp::Entry {
                 kind: EntryKind::Call | EntryKind::TailCall,
                 arity,
+                ret_words,
                 ..
             } => {
                 for _ in 0..*arity {
@@ -721,6 +728,13 @@ fn infer_walk(
                     ty: None,
                     imm: None,
                 });
+                if *ret_words == 2 {
+                    stack.push(Cell {
+                        origin: Origin::Tmp,
+                        ty: None,
+                        imm: None,
+                    });
+                }
             }
             IlOp::LoadReturnSlot { slot, .. } => {
                 if let Some(c) = stack.pop() {
@@ -1179,8 +1193,8 @@ fn apply_call(
     target: u32,
     calls: &DenseCallMap,
 ) -> Result<(), LowerError> {
-    if ret_words != 1 {
-        return Err(LowerError::Refused("dense CALL is one-word".into()));
+    if ret_words != 1 && ret_words != 2 {
+        return Err(LowerError::Refused("CALL ret_words".into()));
     }
     let n = arity as usize;
     if stack.len() < n {
@@ -1203,14 +1217,28 @@ fn apply_call(
             ty: Some(abi.ret),
             imm: None,
         });
+        if ret_words == 2 {
+            stack.push(Cell {
+                origin: Origin::Tmp,
+                ty: abi.ret_hi,
+                imm: None,
+            });
+        }
         return Ok(());
     }
-    // S3: one-word open CALL — result typed from later use.
+    // S3 / B3: open CALL — result typed from later use.
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: None,
         imm: None,
     });
+    if ret_words == 2 {
+        stack.push(Cell {
+            origin: Origin::Tmp,
+            ty: None,
+            imm: None,
+        });
+    }
     Ok(())
 }
 

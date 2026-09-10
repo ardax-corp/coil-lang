@@ -9,14 +9,15 @@
 //! | Edge | Words | Slots / stack |
 //! |------|-------|----------------|
 //! | Args | `arity` | callee slots `0..arity` (same bits as caller `LOAD`s) |
-//! | Return | 1 | TOS after `RETURN`; caller `STORE`s into a typed dest |
+//! | Return | 1 or 2 | TOS after `RETURN`; caller `STORE`s into typed dests |
 //! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
-//! | Two-slot return | — | refuse (P3 LIR) |
+//! | Two-slot return | 2 | `[payload, tag]` / `[a, b]` (B3; cost gate vs fuse) |
 //!
 //! HostInvoke: LICM hoists scalar-pure math; S3 emits I6-typed hosts except
 //! I4 string bytes. User `CALL` uses this map when the callee is already
-//! dense, or an open one-word ABI (S3). Q7 one-word self-`CALL` / `TailCall`
-//! use that open ABI. `CallIndirect` / two-slot `RETURN` still refuse.
+//! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
+//! self-`CALL` / `TailCall` use the open one-word ABI. Two-slot self /
+//! mutual recursion stay refuse (later Q7 / B7). `CallIndirect` stays refuse.
 //! HeapRef and niche words are one-word lanes (Q8).
 
 use std::collections::{HashMap, HashSet};
@@ -33,6 +34,8 @@ use super::ty::MirTy;
 pub struct DenseAbi {
     pub params: Vec<MirTy>,
     pub ret: MirTy,
+    /// Tag / second product word. `None` is the one-word ABI.
+    pub ret_hi: Option<MirTy>,
 }
 
 /// Entry-label id → dense ABI. Built leaf-first during specialize.
@@ -40,20 +43,31 @@ pub struct DenseAbi {
 pub type DenseCallMap = HashMap<u32, DenseAbi>;
 
 impl DenseAbi {
-    /// Word-layout numeric params + one specialized return. Two-slot refuses.
+    /// Word-layout params + one- or two-slot specialized return.
     pub fn from_func(func: &MirFunc) -> Option<Self> {
-        if !matches!(func.ret_layout, MirLayout::Word | MirLayout::HeapNiche) {
-            return None;
-        }
         let ret = func.ret_ty?;
         if !ret.is_word_lane() {
             return None;
         }
+        let ret_hi = match func.ret_layout {
+            MirLayout::Word | MirLayout::HeapNiche => None,
+            MirLayout::TwoSlot => {
+                let hi = func.ret_hi_ty?;
+                if !hi.is_word_lane() {
+                    return None;
+                }
+                Some(hi)
+            }
+        };
         let params: Vec<MirTy> = func.params.iter().map(|p| func.ty(*p)).collect();
         if params.iter().any(|t| !t.is_word_lane()) {
             return None;
         }
-        Some(Self { params, ret })
+        Some(Self {
+            params,
+            ret,
+            ret_hi,
+        })
     }
 
     /// Recover params when `IlFunc.entry_sp` is 0 (frame-base seed, not arity).
@@ -234,12 +248,14 @@ mod tests {
     }
 
     #[test]
-    fn from_func_refuses_two_slot() {
+    fn from_func_accepts_two_slot() {
         let mut b = MirBuilder::new("pair");
         let lo = b.add_param(MirTy::I64).unwrap();
         let hi = b.ins_const(MirConst::I64(1)).unwrap();
         b.ret_pair(lo, hi).unwrap();
         let f = b.finish().unwrap();
-        assert!(DenseAbi::from_func(&f).is_none());
+        let abi = DenseAbi::from_func(&f).expect("B3 two-slot abi");
+        assert_eq!(abi.ret, MirTy::I64);
+        assert_eq!(abi.ret_hi, Some(MirTy::I64));
     }
 }
