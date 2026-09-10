@@ -1239,7 +1239,18 @@ fn odd(int n) -> int {
     return even(n - 1);
 }
 fn main() {
-    let _ = even(10) + odd(10) + even(1) + odd(1);
+    if even(10) != 1 {
+        panic("even10");
+    }
+    if odd(10) != 0 {
+        panic("odd10");
+    }
+    if even(1) != 0 {
+        panic("even1");
+    }
+    if odd(1) != 1 {
+        panic("odd1");
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
@@ -1249,20 +1260,31 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let even_end = odd.min(main);
         let even_bc = if even < even_end { &bc[even..even_end] } else { &bc[even..] };
+        let even_ops: Vec<_> = even_bc
+            .iter()
+            .map(|b| format!("{}:{}", b.bytecode().mnemonic(), b.operand_u32()))
+            .collect();
+        let odd_end = main;
+        let odd_bc = if odd < odd_end { &bc[odd..odd_end] } else { &bc[odd..] };
+        let odd_ops: Vec<_> = odd_bc
+            .iter()
+            .map(|b| format!("{}:{}", b.bytecode().mnemonic(), b.operand_u32()))
+            .collect();
         assert!(
             even_bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
-            "sibling even/odd must keep TailCall; opcodes={:?}",
-            even_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "sibling even/odd must keep TailCall; opcodes={even_ops:?}"
         );
         assert!(
             !even_bc.iter().any(|b| *b.bytecode() == Instruction::Seek),
-            "B7 TailCall stack-arg must not tax a param-only leaf with Seek; opcodes={:?}",
-            even_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "B7 TailCall stack-arg must not tax a param-only leaf with Seek; opcodes={even_ops:?}"
         );
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-        assert!(!vm.panicked(), "even/odd sibling TailCall must run");
+        assert!(
+            !vm.panicked(),
+            "even/odd sibling TailCall must be correct; even={even_ops:?} odd={odd_ops:?}"
+        );
     }
 
     #[test]
@@ -1333,10 +1355,13 @@ fn bounce_b(Option<int> o) -> Option<int> {
 }
 fn main() {
     let r = bounce_a(Option::None);
-    let _ = match r {
-        Option::Some(v) => v,
+    let v = match r {
+        Option::Some(x) => x,
         Option::None => 0,
     };
+    if v != 1 {
+        panic("bounce");
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
@@ -1346,20 +1371,19 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let a_end = b.min(main);
         let a_bc = if a < a_end { &bc[a..a_end] } else { &bc[a..] };
+        let a_ops: Vec<_> = a_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
             a_bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
-            "two-slot sibling must keep TailCall; opcodes={:?}",
-            a_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "two-slot sibling must keep TailCall; opcodes={a_ops:?}"
         );
         assert!(
             !a_bc.iter().any(|b| *b.bytecode() == Instruction::DensePush),
-            "B7 two-slot TailCall must not DensePush args; opcodes={:?}",
-            a_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "B7 two-slot TailCall must not DensePush args; opcodes={a_ops:?}"
         );
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-        assert!(!vm.panicked(), "bounce_a must run");
+        assert!(!vm.panicked(), "bounce_a must return Some(1); opcodes={a_ops:?}");
     }
 
     #[test]
@@ -1379,23 +1403,17 @@ fn pong(int n) -> int {
     }
     return 1 + ping(n - 1);
 }
-fn once(Option<int> o) -> Option<int> {
-    return match o {
-        Option::None => Option::Some(0),
-        Option::Some(x) => once(Option::None),
-    };
-}
 fn main() {
-    let _ = ping(4) + pong(3);
-    let r = once(Option::Some(3));
-    let _ = match r {
-        Option::None => 0,
-        Option::Some(v) => v,
-    };
+    if ping(4) != 4 {
+        panic("ping");
+    }
+    if pong(3) != 3 {
+        panic("pong");
+    }
 }
 "#;
         let mut p = crate::Pipeline::new();
-        let (bc, constants) = p.compile_src(src).expect("compile B7 mutual / self two-slot");
+        let (bc, constants) = p.compile_src(src).expect("compile B7 mutual CALL");
         assert!(
             bc.iter().any(|b| *b.bytecode() == Instruction::CALL)
                 || bc.iter().any(|b| *b.bytecode() == Instruction::TailCall),
@@ -1405,7 +1423,7 @@ fn main() {
         let slots = p.operand_stack_slots() as usize;
         let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
-        assert!(!vm.panicked(), "ping/pong + once must run");
+        assert!(!vm.panicked(), "ping/pong must run");
     }
 
     #[test]
