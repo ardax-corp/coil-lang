@@ -3434,4 +3434,29 @@ fn main() {
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "range checksum");
     }
+
+    #[test]
+    fn q6_for_in_range_assign_to_x_keeps_trip_count() {
+        let src = r#"
+fn trips() -> int {
+    let n = 0;
+    for x in 0..3 {
+        x = 100;
+        n = n + 1;
+    }
+    return n;
+}
+fn main() {
+    if trips() != 3 {
+        panic "range assign checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile range assign");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "range assign checksum");
+    }
 }

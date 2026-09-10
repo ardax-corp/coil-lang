@@ -30,6 +30,8 @@ type level). Runtime lowering:
    while-shaped latch so MIR vectorize / dense match `while i < len`.
 2. **Literal `start..end` / `..=`** — peel `Expr`/`Group` wrappers; two
    locals (`cur`, `end`); unit step. Same latch rule. No heap dict.
+   Read-only `x` aliases the IV (while-shaped) so dense DestProp cannot
+   drop the increment. Assignment to `x` keeps a per-trip copy.
 3. **First-class range value** (`let r = 0..n; for x in r`) — still
    `{start,end,inclusive}` + `GetField`. Later rung.
 4. **Tuple** — temp array, then (1).

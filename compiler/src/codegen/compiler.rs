@@ -10233,7 +10233,15 @@ impl Compiler {
 
         // Consume binding Identifier NodeId (iterable → binding → body).
         let _ = self.next_emit_id();
+        let alias_iv = !crate::const_fold::body_assigns_ident(body, binding_name);
         let binding_slot = self.alloc_binding_slot(binding_name);
+        if alias_iv {
+            // `x` is the IV (while-shaped). A copy DestProp-kills the increment.
+            self.bytecode.push_load(cur_slot);
+            self.bytecode.push_store_pop(binding_slot);
+            // After the preheader copy, step and cond use the named slot.
+        }
+        let iv_slot = if alias_iv { binding_slot } else { cur_slot };
 
         let split_continue = crate::const_fold::body_has_continue(body);
         let mut bb = BlockBuilder::new();
@@ -10247,7 +10255,7 @@ impl Compiler {
         bb.bind_label(top_label, self.bytecode.il_mut());
 
         // cond: cur < end  (half-open) or cur <= end (inclusive)
-        self.bytecode.push_load(cur_slot);
+        self.bytecode.push_load(iv_slot);
         self.bytecode.push_load(end_slot);
         self.bytecode.push(Byte::new(if float {
             if inclusive {
@@ -10262,9 +10270,10 @@ impl Compiler {
         }));
         bb.emit_jump_to(exit_label, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
 
-        // x = cur
-        self.bytecode.push_load(cur_slot);
-        self.bytecode.push_store_pop(binding_slot);
+        if !alias_iv {
+            self.bytecode.push_load(cur_slot);
+            self.bytecode.push_store_pop(binding_slot);
+        }
 
         self.loop_stack
             .push((continue_label.unwrap_or(top_label), exit_label));
@@ -10282,7 +10291,7 @@ impl Compiler {
             bb.bind_label(continue_label, self.bytecode.il_mut());
         }
         // cur = cur + 1  (or + 1.0 for float)
-        self.bytecode.push_load(cur_slot);
+        self.bytecode.push_load(iv_slot);
         if float {
             let bits = Value::from(1.0_f64).raw() as u64;
             let idx = self.intern_constant(bits);
@@ -10292,7 +10301,7 @@ impl Compiler {
             self.bytecode.push_const(1);
             self.bytecode.push(Byte::new(Instruction::ADD));
         }
-        self.bytecode.push_store_pop(cur_slot);
+        self.bytecode.push_store_pop(iv_slot);
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());

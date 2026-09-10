@@ -517,6 +517,67 @@ pub fn body_has_continue<'a>(body: &Output<'a>) -> bool {
     body_has_continue_walk(body)
 }
 
+/// True when `name` is assigned in `body` (so a range IV cannot alias it).
+pub fn body_assigns_ident<'a>(body: &Output<'a>, name: &str) -> bool {
+    body_assigns_ident_walk(body, name)
+}
+
+fn assign_target_is<'a>(target: &Output<'a>, name: &str) -> bool {
+    use parser::ast::Expression;
+    match target.1.as_ref() {
+        Expression::Identifier(n) => *n == name,
+        Expression::Expr(inner)
+        | Expression::Group(inner)
+        | Expression::Statement(inner)
+        | Expression::ExprStatement(inner) => assign_target_is(inner, name),
+        Expression::Fragment(items) if items.len() == 1 => assign_target_is(&items[0], name),
+        _ => false,
+    }
+}
+
+fn body_assigns_ident_walk<'a>(node: &Output<'a>, name: &str) -> bool {
+    use parser::ast::Expression;
+    match node.1.as_ref() {
+        Expression::Assignment(lhs, rhs) | Expression::CompoundAssign(lhs, _, rhs) => {
+            assign_target_is(lhs, name) || body_assigns_ident_walk(rhs, name)
+        }
+        Expression::Block(children) | Expression::Fragment(children) => {
+            children.iter().any(|c| body_assigns_ident_walk(c, name))
+        }
+        Expression::ExprStatement(inner)
+        | Expression::Statement(inner)
+        | Expression::Expr(inner)
+        | Expression::Group(inner) => body_assigns_ident_walk(inner, name),
+        Expression::If(branches) => branches.iter().any(|b| {
+            if let Expression::Branch(cond, body) = b.1.as_ref() {
+                cond.as_ref()
+                    .is_some_and(|c| body_assigns_ident_walk(c, name))
+                    || body_assigns_ident_walk(body, name)
+            } else {
+                false
+            }
+        }),
+        Expression::Match { scrutinee, arms } => {
+            body_assigns_ident_walk(scrutinee, name)
+                || arms
+                    .iter()
+                    .any(|arm| body_assigns_ident_walk(&arm.body, name))
+        }
+        Expression::Loop {
+            iterable,
+            body,
+            identifier,
+        } => {
+            body_assigns_ident_walk(iterable, name)
+                || identifier
+                    .as_ref()
+                    .is_some_and(|i| body_assigns_ident_walk(i, name))
+                || body_assigns_ident_walk(body, name)
+        }
+        _ => false,
+    }
+}
+
 fn body_has_continue_walk<'a>(node: &Output<'a>) -> bool {
     use parser::ast::Expression;
     match node.1.as_ref() {
@@ -990,6 +1051,16 @@ mod tests {
             )])),
         );
         assert!(body_has_continue(&own));
+    }
+
+    #[test]
+    fn body_assigns_ident_detects_assignment() {
+        let assign_x = (
+            SimpleSpan::from(0..1),
+            Box::new(Expression::Assignment(id_expr("x"), int_expr(1))),
+        );
+        assert!(body_assigns_ident(&assign_x, "x"));
+        assert!(!body_assigns_ident(&assign_x, "y"));
     }
 
     #[test]
