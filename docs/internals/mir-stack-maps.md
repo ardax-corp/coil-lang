@@ -14,7 +14,10 @@ and relocate mapped slots on collect.
   `MirInst::Alloc` (`heapref`) plus a `GcBarrier` safepoint.
   `ArrayPush` / `DenseArrayPush` lower to `MirInst::ArrayPush` plus a
   barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way (Q9 R3).
-  `bind_drafts` counts those opcodes and `DenseMake`.
+  Heap `GetField` / `SetField` / `LoadField` lower on the map path so
+  CALL/`InitTyped`+field drafts bind (D1). `bind_drafts` counts those
+  opcodes and `DenseMake`. Escaping `self` stays boxed-once (Q2); I3
+  non-escaping stays unboxed. Dense field ops are D2.
 - [`fill_live_roots`](../../compiler/src/mir/gc.rs) (on `MirBuilder::finish`
   and text parse) sets `GcBarrier.roots` and `MirFunc.gc_roots` to the live
   heap-word SSA values at the edge: the new object plus other live heap
@@ -63,12 +66,12 @@ and relocate mapped slots on collect.
    without maps.
 4. ~~**Looping alloc**~~ — **S2d / S2e.** Mapped preheader `Make*` + index
    may take dense. Per-residual `Seek` restore is gone (StorePop already
-   returns tell to the dense frame).    Residual in-loop `Make*` stays
-   fuse-IL unless SROA/LICM deletes it (S2l). Still refuse: post-loop-only heap return
-   (invert+fuse); leftover unmapped grow / class edges; computed-element
-   stack scalarize; compiler write-barrier opcodes. Mapped `ArrayPush` /
-   CALL+`Make*` is B6. Sibling / mutual `TailCall` is B7; self two-slot
-   `CALL` / `RETURN` is C1 (cost gate).
+   returns tell to the dense frame). Residual in-loop `Make*` stays
+   fuse-IL unless SROA/LICM deletes it (S2l). Still refuse: post-loop-only
+   heap return (invert+fuse); computed-element stack scalarize; compiler
+   write-barrier opcodes. Mapped `ArrayPush` / CALL+`Make*` is B6. Class
+   `new` / field maps are D1. Sibling / mutual `TailCall` is B7; self
+   two-slot `CALL` / `RETURN` is C1 (cost gate).
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 
