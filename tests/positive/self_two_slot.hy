@@ -27,8 +27,8 @@ fn pair_walk(int n) -> (int, int) {
     if n <= 0 {
         return (0, 1);
     }
-    let p = pair_walk(n - 1);
-    return (p[0] + 1, p[1]);
+    let (a, b) = pair_walk(n - 1);
+    return (a + 1, b);
 }
 
 test("self two-slot Option walk") {
@@ -50,6 +50,6 @@ test("self two-slot Option tail") {
 }
 
 test("self two-slot product walk") {
-    let p = pair_walk(4);
-    assert(p[0] == 4 && p[1] == 1)?;
+    let (a, b) = pair_walk(4);
+    assert(a == 4 && b == 1)?;
 }
