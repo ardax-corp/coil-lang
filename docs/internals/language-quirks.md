@@ -10,12 +10,16 @@ Q1–Q9 themselves. Do not treat leftover I4 / dense refuse rows as
 overriding these decisions. Q1 box-once is implemented (codegen + IL). Q2 box-once is implemented
 (codegen field-SROA + identity cache). Q3 grow on `[T; N]` is a typechecker
 diagnostic (`FixedArrayGrow` / E0412). Q4 indexing `i % N` is Euclidean
-into `0..N` (codegen rem + SROA last-arm as spec).
+into `0..N` (codegen rem + SROA last-arm as spec). Q5 `panic` vs `raise`
+is documented (CLI / embed abort only on `panic`; checksum boards use
+`panic`).
 
 User-facing language docs live in
 [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`).
 There is no in-repo user manual to update here; cookbook / types pages there
-should cite this note when those repos take the Q1–Q5 surface.
+should cite this note when those repos take the Q1–Q5 surface. In-repo
+cookbook for Q5 is the section below plus
+[`.cursor/skills/coil-language`](../../.cursor/skills/coil-language/SKILL.md).
 
 ## Locked table
 
@@ -115,16 +119,54 @@ SROA select share the same rem.
 
 ## Q5 — `panic` aborts; `raise` is catchable
 
-Keep both spellings. Do not collapse them.
+Keep both spellings. Do not collapse them. They are not synonyms and
+opts must not rewrite one into the other.
 
 | Form | Meaning |
 |------|---------|
-| `panic` | Aborts the process. Checksum boards, CLI / embed hard failure, and “this must not continue” paths use `panic`. |
-| `raise` | Catchable. `try` / `?` / user error flow. |
+| `panic expr` | **Aborts the process.** Emits `Instruction::Panic`. Writes `panic: <msg>` (plus a line-table suffix when known). Sets `Machine::panicked`. Checksum boards, CLI / embed hard failure, and “this must not continue” paths use `panic`. |
+| `raise expr` | **Catchable.** Early-return `Result.Err(expr)` from a Result-mode function. `try` / `?` / `match` can swallow it. Not a process abort. |
 
-Misusing `raise` for abort hides checksum failures (a catch can swallow
-the board). See [debug-info.md](debug-info.md) for panic line-table
-output. Audit examples that still `raise` for abort (COI-327).
+See [debug-info.md](debug-info.md) for panic line-table output.
+
+### Cookbook
+
+| Use | Spelling |
+|-----|----------|
+| Checksum / hit-bench / “if this fires the program is wrong” | `panic "… checksum"` |
+| CLI / packaged-app hard failure | `panic` |
+| Recoverable user error, `?` chains, `match Result` | `raise` / `return Result.Err(…)` |
+| `coil test` expected-fail path | `raise` or `assert(false)` (harness treats `Err` as a failed case) |
+| `coil test` “this must not continue” | `panic` (also a failed case, and aborts that VM) |
+
+Uncaught `raise` from `main` is a `Result.Err` **return**. Default `coil`
+run, `coil run`, and `coil-embed` exit **0** unless `Machine::panicked`
+is set. That is why a checksum written as `if bad { raise "…" }` can
+print nothing and still look green.
+
+`coil test` is stricter: a case fails on **either** `panic` or a
+non-`Ok` Result (`!panicked && result_is_ok`). Do not rely on that
+harness when writing CLI / embed / example boards.
+
+```coil
+// Abort — CLI / embed exit 1. Cannot be caught.
+fn must_hold(int got, int want) {
+    if got != want {
+        panic "checksum";
+    }
+}
+
+// Catchable — caller uses ? or match.
+fn parse_pos(int n) {
+    if n < 0 {
+        raise "neg";
+    }
+    return n;
+}
+```
+
+Runnable contrast: [`examples/panic.hy`](../../examples/panic.hy) vs
+[`examples/raise_try.hy`](../../examples/raise_try.hy).
 
 ## Q6–Q9 — Roadmap commits (not permanent refuse)
 
