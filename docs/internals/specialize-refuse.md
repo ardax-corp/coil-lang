@@ -146,4 +146,6 @@ refuse map for MIR islands. Full doctrine: [mir-islands.md](mir-islands.md).
 
 A/B: prefer `coil-embed`; flagships flat (±5%) or identical archives; no
 vanity microbenches. Identical flagship `.hyc` is expected while an island
-does not fire on those bodies.
+does not fire on those bodies. Generalization doctrine (MIR default, hard
+walls vs cost gate, A4 natural suites): [opt-generalization.md](opt-generalization.md).
+Refuse tables shrink toward those walls ([COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables)).

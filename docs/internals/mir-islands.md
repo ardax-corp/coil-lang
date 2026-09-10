@@ -20,7 +20,8 @@ into a semantic IR, and do not add a dual AST walker.
 **MIR stays a sidecar.** Eligible bodies may lower to SSA, then emit dense
 opcodes, MIR→LIR (stack IL reconstruct), or a HostInvoke pack. Everything
 else stays fuse-IL. Refuse is a feature: each island documents what still
-does not enter MIR.
+does not enter MIR. Generalization defaults (MIR first, fuse-IL fallback,
+one object story, cost gate): [opt-generalization.md](opt-generalization.md).
 
 **Coverage first, score-chasing never.** Islands exist so more of the
 *language* (match, classes, strings, GC coordination, effects, debugger
@@ -89,6 +90,10 @@ lowering. Unicode / regex stay out of MIR.
 Dense refuse rows that stay current: [specialize-refuse.md](specialize-refuse.md).
 
 ## A/B rules (every island PR)
+
+Generalization PRs also follow [opt-generalization.md](opt-generalization.md)
+(A4): natural suites (`nsieve`, `binary_trees`, `nbody`, `for_in_sum`), no
+env toggles.
 
 1. **Prefer `coil-embed`.** Same host protocol; fixed VM image when comparing
    compilers. Fat-`coil` LTO noise is not a MIR regression.

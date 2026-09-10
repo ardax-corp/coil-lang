@@ -72,5 +72,7 @@ already shades at VM field / vec stores; a compiler opcode would not
 pay rent. I6 marks impure HostInvoke / CALL as effect barriers instead
 of growing GC maps.
 
-See [mir-islands.md](mir-islands.md) (I5) and
-[specialize-refuse.md](specialize-refuse.md).
+See [mir-islands.md](mir-islands.md) (I5),
+[specialize-refuse.md](specialize-refuse.md), and
+[opt-generalization.md](opt-generalization.md) (S2l cost gate: never
+denser-but-slower by default; box once on escape).
