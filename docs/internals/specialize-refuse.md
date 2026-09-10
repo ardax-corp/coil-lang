@@ -96,7 +96,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
 | sibling `TailCall` (even/odd) | `tail_sibling.hy` | dense or fuse-IL | **B7** stack-arg `TailCall` + cost gate |
 | self two-slot `CALL` / `RETURN` | `self_two_slot.hy` / `option_self_call.hy` | dense, LIR, or fuse-IL | **C1** dest + `dest_hi`; cost gate vs fuse |
-| `nsieve` | `nsieve.hy` | dense or fuse-IL | **B6** mapped `Vec.push`; keep when cost ≤ fuse |
+| `nsieve` | `nsieve.hy` | dense | **D0** native `DenseArrayPush` + Index/StoreIndex; cost gate still on |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
 | `*_churn` / `option_int_churn` / `result_int_churn` | several | dense, LIR, or fuse-IL | **B3** two-slot helper `CALL` / `RETURN`; cost gate vs fuse |
@@ -117,6 +117,7 @@ vanity microbenches. Refuse tables shrink toward hard walls
 ([COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables)).
 Post-Q6–Q9 ranked revisit: [opt-generalization.md](opt-generalization.md) B0
 ([COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan)).
+Denser leftovers after C3: [mir-dense-leftovers.md](mir-dense-leftovers.md).
 **B1** ([COI-339](https://linear.app/ardax/issue/COI-339)) is entry hygiene
 for the Q6–Q8 first rungs (tables + `lir_eligible` / infer). **B2**
 ([COI-340](https://linear.app/ardax/issue/COI-340)) is the Seek / frame
@@ -140,3 +141,6 @@ convoy maps, per-PC locals, codegen-unknown line locs.
 **B9** ([COI-347](https://linear.app/ardax/issue/COI-347)) maps
 `FORMAT` / `STRINGIFY` (Q9 R3). Dense infer still refuses table ops.
 Leftover: unicode / regex in SSA (R4).
+**D0** ([COI-354](https://linear.app/ardax/issue/COI-354)) keeps `nsieve`
+dense after lift: `slot_env` follows trivial-phi subst so in-loop
+`ArrayPush` verifies. Cost gate unchanged (no skip-the-gate).
