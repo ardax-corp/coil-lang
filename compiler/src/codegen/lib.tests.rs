@@ -1190,7 +1190,7 @@ impl Foo {
 fn helper(int n) -> int { return n + 1; }
 fn main() {
     let f = new Foo(41);
-    if f.bump() != 42 { raise "bump"; }
+    if f.bump() != 42 { panic "bump"; }
 }
 "#;
         let ast = Pratt::default().parse(src).expect("parse");
@@ -1218,7 +1218,7 @@ impl Foo {
 fn helper(int n) -> int { return n + 1; }
 fn main() {
     let f = new Foo(41);
-    if f.bump() != 42 { raise "bump"; }
+    if f.bump() != 42 { panic "bump"; }
 }
 "#;
         let mut ast = Pratt::default().parse(src).expect("parse");
@@ -1257,7 +1257,7 @@ fn main() {
     let b = new Box(0);
     peek(b);
     thrash(b);
-    if b.get() != 1 { raise "bump"; }
+    if b.get() != 1 { panic "bump"; }
 }
 "#;
         let mut pipeline = crate::Pipeline::new();
@@ -1335,7 +1335,7 @@ impl Foo {
 fn helper(int n) -> int { return n + 1; }
 fn main() {
     let f = new Foo(41);
-    if f.bump() != 42 { raise "bump"; }
+    if f.bump() != 42 { panic "bump"; }
 }
 "#;
         let mut pipeline = crate::Pipeline::new();
@@ -1722,7 +1722,7 @@ fn main() {
              fn main() { \
                let x = 3; \
                let y = 4; \
-               if add(x, y) + add(y, x) != 14 { raise \"add\"; } \
+               if add(x, y) + add(y, x) != 14 { panic \"add\"; } \
              }",
         );
     }
@@ -3203,7 +3203,7 @@ fn main() {
     /// `let x = expr; let y = x;` keeps `x` readable after the bind.
     #[test]
     fn let_x_then_print_x_emits_store_pop() {
-        run_src_ok("fn main() { let x = 42; let y = x; if y != 42 { raise \"let\"; } }");
+        run_src_ok("fn main() { let x = 42; let y = x; if y != 42 { panic \"let\"; } }");
     }
 
     /// Call-site arg prep `add(x, y, z)` packs three LOADs into one `LOAD` with `n=3`.
@@ -5533,9 +5533,9 @@ let _y = nested[0]; \
             r#"
 fn main() {
     let buf: [byte; 3] = ["H", "i", "\n"];
-    if buf[0] != (72 as byte) { raise "H"; }
-    if buf[1] != (105 as byte) { raise "i"; }
-    if buf[2] != (10 as byte) { raise "nl"; }
+    if buf[0] != (72 as byte) { panic "H"; }
+    if buf[1] != (105 as byte) { panic "i"; }
+    if buf[2] != (10 as byte) { panic "nl"; }
 }
 "#,
         );
@@ -5588,7 +5588,7 @@ fn main() {
             r#"
 fn main() {
     let n = len("abc");
-    if n != 3 { raise "len"; }
+    if n != 3 { panic "len"; }
 }
 "#,
         );
