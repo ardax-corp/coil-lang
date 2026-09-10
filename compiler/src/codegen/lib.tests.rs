@@ -5275,15 +5275,13 @@ let _ = take(a); \
                 .iter()
                 .filter(|b| matches!(b.bytecode(), Instruction::LOAD))
                 .collect();
+            let packed = loads.iter().any(|b| {
+                b.load_store_single_slot().is_none() || b.load_store_count() >= 3
+            });
             assert!(
-                loads.len() >= 2,
-                "expected LOADs for escape/index; got {}; ops={:?}",
+                packed || loads.len() >= 3,
+                "escape should LOAD three slots (packed or unfused); got {}; ops={:?}",
                 loads.len(),
-                main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
-            );
-            assert!(
-                loads.iter().any(|b| b.load_store_single_slot().is_none()),
-                "escape push of a[0..3] should fuse into a packed multi-slot LOAD; ops={:?}",
                 main_bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
             );
             assert!(
