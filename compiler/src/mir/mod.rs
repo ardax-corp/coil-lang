@@ -4400,6 +4400,105 @@ fn main() {
     }
 
     #[test]
+    fn q6_for_in_range_param_sum_takes_dense() {
+        let src = r#"
+fn range_sum(Range<int> r) -> int {
+    let iter = r;
+    let acc = 0;
+    for x in iter {
+        acc = acc + x;
+    }
+    return acc;
+}
+fn main() {
+    if range_sum(0..5) != 10 {
+        panic "range param checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile param range for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "range_sum")
+            .expect("range_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "C2 param range for-in should DenseBin; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::MakeDict | Instruction::GetField | Instruction::STRING
+            )),
+            "Range param must not GetField in the helper; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "range param checksum");
+    }
+
+    #[test]
+    fn q6_for_in_range_ret_sum_takes_dense() {
+        let src = r#"
+fn make_range(int n) -> Range<int> {
+    return 0..n;
+}
+fn range_sum(int n) -> int {
+    let r = make_range(n);
+    let acc = 0;
+    for x in r {
+        acc = acc + x;
+    }
+    return acc;
+}
+fn main() {
+    if range_sum(5) != 10 {
+        panic "range ret checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile returned range for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "range_sum")
+            .expect("range_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "C2 returned range for-in should DenseBin; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::MakeDict | Instruction::GetField | Instruction::STRING
+            )),
+            "returned Range bind must not GetField in the helper; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "range ret checksum");
+    }
+
+    #[test]
     fn q6_for_in_range_assign_to_x_keeps_trip_count() {
         let src = r#"
 fn trips() -> int {

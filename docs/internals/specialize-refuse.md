@@ -20,7 +20,7 @@ rungs are **not** in this table — see ladders below and
 | Wall | Today | Commit |
 |------|-------|--------|
 | Unicode / regex in SSA | out of MIR | Q9 **R4** leftover after **B9** / R3 maps |
-| User `Iterator` / coro / dict / parameter range `for` | fuse-IL | later Q6 rung |
+| User `Iterator` / coro / dict / heap-field range `for` | fuse-IL | later Q6 rung |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
 | Native deopt resume maps | not encoded; emit skips `Deopt` | **I7** leftover after **B8** |
@@ -88,6 +88,8 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `main` | `for_in_sum.hy` | fuse-IL | format + `Vec.push` (cost / grow; Q9 R3 maps format; dense still refuses) |
 | `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
 | `range_sum` | `for_in_range_value.hy` | dense counted i64 | **B5** first-class range local |
+| `range_sum` | `for_in_range_param.hy` | dense counted i64 | **C2** Range parameter |
+| `range_sum` | `for_in_range_ret.hy` | dense counted i64 | **C2** returned Range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |

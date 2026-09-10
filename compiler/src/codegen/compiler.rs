@@ -1023,12 +1023,19 @@ impl Compiler {
         let arg_slice = args.as_deref().unwrap_or(&[]);
         let lookup = strip_overload_key(&call_key).to_string();
         let arity = self.emit_call_args_with_rest(&lookup, arg_slice, bytecode, false);
+        let ret_words = if self.two_word_return_kind(&lookup).is_some()
+            || self.two_word_return_kind(&call_key).is_some()
+        {
+            2
+        } else {
+            1
+        };
         self.emit_named_entry_ret(
             bytecode,
             &call_key,
             arity as u32,
             crate::il::EntryKind::TailCall,
-            1,
+            ret_words,
         )
     }
 
@@ -3802,6 +3809,10 @@ impl Compiler {
         self.consume_spread_emit_ids(args);
         let (fixed, rest, pack_rest) = self.split_call_args_for_rest(fn_name, args);
 
+        if !pack_rest && !box_generic && self.callee_has_unboxed_range_params(fn_name) {
+            return self.emit_call_args_range_pairs(fn_name, &fixed, bytecode);
+        }
+
         if !pack_rest && Self::should_reorder_pure_call_args(&fixed) {
             let n = self.emit_call_args_pure_first(&fixed, bytecode, box_generic);
             self.park_args_above_stack_array_boxes(bytecode, n);
@@ -3863,6 +3874,91 @@ impl Compiler {
         let n = fixed.len() as u32;
         self.park_args_above_stack_array_boxes(bytecode, n);
         n
+    }
+
+    /// Stage CALL args, expanding numeric Range values to `[start, end]`.
+    fn emit_call_args_range_pairs(
+        &mut self,
+        fn_name: &str,
+        args: &[Output<'_>],
+        bytecode: &mut CodeBuf,
+    ) -> u32 {
+        let lookup = strip_overload_key(fn_name);
+        let param_tys = self
+            .checker
+            .fn_param_tys(fn_name)
+            .or_else(|| self.checker.fn_param_tys(lookup))
+            .unwrap_or_default();
+        let needs_stage = args.iter().any(|a| {
+            let value = match a.1.as_ref() {
+                Expression::NamedArg(_, v) => v,
+                _ => a,
+            };
+            self.expr_may_clobber_operand_stack(value)
+        });
+        if !needs_stage {
+            let mut n = 0u32;
+            for (i, arg) in args.iter().enumerate() {
+                let value = match arg.1.as_ref() {
+                    Expression::NamedArg(_, v) => v,
+                    _ => arg,
+                };
+                let range = param_tys
+                    .get(i)
+                    .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                    .or_else(|| {
+                        self.codegen_expr_ty(value)
+                            .as_ref()
+                            .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                    });
+                if range.is_some() {
+                    self.emit_range_pair_from_expr(bytecode, value);
+                    n += 2;
+                } else {
+                    self.append_with_existential_pack(bytecode, value);
+                    n += 1;
+                }
+            }
+            return n;
+        }
+        let mut loads: Vec<u32> = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            let value = match arg.1.as_ref() {
+                Expression::NamedArg(_, v) => v,
+                _ => arg,
+            };
+            let range = param_tys
+                .get(i)
+                .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                .or_else(|| {
+                    self.codegen_expr_ty(value)
+                        .as_ref()
+                        .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                })
+                .or_else(|| {
+                    self.codegen_expr_ty(arg)
+                        .as_ref()
+                        .and_then(crate::typechecking::return_layout::two_word_range_kind)
+                });
+            if range.is_some() {
+                self.emit_range_pair_from_expr(bytecode, value);
+                let end_tmp = self.alloc_temp_slot();
+                bytecode.push_store_pop(end_tmp);
+                let start_tmp = self.alloc_temp_slot();
+                bytecode.push_store_pop(start_tmp);
+                loads.push(start_tmp);
+                loads.push(end_tmp);
+            } else {
+                self.append_with_existential_pack(bytecode, value);
+                let tmp = self.alloc_temp_slot();
+                bytecode.push_store_pop(tmp);
+                loads.push(tmp);
+            }
+        }
+        for &tmp in &loads {
+            bytecode.push_load(tmp);
+        }
+        loads.len() as u32
     }
 
     /// True when multi-arg calls must evaluate into temps before the CALL.
@@ -4720,8 +4816,9 @@ impl Compiler {
         false
     }
 
-    /// `Some(kind)` when `expr` is a Range literal or an already-unboxed
-    /// range local (`[start, end]`). Boxed dict ranges stay one word.
+    /// `Some(kind)` when `expr` is a Range literal, an already-unboxed
+    /// range local (`[start, end]`), or a two-word Range-returning call.
+    /// Boxed dict ranges stay one word.
     fn expr_unboxed_range_kind(&self, expr: &Output<'_>) -> Option<String> {
         let cur = unwrap_expr_output(expr);
         match cur.1.as_ref() {
@@ -4732,6 +4829,130 @@ impl Compiler {
                 .unboxed_enum_kind(n)
                 .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
                 .map(str::to_string),
+            Expression::Call { .. } => self
+                .expr_direct_call_two_word_kind(cur)
+                .filter(|k| crate::typechecking::return_layout::is_range_kind(k)),
+            _ => None,
+        }
+    }
+
+    /// Direct CALL args / returns: `[start, end]` from a literal, unboxed
+    /// local, two-word call, or a leftover heap dict.
+    fn emit_range_pair_from_expr(&mut self, bytecode: &mut CodeBuf, expr: &Output<'_>) {
+        let cur = unwrap_expr_output(expr);
+        match cur.1.as_ref() {
+            Expression::Range { start, end, .. } => {
+                self.skip_emit_ids_to_unwrapped(expr);
+                self.append_with_existential_pack(bytecode, start);
+                self.append_with_existential_pack(bytecode, end);
+            }
+            Expression::Identifier(name)
+                if self
+                    .unboxed_enum_kind(name)
+                    .is_some_and(crate::typechecking::return_layout::is_range_kind) =>
+            {
+                let (start_slot, end_slot) = self
+                    .unboxed_enum_info(name)
+                    .expect("range kind implies slots");
+                bytecode.push_load(start_slot);
+                bytecode.push_load(end_slot);
+            }
+            _ if self
+                .expr_direct_call_two_word_kind(expr)
+                .as_deref()
+                .is_some_and(crate::typechecking::return_layout::is_range_kind) =>
+            {
+                self.unbox_enum_context += 1;
+                self.append_with_existential_pack(bytecode, expr);
+                self.unbox_enum_context -= 1;
+            }
+            _ => {
+                self.append_with_existential_pack(bytecode, expr);
+                self.emit_unbox_range_dict_to_pair(bytecode);
+            }
+        }
+    }
+
+    /// Heap `{start,end,inclusive}` on TOS → `[start, end]` via GetField.
+    fn emit_unbox_range_dict_to_pair(&mut self, bytecode: &mut CodeBuf) {
+        self.expr_depth += 1;
+        let tmp = self.alloc_temp_slot();
+        self.expr_depth -= 1;
+        bytecode.push_store_pop(tmp);
+        bytecode.push_load(tmp);
+        self.emit_raw_string_literal(bytecode, "start");
+        bytecode.push_get_field();
+        bytecode.push_load(tmp);
+        self.emit_raw_string_literal(bytecode, "end");
+        bytecode.push_get_field();
+    }
+
+    /// Free-fn numeric Range params use two CALL slots when the fn is not
+    /// taken as a value. Inherent / instance methods keep the boxed dict.
+    fn callee_has_unboxed_range_params(&self, name: &str) -> bool {
+        let lookup = strip_overload_key(name);
+        if self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) {
+            return false;
+        }
+        if self.checker.inherent_method_visibility(lookup).is_some()
+            || is_instance_method_fqn(&self.checker, lookup)
+            || is_instance_method_fqn(&self.checker, name)
+        {
+            return false;
+        }
+        let Some(params) = self
+            .checker
+            .fn_param_tys(name)
+            .or_else(|| self.checker.fn_param_tys(lookup))
+        else {
+            return false;
+        };
+        params
+            .iter()
+            .any(|ty| crate::typechecking::return_layout::two_word_range_kind(ty).is_some())
+    }
+
+    fn current_fn_unboxes_range_params(&self) -> bool {
+        if self.compiling_method {
+            return false;
+        }
+        self.current_function_table_key
+            .as_deref()
+            .into_iter()
+            .chain(self.current_function_qualified.as_deref())
+            .any(|key| self.callee_has_unboxed_range_params(key))
+    }
+
+    fn argument_unboxed_range_kind(&self, arg: &Output<'_>) -> Option<String> {
+        if !self.current_fn_unboxes_range_params() {
+            return None;
+        }
+        if let Some(ty) = self.sidecar_ty_of(arg) {
+            if let Some(kind) = crate::typechecking::return_layout::two_word_range_kind(&ty) {
+                return Some(kind.to_string());
+            }
+        }
+        let Expression::Argument { ty: Some(ty), .. } = arg.1.as_ref() else {
+            return None;
+        };
+        match ty.1.as_ref() {
+            Expression::TypeApp { name, args } => {
+                let inclusive = match *name {
+                    "RangeInclusive" => true,
+                    "Range" => false,
+                    _ => return None,
+                };
+                let numeric = args.first().is_some_and(|a| {
+                    matches!(
+                        a.1.as_ref(),
+                        Expression::Type("int" | "byte" | "float")
+                            | Expression::Identifier("int" | "byte" | "float")
+                    )
+                });
+                numeric.then(|| {
+                    crate::typechecking::return_layout::range_kind(inclusive).to_string()
+                })
+            }
             _ => None,
         }
     }
@@ -8516,7 +8737,8 @@ impl Compiler {
 
     /// `Some(kind)` for a compiled function whose direct CALL/RETURN can
     /// use the known ≤2-word ABI (see `typechecking::return_layout`).
-    /// Enums are `[payload, tag]`; arity-2 immediate products are `[a, b]`.
+    /// Enums are `[payload, tag]`; arity-2 immediate products are `[a, b]`;
+    /// numeric `Range` / `RangeInclusive` are `[start, end]`.
     /// Niched heap `Option<T>` / heap-heap `Result<T, E>`, unbounded `T`,
     /// mixed-heap / wider products, and coroutines stay `None`.
     fn two_word_return_kind(&self, name: &str) -> Option<String> {
@@ -8749,6 +8971,10 @@ impl Compiler {
     /// function returning the same kind, and falls back to ordinary
     /// (boxed) compilation plus an unbox for anything else.
     fn emit_two_word_return_value(&mut self, bytecode: &mut CodeBuf, expr: &Output, enum_name: &str) {
+        if crate::typechecking::return_layout::is_range_kind(enum_name) {
+            self.emit_range_pair_from_expr(bytecode, expr);
+            return;
+        }
         if crate::typechecking::return_layout::is_two_word_product_kind(enum_name) {
             if let Some((a, b)) = Self::expr_arity2_tuple_items(expr) {
                 // Compile components only, do not raise `unbox_enum_context`.
@@ -8936,6 +9162,14 @@ impl Compiler {
         let tag_slot = self.alloc_temp_slot();
         let payload_slot = self.alloc_temp_slot();
         self.expr_depth -= 2;
+        if let Some(inc) =
+            crate::typechecking::return_layout::range_kind_inclusive(enum_name)
+        {
+            bytecode.push_store_pop(tag_slot);
+            bytecode.push_store_pop(payload_slot);
+            self.emit_box_range_slots(bytecode, payload_slot, tag_slot, inc);
+            return;
+        }
         Self::emit_box_pair_to_enum(&self.checker, bytecode, enum_name, tag_slot, payload_slot);
     }
 
@@ -10192,9 +10426,10 @@ impl Compiler {
     /// Lazy range for-in (`int`/`byte`/`float`).
     ///
     /// Fast path when the iterable is a `Range` literal: locals for
-    /// `cur`/`end` only, no heap. Unboxed first-class range locals
-    /// (`let r = 0..n; for x in r`) reuse those `[start, end]` slots.
-    /// Escaped / parameter dicts still unpack via `GetField`.
+    /// `cur`/`end` only, no heap. Unboxed first-class range locals,
+    /// numeric Range parameters, and two-word Range-returning calls
+    /// reuse those `[start, end]` slots. Escaped / heap dicts still
+    /// unpack via `GetField`.
     ///
     /// `float` selects LEF/LEQF/ADDF with step `1.0`; otherwise LE/LEQ/ADD
     /// with step `1` (shared by `int` and `byte`).
@@ -10259,6 +10494,16 @@ impl Compiler {
                 self.bytecode.push_store_pop(cur_slot);
                 self.bytecode.push_load(end_from);
                 self.bytecode.push_store_pop(end_slot);
+            }
+            _ if self
+                .expr_unboxed_range_kind(iterable)
+                .is_some_and(|k| crate::typechecking::return_layout::is_range_kind(&k)) =>
+            {
+                let mut pair = CodeBuf::new();
+                self.emit_range_pair_from_expr(&mut pair, iterable);
+                self.bytecode.append(&mut pair);
+                self.bytecode.push_store_pop(end_slot);
+                self.bytecode.push_store_pop(cur_slot);
             }
             _ => {
                 let range_slot = self.alloc_temp_slot();
@@ -13490,8 +13735,13 @@ impl Compiler {
             }
             Expression::Call { name, args } => bytecode.append(&mut self.compile_call_expr(name, args, ast, self_id, span)),
             Expression::Argument { ty, name: n, .. } => {
-                let slot = self.context.variables.intern(n.to_string()) as u32;
-                self.record_debug_local(n, slot);
+                if let Some(kind) = self.argument_unboxed_range_kind(ast) {
+                    let (start, _) = self.alloc_unboxed_enum_slots(n, &kind);
+                    self.record_debug_local(n, start);
+                } else {
+                    let slot = self.context.variables.intern(n.to_string()) as u32;
+                    self.record_debug_local(n, slot);
+                }
                 if ty
                     .as_ref()
                     .is_some_and(|t| matches!(t.1.as_ref(), Expression::Forall { .. }))
