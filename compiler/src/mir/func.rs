@@ -154,21 +154,22 @@ impl MirFunc {
                 } else {
                     saw_non_phi = true;
                 }
-                let dest = inst.dest();
-                if dest.index() >= self.types.len() {
-                    return Err(format!("dest {dest} has no type"));
+                for dest in inst.dests() {
+                    if dest.index() >= self.types.len() {
+                        return Err(format!("dest {dest} has no type"));
+                    }
+                    if seen_dest[dest.index()] {
+                        return Err(format!("value {dest} defined twice"));
+                    }
+                    seen_dest[dest.index()] = true;
+                    defined[dest.index()] = true;
                 }
-                if seen_dest[dest.index()] {
-                    return Err(format!("value {dest} defined twice"));
-                }
-                seen_dest[dest.index()] = true;
-                defined[dest.index()] = true;
                 self.check_inst(inst, &preds[bi])?;
                 for o in inst.operands() {
                     if o.index() >= self.types.len() || !defined[o.index()] && !inst.is_phi() {
                         // Phi operands may come from later blocks; checked vs preds.
                         if !inst.is_phi() {
-                            return Err(format!("{dest} uses undefined {o}"));
+                            return Err(format!("{} uses undefined {o}", inst.dest()));
                         }
                     }
                 }
@@ -355,9 +356,19 @@ impl MirFunc {
                     return Err(format!("{dest} host dest type"));
                 }
             }
-            MirInst::Call { dest, args, .. } => {
+            MirInst::Call {
+                dest,
+                dest_hi,
+                args,
+                ..
+            } => {
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} call dest is not a word lane"));
+                }
+                if let Some(hi) = dest_hi {
+                    if !self.ty(*hi).is_word_lane() {
+                        return Err(format!("{hi} call hi dest is not a word lane"));
+                    }
                 }
                 for (i, a) in args.iter().enumerate() {
                     if !self.ty(*a).is_word_lane() {

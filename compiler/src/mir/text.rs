@@ -145,8 +145,17 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             }
             Ok(())
         }
-        MirInst::Call { dest, target, args } => {
-            write!(f, "{dest} = call.{} {}", func.ty(*dest), target.0)?;
+        MirInst::Call {
+            dest,
+            dest_hi,
+            target,
+            args,
+        } => {
+            if let Some(hi) = dest_hi {
+                write!(f, "{dest}, {hi} = call.{} {}", func.ty(*dest), target.0)?;
+            } else {
+                write!(f, "{dest} = call.{} {}", func.ty(*dest), target.0)?;
+            }
             for (i, a) in args.iter().enumerate() {
                 if i == 0 {
                     write!(f, " {a}")?;
@@ -349,8 +358,16 @@ impl<'a> Parser<'a> {
 
     fn parse_inst(&mut self, types: &mut Vec<MirTy>) -> Result<MirInst, ParseError> {
         let dest = self.value()?;
+        let dest_hi = if self.eat(',') {
+            Some(self.value()?)
+        } else {
+            None
+        };
         self.expect('=')?;
         let op = self.ident_dots()?;
+        if dest_hi.is_some() && !op.starts_with("call.") {
+            return Err(ParseError("pair dest is call-only".into()));
+        }
         if let Some(rest) = op.strip_prefix("iconst.") {
             let ty = MirTy::parse(rest).ok_or_else(|| ParseError(op.clone()))?;
             let n = self.int()?;
@@ -601,7 +618,15 @@ impl<'a> Parser<'a> {
                 }
             }
             ensure_ty(types, dest, ty);
-            return Ok(MirInst::Call { dest, target, args });
+            if let Some(hi) = dest_hi {
+                ensure_ty(types, hi, MirTy::I64);
+            }
+            return Ok(MirInst::Call {
+                dest,
+                dest_hi,
+                target,
+                args,
+            });
         }
         if let Some(kind_s) = op.strip_prefix("alloc.") {
             let kind = match kind_s {

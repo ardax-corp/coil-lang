@@ -74,6 +74,7 @@ mod tests {
     fn implicit_call_and_explicit_stop() {
         let call = MirInst::Call {
             dest: ValueId(0),
+            dest_hi: None,
             target: Label(1),
             args: Vec::new(),
         };

@@ -142,9 +142,9 @@ list. Q6–Q9 first rungs turned most of those named commits into
 | A3 wall (#380) | After Q6–Q9 (`eaf17283`) | Kind now |
 |----------------|--------------------------|----------|
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` / I4 bytes | **Q9 R1:** table string ops are SSA + MIR→LIR. Dense infer still refuses. `from_bytes` / `to_bytes` wait **R2**. Unicode / regex wait later rungs | Ladder + cost (R1 may keep fuse-IL) |
-| Recursion on the callee (`CALL` / `TailCall`) | **Q7:** one-word self-`CALL` / `TailCall` may dense. **B2:** tight `tak` / `fib` convoy CALL on the stack (no prologue Seek / inter-CALL STORE) so the cost gate can keep them. Mutual / two-slot still refuse. LIR still cannot reconstruct `CALL` | Cost gate + later Q7 rungs |
+| Recursion on the callee (`CALL` / `TailCall`) | **Q7:** one-word self-`CALL` / `TailCall` may dense. **B2:** tight `tak` / `fib` convoy CALL on the stack (no prologue Seek / inter-CALL STORE) so the cost gate can keep them. **B3:** two-slot helper `CALL` / `RETURN` may dense or LIR. Mutual / two-slot self-recursion still refuse | Cost gate + later Q7 rungs |
 | `for` / iterator (`for_in_sum`) | **Q6:** counted desugar — array / Vec / `[T; N]` / literal range helpers dense (`sum`, `for_in_range`). `main` + format / `Vec.push` stays fuse-IL. User `Iterator` / coro / dict / first-class range still refuse | Ladder (counted done) |
-| Dense+match (stack vs regs) | **Q8:** niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` stays I2 LIR. Two-slot `CALL` / `RETURN` stay LIR | Cost gate + leftover ABI wall |
+| Dense+match (stack vs regs) | **Q8:** niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` stays I2 LIR. **B3:** two-slot `CALL` / `RETURN` may dense or LIR (cost gate) | Cost gate |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | Unchanged — fuse-IL | Hard wall (later island) |
 | Debugger-attached / `-Og` | Unchanged — skip dense + LIR ([mir-deopt.md](mir-deopt.md)) | Hard wall (**I7** stays) |
 | Unmapped alloc / GC safepoint | Unchanged for residual `Vec.push` / class `new` / unmapped edges. Mapped `Make*` already S2 / A2 | Hard wall until maps |
@@ -163,7 +163,7 @@ regular reconstruct over bench-shaped peeps.
 |---|-----|---------------|---------------------|
 | **B1** | Shrink leftover **entry** refuses for Q6–Q8 first rungs | **Landed** ([COI-339](https://linear.app/ardax/issue/COI-339)): `lir_eligible` / infer / island copy treat counted `for`, one-word rec `CALL`, and niche/two-slot `Br` as lift→cost, not checklist walls. Cost gate spirit unchanged | Counted `for`, one-word rec `CALL`, niche/two-slot `Br`. Do not force `tak` / `fib` / boxed match |
 | **B2** | Q7 cost-gate lose on `fib` / `tak` | **Landed** ([COI-340](https://linear.app/ardax/issue/COI-340)): dense emit convoys **self** one-word `CALL` like fuse-IL (stack args / results; Seek only when extras live). Sibling / mutual `TailCall` stays fuse-IL (B7). Cost gate unchanged. Flagship `fib` / `tak` archives stay identical (reconstruct fuse-selects to the same bytes) | Checksum + embed wall **≤ fuse**. No skip-the-gate. Regular CALL reconstruct, not a tak opcode |
-| **B3** | Two-slot `CALL` / `RETURN` (dense or LIR reconstruct) | Blocks `option_*` / `result_*` churn and Q8 leftovers. Same ABI hole as LIR `CALL` refuse | Churn helpers; flagships likely identical |
+| **B3** | Two-slot `CALL` / `RETURN` (dense or LIR reconstruct) | **Landed** ([COI-341](https://linear.app/ardax/issue/COI-341)): helper two-slot `CALL` / `RETURN` lower; LIR reconstructs width-2 `CALL`; dense emit may keep when cost ≤ fuse. Self / sibling two-slot recursion stays fuse-IL (B7 / later Q7) | `option_match_call`; checksum; cost gate; flagships flat |
 | **B4** | **Q9 R2** — `string::{from_bytes,to_bytes}` dense HostInvoke | Next named rung on the I4 ladder. Maps/effects like other I6 | Unit reconstruct; dense infer may open this host only |
 | **B5** | Q6 later rungs — first-class range, then user `Iterator` | Counted majority is done. Range-as-value is `GetField` / heap. User `next` needs B3 + Q8 match | `for_in_*`; no full trait rewrite |
 | **B6** | Unmapped alloc / grow / class `new` maps | `nsieve` (`Vec.push`), `binary_trees` (heap / classes). I5 maps cover `Make*`, not these residuals | Natural suite; cost gate still refuses boxed reconstruct |
@@ -182,4 +182,4 @@ Cranelift P5, PGO.
 - PGO, score-chasing, or env-gated opts
 - Combining A0 with [language-quirks.md](language-quirks.md)
   ([COI-331](https://linear.app/ardax/issue/COI-331/q0-docs-language-quirksmd-locked-q1-q9))
-- B3+ compiler work in a B2 PR (two-slot CALL/RETURN)
+- B4+ compiler work in a B3 PR (Q9 R2 bytes)

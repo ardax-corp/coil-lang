@@ -49,7 +49,10 @@ pub fn try_specialize_body(
     // (COI-87 invert+fuse). Debugger-attached / -Og skip this entry (I7).
     // S2k: last-arm writes must survive; Seek size is a cost, not a cap.
     // B7: sibling / mutual TailCall stays fuse-IL. B2 convoy is self-CALL only.
-    if has_sibling_tail_call(ops, official_entry) {
+    // Two-slot self-recursion stays a later Q7 rung.
+    if has_sibling_tail_call(ops, official_entry)
+        || has_self_two_slot_call(ops, official_entry)
+    {
         return None;
     }
     let select_cfg = has_sroa_select_cfg(ops);
@@ -250,6 +253,22 @@ fn paint_index_dest_from_uses(func: &mut crate::mir::func::MirFunc) {
     }
 }
 
+fn has_self_two_slot_call(ops: &[IlOp], self_entry: Option<Label>) -> bool {
+    let Some(entry) = self_entry else {
+        return false;
+    };
+    ops.iter().any(|op| {
+        matches!(
+            op,
+            IlOp::Entry {
+                target,
+                ret_words,
+                ..
+            } if *ret_words >= 2 && *target == entry
+        )
+    })
+}
+
 fn has_sibling_tail_call(ops: &[IlOp], self_entry: Option<Label>) -> bool {
     let Some(entry) = self_entry else {
         return false;
@@ -342,8 +361,8 @@ fn emit_cost(ops: &[IlOp]) -> usize {
 
 /// IL→MIR→LIR for a leftover body after dense specialize misses (I8).
 ///
-/// Dense stays off (`infer_numeric` still refuses `ret_words == 2` and
-/// compare-only). Production `IlModule` replace uses this after stack-IL
+/// Dense may miss (compare-only / cost). Production `IlModule` replace
+/// uses this after stack-IL
 /// opts; `emit_lir` keeps single-use return/cmp values on the stack. Do
 /// not re-opt the reconstruct (`MOD` rematerializes). Call / host / box /
 /// I4 string/format may lift (Q9 R1). I5 alloc needs S2b maps ([`lir_eligible_with`]).

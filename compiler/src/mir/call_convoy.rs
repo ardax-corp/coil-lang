@@ -33,8 +33,10 @@ impl ConvoyPlan {
         }
         for block in &func.blocks {
             for (i, inst) in block.insts.iter().enumerate() {
-                def[inst.dest().index()] = Some((block.id, i));
-                def_block[inst.dest().index()] = Some(block.id);
+                for d in inst.dests() {
+                    def[d.index()] = Some((block.id, i));
+                    def_block[d.index()] = Some(block.id);
+                }
                 if inst.is_phi() {
                     for v in inst.operands() {
                         phi_in[v.index()] = true;
@@ -99,6 +101,21 @@ impl ConvoyPlan {
             }
             if const_used_by_stored(func, ValueId(i as u32), &need_slot) {
                 need_slot[i] = true;
+            }
+        }
+        for block in &func.blocks {
+            for inst in &block.insts {
+                if let MirInst::Call {
+                    dest,
+                    dest_hi: Some(hi),
+                    ..
+                } = inst
+                {
+                    if need_slot[dest.index()] || need_slot[hi.index()] {
+                        need_slot[dest.index()] = true;
+                        need_slot[hi.index()] = true;
+                    }
+                }
             }
         }
 

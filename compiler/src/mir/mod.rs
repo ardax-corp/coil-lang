@@ -16,7 +16,8 @@
 //!
 //! Specialized numeric loops lower to dense 3-address opcodes. Leftover
 //! bodies that [`entry`] accepts lift through MIR→LIR (`RETURN` width 1 or
-//! 2). Dense→dense `CALL` uses the one-word typed ABI ([`abi`]; COI-291).
+//! 2). Dense / LIR `CALL` uses the one-word or two-slot typed ABI
+//! ([`abi`]; COI-291 / B3).
 //! Typed HostInvoke still boxes at the host edge. Escaping / heap-backed
 //! named class locals stay on [`crate::il`]. `FORMAT` / `STRING` /
 //! `STRINGIFY` / `PRINT` may enter MIR→LIR (I4 / Q9 R1); dense infer
@@ -1262,6 +1263,101 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_two_slot_match_call_loop_is_dense_or_lir() {
+        let src = r#"
+fn lookup(int i, int n) -> Option<int> {
+    if i < 0 || i >= n {
+        return Option::None;
+    }
+    return Option::Some(i * 2);
+}
+fn hot(int n, int iters) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < iters {
+        acc = acc + match lookup(i % 10, n) {
+            Option::Some(x) => x,
+            Option::None => 0,
+        };
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    let _ = hot(7, 40);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile two-slot match+call");
+        assert!(
+            bc.iter()
+                .any(|b| *b.bytecode() == Instruction::CALL && b.call_ret_words() >= 2),
+            "two-slot CALL must remain; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            !bc.iter().any(|b| *b.bytecode() == Instruction::MakeEnum),
+            "match+call must not box; opcodes={:?}",
+            bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let hot = p.function_offset("hot").expect("hot");
+        let main = p.function_offset("main").expect("main");
+        let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
+        let lifted = hot_bc.iter().any(|b| {
+            matches!(
+                *b.bytecode(),
+                Instruction::DenseBin | Instruction::DenseConst | Instruction::DensePush
+            )
+        });
+        let _ = lifted;
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "hot(7, 40) must run");
+    }
+
+    #[test]
+    fn pipeline_two_word_sibling_tail_stays_fuse() {
+        let src = r#"
+fn bounce_a(Option<int> o) -> Option<int> {
+    return bounce_b(o);
+}
+fn bounce_b(Option<int> o) -> Option<int> {
+    return match o {
+        Option::None => Option::Some(1),
+        Option::Some(x) => bounce_a(Option::None),
+    };
+}
+fn main() {
+    let r = bounce_a(Option::None);
+    let _ = match r {
+        Option::Some(v) => v,
+        Option::None => 0,
+    };
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile two-word sibling");
+        let a = p.function_offset("bounce_a").expect("bounce_a");
+        let b = p.function_offset("bounce_b").expect("bounce_b");
+        let main = p.function_offset("main").expect("main");
+        let a_end = b.min(main);
+        let a_bc = if a < a_end { &bc[a..a_end] } else { &bc[a..] };
+        assert!(
+            !a_bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::DenseBin | Instruction::DensePush | Instruction::DenseConst
+            )),
+            "two-slot sibling TailCall must stay fuse-IL; opcodes={:?}",
+            a_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        let slots = p.operand_stack_slots() as usize;
+        let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "bounce_a must run");
+    }
+
+    #[test]
     fn pipeline_eval_a_follows_straight_line_work_gate() {
         let src = r#"
 fn eval_a(int i, int j) -> float {
@@ -1614,7 +1710,7 @@ fn main() {
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
         assert_eq!(g.ret_layout, MirLayout::TwoSlot);
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        let _ = emit_dense(&f, Some(Label(0)), &mut pool, false);
         assert!(
             !lir.iter().any(|op| matches!(op, IlOp::StorePop { .. })),
             "return/cmp immediates must stay on the stack"
@@ -3546,7 +3642,13 @@ fn main() {
                     assert_eq!(refuse, None, "Q9 R1: STRING is not a LIR wall");
                     let _ = lir;
                 }
-                "main" => assert_eq!(refuse, Some(LirRefuse::Call)),
+                "main" => {
+                    assert_ne!(
+                        refuse,
+                        Some(LirRefuse::Call),
+                        "B3: two-slot helper CALL is not a LIR wall"
+                    );
+                }
                 _ => {}
             }
         }

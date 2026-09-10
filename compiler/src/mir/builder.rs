@@ -332,7 +332,7 @@ impl MirBuilder {
         target: crate::il::Label,
         args: Vec<ValueId>,
         abi: &super::abi::DenseAbi,
-    ) -> Result<ValueId, MirError> {
+    ) -> Result<(ValueId, Option<ValueId>), MirError> {
         if abi.params.len() != args.len() {
             return Err(MirError::msg(format!(
                 "call arity {} vs {}",
@@ -356,8 +356,22 @@ impl MirBuilder {
             }
         }
         let dest = self.alloc(abi.ret);
-        self.push(MirInst::Call { dest, target, args })?;
-        Ok(dest)
+        let dest_hi = match abi.ret_hi {
+            Some(ty) => {
+                if !ty.is_word_lane() {
+                    return Err(MirError::msg(format!("call hi dest is {ty}")));
+                }
+                Some(self.alloc(ty))
+            }
+            None => None,
+        };
+        self.push(MirInst::Call {
+            dest,
+            dest_hi,
+            target,
+            args,
+        })?;
+        Ok((dest, dest_hi))
     }
 
     /// Stack-join φ for values carried across CFG edges (I2 match diamonds).
