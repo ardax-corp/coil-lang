@@ -165,7 +165,9 @@ I6
 types natives as SSA `HostInvoke` edges when `allow_effects` is set. I7
 ([COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir))
 names `Deopt` stop / leave edges (`allow_deopt`). **B8:** debugger-attached
-and `-Og` may dense + MIR→LIR; emit skips explicit `Deopt` (no maps).
+and `-Og` may dense + MIR→LIR; emit skips explicit `Deopt`. **C3:**
+compiler-internal resume maps, named-let remap, sparse emit locs
+(no archive bump; P5 resume leftover).
 The VM debugger steps the reconstruct
 ([mir-deopt.md](mir-deopt.md)). I8
 ([COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3))
