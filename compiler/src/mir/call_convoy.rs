@@ -19,8 +19,9 @@ pub(super) struct ConvoyPlan {
 
 impl ConvoyPlan {
     /// `self_entry` is this function's CALL label. Only self-recursive
-    /// `CALL` / `TailCall` join the stack convoy (B7 sibling/mutual stay
-    /// on the pre-B2 DensePush path).
+    /// non-tail `CALL` dests join the B2 result convoy. Sibling / mutual
+    /// `TailCall` uses the stack-arg protocol (args on TOS, no dest slot)
+    /// and never treats a foreign `CALL` dest as a self-return.
     pub fn new(func: &MirFunc, self_entry: Option<Label>) -> Self {
         let n = func.types.len();
         let mut uses = vec![0u32; n];
@@ -72,7 +73,8 @@ impl ConvoyPlan {
                     &def_block,
                     &convoy,
                     self_entry,
-                ) {
+                ) && !feeds_only_tail_call(func, ValueId(i as u32), &def, &def_block)
+                {
                     continue;
                 }
                 convoy[i] = true;
@@ -101,6 +103,21 @@ impl ConvoyPlan {
             }
             if const_used_by_stored(func, ValueId(i as u32), &need_slot) {
                 need_slot[i] = true;
+            }
+        }
+        // TailCall dests never live in the caller frame.
+        for block in &func.blocks {
+            for inst in &block.insts {
+                if !is_tail_call_inst(block, inst) {
+                    continue;
+                }
+                let MirInst::Call { dest, dest_hi, .. } = inst else {
+                    continue;
+                };
+                need_slot[dest.index()] = false;
+                if let Some(hi) = dest_hi {
+                    need_slot[hi.index()] = false;
+                }
             }
         }
         for block in &func.blocks {
@@ -205,6 +222,58 @@ fn term_uses(term: &Terminator) -> Vec<ValueId> {
 
 fn is_self_call_inst(inst: &MirInst, entry: Option<Label>) -> bool {
     matches!(inst, MirInst::Call { target, .. } if Some(*target) == entry)
+}
+
+pub(super) fn is_tail_call_inst(block: &super::func::MirBlock, inst: &MirInst) -> bool {
+    let MirInst::Call { dest, dest_hi, .. } = inst else {
+        return false;
+    };
+    match block.term {
+        Some(Terminator::Return { lo: Some(v), hi }) if v == *dest && hi == *dest_hi => {
+            matches!(
+                block.insts.last(),
+                Some(MirInst::Call { dest: d, dest_hi: h, .. }) if d == dest && h == dest_hi
+            )
+        }
+        _ => false,
+    }
+}
+
+/// Const / Bin that only feeds a `TailCall` (any target) stays on TOS.
+/// This is the VM TailCall ABI, not B2 self-CALL dest convoy.
+fn feeds_only_tail_call(
+    func: &MirFunc,
+    v: ValueId,
+    def: &[Option<(BlockId, usize)>],
+    def_block: &[Option<BlockId>],
+) -> bool {
+    let Some(home) = def_block[v.index()] else {
+        return false;
+    };
+    let kind = def[v.index()].and_then(|(b, i)| func.block(b).insts.get(i));
+    if !matches!(kind, Some(MirInst::Const { .. } | MirInst::Bin { .. })) {
+        return false;
+    }
+    let mut saw = false;
+    for block in &func.blocks {
+        for inst in &block.insts {
+            if inst.is_phi() && inst.operands().contains(&v) {
+                return false;
+            }
+            if inst.operands().contains(&v) {
+                if block.id != home || !is_tail_call_inst(block, inst) {
+                    return false;
+                }
+                saw = true;
+            }
+        }
+        if let Some(term) = &block.term {
+            if term_uses(term).contains(&v) {
+                return false;
+            }
+        }
+    }
+    saw
 }
 
 fn is_convoy_shape(
