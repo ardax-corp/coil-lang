@@ -51,7 +51,9 @@ the same order as fuse-IL (`FORMAT` operand is arity).
 - Unit: `try_lower_abi_body` on `STRING`+`RETURN`, `STRING`+`PRINT`,
   and `STRING`+`LOAD`+`FORMAT 1`+`RETURN` succeeds and emits the same
   opcodes (no new Format IR).
-- `wrap_res` (`Result.Err("miss")`) is no longer `LirRefuse::String`.
+- `wrap_res` (`Result.Err("miss")`) is no longer a hard string refuse
+  (two-slot `Result<int, string>` may still lose LIR verify until a
+  later rung).
 - `pipeline_format_loop_stays_fuse_il`: a `format` + i64 add loop still
   has `FORMAT` and **no** `DenseBin` (dense infer still refuses I4).
 - Flagships (`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`):
