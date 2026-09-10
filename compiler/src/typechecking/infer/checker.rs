@@ -83,6 +83,7 @@ impl Checker {
             frame_local_last_use: HashSet::new(),
             fn_value_escaped: HashSet::new(),
             in_bounds_index: HashSet::new(),
+            nonneg_expr: HashSet::new(),
             pin_array: HashSet::new(),
             pin_params: HashSet::new(),
             for_in_pin: HashSet::new(),
@@ -1495,6 +1496,7 @@ impl Checker {
         self.frame_local.clear();
         self.frame_local_last_use.clear();
         self.in_bounds_index.clear();
+        self.nonneg_expr.clear();
         self.pin_array.clear();
         self.pin_params.clear();
         self.for_in_pin.clear();
