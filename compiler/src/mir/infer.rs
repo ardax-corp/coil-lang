@@ -176,6 +176,7 @@ enum InferMode {
     Lir,
     /// S2b sidecar: alloc / grow ops are `HeapRef`. One-word `CALL`
     /// (Q7) and multi-word `CALL` (B3 / C1) type so CALL+alloc drafts bind.
+    /// Heap GetField/SetField/LoadField type so InitTyped+field drafts bind (D1).
     Map,
 }
 
@@ -191,6 +192,11 @@ impl InferMode {
     /// Q9 R1 / R3: leftover LIR / map lift may type string / format IL.
     fn allows_string(self) -> bool {
         matches!(self, Self::Lir | Self::Map)
+    }
+
+    /// D1: map lift types heap GetField / SetField / LoadField (not dense).
+    fn allows_heap_fields(self) -> bool {
+        matches!(self, Self::Map)
     }
 }
 
@@ -454,6 +460,20 @@ fn infer_walk(
                         imm: None,
                     });
                 }
+                Instruction::GetField if mode.allows_heap_fields() => {
+                    apply_get_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+                }
+                Instruction::LoadField if mode.allows_heap_fields() => {
+                    apply_load_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+                }
+                Instruction::SetField if mode.allows_heap_fields() => {
+                    apply_set_field(
+                        &mut stack,
+                        &mut slot_ty,
+                        &mut pool_ty,
+                        common::set_field_slot_index(byte.operand_u32()),
+                    )?;
+                }
                 other => {
                     return Err(LowerError::Refused(format!(
                         "residual byte {}",
@@ -501,6 +521,15 @@ fn infer_walk(
                 } else {
                     apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
                 }
+            }
+            IlOp::GetField { .. } if mode.allows_heap_fields() => {
+                apply_get_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+            }
+            IlOp::LoadField { .. } if mode.allows_heap_fields() => {
+                apply_load_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+            }
+            IlOp::SetField { index, .. } if mode.allows_heap_fields() => {
+                apply_set_field(&mut stack, &mut slot_ty, &mut pool_ty, *index)?;
             }
             IlOp::Entry {
                 kind,
@@ -735,6 +764,53 @@ fn infer_walk(
                     imm: None,
                 });
             }
+            IlOp::GetField { .. } => {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::LoadField { .. } => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::SetField { index, .. } => {
+                if index.is_none() {
+                    let _ = stack.pop();
+                }
+                let _ = stack.pop();
+                // value stays TOS after SetField
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::GetField => {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::LoadField => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::SetField => {
+                if common::set_field_slot_index(byte.operand_u32()).is_none() {
+                    let _ = stack.pop();
+                }
+                let _ = stack.pop();
+            }
             IlOp::Entry {
                 kind: EntryKind::Call | EntryKind::TailCall,
                 arity,
@@ -946,6 +1022,64 @@ fn apply_format(
         }
         _ => Err(LowerError::Refused("format".into())),
     }
+}
+
+fn apply_get_field(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+) -> Result<(), LowerError> {
+    let name = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("GetField stack".into()))?;
+    let obj = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("GetField stack".into()))?;
+    paint(slot_ty, pool_ty, obj, MirTy::HeapRef)?;
+    paint(slot_ty, pool_ty, name, MirTy::HeapRef)?;
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: None,
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_load_field(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+) -> Result<(), LowerError> {
+    let obj = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("LoadField stack".into()))?;
+    paint(slot_ty, pool_ty, obj, MirTy::HeapRef)?;
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: None,
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_set_field(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    index: Option<u32>,
+) -> Result<(), LowerError> {
+    if index.is_none() {
+        let name = stack
+            .pop()
+            .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
+        paint(slot_ty, pool_ty, name, MirTy::HeapRef)?;
+    }
+    let obj = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
+    paint(slot_ty, pool_ty, obj, MirTy::HeapRef)?;
+    let _ = index;
+    Ok(())
 }
 
 fn apply_array_push(

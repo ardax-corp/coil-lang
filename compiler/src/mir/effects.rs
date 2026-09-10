@@ -42,6 +42,7 @@ impl MirInst {
             | Self::GcBarrier { .. }
             | Self::Deopt { .. }
             | Self::FieldStore { .. }
+            | Self::HeapFieldStore { .. }
             | Self::StoreIndex { .. }
             | Self::ArrayPush { .. }
             | Self::Print { .. }

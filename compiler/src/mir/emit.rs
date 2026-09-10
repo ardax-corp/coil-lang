@@ -627,9 +627,12 @@ pub(super) fn emit_inst(
                 out.push(move_op(d, s));
             }
         }
-        MirInst::FieldLoad { .. } | MirInst::FieldStore { .. } => {
+        MirInst::FieldLoad { .. }
+        | MirInst::FieldStore { .. }
+        | MirInst::HeapFieldLoad { .. }
+        | MirInst::HeapFieldStore { .. } => {
             return Err(LowerError::Refused(
-                "dense emit refuses FieldLoad/FieldStore (I3 is MIR→LIR)".into(),
+                "dense emit refuses FieldLoad/FieldStore (I3 is MIR→LIR; heap fields are D2)".into(),
             ));
         }
         MirInst::Alloc { dest, kind, elems } => {

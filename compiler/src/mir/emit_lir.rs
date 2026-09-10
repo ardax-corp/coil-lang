@@ -525,6 +525,37 @@ fn emit_stored(
                 loc,
             });
         }
+        MirInst::HeapFieldLoad {
+            dest,
+            object,
+            name,
+            index,
+        } => {
+            emit_heap_field_load(
+                out, *object, *name, *index, func, plan, regs, pool, loc,
+            )?;
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::HeapFieldStore {
+            dest,
+            object,
+            value,
+            name,
+            index,
+        } => {
+            emit_heap_field_store(
+                out, *object, *value, *name, *index, func, plan, regs, pool, loc,
+            )?;
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+        }
         MirInst::FieldStore {
             dest,
             src,
@@ -762,6 +793,50 @@ fn emit_hi_after_lo(
     emit_stack(out, hi, func, plan, regs, pool, loc)
 }
 
+fn emit_heap_field_load(
+    out: &mut Vec<IlOp>,
+    object: ValueId,
+    name: Option<ValueId>,
+    index: u32,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    emit_stack(out, object, func, plan, regs, pool, loc)?;
+    if let Some(n) = name {
+        emit_stack(out, n, func, plan, regs, pool, loc)?;
+        out.push(IlOp::GetField { loc });
+    } else {
+        out.push(IlOp::LoadField { index, loc });
+    }
+    Ok(())
+}
+
+fn emit_heap_field_store(
+    out: &mut Vec<IlOp>,
+    object: ValueId,
+    value: ValueId,
+    name: Option<ValueId>,
+    index: Option<u32>,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    emit_stack(out, value, func, plan, regs, pool, loc)?;
+    emit_stack(out, object, func, plan, regs, pool, loc)?;
+    if let Some(n) = name {
+        emit_stack(out, n, func, plan, regs, pool, loc)?;
+        out.push(IlOp::SetField { index: None, loc });
+    } else {
+        out.push(IlOp::SetField { index, loc });
+    }
+    Ok(())
+}
+
 fn emit_stack(
     out: &mut Vec<IlOp>,
     v: ValueId,
@@ -922,6 +997,23 @@ fn emit_stack(
             Ok(())
         }
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
+        MirInst::HeapFieldLoad {
+            object,
+            name,
+            index,
+            ..
+        } => emit_heap_field_load(
+            out, *object, *name, *index, func, plan, regs, pool, loc,
+        ),
+        MirInst::HeapFieldStore {
+            object,
+            value,
+            name,
+            index,
+            ..
+        } => emit_heap_field_store(
+            out, *object, *value, *name, *index, func, plan, regs, pool, loc,
+        ),
         MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
         MirInst::Alloc { kind, elems, .. } => {
             emit_alloc_stack(out, *kind, elems, func, plan, regs, pool, loc)

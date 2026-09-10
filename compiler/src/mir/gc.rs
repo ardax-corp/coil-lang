@@ -4,7 +4,9 @@
 //! [`crate::mir::MirInst::Alloc`] plus a [`crate::mir::MirInst::GcBarrier`]
 //! safepoint. `ArrayPush` lowers to [`crate::mir::MirInst::ArrayPush`]
 //! plus a barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way
-//! (Q9 R3). [`fill_live_roots`] records live heap-word SSA values (and IL
+//! (Q9 R3). Heap `GetField` / `SetField` / `LoadField` lower on the map
+//! path so InitTyped+field drafts bind (D1); they are not alloc sites.
+//! [`fill_live_roots`] records live heap-word SSA values (and IL
 //! slots when the builder snapshotted them). Dense specialize and MIR→LIR
 //! sidecar. S2c may emit dense / LIR across alloc when S2b maps exist.
 //!

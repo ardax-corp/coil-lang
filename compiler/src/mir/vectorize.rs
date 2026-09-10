@@ -37,6 +37,8 @@ pub fn try_vectorize(
                     | MirInst::MatchPayload { .. }
                     | MirInst::FieldLoad { .. }
                     | MirInst::FieldStore { .. }
+                    | MirInst::HeapFieldLoad { .. }
+                    | MirInst::HeapFieldStore { .. }
                     | MirInst::Deopt { .. }
                     | MirInst::Alloc { .. }
                     | MirInst::GcBarrier { .. }

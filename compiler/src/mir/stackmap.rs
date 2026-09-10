@@ -126,9 +126,10 @@ fn try_build_draft_err(
     hints.allow_index = true;
     hints.allow_match = true;
     hints.allow_effects = true;
-    hints.allow_string = ops.iter().any(super::string_barrier::is_string_il);
+    hints.allow_string = true;
     hints.unboxed_fields = unboxed_fields.to_vec();
     hints.allow_fields = !unboxed_fields.is_empty();
+    hints.allow_heap_fields = true;
     hints.skip_verify = true;
     let mut func = try_lower_numeric(ops, &hints).map_err(|e| e.to_string())?;
     if func.gc_roots.is_empty() && func.has_gc_edge() {
@@ -310,6 +311,68 @@ mod tests {
         assert!(
             draft.sites[0].contains(&0),
             "live vec slot: {:?}",
+            draft.sites[0]
+        );
+    }
+
+    #[test]
+    fn try_build_draft_from_init_typed_setfield() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::byte(
+                Byte::new(Instruction::InitTyped)
+                    .with_operand_u32(common::pack_init_typed(1, 2)),
+            ),
+            IlOp::StorePop { slot: 0, loc },
+            IlOp::Const { imm: 3, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::SetField {
+                index: Some(0),
+                loc,
+            },
+            IlOp::Pop { loc },
+            IlOp::Const { imm: 4, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::SetField {
+                index: Some(1),
+                loc,
+            },
+            IlOp::Pop { loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let draft = try_build_draft(&ops, "ctor", 0, &[], &[]).expect("D1 maps");
+        assert_eq!(draft.sites.len(), 1);
+        assert!(
+            draft.sites[0].contains(&0),
+            "InitTyped object slot: {:?}",
+            draft.sites[0]
+        );
+    }
+
+    #[test]
+    fn try_build_draft_from_init_typed_getfield() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::byte(
+                Byte::new(Instruction::InitTyped)
+                    .with_operand_u32(common::pack_init_typed(1, 1)),
+            ),
+            IlOp::StorePop { slot: 0, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::String { idx: 0, loc },
+            IlOp::GetField { loc },
+            IlOp::StorePop { slot: 1, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let draft = try_build_draft(&ops, "get", 0, &[], &[]).expect("D1 maps");
+        assert_eq!(draft.sites.len(), 1);
+        assert!(
+            draft.sites[0].contains(&0),
+            "live object across GetField: {:?}",
             draft.sites[0]
         );
     }
