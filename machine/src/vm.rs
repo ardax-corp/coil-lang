@@ -1508,6 +1508,24 @@ impl<const S: usize> Machine<S> {
         }
     }
 
+    /// Declaration-order slots (DenseMake), not TOS-first stack pops.
+    fn dense_enum_payload(heap: &Heap, values: &[Value]) -> EnumPayload {
+        match values.len() {
+            0 => EnumPayload::empty(),
+            1 => EnumPayload::one(Self::value_as_member(heap, values[0])),
+            2 => EnumPayload::two(
+                Self::value_as_member(heap, values[0]),
+                Self::value_as_member(heap, values[1]),
+            ),
+            _ => EnumPayload::from_vec(
+                values
+                    .iter()
+                    .map(|v| Self::value_as_member(heap, *v))
+                    .collect(),
+            ),
+        }
+    }
+
     fn saved_stack_live_mask(heap: &Heap, values: &[Value]) -> u64 {
         let mut mask = 0u64;
         for (i, v) in values.iter().enumerate() {
@@ -2488,7 +2506,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::VFma as u8);
+            promise!(*bc as u8 <= Instruction::DensePush as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3742,6 +3760,107 @@ impl<const S: usize> Machine<S> {
                         &self.vregs[dest],
                     );
                     self.vregs[dest] = out;
+                }
+                Instruction::DenseIndex => {
+                    let (flags, dest, arr, idx) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + arr < stack_cap);
+                    promise!(sp + idx < stack_cap);
+                    let index = self.stack[sp + idx].as_int();
+                    let addr = self.stack[sp + arr].raw() as u64;
+                    let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
+                    let result = match Self::find_object_by_addr(&self.heap, addr) {
+                        Some(crate::memory::Object::Array(gc)) => {
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                        }
+                        Some(crate::memory::Object::Tuple(gc)) => {
+                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
+                        }
+                        _ => None,
+                    };
+                    let Some(result) = result else {
+                        return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
+                    };
+                    self.stack[sp + dest] = result;
+                }
+                Instruction::DenseStoreIndex => {
+                    let (flags, dest, arr, idx) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + arr < stack_cap);
+                    promise!(sp + idx < stack_cap);
+                    let value = self.stack[sp + dest];
+                    let index = self.stack[sp + idx].as_int();
+                    let addr = self.stack[sp + arr].raw() as u64;
+                    let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
+                    if let Some(crate::memory::Object::Array(mut gc)) =
+                        Self::find_object_by_addr(&self.heap, addr)
+                    {
+                        let elems = &mut gc.as_mut().elements;
+                        if !Self::write_indexed(elems, index, value, unchecked) {
+                            return self
+                                .runtime_panic("index out of bounds", ip.saturating_sub(1));
+                        }
+                    } else {
+                        return self.runtime_panic(
+                            "StoreIndex on non-array",
+                            ip.saturating_sub(1),
+                        );
+                    }
+                }
+                Instruction::DenseArrayLen => {
+                    let (dest, arr) = opcode.dense_move_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + arr < stack_cap);
+                    let addr = self.stack[sp + arr].raw() as u64;
+                    let len = match Self::find_object_by_addr(&self.heap, addr) {
+                        Some(crate::memory::Object::Array(gc)) => gc.as_ref().elements.len(),
+                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements.len(),
+                        Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
+                        Some(crate::memory::Object::Instance(gc)) => gc
+                            .as_ref()
+                            .slot_len()
+                            .unwrap_or_else(|| gc.as_ref().iter_fields().count()),
+                        _ => 0,
+                    };
+                    self.stack[sp + dest] = Value::from(len as i64);
+                }
+                Instruction::DenseMake => {
+                    let (kind, dest, arity, base) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + base < stack_cap);
+                    if arity > 0 {
+                        promise!(sp + base + arity - 1 < stack_cap);
+                    }
+                    if arity <= 3 {
+                        note_make_fast();
+                    }
+                    let values = Self::stack_copy_decl(&self.stack, sp + base, arity);
+                    let addr = if kind == common::dense::MAKE_TUPLE {
+                        let (object, _) =
+                            self.heap.alloc(ObjTuple { elements: values }, Object::Tuple);
+                        object.addr()
+                    } else if kind >= common::dense::MAKE_ENUM {
+                        let tag = u32::from(kind - common::dense::MAKE_ENUM);
+                        let payload = Self::dense_enum_payload(&self.heap, &values);
+                        let (object, _) =
+                            self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
+                        object.addr()
+                    } else {
+                        let (object, _) =
+                            self.heap.alloc(ObjArray { elements: values }, Object::Array);
+                        object.addr()
+                    };
+                    self.stack[sp + dest] = Value::from(addr);
+                    self.maybe_gc_after_alloc(ip);
+                }
+                Instruction::DensePush => {
+                    let (arity, base) = opcode.dense_move_parts();
+                    if arity > 0 {
+                        promise!(sp + base + arity - 1 < stack_cap);
+                    }
+                    for i in 0..arity {
+                        self.stack.push(self.stack[sp + base + i]);
+                    }
                 }
                 Instruction::ArrayPush => {
                     // Stack discipline matches `StoreIndex`: codegen emits

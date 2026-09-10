@@ -182,7 +182,12 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         | Instruction::VBin
         | Instruction::VMove
         | Instruction::VReduce
-        | Instruction::VFma => Some(0),
+        | Instruction::VFma
+        | Instruction::DenseIndex
+        | Instruction::DenseStoreIndex
+        | Instruction::DenseArrayLen
+        | Instruction::DenseMake => Some(0),
+        Instruction::DensePush => Some(byte.dense_move_parts().0 as i32),
         Instruction::BinSlotImmJmpf
         | Instruction::BinSlotImmJmpt
         | Instruction::BinSlotSlotJmpf
