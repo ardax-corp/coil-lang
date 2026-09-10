@@ -6561,7 +6561,7 @@ fn main() {
     );
 }
 
-/// #134 / COI-84 pin: a named class used as a whole object stays `InitTyped`.
+/// Q2: a named class used as a whole object materializes one `InitTyped`.
 #[test]
 fn named_local_class_stays_heap_allocated() {
     let src = r#"
@@ -6599,7 +6599,7 @@ fn main() {
         main_code
             .iter()
             .any(|byte| matches!(byte.bytecode(), common::Instruction::InitTyped)),
-        "escaping named local must stay InitTyped; opcodes: {:?}",
+        "identity use must InitTyped once; opcodes: {:?}",
         main_code
             .iter()
             .map(|b| b.bytecode().mnemonic())
