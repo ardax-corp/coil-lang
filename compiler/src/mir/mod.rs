@@ -1427,6 +1427,30 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_tail_sibling_hy_harness_cases_pass() {
+        let src = include_str!("../../../tests/positive/tail_sibling.hy");
+        let mut p = crate::Pipeline::new();
+        p.set_include_tests(true);
+        let (bc, constants) = p.compile_src(src).expect("compile tail_sibling.hy");
+        let cases = p.test_cases().to_vec();
+        assert_eq!(
+            cases.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["sibling tail even/odd", "two-word sibling tail"]
+        );
+        for (name, offset) in &cases {
+            let slots = p.operand_stack_slots() as usize;
+            let mut vm = machine::Machine::<64>::with_operand_capacity(slots.max(64));
+            p.wire_host_natives(&mut vm);
+            vm.load_program(&bc, &constants, p.strings());
+            let ret = vm.call_function(*offset, &[]);
+            assert!(
+                !vm.panicked() && vm.result_is_ok(ret),
+                "{name} must pass"
+            );
+        }
+    }
+
+    #[test]
     fn pipeline_eval_a_follows_straight_line_work_gate() {
         let src = r#"
 fn eval_a(int i, int j) -> float {
