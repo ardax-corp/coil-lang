@@ -513,6 +513,52 @@ impl MirFunc {
                     return Err(format!("{dest} FieldStore index"));
                 }
             }
+            MirInst::HeapFieldLoad {
+                dest,
+                object,
+                name,
+                index,
+            } => {
+                if self.ty(*object) != MirTy::HeapRef {
+                    return Err(format!("{dest} HeapFieldLoad object type"));
+                }
+                if !self.ty(*dest).is_specialized() {
+                    return Err(format!("{dest} HeapFieldLoad dest type"));
+                }
+                if let Some(n) = name {
+                    if self.ty(*n) != MirTy::HeapRef {
+                        return Err(format!("{dest} HeapFieldLoad name type"));
+                    }
+                }
+                if *index > 32 {
+                    return Err(format!("{dest} HeapFieldLoad index"));
+                }
+            }
+            MirInst::HeapFieldStore {
+                dest,
+                object,
+                value,
+                name,
+                index,
+            } => {
+                if self.ty(*object) != MirTy::HeapRef {
+                    return Err(format!("{dest} HeapFieldStore object type"));
+                }
+                if !self.ty(*value).is_specialized() {
+                    return Err(format!("{dest} HeapFieldStore value type"));
+                }
+                if self.ty(*dest) != self.ty(*value) {
+                    return Err(format!("{dest} HeapFieldStore dest type"));
+                }
+                if let Some(n) = name {
+                    if self.ty(*n) != MirTy::HeapRef {
+                        return Err(format!("{dest} HeapFieldStore name type"));
+                    }
+                }
+                if index.is_some_and(|i| i > 32) {
+                    return Err(format!("{dest} HeapFieldStore index"));
+                }
+            }
             MirInst::Alloc { dest, elems, .. } => {
                 if self.ty(*dest) != MirTy::HeapRef {
                     return Err(format!("{dest} Alloc dest is not heapref"));

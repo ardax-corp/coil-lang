@@ -4034,6 +4034,83 @@ fn main() {
             "escaping named local stays InitTyped; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
+        assert!(
+            p.stack_maps()
+                .iter()
+                .any(|m| !m.safepoints.is_empty()),
+            "D1 InitTyped+field body should bind maps: {:?}",
+            p.stack_maps()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_field_hot_binds_maps_stays_fuse_il() {
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+impl Point {
+    pub fn sum() -> int {
+        return self.x + self.y;
+    }
+}
+fn hot() -> int {
+    let p = new Point(3, 4);
+    let i = 0;
+    let acc = 0;
+    while i < 4 {
+        acc = acc + p.sum() + p.x;
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    if hot() != 40 {
+        panic "hot checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile field_hot board");
+        assert!(
+            p.stack_maps()
+                .iter()
+                .any(|m| !m.safepoints.is_empty()),
+            "D1 field_hot InitTyped should bind maps: {:?}",
+            p.stack_maps()
+        );
+        let symbols = p.program_debug().fn_symbols;
+        for name in ["hot", "Point::sum"] {
+            let Some(i) = symbols.iter().position(|s| s.name == name) else {
+                continue;
+            };
+            let start = symbols[i].entry_pc as usize;
+            let end = symbols
+                .get(i + 1)
+                .map(|s| s.entry_pc as usize)
+                .unwrap_or(bc.len());
+            let slice = &bc[start..end];
+            assert!(
+                slice
+                    .iter()
+                    .all(|b| *b.bytecode() != Instruction::DenseBin),
+                "{name} must stay fuse-IL (cost / HeapField); opcodes={:?}",
+                slice.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            );
+        }
+        assert!(
+            bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::GetField | Instruction::LoadField | Instruction::SetField
+            )),
+            "escaping field ops stay fuse-IL; opcodes={:?}",
+            bc.iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     }

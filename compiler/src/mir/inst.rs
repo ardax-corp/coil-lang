@@ -297,6 +297,24 @@ pub enum MirInst {
         base: u32,
         index: u32,
     },
+    /// Heap `GetField` / `LoadField` on an escaping object (D1 maps).
+    /// `object` is [`MirTy::HeapRef`]. Dest is the field word (not SROA).
+    /// `name` is the string key for `GetField`; `LoadField` uses `index`.
+    HeapFieldLoad {
+        dest: ValueId,
+        object: ValueId,
+        name: Option<ValueId>,
+        index: u32,
+    },
+    /// Heap `SetField`. Dest is the stored value (VM leaves it TOS).
+    /// Indexed slot form uses `index`; named form uses `name`.
+    HeapFieldStore {
+        dest: ValueId,
+        object: ValueId,
+        value: ValueId,
+        name: Option<ValueId>,
+        index: Option<u32>,
+    },
     /// Heap index load (S3). `array` is `HeapRef`; `index` is `i64`.
     /// Reconstructs `Index` / `IndexUnchecked` (pin forms lower to the
     /// same unpinned residuals — pin slots do not survive dense Seek).
@@ -382,7 +400,8 @@ pub enum MirInst {
 pub enum MirAllocKind {
     Array,
     Tuple,
-    /// `InitTyped` (`type_id`, `nfields`). Fields stay fuse-IL `SetField`.
+    /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
+    /// dense Object `DenseMake` is D2.
     Object {
         type_id: u32,
         nfields: u32,
@@ -467,6 +486,8 @@ impl MirInst {
             | Self::MatchPayload { dest, .. }
             | Self::FieldLoad { dest, .. }
             | Self::FieldStore { dest, .. }
+            | Self::HeapFieldLoad { dest, .. }
+            | Self::HeapFieldStore { dest, .. }
             | Self::Index { dest, .. }
             | Self::StoreIndex { dest, .. }
             | Self::ArrayLen { dest, .. }
@@ -523,6 +544,27 @@ impl MirInst {
             Self::MatchPayload { scrutinee, .. } => vec![*scrutinee],
             Self::FieldLoad { object, .. } => vec![*object],
             Self::FieldStore { src, .. } => vec![*src],
+            Self::HeapFieldLoad {
+                object, name, ..
+            } => {
+                let mut v = vec![*object];
+                if let Some(n) = name {
+                    v.push(*n);
+                }
+                v
+            }
+            Self::HeapFieldStore {
+                object,
+                value,
+                name,
+                ..
+            } => {
+                let mut v = vec![*object, *value];
+                if let Some(n) = name {
+                    v.push(*n);
+                }
+                v
+            }
             Self::Index { array, index, .. } => vec![*array, *index],
             Self::StoreIndex {
                 array,
@@ -565,6 +607,26 @@ impl MirInst {
             Self::MatchPayload { scrutinee, .. } => *scrutinee = map(*scrutinee),
             Self::FieldLoad { object, .. } => *object = map(*object),
             Self::FieldStore { src, .. } => *src = map(*src),
+            Self::HeapFieldLoad {
+                object, name, ..
+            } => {
+                *object = map(*object);
+                if let Some(n) = name {
+                    *n = map(*n);
+                }
+            }
+            Self::HeapFieldStore {
+                object,
+                value,
+                name,
+                ..
+            } => {
+                *object = map(*object);
+                *value = map(*value);
+                if let Some(n) = name {
+                    *n = map(*n);
+                }
+            }
             Self::Index { array, index, .. } => {
                 *array = map(*array);
                 *index = map(*index);

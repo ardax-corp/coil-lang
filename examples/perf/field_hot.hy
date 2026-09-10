@@ -1,4 +1,5 @@
 // Hot GetField path: repeated reads of the same class fields.
+// Allocating `hot` is map-eligible (D1); `main` only prints.
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};
@@ -17,7 +18,7 @@ impl Point {
     }
 }
 
-fn main() {
+fn hot() -> int {
     let p = new Point(3, 4);
     let acc = 0;
     let i = 0;
@@ -28,5 +29,9 @@ fn main() {
         acc = acc + p.x + p.y;
         i = i + 1;
     }
-    write_all(stdout(), to_bytes(format("%i", acc)));
+    return acc;
+}
+
+fn main() {
+    write_all(stdout(), to_bytes(format("%i", hot())));
 }

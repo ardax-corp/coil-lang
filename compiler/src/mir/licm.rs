@@ -146,6 +146,7 @@ fn loop_mutates_heap_or_calls(func: &MirFunc, lp: &LoopInfo) -> bool {
                 MirInst::StoreIndex { .. }
                     | MirInst::Call { .. }
                     | MirInst::FieldStore { .. }
+                    | MirInst::HeapFieldStore { .. }
             ) {
                 return true;
             }
@@ -255,6 +256,8 @@ fn hoistable(inst: &MirInst, allow_index: bool, allow_alloc: bool) -> bool {
         | MirInst::MatchPayload { .. }
         | MirInst::FieldLoad { .. }
         | MirInst::FieldStore { .. }
+        | MirInst::HeapFieldLoad { .. }
+        | MirInst::HeapFieldStore { .. }
         | MirInst::StoreIndex { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }

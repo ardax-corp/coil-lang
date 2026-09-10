@@ -331,9 +331,8 @@ fn perf_mandelbrot_tree_shakes_unused_builtin_thunks() {
 fn perf_field_hot_reuses_repeated_string_keys() {
     let (bc, _, _, _, pipeline) = compile("examples/perf/field_hot.hy");
     let syms = pipeline.program_debug().fn_symbols;
-    // Count STRING only in Point methods + main — not linked Show/String/io helpers.
     let mut strings = 0usize;
-    for name in ["Point::sum", "Point::twice_x", "main"] {
+    for name in ["Point::sum", "Point::twice_x", "hot", "main"] {
         let (start, end) = fn_pc_range(&syms, name, bc.len());
         strings += count_opcodes_in(&bc, start, end, Instruction::STRING);
     }
@@ -342,9 +341,28 @@ fn perf_field_hot_reuses_repeated_string_keys() {
         strings <= 10,
         "field_hot user fns should reuse field-name STRINGs, got {strings}"
     );
+    let fields = count_opcodes(&bc, Instruction::GetField)
+        + count_opcodes(&bc, Instruction::LoadField);
     assert!(
-        count_opcodes(&bc, Instruction::GetField) >= 1,
-        "field_hot should emit GetField"
+        fields >= 1,
+        "field_hot should emit GetField/LoadField (got GetField={} LoadField={})",
+        count_opcodes(&bc, Instruction::GetField),
+        count_opcodes(&bc, Instruction::LoadField)
+    );
+    assert!(
+        pipeline
+            .stack_maps()
+            .iter()
+            .any(|m| !m.safepoints.is_empty()),
+        "D1 field_hot InitTyped should bind maps: {:?}",
+        pipeline.stack_maps()
+    );
+    let (start, end) = fn_pc_range(&syms, "hot", bc.len());
+    assert!(
+        !bc[start..end]
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseBin),
+        "field_hot hot stays fuse-IL (HeapField / cost)"
     );
 }
 

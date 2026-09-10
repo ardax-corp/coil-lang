@@ -176,6 +176,7 @@ enum InferMode {
     Lir,
     /// S2b sidecar: alloc / grow ops are `HeapRef`. One-word `CALL`
     /// (Q7) and multi-word `CALL` (B3 / C1) type so CALL+alloc drafts bind.
+    /// Heap GetField/SetField/LoadField type so InitTyped+field drafts bind (D1).
     Map,
 }
 
@@ -191,6 +192,11 @@ impl InferMode {
     /// Q9 R1 / R3: leftover LIR / map lift may type string / format IL.
     fn allows_string(self) -> bool {
         matches!(self, Self::Lir | Self::Map)
+    }
+
+    /// D1: map lift types heap GetField / SetField / LoadField (not dense).
+    fn allows_heap_fields(self) -> bool {
+        matches!(self, Self::Map)
     }
 }
 
@@ -210,6 +216,7 @@ fn infer_walk(
     let mut has_float_arith = false;
     let mut has_i64_arith = false;
     let mut slot_imm: HashMap<u32, i64> = HashMap::new();
+    let reuse = mode == InferMode::Map;
 
     for op in ops {
         match op {
@@ -239,8 +246,8 @@ fn infer_walk(
                     slot_imm.remove(slot);
                 }
                 if let Some(ty) = c.ty {
-                    set_slot(&mut slot_ty, *slot, ty)?;
-                    paint(&mut slot_ty, &mut pool_ty, c, ty)?;
+                    set_slot_reuse(&mut slot_ty, *slot, ty, reuse)?;
+                    paint_slots(&mut slot_ty, &mut pool_ty, c, ty, reuse)?;
                 }
             }
             IlOp::Const { imm, .. } => stack.push(Cell {
@@ -298,6 +305,7 @@ fn infer_walk(
                     &mut has_i32,
                     &mut has_float_arith,
                     &mut has_i64_arith,
+                    reuse,
                 )?;
             }
             IlOp::BinSlotImm { op, slot, .. } => {
@@ -312,7 +320,7 @@ fn infer_walk(
                 if is_int_arith(inst) {
                     has_i64_arith = true;
                 }
-                set_slot(&mut slot_ty, u32::from(*slot), ty)?;
+                set_slot_reuse(&mut slot_ty, u32::from(*slot), ty, reuse)?;
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
@@ -331,8 +339,8 @@ fn infer_walk(
                 if is_int_arith(inst) {
                     has_i64_arith = true;
                 }
-                set_slot(&mut slot_ty, u32::from(*a), ty)?;
-                set_slot(&mut slot_ty, u32::from(*b), ty)?;
+                set_slot_reuse(&mut slot_ty, u32::from(*a), ty, reuse)?;
+                set_slot_reuse(&mut slot_ty, u32::from(*b), ty, reuse)?;
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
@@ -384,7 +392,9 @@ fn infer_walk(
                         imm: None,
                     });
                 }
-                Instruction::Seek => {}
+                Instruction::Seek => {
+                    apply_seek(&mut stack, &slot_ty, byte.operand_u32())?;
+                }
                 Instruction::Unpack => {
                     let arity = byte.operand_u32();
                     if arity > 1 {
@@ -427,7 +437,7 @@ fn infer_walk(
                     } else {
                         has_i64_arith = true;
                     }
-                    set_slot(&mut slot_ty, slot as u32, ty)?;
+                    set_slot_reuse(&mut slot_ty, slot as u32, ty, reuse)?;
                 }
                 Instruction::STRING if mode.allows_string() => {
                     stack.push(Cell {
@@ -453,6 +463,20 @@ fn infer_walk(
                         ty: Some(MirTy::HeapRef),
                         imm: None,
                     });
+                }
+                Instruction::GetField if mode.allows_heap_fields() => {
+                    apply_get_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+                }
+                Instruction::LoadField if mode.allows_heap_fields() => {
+                    apply_load_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+                }
+                Instruction::SetField if mode.allows_heap_fields() => {
+                    apply_set_field(
+                        &mut stack,
+                        &mut slot_ty,
+                        &mut pool_ty,
+                        common::set_field_slot_index(byte.operand_u32()),
+                    )?;
                 }
                 other => {
                     return Err(LowerError::Refused(format!(
@@ -502,6 +526,15 @@ fn infer_walk(
                     apply_host(&mut stack, &mut slot_ty, &mut pool_ty, *arity, *layout)?;
                 }
             }
+            IlOp::GetField { .. } if mode.allows_heap_fields() => {
+                apply_get_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+            }
+            IlOp::LoadField { .. } if mode.allows_heap_fields() => {
+                apply_load_field(&mut stack, &mut slot_ty, &mut pool_ty)?;
+            }
+            IlOp::SetField { index, .. } if mode.allows_heap_fields() => {
+                apply_set_field(&mut stack, &mut slot_ty, &mut pool_ty, *index)?;
+            }
             IlOp::Entry {
                 kind,
                 arity,
@@ -550,6 +583,7 @@ fn infer_walk(
                     &mut has_i32,
                     &mut has_float_arith,
                     &mut has_i64_arith,
+                    reuse,
                 )?;
             }
             _ => {
@@ -734,6 +768,56 @@ fn infer_walk(
                     ty: Some(MirTy::HeapRef),
                     imm: None,
                 });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
+                let _ = apply_seek(&mut stack, &slot_ty, byte.operand_u32());
+            }
+            IlOp::GetField { .. } => {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::LoadField { .. } => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::SetField { index, .. } => {
+                if index.is_none() {
+                    let _ = stack.pop();
+                }
+                let _ = stack.pop();
+                // value stays TOS after SetField
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::GetField => {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::LoadField => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::SetField => {
+                if common::set_field_slot_index(byte.operand_u32()).is_none() {
+                    let _ = stack.pop();
+                }
+                let _ = stack.pop();
             }
             IlOp::Entry {
                 kind: EntryKind::Call | EntryKind::TailCall,
@@ -948,6 +1032,87 @@ fn apply_format(
     }
 }
 
+fn apply_seek(
+    stack: &mut Vec<Cell>,
+    slot_ty: &HashMap<u32, MirTy>,
+    tell: u32,
+) -> Result<(), LowerError> {
+    // Ctor box: POP then `Seek tmp+1` so TOS is the InitTyped object. Loop /
+    // prologue Seek only re-anchors tell — do not treat those as a load
+    // (that joined bool latch slots with HeapRef).
+    if !stack.is_empty() || tell == 0 {
+        return Ok(());
+    }
+    let slot = tell - 1;
+    if slot_ty.get(&slot) != Some(&MirTy::HeapRef) {
+        return Ok(());
+    }
+    stack.push(Cell {
+        origin: Origin::Slot(slot),
+        ty: Some(MirTy::HeapRef),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_get_field(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+) -> Result<(), LowerError> {
+    let name = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("GetField stack".into()))?;
+    let obj = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("GetField stack".into()))?;
+    paint_slots(slot_ty, pool_ty, obj, MirTy::HeapRef, true)?;
+    paint_slots(slot_ty, pool_ty, name, MirTy::HeapRef, true)?;
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: None,
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_load_field(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+) -> Result<(), LowerError> {
+    let obj = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("LoadField stack".into()))?;
+    paint_slots(slot_ty, pool_ty, obj, MirTy::HeapRef, true)?;
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: None,
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_set_field(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    index: Option<u32>,
+) -> Result<(), LowerError> {
+    if index.is_none() {
+        let name = stack
+            .pop()
+            .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
+        paint_slots(slot_ty, pool_ty, name, MirTy::HeapRef, true)?;
+    }
+    let obj = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
+    paint_slots(slot_ty, pool_ty, obj, MirTy::HeapRef, true)?;
+    let _ = index;
+    Ok(())
+}
+
 fn apply_array_push(
     stack: &mut Vec<Cell>,
     slot_ty: &mut HashMap<u32, MirTy>,
@@ -1086,6 +1251,7 @@ fn apply_bin(
     has_i32: &mut bool,
     has_float_arith: &mut bool,
     has_i64_arith: &mut bool,
+    reuse: bool,
 ) -> Result<(), LowerError> {
     let rhs = stack
         .pop()
@@ -1137,8 +1303,8 @@ fn apply_bin(
     if is_int_arith(inst) {
         *has_i64_arith = true;
     }
-    paint(slot_ty, pool_ty, lhs, ty)?;
-    paint(slot_ty, pool_ty, rhs, ty)?;
+    paint_slots(slot_ty, pool_ty, lhs, ty, reuse)?;
+    paint_slots(slot_ty, pool_ty, rhs, ty, reuse)?;
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(if is_cmp(inst) { MirTy::Bool } else { ty }),
@@ -1367,8 +1533,18 @@ fn paint(
     cell: Cell,
     ty: MirTy,
 ) -> Result<(), LowerError> {
+    paint_slots(slot_ty, pool_ty, cell, ty, false)
+}
+
+fn paint_slots(
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    cell: Cell,
+    ty: MirTy,
+    reuse: bool,
+) -> Result<(), LowerError> {
     match cell.origin {
-        Origin::Slot(s) => set_slot(slot_ty, s, ty),
+        Origin::Slot(s) => set_slot_reuse(slot_ty, s, ty, reuse),
         Origin::Pool(i) => {
             let i = i as usize;
             if i >= pool_ty.len() {
@@ -1387,7 +1563,12 @@ fn paint(
     }
 }
 
-fn set_slot(map: &mut HashMap<u32, MirTy>, slot: u32, ty: MirTy) -> Result<(), LowerError> {
+fn set_slot_reuse(
+    map: &mut HashMap<u32, MirTy>,
+    slot: u32,
+    ty: MirTy,
+    reuse: bool,
+) -> Result<(), LowerError> {
     match map.get(&slot).copied() {
         None => {
             map.insert(slot, ty);
@@ -1398,6 +1579,10 @@ fn set_slot(map: &mut HashMap<u32, MirTy>, slot: u32, ty: MirTy) -> Result<(), L
             let j = old.join(ty);
             if j.is_specialized() {
                 map.insert(slot, j);
+                Ok(())
+            } else if reuse {
+                // Map drafts: temps recycle as i64/bool after the object is stored.
+                map.insert(slot, ty);
                 Ok(())
             } else {
                 Err(LowerError::Refused(format!(

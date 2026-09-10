@@ -511,6 +511,73 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Heap GetField / LoadField. `object` is heapref; dest is the field word.
+    pub fn ins_heap_field_load(
+        &mut self,
+        object: ValueId,
+        name: Option<ValueId>,
+        index: u32,
+        dest_ty: MirTy,
+    ) -> Result<ValueId, MirError> {
+        if self.resolve_ty(object) != MirTy::HeapRef {
+            return Err(MirError::msg(format!(
+                "HeapFieldLoad object {}",
+                self.resolve_ty(object)
+            )));
+        }
+        if !dest_ty.is_specialized() {
+            return Err(MirError::msg(format!("HeapFieldLoad dest {dest_ty}")));
+        }
+        if let Some(n) = name {
+            if self.resolve_ty(n) != MirTy::HeapRef {
+                return Err(MirError::msg("HeapFieldLoad name"));
+            }
+        }
+        let dest = self.alloc(dest_ty);
+        self.push(MirInst::HeapFieldLoad {
+            dest,
+            object: self.resolve(object),
+            name: name.map(|n| self.resolve(n)),
+            index,
+        })?;
+        Ok(dest)
+    }
+
+    /// Heap SetField. Dest is the stored value (TOS after the op).
+    pub fn ins_heap_field_store(
+        &mut self,
+        object: ValueId,
+        value: ValueId,
+        name: Option<ValueId>,
+        index: Option<u32>,
+    ) -> Result<ValueId, MirError> {
+        if self.resolve_ty(object) != MirTy::HeapRef {
+            return Err(MirError::msg(format!(
+                "HeapFieldStore object {}",
+                self.resolve_ty(object)
+            )));
+        }
+        let ty = self.resolve_ty(value);
+        if !ty.is_specialized() {
+            return Err(MirError::msg(format!("HeapFieldStore value {ty}")));
+        }
+        if let Some(n) = name {
+            if self.resolve_ty(n) != MirTy::HeapRef {
+                return Err(MirError::msg("HeapFieldStore name"));
+            }
+        }
+        let dest = self.alloc(ty);
+        let value = self.resolve(value);
+        self.push(MirInst::HeapFieldStore {
+            dest,
+            object: self.resolve(object),
+            value,
+            name: name.map(|n| self.resolve(n)),
+            index,
+        })?;
+        Ok(dest)
+    }
+
     /// Heap index load (S3). `array` is `heapref`; `index` is `i64`.
     pub fn ins_index(
         &mut self,

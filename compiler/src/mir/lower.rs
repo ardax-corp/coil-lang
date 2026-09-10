@@ -68,6 +68,8 @@ pub struct LowerHints {
     pub unboxed_fields: Vec<(u32, u32)>,
     /// I3: Load/Store of those slots become FieldLoad/FieldStore.
     pub allow_fields: bool,
+    /// D1: heap GetField / SetField / LoadField on escaping objects (maps).
+    pub allow_heap_fields: bool,
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` → Alloc +
     /// GcBarrier with S2a live roots. S2c emit needs maps.
     pub allow_alloc: bool,
@@ -98,6 +100,7 @@ impl Default for LowerHints {
             allow_match: false,
             unboxed_fields: Vec::new(),
             allow_fields: false,
+            allow_heap_fields: false,
             allow_alloc: false,
             allow_index: false,
             allow_effects: false,
@@ -788,6 +791,15 @@ fn lower_op(
             },
             u32::from(*arity),
         ),
+        IlOp::GetField { .. } if hints.allow_heap_fields => {
+            lower_heap_get_field(b, tos, next, hints)
+        }
+        IlOp::LoadField { index, .. } if hints.allow_heap_fields => {
+            lower_heap_load_field(b, tos, next, hints, *index)
+        }
+        IlOp::SetField { index, .. } if hints.allow_heap_fields => {
+            lower_heap_set_field(b, tos, *index)
+        }
         IlOp::GetField { .. }
         | IlOp::SetField { .. }
         | IlOp::LoadField { .. }
@@ -913,6 +925,25 @@ fn lower_byte(
                 .ok_or_else(|| LowerError::Refused("ArrayPush stack".into()))?;
             let obj = b.ins_array_push(array, value)?;
             tos.push(b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])?);
+            Ok(())
+        }
+        Instruction::GetField if hints.allow_heap_fields => {
+            lower_heap_get_field(b, tos, next, hints)
+        }
+        Instruction::LoadField if hints.allow_heap_fields => {
+            lower_heap_load_field(b, tos, next, hints, byte.operand_u32() & 0xFFFF)
+        }
+        Instruction::SetField if hints.allow_heap_fields => {
+            lower_heap_set_field(b, tos, common::set_field_slot_index(byte.operand_u32()))
+        }
+        Instruction::Seek if hints.allow_heap_fields => {
+            let n = byte.operand_u32();
+            if tos.is_empty() && n > 0 {
+                let slot = n - 1;
+                if hints.slot_ty.get(&slot) == Some(&MirTy::HeapRef) {
+                    tos.push(b.use_local(LocalId(slot), MirTy::HeapRef)?);
+                }
+            }
             Ok(())
         }
         Instruction::Seek if hints.allow_match => Ok(()),
@@ -1195,6 +1226,61 @@ fn lower_index(
         .ok_or_else(|| LowerError::Refused("index stack".into()))?;
     let dest_ty = use_result_ty(hints, next, MirTy::I64);
     tos.push(b.ins_index(arr, idx, dest_ty, unchecked)?);
+    Ok(())
+}
+
+fn lower_heap_get_field(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    next: Option<&IlOp>,
+    hints: &LowerHints,
+) -> Result<(), LowerError> {
+    let name = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("GetField stack".into()))?;
+    let obj = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("GetField stack".into()))?;
+    let dest_ty = use_result_ty(hints, next, MirTy::I64);
+    tos.push(b.ins_heap_field_load(obj, Some(name), 0, dest_ty)?);
+    Ok(())
+}
+
+fn lower_heap_load_field(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    next: Option<&IlOp>,
+    hints: &LowerHints,
+    index: u32,
+) -> Result<(), LowerError> {
+    let obj = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("LoadField stack".into()))?;
+    let dest_ty = use_result_ty(hints, next, MirTy::I64);
+    tos.push(b.ins_heap_field_load(obj, None, index, dest_ty)?);
+    Ok(())
+}
+
+fn lower_heap_set_field(
+    b: &mut MirBuilder,
+    tos: &mut Vec<ValueId>,
+    index: Option<u32>,
+) -> Result<(), LowerError> {
+    let name = if index.is_none() {
+        Some(
+            tos.pop()
+                .ok_or_else(|| LowerError::Refused("SetField stack".into()))?,
+        )
+    } else {
+        None
+    };
+    let obj = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
+    let value = tos
+        .pop()
+        .ok_or_else(|| LowerError::Refused("SetField stack".into()))?;
+    tos.push(b.ins_heap_field_store(obj, value, name, index)?);
     Ok(())
 }
 
