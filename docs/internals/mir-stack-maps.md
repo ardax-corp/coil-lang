@@ -64,9 +64,10 @@ and relocate mapped slots on collect.
    may take dense. Per-residual `Seek` restore is gone (StorePop already
    returns tell to the dense frame).    Residual in-loop `Make*` stays
    fuse-IL unless SROA/LICM deletes it (S2l). Still refuse: post-loop-only heap return
-   (invert+fuse); leftover unmapped grow / class edges; mutual / two-slot
-   recursive `CALL`; computed-element stack scalarize; compiler write-barrier
-   opcodes. Mapped `ArrayPush` / CALL+`Make*` is B6.
+   (invert+fuse); leftover unmapped grow / class edges; computed-element
+   stack scalarize; compiler write-barrier opcodes. Mapped `ArrayPush` /
+   CALL+`Make*` is B6. Sibling / mutual / self two-slot recursion is B7
+   (cost gate).
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 

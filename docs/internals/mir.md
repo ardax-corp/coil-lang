@@ -23,7 +23,7 @@ the stack).
 | `MirTy` | Lattice: `bottom ⊑ {i32⊑i64, f32⊑f64, bool, heap-ref, niche Option/Result} ⊑ value`. I1 names heap/niche words; dense still uses numeric lanes only ([mir-islands.md](mir-islands.md)). |
 | `MirLayout` | Call-edge ABI: `word` / `twoslot` / `heap_niche` |
 | `MirBuilder` | Braun SSA (locals = IL slots, explicit φ) |
-| `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses escaping classes / leftover unmapped heap / mutual `CALL`. One-word `CALL` (Q7), two-slot helper `CALL` / `RETURN` (B3), niche / two-slot match (Q8), and mapped `ArrayPush` (B6) lower |
+| `try_lower_numeric` | Pre-fuse `IlOp` → SSA; refuses escaping classes / leftover unmapped heap. One-word `CALL` (Q7), two-slot helper / self / sibling `CALL` / `RETURN` (B3 / B7), niche / two-slot match (Q8), and mapped `ArrayPush` (B6) lower |
 | `try_specialize_body` | Infer + SSA + MIR CSE/GVN + MIR LICM + MIR InstCombine (P11 float peeps) + DestProp + IV SR + saxpy-reduce HostInvoke (P12) or dense emit (HostInvoke box/unbox; cost gate vs fuse) |
 | `try_lower_abi_body` | Infer + SSA + MIR CSE + LIR emit when there is no hard refuse; `IlModule` keeps it only if cost ≤ fuse |
 | `mir::cse` | Same-block GVN (includes `DIVF`/`DIV` that stack-IL CSE refuses); used on dense and LIR leafs |
@@ -182,12 +182,13 @@ One-word ABI ([`compiler/src/mir/abi.rs`](../../compiler/src/mir/abi.rs)):
 - **Args:** `arity` Value words in callee slots `0..arity` (same bits as
   typed dense slots — `i32`/`i64`/`f32`/`f64`/`bool`).
 - **Return:** one word on TOS (`RETURN` width 1). Caller `STORE`s it.
-- **Two-slot / niche:** refuse (M4 / P3 LIR). `CallIndirect` refuses.
-  Mutual recursion stays refuse. **Q7:** one-word self-`CALL` / `TailCall`
-  may dense after convoy fused returns unfuse. Keep only when emit cost
-  ≤ fuse-IL. **B2** emits CALL args/results on the operand stack and
-  skips prologue `Seek` when only param slots are live, so tight
-  `tak` / `fib` can win that gate.
+- **Two-slot / niche:** helper two-slot is **B3**; self / sibling two-slot
+  recursion is **B7**. `CallIndirect` refuses.
+  **Q7:** one-word self-`CALL` / `TailCall` may dense after convoy fused
+  returns unfuse. **B7:** sibling / mutual `TailCall` uses stack args (not
+  B2 dest convoy). Keep only when emit cost ≤ fuse-IL. **B2** emits self
+  CALL args/results on the operand stack and skips prologue `Seek` when
+  only param slots are live, so tight `tak` / `fib` can win that gate.
 
 `IlModule` specializes **bottom-up**: a body may `CALL` only after the
 callee is already in the dense ABI map. Infer/lower treat that `CALL`

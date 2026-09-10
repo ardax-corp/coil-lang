@@ -50,7 +50,7 @@ tables shrink toward.
    (counted `for`, one-word recursive `CALL`, niche/two-slot dense+match,
    format LIR reconstruct); leftover shapes are **ladders** or **cost
    gates**, not forever refuse. Remaining walls: I7 debugger / `-Og`,
-   leftover unmapped grow / class edges, mutual / two-slot recursive `CALL`, boxed multi-payload
+   leftover unmapped grow / class edges, boxed multi-payload
    match, residual `Byte`/`Pow`/bitwise. Everything else is
    **cost-gated**: lift, opt, emit, compare to fuse-IL. Do not add
    feature-shaped refuses (W3 work-op floors, Seek≤64 prove quirks,
@@ -142,12 +142,12 @@ list. Q6–Q9 first rungs turned most of those named commits into
 | A3 wall (#380) | After Q6–Q9 (`eaf17283`) | Kind now |
 |----------------|--------------------------|----------|
 | `FORMAT` / `STRING` / `STRINGIFY` / `PRINT` / I4 bytes | **Q9 R1:** table string ops are SSA + MIR→LIR. Dense infer still refuses table ops. **R2:** `from_bytes` / `to_bytes` are I6 dense HostInvoke. Unicode / regex wait R4 | Ladder + cost (R1 may keep fuse-IL) |
-| Recursion on the callee (`CALL` / `TailCall`) | **Q7:** one-word self-`CALL` / `TailCall` may dense. **B2:** tight `tak` / `fib` convoy CALL on the stack (no prologue Seek / inter-CALL STORE) so the cost gate can keep them. **B3:** two-slot helper `CALL` / `RETURN` may dense or LIR. Mutual / two-slot self-recursion still refuse | Cost gate + later Q7 rungs |
+| Recursion on the callee (`CALL` / `TailCall`) | **Q7:** one-word self-`CALL` / `TailCall` may dense. **B2:** tight `tak` / `fib` convoy CALL on the stack (no prologue Seek / inter-CALL STORE) so the cost gate can keep them. **B3:** two-slot helper `CALL` / `RETURN` may dense or LIR. **B7:** sibling / mutual `TailCall` and self two-slot `CALL` / `RETURN` may dense (stack-arg TailCall protocol; not B2 dest convoy) | Cost gate |
 | `for` / iterator (`for_in_sum`) | **Q6:** counted desugar — array / Vec / `[T; N]` / literal range helpers dense (`sum`, `for_in_range`). **B5:** first-class `let r = 0..n` locals unbox `[start,end]` (`for_in_range_value`). `main` + format / `Vec.push` stays fuse-IL. User `Iterator` / coro / dict / parameter range still refuse | Ladder (counted + local range) |
 | Dense+match (stack vs regs) | **Q8:** niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` stays I2 LIR. **B3:** two-slot `CALL` / `RETURN` may dense or LIR (cost gate) | Cost gate |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | Unchanged — fuse-IL | Hard wall (later island) |
 | Debugger-attached / `-Og` | Unchanged — skip dense + LIR ([mir-deopt.md](mir-deopt.md)) | Hard wall (**I7** stays) |
-| Unmapped alloc / GC safepoint | **B6:** `ArrayPush` / `DenseArrayPush` grow sites encode S2b maps; CALL+alloc drafts bind (one-word `CALL`). Cost gate still refuses boxed reconstruct. Multi-payload match / mutual rec stay walls | Ladder + cost (maps); leftover unmapped edges stay fuse-IL |
+| Unmapped alloc / GC safepoint | **B6:** `ArrayPush` / `DenseArrayPush` grow sites encode S2b maps; CALL+alloc drafts bind (one-word `CALL`). Cost gate still refuses boxed reconstruct. Multi-payload match stays a wall | Ladder + cost (maps); leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | Unchanged | Hard wall (later island) |
 | Compare-only (no arith) | Unchanged — fuse-IL or I8 LIR | Cost gate |
 
@@ -166,8 +166,8 @@ regular reconstruct over bench-shaped peeps.
 | **B3** | Two-slot `CALL` / `RETURN` (dense or LIR reconstruct) | **Landed** ([COI-341](https://linear.app/ardax/issue/COI-341)): helper two-slot `CALL` / `RETURN` lower; LIR reconstructs width-2 `CALL`; dense emit may keep when cost ≤ fuse. Self / sibling two-slot recursion stays fuse-IL (B7 / later Q7) | `option_match_call`; checksum; cost gate; flagships flat |
 | **B4** | **Q9 R2** — `string::{from_bytes,to_bytes}` dense HostInvoke | **Landed** ([COI-342](https://linear.app/ardax/issue/COI-342)): I6 dense HostInvoke (box at the host edge). Table `STRING` / `FORMAT` stay off dense. Maps across format wait R3 | Unit reconstruct; dense loop + HostInvoke; format loop still fuse-IL |
 | **B5** | Q6 later rungs — first-class range, then user `Iterator` | **Landed** ([COI-343](https://linear.app/ardax/issue/COI-343)): unboxed `let r = 0..n` locals (no `GetField`). Parameter / heap dict range, user `next`, coro, dict stay refuse | `for_in_range_value`; no full trait rewrite |
-| **B6** | Unmapped alloc / grow / class `new` maps | **This rung:** `ArrayPush` is a mapped grow safepoint; `DenseArrayPush` (archive **4.11**) is the native reconstruct. Map lift types one-word `CALL` so CALL+`Make*` / `InitTyped` drafts bind. `binary_trees` `item_check` still fuse-IL (multi-payload match). Cost gate still refuses boxed reconstruct | `nsieve`; CALL+enum wrap; flagships flat |
-| **B7** | Mutual recursion (later Q7) | After B2/B3. Sibling even/odd `TailCall` already exists; general mutual + two-slot rec stay refuse | Existing sibling + a mutual pair; no new opcode |
+| **B6** | Unmapped alloc / grow / class `new` maps | **Landed** ([COI-344](https://linear.app/ardax/issue/COI-344)): `ArrayPush` is a mapped grow safepoint; `DenseArrayPush` (archive **4.11**) is the native reconstruct. Map lift types one-word `CALL` so CALL+`Make*` / `InitTyped` drafts bind. `binary_trees` `item_check` still fuse-IL (multi-payload match). Cost gate still refuses boxed reconstruct | `nsieve`; CALL+enum wrap; flagships flat |
+| **B7** | Mutual / sibling / self two-slot recursion | **This rung:** sibling / mutual `TailCall` and self two-slot `CALL` / `RETURN` may dense. Reconstruct puts TailCall args on TOS (VM ABI); B2 dest convoy stays self-`CALL` only. Keep/refuse is the cost gate. Leftover: LIR still cannot rebuild one-word `CALL` / `TailCall`; non-tail mutual may lose on DensePush / Seek | `tail_sibling.hy`; even/odd + bounce + a mutual pair; checksum; flagships flat. No new opcode |
 | **B8** | **I7** debugger-attached / `-Og` on MIR | True wall: VM debugger is fuse-IL. Deopt edges exist; emit still refuses. Needed before specialized bodies can be stepped | Debugger tests; no MIR stepping rewrite |
 | **B9** | Q9 **R3–R4** — maps across `FORMAT`; unicode / regex only if an island says so | After R2. R1 already reconstructs table ops on LIR | No second Format lowering; no vanity string benches |
 
