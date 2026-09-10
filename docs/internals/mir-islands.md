@@ -36,9 +36,10 @@ block islands on P5. Do not revive PGO.
 dense specialize, then IL→MIR→LIR when [`lir_eligible`](../../compiler/src/mir/entry.rs)
 has **no LIR reconstruct wall**. Walls today: unmapped I5 alloc, I6 `CALL` /
 HostInvoke (LIR emit cannot reconstruct — Q7 densifies one-word self-`CALL`
-instead), I4 `from_bytes` / `to_bytes` on dense (Q9 R1 reopened table
-`STRING` / `PRINT` / `FORMAT` / `STRINGIFY` on MIR→LIR —
-[q9-format-string.md](q9-format-string.md)), escaping fields, box, I2
+instead), I4 table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` on MIR→LIR
+(Q9 R1; dense infer still refuses —
+[q9-format-string.md](q9-format-string.md)). R2 densifies
+`from_bytes` / `to_bytes` HostInvoke. Escaping fields, box, I2
 multi-payload `Unpack`, I7 debugger-attached / `-Og`. Counted `for` (Q6)
 and niche / two-slot match (Q8) are lift + cost, not checklist refuses.
 Heap index is not a wall after A2. No dual AST walker. No work-op /
@@ -55,7 +56,7 @@ ConstReturnImm fuse is not undone.
 | I1 | Heap / niche types | [COI-293](https://linear.app/ardax/issue/COI-293/i1-heap-niche-types-in-mir-lattice) | `MirTy` / `MirLayout` name heap-ref + niche Option/Result Value words; infer/lower may carry them; no GC maps; no specialize of allocating/escaping bodies | on main (#342) |
 | I2 | Match on niche / two-slot / boxed overlap | [COI-294](https://linear.app/ardax/issue/COI-294/i2-match-on-niche-two-slot-in-mir) / [COI-302](https://linear.app/ardax/issue/COI-302/after-unlock-i2-boxedconstructmatch-cost-gate) / [COI-330](https://linear.app/ardax/issue/COI-330) Q8 | JumpIfMatch-shaped control in MIR; arity 0 overlap + any tag; niche `LogNot` / two-slot tag `Br`; **Q8** dense reconstruct for niche / two-slot (register `Br`, cost gate); boxed `JumpIfMatch` stays LIR | on main + Q8 (#388) |
 | I3 | Non-escaping class fields | [COI-295](https://linear.app/ardax/issue/COI-295/i3-non-escaping-class-fields-in-mir) | Field load/store using the existing local-escape sidecar; escaping named locals stay fuse-IL | on main (#344) |
-| I4 | String / format subset | [COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse) / [COI-332](https://linear.app/ardax/issue/COI-332) Q9 | **Q9 R1 shipped.** Table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` are SSA + MIR→LIR reconstruct. Dense infer still refuses (numeric paths unchanged). Later: `from_bytes` / `to_bytes` dense, maps across format, unicode/regex. No half-format second lowering | #345 barrier; Q9 R1 #389; ladder [q9-format-string.md](q9-format-string.md) |
+| I4 | String / format subset | [COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-subset-or-refuse) / [COI-332](https://linear.app/ardax/issue/COI-332) Q9 | **Q9 R1 + R2 shipped.** Table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` are SSA + MIR→LIR reconstruct. Dense infer still refuses table ops. `from_bytes` / `to_bytes` are I6 dense HostInvoke. Later: maps across format, unicode/regex. No half-format second lowering | #345 barrier; Q9 R1 #389; Q9 R2 B4; ladder [q9-format-string.md](q9-format-string.md) |
 | I5 | Alloc + GC barriers | [COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir) / [COI-305](https://linear.app/ardax/issue/COI-305/s2a-live-root-sidecar-at-mir-gcbarrier-alloc) / [COI-306](https://linear.app/ardax/issue/COI-306/s2b-slot-frame-stack-maps-for-interpreter-gc) / [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist) / [COI-314](https://linear.app/ardax/issue/COI-314/s2d-map-backed-looping-alloc-further-alloc-opts) | MakeArray / alloc edges; S2a live-root sidecar; S2b interpreter slot / frame maps; S2c specialize / LIR across alloc when maps exist; S2d mapped in-loop / preheader Make* | I5 / S2a–S2d on main |
 | I6 | Effects / HostInvoke | [COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges) | Broader than W4 allowlist; purity sidecar drives barriers | on main (#347) |
 | I7 | Debugger / deopt | [COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir) | Deopt / stop metadata on MIR edges; VM debugger stays source of truth | on main (#348) |
@@ -63,8 +64,9 @@ ConstReturnImm fuse is not undone.
 
 I4 was closed as a hard MIR barrier (#345). **Q9 R1** reopens it as a
 phased island: SSA + LIR reconstruct of the shipped string/format
-opcodes. Dense specialize still skips them so numeric / array work is
-not stalled. Unicode / regex stay out until a later cut. Ladder:
+opcodes. Dense specialize still skips table ops so numeric / array work
+is not stalled. **Q9 R2** opens `from_bytes` / `to_bytes` as I6 dense
+HostInvoke. Unicode / regex stay out until R4. Ladder:
 [q9-format-string.md](q9-format-string.md). Spec:
 [language-quirks.md](language-quirks.md).
 
@@ -73,7 +75,7 @@ not stalled. Unicode / regex stay out until a later cut. Ladder:
 | Language / IL feature | Today | Target |
 |-----------------------|-------|--------|
 | Numeric loops / straight-line (`i32`/`i64`/`f32`/`f64`/`bool`) | dense (`DenseBin` …) after MIR CSE/LICM/peeps when cost ≤ fuse-IL | stay dense (Low IR) |
-| HostInvoke inside numeric | dense + box/unbox at host edge; LICM hoists scalar-pure (purity bits); `packed_*` stays in-place | S3 emits I6-typed hosts except I4 `from_bytes` / `to_bytes` |
+| HostInvoke inside numeric | dense + box/unbox at host edge; LICM hoists scalar-pure (purity bits); `packed_*` stays in-place | S3 / Q9 R2 emit I6-typed hosts including `from_bytes` / `to_bytes` |
 | One-word `CALL` (dense map or open fuse-IL / LIR) | dense | S3 + **Q7** one-word self-recursive `CALL` / `TailCall` (`tak` / `fib`). Two-slot / niche / mutual still refuse; LIR still cannot reconstruct `CALL` |
 | Saxpy-reduce | HostInvoke `simd_axpy_reduce` (P12) | stay |
 | Stride-1 numeric store (`v[i] = i` / zip / scale) | `VLoad` / `VStore` / `VBin` / `VMove` (S5a V0) | stay |
@@ -87,8 +89,8 @@ not stalled. Unicode / regex stay out until a later cut. Ladder:
 | Class fields (escaping / heap-backed) | fuse-IL | stay refuse (I3 is **non-escaping** only) |
 | Non-escaping named class locals (sidecar) | MIR→LIR `FieldLoad` / `FieldStore` on unboxed slots | **I3** |
 | Heap index / `MakeArray` / alloc | SSA `Alloc` + `GcBarrier` when `allow_alloc`; S2a–S2l + **A2** dense-native `Index` / `Make*` / `DensePush`; keep when maps exist and cost ≤ fuse-IL. In-loop `Vec.push` / class `new` stay fuse-IL. Boxed match stays LIR (I2); niche / two-slot match may dense (**Q8**) | **I5** / **S2** / **A2** |
-| `FORMAT` / string ops | **Q9 R1** MIR→LIR (`String` / `Print` / `Format` / `Stringify`); dense infer still refuses; cost gate may keep fuse-IL | **I4** / **Q9** — [q9-format-string.md](q9-format-string.md) |
-| Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
+| `FORMAT` / string ops | **Q9 R1** MIR→LIR (`String` / `Print` / `Format` / `Stringify`); dense infer still refuses table ops; **R2** densifies `from_bytes` / `to_bytes` HostInvoke; cost gate may keep fuse-IL | **I4** / **Q9** — [q9-format-string.md](q9-format-string.md) |
+| Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 / R2 dense emit; LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
 | Recursion (`tak` / `fib`) | fuse-IL or dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene + **B2** CALL convoy. Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense without a prologue Seek on param-only leafs. Mutual / two-slot self-recursion stay refuse. Helper two-slot `CALL` / `RETURN` is **B3** |
 | `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); `main` + format and user `Iterator` / coro / dict / first-class range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |

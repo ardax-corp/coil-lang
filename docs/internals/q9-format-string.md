@@ -11,24 +11,25 @@ the phased design so later rungs do not invent a second Format lowering.
 ## Choice
 
 **Reuse the shipped opcodes.** SSA names the same `STRING` / `PRINT` /
-`FORMAT` / `STRINGIFY` (and later `string::{from_bytes,to_bytes}`) the
-VM already runs. Reconstruct them on MIR→LIR. Do **not** add a half
-Format compiler, a second specifier walker, or vanity string benches.
+`FORMAT` / `STRINGIFY` and `string::{from_bytes,to_bytes}` HostInvoke the
+VM already runs. Reconstruct table ops on MIR→LIR. Densify byte hosts at
+the I6 box edge (R2). Do **not** add a half Format compiler, a second
+specifier walker, or vanity string benches.
 
-Dense numeric / array paths stay off this island until a later rung
-explicitly densifies a string edge. Flagships that never print stay
+Dense numeric / array paths stay off table `STRING` / `FORMAT`. R2 only
+opens the bytes HostInvoke edge. Flagships that never print stay
 identical. Keep/refuse is checksum + cost gate. No env toggle. No PGO.
 
 ## Ladder
 
 | Rung | What enters MIR | Emit | Still refuse |
 |------|-----------------|------|--------------|
-| **R1 (this PR)** | Table `STRING`, `PRINT`, `FORMAT`, `STRINGIFY` as SSA (`HeapRef` / IO token) | MIR→LIR reconstruct of the same IL. Dense infer still refuses so numeric specialize is unchanged | `from_bytes` / `to_bytes` dense HostInvoke; unicode / regex; format-in-loop dense |
-| **R2** | `string::{from_bytes,to_bytes}` as I6 HostInvoke on dense when maps/effects allow | Dense box at the host edge (same as other I6) | unicode / regex |
+| **R1** | Table `STRING`, `PRINT`, `FORMAT`, `STRINGIFY` as SSA (`HeapRef` / IO token) | MIR→LIR reconstruct of the same IL. Dense infer still refuses so numeric specialize is unchanged | unicode / regex; format-in-loop dense |
+| **R2 (this PR)** | `string::{from_bytes,to_bytes}` as I6 HostInvoke on dense when maps/effects allow | Dense box at the host edge (same as other I6) | unicode / regex |
 | **R3** | Live-heap maps across `FORMAT` / `STRINGIFY` (I5-style roots) so a format in a mapped loop can stay SSA | LIR (then dense only if cost wins) | unicode / regex |
 | **R4** | Unicode / regex — only if a later island says they belong in SSA | TBD | — |
 
-Post-quirks rank: R2 is **B4**, R3–R4 are **B9**
+Post-quirks rank: R2 is **B4** (this PR). R3–R4 stay **B9**
 ([opt-generalization.md](opt-generalization.md) B0).
 
 R1 is the reopen: I4 is no longer a hard LIR wall. A prove body
@@ -49,7 +50,7 @@ heavier (`Seek` / `STORE`). That is a lose, not a barrier.
 typed word lanes (`i64` / `f64` / `HeapRef`). Reconstruct pops them in
 the same order as fuse-IL (`FORMAT` operand is arity).
 
-## Prove
+## Prove (R1)
 
 - Unit: `try_lower_abi_body` on `STRING`+`RETURN`, `STRING`+`PRINT`,
   and `STRING`+`LOAD`+`FORMAT 1`+`RETURN` succeeds and emits the same
@@ -58,13 +59,25 @@ the same order as fuse-IL (`FORMAT` operand is arity).
   (two-slot `Result<int, string>` may still lose LIR verify until a
   later rung).
 - `pipeline_format_loop_stays_fuse_il`: a `format` + i64 add loop still
-  has `FORMAT` and **no** `DenseBin` (dense infer still refuses I4).
+  has `FORMAT` and **no** `DenseBin` (dense infer still refuses table I4).
 - Flagships (`mandelbrot` / `tak` / `nsieve` / `binary_trees` / `fib`):
   identical archives or flat.
 
-## Non-goals (this PR)
+## Prove (R2)
+
+- `dense_host_ok` is true for `from_bytes` / `to_bytes` (I6 word edge;
+  still off the W4 float allowlist). Impure IO — LICM does not hoist.
+- Unit: HostInvoke + `LOAD` reconstructs on dense emit; LIR emit still
+  refuses HostInvoke (same as other I6).
+- `pipeline_to_bytes_loop_takes_dense` / `pipeline_from_bytes_loop_takes_dense`:
+  a bytes-host + i64 add loop emits `HostInvoke` + `DenseBin`. STRING
+  literals stay in `main`. Format loops stay fuse-IL.
+- Cost gate unchanged. Flagships identical or flat. No env toggle. No PGO.
+
+## Non-goals (R2)
 
 - New opcodes or a specifier interpreter in MIR
-- Dense specialize of format/print loops
-- Unicode / regex in SSA
+- Dense specialize of format/print loops (R3 maps)
+- Unicode / regex in SSA (R4 / B9)
+- LIR reconstruct of HostInvoke
 - Score-chasing string microbenches
