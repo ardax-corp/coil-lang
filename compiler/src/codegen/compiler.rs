@@ -4631,18 +4631,24 @@ impl Compiler {
         let two_word_rhs = self
             .expr_direct_call_two_word_kind(rhs_node)
             .or_else(|| self.expr_direct_call_two_word_kind(rhs));
+        let range_kind = self.expr_unboxed_range_kind(rhs_node);
         let named_class_sroa = two_word_rhs.is_none()
+            && range_kind.is_none()
             && matches!(rhs_node.1.as_ref(), Expression::Instantiate(_, _))
             && self
                 .ctor_unbox_ty(rhs_node)
                 .is_some_and(|ty| self.checker.ty_is_class(&ty));
         if two_word_rhs.is_none()
+            && range_kind.is_none()
             && !named_class_sroa
             && !(self.node_is_frame_local(binder)
                 || self.node_is_frame_local(rhs_node)
                 || self.node_is_frame_local(rhs))
         {
             return false;
+        }
+        if let Some(kind) = range_kind {
+            return self.emit_unboxed_enum_bind(bytecode, name, rhs, rhs_is_match, &kind);
         }
         let ty = self
             .sidecar_ty_of(binder)
@@ -4715,6 +4721,38 @@ impl Compiler {
             return self.emit_unboxed_enum_bind(bytecode, name, rhs, rhs_is_match, &kind);
         }
         false
+    }
+
+    /// `Some(kind)` when `expr` is a Range literal or an already-unboxed
+    /// range local (`[start, end]`). Boxed dict ranges stay one word.
+    fn expr_unboxed_range_kind(&self, expr: &Output<'_>) -> Option<String> {
+        let cur = unwrap_expr_output(expr);
+        match cur.1.as_ref() {
+            Expression::Range { inclusive, .. } => {
+                Some(crate::typechecking::return_layout::range_kind(*inclusive).to_string())
+            }
+            Expression::Identifier(n) => self
+                .unboxed_enum_kind(n)
+                .filter(|k| crate::typechecking::return_layout::is_range_kind(k))
+                .map(str::to_string),
+            _ => None,
+        }
+    }
+
+    fn emit_box_range_slots(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        start_slot: u32,
+        end_slot: u32,
+        inclusive: bool,
+    ) {
+        bytecode.push_load(start_slot);
+        self.emit_raw_string_literal(bytecode, "start");
+        bytecode.push_load(end_slot);
+        self.emit_raw_string_literal(bytecode, "end");
+        bytecode.push_const(if inclusive { 1 } else { 0 });
+        self.emit_raw_string_literal(bytecode, "inclusive");
+        bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(3));
     }
 
     /// Compile `rhs` as `[payload, tag]` and store both into `name`.
@@ -10157,9 +10195,9 @@ impl Compiler {
     /// Lazy range for-in (`int`/`byte`/`float`).
     ///
     /// Fast path when the iterable is a `Range` literal: locals for
-    /// `cur`/`end` only, no heap. First-class range values
-    /// (`let r = 0..n; for x in r`) are dicts `{start,end,inclusive}`
-    /// unpacked via `GetField`.
+    /// `cur`/`end` only, no heap. Unboxed first-class range locals
+    /// (`let r = 0..n; for x in r`) reuse those `[start, end]` slots.
+    /// Escaped / parameter dicts still unpack via `GetField`.
     ///
     /// `float` selects LEF/LEQF/ADDF with step `1.0`; otherwise LE/LEQ/ADD
     /// with step `1` (shared by `int` and `byte`).
@@ -10200,7 +10238,7 @@ impl Compiler {
         let end_slot = self.alloc_temp_slot();
 
         // Pratt often wraps `0..n` in Expr/Group. Peel so the counted
-        // locals path runs; first-class range values stay dict+GetField.
+        // locals path runs. Unboxed `let r = 0..n` locals skip GetField.
         match unwrap_expr_output(iterable).1.as_ref() {
             Expression::Range { start, end, .. } => {
                 self.skip_emit_ids_to_unwrapped(iterable);
@@ -10209,6 +10247,20 @@ impl Compiler {
                 self.bytecode.push_store_pop(cur_slot);
                 let mut end_bc = self.do_compile(end);
                 self.bytecode.append(&mut end_bc);
+                self.bytecode.push_store_pop(end_slot);
+            }
+            Expression::Identifier(name)
+                if self
+                    .unboxed_enum_kind(name)
+                    .is_some_and(crate::typechecking::return_layout::is_range_kind) =>
+            {
+                let (start_slot, end_from) = self
+                    .unboxed_enum_info(name)
+                    .expect("range kind implies slots");
+                self.skip_emit_ids_to_unwrapped(iterable);
+                self.bytecode.push_load(start_slot);
+                self.bytecode.push_store_pop(cur_slot);
+                self.bytecode.push_load(end_from);
                 self.bytecode.push_store_pop(end_slot);
             }
             _ => {
@@ -13001,9 +13053,10 @@ impl Compiler {
                 let arity = items.len() as u32;
                 bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(arity));
             }
-            // Lazy range value: dict `{ start, end, inclusive }` so
-            // first-class `let r = 0..n; for x in r` works via GetField.
-            // Direct `for x in 0..n` uses the no-heap fast path instead.
+            // Lazy range value: dict `{ start, end, inclusive }` on escape.
+            // Unboxed locals / two-word context keep `[start, end]` only
+            // (`inclusive` lives in the type / bind kind). Direct
+            // `for x in 0..n` uses the no-heap fast path instead.
             Expression::Range {
                 start,
                 end,
@@ -13011,13 +13064,18 @@ impl Compiler {
             } => {
                 let mut start_bc = self.do_compile(start);
                 bytecode.append(&mut start_bc);
-                self.emit_raw_string_literal(&mut bytecode, "start");
-                let mut end_bc = self.do_compile(end);
-                bytecode.append(&mut end_bc);
-                self.emit_raw_string_literal(&mut bytecode, "end");
-                bytecode.push_const(if *inclusive { 1 } else { 0 });
-                self.emit_raw_string_literal(&mut bytecode, "inclusive");
-                bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(3));
+                if self.unbox_enum_context > 0 {
+                    let mut end_bc = self.do_compile(end);
+                    bytecode.append(&mut end_bc);
+                } else {
+                    self.emit_raw_string_literal(&mut bytecode, "start");
+                    let mut end_bc = self.do_compile(end);
+                    bytecode.append(&mut end_bc);
+                    self.emit_raw_string_literal(&mut bytecode, "end");
+                    bytecode.push_const(if *inclusive { 1 } else { 0 });
+                    self.emit_raw_string_literal(&mut bytecode, "inclusive");
+                    bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(3));
+                }
             }
             Expression::Index(target, Some(index)) => {
                 if let Expression::Identifier(name) = target.1.as_ref()
@@ -13581,6 +13639,11 @@ impl Compiler {
                     if self.unbox_enum_context > 0 {
                         bytecode.push_load(payload);
                         bytecode.push_load(tag_slot);
+                    } else if let Some(inc) = self
+                        .unboxed_enum_kind(n)
+                        .and_then(crate::typechecking::return_layout::range_kind_inclusive)
+                    {
+                        self.emit_box_range_slots(&mut bytecode, payload, tag_slot, inc);
                     } else if let Some(kind) = self.unboxed_enum_kind(n).map(str::to_string) {
                         // Escape / unsure consumer: box the pair once here.
                         Self::emit_box_slots_to_enum(
@@ -14902,6 +14965,31 @@ impl Compiler {
             Expression::Access(receiver, field) => {
                 if self.try_emit_direct_class_field_access(&mut bytecode, receiver, field) {
                     return bytecode;
+                }
+                if let Expression::Identifier(name) = unwrap_expr_output(receiver).1.as_ref()
+                    && let Some((start_slot, end_slot)) = self.unboxed_enum_info(name)
+                    && let Some(inc) = self
+                        .unboxed_enum_kind(name)
+                        .and_then(crate::typechecking::return_layout::range_kind_inclusive)
+                {
+                    match *field {
+                        "start" => {
+                            self.skip_emit_ids_to_unwrapped(receiver);
+                            bytecode.push_load(start_slot);
+                            return bytecode;
+                        }
+                        "end" => {
+                            self.skip_emit_ids_to_unwrapped(receiver);
+                            bytecode.push_load(end_slot);
+                            return bytecode;
+                        }
+                        "inclusive" => {
+                            self.skip_emit_ids_to_unwrapped(receiver);
+                            bytecode.push_const(if inc { 1 } else { 0 });
+                            return bytecode;
+                        }
+                        _ => {}
+                    }
                 }
                 if let Expression::Identifier(name) = unwrap_expr_output(receiver).1.as_ref()
                     && self.unboxed_class_boxed_slot(name).is_none()

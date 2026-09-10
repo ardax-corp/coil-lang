@@ -24,6 +24,35 @@ pub fn is_two_word_product_kind(kind: &str) -> bool {
     kind == TWO_WORD_PRODUCT_KIND
 }
 
+/// Unboxed first-class `Range<T>` local: slots are `[start, end]`.
+pub const TWO_WORD_RANGE_KIND: &str = "__range";
+
+/// Unboxed first-class `RangeInclusive<T>` local: slots are `[start, end]`.
+pub const TWO_WORD_RANGE_INCLUSIVE_KIND: &str = "__range_inc";
+
+pub fn is_range_kind(kind: &str) -> bool {
+    kind == TWO_WORD_RANGE_KIND || kind == TWO_WORD_RANGE_INCLUSIVE_KIND
+}
+
+/// `Some(inclusive)` when `kind` is an unboxed range pair.
+pub fn range_kind_inclusive(kind: &str) -> Option<bool> {
+    if kind == TWO_WORD_RANGE_INCLUSIVE_KIND {
+        Some(true)
+    } else if kind == TWO_WORD_RANGE_KIND {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+pub fn range_kind(inclusive: bool) -> &'static str {
+    if inclusive {
+        TWO_WORD_RANGE_INCLUSIVE_KIND
+    } else {
+        TWO_WORD_RANGE_KIND
+    }
+}
+
 /// `Some(kind)` when direct `CALL`/`RETURN` of a function returning `ty`
 /// can move two words instead of boxing. Enum kinds are the enum name
 /// (`[payload, tag]`); [`TWO_WORD_PRODUCT_KIND`] is an arity-2 immediate
@@ -283,5 +312,14 @@ fn shape() -> Shape {
         let i = Ty::Con(INT.into());
         let ty = Ty::Tuple(vec![i.clone(), i.clone(), i]);
         assert_eq!(two_word_return_enum(&c, &ty), None);
+    }
+
+    #[test]
+    fn range_kinds_round_trip_inclusive() {
+        assert!(is_range_kind(TWO_WORD_RANGE_KIND));
+        assert!(is_range_kind(TWO_WORD_RANGE_INCLUSIVE_KIND));
+        assert!(!is_range_kind(TWO_WORD_PRODUCT_KIND));
+        assert_eq!(range_kind_inclusive(range_kind(false)), Some(false));
+        assert_eq!(range_kind_inclusive(range_kind(true)), Some(true));
     }
 }
