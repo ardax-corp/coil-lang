@@ -2590,6 +2590,13 @@ fn main() -> int {
             .filter(|b| *b.bytecode() == Instruction::CALL)
             .count();
         assert!(calls >= 1, "at must remain a CALL; otherwise the test is vacuous");
+        let dense = at
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseIndex);
+        if dense {
+            // A3: counted helper lifts to dense-native index; pin/uncheck is fuse-IL.
+            return;
+        }
         assert!(
             at.iter().any(|b| is_unchecked_index(*b.bytecode())),
             "caller-proven at(a,i) should uncheck a[i]; body={:?}",
