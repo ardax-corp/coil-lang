@@ -25,6 +25,25 @@ impl ArrayEscape {
     }
 }
 
+/// How a named `new C` local may be rewritten (Q2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClassEscape {
+    /// Field-only, non-escaping. Invisible field-SROA (consecutive slots).
+    Private,
+    /// Identity use (call, return, method, drop-as-value, alias, compare).
+    /// Materialize **one** heap instance and reuse it (Q1 box-once).
+    BoxOnce,
+    /// Stay heap from construction: `fn drop()`, arity 0 or > 32, parameters.
+    Heap,
+}
+
+impl ClassEscape {
+    /// Field slots are sound (private region, or box-at-identity).
+    pub fn stack_allocatable(self) -> bool {
+        matches!(self, Self::Private | Self::BoxOnce)
+    }
+}
+
 /// Vec length-changing methods that are a type error on `[T; N]` (Q3).
 pub fn is_fixed_array_grow_method(method: &str) -> bool {
     matches!(

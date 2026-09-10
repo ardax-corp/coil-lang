@@ -1,11 +1,10 @@
 //! In-frame escape facts for ObjEnum / small class values.
 //!
-//! Fail-closed: a local is frame-local only when every use stays in this
-//! frame (local match / class field load or store). Any whole-object use
-//! (call, return, aggregate, host/FFI, identity compare) keeps a named
-//! class heap-backed (COI-84 pin / S2j non-escaping only). Method
-//! receivers, aliases, nested captures, and `fn drop()` stay heap.
-//! Function parameters stay boxed.
+//! `frame_local` is the **private** (never-escaped) answer used by I3 MIR
+//! sidecar and enum unbox. Named `new C` identity uses are **Q2 box-once**
+//! in codegen (`unboxed_class_box`): field-only stays slots; call / return
+//! / method / alias / compare materialize one heap instance. `fn drop()`,
+//! arity 0 or > 32, and parameters stay heap from construction.
 
 use std::collections::{HashMap, HashSet};
 
@@ -908,7 +907,7 @@ fn main() {
         assert_eq!(
             frame_local_count(src),
             0,
-            "whole-object call-arg stays heap (COI-84 pin)"
+            "identity call-arg is not frame_local (Q2 boxes in codegen)"
         );
     }
 
