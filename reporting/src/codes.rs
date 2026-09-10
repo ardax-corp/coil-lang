@@ -105,6 +105,8 @@ pub enum ErrorCode {
     HostDloadDenied,
     /// `dload` path is not a compile-time string (would leak the runtime allowlist).
     HostDloadNonConst,
+    /// Length-changing method (`push` / `insert` / …) on a fixed `[T; N]`.
+    FixedArrayGrow,
 
     UnknownExpression,
     CodegenError,
@@ -185,6 +187,7 @@ impl ErrorCode {
             Self::HostFfiExecDenied => "E0409",
             Self::HostDloadDenied => "E0410",
             Self::HostDloadNonConst => "E0411",
+            Self::FixedArrayGrow => "E0412",
             Self::UnknownExpression => "E0800",
             Self::CodegenError => "E0801",
             Self::UnboundedRecursion => "E0802",
@@ -266,6 +269,7 @@ impl ErrorCode {
             Self::HostFfiExecDenied => "FFI process-exec is not granted",
             Self::HostDloadDenied => "dload stem is not granted",
             Self::HostDloadNonConst => "dload path must be a string literal",
+            Self::FixedArrayGrow => "[T; N] cannot grow",
             Self::UnknownExpression => "unknown expression in codegen",
             Self::CodegenError => "codegen error",
             Self::UnboundedRecursion => "unbounded recursion depth",
@@ -355,6 +359,7 @@ mod tests {
             | HostFfiExecDenied
             | HostDloadDenied
             | HostDloadNonConst
+            | FixedArrayGrow
             | UnknownExpression
             | CodegenError
             | UnboundedRecursion
@@ -426,6 +431,7 @@ mod tests {
             HostFfiExecDenied,
             HostDloadDenied,
             HostDloadNonConst,
+            FixedArrayGrow,
             UnknownExpression,
             CodegenError,
             UnboundedRecursion,
