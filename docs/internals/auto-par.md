@@ -197,3 +197,8 @@ Pool workers pin a TLS local deque tagged with the owning reactor identity.
 `submit` / join-help only push or pop that deque when it belongs to the same
 reactor; otherwise work goes through the shared injector. That keeps concurrent
 `Machine`s (parallel tests) and nested reactors from cross-feeding jobs.
+
+Shape selection after MIR / Q6–Q8 (AlwaysPar-to-cutoff vs top-site, counted
+`for` vs recursive fib, parked P0–P3): [auto-par-shapes.md](auto-par-shapes.md).
+That note is design-only; IPA policy is **deprioritized** pending tree-shake /
+reorder assessment. `COIL_AUTO_PAR` stays compile-time only.
