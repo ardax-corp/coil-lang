@@ -1160,7 +1160,7 @@ mod tests {
     }
 
     #[test]
-    fn debugger_attached_refuses_dense_opcodes() {
+    fn debugger_attached_may_dense_opcodes() {
         use common::Instruction;
         let src = r#"
 fn hot(float a, float b, int n) -> float {
@@ -1181,7 +1181,7 @@ fn main() {
         let _ = fs::create_dir_all(&dir);
         let path = dir.join("hot.hy");
         fs::write(&path, src).unwrap();
-        let session = compile_entry(path.to_str().unwrap(), HostGrants::deny_all())
+        let mut session = compile_entry(path.to_str().unwrap(), HostGrants::deny_all())
             .expect("compile debugger-attached hot");
         let dense = session.artifacts.bytecode.iter().any(|b| {
             matches!(
@@ -1205,7 +1205,12 @@ fn main() {
                     | Instruction::DensePush
             )
         });
-        assert!(!dense, "I7: debugger-attached must stay on fuse-IL");
+        assert!(dense, "B8: debugger-attached may keep dense reconstruct");
+        let reason = session.start();
+        assert!(
+            matches!(reason, StopReason::Halt),
+            "dense debug session must halt; reason={reason:?}"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

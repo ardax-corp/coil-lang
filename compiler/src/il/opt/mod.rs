@@ -93,8 +93,9 @@ pub struct OptimizeOptions {
     pub collect_stats: bool,
     /// Pure user `fn` names + entry labels for COI-99 length-proof barriers.
     pub pure_call_ctx: Option<super::pure_call::PureCallCtx>,
-    /// Dense specialize + MIR→LIR body replace. Off for `-Og` and
-    /// debugger-attached compiles (I7).
+    /// Dense specialize + MIR→LIR body replace. On for every named
+    /// opt level, including `-Og` (B8). Debugger-attached compiles
+    /// keep this on; the VM debugger steps the reconstruct.
     pub mir_specialize: bool,
 }
 

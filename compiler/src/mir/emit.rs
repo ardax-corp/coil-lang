@@ -30,11 +30,6 @@ pub fn emit_dense(
             "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
     }
-    if func.has_deopt_edge() {
-        return Err(LowerError::Refused(
-            "dense emit refuses Deopt (I7: VM debugger stays on fuse-IL)".into(),
-        ));
-    }
     if func.blocks.iter().any(|b| {
         b.insts.iter().any(|i| match i {
             MirInst::HostInvoke { native_id, .. } => {
@@ -669,11 +664,7 @@ pub(super) fn emit_inst(
                 }
             }
         }
-        MirInst::Deopt { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses Deopt (I7: VM debugger stays on fuse-IL)".into(),
-            ));
-        }
+        MirInst::Deopt { .. } => {}
         MirInst::String { .. }
         | MirInst::Print { .. }
         | MirInst::Format { .. }

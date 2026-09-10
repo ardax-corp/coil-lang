@@ -37,11 +37,6 @@ pub fn emit_lir(
             "MIR→LIR refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
         ));
     }
-    if func.has_deopt_edge() {
-        return Err(LowerError::Refused(
-            "MIR→LIR refuses Deopt (I7: bail to fuse-IL)".into(),
-        ));
-    }
     let plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &plan)?;
     let regs = coalesce_safe_latch_phis(func, regs);
@@ -628,11 +623,7 @@ fn emit_stored(
                 });
             }
         }
-        MirInst::Deopt { .. } => {
-            return Err(LowerError::Refused(
-                "MIR→LIR refuses Deopt (I7: bail to fuse-IL)".into(),
-            ));
-        }
+        MirInst::Deopt { .. } => {}
         MirInst::String { dest, idx } => {
             out.push(IlOp::String { idx: *idx, loc });
             if plan.need_slot[dest.index()] {
@@ -932,9 +923,7 @@ fn emit_stack(
                 Err(LowerError::Refused("GcBarrier has no alloc".into()))
             }
         }
-        MirInst::Deopt { .. } => Err(LowerError::Refused(
-            "MIR→LIR refuses Deopt (I7: bail to fuse-IL)".into(),
-        )),
+        MirInst::Deopt { .. } => Ok(()),
         MirInst::String { idx, .. } => {
             out.push(IlOp::String { idx: *idx, loc });
             Ok(())

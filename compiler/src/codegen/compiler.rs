@@ -297,11 +297,8 @@ impl Compiler {
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 
-    /// I7: debugger-attached compiles refuse dense / MIR→LIR shortcuts.
-    pub fn set_debugger_attached(&mut self, on: bool) {
-        if on {
-            self.opt_options.mir_specialize = false;
-        }
+    /// I7/B8: session flag only. Does not disable MIR specialize.
+    pub fn set_debugger_attached(&mut self, _on: bool) {
         self.bytecode.set_opt_options(self.opt_options.clone());
     }
 

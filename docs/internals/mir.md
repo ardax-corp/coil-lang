@@ -163,8 +163,9 @@ I6
 ([COI-297](https://linear.app/ardax/issue/COI-297/i6-effects-hostinvoke-as-mir-edges))
 types natives as SSA `HostInvoke` edges when `allow_effects` is set. I7
 ([COI-299](https://linear.app/ardax/issue/COI-299/i7-debugger-deopt-boundaries-on-mir))
-names `Deopt` stop / leave edges (`allow_deopt`). Debugger-attached
-and `-Og` skip dense + MIR→LIR so the VM debugger stays on fuse-IL
+names `Deopt` stop / leave edges (`allow_deopt`). **B8:** debugger-attached
+and `-Og` may dense + MIR→LIR; emit skips explicit `Deopt` (no maps).
+The VM debugger steps the reconstruct
 ([mir-deopt.md](mir-deopt.md)). I8
 ([COI-298](https://linear.app/ardax/issue/COI-298/i8-broaden-mir-emit-entry-post-i1-i3))
 lifts leftover bodies through MIR→LIR when there is no hard refuse.
@@ -293,7 +294,7 @@ heap-index. Width is eight `i64`/`f64` lanes; handlers call
 `coil-simd::lanes`. No userland SIMD syntax.
 
 Hard refuse (same spirit as dense): alloc/GC in the region, `match`,
-impure `CALL` / HostInvoke, debugger / `-Og`, heap words in vregs,
+impure `CALL` / HostInvoke, explicit `Deopt`, heap words in vregs,
 gather/scatter, loop-carried reductions (V1). Dense+Index mix stays
 fuse-IL. P12 HostInvoke packs are unchanged.
 
@@ -312,7 +313,7 @@ scalar (`s = (…((s+x0)+x1)…)`); `VFma` is mul-then-add (two
 roundings). No fast-math / contract flag. Hardware `fmadd` is not used.
 
 Same refuse map as V0 (alloc/GC, match, impure CALL/HostInvoke,
-debugger/`-Og`, heap words in vregs). Reductions without a heap load
+explicit `Deopt`, heap words in vregs). Reductions without a heap load
 stay dense (`s = s + i`). P12 HostInvoke packs stay first.
 
 Prove: `scan` in `examples/perf/vec_scan.hy`; saxpy store in

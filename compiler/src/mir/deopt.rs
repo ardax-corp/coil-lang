@@ -1,10 +1,10 @@
 //! I7 — debugger stop / deopt boundaries on MIR edges.
 //!
-//! The VM debugger on fuse-IL bytecode remains the v1 stop engine. This
-//! sidecar names where a later native or denser tier must pause or leave
-//! specialized code. Production specialize does not set
-//! [`crate::mir::LowerHints::allow_deopt`]; debugger-attached compiles
-//! refuse dense / MIR→LIR replace instead.
+//! The VM debugger steps reconstructed bytecode (fuse-IL, LIR, or dense).
+//! This sidecar names where a later native tier must pause or leave.
+//! Production specialize does not set
+//! [`crate::mir::LowerHints::allow_deopt`]. Explicit `Deopt` insts are
+//! skipped at emit (not encoded; no resume maps).
 
 use crate::il::IlOp;
 

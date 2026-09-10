@@ -91,7 +91,7 @@ pub struct Pipeline {
     host_grants: HostGrants,
     /// IL / inliner preset ([`crate::OptLevel`], COI-127 / COI-173). Default Standard.
     opt_level: crate::OptLevel,
-    /// I7: debugger-attached compiles refuse dense / MIR→LIR shortcuts.
+    /// I7: `coil debug` sets this; B8 does not disable MIR specialize.
     debugger_attached: bool,
     /// Collect IL opt counters for `--opt-stats` (COI-131).
     collect_opt_stats: bool,
@@ -1515,7 +1515,8 @@ impl Pipeline {
         }
     }
 
-    /// Refuse dense specialize and MIR→LIR replace (I7). `coil debug` sets this.
+    /// Mark a debugger-attached compile (I7). `coil debug` sets this.
+    /// B8: does not disable MIR specialize; stops stay on reconstructed bytecode.
     pub fn set_debugger_attached(&mut self, on: bool) {
         self.debugger_attached = on;
         if self.compiler.get().is_some() {

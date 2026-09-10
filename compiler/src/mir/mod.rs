@@ -27,8 +27,8 @@
 //! emit across alloc only when S2b maps exist (S2c), including mapped
 //! preheader `Make*` (S2d), Seek-less residuals (S2e), and S2f SROA /
 //! StoreIndex-array reuse. Impure HostInvoke / CALL are SSA barriers
-//! (I6); LICM hoist uses purity bits. Debugger-attached compiles refuse
-//! dense / MIR→LIR (I7). I8 entry is lift + cost gate after LIR
+//! (I6); LICM hoist uses purity bits. Debugger-attached / `-Og` still
+//! specialize (B8); explicit `Deopt` is skipped at emit. I8 entry is lift + cost gate after LIR
 //! reconstruct walls. Q6 counted `for`, Q7 one-word rec `CALL`, and Q8
 //! niche / two-slot `Br` are hygiene (lift, then cost) — not checklist
 //! refuses.
@@ -3258,7 +3258,7 @@ fn main() {
     }
 
     #[test]
-    fn i7_deopt_edges_visible_and_emit_refuses() {
+    fn i7_deopt_edges_visible_and_emit_skips() {
         let loc = DebugLoc {
             file: 0,
             start_byte: 0,
@@ -3296,8 +3296,13 @@ fn main() {
         g.verify().unwrap();
         assert!(g.has_deopt_edge());
         let mut pool = Vec::new();
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
-        assert!(emit_lir(&f, Some(Label(0)), &mut pool, false).is_err());
+        let dense = emit_dense(&f, Some(Label(0)), &mut pool, false).expect("skip Deopt");
+        let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("skip Deopt");
+        assert!(
+            !dense.iter().any(|op| matches!(op, IlOp::HostInvoke { .. })),
+            "Deopt must not encode as a host/native"
+        );
+        assert!(!lir.is_empty());
         let mut no = LowerHints::new("plain");
         no.slot_ty.insert(0, MirTy::I64);
         no.param_count = 1;
@@ -3306,7 +3311,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_debugger_attached_refuses_dense() {
+    fn pipeline_debugger_attached_and_og_may_dense() {
         let src = r#"
 fn hot(float a, float b, int n) -> float {
     let i = 0;
@@ -3322,9 +3327,17 @@ fn main() {
     let _ = hot(2.0, 1.0, 8);
 }
 "#;
+        let mut def = crate::Pipeline::new();
+        let (bc_def, constants) = def.compile_src(src).expect("compile default");
+        assert!(
+            bc_def.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "default must dense hot; opcodes={:?}",
+            bc_def.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+
         let mut attached = crate::Pipeline::new();
         attached.set_debugger_attached(true);
-        let (bc, constants) = attached
+        let (bc, constants_dbg) = attached
             .compile_src(src)
             .expect("compile debugger-attached");
         assert!(
@@ -3332,22 +3345,29 @@ fn main() {
             "flag must stick"
         );
         assert!(
-            bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
-            "I7 debugger-attached must refuse dense; opcodes={:?}",
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "B8 debugger-attached may dense; opcodes={:?}",
             bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
+        assert_eq!(
+            bc, bc_def,
+            "debugger-attached must not change Standard reconstruct"
+        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
-        vm.run_raw(&bc, &constants, attached.strings(), attached.static_slot_count());
+        vm.run_raw(&bc, &constants_dbg, attached.strings(), attached.static_slot_count());
+        let mut vm_def = machine::Machine::<64>::with_operand_capacity(64);
+        vm_def.run_raw(&bc_def, &constants, def.strings(), def.static_slot_count());
 
         let mut og = crate::Pipeline::new();
         og.set_opt_level(crate::OptLevel::Debug);
-        let (bc_og, _) = og.compile_src(src).expect("compile -Og");
+        let (bc_og, constants_og) = og.compile_src(src).expect("compile -Og");
         assert!(
-            bc_og
-                .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
-            "-Og must refuse dense specialize"
+            bc_og.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "B8 -Og may dense; opcodes={:?}",
+            bc_og.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
+        let mut vm_og = machine::Machine::<64>::with_operand_capacity(64);
+        vm_og.run_raw(&bc_og, &constants_og, og.strings(), og.static_slot_count());
     }
 
     #[test]

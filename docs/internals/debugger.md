@@ -34,8 +34,9 @@ gated calls fail typecheck (`E0406`–`E0411`). The compiled in-memory bytecode 
 the grant at run time, same as other compile-and-run paths.
 
 `coil debug` does **not** take `-Og` / `--opt-level`. The session always sets
-`Pipeline::set_debugger_attached(true)` (I7). Use `-Og` on `coil compile` /
-`coil dissect` when you want the same refuse without a debug controller.
+`Pipeline::set_debugger_attached(true)` (I7). **B8:** that flag no longer
+disables MIR specialize. Use `-Og` on `coil compile` / `coil dissect` for
+Basic IL cleanup (still may dense / LIR).
 
 ## IDE debugging (DAP)
 
@@ -98,8 +99,10 @@ breakpoints (`setFunctionBreakpoints`) are more reliable when line info is spars
   stack lines stay exact (unknown → no path / line 0).
 - Function breakpoints use live compile symbols (same FQN rules as `coil dissect --fn`).
 - Hot path: stop checks run only when a debug controller is attached.
-- **I7:** `coil debug` sets `Pipeline::set_debugger_attached(true)` so
-  dense specialize and MIR→LIR body replace stay off. Stops remain on
-  fuse-IL bytecode (this debugger). **MIR `Deopt` metadata is unused** by
-  `coil-debug` / DAP — it names edges for a later native tier; see
+- **I7 / B8:** `coil debug` sets `Pipeline::set_debugger_attached(true)`.
+  Stops remain on reconstructed bytecode (fuse-IL, LIR, or dense).
+  Function breakpoints and `stepi` work on specialized bodies.
+  **MIR `Deopt` metadata is unused** by `coil-debug` / DAP — emit skips
+  those insts (no resume maps). Named `let` slots can be stale after SSA
+  remap; params usually keep their slots. See
   [mir-deopt.md](mir-deopt.md).
