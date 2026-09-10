@@ -170,7 +170,7 @@ fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
 }
 
 /// Knobs that are not pass names.
-fn base_knobs(level: OptLevel) -> OptimizeOptions {
+fn base_knobs(_level: OptLevel) -> OptimizeOptions {
     let mut o = all_off();
     o.mir_specialize = true;
     o
