@@ -3642,7 +3642,13 @@ fn main() {
                     assert_eq!(refuse, None, "Q9 R1: STRING is not a LIR wall");
                     let _ = lir;
                 }
-                "main" => assert_eq!(refuse, Some(LirRefuse::Call)),
+                "main" => {
+                    assert_ne!(
+                        refuse,
+                        Some(LirRefuse::Call),
+                        "B3: two-slot helper CALL is not a LIR wall"
+                    );
+                }
                 _ => {}
             }
         }
