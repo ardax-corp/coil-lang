@@ -57,10 +57,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///     Eight numeric lanes; execution via `coil-simd`. HostInvoke packs stay.
 /// 9 — compiler-only `VReduce` / `VFma` (S5b V1). Horizontal left-fold
 ///     add and mul-then-add FMA; `coil-simd` lanes; no fast-math.
+/// 10 — dense-native heap ops (COI-335): `DenseIndex` / `DenseStoreIndex`
+///     / `DenseArrayLen` / `DenseMake` / `DensePush`.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 9;
+pub const ARCHIVE_MINOR: u16 = 10;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -345,9 +347,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 9);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 9));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.9");
+        assert_eq!(ARCHIVE_MINOR, 10);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 10));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.10");
     }
 
     #[test]
