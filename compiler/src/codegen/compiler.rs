@@ -4641,6 +4641,14 @@ impl Compiler {
             let Some(cname) = Checker::class_name_of_ty(&ty) else {
                 return false;
             };
+            if self.decorated_class_ctors.contains_key(cname)
+                || self
+                    .checker
+                    .resolve_class_key(cname)
+                    .is_some_and(|k| self.decorated_class_ctors.contains_key(&k))
+            {
+                return false;
+            }
             let n = self
                 .context
                 .classes
