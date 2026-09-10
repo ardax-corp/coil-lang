@@ -6978,6 +6978,59 @@ fn main() {
 }
 
 #[test]
+fn b6_vec_push_maps_and_nsieve_checksum() {
+    let src = include_str!("../../examples/perf/nsieve.hy");
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile nsieve");
+    assert!(
+        pipeline
+            .stack_maps()
+            .iter()
+            .any(|m| !m.safepoints.is_empty()),
+        "B6 nsieve Vec.push should bind grow maps: {:?}",
+        pipeline.stack_maps()
+    );
+    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(out, "1900");
+}
+
+#[test]
+fn b6_call_plus_make_enum_maps() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+enum Box {
+    Wrap(int),
+}
+fn leaf(int n) -> int {
+    return n + 1;
+}
+fn wrap(int n) -> Box {
+    return Box::Wrap(leaf(n));
+}
+fn main() {
+    let b = wrap(2);
+    let v = match b {
+        Box::Wrap(x) => x,
+    };
+    write(stdout(), to_bytes(format("%i", v)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    assert!(
+        pipeline
+            .stack_maps()
+            .iter()
+            .any(|m| !m.safepoints.is_empty()),
+        "B6 CALL+MakeEnum should bind maps: {:?}",
+        pipeline.stack_maps()
+    );
+    let out = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(out, "3");
+}
+
+#[test]
 fn result_heap_churn_example_checksum() {
     let src = include_str!("../../examples/perf/result_heap_churn.hy");
     let output = run_example_src(src);

@@ -576,6 +576,30 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// In-place grow (B6). Dest is `heapref`. Pair with [`Self::ins_gc_barrier`].
+    pub fn ins_array_push(
+        &mut self,
+        array: ValueId,
+        value: ValueId,
+    ) -> Result<ValueId, MirError> {
+        let at = self.resolve_ty(array);
+        if at != MirTy::HeapRef && at != MirTy::Value {
+            return Err(MirError::msg(format!("ArrayPush array is {at}")));
+        }
+        let vt = self.resolve_ty(value);
+        if !vt.is_word_lane() && vt != MirTy::Value {
+            return Err(MirError::msg(format!("ArrayPush value is {vt}")));
+        }
+        let dest = self.alloc(MirTy::HeapRef);
+        self.push(MirInst::ArrayPush {
+            dest,
+            array: self.resolve(array),
+            value: self.resolve(value),
+        })?;
+        self.snapshot_slots(dest);
+        Ok(dest)
+    }
+
     /// Heap alloc (I5). Dest is `heapref`. Does not emit a barrier; call
     /// [`Self::ins_gc_barrier`] so the safepoint edge is visible.
     pub fn ins_alloc(

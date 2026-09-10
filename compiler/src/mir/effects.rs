@@ -43,6 +43,7 @@ impl MirInst {
             | Self::Deopt { .. }
             | Self::FieldStore { .. }
             | Self::StoreIndex { .. }
+            | Self::ArrayPush { .. }
             | Self::Print { .. }
             | Self::Format { .. }
             | Self::Stringify { .. } => true,

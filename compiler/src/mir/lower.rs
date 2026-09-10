@@ -900,6 +900,17 @@ fn lower_byte(
             let unchecked = *byte.bytecode() == Instruction::StoreIndexUnchecked;
             lower_store_index(b, tos, unchecked)
         }
+        Instruction::ArrayPush if hints.allow_alloc => {
+            let value = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("ArrayPush stack".into()))?;
+            let array = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("ArrayPush stack".into()))?;
+            let obj = b.ins_array_push(array, value)?;
+            tos.push(b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])?);
+            Ok(())
+        }
         Instruction::Seek if hints.allow_match => Ok(()),
         inst if is_alloc_inst(inst) && hints.allow_alloc => {
             let (type_id, nfields) = if inst == Instruction::InitTyped {

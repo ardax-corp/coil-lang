@@ -118,7 +118,7 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
 mod tests {
     use super::*;
     use crate::il::{IlJumpKind, IlOp, Label};
-    use common::DebugLoc;
+    use common::{Byte, DebugLoc, Instruction};
 
     fn loc() -> DebugLoc {
         DebugLoc::unknown()
@@ -276,6 +276,20 @@ mod tests {
         assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
         assert_eq!(lir_refuse_with(&ops, &[], true), None);
         assert!(lir_eligible_with(&ops, &[], true));
+    }
+
+    #[test]
+    fn b6_mapped_array_push_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::byte(Byte::new(Instruction::ArrayPush)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_with(&ops, &[], true), None);
     }
 
     #[test]

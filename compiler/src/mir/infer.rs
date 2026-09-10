@@ -171,8 +171,8 @@ pub fn infer_stack_map(
 enum InferMode {
     Dense,
     Lir,
-    /// S2b sidecar: alloc ops are `HeapRef`. User `CALL` still fails
-    /// this walk (LIR / map cannot reconstruct CALL — B3, not Q7).
+    /// S2b sidecar: alloc / grow ops are `HeapRef`. One-word `CALL`
+    /// (Q7) and two-slot helper `CALL` (B3) type so CALL+alloc drafts bind.
     Map,
 }
 
@@ -412,6 +412,10 @@ fn infer_walk(
                 Instruction::StoreIndex | Instruction::StoreIndexUnchecked => {
                     apply_store_index(&mut stack, &mut slot_ty, &mut pool_ty, false)?;
                 }
+                Instruction::ArrayPush if mode.allows_alloc(allow_alloc) => {
+                    apply_array_push(&mut stack, &mut slot_ty, &mut pool_ty)?;
+                }
+                Instruction::DenseArrayPush if mode.allows_alloc(allow_alloc) => {}
                 Instruction::INC | Instruction::DEC => {
                     let (slot, _, is_float) = byte.inc_dec_parts();
                     let ty = if is_float { MirTy::F64 } else { MirTy::I64 };
@@ -501,7 +505,8 @@ fn infer_walk(
                 ..
             } if matches!(kind, EntryKind::Call | EntryKind::TailCall)
                 && (mode == InferMode::Dense
-                    || (mode.lir_shape()
+                    || mode == InferMode::Map
+                    || (mode == InferMode::Lir
                         && *ret_words == 2
                         && matches!(kind, EntryKind::Call))) =>
             {
@@ -712,6 +717,15 @@ fn infer_walk(
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: None,
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayPush => {
+                let _ = stack.pop();
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::HeapRef),
                     imm: None,
                 });
             }
@@ -926,6 +940,31 @@ fn apply_format(
         }
         _ => Err(LowerError::Refused("format".into())),
     }
+}
+
+fn apply_array_push(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+) -> Result<(), LowerError> {
+    let val = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("ArrayPush stack".into()))?;
+    let arr = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("ArrayPush stack".into()))?;
+    paint(slot_ty, pool_ty, arr, MirTy::HeapRef)?;
+    if let Some(ty) = val.ty {
+        if ty.is_word_lane() {
+            paint(slot_ty, pool_ty, val, ty)?;
+        }
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::HeapRef),
+        imm: None,
+    });
+    Ok(())
 }
 
 fn push_map_alloc(stack: &mut Vec<Cell>, arity: usize) -> Result<(), LowerError> {

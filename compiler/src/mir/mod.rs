@@ -2297,6 +2297,35 @@ fn main() {
     }
 
     #[test]
+    fn b6_array_push_lowers_and_maps() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::byte(Byte::new(Instruction::ArrayPush)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("grow");
+        hints.allow_alloc = true;
+        hints.slot_ty.insert(0, MirTy::HeapRef);
+        let f = try_lower_numeric(&ops, &hints).expect("lower ArrayPush");
+        f.verify().unwrap();
+        assert!(f.has_gc_edge());
+        assert!(f.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::ArrayPush { .. }))
+        }));
+        let draft = super::stackmap::try_build_draft(&ops, "grow", 1, &[], &[]).expect("maps");
+        assert_eq!(draft.sites.len(), 1);
+        let mut pool = Vec::new();
+        assert!(
+            try_lower_abi_body(&ops, "grow", 1, &mut pool).is_some(),
+            "mapped ArrayPush may take LIR"
+        );
+    }
+
     fn i5_init_typed_lowers_object_alloc() {
         let loc = loc();
         let ops = vec![

@@ -586,6 +586,19 @@ fn emit_stored(
                 loc,
             });
         }
+        MirInst::ArrayPush {
+            dest,
+            array,
+            value,
+        } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::byte(Byte::new(Instruction::ArrayPush)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::HostInvoke { .. } => {
             return Err(LowerError::Refused(
                 "MIR→LIR leafs do not emit HostInvoke (dense W4)".into(),
@@ -856,6 +869,23 @@ fn emit_stack(
         MirInst::ArrayLen { dest, array } => {
             emit_stack(out, *array, func, plan, regs, pool, loc)?;
             out.push(IlOp::byte(Byte::new(Instruction::ArrayLen)));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Dup { loc });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
+        MirInst::ArrayPush {
+            dest,
+            array,
+            value,
+        } => {
+            emit_stack(out, *array, func, plan, regs, pool, loc)?;
+            emit_stack(out, *value, func, plan, regs, pool, loc)?;
+            out.push(IlOp::byte(Byte::new(Instruction::ArrayPush)));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::Dup { loc });
                 out.push(IlOp::StorePop {
