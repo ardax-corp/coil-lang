@@ -184,7 +184,9 @@ One-word ABI ([`compiler/src/mir/abi.rs`](../../compiler/src/mir/abi.rs)):
 - **Two-slot / niche:** refuse (M4 / P3 LIR). `CallIndirect` refuses.
   Mutual recursion stays refuse. **Q7:** one-word self-`CALL` / `TailCall`
   may dense after convoy fused returns unfuse. Keep only when emit cost
-  ≤ fuse-IL. Tight `tak` / `fib` lose that gate (measured Seek tax).
+  ≤ fuse-IL. **B2** emits CALL args/results on the operand stack and
+  skips prologue `Seek` when only param slots are live, so tight
+  `tak` / `fib` can win that gate.
 
 `IlModule` specializes **bottom-up**: a body may `CALL` only after the
 callee is already in the dense ABI map. Infer/lower treat that `CALL`

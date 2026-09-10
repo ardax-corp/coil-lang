@@ -90,7 +90,7 @@ not stalled. Unicode / regex stay out until a later cut. Ladder:
 | `FORMAT` / string ops | **Q9 R1** MIR→LIR (`String` / `Print` / `Format` / `Stringify`); dense infer still refuses; cost gate may keep fuse-IL | **I4** / **Q9** — [q9-format-string.md](q9-format-string.md) |
 | Impure HostInvoke / IO / clocks / GC natives | SSA edge + barrier; S3 dense emit (except I4 string bytes); LICM never hoists impure | **I6** / **S3** |
 | Debugger stops / deopt | SSA `Deopt` + implicit leave edges; debugger-attached / `-Og` refuse dense + LIR | **I7** |
-| Recursion (`tak` / `fib`) | fuse-IL on tight leafs; dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene. Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense. `tak` / `fib` lose the cost gate (Seek + STORE) — that Seek tax is **B2**, not an entry wall. Mutual / two-slot stay refuse |
+| Recursion (`tak` / `fib`) | fuse-IL or dense when cost ≤ fuse | **Q7** (#387) + **B1** entry hygiene + **B2** CALL convoy. Convoy fused returns unfuse; one-word self-`CALL` / `TailCall` may dense without a prologue Seek on param-only leafs. Mutual / two-slot stay refuse |
 | `for` / iterators | **Q6 counted desugar** on array / Vec / `[T; N]` / literal range helpers (`for_in_sum` `sum`, `for_in_range`); `main` + format and user `Iterator` / coro / dict / first-class range stay fuse-IL | phased ladder — [q6-iterator-protocol.md](q6-iterator-protocol.md); not a permanent fuse-IL ceiling |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | stay unless a later island has a regular reason |
 | Cranelift / native | parked (P5) | not an island delivery vehicle |

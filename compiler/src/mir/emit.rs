@@ -4,6 +4,7 @@ use common::{dense, Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
+use super::call_convoy::ConvoyPlan;
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -44,16 +45,21 @@ pub fn emit_dense(
             "dense emit refuses I4 string HostInvoke".into(),
         ));
     }
-    let (regs, scratch) = assign_regs(func)?;
+    let plan = ConvoyPlan::new(func, entry_label);
+    let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
     let regs = coalesce_safe_latch_phis(func, regs);
-    let gather = gather_window(func);
-    let max_reg = regs
+    let gather = gather_window(func, entry_label);
+    let mut max_slot = plan
+        .need_slot
         .iter()
-        .copied()
+        .enumerate()
+        .filter(|(_, n)| **n)
+        .map(|(i, _)| regs[i])
         .max()
-        .unwrap_or(0)
-        .max(scratch)
-        .saturating_add(gather);
+        .unwrap_or(0);
+    if gather > 0 {
+        max_slot = max_slot.max(scratch.saturating_add(gather.saturating_sub(1)));
+    }
     let loc = DebugLoc::unknown();
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
@@ -72,14 +78,18 @@ pub fn emit_dense(
 
     let mut out = Vec::new();
     out.push(IlOp::Label(block_lab[func.entry.index()]));
-    out.push(IlOp::byte(
-        Byte::new(Instruction::Seek).with_operand_u32(u32::from(max_reg) + 1),
-    ));
+    let frame = u32::from(max_slot) + 1;
+    if frame > func.params.len() as u32 {
+        out.push(IlOp::byte(
+            Byte::new(Instruction::Seek).with_operand_u32(frame),
+        ));
+    }
 
     for block in &func.blocks {
         if block.id != func.entry {
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
+        let mut stacked: Vec<ValueId> = Vec::new();
         for inst in &block.insts {
             if inst.is_phi() {
                 continue;
@@ -92,16 +102,40 @@ pub fn emit_dense(
             if is_tail_call_inst(block, inst) {
                 continue;
             }
+            if let MirInst::Call { dest, target, args } = inst {
+                emit_call(
+                    &mut out,
+                    &mut stacked,
+                    crate::il::EntryKind::Call,
+                    *dest,
+                    *target,
+                    args,
+                    func,
+                    &plan,
+                    &regs,
+                    scratch,
+                    pool,
+                    loc,
+                )?;
+                continue;
+            }
+            if !plan.needs_slot(inst.dest()) {
+                continue;
+            }
             emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, across_alloc)?;
+            stacked.clear();
         }
         emit_term(
             &mut out,
+            &mut stacked,
             block,
             func,
+            &plan,
             &regs,
             scratch,
             &block_lab,
             &mut next_label,
+            pool,
             loc,
         )?;
     }
@@ -112,7 +146,7 @@ pub(super) fn max_label_hint(entry: Option<Label>) -> u32 {
     entry.map(|Label(id)| id.saturating_add(1)).unwrap_or(1)
 }
 
-pub(super) fn assign_regs(func: &MirFunc) -> Result<(Vec<u8>, u8), LowerError> {
+pub(super) fn assign_regs(func: &MirFunc, need_slot: &[bool]) -> Result<(Vec<u8>, u8), LowerError> {
     let n = func.types.len();
     let mut reg = vec![0u8; n];
     for (i, &p) in func.params.iter().enumerate() {
@@ -123,6 +157,9 @@ pub(super) fn assign_regs(func: &MirFunc) -> Result<(Vec<u8>, u8), LowerError> {
     }
     let mut next = func.params.len();
     for i in 0..n {
+        if !need_slot.get(i).copied().unwrap_or(false) {
+            continue;
+        }
         if func.params.iter().any(|p| p.index() == i) {
             continue;
         }
@@ -240,8 +277,11 @@ fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
 pub(super) fn emit_br_cond(
     out: &mut Vec<IlOp>,
     block: &super::func::MirBlock,
+    func: &MirFunc,
+    plan: &ConvoyPlan,
     regs: &[u8],
     cond: ValueId,
+    pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     if let Some(MirInst::Cmp {
@@ -249,14 +289,38 @@ pub(super) fn emit_br_cond(
     }) = block.insts.iter().find(|inst| {
         matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
     }) {
+        if plan.needs_slot(*lhs)
+            && let Some(imm) = tree_i16(func, plan, *rhs)
+        {
+            out.push(IlOp::BinSlotImm {
+                op: stack_cmp_op(*op, *ty)? as u8,
+                slot: regs[lhs.index()],
+                imm,
+                loc,
+            });
+            return Ok(());
+        }
         out.push(IlOp::Load {
             slot: u32::from(regs[lhs.index()]),
             loc,
         });
-        out.push(IlOp::Load {
-            slot: u32::from(regs[rhs.index()]),
-            loc,
-        });
+        if plan.needs_slot(*rhs) {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[rhs.index()]),
+                loc,
+            });
+        } else {
+            emit_stack_value(
+                out,
+                &mut Vec::new(),
+                *rhs,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            )?;
+        }
         out.push(IlOp::Bin {
             op: stack_cmp_op(*op, *ty)?,
             loc,
@@ -576,12 +640,15 @@ pub(super) fn emit_inst(
 
 fn emit_term(
     out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
     block: &super::func::MirBlock,
     func: &MirFunc,
+    plan: &ConvoyPlan,
     regs: &[u8],
     scratch: u8,
     block_lab: &[Label],
     next_label: &mut u32,
+    pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     let Some(term) = &block.term else {
@@ -606,7 +673,7 @@ fn emit_term(
         } => {
             let t_moves = phi_moves(func, block.id, *taken, regs, scratch);
             let f_moves = phi_moves(func, block.id, *not_taken, regs, scratch);
-            emit_br_cond(out, block, regs, *cond, loc)?;
+            emit_br_cond(out, block, func, plan, regs, *cond, pool, loc)?;
             if t_moves.is_empty() && f_moves.is_empty() {
                 emit_cond_jumps(
                     out,
@@ -658,21 +725,24 @@ fn emit_term(
             if let Some(v) = lo {
                 if let Some(MirInst::Call { dest, target, args }) = block.insts.last() {
                     if *dest == *v {
-                        emit_dense_push(out, args, regs, scratch, loc)?;
-                        out.push(IlOp::Entry {
-                            kind: crate::il::EntryKind::TailCall,
-                            arity: args.len() as u32,
-                            target: *target,
+                        emit_call(
+                            out,
+                            stacked,
+                            crate::il::EntryKind::TailCall,
+                            *dest,
+                            *target,
+                            args,
+                            func,
+                            plan,
+                            regs,
+                            scratch,
+                            pool,
                             loc,
-                            ret_words: 1,
-                        });
+                        )?;
                         return Ok(());
                     }
                 }
-                out.push(IlOp::Load {
-                    slot: u32::from(regs[v.index()]),
-                    loc,
-                });
+                emit_stack_value(out, stacked, *v, func, plan, regs, pool, loc)?;
             } else {
                 out.push(IlOp::Const { imm: 0, loc });
             }
@@ -1005,12 +1075,13 @@ fn cmp_kind(op: MirCmpOp, ty: MirTy) -> Result<u8, LowerError> {
     Ok(dense::pack_cmp(lane, pred))
 }
 
-fn gather_window(func: &MirFunc) -> u8 {
+fn gather_window(func: &MirFunc, self_entry: Option<Label>) -> u8 {
     let mut n = 0u8;
     for b in &func.blocks {
         for inst in &b.insts {
             let w = match inst {
-                MirInst::Call { args, .. } | MirInst::HostInvoke { args, .. } => args.len(),
+                MirInst::Call { args, target, .. } if Some(*target) != self_entry => args.len(),
+                MirInst::HostInvoke { args, .. } => args.len(),
                 MirInst::Alloc { elems, .. } => elems.len(),
                 _ => 0,
             };
@@ -1057,6 +1128,263 @@ fn is_tail_call_inst(block: &super::func::MirBlock, inst: &MirInst) -> bool {
         }) if v == *dest => matches!(block.insts.last(), Some(MirInst::Call { dest: d, .. }) if d == dest),
         _ => false,
     }
+}
+
+fn emit_call(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    kind: crate::il::EntryKind,
+    dest: ValueId,
+    target: crate::il::Label,
+    args: &[ValueId],
+    func: &MirFunc,
+    plan: &ConvoyPlan,
+    regs: &[u8],
+    scratch: u8,
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if !plan.is_self_call(target) {
+        stacked.clear();
+        emit_dense_push(out, args, regs, scratch, loc)?;
+        out.push(IlOp::Entry {
+            kind,
+            arity: args.len() as u32,
+            target,
+            loc,
+            ret_words: 1,
+        });
+        if kind != crate::il::EntryKind::TailCall && plan.needs_slot(dest) {
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        return Ok(());
+    }
+    emit_args_on_stack(out, stacked, args, func, plan, regs, pool, loc)?;
+    out.push(IlOp::Entry {
+        kind,
+        arity: args.len() as u32,
+        target,
+        loc,
+        ret_words: 1,
+    });
+    let arity = args.len();
+    if stacked.len() >= arity {
+        stacked.truncate(stacked.len() - arity);
+    } else {
+        stacked.clear();
+    }
+    if kind == crate::il::EntryKind::TailCall {
+        return Ok(());
+    }
+    if plan.needs_slot(dest) {
+        out.push(IlOp::StorePop {
+            slot: u32::from(regs[dest.index()]),
+            loc,
+        });
+    } else {
+        stacked.push(dest);
+    }
+    Ok(())
+}
+
+fn emit_args_on_stack(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    args: &[ValueId],
+    func: &MirFunc,
+    plan: &ConvoyPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if !args.is_empty() && stacked.ends_with(args) {
+        return Ok(());
+    }
+    for &a in args {
+        emit_stack_value(out, stacked, a, func, plan, regs, pool, loc)?;
+    }
+    Ok(())
+}
+
+fn emit_stack_value(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    v: ValueId,
+    func: &MirFunc,
+    plan: &ConvoyPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if stacked.last() == Some(&v) {
+        return Ok(());
+    }
+    if plan.needs_slot(v) {
+        out.push(IlOp::Load {
+            slot: u32::from(regs[v.index()]),
+            loc,
+        });
+        stacked.push(v);
+        return Ok(());
+    }
+    let Some((bid, idx)) = plan.def[v.index()] else {
+        return Err(LowerError::Refused("dense convoy undef".into()));
+    };
+    match &func.block(bid).insts[idx] {
+        MirInst::Const { c, .. } => {
+            push_stack_const(out, *c, pool, loc)?;
+            stacked.push(v);
+            Ok(())
+        }
+        MirInst::Bin {
+            dest,
+            op,
+            ty,
+            lhs,
+            rhs,
+        } => {
+            emit_stack_bin(out, stacked, *op, *ty, *lhs, *rhs, *dest, func, plan, regs, pool, loc)
+        }
+        MirInst::Call { dest, .. } if *dest == v => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[v.index()]),
+                loc,
+            });
+            stacked.push(v);
+            Ok(())
+        }
+        _ => Err(LowerError::Refused("dense convoy value".into())),
+    }
+}
+
+fn emit_stack_bin(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    op: MirBinOp,
+    ty: MirTy,
+    lhs: ValueId,
+    rhs: ValueId,
+    dest: ValueId,
+    func: &MirFunc,
+    plan: &ConvoyPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    let stack_op = stack_bin_op(op, ty)?;
+    if stacked.len() >= 2
+        && stacked[stacked.len() - 2] == lhs
+        && stacked[stacked.len() - 1] == rhs
+    {
+        out.push(IlOp::Bin {
+            op: stack_op,
+            loc,
+        });
+        stacked.pop();
+        stacked.pop();
+        stacked.push(dest);
+        return Ok(());
+    }
+    if plan.needs_slot(lhs)
+        && let Some(imm) = tree_i16(func, plan, rhs)
+    {
+        out.push(IlOp::BinSlotImm {
+            op: stack_op as u8,
+            slot: regs[lhs.index()],
+            imm,
+            loc,
+        });
+        stacked.push(dest);
+        return Ok(());
+    }
+    emit_stack_value(out, stacked, lhs, func, plan, regs, pool, loc)?;
+    emit_stack_value(out, stacked, rhs, func, plan, regs, pool, loc)?;
+    out.push(IlOp::Bin {
+        op: stack_op,
+        loc,
+    });
+    stacked.pop();
+    stacked.pop();
+    stacked.push(dest);
+    Ok(())
+}
+
+fn tree_i16(func: &MirFunc, plan: &ConvoyPlan, v: ValueId) -> Option<i16> {
+    let (bid, idx) = plan.def[v.index()]?;
+    let MirInst::Const { c, .. } = &func.block(bid).insts[idx] else {
+        return None;
+    };
+    let n = match *c {
+        MirConst::I64(x) => x,
+        MirConst::I32(x) => i64::from(x),
+        MirConst::Bool(x) => i64::from(x),
+        _ => return None,
+    };
+    i16::try_from(n).ok()
+}
+
+fn stack_bin_op(op: MirBinOp, ty: MirTy) -> Result<Instruction, LowerError> {
+    Ok(match (op, ty.is_float()) {
+        (MirBinOp::Add, false) => Instruction::ADD,
+        (MirBinOp::Add, true) => Instruction::ADDF,
+        (MirBinOp::Sub, false) => Instruction::SUB,
+        (MirBinOp::Sub, true) => Instruction::SUBF,
+        (MirBinOp::Mul, false) => Instruction::MUL,
+        (MirBinOp::Mul, true) => Instruction::MULF,
+        (MirBinOp::Div, false) => Instruction::DIV,
+        (MirBinOp::Div, true) => Instruction::DIVF,
+        (MirBinOp::Rem, false) => Instruction::MOD,
+        (MirBinOp::Rem, true) => Instruction::MODF,
+        (MirBinOp::BitAnd, _) => Instruction::BITAND,
+        (MirBinOp::BitOr, _) => Instruction::BITOR,
+        (MirBinOp::Xor, _) => Instruction::XOR,
+        (MirBinOp::Shl, _) => Instruction::SHL,
+        (MirBinOp::Shr, _) => Instruction::SHR,
+    })
+}
+
+fn push_stack_const(
+    out: &mut Vec<IlOp>,
+    c: MirConst,
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    match c {
+        MirConst::I64(v) => {
+            if let Ok(imm) = i32::try_from(v) {
+                if imm >= 0 {
+                    out.push(IlOp::Const { imm, loc });
+                    return Ok(());
+                }
+            }
+            let idx = u32::from(intern_pool(pool, v as u64)?);
+            out.push(IlOp::ConstPool { idx, loc });
+        }
+        MirConst::I32(v) => {
+            if v >= 0 {
+                out.push(IlOp::Const { imm: v, loc });
+            } else {
+                let idx = u32::from(intern_pool(pool, v as i64 as u64)?);
+                out.push(IlOp::ConstPool { idx, loc });
+            }
+        }
+        MirConst::Bool(v) => out.push(IlOp::Const {
+            imm: i32::from(v),
+            loc,
+        }),
+        MirConst::F64(bits) => {
+            let idx = u32::from(intern_pool(pool, bits)?);
+            out.push(IlOp::ConstPool { idx, loc });
+        }
+        MirConst::F32(bits) => {
+            let idx = u32::from(intern_pool(pool, u64::from(bits))?);
+            out.push(IlOp::ConstPool { idx, loc });
+        }
+    }
+    Ok(())
 }
 
 fn emit_dense_push(

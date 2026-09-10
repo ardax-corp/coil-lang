@@ -263,8 +263,9 @@ pub enum MirInst {
         native_id: u16,
         args: Vec<ValueId>,
     },
-    /// Dense→dense `CALL` (COI-291). Args are typed SSA; emit `LOAD`s +
-    /// one-word `Entry` + `STORE` (same bits as the callee's slots `0..n`).
+    /// Dense→dense `CALL` (COI-291). Args stay on the operand stack
+    /// (LOAD / BinSlotImm convoy); one-word `Entry`. `STORE` only when the
+    /// dest is live in a slot. Same bits as the callee's slots `0..n`.
     Call {
         dest: ValueId,
         target: crate::il::Label,
