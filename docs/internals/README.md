@@ -9,7 +9,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [MIR language islands](mir-islands.md) | COI-292 I0: islands vs full-MIR rewrite; I1–I8 ladder; I8 IL→MIR entry; I4 FORMAT/string **reopened** under Q9 (delivery ladder); A/B rules |
 | [Language quirks](language-quirks.md) | Locked Q1–Q9 (2026-09-10): `[T; N]` box-once, class field-SROA, grow type error, defined `i % N`, panic vs raise, roadmap Q6–Q9 |
 | [Q6 iterator protocol](q6-iterator-protocol.md) | Counted desugar for `for` (array / literal range / B5 first-class range locals); later rungs for user Iterator / coro |
-| [Q9 format / string](q9-format-string.md) | I4 reopen: SSA + LIR reconstruct of `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; later rungs for bytes / maps / unicode |
+| [Q9 format / string](q9-format-string.md) | I4 reopen: SSA + LIR reconstruct of `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; R2 bytes HostInvoke; R3 maps; R4 unicode leftover |
 | [Opt generalization](opt-generalization.md) | COI-333 A0: MIR default + one object story + dense-native + cost gate; A4 measurement; **B0** audit + **B1** Q6–Q8 entry hygiene |
 | [MIR deopt / debugger](mir-deopt.md) | COI-299 I7: stop/deopt edges; VM debugger stays source of truth |
 | [Specialize refuse](specialize-refuse.md) | Hard walls vs Q6–Q9 ladders / cost gate; B1 entry hygiene; B2 CALL convoy; B3 two-slot CALL; B7 sibling / mutual TailCall |

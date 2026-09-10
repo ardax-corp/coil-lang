@@ -19,7 +19,7 @@ rungs are **not** in this table — see ladders below and
 
 | Wall | Today | Commit |
 |------|-------|--------|
-| Unicode / regex in SSA | out of MIR | later Q9 rung (R4 / B9) |
+| Unicode / regex in SSA | out of MIR | Q9 **R4** leftover after **B9** / R3 maps |
 | User `Iterator` / coro / dict / parameter range `for` | fuse-IL | later Q6 rung |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
@@ -40,7 +40,7 @@ rungs are **not** in this table — see ladders below and
 | Self two-slot `CALL` / `RETURN` | fuse-IL | leftover after B7 |
 | Two-slot helper `CALL` / `RETURN` | **B3** eligible | Cost gate; LIR reconstructs width-2 `CALL`; dense may keep |
 | Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
-| `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR | Cost gate; dense infer still refuses |
+| `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR; **R3** maps `FORMAT` / `STRINGIFY` | Cost gate; dense infer still refuses |
 | `from_bytes` / `to_bytes` | **Q9** R2 I6 dense HostInvoke | Cost gate; box at the host edge; LIR still cannot reconstruct HostInvoke |
 | Compare-only (no float/i64/i32 arith) | I8 LIR or fuse-IL | Cost gate |
 
@@ -85,7 +85,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `times_a` / `times_at` | `nbody.hy` | dense + open CALL + Index | S3 / A2 |
 | `sum` / `fill` / `scan` / `axpy` | `indexed_sum.hy` / `vec_scan.hy` / `vec_axpy.hy` | `V*` / dense Index | S5 |
 | `sum` | `for_in_sum.hy` | `VReduce` / dense Index | **Q6** counted array |
-| `main` | `for_in_sum.hy` | fuse-IL | format + `Vec.push` (cost / grow; Q9 R1 can lift format alone) |
+| `main` | `for_in_sum.hy` | fuse-IL | format + `Vec.push` (cost / grow; Q9 R3 maps format; dense still refuses) |
 | `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
 | `range_sum` | `for_in_range_value.hy` | dense counted i64 | **B5** first-class range local |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
@@ -98,7 +98,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `*_churn` / `option_int_churn` / `result_int_churn` | several | dense, LIR, or fuse-IL | **B3** two-slot helper `CALL` / `RETURN`; cost gate vs fuse |
 | `hot` / match+call | `option_match_call.hy` | dense or LIR | **B3** two-slot CALL + Q8 `Br` |
 | `match_*` boxed enum | several | fuse-IL or LIR | boxed `JumpIfMatch` stays I2 LIR |
-| `array_mut` | `array_mut.hy` | fuse-IL | `main` + write / format (Q9 R1 does not densify) |
+| `array_mut` | `array_mut.hy` | fuse-IL | `main` + write / format (Q9 R3 maps format; does not densify) |
 | `bump` | `looping_makearray.hy` | dense or SROA | mapped preheader or slot SROA |
 | `pack` | `s2d_inloop_pack_store.hy` | dense SROA | computed-index select |
 | `pack` | `s2d_inloop_escape.hy` | dense-native or fuse-IL | A2 + cost gate |
@@ -130,3 +130,6 @@ one-word `CALL` / `TailCall`.
 debugger-attached / `-Og` specialize refuse. Majority bodies may dense
 or LIR; the VM debugger steps the reconstruct. Leftover: native resume
 maps, named-local remap after SSA, sparse line locs on emit.
+**B9** ([COI-347](https://linear.app/ardax/issue/COI-347)) maps
+`FORMAT` / `STRINGIFY` (Q9 R3). Dense infer still refuses table ops.
+Leftover: unicode / regex in SSA (R4).

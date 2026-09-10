@@ -16,21 +16,23 @@ VM already runs. Reconstruct table ops on MIR→LIR. Densify byte hosts at
 the I6 box edge (R2). Do **not** add a half Format compiler, a second
 specifier walker, or vanity string benches.
 
-Dense numeric / array paths stay off table `STRING` / `FORMAT`. R2 only
-opens the bytes HostInvoke edge. Flagships that never print stay
-identical. Keep/refuse is checksum + cost gate. No env toggle. No PGO.
+Dense numeric / array paths stay off table `STRING` / `FORMAT`. R2 opens
+the bytes HostInvoke edge. R3 maps `FORMAT` / `STRINGIFY` like I5 alloc.
+Flagships that never print stay identical. Keep/refuse is checksum +
+cost gate. No env toggle. No PGO.
 
 ## Ladder
 
 | Rung | What enters MIR | Emit | Still refuse |
 |------|-----------------|------|--------------|
 | **R1** | Table `STRING`, `PRINT`, `FORMAT`, `STRINGIFY` as SSA (`HeapRef` / IO token) | MIR→LIR reconstruct of the same IL. Dense infer still refuses so numeric specialize is unchanged | unicode / regex; format-in-loop dense |
-| **R2 (this PR)** | `string::{from_bytes,to_bytes}` as I6 HostInvoke on dense when maps/effects allow | Dense box at the host edge (same as other I6) | unicode / regex |
-| **R3** | Live-heap maps across `FORMAT` / `STRINGIFY` (I5-style roots) so a format in a mapped loop can stay SSA | LIR (then dense only if cost wins) | unicode / regex |
+| **R2** | `string::{from_bytes,to_bytes}` as I6 HostInvoke on dense when maps/effects allow | Dense box at the host edge (same as other I6) | unicode / regex |
+| **R3 (this PR)** | Live-heap maps across `FORMAT` / `STRINGIFY` (I5-style roots) so a format in a mapped loop can stay SSA | LIR when maps bind and cost ≤ fuse. Dense infer still refuses table ops | unicode / regex |
 | **R4** | Unicode / regex — only if a later island says they belong in SSA | TBD | — |
 
-Post-quirks rank: R2 is **B4** (this PR). R3–R4 stay **B9**
-([opt-generalization.md](opt-generalization.md) B0).
+Post-quirks rank: R2 is **B4**. **R3** is **B9**
+([opt-generalization.md](opt-generalization.md) B0). R4 stays leftover
+(no island asked for unicode / regex in SSA).
 
 R1 is the reopen: I4 is no longer a hard LIR wall. A prove body
 (`STRING` + `PRINT`, or `format("%i", n)` + `RETURN`) can lower. The
@@ -75,10 +77,27 @@ the same order as fuse-IL (`FORMAT` operand is arity).
   literals stay in `main`. Format loops stay fuse-IL.
 - Cost gate unchanged. Flagships identical or flat. No env toggle. No PGO.
 
-## Non-goals (R2)
+## Prove (R3)
 
-- New opcodes or a specifier interpreter in MIR
-- Dense specialize of format/print loops (R3 maps)
-- Unicode / regex in SSA (R4 / B9)
+- `FORMAT` / `STRINGIFY` pair `GcBarrier` and encode S2b drafts. Bind
+  safepoints on those opcodes (same maps as I5 alloc / B6 grow).
+- A format + i64 add loop still has `FORMAT` and **no** `DenseBin`.
+- A live heap string across `format` is in the FORMAT slot map.
+- `try_lower_abi_body` on `STRING`+`LOAD`+`FORMAT 1` still reconstructs
+  the shipped opcode (maps required; no second Format IR).
+- Flagships identical or flat. Cost gate unchanged. No env toggle. No PGO.
+
+## Leftover after R3
+
+- Dense specialize of table `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`
+  (only if cost wins; do not stall numeric / array specialize)
+- Unicode / regex in SSA (**R4**) — no island has asked for that yet
 - LIR reconstruct of HostInvoke
 - Score-chasing string microbenches
+
+## Non-goals (R3)
+
+- New opcodes or a specifier interpreter in MIR
+- A half second Format lowering
+- Unicode / regex HostInvoke or SSA (R4)
+- Env toggles / PGO

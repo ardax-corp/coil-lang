@@ -54,8 +54,9 @@ I4 / Q9 ([COI-296](https://linear.app/ardax/issue/COI-296/i4-string-format-mir-s
 names `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` as SSA (R1) and
 reconstructs them on MIR→LIR. Dense infer still refuses table ops so
 numeric specialize is unchanged. **R2** densifies `from_bytes` /
-`to_bytes` as I6 HostInvoke (box at the host edge). There is no second
-Format lowering. Unicode / regex are out of MIR. Ladder:
+`to_bytes` as I6 HostInvoke (box at the host edge). **R3** maps
+`FORMAT` / `STRINGIFY` like I5 alloc. There is no second
+Format lowering. Unicode / regex are out of MIR (R4 leftover). Ladder:
 [q9-format-string.md](q9-format-string.md).
 I5 ([COI-300](https://linear.app/ardax/issue/COI-300/i5-alloc-gc-barriers-in-mir))
 names `Alloc` (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`) and
