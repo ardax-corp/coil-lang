@@ -2907,6 +2907,29 @@ fn main() {
 }
 
 #[test]
+fn fixed_array_push_reports_e0412() {
+    let msgs = check_messages(
+        r#"
+fn main() {
+    let xs = [1, 2, 3];
+    xs.push(4);
+}
+"#,
+    );
+    assert!(
+        msgs.iter().any(|m| {
+            m.code() == Some(ErrorCode::FixedArrayGrow)
+                && m.message().contains("`[T; N]` cannot grow")
+                && m.help().as_deref() == Some("use `Vec<T>` for growable storage")
+        }),
+        "expected FixedArrayGrow (E0412), got: {:?}",
+        msgs.iter()
+            .map(|m| (m.code(), m.message(), m.help().cloned()))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
 fn pub_members_accessible_from_free_fn() {
     let msgs = check_messages(
         r#"

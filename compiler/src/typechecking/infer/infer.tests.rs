@@ -10,24 +10,108 @@
     };
     use parser::Pratt;
 
-    #[test]
-    fn fixed_array_push_is_type_error() {
-        let src = r#"
-fn main() {
-    let xs = [1, 2, 3];
-    xs.push(4);
-}
-"#;
+    fn assert_fixed_array_grow(src: &str, method: &str) {
         let ast = Pratt::default().parse(src).expect("parse");
         let mut c = Checker::new();
         let _ = c.check_program(&ast);
         assert!(
             c.messages().iter().any(|m| {
-                m.code() == Some(ErrorCode::TypeMismatch)
+                m.code() == Some(ErrorCode::FixedArrayGrow)
                     && m.message().contains("cannot grow")
+                    && m.message().contains(method)
             }),
-            "Q3: {:?}",
-            c.messages()
+            "Q3 `{method}`: {msgs:?}",
+            method = method,
+            msgs = c.messages()
+        );
+    }
+
+    #[test]
+    fn fixed_array_push_is_type_error() {
+        assert_fixed_array_grow(
+            r#"
+fn main() {
+    let xs = [1, 2, 3];
+    xs.push(4);
+}
+"#,
+            "push",
+        );
+    }
+
+    #[test]
+    fn fixed_array_insert_is_type_error() {
+        assert_fixed_array_grow(
+            r#"
+fn main() {
+    let xs: [int; 3] = [1, 2, 3];
+    xs.insert(0, 0);
+}
+"#,
+            "insert",
+        );
+    }
+
+    #[test]
+    fn fixed_array_pop_is_type_error() {
+        assert_fixed_array_grow(
+            r#"
+fn main() {
+    let xs = [1, 2, 3];
+    let _ = xs.pop();
+}
+"#,
+            "pop",
+        );
+    }
+
+    #[test]
+    fn fixed_array_reserve_is_type_error() {
+        assert_fixed_array_grow(
+            r#"
+fn main() {
+    let xs = [1, 2, 3];
+    xs.reserve(8);
+}
+"#,
+            "reserve",
+        );
+    }
+
+    #[test]
+    fn fixed_array_grow_on_param_and_readonly() {
+        assert_fixed_array_grow(
+            r#"
+fn bump(xs: [int; 2]) {
+    xs.push(1);
+}
+fn main() {
+    bump([0, 0]);
+}
+"#,
+            "push",
+        );
+        assert_fixed_array_grow(
+            r#"
+fn main() {
+    let xs = readonly [1, 2];
+    xs.clear();
+}
+"#,
+            "clear",
+        );
+    }
+
+    #[test]
+    fn fixed_array_grow_method_as_value_is_type_error() {
+        assert_fixed_array_grow(
+            r#"
+fn main() {
+    let xs = [1, 2, 3];
+    let _ = xs.push;
+}
+"#,
+            "push",
         );
     }
 
