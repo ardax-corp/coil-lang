@@ -117,6 +117,7 @@ vanity microbenches. Refuse tables shrink toward hard walls
 ([COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables)).
 Post-Q6–Q9 ranked revisit: [opt-generalization.md](opt-generalization.md) B0
 ([COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan)).
+Denser leftovers after C3: [mir-dense-leftovers.md](mir-dense-leftovers.md).
 **B1** ([COI-339](https://linear.app/ardax/issue/COI-339)) is entry hygiene
 for the Q6–Q8 first rungs (tables + `lir_eligible` / infer). **B2**
 ([COI-340](https://linear.app/ardax/issue/COI-340)) is the Seek / frame
