@@ -516,7 +516,7 @@ pub(super) fn emit_inst(
             args,
         } => {
             emit_dense_push(out, args, regs, scratch, loc)?;
-            let ret_words = if dest_hi.is_some() { 2 } else { 1 };
+            let ret_words = super::abi::ret_words_from_hi(*dest_hi);
             out.push(IlOp::Entry {
                 kind: crate::il::EntryKind::Call,
                 arity: args.len() as u32,
@@ -789,16 +789,11 @@ fn emit_term(
             }
             if let Some(h) = hi {
                 emit_stack_value(out, stacked, *h, func, plan, regs, pool, loc)?;
-                out.push(IlOp::Return {
-                    loc,
-                    ret_words: 2,
-                });
-            } else {
-                out.push(IlOp::Return {
-                    loc,
-                    ret_words: 1,
-                });
             }
+            out.push(IlOp::Return {
+                loc,
+                ret_words: super::abi::ret_words_from_hi(*hi),
+            });
         }
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
@@ -1185,7 +1180,7 @@ fn emit_call(
     pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
-    let ret_words = if dest_hi.is_some() { 2 } else { 1 };
+    let ret_words = super::abi::ret_words_from_hi(dest_hi);
     // TailCall (self or sibling): args on the operand stack, then jump.
     // Do not DensePush / convoy a foreign CALL dest as a self-return (B2).
     if kind == crate::il::EntryKind::TailCall {

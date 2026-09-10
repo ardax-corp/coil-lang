@@ -4,7 +4,7 @@
 //! lattice top. I1 names shipped one-word heap/niche ABIs so later islands
 //! can SSA them. Dense specialize uses [`MirTy::is_word_lane`] (numeric,
 //! `HeapRef`, and niche Option/Result words). Two-slot CALL/RETURN may
-//! dense or LIR (B3); keep/refuse is the cost gate.
+//! dense or LIR (B3 / C1); keep/refuse is the cost gate.
 
 use crate::typechecking::{Ty, ty as coil_ty, ty::is_option_ty};
 

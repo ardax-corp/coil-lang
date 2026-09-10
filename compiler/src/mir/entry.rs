@@ -9,8 +9,8 @@
 //! HostInvoke (emit cannot rebuild those), escaping fields, box,
 //! multi-payload match. Q6 counted `for`, Q7 one-word dense `CALL`, and
 //! Q8 niche / two-slot `Br` are not walls — they lift on the dense path;
-//! keep/refuse is the cost gate. LIR reconstructs two-slot `CALL`
-//! (B3); one-word `CALL` / `TailCall` stay dense-or-fuse. Heap index
+//! keep/refuse is the cost gate. LIR reconstructs multi-word `CALL`
+//! (B3 / C1); one-word `CALL` / `TailCall` stay dense-or-fuse. Heap index
 //! is not a wall after A2. Fuse-IL stays the fallback.
 //! There is no second AST walker.
 
@@ -87,7 +87,8 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 kind: crate::il::EntryKind::Call,
                 ret_words,
                 ..
-            } if *ret_words == 2 => {}
+            } if super::abi::is_multi_word_ret(*ret_words)
+                && super::abi::ret_words_ok(*ret_words) => {}
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
             IlOp::HostInvoke { .. } => return Some(LirRefuse::Host),
             IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => {
@@ -262,6 +263,18 @@ mod tests {
             ret_words: 2,
         }];
         assert_eq!(lir_refuse(&tail, &[]), Some(LirRefuse::Call));
+        let wide = [IlOp::Entry {
+            kind: crate::il::EntryKind::Call,
+            arity: 1,
+            target: Label(1),
+            loc,
+            ret_words: 3,
+        }];
+        assert_eq!(
+            lir_refuse(&wide, &[]),
+            Some(LirRefuse::Call),
+            "N>MAX_MODELED_RET_WORDS stays a LIR reconstruct wall"
+        );
     }
 
     #[test]

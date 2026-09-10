@@ -3,8 +3,8 @@
 //! Fuse-select remains the production bytecode lowerer. This path is an
 //! optional sidecar: escaping classes, leftover unmapped heap, and residual
 //! `Byte` (except a small numeric set) refuse so the existing `Value`
-//! interpreter is unchanged. One-word `CALL` (Q7), two-slot `CALL` /
-//! `RETURN` (B3 / B7), and niche / two-slot match (Q8) lower; keep/refuse
+//! interpreter is unchanged. One-word `CALL` (Q7), multi-word `CALL` /
+//! `RETURN` (B3 / B7 / C1), and niche / two-slot match (Q8) lower; keep/refuse
 //! is the cost gate.
 
 use std::collections::{BTreeSet, HashMap};
@@ -701,8 +701,8 @@ fn lower_op(
             ret_words,
             ..
         } => {
-            if *ret_words != 1 && *ret_words != 2 {
-                return Err(LowerError::Refused("CALL ret_words".into()));
+            if !super::abi::ret_words_ok(*ret_words) {
+                return Err(LowerError::Refused(format!("CALL ret_words {ret_words}")));
             }
             let n = *arity as usize;
             if tos.len() < n {
@@ -713,7 +713,7 @@ fn lower_op(
                 args.push(tos.pop().expect("arity checked"));
             }
             args.reverse();
-            let (dest_ty, dest_hi_ty) = if *ret_words == 2 {
+            let (dest_ty, dest_hi_ty) = if super::abi::is_multi_word_ret(*ret_words) {
                 two_slot_call_tys(hints, rest)
             } else {
                 (use_result_ty(hints, next, MirTy::I64), None)
@@ -722,7 +722,7 @@ fn lower_op(
                 if abi.params.len() != n {
                     return Err(LowerError::Refused("CALL arity".into()));
                 }
-                if (*ret_words == 2) != abi.ret_hi.is_some() {
+                if super::abi::is_multi_word_ret(*ret_words) != abi.ret_hi.is_some() {
                     return Err(LowerError::Refused("CALL ret width".into()));
                 }
                 abi.clone()
@@ -742,7 +742,7 @@ fn lower_op(
             };
             let (lo, hi) = b.ins_call(*target, args, &abi)?;
             tos.push(lo);
-            if *ret_words == 2 {
+            if super::abi::is_multi_word_ret(*ret_words) {
                 tos.push(hi.ok_or_else(|| LowerError::Refused("CALL hi dest".into()))?);
             }
             Ok(())

@@ -9,17 +9,20 @@
 //! | Edge | Words | Slots / stack |
 //! |------|-------|----------------|
 //! | Args | `arity` | callee slots `0..arity` (same bits as caller `LOAD`s) |
-//! | Return | 1 or 2 | TOS after `RETURN`; caller `STORE`s into typed dests |
+//! | Return | 1..=[`MAX_MODELED_RET_WORDS`] | TOS after `RETURN`; caller `STORE`s dests |
 //! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
-//! | Two-slot return | 2 | `[payload, tag]` / `[a, b]` (B3; cost gate vs fuse) |
+//! | Multi-word return | 2 | `[payload, tag]` / `[a, b]` (B3 / C1; cost gate vs fuse) |
 //!
 //! HostInvoke: LICM hoists scalar-pure math; S3 / Q9 R2 emit I6-typed hosts
 //! including `from_bytes` / `to_bytes`. User `CALL` uses this map when the callee is already
 //! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
 //! self-`CALL` / `TailCall` use the open one-word ABI. **B7** sibling /
-//! mutual `TailCall` uses the same open ABI; keep/refuse is the cost
-//! gate. Self two-slot recursion stays refuse. `CallIndirect` stays refuse.
+//! mutual `TailCall` and **C1** self two-slot `CALL` / `RETURN` use the
+//! same open ABI; keep/refuse is the cost gate. `CallIndirect` stays refuse.
 //! HeapRef and niche words are one-word lanes (Q8).
+//!
+//! SSA models at most dest + `dest_hi`. N>2 is the same `ret_words` field
+//! but needs extra dests + archive encoding — not a self-vs-helper wall.
 
 use std::collections::{HashMap, HashSet};
 
@@ -29,6 +32,29 @@ use common::Instruction;
 use super::func::MirFunc;
 use super::layout::MirLayout;
 use super::ty::MirTy;
+
+/// Direct `CALL`/`RETURN` width SSA can reconstruct (dest + optional `dest_hi`).
+/// VM encoding today is `CALL` bit 31 / `RETURN` operand 2. Raise this only
+/// with extra dests and archive encoding.
+pub const MAX_MODELED_RET_WORDS: u32 = 2;
+
+/// `1..=MAX_MODELED_RET_WORDS` — infer/lower refuse anything else.
+#[inline]
+pub fn ret_words_ok(ret_words: u32) -> bool {
+    (1..=MAX_MODELED_RET_WORDS).contains(&ret_words)
+}
+
+/// Extra TOS words besides the first return (`ret_words >= 2`).
+#[inline]
+pub fn is_multi_word_ret(ret_words: u32) -> bool {
+    ret_words >= 2
+}
+
+/// Width from a pair dest (`dest_hi` present → 2).
+#[inline]
+pub fn ret_words_from_hi(dest_hi: Option<impl Sized>) -> u32 {
+    if dest_hi.is_some() { 2 } else { 1 }
+}
 
 /// One-word dense callee signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -258,5 +284,19 @@ mod tests {
         let abi = DenseAbi::from_func(&f).expect("B3 two-slot abi");
         assert_eq!(abi.ret, MirTy::I64);
         assert_eq!(abi.ret_hi, Some(MirTy::I64));
+    }
+
+    #[test]
+    fn modeled_ret_width_is_one_or_two() {
+        assert!(ret_words_ok(1));
+        assert!(ret_words_ok(2));
+        assert!(!ret_words_ok(0));
+        assert!(!ret_words_ok(3));
+        assert!(!is_multi_word_ret(1));
+        assert!(is_multi_word_ret(2));
+        assert!(is_multi_word_ret(3));
+        assert_eq!(ret_words_from_hi(None::<u8>), 1);
+        assert_eq!(ret_words_from_hi(Some(0u8)), 2);
+        assert_eq!(MAX_MODELED_RET_WORDS, 2);
     }
 }

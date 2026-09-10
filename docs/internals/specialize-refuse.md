@@ -28,7 +28,7 @@ rungs are **not** in this table — see ladders below and
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
 | LIR one-word `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | I6 |
 | LIR one-word sibling `TailCall` | fuse-IL (dense may still emit) | I6 |
-| Self two-slot recursive `CALL` | fuse-IL | leftover after **B7** |
+| `CALL` / `RETURN` width > `MAX_MODELED_RET_WORDS` (2) | fuse-IL | C1 leftover — extra dests + archive encoding |
 
 ## Ladders / cost-gated (were A3 walls)
 
@@ -37,7 +37,7 @@ rungs are **not** in this table — see ladders below and
 | Counted `for` (array / Vec / `[T; N]` / literal range) | **Q6** dense helpers | Cost gate; `main` + format / grow still fuse-IL |
 | One-word self-`CALL` / `TailCall` | **Q7** eligible | Cost gate; **B2** convoy reconstruct (no Seek tax on param-only leafs) |
 | Sibling / mutual `TailCall` | **B7** eligible | Cost gate; stack-arg + reserved callee entry labels |
-| Self two-slot `CALL` / `RETURN` | fuse-IL | leftover after B7 |
+| Self two-slot `CALL` / `RETURN` | **C1** eligible | Cost gate; dest + `dest_hi`; N>2 stays refuse |
 | Two-slot helper `CALL` / `RETURN` | **B3** eligible | Cost gate; LIR reconstructs width-2 `CALL`; dense may keep |
 | Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
 | `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR; **R3** maps `FORMAT` / `STRINGIFY` | Cost gate; dense infer still refuses |
@@ -92,6 +92,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
 | sibling `TailCall` (even/odd) | `tail_sibling.hy` | dense or fuse-IL | **B7** stack-arg `TailCall` + cost gate |
+| self two-slot `CALL` / `RETURN` | `self_two_slot.hy` / `option_self_call.hy` | dense, LIR, or fuse-IL | **C1** dest + `dest_hi`; cost gate vs fuse |
 | `nsieve` | `nsieve.hy` | dense or fuse-IL | **B6** mapped `Vec.push`; keep when cost ≤ fuse |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
 | `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
@@ -124,7 +125,9 @@ helper `CALL` / `RETURN` on dense and LIR; keep/refuse is still cost.
 boxed reconstruct.
 **B7** ([COI-345](https://linear.app/ardax/issue/COI-345)) opens sibling /
 mutual `TailCall` (one-word and two-slot); keep/refuse is still cost.
-Self two-slot recursion stays fuse-IL. LIR still cannot reconstruct
+**C1** ([COI-349](https://linear.app/ardax/issue/COI-349)) opens self
+two-slot `CALL` / `RETURN` on the same dest + `dest_hi` reconstruct.
+N>2 stays refuse (`MAX_MODELED_RET_WORDS`). LIR still cannot reconstruct
 one-word `CALL` / `TailCall`.
 **B8** ([COI-346](https://linear.app/ardax/issue/COI-346)) drops the
 debugger-attached / `-Og` specialize refuse. Majority bodies may dense
