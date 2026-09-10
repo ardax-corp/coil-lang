@@ -114,7 +114,7 @@ Island inventory: [mir-islands.md](mir-islands.md). Dense refuse rows:
 
 | Area | Implication |
 |------|-------------|
-| S2g | Retarget to **box-once** (Q1). Fresh `MakeArray` per escape edge is out of spec. Identity across return / call / field / host must match. |
+| S2g | **Box-once** (Q1 / COI-334). Identity across return / call / field / host matches. |
 | S2j / I3 | Mirrors Q2. Field-only non-escaping unbox stays; identity use forces heap. COI-84 non-goal does not block that narrow case. |
 | Grow | Type error on `[T; N]` (Q3). Do not keep grow as an opt refuse for fixed arrays once the checker lands. |
 | Defined mod | S2f / S2k / S2h select and runtime `%` follow Q4. Negative `i % N` is in-range. |

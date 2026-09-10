@@ -113,15 +113,15 @@ loops (residual boxing still loses; [s2d-inloop-make-tax.md](s2d-inloop-make-tax
 S2f scalarizes `[T; N]` when the index is proven (`i % N`; **Q4**
 defines that remainder into `0..N`).
 S2k lets those select diamonds take dense when reconstruct is sound
-(Seek ≤ 64, last-arm writes kept). S2g boxes at a named escape (return /
-call-arg / `ArrayPush` value / field / host) instead of refusing the
-body — **today a fresh box per edge; Q1 requires box-once**
-([language-quirks.md](language-quirks.md)). S2h keeps unproven `xs[k]` off raw slots: codegen uses a weaker
+(Seek ≤ 64, last-arm writes kept). `sroa_select` is not a fuse-only brand:
+in-loop Make* + select stays fuse-IL (prove-frame); post-loop box-once
+uses reconstruct + cost. S2g **boxes once** at a named escape (return /
+call-arg / `ArrayPush` value / field / host) and reuses that identity
+(Q1 / [language-quirks.md](language-quirks.md)). S2h keeps unproven `xs[k]` off raw slots: codegen uses a weaker
 bound or runtime range-check + slot-select (OOB heap Index/StoreIndex);
-leftover MakeArray stays heap. S2i keeps observed zip/broadcast
-(`vec_array.hy`) as heap Index/StoreIndex (operands may be slots).
-Grow-`ArrayPush` / arity > 32 stay heap today; **Q3** makes grow on
-`[T; N]` a type error (`Vec` instead).
+leftover MakeArray stays heap. S2i is the same escape rule: private
+computed elems SROA; observed/escape boxes once (not a `vec_array` exception).
+Grow on `[T; N]` is a type error (Q3); leftover grow dest / arity > 32 stay heap.
 Compare-only leftovers may take LIR when maps exist and the cost gate holds.
 Const-index `s += xs[0]` usually mem_fwd+DCE's the `MakeArray` before MIR. A live heap return (`return [i]`) plus a counted
 loop and **no** earlier alloc stays fuse-IL so invert+fuse remains
