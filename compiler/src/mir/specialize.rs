@@ -3,7 +3,7 @@
 
 use common::Instruction;
 
-use crate::il::{IlOp, Label};
+use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::abi::{DenseAbi, DenseCallMap};
 use super::emit::emit_dense;
@@ -37,7 +37,8 @@ pub fn try_specialize_body(
     // the cost gate vs fuse-IL (A3). S3/S3b: one-word CALL (dense map or
     // open), I6 HostInvoke except I4 string bytes, heap index / ArrayLen /
     // StoreIndex (dense residuals after V*). FORMAT / string ops stay
-    // fuse-IL (I4 / Q9). Match stays LIR (Q8). Alloc / InitTyped take
+    // fuse-IL (I4 / Q9). Q8: niche / two-slot match may dense when the
+    // reconstruct beats fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
     // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. CALL / HostInvoke box at the ABI
@@ -64,6 +65,11 @@ pub fn try_specialize_body(
         return None;
     }
     let mut hints = LowerHints::new(name);
+    hints.allow_match = match_shaped_il(ops)
+        || inferred
+            .slot_ty
+            .values()
+            .any(|t| matches!(t, super::ty::MirTy::NicheOpt | super::ty::MirTy::NicheRes));
     hints.slot_ty = inferred.slot_ty;
     hints.pool = pool.clone();
     hints.pool_ty = inferred.pool_ty;
@@ -146,6 +152,53 @@ pub fn try_specialize_body(
         return None;
     }
     Some((out, abi))
+}
+
+/// Q8: JumpIfMatch / last-arm Unpack, or fuse-IL tag/niche peek (`DUP` +
+/// `EQ`/`LogNot` + cond jump). Do not treat every stack-carrying diamond
+/// as match — that densifies `if !flag` and drops LogNotJmpt.
+fn match_shaped_il(ops: &[IlOp]) -> bool {
+    let mut i = 0;
+    while i < ops.len() {
+        match &ops[i] {
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { arity, .. },
+                ..
+            } if *arity <= 1 => return true,
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => return true,
+            IlOp::Dup { .. } => {
+                if peek_tag_or_niche_test(&ops[i + 1..]) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
+fn peek_tag_or_niche_test(ops: &[IlOp]) -> bool {
+    match ops {
+        [IlOp::LogNot { .. }, IlOp::Jump { kind, .. }, ..]
+            if matches!(
+                kind,
+                IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse
+            ) =>
+        {
+            true
+        }
+        [IlOp::Const { .. }, IlOp::Bin { op, .. }, IlOp::Jump { kind, .. }, ..]
+            if matches!(*op, Instruction::EQ | Instruction::NEQ)
+                && matches!(
+                    kind,
+                    IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse
+                ) =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Index / open CALL dests default to i64 when the next IL is StorePop.

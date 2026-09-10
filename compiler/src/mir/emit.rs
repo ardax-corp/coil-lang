@@ -44,15 +44,6 @@ pub fn emit_dense(
             "dense emit refuses I4 string HostInvoke".into(),
         ));
     }
-    if func
-        .types
-        .iter()
-        .any(|t| matches!(t, MirTy::NicheOpt | MirTy::NicheRes))
-    {
-        return Err(LowerError::Refused(
-            "dense emit refuses niche SSA (I2 match stays LIR)".into(),
-        ));
-    }
     let (regs, scratch) = assign_regs(func)?;
     let regs = coalesce_safe_latch_phis(func, regs);
     let gather = gather_window(func);
@@ -501,10 +492,18 @@ pub(super) fn emit_inst(
                     .with_dense_move(regs[dest.index()], regs[array.index()]),
             ));
         }
-        MirInst::MatchPayload { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses MatchPayload (I2 is MIR→LIR)".into(),
-            ));
+        MirInst::MatchPayload { dest, scrutinee, .. } => {
+            let st = func.ty(*scrutinee);
+            if !matches!(st, MirTy::NicheOpt | MirTy::NicheRes) {
+                return Err(LowerError::Refused(
+                    "dense MatchPayload is niche-only (boxed stays LIR)".into(),
+                ));
+            }
+            let d = regs[dest.index()];
+            let s = regs[scrutinee.index()];
+            if d != s {
+                out.push(move_op(d, s));
+            }
         }
         MirInst::FieldLoad { .. } | MirInst::FieldStore { .. } => {
             return Err(LowerError::Refused(
@@ -677,10 +676,27 @@ fn emit_term(
         Terminator::Unreachable => {
             out.push(IlOp::Halt { loc });
         }
-        Terminator::JumpIfMatch { .. } => {
-            return Err(LowerError::Refused(
-                "dense emit refuses JumpIfMatch (I2 is MIR→LIR)".into(),
-            ));
+        Terminator::JumpIfMatch {
+            scrutinee,
+            tag,
+            taken,
+            not_taken,
+            ..
+        } => {
+            emit_dense_jump_if_match(
+                out,
+                func,
+                block,
+                *scrutinee,
+                *tag,
+                *taken,
+                *not_taken,
+                regs,
+                scratch,
+                block_lab,
+                next_label,
+                loc,
+            )?;
         }
     }
     Ok(())
@@ -830,7 +846,108 @@ fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u16, LowerError> {
     Ok(i as u16)
 }
 
+fn emit_dense_jump_if_match(
+    out: &mut Vec<IlOp>,
+    func: &MirFunc,
+    block: &super::func::MirBlock,
+    scrutinee: ValueId,
+    tag: u32,
+    taken: BlockId,
+    not_taken: BlockId,
+    regs: &[u8],
+    scratch: u8,
+    block_lab: &[Label],
+    next_label: &mut u32,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    let st = func.ty(scrutinee);
+    if !matches!(st, MirTy::NicheOpt | MirTy::NicheRes) {
+        return Err(LowerError::Refused(
+            "dense JumpIfMatch is niche-only (boxed stays LIR)".into(),
+        ));
+    }
+    if tag > 1 {
+        return Err(LowerError::Refused(
+            "dense JumpIfMatch tag > 1 (keep fuse-IL)".into(),
+        ));
+    }
+    let t_moves = phi_moves(func, block.id, taken, regs, scratch);
+    let f_moves = phi_moves(func, block.id, not_taken, regs, scratch);
+    out.push(IlOp::Load {
+        slot: u32::from(regs[scrutinee.index()]),
+        loc,
+    });
+    match st {
+        MirTy::NicheOpt => {
+            // None = 0 (tag 0), Some = nonzero pointer (tag 1).
+            out.push(IlOp::Const { imm: 0, loc });
+            out.push(IlOp::Bin {
+                op: Instruction::EQ,
+                loc,
+            });
+        }
+        MirTy::NicheRes => {
+            // Err = ptr | 1 (tag 1), Ok = aligned pointer (tag 0).
+            out.push(IlOp::Const { imm: 1, loc });
+            out.push(IlOp::Bin {
+                op: Instruction::BITAND,
+                loc,
+            });
+        }
+        _ => unreachable!(),
+    }
+    // Cond true: NicheOpt None / NicheRes Err.
+    let cond_true_is_taken = match st {
+        MirTy::NicheOpt => tag == 0,
+        MirTy::NicheRes => tag == 1,
+        _ => unreachable!(),
+    };
+    let (true_dest, false_dest, true_phi, false_phi) = if cond_true_is_taken {
+        (taken, not_taken, t_moves, f_moves)
+    } else {
+        (not_taken, taken, f_moves, t_moves)
+    };
+    if true_phi.is_empty() && false_phi.is_empty() {
+        emit_cond_jumps(out, func, block.id, true_dest, false_dest, block_lab, loc);
+        return Ok(());
+    }
+    let f_lab = Label(*next_label);
+    *next_label += 1;
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::JumpIfFalse,
+        target: f_lab,
+        loc,
+        hint: Default::default(),
+    });
+    for (d, s) in true_phi {
+        out.push(move_op(d, s));
+    }
+    if !is_fallthrough(func, block.id, true_dest) {
+        out.push(IlOp::Jump {
+            kind: IlJumpKind::Unconditional,
+            target: block_lab[true_dest.index()],
+            loc,
+            hint: Default::default(),
+        });
+    }
+    out.push(IlOp::Label(f_lab));
+    for (d, s) in false_phi {
+        out.push(move_op(d, s));
+    }
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::Unconditional,
+        target: block_lab[false_dest.index()],
+        loc,
+        hint: Default::default(),
+    });
+    Ok(())
+}
+
 fn bin_kind(op: MirBinOp, ty: MirTy) -> Result<u8, LowerError> {
+    let ty = match ty {
+        MirTy::HeapRef | MirTy::NicheOpt | MirTy::NicheRes => MirTy::I64,
+        other => other,
+    };
     Ok(match (op, ty) {
         (MirBinOp::Add, MirTy::I64) => dense::IADD64,
         (MirBinOp::Sub, MirTy::I64) => dense::ISUB64,

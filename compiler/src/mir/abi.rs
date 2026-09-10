@@ -10,13 +10,14 @@
 //! |------|-------|----------------|
 //! | Args | `arity` | callee slots `0..arity` (same bits as caller `LOAD`s) |
 //! | Return | 1 | TOS after `RETURN`; caller `STORE`s into a typed dest |
-//! | Two-slot / niche | — | refuse (M4 / P3 LIR) |
+//! | Niche Option/Result | 1 | Q8 word lane (match reconstructs as `Br`) |
+//! | Two-slot return | — | refuse (P3 LIR) |
 //!
 //! HostInvoke: LICM hoists scalar-pure math; S3 emits I6-typed hosts except
 //! I4 string bytes. User `CALL` uses this map when the callee is already
 //! dense, or an open one-word ABI (S3). Q7 one-word self-`CALL` / `TailCall`
-//! use that open ABI. `CallIndirect` / two-slot still refuse. HeapRef is a
-//! word lane.
+//! use that open ABI. `CallIndirect` / two-slot `RETURN` still refuse.
+//! HeapRef and niche words are one-word lanes (Q8).
 
 use std::collections::{HashMap, HashSet};
 
@@ -41,7 +42,7 @@ pub type DenseCallMap = HashMap<u32, DenseAbi>;
 impl DenseAbi {
     /// Word-layout numeric params + one specialized return. Two-slot refuses.
     pub fn from_func(func: &MirFunc) -> Option<Self> {
-        if func.ret_layout != MirLayout::Word {
+        if !matches!(func.ret_layout, MirLayout::Word | MirLayout::HeapNiche) {
             return None;
         }
         let ret = func.ret_ty?;
@@ -218,6 +219,18 @@ mod tests {
         let abi = DenseAbi::from_func(&f).expect("S3 HeapRef is a word lane");
         assert_eq!(abi.params, vec![MirTy::HeapRef]);
         assert_eq!(abi.ret, MirTy::HeapRef);
+    }
+
+    #[test]
+    fn from_func_accepts_niche_word() {
+        let mut b = MirBuilder::new("opt");
+        let p = b.add_param(MirTy::NicheOpt).unwrap();
+        b.set_ret_ty(MirTy::NicheOpt);
+        b.ret(Some(p)).unwrap();
+        let f = b.finish().unwrap();
+        let abi = DenseAbi::from_func(&f).expect("Q8 niche is a word lane");
+        assert_eq!(abi.params, vec![MirTy::NicheOpt]);
+        assert_eq!(abi.ret, MirTy::NicheOpt);
     }
 
     #[test]

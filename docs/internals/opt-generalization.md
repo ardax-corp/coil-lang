@@ -47,7 +47,7 @@ tables shrink toward.
 
 5. **Refuse inventory shrinks to hard walls.** A hard wall is unsound or
    a true language / runtime barrier until a locked commit lands (Q6–Q9
-   iterators / recursion / dense+match / strings; I7 debugger / `-Og`;
+   iterators / recursion / boxed match / strings; I7 debugger / `-Og`;
    unmapped alloc). Everything else is **cost-gated**: lift, opt, emit,
    compare to fuse-IL. Do not add feature-shaped refuses (W3 work-op
    floors, Seek≤64 prove quirks, HostInvoke **id** allowlists) as
