@@ -2,7 +2,7 @@
 //!
 //! LICM hoist uses purity bits ([`super::effects::host_may_hoist`]), not
 //! these id ranges. S3 dense emit reconstructs I6-typed HostInvoke edges
-//! (box → call → unbox) except I4 `from_bytes` / `to_bytes`. User `CALL`
+//! (box → call → unbox), including Q9 R2 `from_bytes` / `to_bytes`. User `CALL`
 //! is one-word (dense map or open fuse-IL / LIR callee).
 
 use common::{
@@ -107,17 +107,17 @@ pub fn host_edge_spec(id: u16) -> Option<HostSpec> {
     })
 }
 
-/// I4 string bytes stay fuse-IL — not a dense HostInvoke edge.
-pub fn is_i4_host(id: u16) -> bool {
+/// Q9 R2 string-bytes HostInvoke (`from_bytes` / `to_bytes`).
+pub fn is_i4_bytes_host(id: u16) -> bool {
     matches!(
         HOST_NATIVES.get(id as usize).map(|n| n.name),
         Some("from_bytes" | "to_bytes")
     )
 }
 
-/// S3: any I6-typed host except I4 string bytes may sit in a dense body.
+/// S3 / Q9 R2: any I6-typed host may sit in a dense body (box at the edge).
 pub fn dense_host_ok(id: u16) -> bool {
-    !is_i4_host(id) && host_edge_spec(id).is_some()
+    host_edge_spec(id).is_some()
 }
 
 pub fn host_edge_spec_by_name(name: &str) -> Option<HostSpec> {
@@ -159,14 +159,23 @@ mod tests {
         }
         assert!(host_spec(common::CLOCK_SLEEP_MS_ID).is_none());
         assert!(host_spec(common::RESULT_UNIT_PROBE_ID).is_none());
-        // I4/I6: string bytes stay off W4 dense; they are typed I6 edges.
+        // Q9 R2: string bytes stay off W4 float specs; they are I6 word edges.
         assert!(host_spec_by_name("from_bytes").is_none());
         assert!(host_spec_by_name("to_bytes").is_none());
+        let from = host_edge_spec_by_name("from_bytes").expect("from_bytes I6");
+        let to = host_edge_spec_by_name("to_bytes").expect("to_bytes I6");
+        assert!(dense_host_ok(from.id));
+        assert!(dense_host_ok(to.id));
+        assert!(is_i4_bytes_host(from.id));
+        assert!(is_i4_bytes_host(to.id));
+        assert_eq!(from.args, I64_1);
+        assert_eq!(to.args, I64_1);
+        assert_eq!(from.ret, MirTy::I64);
+        assert_eq!(to.ret, MirTy::I64);
         let clock = host_edge_spec(common::CLOCK_MONO_NANOS_ID).expect("clock edge");
         assert!(clock.args.is_empty());
         assert_eq!(clock.ret, MirTy::I64);
         assert!(!crate::mir::effects::host_may_hoist(common::CLOCK_MONO_NANOS_ID));
         assert!(host_edge_spec_by_name("write").is_some());
-        assert!(host_edge_spec_by_name("from_bytes").is_some());
     }
 }

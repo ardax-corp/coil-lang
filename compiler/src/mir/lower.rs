@@ -73,8 +73,7 @@ pub struct LowerHints {
     pub allow_alloc: bool,
     /// S3: `Index` / `StoreIndex` / `ArrayLen` / `ArrayPin`.
     pub allow_index: bool,
-    /// I6: type HostInvoke (clocks / IO / GC / FFI names) as SSA edges.
-    /// Dense emit keeps I4 string bytes off.
+    /// I6: type HostInvoke (clocks / IO / GC / FFI / Q9 R2 bytes) as SSA edges.
     pub allow_effects: bool,
     /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
     /// Production specialize leaves this off; emit still refuses.

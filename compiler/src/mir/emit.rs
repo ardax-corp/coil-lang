@@ -42,7 +42,7 @@ pub fn emit_dense(
         })
     }) {
         return Err(LowerError::Refused(
-            "dense emit refuses I4 string HostInvoke".into(),
+            "dense emit refuses untyped HostInvoke".into(),
         ));
     }
     let plan = ConvoyPlan::new(func, entry_label);

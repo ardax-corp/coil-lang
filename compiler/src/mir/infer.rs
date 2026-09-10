@@ -6,14 +6,15 @@
 //! floor, and not a Q6–Q8 feature checklist). S3 / **Q7**: one-word
 //! `CALL` / `TailCall` infer without a dense callee map (open ABI until
 //! the map records the body). **B3**: two-slot `CALL` / `RETURN` infer
-//! (self / mutual two-slot recursion still refuse at specialize). I6-typed HostInvoke except I4 string bytes;
+//! (self / mutual two-slot recursion still refuse at specialize). I6-typed HostInvoke including Q9 R2 `from_bytes` / `to_bytes`;
 //! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
 //! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on
 //! every mode (dense reconstruct is register `Br`). Counted `for` (Q6)
 //! is ordinary i64 + index IL — no extra refuse. Still refuse class
 //! field / unmapped alloc / residual `Byte` /
 //! `Pow` / `AND`/`OR`. Q9 R1: LIR infer accepts `STRING` / `PRINT` /
-//! `FORMAT` / `STRINGIFY`; dense infer still refuses them. S2c maps
+//! `FORMAT` / `STRINGIFY`; dense infer still refuses those table ops.
+//! R2 opens `from_bytes` / `to_bytes` HostInvoke on dense. S2c maps
 //! allow alloc. Compare-only stays fuse-IL. Q7 unfuses convoy
 //! `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` so one-word
 //! self-`CALL` can infer.
