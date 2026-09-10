@@ -28,6 +28,9 @@ identical. Keep/refuse is checksum + cost gate. No env toggle. No PGO.
 | **R3** | Live-heap maps across `FORMAT` / `STRINGIFY` (I5-style roots) so a format in a mapped loop can stay SSA | LIR (then dense only if cost wins) | unicode / regex |
 | **R4** | Unicode / regex — only if a later island says they belong in SSA | TBD | — |
 
+Post-quirks rank: R2 is **B4**, R3–R4 are **B9**
+([opt-generalization.md](opt-generalization.md) B0).
+
 R1 is the reopen: I4 is no longer a hard LIR wall. A prove body
 (`STRING` + `PRINT`, or `format("%i", n)` + `RETURN`) can lower. The
 `IlModule` cost gate may still keep fuse-IL when reconstruct is

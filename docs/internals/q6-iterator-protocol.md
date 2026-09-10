@@ -51,6 +51,9 @@ Flagships do not need this island.
 
 ## Later rungs (not this PR)
 
+Ranked as **B5** in [opt-generalization.md](opt-generalization.md) B0
+(after B1 entry hygiene and B3 two-slot CALL):
+
 - First-class range unpack without I4 `STRING` / heap `GetField`
 - User `Iterator::next` on MIR (needs Q8 dense+match or LIR + CALL)
 - Coro / dict for-in

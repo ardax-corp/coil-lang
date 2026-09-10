@@ -181,7 +181,9 @@ this docs PR. They **do** change how island / refuse docs may speak:
 | Q9 | **R1 landed:** `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` are SSA + MIR→LIR. Dense infer still refuses. `from_bytes` / `to_bytes` / unicode / regex later | Phased ladder. Full format / string on MIR. No half-format second lowering. See [q9-format-string.md](q9-format-string.md). |
 
 Island inventory: [mir-islands.md](mir-islands.md). Dense refuse rows:
-[specialize-refuse.md](specialize-refuse.md).
+[specialize-refuse.md](specialize-refuse.md). Post-Q6–Q9 ranked leftover
+board: [opt-generalization.md](opt-generalization.md) B0
+([COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan)).
 
 ## Opt implications (do not implement here)
 

@@ -13,8 +13,9 @@ Doctrine: [opt-generalization.md](opt-generalization.md). Islands:
 
 ## Hard walls (today)
 
-Until the named commit lands, these do not enter dense / LIR. They are not
-forever barriers.
+True barriers (unsound or missing ABI / maps / debugger). Q6–Q9 first
+rungs are **not** in this table — see ladders below and
+[opt-generalization.md](opt-generalization.md) B0.
 
 | Wall | Today | Commit |
 |------|-------|--------|
@@ -27,7 +28,18 @@ forever barriers.
 | Debugger-attached / `-Og` | fuse-IL | **I7** (stays) |
 | Unmapped alloc / GC safepoint | fuse-IL | maps (I5 / S2b) |
 | Residual `Byte` / `Pow` / `AND`/`OR` | fuse-IL | later island |
-| Compare-only (no float/i64/i32 arith) | fuse-IL or I8 LIR | cost gate |
+| Two-slot `CALL` / `RETURN` (LIR reconstruct) | LIR / fuse-IL | B3 |
+| LIR `CALL` / HostInvoke reconstruct | fuse-IL (dense may still emit) | B3 / I6 |
+
+## Ladders / cost-gated (were A3 walls)
+
+| Shape | After Q6–Q9 | Keep |
+|-------|-------------|------|
+| Counted `for` (array / Vec / `[T; N]` / literal range) | **Q6** dense helpers | Cost gate; `main` + format / grow still fuse-IL |
+| One-word self-`CALL` / `TailCall` | **Q7** eligible | Cost gate; `tak` / `fib` lose (Seek tax) |
+| Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
+| `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR | Cost gate; dense infer still refuses |
+| Compare-only (no float/i64/i32 arith) | I8 LIR or fuse-IL | Cost gate |
 
 Post-loop-only `return [x]` stays fuse-IL so invert+fuse (COI-87) stays
 observable. Boxed LOAD/STORE heap residuals lose the cost gate
@@ -94,3 +106,5 @@ error (**Q3**). A2 emits `DenseIndex` / `DenseMake` / `DensePush`.
 A/B: prefer `coil-embed`; flagships flat (±5%) or identical archives; no
 vanity microbenches. Refuse tables shrink toward hard walls
 ([COI-336](https://linear.app/ardax/issue/COI-336/a3-broaden-mir-entry-shrink-refuse-tables)).
+Post-Q6–Q9 ranked revisit: [opt-generalization.md](opt-generalization.md) B0
+([COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan)).
