@@ -697,17 +697,20 @@ struct Context {
 
     /// Frame-local / two-slot ObjEnum: name → (payload_slot, tag_slot, enum_name).
     unboxed_enum_locals: HashMap<String, (u32, u32, String)>,
-    /// Frame-local small class: name → (base_slot, nfields, class_name).
+    /// Named `new C` field-SROA: name → (base_slot, nfields, class_name).
     unboxed_class_locals: HashMap<String, (u32, usize, String)>,
+    /// First identity use of an unboxed class → heap slot (Q2 box-once).
+    unboxed_class_box: HashMap<String, u32>,
 
     prev: Option<Box<Self>>,
 }
 
 
-/// Speculative call-site emit: buffer prefix plus Q1 box-once cache.
+/// Speculative call-site emit: buffer prefix plus Q1/Q2 box-once caches.
 struct EmitAttempt {
     bytecode: Option<CodeBuf>,
     stack_array_box: HashMap<String, u32>,
+    unboxed_class_box: HashMap<String, u32>,
 }
 
 /// Length of the CALL + JMP + HALT prologue every [`Compiler`] starts with.
@@ -1115,6 +1118,7 @@ impl<'ctx> Context {
             stack_array_box: self.stack_array_box.clone(),
             unboxed_enum_locals: self.unboxed_enum_locals.clone(),
             unboxed_class_locals: self.unboxed_class_locals.clone(),
+            unboxed_class_box: self.unboxed_class_box.clone(),
             prev: Some(Box::new(self.to_owned())),
         }
     }

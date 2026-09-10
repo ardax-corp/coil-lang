@@ -4825,9 +4825,10 @@ fn main() {
         assert!(!vm.panicked(), "bump(6)==28; opcodes={names:?}");
     }
 
-    /// #134 / COI-84 pin: returning a named class stays heap `InitTyped`.
+    /// Q2: returning a named class boxes once at the identity edge.
+    /// The field-only loop stays slot-SROA (no heap field ops).
     #[test]
-    fn named_class_sroa_return_stays_heap() {
+    fn named_class_sroa_return_boxes_once() {
         use common::Instruction;
         let src = r#"
 class Point {
@@ -4857,19 +4858,26 @@ fn main() {
             .compiler_mut()
             .get_function("fill")
             .expect("fill");
-        let fill_bc = &bc[fill_off..];
+        let main_off = pipeline
+            .compiler_mut()
+            .get_function("main")
+            .expect("main");
+        let fill_bc = &bc[fill_off..main_off];
         let names: Vec<_> = fill_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
-        assert!(
-            fill_bc
-                .iter()
-                .any(|b| matches!(b.bytecode(), Instruction::InitTyped)),
-            "escaping return stays InitTyped; opcodes={names:?}"
+        let inits = fill_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::InitTyped))
+            .count();
+        assert_eq!(
+            inits, 1,
+            "return identity boxes once; opcodes={names:?}"
         );
         assert!(
-            fill_bc
-                .iter()
-                .any(|b| matches!(b.bytecode(), Instruction::LoadField | Instruction::SetField)),
-            "escaping return keeps heap field ops; opcodes={names:?}"
+            fill_bc.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::GetField | Instruction::LoadField
+            )),
+            "field-only loop stays SROA; box uses SetField; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
@@ -4877,9 +4885,9 @@ fn main() {
         assert!(!vm.panicked(), "fill(6) x+y==28; opcodes={names:?}");
     }
 
-    /// S2j: private-after-escape refuses — construction stays InitTyped.
+    /// Q2: private field use after an identity edge goes through the boxed instance.
     #[test]
-    fn named_class_sroa_refuses_private_after_escape() {
+    fn named_class_sroa_private_after_escape_uses_box() {
         use common::Instruction;
         let src = r#"
 class Point {
@@ -4907,18 +4915,108 @@ fn main() {
             .compiler_mut()
             .get_function("hot")
             .expect("hot");
-        let hot_bc = &bc[hot_off..];
+        let main_off = pipeline
+            .compiler_mut()
+            .get_function("main")
+            .expect("main");
+        let hot_bc = &bc[hot_off..main_off];
         let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let inits = hot_bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::InitTyped))
+            .count();
+        assert_eq!(
+            inits, 1,
+            "call-arg boxes once; opcodes={names:?}"
+        );
         assert!(
             hot_bc
                 .iter()
-                .any(|b| matches!(b.bytecode(), Instruction::InitTyped)),
-            "private after escape stays heap; opcodes={names:?}"
+                .any(|b| matches!(b.bytecode(), Instruction::SetField | Instruction::LoadField)),
+            "post-escape field store uses the boxed instance; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
         assert!(!vm.panicked(), "hot()==13; opcodes={names:?}");
+    }
+
+    /// Q2: two identity edges share one heap instance (mutation is visible).
+    #[test]
+    fn named_class_box_once_identity() {
+        use common::Instruction;
+        let src = r#"
+class Point {
+    pub x: int,
+    pub y: int,
+}
+fn give(Point p) -> Point {
+    return p;
+}
+fn observe(Point a, Point b) -> int {
+    a.x = 99;
+    return b.x;
+}
+fn pack() -> int {
+    let p = new Point(1, 2);
+    let a = give(p);
+    return observe(a, give(p));
+}
+fn nested() -> int {
+    let p = new Point(1, 2);
+    return observe(give(p), give(p));
+}
+fn mutate_after() -> int {
+    let p = new Point(1, 2);
+    let a = give(p);
+    p.x = 77;
+    return a.x;
+}
+fn main() {
+    if pack() != 99 {
+        panic "box-once identity";
+    }
+    if nested() != 99 {
+        panic "nested bounce identity";
+    }
+    if mutate_after() != 77 {
+        panic "post-escape mutate";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let pack_off = pipeline
+            .compiler_mut()
+            .get_function("pack")
+            .expect("pack");
+        let nested_off = pipeline
+            .compiler_mut()
+            .get_function("nested")
+            .expect("nested");
+        let mutate_off = pipeline
+            .compiler_mut()
+            .get_function("mutate_after")
+            .expect("mutate_after");
+        for (fname, start, end) in [
+            ("pack", pack_off, nested_off),
+            ("nested", nested_off, mutate_off),
+        ] {
+            let fn_bc = &bc[start..end];
+            let names: Vec<_> = fn_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
+            let inits = fn_bc
+                .iter()
+                .filter(|b| matches!(b.bytecode(), Instruction::InitTyped))
+                .count();
+            assert_eq!(
+                inits, 1,
+                "{fname}: one box for two escapes; opcodes={names:?}"
+            );
+        }
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "Q2 identity edges");
     }
 
     /// S2h: unproven `xs[k]` load uses runtime 0<=k<N then slots; OOB arm is heap Index.

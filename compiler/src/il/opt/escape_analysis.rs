@@ -6,7 +6,7 @@
 //! a `vec_array` type refuse) so sibling zips do not share slots. Growing
 //! `ArrayPush` dest and private use after escape stay heap (Q3 grow is a
 //! type error on `[T; N]`). Named class SROA is codegen / `local_escape`
-//! (S2j / Q2). Unproven `xs[k]` on leftover heap `MakeArray` stays heap
+//! (S2j / Q2 box-once). Unproven `xs[k]` on leftover heap `MakeArray` stays heap
 //! (S2h). Codegen `[T; N]` locals use OOB-safe select + defined `i % N`
 //! (Q4).
 

@@ -7,7 +7,8 @@ this note is [COI-331](https://linear.app/ardax/issue/COI-331)).
 
 This file is **spec**, not a compiler changelog. Implementation tickets are
 Q1–Q9 themselves. Do not treat leftover I4 / dense refuse rows as
-overriding these decisions. Q1 box-once is implemented (codegen + IL).
+overriding these decisions. Q1 box-once is implemented (codegen + IL). Q2 box-once is implemented
+(codegen field-SROA + identity cache).
 
 User-facing language docs live in
 [coil-website](https://github.com/ardax-corp/coil-website) (`src/content/docs/`).
@@ -57,13 +58,21 @@ non-escaping uses may unbox into consecutive field slots (S2j / I3). Any
 identity use — call, return, method receiver, `drop`, alias, aggregate,
 host/FFI, identity compare — forces a real heap instance.
 
+On the first identity use, materialize **one** heap object and reuse it
+on every later escape edge. Field uses before that edge stay slots;
+field uses after it go through the boxed instance. Do not emit a fresh
+`InitTyped` per edge. `fn drop()` and arity 0 or > 32 stay heap from
+construction (finalizer / layout).
+
+Compiler (S2j [COI-320](https://linear.app/ardax/issue/COI-320) + Q2
+[COI-324](https://linear.app/ardax/issue/COI-324)): codegen binds eligible
+`new C` to field slots and `emit_escape_unboxed_class` boxes once.
+`local_escape` `frame_local` remains the never-escaped I3 fact.
+
 **[COI-84](https://linear.app/ardax/issue/COI-84) non-goal is superseded
 for this narrow case.** COI-84 closed as “named locals stay allocated”
-(#134 pin). Q2 reopens **field-only non-escaping** SROA as the written
-rule. Whole-object identity still forces heap; `fn drop()` still boxes.
-S2j ([COI-320](https://linear.app/ardax/issue/COI-320) / #372) already
-mirrors this shape — align remaining pins and tests with Q2, do not
-treat COI-84 as a forever refuse.
+(#134 pin). Q2 reopens field-SROA and aligns that pin with box-once:
+identity still forces heap, but not a heap-from-`new` refuse.
 
 ## Q3 — `[T; N]` cannot grow
 
@@ -119,7 +128,7 @@ Island inventory: [mir-islands.md](mir-islands.md). Dense refuse rows:
 |------|-------------|
 | S2g | **Box-once** (Q1 / COI-334). Identity across return / call / field / host matches. |
 | Heap ops | A2 ([COI-335](https://linear.app/ardax/issue/COI-335)): dense-native `Index` / `StoreIndex` / `ArrayLen` / `Make*` when maps allow. Box only at CALL / RETURN / HostInvoke (`DensePush`). Residual LOAD/STORE boxing stays fuse-IL via the cost gate. |
-| S2j / I3 | Mirrors Q2. Field-only non-escaping unbox stays; identity use forces heap. COI-84 non-goal does not block that narrow case. |
+| S2j / I3 | Mirrors Q2. Field-only unbox stays; identity boxes once and reuses. COI-84 non-goal does not block that case. |
 | Grow | Type error on `[T; N]` (Q3). Do not keep grow as an opt refuse for fixed arrays once the checker lands. |
 | Defined mod | S2f / S2k / S2h select and runtime `%` follow Q4. Negative `i % N` is in-range. |
 | `panic` / `raise` | Checksum and CLI boards: `panic` (Q5). Opts must not rewrite `panic` into `raise`. |

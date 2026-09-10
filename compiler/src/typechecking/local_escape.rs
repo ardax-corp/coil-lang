@@ -1,11 +1,10 @@
 //! In-frame escape facts for ObjEnum / small class values.
 //!
-//! Fail-closed: a local is frame-local only when every use stays in this
-//! frame (local match / class field load or store). Any whole-object use
-//! (call, return, aggregate, host/FFI, identity compare) keeps a named
-//! class heap-backed (COI-84 pin / S2j non-escaping only). Method
-//! receivers, aliases, nested captures, and `fn drop()` stay heap.
-//! Function parameters stay boxed.
+//! `frame_local` is the **private** (never-escaped) answer used by I3 MIR
+//! sidecar and enum unbox. Named `new C` identity uses are **Q2 box-once**
+//! in codegen (`unboxed_class_box`): field-only stays slots; call / return
+//! / method / alias / compare materialize one heap instance. `fn drop()`,
+//! arity 0 or > 32, and parameters stay heap from construction.
 
 use std::collections::{HashMap, HashSet};
 
@@ -14,9 +13,6 @@ use parser::ast::{EnumConstructPayload, Expression, Output};
 use super::id::NodeId;
 use super::infer::Checker;
 use super::ty::{is_option_ty, is_result_ty, strip_readonly, Ty};
-
-/// Maximum payload arity / field count we will unbox into frame slots.
-pub const MAX_UNBOX_SLOTS: usize = 32;
 
 struct Candidate {
     binder: NodeId,
@@ -623,14 +619,12 @@ fn is_unbox_ty(checker: &Checker, ty: &Ty) -> bool {
         let Some(name) = Checker::class_name_of_ty(ty) else {
             return false;
         };
-        if checker.class_has_drop(name) {
-            return false;
-        }
         if !matches!(ty, Ty::Con(_)) {
             return false;
         }
         let n = checker.class_fields(name).map(|f| f.len()).unwrap_or(0);
-        return n >= 1 && n <= MAX_UNBOX_SLOTS;
+        return crate::escape::ClassEscape::for_named_new(checker.class_has_drop(name), n)
+            .stack_allocatable();
     }
     let Some(name) = enum_name(ty) else {
         return false;
@@ -908,7 +902,7 @@ fn main() {
         assert_eq!(
             frame_local_count(src),
             0,
-            "whole-object call-arg stays heap (COI-84 pin)"
+            "identity call-arg is not frame_local (Q2 boxes in codegen)"
         );
     }
 

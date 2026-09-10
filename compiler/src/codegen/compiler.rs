@@ -741,10 +741,12 @@ impl Compiler {
         let bc_len = self.bytecode.len();
         let dbg_len = self.debug_locs.len();
         let boxes = self.context.stack_array_box.clone();
+        let class_boxes = self.context.unboxed_class_box.clone();
         let _ = self.do_compile(ast);
         self.bytecode.truncate(bc_len);
         self.debug_locs.truncate(dbg_len);
         self.context.stack_array_box = boxes;
+        self.context.unboxed_class_box = class_boxes;
     }
 
     fn discard_if_branch(&mut self, branch: &Output<'_>) {
@@ -1480,7 +1482,7 @@ impl Compiler {
     }
 
     /// Snapshot a speculative emit so a refusal can undo both the buffer and
-    /// Q1 box-once cache (`stack_array_box` is written while compiling args).
+    /// Q1/Q2 box-once caches (written while compiling args).
     fn begin_emit_attempt(&self, bytecode: &CodeBuf) -> EmitAttempt {
         EmitAttempt {
             bytecode: if bytecode.is_empty() {
@@ -1489,6 +1491,7 @@ impl Compiler {
                 Some(bytecode.clone())
             },
             stack_array_box: self.context.stack_array_box.clone(),
+            unboxed_class_box: self.context.unboxed_class_box.clone(),
         }
     }
 
@@ -1498,6 +1501,7 @@ impl Compiler {
             None => bytecode.clear(),
         }
         self.context.stack_array_box = attempt.stack_array_box;
+        self.context.unboxed_class_box = attempt.unboxed_class_box;
     }
 
     /// Resolve a function body byte span, including provisional self-bodies.
@@ -3306,13 +3310,17 @@ impl Compiler {
     /// Lift `arity` TOS args above every cached `[T; N]` box so a dense callee
     /// whose frame base is `tell - arity` cannot Seek/write the identity slot.
     fn park_args_above_stack_array_boxes(&mut self, bytecode: &mut CodeBuf, arity: u32) {
-        if arity == 0 || self.context.stack_array_box.is_empty() {
+        if arity == 0
+            || (self.context.stack_array_box.is_empty()
+                && self.context.unboxed_class_box.is_empty())
+        {
             return;
         }
         let Some(park) = self
             .context
             .stack_array_box
             .values()
+            .chain(self.context.unboxed_class_box.values())
             .copied()
             .max()
             .map(|s| s + 1)
@@ -4476,7 +4484,12 @@ impl Compiler {
             .map(|(_, _, cname)| cname.as_str())
     }
 
-    /// Fail-safe: rematerialize an unboxed class if a whole-object use slips through.
+    /// Heap identity after the first whole-object use (Q2).
+    fn unboxed_class_boxed_slot(&self, name: &str) -> Option<u32> {
+        self.context.unboxed_class_box.get(name).copied()
+    }
+
+    /// Build a heap instance from field slots (TOS = instance).
     fn emit_box_unboxed_class(
         &mut self,
         bytecode: &mut CodeBuf,
@@ -4501,6 +4514,26 @@ impl Compiler {
         bytecode.push_seek(tmp_inst + 1);
     }
 
+    /// Q2: first identity use boxes once; later edges reuse that instance.
+    fn emit_escape_unboxed_class(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        name: &str,
+        class_name: &str,
+        base: u32,
+        nfields: usize,
+    ) {
+        if let Some(&slot) = self.context.unboxed_class_box.get(name) {
+            bytecode.push_load(slot);
+            return;
+        }
+        self.emit_box_unboxed_class(bytecode, class_name, base, nfields);
+        let slot = self.alloc_temp_slot();
+        bytecode.push(Byte::new(Instruction::DUPLICATE));
+        bytecode.push_store_pop(slot);
+        self.context.unboxed_class_box.insert(name.to_string(), slot);
+    }
+
     fn unboxed_class_field_slot(
         &self,
         receiver: &Output<'_>,
@@ -4509,6 +4542,9 @@ impl Compiler {
         let Expression::Identifier(name) = unwrap_expr_output(receiver).1.as_ref() else {
             return None;
         };
+        if self.unboxed_class_boxed_slot(name).is_some() {
+            return None;
+        }
         let (base, nfields) = self.unboxed_class_info(name)?;
         let idx = self.class_field_slot(receiver, field)?;
         if (idx as usize) < nfields {
@@ -4526,8 +4562,9 @@ impl Compiler {
         let fields: Vec<(u32, u32)> = self
             .context
             .unboxed_class_locals
-            .values()
-            .map(|(base, n, _)| (*base, *n as u32))
+            .iter()
+            .filter(|(name, _)| !self.context.unboxed_class_box.contains_key(*name))
+            .map(|(_, (base, n, _))| (*base, *n as u32))
             .collect();
         self.bytecode.set_last_func_unboxed_fields(fields);
     }
@@ -4569,7 +4606,13 @@ impl Compiler {
         let two_word_rhs = self
             .expr_direct_call_two_word_kind(rhs_node)
             .or_else(|| self.expr_direct_call_two_word_kind(rhs));
+        let named_class_sroa = two_word_rhs.is_none()
+            && matches!(rhs_node.1.as_ref(), Expression::Instantiate(_, _))
+            && self
+                .ctor_unbox_ty(rhs_node)
+                .is_some_and(|ty| self.checker.ty_is_class(&ty));
         if two_word_rhs.is_none()
+            && !named_class_sroa
             && !(self.node_is_frame_local(binder)
                 || self.node_is_frame_local(rhs_node)
                 || self.node_is_frame_local(rhs))
@@ -4598,6 +4641,14 @@ impl Compiler {
             let Some(cname) = Checker::class_name_of_ty(&ty) else {
                 return false;
             };
+            if self.decorated_class_ctors.contains_key(cname)
+                || self
+                    .checker
+                    .resolve_class_key(cname)
+                    .is_some_and(|k| self.decorated_class_ctors.contains_key(&k))
+            {
+                return false;
+            }
             let n = self
                 .context
                 .classes
@@ -4701,15 +4752,16 @@ impl Compiler {
             let Some(name) = Checker::class_name_of_ty(ty) else {
                 return false;
             };
-            if self.checker.class_has_drop(name) {
-                return false;
-            }
             let n = self
                 .checker
                 .class_fields(name)
                 .map(|f| f.len())
                 .unwrap_or(0);
-            return n >= 1 && n <= 32;
+            return crate::escape::ClassEscape::for_named_new(
+                self.checker.class_has_drop(name),
+                n,
+            )
+            .stack_allocatable();
         }
         crate::typechecking::ty::is_option_ty(ty)
             || crate::typechecking::ty::is_result_ty(ty)
@@ -9146,6 +9198,7 @@ impl Compiler {
         let prev_vars = std::mem::take(&mut self.context.variables);
         let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
         let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
+        let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
         let prev_pins = std::mem::take(&mut self.pinned_array_slots);
         let prev_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
         let prev_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
@@ -9201,6 +9254,7 @@ impl Compiler {
         self.context.variables = prev_vars;
         self.context.unboxed_enum_locals = prev_unboxed_enum;
         self.context.unboxed_class_locals = prev_unboxed_class;
+        self.context.unboxed_class_box = prev_unboxed_class_box;
         self.pinned_array_slots = prev_pins;
         self.polyfn_vars = prev_polyfn_vars;
         self.polyfn_sources = prev_polyfn_sources;
@@ -12653,6 +12707,7 @@ impl Compiler {
                 let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
                 let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
                 let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
+                let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
                 let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
                 let prev_pins = std::mem::take(&mut self.pinned_array_slots);
@@ -12674,6 +12729,7 @@ impl Compiler {
                 self.context.stack_array_box.clear();
                 self.context.unboxed_enum_locals.clear();
                 self.context.unboxed_class_locals.clear();
+                self.context.unboxed_class_box.clear();
                 self.expr_depth = 0;
                 if self.compiling_method {
                     let slot = self.context.variables.intern("self".to_string()) as u32;
@@ -12757,6 +12813,7 @@ impl Compiler {
                 self.context.stack_array_box = prev_stack_boxes;
                 self.context.unboxed_enum_locals = prev_unboxed_enum;
                 self.context.unboxed_class_locals = prev_unboxed_class;
+                self.context.unboxed_class_box = prev_unboxed_class_box;
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
                 self.pinned_array_slots = prev_pins;
@@ -13489,7 +13546,7 @@ impl Compiler {
                         .unboxed_class_type_name(n)
                         .unwrap_or(n)
                         .to_string();
-                    self.emit_box_unboxed_class(&mut bytecode, &cname, base, nfields);
+                    self.emit_escape_unboxed_class(&mut bytecode, n, &cname, base, nfields);
                 } else if let Some(slot) = self.lookup_slot(n) {
                     if let Some((base, len)) = self.stack_array_info(n) {
                         // Escape multi-slot local to a heap ObjArray (Q1 box-once).
@@ -14456,9 +14513,18 @@ impl Compiler {
                                             bytecode.push_store_pop(base + i as u32);
                                         }
                                     }
+                                    self.context.unboxed_class_box.remove(*name);
                                 } else {
                                     self.append_binding_rhs(&mut bytecode, value);
-                                    bytecode.push_store_pop(symbol as u32);
+                                    if let Some(slot) = self.unboxed_class_boxed_slot(name) {
+                                        bytecode.push_store_pop(slot);
+                                    } else {
+                                        let slot = self.alloc_temp_slot();
+                                        bytecode.push_store_pop(slot);
+                                        self.context
+                                            .unboxed_class_box
+                                            .insert((*name).to_string(), slot);
+                                    }
                                 }
                             } else if let Some((base, n)) = self.stack_array_info(name) {
                                 // Assignment: `name` Identifier is pre-walked
@@ -14680,11 +14746,15 @@ impl Compiler {
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
                 let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
                 let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
+                let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
+                let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
                 let prev_fn_polyfn_sources = std::mem::take(&mut self.polyfn_sources);
                 self.context.variables = Interner::default();
                 self.context.stack_array_locals.clear();
                 self.context.stack_array_box.clear();
+                self.context.unboxed_class_locals.clear();
+                self.context.unboxed_class_box.clear();
 
                 let prev_result_mode = self.compiling_result_mode;
                 let prev_result_ok_is_result = self.compiling_result_ok_is_result;
@@ -14729,6 +14799,8 @@ impl Compiler {
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
                 self.context.stack_array_box = prev_stack_boxes;
+                self.context.unboxed_class_locals = prev_unboxed_class;
+                self.context.unboxed_class_box = prev_unboxed_class_box;
                 self.polyfn_vars = prev_fn_polyfn_vars;
                 self.polyfn_sources = prev_fn_polyfn_sources;
             }
@@ -14779,6 +14851,7 @@ impl Compiler {
                     return bytecode;
                 }
                 if let Expression::Identifier(name) = unwrap_expr_output(receiver).1.as_ref()
+                    && self.unboxed_class_boxed_slot(name).is_none()
                     && let Some((base, nfields)) = self.unboxed_class_info(name)
                 {
                     let class_ty = self.receiver_type(receiver);
