@@ -244,6 +244,7 @@ fn maybe_warn_stale_default_out(pipeline: &mut Pipeline, entry: &str, debug: &Pr
 }
 
 /// Run archived bytecode. Returns `true` when a language-level `panic` aborted.
+/// Uncaught `raise` from `main` is a `Result.Err` return and is not an abort (Q5).
 pub(crate) fn execute_archive(
     pipeline: &Pipeline,
     bytecode: &[Byte],

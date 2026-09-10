@@ -90,6 +90,7 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 /// Run archived bytecode with standard host natives (no compiler).
 ///
 /// Returns `true` when a language-level `panic` aborted.
+/// `raise` is catchable (`Result.Err`); it does not set this flag (Q5).
 ///
 /// Restores [`common::CStructLayout`] from the archive (CLI `.hyc` and packaged
 /// runner share this path). `ffi_search_paths` are searched before `entry`'s parent.
