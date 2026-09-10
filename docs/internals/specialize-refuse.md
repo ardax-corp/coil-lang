@@ -36,7 +36,7 @@ rungs are **not** in this table — see ladders below and
 | Shape | After Q6–Q9 | Keep |
 |-------|-------------|------|
 | Counted `for` (array / Vec / `[T; N]` / literal range) | **Q6** dense helpers | Cost gate; `main` + format / grow still fuse-IL |
-| One-word self-`CALL` / `TailCall` | **Q7** eligible | Cost gate; `tak` / `fib` lose (Seek tax) |
+| One-word self-`CALL` / `TailCall` | **Q7** eligible | Cost gate; **B2** convoy reconstruct (no Seek tax on param-only leafs) |
 | Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
 | `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR | Cost gate; dense infer still refuses |
 | Compare-only (no float/i64/i32 arith) | I8 LIR or fuse-IL | Cost gate |
@@ -86,7 +86,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
-| `tak` / `fib` | `tak.hy` / `fib.hy` | fuse-IL | **Q7** eligible; cost gate loses (Seek tax) |
+| `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
 | sibling `TailCall` (even/odd) | — | fuse-IL or dense | open one-word `TailCall` + cost gate |
 | `nsieve` | `nsieve.hy` | fuse-IL | `Vec.push` (no `Make*`) |
 | `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
@@ -109,5 +109,6 @@ vanity microbenches. Refuse tables shrink toward hard walls
 Post-Q6–Q9 ranked revisit: [opt-generalization.md](opt-generalization.md) B0
 ([COI-338](https://linear.app/ardax/issue/COI-338/b0-post-quirks-refuse-audit-ranked-revisit-plan)).
 **B1** ([COI-339](https://linear.app/ardax/issue/COI-339)) is entry hygiene
-for the Q6–Q8 first rungs (tables + `lir_eligible` / infer). Cost gate
-unchanged — do not force dense on `fib` / `tak` Seek loses (B2).
+for the Q6–Q8 first rungs (tables + `lir_eligible` / infer). **B2**
+([COI-340](https://linear.app/ardax/issue/COI-340)) is the Seek / frame
+parking reconstruct so tight `fib` / `tak` can win the cost gate.
