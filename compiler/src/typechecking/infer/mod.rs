@@ -190,6 +190,8 @@ pub struct Checker {
     pub(crate) fn_value_escaped: HashSet<String>,
     /// `arr[i]` nodes proven `0 <= i < len(arr)` with a stable length.
     pub(crate) in_bounds_index: HashSet<NodeId>,
+    /// Expressions proven `>= 0` at the use site (Q4 skip Euclidean rem).
+    pub(crate) nonneg_expr: HashSet<NodeId>,
     /// Array parameter nodes that may be `ArrayPin`'d for the whole frame.
     pub(crate) pin_array: HashSet<NodeId>,
     /// `(fn_name, param_name)` for helper pins (survives mono AST clones).

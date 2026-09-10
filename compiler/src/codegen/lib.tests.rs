@@ -4754,17 +4754,24 @@ fn main() {
     }
 
     /// Q4: indexing `i % N` maps negative remainders into `0..N`.
+    /// `(-2) % 3` is slot 1 — last-arm luck would wrongly take slot 2.
     #[test]
     fn stack_array_euclid_mod_index() {
         let src = r#"
 fn main() {
     let xs = [10, 20, 30];
     if xs[(0 - 1) % 3] != 30 {
-        panic "euclid rem";
+        panic "euclid rem -1";
     }
-    xs[(0 - 1) % 3] = 7;
-    if xs[2] != 7 {
-        panic "euclid store";
+    if xs[(0 - 2) % 3] != 20 {
+        panic "euclid rem -2";
+    }
+    if xs[(0 - 5) % 3] != 20 {
+        panic "euclid rem -5";
+    }
+    xs[(0 - 2) % 3] = 7;
+    if xs[1] != 7 {
+        panic "euclid store -2";
     }
 }
 "#;
@@ -4773,7 +4780,36 @@ fn main() {
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         pipeline.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
-        assert!(!vm.panicked(), "(-1) % 3 indexes slot 2");
+        assert!(!vm.panicked(), "Euclidean rem, not last-arm luck");
+    }
+
+    /// Q4: unknown local dividend (`let i = 0-2`) is Euclidean, not last-arm.
+    #[test]
+    fn local_var_euclid_mod_index() {
+        let src = r#"
+fn sink([int; 3] xs) {}
+fn main() {
+    let xs = [10, 20, 30];
+    let i = 0 - 2;
+    if xs[i % 3] != 20 {
+        panic "local euclid -2";
+    }
+    sink(xs);
+    if xs[i % 3] != 20 {
+        panic "heap euclid -2";
+    }
+    i = 0 - 5;
+    if xs[i % 3] != 20 {
+        panic "heap euclid -5";
+    }
+}
+"#;
+        let mut pipeline = crate::Pipeline::new();
+        let (bc, constants) = pipeline.compile_src(src).expect("compile");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, pipeline.strings(), pipeline.static_slot_count());
+        assert!(!vm.panicked(), "local/heap i % 3 is Euclidean");
     }
 
     /// S2j: non-escaping named class field load/store — no InitTyped.

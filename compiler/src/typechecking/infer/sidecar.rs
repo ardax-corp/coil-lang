@@ -39,6 +39,8 @@ pub struct TypedSidecar {
     frame_local_last_use: HashSet<NodeId>,
     /// Index expressions proven `0 <= i < len(arr)` with stable length.
     in_bounds_index: HashSet<NodeId>,
+    /// Dividend / index nodes proven `>= 0` (Q4: skip Euclidean rem fixup).
+    nonneg_expr: HashSet<NodeId>,
     /// Array parameter nodes to pin for the frame (`ArrayPin`).
     pin_array: HashSet<NodeId>,
     pin_params: HashSet<(String, String)>,
@@ -107,6 +109,15 @@ impl TypedSidecar {
 
     pub fn in_bounds_index_ids(&self) -> &HashSet<NodeId> {
         &self.in_bounds_index
+    }
+
+    /// True when `id` is proven `>= 0` (counted-loop `i`, non-neg const).
+    pub fn is_nonneg_expr(&self, id: NodeId) -> bool {
+        self.nonneg_expr.contains(&id)
+    }
+
+    pub fn nonneg_expr_ids(&self) -> &HashSet<NodeId> {
+        &self.nonneg_expr
     }
 
     /// True when `id` is an array parameter that may be pinned at function entry.
@@ -209,6 +220,7 @@ impl Checker {
             frame_local: self.frame_local.clone(),
             frame_local_last_use: self.frame_local_last_use.clone(),
             in_bounds_index: self.in_bounds_index.clone(),
+            nonneg_expr: self.nonneg_expr.clone(),
             pin_array: self.pin_array.clone(),
             pin_params: self.pin_params.clone(),
             for_in_pin: self.for_in_pin.clone(),

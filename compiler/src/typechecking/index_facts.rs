@@ -80,6 +80,7 @@ struct CallSite {
 /// Fill length / in-bounds sets on [`Checker`] after inference.
 pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     checker.in_bounds_index.clear();
+    checker.nonneg_expr.clear();
     checker.pin_array.clear();
     checker.pin_params.clear();
     checker.for_in_pin.clear();
@@ -184,6 +185,12 @@ fn is_arrayish(ty: &Ty) -> bool {
 
 fn nid(checker: &Checker, node: &Output<'_>) -> Option<NodeId> {
     checker.id_table().id_of_output(node)
+}
+
+fn mark_nonneg_node(checker: &mut Checker, node: &Output<'_>) {
+    if let Some(id) = nid(checker, node) {
+        checker.nonneg_expr.insert(id);
+    }
 }
 
 fn peel<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
@@ -429,6 +436,12 @@ fn walk_tree(
             }
             note_call(env, calls, name, args.as_deref(), pure);
         }
+        Expression::Identifier(name) => {
+            if env.nonneg.contains(*name) {
+                mark_nonneg_node(checker, ast);
+            }
+        }
+        Expression::Integer(n) if *n >= 0 => mark_nonneg_node(checker, ast),
         Expression::Index(base, Some(idx)) => {
             walk_tree(checker, base, pure, env, calls);
             walk_tree(checker, idx, pure, env, calls);
@@ -1116,6 +1129,30 @@ fn main() -> int {
         assert!(
             s.is_pin_param("at", "a"),
             "helper param a should be pin_params"
+        );
+    }
+
+    #[test]
+    fn counted_loop_marks_nonneg_dividend() {
+        let src = r#"
+fn pack(int n) -> int {
+    let i = 0;
+    let s = 0;
+    let xs = [0, 0, 0];
+    while i < n {
+        s = s + xs[i % 3];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    pack(4);
+}
+"#;
+        let s = sidecar(src);
+        assert!(
+            !s.nonneg_expr_ids().is_empty(),
+            "counted-loop i should be proven nonneg"
         );
     }
 }

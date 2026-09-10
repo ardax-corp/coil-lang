@@ -3340,8 +3340,8 @@ impl Compiler {
     }
 
     /// Index `i % m` (`m > 0`) is Euclidean into `0..m` (Q4).
-    /// Skip the fixup when the dividend is not statically negative so
-    /// counted-loop `i % N` stays S2k-dense.
+    /// Skip the fixup only when the dividend is proven `>= 0` so
+    /// counted-loop `i % N` stays S2k-dense (same remainder).
     fn compile_array_index_expr(&mut self, bytecode: &mut CodeBuf, index: &Output<'_>) {
         bytecode.append(&mut self.do_compile(index));
         if let Some(m) = self.index_mod_needs_euclid(index) {
@@ -3361,15 +3361,36 @@ impl Compiler {
             return None;
         }
         let lhs = unwrap_expr_output(lhs);
-        let neg = match crate::const_fold::eval_expr(lhs, self.const_env()) {
-            Some(crate::const_fold::ConstValue::Int(n)) => n < 0,
+        if self.index_dividend_proven_nonneg(lhs) {
+            return None;
+        }
+        Some(*m as i32)
+    }
+
+    fn index_dividend_proven_nonneg(&self, lhs: &Output<'_>) -> bool {
+        match crate::const_fold::eval_expr(lhs, self.const_env()) {
+            Some(crate::const_fold::ConstValue::Int(n)) => n >= 0,
             Some(_) => false,
-            None => matches!(
-                lhs.1.as_ref(),
-                Expression::Negate(_) | Expression::Sub(_, _)
-            ),
-        };
-        neg.then_some(*m as i32)
+            None => self.node_is_nonneg_expr(lhs),
+        }
+    }
+
+    fn node_is_nonneg_expr(&self, node: &Output<'_>) -> bool {
+        let mut cur = node;
+        loop {
+            if self
+                .node_id_of(cur)
+                .is_some_and(|id| self.typed_sidecar.is_nonneg_expr(id))
+            {
+                return true;
+            }
+            match cur.1.as_ref() {
+                Expression::Group(inner) | Expression::Expr(inner) => cur = inner,
+                Expression::Fragment(items) if items.len() == 1 => cur = &items[0],
+                _ => break,
+            }
+        }
+        false
     }
 
     /// Toward-zero `r = i % n` on TOS → Euclidean `r ∈ 0..n`.
@@ -3466,6 +3487,8 @@ impl Compiler {
                 bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
                 bb.bind_label(next, bytecode.il_mut());
             } else {
+                // Q4: last arm is slot N-1 after Euclidean rem, not a
+                // negative-remainder refuse.
                 bytecode.push_load(base + k as u32);
                 bytecode.push_store_pop(dest);
             }
@@ -3537,6 +3560,8 @@ impl Compiler {
                 bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
                 bb.bind_label(next, bytecode.il_mut());
             } else {
+                // Q4: last arm is slot N-1 after Euclidean rem, not a
+                // negative-remainder refuse.
                 bytecode.push_load(val_slot);
                 bytecode.push_store_pop(base + k as u32);
             }
