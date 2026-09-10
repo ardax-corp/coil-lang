@@ -60,22 +60,26 @@ GVN has two layers under the COI-82 ceiling — neither is real SSA slot rename.
 
 **Operand-order canon.** `il::canon` rewrites Known-SP `Const; Load; op` and high-then-low `Load; Load; op` windows into preferred forms before algebraic/fuse. Int `ConstPool; Load; int-op` demotes the pool entry to inline `Const` when the value is a non-negative `i32` without `POOL_FLAG` bit 31 (float pool operands and non-commutative ops refused). Ordered cmps flip polarity on swap (`LE`↔`GT`, `LEQ`↔`GEQ`). No float reassociation. Loop bounds' `i < bound` header match accepts `Load i; Load b; LE` and the post-canon `Load b; Load i; GT` (and matching `BinSlotSlot` forms); **`LEQ`/`GEQ` headers are not treated as length proofs** (`i <= len` would allow an OOB index; COI-85 / COI-98). See `CanonStats` / `last_canon_stats()`.
 
-**MakeArray frame scalarization (COI-84 ceiling for named locals; escape pass is narrower).** `escape_analysis` rewrites non-escaping `MakeArray` locals to consecutive frame slots when every element is an immediate (`Const` / pool / string) and arity ≤ 32. Computed elements (zip/broadcast `ADD`s, etc.) stay a heap object with sound `Index` / `StoreIndex` (S2i) — exploding those miscompiled `examples/vec_array.hy`. Zip/broadcast *operands* that are literals or stack-array locals load elements directly (S2f slots); the result is still `MakeArray`. A named escape (return, call-arg, `ArrayPush` value, field store, HostInvoke)
-boxes from those slots at the edge (S2g). **Q1** requires box-once / reused
-identity; today's fresh-per-edge snapshots are out of spec
-([language-quirks.md](language-quirks.md)). Unproven `xs[k]` on a codegen
-`[T; N]` local uses a runtime `0 <= k < N` check then slot-select; the
-cold arm is heap `Index` / `StoreIndex` (S2h). Leftover IL `MakeArray`
-plus unproven `xs[k]` stays heap. Growing `ArrayPush` dest and
-private uses after an escape still refuse. Those slots are already GC roots. Named class locals are a **separate** codegen / `local_escape` path (S2j), not this `MakeArray` pass. Deliberately refused here:
+**MakeArray frame scalarization (Q1 / COI-334).** One escape answer
+(`compiler/src/escape.rs` + IL `escape_analysis`): non-escaping `[T; N]` /
+`MakeArray` → consecutive frame slots (arity ≤ 32); named escape → **box
+once** and reuse that heap identity (codegen + IL). Immediate elems SROA;
+computed zip/ADD elems stay heap Index/StoreIndex (S2i — same escape
+answer, not a `vec_array` type refuse) so sibling zips do not share slots.
+Zip operands that are literals or stack-array locals still load slots. Unproven
+`xs[k]` on a codegen `[T; N]` local uses a runtime `0 <= k < N` check then
+slot-select; the cold arm is heap `Index` / `StoreIndex` (S2h). Leftover IL
+`MakeArray` plus unproven `xs[k]` stays heap. Growing `ArrayPush` dest and
+private uses after an escape stay heap; grow on `[T; N]` is a **type error**
+(Q3). Indexing `i % N` is Euclidean into `0..N` (Q4). Named class locals
+are a **separate** codegen / `local_escape` path (S2j / Q2). Deliberately
+refused here:
 
 | Refused | Why |
 |---------|-----|
-| Slot-SROA of computed elements | Historical miscompile of `vec_array.hy`; S2i keeps heap identity |
 | Arity > 32 | Hard cap in the pass |
-| Growing `ArrayPush` dest / private use after escape | Slots have no object identity; grow and post-escape slot reads are unsound |
+| Growing `ArrayPush` dest / private use after escape | Slots have no object identity; Q3 grow on `[T; N]` is a type error |
 | Unproven `xs[k]` as a raw slot | Slots have no OOB; S2h uses heap Index/StoreIndex or a proven/weaker bound |
-| Negative `i % m` | Historical refuse (last-arm slot). **Q4** defines indexing `i % N` → `0..N` |
 | Named class locals (this pass) | Class SROA lives in `local_escape` / codegen (COI-320), not `escape_analysis` |
 
 **Conservative copy propagation.** The IL pass forwards pure `CONST` / `CONST_POOL` / `STRING` / `LOAD` / slot-bin producers through straight-line `<producer>; STORE t; LOAD t` regions. It invalidates bindings at dependent stores, calls, memory operations, labels, and jumps. It only removes the original producer/store when `il::tell` proves the store's cursor floor is redundant; otherwise the store remains to protect shared local/operand slots. Aggregate materialization and field-key loads stay intact so specialized lowering can still form packed arrays and field-key CSE.

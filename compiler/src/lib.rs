@@ -1,6 +1,7 @@
 mod ast_cache;
 mod attrs;
 mod block_builder;
+pub(crate) mod escape;
 mod const_fold;
 #[cfg(any(test, feature = "dissect"))]
 mod dissect;

@@ -1,4 +1,4 @@
-//! S2f: reuse the StoreIndex array instead of rematerializing `Alloc`.
+//! S2f / Q1: reuse the StoreIndex array instead of rematerializing `Alloc`.
 //!
 //! Stack-IL / codegen already SROAs non-escaping `[T; N]` locals. Dense /
 //! leftover reconstruct can still emit a second `Alloc` of the same elems
@@ -18,6 +18,9 @@ pub fn sroa(func: &mut MirFunc) -> usize {
     for block in &func.blocks {
         let mut alloc_of: HashMap<ValueId, Vec<ValueId>> = HashMap::new();
         let mut live_obj: HashMap<Vec<ValueId>, ValueId> = HashMap::new();
+        // Reconstruct may Alloc the same elems immediately after StoreIndex.
+        // A later sibling zip with the same recipe must stay a fresh object.
+        let mut pending_reuse: Option<(Vec<ValueId>, ValueId)> = None;
         for inst in &block.insts {
             match inst {
                 MirInst::Alloc {
@@ -26,28 +29,44 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                     elems,
                 } => {
                     alloc_of.insert(*dest, elems.clone());
-                    if let Some(&prev) = live_obj.get(elems) {
+                    if pending_reuse
+                        .as_ref()
+                        .is_some_and(|(e, _)| e == elems)
+                    {
+                        let arr = pending_reuse.as_ref().unwrap().1;
+                        subst.insert(*dest, arr);
+                    } else if let Some(&prev) = live_obj.get(elems) {
                         subst.insert(*dest, prev);
                     } else {
                         live_obj.insert(elems.clone(), *dest);
                     }
+                    pending_reuse = None;
                 }
                 MirInst::GcBarrier { dest, roots, .. } => {
                     if let Some(&r0) = roots.first() {
                         let obj = subst.get(&r0).copied().unwrap_or(r0);
                         subst.insert(*dest, obj);
                         if let Some(elems) = alloc_of.get(&r0).cloned() {
-                            live_obj.insert(elems, obj);
+                            if pending_reuse
+                                .as_ref()
+                                .is_some_and(|(e, arr)| e == &elems && *arr == obj)
+                            {
+                                // Keep reconstruct pending across the store's barrier.
+                            } else {
+                                live_obj.insert(elems, obj);
+                                pending_reuse = None;
+                            }
                         }
                     }
                 }
                 MirInst::StoreIndex { array, .. } => {
                     let arr = subst.get(array).copied().unwrap_or(*array);
                     if let Some(elems) = alloc_of.get(&arr).cloned() {
-                        live_obj.insert(elems, arr);
+                        live_obj.remove(&elems);
+                        pending_reuse = Some((elems, arr));
                     }
                 }
-                _ => {}
+                _ => pending_reuse = None,
             }
         }
     }
@@ -148,5 +167,28 @@ mod tests {
             .filter(|i| matches!(i, MirInst::Alloc { .. }))
             .count();
         assert_eq!(allocs, 1, "second Alloc must die; {func:?}");
+    }
+
+    #[test]
+    fn sibling_alloc_after_store_stays_fresh() {
+        let mut b = MirBuilder::new("zip");
+        let i = b.add_param(MirTy::I64).unwrap();
+        let z = b.ins_const(MirConst::I64(0)).unwrap();
+        let a0 = b.ins_alloc(MirAllocKind::Array, vec![z, z]).unwrap();
+        let _st = b.ins_store_index(a0, i, i, false).unwrap();
+        let _keep = b.ins_const(MirConst::I64(1)).unwrap();
+        let a1 = b.ins_alloc(MirAllocKind::Array, vec![z, z]).unwrap();
+        let v = b.ins_index(a1, i, MirTy::I64, false).unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(v)).unwrap();
+        let mut func = b.finish().unwrap();
+        let _ = sroa(&mut func);
+        let allocs = func
+            .blocks
+            .iter()
+            .flat_map(|bl| bl.insts.iter())
+            .filter(|i| matches!(i, MirInst::Alloc { .. }))
+            .count();
+        assert_eq!(allocs, 2, "later zip must not reuse mutated a; {func:?}");
     }
 }

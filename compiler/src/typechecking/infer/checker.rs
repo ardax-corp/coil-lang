@@ -4043,6 +4043,23 @@ impl Checker {
 
             let recv_ty = self.infer(recv);
             let resolved = apply_ty_prune(&self.subst, &recv_ty);
+            if matches!(
+                strip_readonly(&resolved),
+                Ty::Array {
+                    length: ArrayLength::Static(_),
+                    ..
+                }
+            ) && crate::escape::is_fixed_array_grow_method(method)
+            {
+                return self.error_with_help(
+                    ErrorCode::TypeMismatch,
+                    format!(
+                        "`[T; N]` cannot grow; `{method}` is a type error"
+                    ),
+                    range,
+                    Some("use `Vec<T>` for growable storage".to_string()),
+                );
+            }
             if *method == "attach"
                 && self.class_owner_from_ty(&resolved).as_deref()
                     == Some(crate::typechecking::ty::STREAM)

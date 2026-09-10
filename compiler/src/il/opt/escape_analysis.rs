@@ -1,17 +1,18 @@
 //! Fail-closed escape analysis for `MakeArray` → frame-slot scalarization.
 //!
-//! Immediate `MakeArray` locals (arity ≤ 32) become consecutive frame slots.
-//! Private `Index` / `len` / const `StoreIndex` stay slot ops. A **named**
-//! escape (return, call-arg, `ArrayPush` value, field store, HostInvoke /
-//! print) boxes once (`MakeArray` from slots) at that edge (S2g). Computed
-//! elements stay heap (`vec_array.hy`, S2i): sound `Index` / `StoreIndex`,
-//! not slot-SROA. Growing `ArrayPush` dest and private use after escape
-//! stay refused. Named class SROA is codegen / `local_escape` (S2j).
-//! Unproven `xs[k]` on a leftover heap
-//! `MakeArray` stays heap (S2h pick). Codegen `[T; N]` locals use OOB-safe
-//! select instead.
+//! Shared verdict is [`crate::escape::ArrayEscape`] (Q1): non-escaping →
+//! slots; escaping → **box once** and reuse that identity. Immediate elems
+//! SROA; computed zip/ADD elems stay heap (same Index/StoreIndex rule, not
+//! a `vec_array` type refuse) so sibling zips do not share slots. Growing
+//! `ArrayPush` dest and private use after escape stay heap (Q3 grow is a
+//! type error on `[T; N]`). Named class SROA is codegen / `local_escape`
+//! (S2j / Q2). Unproven `xs[k]` on leftover heap `MakeArray` stays heap
+//! (S2h). Codegen `[T; N]` locals use OOB-safe select + defined `i % N`
+//! (Q4).
 
 use common::Instruction;
+
+use crate::escape::ArrayEscape;
 
 use super::super::op::{EntryKind, IlOp};
 
@@ -24,6 +25,19 @@ pub struct AllocSite {
     pub escaped: bool,
     /// Scalarize anyway; rewrite whole-array `LOAD`s to a slot `MakeArray`.
     pub box_at_escape: bool,
+}
+
+impl AllocSite {
+    /// Shared Q1 answer for this site.
+    pub fn kind(&self) -> ArrayEscape {
+        if self.box_at_escape {
+            ArrayEscape::BoxOnce
+        } else if !self.escaped {
+            ArrayEscape::Private
+        } else {
+            ArrayEscape::Heap
+        }
+    }
 }
 
 /// Result of [`analyze_escapes`].
@@ -55,7 +69,7 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
                 make_idx: i,
                 arity: *arity,
                 store_slot: *slot,
-                escaped: !makearray_elems_are_immediate(ops, i, *arity),
+                escaped: false,
                 box_at_escape: false,
             });
             i += 2;
@@ -82,12 +96,26 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
             continue;
         }
         match classify_site_uses(ops, a) {
-            SiteUses::Private => {}
+            SiteUses::Private => {
+                // Computed elems stay heap unless they are immediates.
+                // Slot-SROA of zip/ADD results aliases sibling zips and
+                // named locals across assert joins (dest-prop / slot reuse).
+                if !makearray_elems_are_immediate(ops, a.make_idx, a.arity) {
+                    a.escaped = true;
+                }
+            }
             SiteUses::BoxAtEscape => {
                 a.escaped = true;
                 a.box_at_escape = true;
             }
             SiteUses::Refuse => a.escaped = true,
+        }
+        // Q1 box snapshot: MakeArray of LOADs from slots that are also stored
+        // (codegen `[T; N]` locals). Exploding that copy lets dest-prop mix
+        // the snapshot with the mutable slots.
+        if makearray_is_mutated_slot_snapshot(ops, a.make_idx, a.arity) {
+            a.escaped = true;
+            a.box_at_escape = false;
         }
     }
     EscapeInfo { allocs }
@@ -95,9 +123,7 @@ pub fn analyze_escapes(ops: &[IlOp]) -> EscapeInfo {
 
 /// True when the site can explode into slots (private or box-at-edge).
 pub fn is_stack_allocatable(site: &AllocSite) -> bool {
-    (!site.escaped || site.box_at_escape)
-        && site.arity >= 1
-        && site.arity <= MAX_STACK_ARITY
+    site.kind().stack_allocatable() && site.arity >= 1 && site.arity <= MAX_STACK_ARITY
 }
 
 /// Scalarize every stack-allocatable `MakeArray` into consecutive locals.
@@ -119,6 +145,7 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
         return;
     }
 
+    let mut boxed: std::collections::HashSet<u32> = std::collections::HashSet::new();
     let mut out = Vec::with_capacity(ops.len());
     let mut i = 0;
     while i < ops.len() {
@@ -171,13 +198,19 @@ pub fn allocate_on_stack(ops: &mut Vec<IlOp>, info: &EscapeInfo) {
                     continue;
                 }
                 None if named_escape_kind(ops, i) == Some(EscapeKind::Box) => {
-                    for k in 0..arity {
-                        out.push(IlOp::Load {
-                            slot: b + k,
-                            loc,
-                        });
+                    if boxed.insert(slot) {
+                        for k in 0..arity {
+                            out.push(IlOp::Load {
+                                slot: b + k,
+                                loc,
+                            });
+                        }
+                        out.push(IlOp::MakeArray { arity, loc });
+                        out.push(IlOp::Dup { loc });
+                        out.push(IlOp::StorePop { slot, loc });
+                    } else {
+                        out.push(IlOp::Load { slot, loc });
                     }
-                    out.push(IlOp::MakeArray { arity, loc });
                     i += 1;
                     continue;
                 }
@@ -410,6 +443,28 @@ fn makearray_elems_are_immediate(ops: &[IlOp], make_idx: usize, arity: u32) -> b
             op,
             IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. }
         )
+    })
+}
+
+fn slot_has_store(ops: &[IlOp], slot: u32) -> bool {
+    ops.iter().any(|op| match op {
+        IlOp::StorePop { slot: s, .. } if *s == slot => true,
+        IlOp::Byte { byte, .. }
+            if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop) =>
+        {
+            (0..byte.load_store_count()).any(|k| byte.load_store_slot_at(k) == slot)
+        }
+        _ => false,
+    })
+}
+
+fn makearray_is_mutated_slot_snapshot(ops: &[IlOp], make_idx: usize, arity: u32) -> bool {
+    let n = arity as usize;
+    if make_idx < n {
+        return false;
+    }
+    ops[make_idx - n..make_idx].iter().any(|op| {
+        load_of_single_slot(op).is_some_and(|s| slot_has_store(ops, s))
     })
 }
 

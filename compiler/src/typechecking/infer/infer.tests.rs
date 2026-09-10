@@ -11,6 +11,27 @@
     use parser::Pratt;
 
     #[test]
+    fn fixed_array_push_is_type_error() {
+        let src = r#"
+fn main() {
+    let xs = [1, 2, 3];
+    xs.push(4);
+}
+"#;
+        let ast = Pratt::default().parse(src).expect("parse");
+        let mut c = Checker::new();
+        let _ = c.check_program(&ast);
+        assert!(
+            c.messages().iter().any(|m| {
+                m.code() == Some(ErrorCode::TypeMismatch)
+                    && m.message().contains("cannot grow")
+            }),
+            "Q3: {:?}",
+            c.messages()
+        );
+    }
+
+    #[test]
     fn error_with_labels_records_secondary_spans() {
         let mut c = Checker::new();
         let _ = c.error_with_labels(

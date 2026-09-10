@@ -198,20 +198,16 @@ S2f:
   Seek fits the 64-slot prove frame. MIR `sroa` reuses the StoreIndex array.
   MIR LICM may hoist invariant `Alloc`/`GcBarrier` when the loop has
   no `StoreIndex` / `CALL`. Use `panic` (not `raise`) for checksums.
-- **Refused:** growing `ArrayPush` dest; private use after an escape;
-  unproven `xs[k]` as a raw slot; slot-SROA of observed computed elems
-  (`vec_array.hy`); arity > 32; named
-  class SROA in this array pass (S2j is `local_escape`); negative `i % N` (last slot, not OOB); in-loop Make*
-  **dense** (S2e boxing tax). Non-escaping computed *elements*
-  (`[i,i+1,i+2]`) still SROA into slots.
-- **S2g (COI-317):** a named escape (return, call-arg, `ArrayPush` *value*,
-  field store, HostInvoke / print) keeps slots in the private region and
-  emits one `MakeArray` at the edge. Multiple snapshot boxes are allowed
-  when no private use follows the first escape. Identity is not preserved
-  across edges (each box is a fresh heap object). **Out of spec under
-  Q1** ([language-quirks.md](language-quirks.md)): escape must **box
-  once** and reuse heap identity. Fresh-per-edge is a bug relative to
-  the 2026-09-10 lock, not a language rule.
+- **Refused:** growing `ArrayPush` dest (Q3 type error on `[T; N]`);
+  private use after an escape; unproven `xs[k]` as a raw slot; arity > 32;
+  named class SROA in this array pass (S2j is `local_escape`); in-loop
+  Make* **dense** when reconstruct still allocates (S2l). Indexing
+  `i % N` is Euclidean `0..N` (Q4). Immediate elems SROA; computed zip/ADD
+  elems stay heap (S2i). Observed/escape of immediates boxes once.
+- **S2g (COI-317 / COI-334):** a named escape keeps slots in the private
+  region and **boxes once**; later edges reuse that heap identity (Q1).
+  Fresh-per-edge snapshots are gone. Private use after the first escape
+  still refuses slot-SROA (heap from the start).
 - **S2h (COI-318):** unproven `xs[k]` is never a raw slot. Codegen `[T; N]`
   locals take a weaker bound (`i % m` with `m <= N`, sidecar in-bounds, or
   a runtime `0 <= k < N` check) and still SROA; the cold arm is heap
@@ -222,8 +218,8 @@ S2f:
   that are literals or stack-array locals load slots (S2f); the result is
   not slot-SROA'd. Remaining refuse: grow dest, private after escape,
   arity > 32, named class SROA in *this* array pass (S2j is separate),
-  negative remainder (Q4 defined `i % N` is the language rule;
-  implementation still pending), slot-SROA of computed elems.
+  leftover grow dest). Indexing `i % N` is Q4 Euclidean. Computed zip
+  results stay heap; observed immediate zip boxes once.
 - **S2j (COI-320):** unique **non-escaping** named `let p = new C(...)`
   with field load/store unboxes into consecutive slots. Whole-object
   use stays heap `InitTyped` (#134 pin). Still heap: `fn drop()`, method
