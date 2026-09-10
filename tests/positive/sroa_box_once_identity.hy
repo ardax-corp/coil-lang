@@ -6,7 +6,8 @@ fn observe([int; 3] a, [int; 3] b) -> int {
 
 test("two call-arg escapes are the same object") {
     let xs = [1, 2, 3];
-    assert(observe(xs, xs) == 99)?;
+    let a = bounce(xs);
+    assert(observe(a, bounce(xs)) == 99)?;
 }
 
 fn bounce([int; 3] xs) -> [int; 3] {

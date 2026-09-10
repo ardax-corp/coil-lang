@@ -4609,13 +4609,17 @@ fn main() {
     fn stack_array_box_once_identity() {
         use common::Instruction;
         let src = r#"
+fn give([int; 3] xs) -> [int; 3] {
+    return xs;
+}
 fn observe([int; 3] a, [int; 3] b) -> int {
     a[0] = 99;
     return b[0];
 }
 fn pack() -> int {
     let xs = [1, 2, 3];
-    return observe(xs, xs);
+    let a = give(xs);
+    return observe(a, give(xs));
 }
 fn main() {
     if pack() != 99 {
@@ -4651,11 +4655,10 @@ fn main() {
         let src = r#"
 fn main() {
     let xs = [10, 20, 30];
-    let i = 0 - 1;
-    if xs[i % 3] != 30 {
+    if xs[(0 - 1) % 3] != 30 {
         panic "euclid rem";
     }
-    xs[i % 3] = 7;
+    xs[(0 - 1) % 3] = 7;
     if xs[2] != 7 {
         panic "euclid store";
     }

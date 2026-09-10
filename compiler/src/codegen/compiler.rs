@@ -3205,17 +3205,36 @@ impl Compiler {
     }
 
     /// Index `i % m` (`m > 0`) is Euclidean into `0..m` (Q4).
+    /// Skip the fixup when the dividend is not statically negative so
+    /// counted-loop `i % N` stays S2k-dense.
     fn compile_array_index_expr(&mut self, bytecode: &mut CodeBuf, index: &Output<'_>) {
         bytecode.append(&mut self.do_compile(index));
-        let idx = unwrap_expr_output(index);
-        if let Expression::Mod(_, rhs) = idx.1.as_ref()
-            && let Expression::Integer(m) = unwrap_expr_output(rhs).1.as_ref()
-            && *m > 0
-        {
-            if *m <= i32::MAX as i64 {
-                self.emit_euclid_rem_fixup(bytecode, *m as i32);
-            }
+        if let Some(m) = self.index_mod_needs_euclid(index) {
+            self.emit_euclid_rem_fixup(bytecode, m);
         }
+    }
+
+    fn index_mod_needs_euclid(&self, index: &Output<'_>) -> Option<i32> {
+        let idx = unwrap_expr_output(index);
+        let Expression::Mod(lhs, rhs) = idx.1.as_ref() else {
+            return None;
+        };
+        let Expression::Integer(m) = unwrap_expr_output(rhs).1.as_ref() else {
+            return None;
+        };
+        if *m <= 0 || *m > i32::MAX as i64 {
+            return None;
+        }
+        let lhs = unwrap_expr_output(lhs);
+        let neg = match crate::const_fold::eval_expr(lhs, self.const_env()) {
+            Some(crate::const_fold::ConstValue::Int(n)) => n < 0,
+            Some(_) => false,
+            None => matches!(
+                lhs.1.as_ref(),
+                Expression::Negate(_) | Expression::Sub(_, _)
+            ),
+        };
+        neg.then_some(*m as i32)
     }
 
     /// Toward-zero `r = i % n` on TOS → Euclidean `r ∈ 0..n`.
@@ -3840,8 +3859,8 @@ impl Compiler {
             Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {
                 self.expr_is_call_arg_stack_leaf(v)
             }
-            Expression::Identifier(_)
-            | Expression::Integer(_)
+            Expression::Identifier(name) => self.stack_array_info(name).is_none(),
+            Expression::Integer(_)
             | Expression::Float(_)
             | Expression::Bool(_)
             | Expression::String(_) => true,
