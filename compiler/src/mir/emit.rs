@@ -1,5 +1,7 @@
 //! Lower verified numeric MIR to dense bytecode (`IlOp` residuals + labels).
 
+use std::collections::HashSet;
+
 use common::{dense, Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
@@ -61,18 +63,25 @@ pub fn emit_dense(
         max_slot = max_slot.max(scratch.saturating_add(gather.saturating_sub(1)));
     }
     let loc = DebugLoc::unknown();
+    // Sibling / mutual CALL targets keep their official entry ids. Local
+    // SSA labels must not reuse those ids or to_flat treats the TailCall
+    // as intra-body (B2 even/odd break).
+    let reserved: HashSet<u32> = func
+        .blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter_map(|inst| match inst {
+            MirInst::Call { target, .. } if Some(*target) != entry_label => Some(target.0),
+            _ => None,
+        })
+        .collect();
     let mut next_label = max_label_hint(entry_label);
     let mut block_lab = vec![Label(0); func.blocks.len()];
     for b in &func.blocks {
         if b.id == func.entry {
-            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| {
-                let l = Label(next_label);
-                next_label += 1;
-                l
-            });
+            block_lab[b.id.index()] = entry_label.unwrap_or_else(|| take_label(&mut next_label, &reserved));
         } else {
-            block_lab[b.id.index()] = Label(next_label);
-            next_label += 1;
+            block_lab[b.id.index()] = take_label(&mut next_label, &reserved);
         }
     }
 
@@ -142,11 +151,21 @@ pub fn emit_dense(
             scratch,
             &block_lab,
             &mut next_label,
+            &reserved,
             pool,
             loc,
         )?;
     }
     Ok(out)
+}
+
+fn take_label(next: &mut u32, reserved: &HashSet<u32>) -> Label {
+    while reserved.contains(next) {
+        *next = next.saturating_add(1);
+    }
+    let id = *next;
+    *next = next.saturating_add(1);
+    Label(id)
 }
 
 pub(super) fn max_label_hint(entry: Option<Label>) -> u32 {
@@ -677,6 +696,7 @@ fn emit_term(
     scratch: u8,
     block_lab: &[Label],
     next_label: &mut u32,
+    reserved: &HashSet<u32>,
     pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
@@ -714,8 +734,7 @@ fn emit_term(
                     loc,
                 );
             } else {
-                let f_lab = Label(*next_label);
-                *next_label += 1;
+                let f_lab = take_label(next_label, reserved);
                 out.push(IlOp::Jump {
                     kind: IlJumpKind::JumpIfFalse,
                     target: f_lab,
@@ -812,6 +831,7 @@ fn emit_term(
                 scratch,
                 block_lab,
                 next_label,
+                reserved,
                 loc,
             )?;
         }
@@ -975,6 +995,7 @@ fn emit_dense_jump_if_match(
     scratch: u8,
     block_lab: &[Label],
     next_label: &mut u32,
+    reserved: &HashSet<u32>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     let st = func.ty(scrutinee);
@@ -1028,8 +1049,7 @@ fn emit_dense_jump_if_match(
         emit_cond_jumps(out, func, block.id, true_dest, false_dest, block_lab, loc);
         return Ok(());
     }
-    let f_lab = Label(*next_label);
-    *next_label += 1;
+    let f_lab = take_label(next_label, reserved);
     out.push(IlOp::Jump {
         kind: IlJumpKind::JumpIfFalse,
         target: f_lab,

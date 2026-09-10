@@ -17,8 +17,8 @@
 //! including `from_bytes` / `to_bytes`. User `CALL` uses this map when the callee is already
 //! dense, or an open one-word / two-slot ABI (S3 / B3). Q7 one-word
 //! self-`CALL` / `TailCall` use the open one-word ABI. **B7** sibling /
-//! mutual `TailCall` and self two-slot `CALL` / `RETURN` use the same
-//! open ABI; keep/refuse is the cost gate. `CallIndirect` stays refuse.
+//! mutual `TailCall` uses the same open ABI; keep/refuse is the cost
+//! gate. Self two-slot recursion stays refuse. `CallIndirect` stays refuse.
 //! HeapRef and niche words are one-word lanes (Q8).
 
 use std::collections::{HashMap, HashSet};

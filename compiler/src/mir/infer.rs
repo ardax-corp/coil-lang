@@ -5,8 +5,8 @@
 //! body. Keep/refuse is the emit **cost gate** vs fuse-IL (not a work-op
 //! floor, and not a Q6–Q8 feature checklist). S3 / **Q7**: one-word
 //! `CALL` / `TailCall` infer without a dense callee map (open ABI until
-//! the map records the body). **B3** / **B7**: two-slot `CALL` / `RETURN`
-//! infer, including sibling / mutual `TailCall` and self two-slot recursion.
+//! the map records the body). **B3** / **B7**: two-slot helper `CALL` /
+//! `RETURN` and sibling / mutual `TailCall` infer (self two-slot stays refuse).
 //! I6-typed HostInvoke including Q9 R2 `from_bytes` / `to_bytes`;
 //! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
 //! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on

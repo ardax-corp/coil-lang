@@ -60,7 +60,7 @@ pub struct LowerHints {
     pub param_count: u32,
     /// Leaf-first dense callees (COI-291). Empty still allows an open
     /// one-word `CALL` / `TailCall` (S3 / Q7) and two-slot open CALL
-    /// (B3 / B7 sibling, mutual, self two-slot).
+    /// (B3 / B7 sibling and mutual TailCall).
     pub calls: DenseCallMap,
     /// I2: `JumpIfMatch` / `Unpack` / `Seek` and stack-carrying CFG edges.
     pub allow_match: bool,
