@@ -21,7 +21,7 @@ rungs are **not** in this table — see ladders below and
 |------|-------|--------|
 | Unicode / regex in SSA | out of MIR | later Q9 rung (R4 / B9) |
 | Mutual / two-slot recursive `CALL` | fuse-IL | later Q7 rung |
-| User `Iterator` / coro / dict / first-class range `for` | fuse-IL | later Q6 rung |
+| User `Iterator` / coro / dict / parameter range `for` | fuse-IL | later Q6 rung |
 | Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
 | Debugger-attached / `-Og` | fuse-IL | **I7** (stays) |
@@ -85,6 +85,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `sum` | `for_in_sum.hy` | `VReduce` / dense Index | **Q6** counted array |
 | `main` | `for_in_sum.hy` | fuse-IL | format + `Vec.push` (cost / grow; Q9 R1 can lift format alone) |
 | `range_sum` | `for_in_range.hy` | dense counted i64 | **Q6** literal range |
+| `range_sum` | `for_in_range_value.hy` | dense counted i64 | **B5** first-class range local |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `main` | `field_hot.hy` | fuse-IL | escaping class / `CALL` |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
