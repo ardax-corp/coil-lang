@@ -3535,6 +3535,12 @@ impl Checker {
                     variant_names.into_iter().zip(payloads).collect();
                 self.access_field_in_sum(name, &variants, None, field, range)
             }
+            Ty::Array {
+                length: ArrayLength::Static(_),
+                ..
+            } if crate::escape::is_fixed_array_grow_method(field) => {
+                self.reject_fixed_array_grow(field, range)
+            }
             Ty::Record { fields } => match fields.iter().find(|(n, _)| n == field) {
                 Some((_, fty)) => fty.clone(),
                 None => {
@@ -4011,6 +4017,26 @@ impl Checker {
         env_scheme
     }
 
+    fn is_static_array_ty(ty: &Ty) -> bool {
+        matches!(
+            strip_readonly(ty),
+            Ty::Array {
+                length: ArrayLength::Static(_),
+                ..
+            }
+        )
+    }
+
+    /// Q3: length-changing methods are a type error on `[T; N]`.
+    fn reject_fixed_array_grow(&mut self, method: &str, range: Range<usize>) -> Ty {
+        self.error_with_help(
+            ErrorCode::FixedArrayGrow,
+            format!("`[T; N]` cannot grow; `{method}` is a type error"),
+            range,
+            Some("use `Vec<T>` for growable storage".to_string()),
+        )
+    }
+
     fn infer_call_expr(
         &mut self,
         name: &Output,
@@ -4043,22 +4069,10 @@ impl Checker {
 
             let recv_ty = self.infer(recv);
             let resolved = apply_ty_prune(&self.subst, &recv_ty);
-            if matches!(
-                strip_readonly(&resolved),
-                Ty::Array {
-                    length: ArrayLength::Static(_),
-                    ..
-                }
-            ) && crate::escape::is_fixed_array_grow_method(method)
+            if Self::is_static_array_ty(&resolved)
+                && crate::escape::is_fixed_array_grow_method(method)
             {
-                return self.error_with_help(
-                    ErrorCode::TypeMismatch,
-                    format!(
-                        "`[T; N]` cannot grow; `{method}` is a type error"
-                    ),
-                    range,
-                    Some("use `Vec<T>` for growable storage".to_string()),
-                );
+                return self.reject_fixed_array_grow(method, range);
             }
             if *method == "attach"
                 && self.class_owner_from_ty(&resolved).as_deref()

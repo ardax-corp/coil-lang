@@ -236,6 +236,31 @@ fn assert_compile_fails(src: &str, code: compiler::ErrorCode) {
     assert_compile_fails_pipeline(&mut pipeline, src, code);
 }
 
+#[test]
+fn fixed_array_push_is_type_error_not_mir_refuse() {
+    let src = r#"
+fn main() {
+    let xs = [1, 2, 3];
+    xs.push(4);
+}
+"#;
+    assert_compile_fails(src, compiler::ErrorCode::FixedArrayGrow);
+    let mut pipeline = test_pipeline();
+    let _ = pipeline.compile_src(src);
+    assert!(
+        pipeline
+            .messages()
+            .iter()
+            .any(|m| m.message().contains("cannot grow") && m.help().as_deref() == Some("use `Vec<T>` for growable storage")),
+        "Q3 front-end diagnostic, got {:?}",
+        pipeline
+            .messages()
+            .iter()
+            .map(|m| (m.code(), m.message(), m.help().clone()))
+            .collect::<Vec<_>>()
+    );
+}
+
 fn assert_compile_fails_pipeline(pipeline: &mut Pipeline, src: &str, code: compiler::ErrorCode) {
     let result = pipeline.compile_src(src);
     let msgs: Vec<_> = pipeline

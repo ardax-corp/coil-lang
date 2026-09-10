@@ -62,3 +62,17 @@ pub fn is_fixed_array_grow_method(method: &str) -> bool {
         "push" | "insert" | "pop" | "remove" | "clear" | "reserve"
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grow_methods_are_length_changing() {
+        for name in ["push", "insert", "pop", "remove", "clear", "reserve"] {
+            assert!(is_fixed_array_grow_method(name), "{name}");
+        }
+        assert!(!is_fixed_array_grow_method("len"));
+        assert!(!is_fixed_array_grow_method("capacity"));
+    }
+}
