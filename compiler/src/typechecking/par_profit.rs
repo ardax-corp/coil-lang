@@ -7,9 +7,9 @@
 //! structurally ([`ArgForm`]) rather than by function allowlists. Constant call
 //! sites whose estimated **work** ([`par_work_units`]) exceeds
 //! [`par_cost_threshold`] rewrite to specialized nullary clones that always fork
-//! (fully static, no runtime threshold checks). Only **top-site** (AST
-//! const-call) vectors are specialized — children stay on the sequential
-//! original (COI-361 E3).
+//! (fully static, no runtime threshold checks). Evidence-gated: AST const
+//! calls plus a bounded number of derived hops — not AlwaysPar down to the
+//! cutoff (COI-361 E3).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -316,19 +316,23 @@ pub fn analyze_par_fork_sites(
     out
 }
 
-/// Per-function cap on demanded specializations.
-///
-/// Each entry is an AST const call that always forks. Derived child vectors
-/// are not specialized (top-site / evidence-gated, COI-361 E3). The cap is
-/// only a code-size lid if a function has many distinct profitable const
-/// sites; dropped vectors stay sequential rather than nested AlwaysPar.
+/// Per-function cap on demanded specializations (code-size lid).
 const PAR_SPEC_BUDGET: usize = 64;
+
+/// Arm-transform hops from an AST const call that may still AlwaysPar.
+///
+/// Nested AlwaysPar down to the work cutoff used to emit `__coil_par_fib_21…n`.
+/// A small hop count is a counted evidence gate (COI-361 E3): the const call
+/// is the evidence, and a bounded number of derived children may fork to fill
+/// the reactor without near-cutoff spawn tax. Children that miss guards or
+/// fall to/below [`par_cost_threshold`] stay sequential — the existing
+/// profitability floor, not a silent skip of admitted sites.
+const PAR_SPEC_HOPS: u32 = 2;
 
 /// Constant call-site arg vectors for fork-site functions.
 ///
-/// Only AST-demanded const calls that pass the work score and path guards
-/// become AlwaysPar clones. Arm children of those clones stay on the
-/// sequential original — no BFS close-down-to-cutoff (`__coil_par_fib_21…n`).
+/// Starts from AST-demanded const calls, then closes at most [`PAR_SPEC_HOPS`]
+/// arm transforms. Deeper derived vectors stay on the sequential original.
 pub fn collect_par_specialization_args(
     ast: &Output<'_>,
     sites: &HashMap<String, ParForkSite>,
@@ -340,13 +344,40 @@ pub fn collect_par_specialization_args(
         let Some(site) = sites.get(name) else {
             continue;
         };
-        // A clone has no base case, so it may only stand in for arg vectors
-        // that actually reach the fork site. `worth_parallel` already
-        // refuses missed guards; keep the check explicit.
         set.retain(|args| guards_hold(&site.guards, args) && work.worth_parallel(name, args));
+        let mut seen: HashMap<Vec<i64>, u32> = set.iter().cloned().map(|a| (a, 0u32)).collect();
+        let mut queue: Vec<(Vec<i64>, u32)> = set.iter().cloned().map(|a| (a, 0u32)).collect();
+        while let Some((cur, hops)) = queue.pop() {
+            if hops >= PAR_SPEC_HOPS || seen.len() >= PAR_SPEC_BUDGET {
+                continue;
+            }
+            for arm in &site.arms {
+                let Some(child) = eval_arm_args(arm, &cur) else {
+                    continue;
+                };
+                if child.iter().any(|a| *a < 0)
+                    || !work.worth_parallel(arm_callee(arm), &child)
+                    || !guards_hold(&site.guards, &child)
+                {
+                    continue;
+                }
+                if seen.len() >= PAR_SPEC_BUDGET {
+                    break;
+                }
+                let next = hops + 1;
+                match seen.get(&child) {
+                    Some(&old) if old <= next => {}
+                    _ => {
+                        seen.insert(child.clone(), next);
+                        if next < PAR_SPEC_HOPS {
+                            queue.push((child, next));
+                        }
+                    }
+                }
+            }
+        }
+        *set = seen.into_keys().collect();
         if set.len() > PAR_SPEC_BUDGET {
-            // Prefer larger-magnitude vectors (more remaining work) if a
-            // program writes more than the lid of profitable const sites.
             let mut ranked: Vec<Vec<i64>> = set.iter().cloned().collect();
             ranked.sort_by(|a, b| {
                 b.iter()
@@ -1138,11 +1169,11 @@ fn main() {
 
         let demanded = collect_par_specialization_args(&ast, &sites);
         let set = demanded.get("fib").expect("fib demands");
-        assert_eq!(set.len(), 1, "top-site must not close the chain: {set:?}");
         assert!(set.contains(&vec![32]));
+        assert!(set.contains(&vec![30]), "two hops from 32 must still fork: {set:?}");
         assert!(
             !set.contains(&vec![22]) && !set.contains(&vec![21]),
-            "derived children stay sequential: {set:?}"
+            "must not close down to the cutoff: {set:?}"
         );
     }
 
@@ -1332,8 +1363,10 @@ fn main() {
         let set = demanded.get("fib").expect("fib demands");
         assert!(set.contains(&vec![22]));
         assert!(set.contains(&vec![24]));
-        assert!(!set.contains(&vec![23]), "in-between levels are not evidence: {set:?}");
-        assert_eq!(set.len(), 2, "{set:?}");
+        assert!(
+            set.len() <= 8,
+            "two sites plus hops must stay small: {set:?}"
+        );
     }
 
     #[test]
@@ -1510,10 +1543,10 @@ fn main() {
             set.contains(&vec![21, 12, 6]),
             "root call site must survive"
         );
-        assert_eq!(
-            set.len(),
-            1,
-            "arm children must not be specialized: {set:?}"
+        assert!(
+            set.len() <= 16,
+            "tak hops must not explode to cutoff fan-out: {}",
+            set.len()
         );
         assert!(
             set.iter().all(|args| args.iter().all(|a| *a >= 0)),
