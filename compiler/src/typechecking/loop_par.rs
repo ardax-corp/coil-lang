@@ -13,7 +13,7 @@
 //! const range locals) share this shape; the latch `+ 1` is implicit. Dynamic
 //! C2 trip counts stay sequential.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{AdjustOp, AssignOp, Expression, Output};
 
@@ -24,6 +24,8 @@ use super::par_profit::par_loop_grain;
 pub enum LoopReduceOp {
     Add,
     Mul,
+    /// Bitwise xor: associative, commutative, identity `0`.
+    Xor,
 }
 
 impl LoopReduceOp {
@@ -33,6 +35,7 @@ impl LoopReduceOp {
         match self {
             Self::Add => 0,
             Self::Mul => 1,
+            Self::Xor => 0,
         }
     }
 }
@@ -57,6 +60,8 @@ pub struct LoopParSite {
     pub index_expr_ptr: usize,
     /// Pointer of `e` in `acc = acc ⊕ e`.
     pub reduce_expr_ptr: usize,
+    /// Enclosing const-int locals the body reads (inlined into the worker).
+    pub captures: Vec<(String, i64)>,
 }
 
 impl LoopParSite {
@@ -288,19 +293,21 @@ impl Scan<'_> {
         }
 
         // Every value the body computes must depend only on the induction
-        // variable and temps declared earlier in the same body.
+        // variable, temps declared earlier in the same body, and enclosing
+        // const-int locals (those become worker-frame immediates).
         let mut locals = HashSet::new();
+        let mut captures = BTreeSet::new();
         for form in &forms {
             match form {
                 StmtForm::Local { name, init } => {
-                    if *name == index || *name == acc || !self.independent(init, &index, acc, &locals)
+                    if *name == index || *name == acc || !self.independent(init, &index, acc, &locals, consts, &mut captures)
                     {
                         return None;
                     }
                     locals.insert((*name).to_string());
                 }
                 StmtForm::Reduce { expr, .. } => {
-                    if !self.independent(expr, &index, acc, &locals) {
+                    if !self.independent(expr, &index, acc, &locals, consts, &mut captures) {
                         return None;
                     }
                 }
@@ -317,31 +324,51 @@ impl Scan<'_> {
             implicit_step,
             index_expr_ptr,
             reduce_expr_ptr: std::ptr::from_ref(reduce_expr) as *const Output<'_> as usize,
+            captures: captures.into_iter().collect(),
         })
     }
 
     /// Whether `expr` reads nothing but the induction variable, loop-private
-    /// temps and integer literals, and calls nothing but pure functions.
+    /// temps, enclosing const ints, and integer literals, and calls nothing but
+    /// pure functions.
     ///
     /// Deliberately narrow: division and modulo can trap, and every other node
     /// kind (index, field, method, lambda, `try`) either reaches shared state or
-    /// cannot be re-emitted into a private frame.
+    /// cannot be re-emitted into a private frame. Const-int captures are
+    /// re-materialized as immediates in that frame (not live outer slots).
     fn independent(
         &self,
         expr: &Output<'_>,
         index: &str,
         acc: &str,
         locals: &HashSet<String>,
+        consts: &ConstLocals,
+        captures: &mut BTreeSet<(String, i64)>,
     ) -> bool {
         let expr = peel(expr);
-        let both = |a: &Output<'_>, b: &Output<'_>| {
-            self.independent(a, index, acc, locals) && self.independent(b, index, acc, locals)
+        let both = |a: &Output<'_>, b: &Output<'_>, captures: &mut BTreeSet<(String, i64)>| {
+            self.independent(a, index, acc, locals, consts, captures)
+                && self.independent(b, index, acc, locals, consts, captures)
         };
         match expr.1.as_ref() {
             Expression::Integer(_) => true,
-            Expression::Identifier(n) => *n != acc && (*n == index || locals.contains(*n)),
+            Expression::Identifier(n) => {
+                if *n == acc {
+                    return false;
+                }
+                if *n == index || locals.contains(*n) {
+                    return true;
+                }
+                match consts.get(*n) {
+                    Some(ConstVal::Int(k)) => {
+                        captures.insert(((*n).to_string(), *k));
+                        true
+                    }
+                    _ => false,
+                }
+            }
             Expression::Negate(a) | Expression::Positive(a) => {
-                self.independent(a, index, acc, locals)
+                self.independent(a, index, acc, locals, consts, captures)
             }
             Expression::Add(a, b)
             | Expression::Sub(a, b)
@@ -350,7 +377,7 @@ impl Scan<'_> {
             | Expression::Shr(a, b)
             | Expression::Xor(a, b)
             | Expression::BitAnd(a, b)
-            | Expression::BitOr(a, b) => both(a, b),
+            | Expression::BitOr(a, b) => both(a, b, captures),
             Expression::Call {
                 name,
                 args: Some(args),
@@ -359,7 +386,10 @@ impl Scan<'_> {
                     peel(name).1.as_ref(),
                     Expression::Identifier(f) if self.pure_fns.contains(*f)
                 );
-                pure_callee && args.iter().all(|a| self.independent(a, index, acc, locals))
+                pure_callee
+                    && args
+                        .iter()
+                        .all(|a| self.independent(a, index, acc, locals, consts, captures))
             }
             _ => false,
         }
@@ -413,11 +443,11 @@ fn statement_form<'a>(item: &'a Output<'a>, index: &str) -> Option<StmtForm<'a>>
                 return (ident_name(a) == Some(index) && int_literal(b) == Some(1))
                     .then_some(StmtForm::Step);
             }
-            // `acc = acc ⊕ expr`: the accumulator must be the left operand, so
-            // the reduction is the outermost node and `expr` is reduction-free.
+            // `acc = acc ⊕ expr` or `acc = expr ⊕ acc` for commutative ops.
             let (op, expr) = match peel(rhs).1.as_ref() {
-                Expression::Add(a, b) => (LoopReduceOp::Add, (ident_name(a)? == name).then_some(b)?),
-                Expression::Mul(a, b) => (LoopReduceOp::Mul, (ident_name(a)? == name).then_some(b)?),
+                Expression::Add(a, b) => commute_reduce(LoopReduceOp::Add, name, a, b)?,
+                Expression::Mul(a, b) => commute_reduce(LoopReduceOp::Mul, name, a, b)?,
+                Expression::Xor(a, b) => commute_reduce(LoopReduceOp::Xor, name, a, b)?,
                 _ => return None,
             };
             Some(StmtForm::Reduce {
@@ -434,7 +464,24 @@ fn compound_reduce_op(op: AssignOp) -> Option<LoopReduceOp> {
     match op {
         AssignOp::Add => Some(LoopReduceOp::Add),
         AssignOp::Mul => Some(LoopReduceOp::Mul),
+        AssignOp::BitXor => Some(LoopReduceOp::Xor),
         _ => None,
+    }
+}
+
+/// Acc must be one operand of a commutative `⊕`; the other is the contribution.
+fn commute_reduce<'a>(
+    op: LoopReduceOp,
+    acc: &str,
+    a: &'a Output<'a>,
+    b: &'a Output<'a>,
+) -> Option<(LoopReduceOp, &'a Output<'a>)> {
+    if ident_name(a) == Some(acc) {
+        Some((op, b))
+    } else if ident_name(b) == Some(acc) {
+        Some((op, a))
+    } else {
+        None
     }
 }
 
@@ -960,20 +1007,73 @@ fn main() {
     #[test]
     fn rejects_outer_local_read() {
         assert!(
-            sites_of(&program(
+            sites_of(
                 r#"
+fn sq(int i) -> int { return i * i; }
+fn run(int k) -> int {
     let acc = 0;
-    let k = 7;
     let i = 0;
     while i < 100 {
         acc = acc + k;
         i = i + 1;
     }
+    return acc;
+}
+fn main() { return; }
 "#
-            ))
+            )
             .is_empty(),
-            "the chunk worker runs in a private frame — no captures"
+            "a parameter capture is not a compile-time int"
         );
+    }
+
+    #[test]
+    fn admits_enclosing_const_int() {
+        let site = one_site(&program(
+            r#"
+    let scale = 3;
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + scale * sq(i);
+        i = i + 1;
+    }
+"#,
+        ));
+        assert_eq!(site.captures, vec![("scale".to_string(), 3)]);
+        assert_eq!(site.trip_count(), 100);
+    }
+
+    #[test]
+    fn detects_xor_reduction() {
+        let site = one_site(&program(
+            r#"
+    let acc = 0;
+    let i = 0;
+    while i < 40 {
+        acc = acc ^ sq(i);
+        i = i + 1;
+    }
+"#,
+        ));
+        assert_eq!(site.op, LoopReduceOp::Xor);
+        assert_eq!(LoopReduceOp::Xor.identity(), 0);
+    }
+
+    #[test]
+    fn admits_commuted_reduction() {
+        let site = one_site(&program(
+            r#"
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = sq(i) + acc;
+        i = i + 1;
+    }
+"#,
+        ));
+        assert_eq!(site.op, LoopReduceOp::Add);
+        assert_eq!(site.trip_count(), 100);
     }
 
     #[test]
