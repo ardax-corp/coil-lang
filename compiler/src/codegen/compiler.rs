@@ -28,11 +28,12 @@ fn apply_debug_slot_remaps(
     }
 }
 
-/// Lowered form of a [`ParCombine`](crate::typechecking::ParCombine): the single
-/// instruction that folds the joined arm results once they are all on the stack.
+/// Lowered form of a [`ParCombine`](crate::typechecking::ParCombine): how to
+/// fold joined arm results once they are on the stack.
 enum ParCombinePlan {
-    /// `ADD` / `SUB` / `MUL` over exactly two arms.
-    Bin(Instruction),
+    /// `ADD` / `SUB` / `MUL` / `XOR`. Two arms: one op. N>2: `n-1` ops of an
+    /// associative combine (right-associated on the stack, same `int` result).
+    Bin { ins: Instruction, n: usize },
     /// Rebuild a call with the arm results as arguments.
     Call { entry: u32, arity: u32 },
     /// `(arm0, …)` tuple pack.
@@ -7878,6 +7879,11 @@ impl Compiler {
                 self.push_int_const(*sub);
                 self.bytecode.push(Byte::new(Instruction::SUB));
             }
+            ArgForm::ParamPlus { param, add } => {
+                self.bytecode.push_load(*param as u32);
+                self.push_int_const(*add);
+                self.bytecode.push(Byte::new(Instruction::ADD));
+            }
         }
     }
 
@@ -7957,15 +7963,22 @@ impl Compiler {
         let arms = site.arms.len();
         match &site.combine {
             ParCombine::BinOp(op) => {
-                if arms != 2 {
+                if arms < 2 {
                     return None;
                 }
                 let ins = match op {
                     ParBinOp::Add => Instruction::ADD,
                     ParBinOp::Sub => Instruction::SUB,
                     ParBinOp::Mul => Instruction::MUL,
+                    ParBinOp::Xor => Instruction::XOR,
                 };
-                Some((ParCombinePlan::Bin(ins), vec![0, 1]))
+                if matches!(op, ParBinOp::Sub) && arms != 2 {
+                    return None;
+                }
+                Some((
+                    ParCombinePlan::Bin { ins, n: arms },
+                    (0..arms).collect(),
+                ))
             }
             ParCombine::SelfCall => {
                 if arms != site.param_count {
@@ -8015,7 +8028,11 @@ impl Compiler {
 
     fn emit_par_combine(&mut self, plan: &ParCombinePlan) {
         match plan {
-            ParCombinePlan::Bin(op) => self.bytecode.push(Byte::new(*op)),
+            ParCombinePlan::Bin { ins, n } => {
+                for _ in 1..*n {
+                    self.bytecode.push(Byte::new(*ins));
+                }
+            }
             ParCombinePlan::Call { entry, arity } => self
                 .bytecode
                 .push(Byte::new(Instruction::CALL).with_call_packed(*arity, *entry)),
@@ -8109,6 +8126,7 @@ impl Compiler {
         let fold = match site.op {
             LoopReduceOp::Add => Instruction::ADD,
             LoopReduceOp::Mul => Instruction::MUL,
+            LoopReduceOp::Xor => Instruction::XOR,
         };
         let identity = site.op.identity() as i32;
 
@@ -8234,10 +8252,19 @@ impl Compiler {
         self.context.variables.intern(site.index.clone());
         self.context.variables.intern("__coil_par_hi".to_string());
         self.context.variables.intern(site.acc.clone());
+        let mut capture_inits = Vec::new();
+        for (name, val) in &site.captures {
+            let slot = self.context.variables.intern(name.clone()) as u32;
+            capture_inits.push((slot, *val));
+        }
 
         let mut bb = BlockBuilder::new();
         let top = bb.fresh_label(self.bytecode.il_mut());
         let exit = bb.fresh_label(self.bytecode.il_mut());
+        for (slot, val) in capture_inits {
+            self.push_int_const(val);
+            self.bytecode.push_store_pop(slot);
+        }
         bb.bind_label(top, self.bytecode.il_mut());
         self.bytecode.push_load(INDEX_SLOT);
         self.bytecode.push_load(BOUND_SLOT);
