@@ -1250,6 +1250,7 @@ impl Pipeline {
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             struct_layouts: self.archived_struct_layouts(),
             operand_stack_slots: self.operand_stack_slots(),
+            stack_maps: self.stack_maps().to_vec(),
             bytecode: self.bytecode,
         };
 
@@ -1826,11 +1827,13 @@ fn main() {
             fn_symbols: debug.fn_symbols,
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
+            stack_maps: pipeline.stack_maps().to_vec(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
         assert!(decoded.operand_stack_slots_persisted);
         assert_eq!(decoded.program.operand_stack_slots, 512);
+        assert!(decoded.stack_maps_persisted);
     }
 
     #[test]

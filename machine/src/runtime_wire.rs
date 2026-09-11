@@ -74,7 +74,8 @@ pub fn wire_thread_program<const N: usize>(
     )
 }
 
-/// Like [`wire_thread_program`], attaching S2b maps for compile-and-run.
+/// Like [`wire_thread_program`], attaching S2b maps for compile-and-run
+/// and archive/embed load.
 pub fn wire_thread_program_with_maps<const N: usize>(
     machine: &mut Machine<N>,
     bytecode: &[Byte],

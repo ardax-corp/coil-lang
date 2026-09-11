@@ -6994,6 +6994,87 @@ fn main() {
 }
 
 #[test]
+fn s2b_maps_survive_archive_load_and_collect() {
+    use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
+    use machine::wire_thread_program_with_maps;
+    use rkyv::rancor::Error;
+
+    let src = r#"
+use gc::{collect};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn keep([int] xs) -> [int] {
+    let junk = [1, 2, 3];
+    collect();
+    if junk == xs {
+        return junk;
+    }
+    return xs;
+}
+fn main() {
+    let a = [42, 7];
+    let b = keep(a);
+    write(stdout(), to_bytes(format("%i", b[0])));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+    let debug = pipeline.program_debug();
+    let program = ArchivedProgram {
+        version: ARCHIVE_VERSION,
+        static_slot_count: pipeline.static_slot_count(),
+        constants: constants.clone(),
+        strings: pipeline.strings().to_vec(),
+        bytecode: bytecode.clone(),
+        source_files: debug.source_files,
+        debug_locs: debug.debug_locs,
+        fn_symbols: debug.fn_symbols,
+        struct_layouts: pipeline.archived_struct_layouts(),
+        operand_stack_slots: pipeline.operand_stack_slots(),
+        stack_maps: pipeline.stack_maps().to_vec(),
+    };
+    let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+    let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
+    assert!(decoded.stack_maps_persisted);
+    assert_eq!(
+        decoded.program.stack_maps.as_slice(),
+        pipeline.stack_maps()
+    );
+    assert!(
+        !decoded.program.stack_maps.is_empty(),
+        "mapped keep() must persist S2b maps"
+    );
+
+    let loaded = &decoded.program;
+    let shared = SharedBuf::new();
+    let mut machine = Machine::<256>::with_operand_capacity(loaded.operand_stack_slots as usize);
+    machine.set_shared_print(shared.inner.clone());
+    machine.with_output(shared.clone());
+    pipeline.wire_vm_ffi(&mut machine, None);
+    pipeline.wire_host_natives(&mut machine);
+    wire_thread_program_with_maps(
+        &mut machine,
+        &loaded.bytecode,
+        &loaded.constants,
+        &loaded.strings,
+        loaded.static_slot_count,
+        loaded.debug_bundle(),
+        loaded.operand_stack_slots,
+        loaded.stack_maps.clone(),
+    );
+    machine.set_program_debug(loaded.debug_bundle());
+    machine.run_raw(
+        &loaded.bytecode,
+        &loaded.constants,
+        &loaded.strings,
+        loaded.static_slot_count,
+    );
+    let _ = machine.restore_output();
+    assert!(!machine.panicked(), "archive-loaded keep/collect panicked");
+    assert_eq!(shared.into_utf8(), "42");
+}
+
+#[test]
 fn s2c_mapped_pair_runs_and_keeps_maps() {
     let src = r#"
 use io::{stdout, write};
@@ -9809,6 +9890,7 @@ fn main() {
         fn_symbols: Vec::new(),
         struct_layouts: Vec::new(),
         operand_stack_slots: pipeline.operand_stack_slots(),
+        stack_maps: pipeline.stack_maps().to_vec(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =
