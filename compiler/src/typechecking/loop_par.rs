@@ -17,7 +17,7 @@ use std::collections::{HashMap, HashSet};
 
 use parser::ast::{AdjustOp, AssignOp, Expression, Output};
 
-use super::par_profit::par_cost_threshold;
+use super::par_profit::par_loop_grain;
 
 /// Associative operator folding a loop's per-iteration contributions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -246,9 +246,9 @@ impl Scan<'_> {
         consts: &ConstLocals,
         implicit_step: bool,
     ) -> Option<LoopParSite> {
-        // Profitability: trip count, not fib-units. A short loop cannot pay
-        // for a spawn plus a join (isolate grain).
-        if end.checked_sub(begin)? <= par_cost_threshold() {
+        // Profitability: trip-count grain, same spawn-floor idea as
+        // expression `W` but a different unit (iterations, not fork-tree nodes).
+        if end.checked_sub(begin)? <= par_loop_grain() {
             return None;
         }
 
@@ -822,7 +822,7 @@ fn main() {{
 
     #[test]
     fn rejects_trip_count_at_threshold() {
-        let t = par_cost_threshold();
+        let t = par_loop_grain();
         assert!(
             sites_of(&program(&format!(
                 r#"
