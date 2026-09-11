@@ -369,7 +369,8 @@ fib-equivalent units so `COIL_PAR_THRESHOLD` could stay **20**. F0 compares
 `W` **directly** to a grain floor (default **10945** = `W(fib(20))` =
 `Fib(21)-1`). Verdicts on the calibrated loads stay the same: `fib(21)`
 forks, `fib(20)` refuses, `tak(24, 22, 20)` refuses, and the fair
-`tak(18, 12, 6)` bench load lands on the floor and stays sequential. Loop IPA
+`tak(18, 12, 6)` bench load is 8398 grain (below the floor; fib-units used
+to report it as 20). Loop IPA
 keeps trip-count grain via `COIL_LOOP_GRAIN` (default 20). Full formula and
 verdict table in [auto-par](auto-par.md#expression-grain-w).
 

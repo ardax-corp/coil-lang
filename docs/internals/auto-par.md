@@ -109,14 +109,15 @@ grain floor.
 The default floor **10945** is a profitability constant in **grain** (nodes),
 not “fib(n)”. It is `W(fib(20))` for the `n <= 1` recurrence
 (`Fib(21) - 1`): the same spawn-profitability point previously written as
-fib-unit 20. `fib(20)` still refuses, `fib(21)` still forks; the fair
-`tak(18, 12, 6)` load still lands *on* the floor and stays sequential.
+fib-unit 20. `fib(20)` still refuses, `fib(21)` still forks. The fair
+`tak(18, 12, 6)` load is **8398** grain — below that floor (fib-units used
+to round it up to 20). It stays sequential.
 
 | Site | `max(args)` | Grain `W` | Verdict (default floor) | Real calls |
 |---|---|---|---|---|
 | `fib(21)` | 21 | 17710 | fork | 35 421 |
 | `fib(20)` | 20 | 10945 | refuse | 21 891 |
-| `tak(18, 12, 6)` (fair bench) | 18 | 10945 | refuse | 63 609 |
+| `tak(18, 12, 6)` (fair bench) | 18 | 8398 | refuse | 63 609 |
 | `tak(21, 12, 6)` | 21 | >10945 | fork | 230 613 |
 | `tak(24, 22, 20)` | 24 | 53-scale | refuse | 53 |
 | `sq(n) + sq(n - 1)` at 22 | 22 | 1 | refuse | 2 |
@@ -128,7 +129,7 @@ the caps — so `W` is a lower bound on the tree and unknown structure can
 only make a site refuse. `tak` is the interesting case: its arms rotate
 parameters, so a large component stays alive, but many children miss the `y < x`
 guard and the combine's re-entry is invisible. The fair benchmark
-load lands exactly *on* the floor and stays sequential; only a genuinely deeper
+load lands **below** the floor (`W = 8398`) and stays sequential; only a genuinely deeper
 tree crosses it.
 
 The default is a profitability floor, not an arbitrary gate: forking below

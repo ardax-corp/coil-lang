@@ -1462,8 +1462,10 @@ fn main() { return; }
 
     /// Rotating `tak` arms keep a large component alive, but most children miss
     /// the `y < x` guard and the `SelfCall` combine's re-entry is unknowable,
-    /// so the fair benchmark load lands on the grain floor and refuses.
-    /// Only a load with a genuinely deeper tree crosses it.
+    /// so the fair benchmark load scores **8398** grain — below the
+    /// fib-calibrated floor **10945**. Fib-unit inversion used to report this
+    /// as unit 20 (`Fib(21)-1 = 10945` is the next invert bucket). Only a
+    /// genuinely deeper tree crosses the floor.
     #[test]
     fn fair_tak_load_scores_below_threshold() {
         let floor = par_expr_grain();
@@ -1478,7 +1480,11 @@ fn tak(int x, int y, int z) -> int {
 fn main() { return; }
 "#,
         );
-        assert_eq!(par_work_grain(&sites, "tak", &[18, 12, 6]), floor);
+        assert_eq!(par_work_grain(&sites, "tak", &[18, 12, 6]), 8398);
+        assert!(
+            8398 < floor,
+            "fair tak grain must sit below the fib-calibrated floor"
+        );
         assert!(
             !args_worth_parallel(&sites, "tak", &[18, 12, 6]),
             "the fair tak(18, 12, 6) load must stay sequential"
