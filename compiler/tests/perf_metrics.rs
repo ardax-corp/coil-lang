@@ -342,27 +342,35 @@ fn perf_field_hot_reuses_repeated_string_keys() {
         "field_hot user fns should reuse field-name STRINGs, got {strings}"
     );
     let fields = count_opcodes(&bc, Instruction::GetField)
-        + count_opcodes(&bc, Instruction::LoadField);
+        + count_opcodes(&bc, Instruction::LoadField)
+        + count_opcodes(&bc, Instruction::DenseFieldLoad);
     assert!(
         fields >= 1,
-        "field_hot should emit GetField/LoadField (got GetField={} LoadField={})",
+        "field_hot should emit field loads (got GetField={} LoadField={} DenseFieldLoad={})",
         count_opcodes(&bc, Instruction::GetField),
-        count_opcodes(&bc, Instruction::LoadField)
+        count_opcodes(&bc, Instruction::LoadField),
+        count_opcodes(&bc, Instruction::DenseFieldLoad)
     );
     assert!(
         pipeline
             .stack_maps()
             .iter()
             .any(|m| !m.safepoints.is_empty()),
-        "D1 field_hot InitTyped should bind maps: {:?}",
+        "D2 field_hot InitTyped should bind maps: {:?}",
         pipeline.stack_maps()
     );
     let (start, end) = fn_pc_range(&syms, "hot", bc.len());
     assert!(
-        !bc[start..end]
+        bc[start..end]
             .iter()
             .any(|b| *b.bytecode() == Instruction::DenseBin),
-        "field_hot hot stays fuse-IL (HeapField / cost)"
+        "field_hot hot keeps DenseBin (D2 field natives)"
+    );
+    assert!(
+        bc[start..end]
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseFieldLoad),
+        "field_hot hot keeps DenseFieldLoad"
     );
 }
 

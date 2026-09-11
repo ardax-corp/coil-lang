@@ -7,8 +7,8 @@ the denser-coverage kick list for majority programs + checksum + cost
 gate ([opt-generalization.md](opt-generalization.md) A0).
 
 Tip: D0 [COI-354](https://linear.app/ardax/issue/COI-354) (`7960eed2`).
-D1 [COI-355](https://linear.app/ardax/issue/COI-355) maps class `new` /
-field edges (this PR).
+D1 [COI-355](https://linear.app/ardax/issue/COI-355) (`e046af78`).
+D2 [COI-356](https://linear.app/ardax/issue/COI-356) dense field / Object make (this PR).
 
 ## Cross-check (open Linear / landed PRs)
 
@@ -17,15 +17,15 @@ field edges (this PR).
 | [COI-351](https://linear.app/ardax/issue/COI-351) C2 | **Done** (#401) | Numeric free-fn Range param / two-slot `CALL`/`RETURN`; counted `for` without `GetField` | User `Iterator` / coro / dict / heap-field Range → [COI-353](https://linear.app/ardax/issue/COI-353) **C2b** (Todo). Not this wave. |
 | [COI-350](https://linear.app/ardax/issue/COI-350) C3 | **Done** (#402) | Compiler-internal `DraftDeoptMap`, named-let remap, sparse emit locs | P5 resume, incomplete convoy maps, per-PC locals. Debugger, not a hot-path densify. |
 | [COI-344](https://linear.app/ardax/issue/COI-344) B6 | **Done** (#396) | Mapped `ArrayPush` / `DenseArrayPush` (archive **4.11**); CALL+`Make*` / `InitTyped` drafts bind | Unmapped **class** edges were D1; `DenseMake` has no Object kind; `item_check` still fuse (match wall, not maps) |
-| [COI-335](https://linear.app/ardax/issue/COI-335) A2 | **Done** (#379) | `DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` / `DenseMake` / `DensePush` | No dense field op; Object `Alloc` reconstructs `InitTyped` — **D2** |
+| [COI-335](https://linear.app/ardax/issue/COI-335) A2 | **Done** (#379) | `DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` / `DenseMake` / `DensePush` | Field / Object natives were D2 |
+| [COI-355](https://linear.app/ardax/issue/COI-355) D1 | **Done** (#408) | Sound GC maps across `InitTyped`+`SetField`/`GetField` on escaping named objects | Dense field / Object `DenseMake` → **D2** (this PR). Escaping `self` stays boxed-once (Q2) |
+| [COI-356](https://linear.app/ardax/issue/COI-356) D2 | **Done** (this PR) | `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` (archive **4.12**); cost gate can keep field loops | LIR still `HeapField`. I3 unboxed stays MIR→LIR. Printing `main` stays fuse |
 | [COI-340](https://linear.app/ardax/issue/COI-340) B2 | **Done** (#392) | Self-`CALL` convoy so tight `fib`/`tak` can win the gate | Other lifted bodies may still lose on Seek / boxed reconstruct |
 | [COI-354](https://linear.app/ardax/issue/COI-354) D0 | **Done** (#407) | `slot_env` follows trivial-phi subst so in-loop `ArrayPush` + pin loops verify; `nsieve` keeps dense-native | Straight-line / select still lose on `emit_cost`; multi-payload match stays later |
-| [COI-355](https://linear.app/ardax/issue/COI-355) D1 | **Done** (this PR) | Sound GC maps across `InitTyped`+`SetField`/`GetField` on escaping named objects | Dense field / Object `DenseMake` → [COI-356](https://linear.app/ardax/issue/COI-356) **D2**. Escaping `self` stays boxed-once (Q2) |
 | [COI-347](https://linear.app/ardax/issue/COI-347) B9 | **Done** (#399) | Q9 R3 maps `FORMAT`/`STRINGIFY` | Dense infer still refuses table ops. Unicode/regex → [COI-348](https://linear.app/ardax/issue/COI-348) **B10** |
 | [COI-352](https://linear.app/ardax/issue/COI-352) C1b | Todo | N>2 modeled `CALL`/`RETURN` | Archive encoding. Not majority until that ABI exists. |
 
-No Linear ticket today for leftover dense field ops / boxed multi-payload
-match. D1 class-`new` maps is [COI-355](https://linear.app/ardax/issue/COI-355).
+No Linear ticket today for leftover boxed multi-payload match (D3).
 
 ## Inventory (#405 ranking, verified on tip)
 
@@ -75,46 +75,41 @@ B6 majority grow/Make* plus D1 class/field maps.
 
 **Hunch that does not hold:** “Unmapped alloc still means `Vec.push`.”
 `Vec.push` is a mapped grow safepoint. Field ops are still
-`LirRefuse::HeapField` for **reconstruct** (D2). Maps now bind across
-`InitTyped`+field. `MirAllocKind::Object` still cannot `DenseMake`.
+`LirRefuse::HeapField` for **LIR reconstruct**. Maps bind across
+`InitTyped`+field. `MirAllocKind::Object` emits `DenseMakeObject`.
 
 I3 already unboxes **non-escaping** named `new C`. Escaping `self` /
 `take(p)` stays heap — Q2 identity, not a map bug. D1 does not SROA
-escaped `self`.
+escaped `self`. D2 does not unbox escaped `self`.
 
-**Blocker for keep:** Object alloc has no native kind; LIR still refuses
-HeapField. Maps first (this ticket); native reconstruct is D2 so the
-cost gate can keep.
+**Blocker for keep:** **landed** (D2 natives). LIR still refuses HeapField
+(dense is the keep path).
 
-**Perf surface:** `examples/perf/field_hot.hy` (`hot` maps, stays fuse-IL;
-printing `main` stays unmapped). Escaping `new` + `take`. Not `nsieve`.
+**Perf surface:** `examples/perf/field_hot.hy` (`hot` maps + dense-native).
+Printing `main` stays unmapped. Escaping `new` + `take`. Not `nsieve`.
 
-**Effort:** done. D2 is medium + archive minor if a new dense field op.
+**Effort:** done.
 
 ### 3. Dense-native leftover heap / class edges (A2 leftover)
 
-**Status:** open gap after #379.
+**Status:** **landed** ([COI-356](https://linear.app/ardax/issue/COI-356)).
 
 **Landed native:** `DenseIndex`, `DenseStoreIndex`, `DenseArrayLen`,
 `DenseMake` (array/tuple/enum tag), `DensePush` (CALL/HostInvoke),
-`DenseArrayPush` (B6). Dense emit **refuses** `FieldLoad`/`FieldStore`
-(“I3 is MIR→LIR”).
+`DenseArrayPush` (B6), `DenseFieldLoad` / `DenseFieldStore` /
+`DenseMakeObject` (D2, archive **4.12**). Unboxed `FieldLoad`/`FieldStore`
+stay MIR→LIR (I3).
 
 **Hunch that does not hold:** “I3 field-SROA will densify `field_hot`.”
 `field_hot` calls methods on a live object (`self` identity). Q2 boxes
-once. I3 is non-escaping locals only. `perf_field_hot_reuses_repeated_string_keys`
-still requires `GetField`/`LoadField`.
+once. I3 is non-escaping locals only.
 
-**Blocker:** no dense field opcode / Object `DenseMake`; LIR field reconstruct
-only for unboxed slots. Coupled to (2): maps first, then native ops so the
-cost gate can keep.
+**Blocker:** none for indexed class fields. Named `GetField`+`STRING` still
+fights dense table-op refuse. Dict field loops stay fuse-IL.
 
-**Perf surface:** same as (2); in-loop Index bodies that still residual-box
-(A2 already won the mapped Index/`MakeArray` majority — `times_a`,
-`indexed_sum`, Q6 `sum`).
+**Perf surface:** `field_hot` `hot`; field store loops.
 
-**Effort:** medium + **archive minor** if a new dense field op. Prefer
-regular field native over a `field_hot` peep.
+**Effort:** done. Regular field natives, not a `field_hot` peep.
 
 ### 4. Q9 vs whole-`main` fuse
 
@@ -171,8 +166,7 @@ Majority programs + cost gate. One ticket at a time. A4 on every code PR.
 |------|------|---------------|-----|
 | **P0** | Keep-rate on bodies that **already lift** | **Landed** [COI-354](https://linear.app/ardax/issue/COI-354): `nsieve` keeps dense. Residual: other Seek/box losers | Skip-the-gate. Vanity microbench. |
 | **P1** | Class `new` / field **maps** (B6 leftover) | **Landed** [COI-355](https://linear.app/ardax/issue/COI-355): maps bind on `InitTyped`+field. Escaping identity stays boxed-once (Q2). | Re-doing `ArrayPush` maps. Unboxing escaped `self`. |
-| **P2** | Dense-native field / Object `DenseMake` (A2 leftover) | After P1, so reconstruct is native and the gate can keep. | Bench-shaped `GetField` fuse. |
-| **P2** | Dense-native field / Object `DenseMake` (A2 leftover) | After P1, so reconstruct is native and the gate can keep. | Bench-shaped `GetField` fuse. |
+| **P2** | Dense-native field / Object `DenseMake` (A2 leftover) | **Landed** [COI-356](https://linear.app/ardax/issue/COI-356): `DenseFieldLoad`/`DenseFieldStore`/`DenseMakeObject`. Cost gate can keep field loops. | Bench-shaped `GetField` fuse. |
 | **P3** | Boxed multi-payload match | Flagship + real enums. Hard wall. Bigger than P0–P2. | Trees opcode. Forcing dense `main`. |
 
 **Do not kick now:** whole-`main` dense format (4); C2b user Iterator
@@ -185,7 +179,7 @@ tree-shake / BB reorder (#405).
 
 - **C2 / C3 are the denser-MIR leftovers.** They shipped (#401 / #402).
   Leftovers are Iterator/coro (language) and P5 (native), not keep-rate.
-- **B6 left `ArrayPush` unmapped.** Mapped. Leftover is class field / Object.
+- **B6 left `ArrayPush` unmapped.** Mapped. Class field maps are D1; natives D2.
 - **`nsieve` is dense after B6.** Maps bound; keep needed D0 `slot_env` rewrite.
 - **`field_hot` is an I3 miss.** Escaping `self`. Q2.
 - **Densify printing `main`.** Helpers are the island. Table ops stay off dense.
@@ -207,9 +201,9 @@ Opt generalization board, same shape as B6/C2 (tip SHA, prove, A4):
    reconstruct.
 
 3. **P2 — A2 leftover: dense-native field / Object make**  
-   After P1. Native reconstruct of field load/store (and Object
-   `DenseMake` if needed). Archive minor only if a new opcode. Prove
-   field loops; flagships flat.
+   **Landed** [COI-356](https://linear.app/ardax/issue/COI-356).
+   `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject`. Escaping
+   `self` stays boxed-once. Cost gate still on. Flagships flat.
 
 4. **P3 — Boxed multi-payload match (`Unpack` arity > 1)**  
    I2 leftover. `binary_trees` `item_check`. Per-index payload maps.

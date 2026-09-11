@@ -4030,8 +4030,11 @@ fn main() {
         assert!(
             hot_bc
                 .iter()
-                .any(|b| *b.bytecode() == Instruction::InitTyped),
-            "escaping named local stays InitTyped; opcodes={:?}",
+                .any(|b| matches!(
+                    *b.bytecode(),
+                    Instruction::InitTyped | Instruction::DenseMakeObject
+                )),
+            "escaping named local stays boxed-once; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
@@ -4046,7 +4049,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_field_hot_binds_maps_stays_fuse_il() {
+    fn pipeline_field_hot_keeps_dense_native() {
         let src = r#"
 class Point {
     pub x: int,
@@ -4079,7 +4082,7 @@ fn main() {
             p.stack_maps()
                 .iter()
                 .any(|m| !m.safepoints.is_empty()),
-            "D1 field_hot InitTyped should bind maps: {:?}",
+            "D2 field_hot InitTyped should bind maps: {:?}",
             p.stack_maps()
         );
         let symbols = p.program_debug().fn_symbols;
@@ -4096,20 +4099,57 @@ fn main() {
             assert!(
                 slice
                     .iter()
-                    .all(|b| *b.bytecode() != Instruction::DenseBin),
-                "{name} must stay fuse-IL (cost / HeapField); opcodes={:?}",
+                    .any(|b| *b.bytecode() == Instruction::DenseBin),
+                "{name} must keep DenseBin; opcodes={:?}",
+                slice.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            );
+            assert!(
+                slice.iter().any(|b| *b.bytecode() == Instruction::DenseFieldLoad),
+                "{name} must keep DenseFieldLoad; opcodes={:?}",
                 slice.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
             );
         }
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_field_store_loop_keeps_dense() {
+        let src = r#"
+class Point {
+    pub n: int,
+}
+fn hot() -> int {
+    let p = new Point(0);
+    let i = 0;
+    while i < 4 {
+        p.n = p.n + 1;
+        i = i + 1;
+    }
+    return p.n;
+}
+fn main() {
+    if hot() != 4 {
+        panic "store checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile field store loop");
+        let hot_bc = hot_slice(&p, &bc);
         assert!(
-            bc.iter().any(|b| matches!(
-                *b.bytecode(),
-                Instruction::GetField | Instruction::LoadField | Instruction::SetField
-            )),
-            "escaping field ops stay fuse-IL; opcodes={:?}",
-            bc.iter()
-                .map(|b| b.bytecode().mnemonic())
-                .collect::<Vec<_>>()
+            hot_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::DenseFieldLoad),
+            "field store loop DenseFieldLoad; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            hot_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::DenseFieldStore),
+            "field store loop DenseFieldStore; opcodes={:?}",
+            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
