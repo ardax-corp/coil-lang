@@ -418,6 +418,16 @@ impl Heap {
         self.alloc_bytes
     }
 
+    /// Slab chunks currently mapped (64KiB each). Sweep does not unmap.
+    pub fn slab_chunk_count(&self) -> usize {
+        self.slab.chunk_count()
+    }
+
+    /// Mapped slab bytes (not payload `Vec`s).
+    pub fn mapped_bytes(&self) -> usize {
+        self.slab.mapped_bytes()
+    }
+
     /// Number of live heap objects (for GC pressure after `HostInvoke`).
     #[inline]
     pub fn live_object_count(&self) -> usize {

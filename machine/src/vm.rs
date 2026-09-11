@@ -5,6 +5,7 @@ use std::{
     fmt::Write as FmtWrite,
     io::{self, Write as IoWrite},
     path::PathBuf,
+    sync::Arc,
 };
 
 #[cfg(any(test, feature = "vm_profile"))]
@@ -344,9 +345,10 @@ pub struct Machine<const S: usize> {
     /// Keeps libffi callback trampolines alive (ties lifetime to VM run).
     ffi_closures: Vec<crate::ffi::OwnedClosure>,
     /// Bytecode/constants for nested `call_function` / callbacks.
-    program_code: Vec<RawByte>,
-    program_constants: Vec<u64>,
-    program_strings: Vec<String>,
+    /// `Arc` so reactor workers share the [`crate::thread::ThreadProgram`] image.
+    program_code: Arc<Vec<RawByte>>,
+    program_constants: Arc<Vec<u64>>,
+    program_strings: Arc<Vec<String>>,
     /// Interned handle per `program_strings` index. Not a GC root: sweep
     /// zeros the table so unmarked literals can die; STRING still stacks
     /// the handle before `maybe_gc`.
@@ -435,9 +437,9 @@ impl<const S: usize> Machine<S> {
             dload_gate: crate::ffi::DloadGate::deny_all(),
             struct_layouts: Vec::new(),
             ffi_closures: Vec::new(),
-            program_code: Vec::new(),
-            program_constants: Vec::new(),
-            program_strings: Vec::new(),
+            program_code: Arc::new(Vec::new()),
+            program_constants: Arc::new(Vec::new()),
+            program_strings: Arc::new(Vec::new()),
             program_string_cache: Vec::new(),
             nested_depth: 0,
             nested_frame_depths: Vec::new(),
@@ -669,10 +671,10 @@ impl<const S: usize> Machine<S> {
             self.statics = vec![Value::default(); static_slots as usize];
         }
         if self.program_code.is_empty() {
-            self.program_code = unsafe {
+            self.program_code = Arc::new(unsafe {
                 std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
-            };
-            self.program_constants = constants.to_vec();
+            });
+            self.program_constants = Arc::new(constants.to_vec());
             self.install_program_strings(strings);
             self.sync_thread_program_from_current();
         }
@@ -1594,7 +1596,11 @@ impl<const S: usize> Machine<S> {
     }
 
     fn install_program_strings(&mut self, strings: &[String]) {
-        self.program_strings = strings.to_vec();
+        self.install_program_strings_arc(Arc::new(strings.to_vec()));
+    }
+
+    fn install_program_strings_arc(&mut self, strings: Arc<Vec<String>>) {
+        self.program_strings = strings;
         self.program_string_cache.clear();
         self.program_string_cache
             .resize(self.program_strings.len(), Value::default());
@@ -1776,9 +1782,9 @@ impl<const S: usize> Machine<S> {
             return;
         }
         self.thread_program = Some(std::sync::Arc::new(crate::thread::ThreadProgram {
-            code: std::sync::Arc::new(self.program_code.clone()),
-            constants: std::sync::Arc::new(self.program_constants.clone()),
-            strings: std::sync::Arc::new(self.program_strings.clone()),
+            code: Arc::clone(&self.program_code),
+            constants: Arc::clone(&self.program_constants),
+            strings: Arc::clone(&self.program_strings),
             static_slot_count: self.statics.len() as u32,
             debug: self.program_debug.clone(),
             operand_stack_slots: self.stack.capacity() as u32,
@@ -2185,17 +2191,65 @@ impl<const S: usize> Machine<S> {
 
     /// Load bytecode for reentrant [`call_function`] without running `main`.
     pub fn load_program(&mut self, code: &[RawByte], constants: &[u64], strings: &[String]) {
-        self.program_code = code.to_vec();
-        self.program_constants = constants.to_vec();
+        self.program_code = Arc::new(code.to_vec());
+        self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.panicked = false;
+    }
+
+    /// Pin an already-shared program image (reactor workers / join-help).
+    ///
+    /// Does not memcpy bytecode, constants, or the string table.
+    pub fn load_shared_program(
+        &mut self,
+        code: Arc<Vec<RawByte>>,
+        constants: Arc<Vec<u64>>,
+        strings: Arc<Vec<String>>,
+    ) {
+        self.program_code = code;
+        self.program_constants = constants;
+        self.install_program_strings_arc(strings);
+        self.panicked = false;
+    }
+
+    /// Drop isolate GC identity after a reactor job. Operand-stack capacity
+    /// is kept. More than one mapped slab chunk is unmapped so RSS cannot
+    /// climb with successive jobs; a single 64KiB chunk is collected in place.
+    pub fn reset_isolate_heap(&mut self) {
+        self.frames = {
+            let mut frames = ArrayVec::default();
+            frames.consume();
+            frames
+        };
+        self.frame_pins.clear();
+        self.stack.seek(0);
+        self.resume_stack.clear();
+        self.statics.fill(Value::default());
+        self.program_string_cache.fill(Value::default());
+        self.nested_depth = 0;
+        self.nested_frame_depths.clear();
+        self.nested_return = None;
+        self.pending_ffi = None;
+        self.pending_io = None;
+        self.panicked = false;
+        self.userland_libraries.clear();
+        self.ffi_closures.clear();
+        self.gc_in_progress = false;
+        self.gc_deferred = false;
+        if self.heap.slab_chunk_count() > 1 {
+            self.heap = Heap::default();
+        } else if self.heap.slab_chunk_count() == 1 {
+            self.heap.collect(&[]);
+            self.program_string_cache.fill(Value::default());
+        }
     }
 
     /// Rewrite the first `JMP target` at or after `from` into `HALT` so setup
     /// can run without falling through into `main`.
     pub fn halt_first_jump_to(&mut self, from: usize, target: u32) {
+        let owned = Arc::make_mut(&mut self.program_code);
         let code: &mut [Byte] = unsafe {
-            std::slice::from_raw_parts_mut(self.program_code.as_mut_ptr().cast(), self.program_code.len())
+            std::slice::from_raw_parts_mut(owned.as_mut_ptr().cast(), owned.len())
         };
         for b in code.iter_mut().skip(from) {
             if matches!(b.bytecode(), Instruction::JMP) && b.operand_u32() == target {
@@ -2264,10 +2318,10 @@ impl<const S: usize> Machine<S> {
             return;
         }
         self.statics = vec![Value::default(); static_slots as usize];
-        self.program_code = unsafe {
+        self.program_code = Arc::new(unsafe {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
-        };
-        self.program_constants = constants.to_vec();
+        });
+        self.program_constants = Arc::new(constants.to_vec());
         self.install_program_strings(strings);
         self.sync_thread_program_from_current();
         let mut ip = 0usize;
