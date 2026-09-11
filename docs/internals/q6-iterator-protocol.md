@@ -47,6 +47,9 @@ type level). Runtime lowering:
    until a later rung (match / CALL / resume).
 
 No new opcode. No env toggle. Keep/refuse is checksum + cost gate.
+Counted const `for` / range with an associative int reduce may also
+**loop-IPA** (COI-362 E4) when trip count beats `COIL_PAR_THRESHOLD`;
+dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
 
 ## Prove
 
