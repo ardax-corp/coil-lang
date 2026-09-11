@@ -7621,8 +7621,7 @@ impl Compiler {
         else {
             return;
         };
-        // Cheapest arg vectors first: arms shrink their args, so a parent then
-        // finds its children's nullary clones already bound.
+        // Cheapest first so a parent clone can bind to in-hop child clones.
         let mut ordered: Vec<Vec<i64>> = arg_sets.into_iter().collect();
         ordered.sort_by(|a, b| (a.iter().sum::<i64>(), a).cmp(&(b.iter().sum::<i64>(), b)));
         for args in &ordered {
@@ -7632,9 +7631,10 @@ impl Compiler {
 
     /// Emit one always-fork nullary clone of `site.fn_name` at `parent_args`.
     ///
-    /// Arm 0 is spawned onto the work-stealing reactor, the remaining arms run
-    /// inline, and the joined results are folded by the site's combine. A
-    /// failed spawn falls back to evaluating every arm sequentially.
+    /// Evidence-gated AlwaysPar (COI-361 E3): arm 0 is spawned, remaining arms
+    /// run inline, then join + combine. In-hop child clones are used when they
+    /// exist; deeper levels call the sequential original. Failed spawn/join
+    /// falls back to sequential arms.
     fn emit_one_par_specialization(
         &mut self,
         site: &crate::typechecking::ParForkSite,
@@ -7888,8 +7888,8 @@ impl Compiler {
 
     /// Callable for one arm: `(entry, arity, needs_push_args)`.
     ///
-    /// A child level that is itself specialized is invoked as its nullary
-    /// clone; otherwise the callee is called with concrete args.
+    /// An in-hop child specialization is invoked as its nullary clone;
+    /// otherwise the sequential callee is called with concrete args.
     fn par_arm_callable(
         &self,
         arm: &crate::typechecking::ParArm,

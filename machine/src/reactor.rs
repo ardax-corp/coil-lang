@@ -46,6 +46,8 @@ pub struct Reactor {
     n_workers: AtomicUsize,
     started: OnceLock<()>,
     inflight: AtomicUsize,
+    /// Total `submit` calls this reactor has accepted (IPA spawn count).
+    submitted: AtomicUsize,
     shutdown: AtomicBool,
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
@@ -60,6 +62,7 @@ impl Reactor {
             n_workers: AtomicUsize::new(n_workers),
             started: OnceLock::new(),
             inflight: AtomicUsize::new(0),
+            submitted: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             worker_handles: Mutex::new(Vec::new()),
         })
@@ -71,6 +74,11 @@ impl Reactor {
 
     pub fn inflight(&self) -> usize {
         self.inflight.load(Ordering::SeqCst)
+    }
+
+    /// Jobs pushed since this reactor was created (each AlwaysPar `thread_spawn`).
+    pub fn jobs_submitted(&self) -> usize {
+        self.submitted.load(Ordering::Relaxed)
     }
 
     fn ensure_started(self: &Arc<Self>) {
@@ -124,6 +132,7 @@ impl Reactor {
     /// Submit `job` to the pool (starts workers lazily).
     pub fn submit(self: &Arc<Self>, job: Job) {
         self.ensure_started();
+        self.submitted.fetch_add(1, Ordering::Relaxed);
         self.inflight.fetch_add(1, Ordering::SeqCst);
         match try_push_local(self, job) {
             Ok(()) => {}
@@ -599,6 +608,7 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert_eq!(reactor.inflight(), 0);
+        assert_eq!(reactor.jobs_submitted(), 1);
     }
 
     #[test]
