@@ -4119,11 +4119,16 @@ fn main() {
 class Point {
     pub n: int,
 }
+impl Point {
+    pub fn bump() {
+        self.n = self.n + 1;
+    }
+}
 fn hot() -> int {
     let p = new Point(0);
     let i = 0;
     while i < 4 {
-        p.n = p.n + 1;
+        p.bump();
         i = i + 1;
     }
     return p.n;
@@ -4136,20 +4141,30 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile field store loop");
-        let hot_bc = hot_slice(&p, &bc);
+        let symbols = p.program_debug().fn_symbols;
+        let bump = symbols
+            .iter()
+            .position(|s| s.name == "Point::bump")
+            .expect("Point::bump");
+        let start = symbols[bump].entry_pc as usize;
+        let end = symbols
+            .get(bump + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let bump_bc = &bc[start..end];
         assert!(
-            hot_bc
+            bump_bc
                 .iter()
                 .any(|b| *b.bytecode() == Instruction::DenseFieldLoad),
-            "field store loop DenseFieldLoad; opcodes={:?}",
-            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "escaping self store DenseFieldLoad; opcodes={:?}",
+            bump_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc
+            bump_bc
                 .iter()
                 .any(|b| *b.bytecode() == Instruction::DenseFieldStore),
-            "field store loop DenseFieldStore; opcodes={:?}",
-            hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            "escaping self store DenseFieldStore; opcodes={:?}",
+            bump_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
