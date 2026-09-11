@@ -12,10 +12,11 @@
 //! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
 //! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on
 //! every mode (dense reconstruct is register `Br`). Counted `for` (Q6)
-//! is ordinary i64 + index IL — no extra refuse. Still refuse class
-//! field / unmapped alloc / residual `Byte` /
-//! `Pow` / `AND`/`OR`. Q9 R1: LIR infer accepts `STRING` / `PRINT` /
-//! `FORMAT` / `STRINGIFY`; dense infer still refuses those table ops.
+//! is ordinary i64 + index IL — no extra refuse. Still refuse unmapped
+//! alloc / residual `Byte` / `Pow` / `AND`/`OR`. **D2**: dense infer types
+//! heap `GetField` / `SetField` / `LoadField`. Q9 R1: LIR infer accepts
+//! `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; dense infer still refuses
+//! those table ops.
 //! R2 opens `from_bytes` / `to_bytes` HostInvoke on dense. R3 maps
 //! `FORMAT` / `STRINGIFY` like I5 alloc. S2c maps
 //! allow alloc. Compare-only stays fuse-IL. Q7 unfuses convoy
@@ -194,9 +195,9 @@ impl InferMode {
         matches!(self, Self::Lir | Self::Map)
     }
 
-    /// D1: map lift types heap GetField / SetField / LoadField (not dense).
+    /// D1/D2: map and dense lifts type heap GetField / SetField / LoadField.
     fn allows_heap_fields(self) -> bool {
-        matches!(self, Self::Map)
+        matches!(self, Self::Map | Self::Dense)
     }
 }
 
@@ -216,7 +217,8 @@ fn infer_walk(
     let mut has_float_arith = false;
     let mut has_i64_arith = false;
     let mut slot_imm: HashMap<u32, i64> = HashMap::new();
-    let reuse = mode == InferMode::Map;
+    let reuse = mode == InferMode::Map
+        || (mode == InferMode::Dense && ops.iter().any(is_heap_field_op));
 
     for op in ops {
         match op {
@@ -429,6 +431,8 @@ fn infer_walk(
                     apply_array_push(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
                 Instruction::DenseArrayPush if mode.allows_alloc(allow_alloc) => {}
+                Instruction::DenseFieldLoad | Instruction::DenseFieldStore => {}
+                Instruction::DenseMakeObject if mode.allows_alloc(allow_alloc) => {}
                 Instruction::INC | Instruction::DEC => {
                     let (slot, _, is_float) = byte.inc_dec_parts();
                     let ty = if is_float { MirTy::F64 } else { MirTy::I64 };
@@ -945,6 +949,22 @@ pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
         }
     }
     any
+}
+
+/// Heap GetField / SetField / LoadField (fuse-IL or residual dense).
+fn is_heap_field_op(op: &IlOp) -> bool {
+    match op {
+        IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => true,
+        IlOp::Byte { byte, .. } => matches!(
+            *byte.bytecode(),
+            Instruction::GetField
+                | Instruction::SetField
+                | Instruction::LoadField
+                | Instruction::DenseFieldLoad
+                | Instruction::DenseFieldStore
+        ),
+        _ => false,
+    }
 }
 
 /// Heap-index / store / pin / ArrayLen — S3 may specialize these with maps.

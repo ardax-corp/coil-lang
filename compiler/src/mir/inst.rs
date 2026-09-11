@@ -401,7 +401,7 @@ pub enum MirAllocKind {
     Array,
     Tuple,
     /// `InitTyped` (`type_id`, `nfields`). Heap fields are SSA for maps (D1);
-    /// dense Object `DenseMake` is D2.
+    /// dense Object `DenseMakeObject` is D2.
     Object {
         type_id: u32,
         nfields: u32,

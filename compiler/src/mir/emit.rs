@@ -627,13 +627,46 @@ pub(super) fn emit_inst(
                 out.push(move_op(d, s));
             }
         }
-        MirInst::FieldLoad { .. }
-        | MirInst::FieldStore { .. }
-        | MirInst::HeapFieldLoad { .. }
-        | MirInst::HeapFieldStore { .. } => {
+        MirInst::FieldLoad { .. } | MirInst::FieldStore { .. } => {
             return Err(LowerError::Refused(
-                "dense emit refuses FieldLoad/FieldStore (I3 is MIR→LIR; heap fields are D2)".into(),
+                "dense emit refuses unboxed FieldLoad/FieldStore (I3 is MIR→LIR)".into(),
             ));
+        }
+        MirInst::HeapFieldLoad {
+            dest,
+            object,
+            name,
+            index,
+        } => {
+            emit_dense_field_load(
+                out,
+                regs[dest.index()],
+                regs[object.index()],
+                name.map(|n| regs[n.index()]),
+                *index,
+                loc,
+            )?;
+        }
+        MirInst::HeapFieldStore {
+            dest,
+            object,
+            value,
+            name,
+            index,
+        } => {
+            let d = regs[dest.index()];
+            let v = regs[value.index()];
+            if d != v {
+                out.push(move_op(d, v));
+            }
+            emit_dense_field_store(
+                out,
+                d,
+                regs[object.index()],
+                name.map(|n| regs[n.index()]),
+                *index,
+                loc,
+            )?;
         }
         MirInst::Alloc { dest, kind, elems } => {
             if !across_alloc {
@@ -654,6 +687,8 @@ pub(super) fn emit_inst(
                         base,
                     ),
                 ));
+            } else if let Some(op) = dense_make_object(*kind, regs[dest.index()], loc)? {
+                out.push(op);
             } else {
                 emit_dense_push(out, elems, regs, scratch, loc)?;
                 out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
@@ -1517,6 +1552,66 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
         }
         MirAllocKind::Object { .. } => Ok(None),
     }
+}
+
+fn dense_make_object(
+    kind: MirAllocKind,
+    dest: u8,
+    loc: DebugLoc,
+) -> Result<Option<IlOp>, LowerError> {
+    let MirAllocKind::Object { type_id, nfields } = kind else {
+        return Ok(None);
+    };
+    let nfields =
+        u8::try_from(nfields).map_err(|_| LowerError::Refused("DenseMakeObject nfields".into()))?;
+    let type_id =
+        u16::try_from(type_id).map_err(|_| LowerError::Refused("DenseMakeObject type_id".into()))?;
+    Ok(Some(IlOp::from_plain_byte(
+        Byte::new(Instruction::DenseMakeObject)
+            .with_operand_u32(dense::pack_make_object(dest, nfields, type_id)),
+        loc,
+    )))
+}
+
+fn emit_dense_field_load(
+    out: &mut Vec<IlOp>,
+    dest: u8,
+    object: u8,
+    name: Option<u8>,
+    index: u32,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    let (flags, c) = field_dense_c(name, Some(index))?;
+    out.push(IlOp::from_plain_byte(
+        Byte::new(Instruction::DenseFieldLoad).with_dense_abc(flags, dest, object, c),
+        loc,
+    ));
+    Ok(())
+}
+
+fn emit_dense_field_store(
+    out: &mut Vec<IlOp>,
+    dest: u8,
+    object: u8,
+    name: Option<u8>,
+    index: Option<u32>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    let (flags, c) = field_dense_c(name, index)?;
+    out.push(IlOp::from_plain_byte(
+        Byte::new(Instruction::DenseFieldStore).with_dense_abc(flags, dest, object, c),
+        loc,
+    ));
+    Ok(())
+}
+
+fn field_dense_c(name: Option<u8>, index: Option<u32>) -> Result<(u8, u8), LowerError> {
+    if let Some(n) = name {
+        return Ok((dense::FIELD_NAMED, n));
+    }
+    let index = index.ok_or_else(|| LowerError::Refused("dense field index".into()))?;
+    let c = u8::try_from(index).map_err(|_| LowerError::Refused("dense field index".into()))?;
+    Ok((0, c))
 }
 
 /// Reconstruct fuse-IL alloc from SSA (`MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped`).

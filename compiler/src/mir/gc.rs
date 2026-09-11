@@ -6,6 +6,8 @@
 //! plus a barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way
 //! (Q9 R3). Heap `GetField` / `SetField` / `LoadField` lower on the map
 //! path so InitTyped+field drafts bind (D1); they are not alloc sites.
+//! Dense emit reconstructs those as `DenseFieldLoad` / `DenseFieldStore`
+//! and Object `DenseMakeObject` (D2).
 //! [`fill_live_roots`] records live heap-word SSA values (and IL
 //! slots when the builder snapshotted them). Dense specialize and MIR→LIR
 //! sidecar. S2c may emit dense / LIR across alloc when S2b maps exist.
@@ -38,6 +40,7 @@ pub fn is_alloc_inst(inst: Instruction) -> bool {
     matches!(
         inst,
         Instruction::InitTyped | Instruction::INIT | Instruction::DenseMake
+            | Instruction::DenseMakeObject
     )
 }
 

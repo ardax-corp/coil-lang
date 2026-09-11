@@ -163,6 +163,7 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
             | Instruction::INIT
             | Instruction::ArrayPush
             | Instruction::DenseMake
+            | Instruction::DenseMakeObject
             | Instruction::DenseArrayPush
             | Instruction::FORMAT
             | Instruction::STRINGIFY
