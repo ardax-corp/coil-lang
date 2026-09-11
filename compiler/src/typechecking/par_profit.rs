@@ -7,9 +7,11 @@
 //! structurally ([`ArgForm`]) rather than by function allowlists. Constant call
 //! sites whose estimated **work** ([`par_work_units`]) exceeds
 //! [`par_cost_threshold`] rewrite to specialized nullary clones that always fork
-//! (fully static, no runtime threshold checks).
+//! (fully static, no runtime threshold checks). Only **top-site** (AST
+//! const-call) vectors are specialized — children stay on the sequential
+//! original (COI-361 E3).
 
-use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{EnumConstructPayload, Expression, Output, Pattern};
 
@@ -316,16 +318,17 @@ pub fn analyze_par_fork_sites(
 
 /// Per-function cap on demanded specializations.
 ///
-/// Each entry becomes an emitted clone that always forks, so multi-arg sites
-/// (whose closure grows combinatorially) need a code-size and spawn budget.
-/// Levels dropped by the budget simply stay on the sequential original.
+/// Each entry is an AST const call that always forks. Derived child vectors
+/// are not specialized (top-site / evidence-gated, COI-361 E3). The cap is
+/// only a code-size lid if a function has many distinct profitable const
+/// sites; dropped vectors stay sequential rather than nested AlwaysPar.
 const PAR_SPEC_BUDGET: usize = 64;
 
-/// Constant call-site arg vectors for fork-site functions, closed under the
-/// arm transforms so every specialization a clone can reach also exists.
+/// Constant call-site arg vectors for fork-site functions.
 ///
-/// The closure is breadth-first (shallowest levels are the profitable ones)
-/// and bounded by [`PAR_SPEC_BUDGET`].
+/// Only AST-demanded const calls that pass the work score and path guards
+/// become AlwaysPar clones. Arm children of those clones stay on the
+/// sequential original — no BFS close-down-to-cutoff (`__coil_par_fib_21…n`).
 pub fn collect_par_specialization_args(
     ast: &Output<'_>,
     sites: &HashMap<String, ParForkSite>,
@@ -338,41 +341,24 @@ pub fn collect_par_specialization_args(
             continue;
         };
         // A clone has no base case, so it may only stand in for arg vectors
-        // that actually reach the fork site.
-        set.retain(|args| guards_hold(&site.guards, args));
-        let mut queue: VecDeque<Vec<i64>> = set.iter().cloned().collect();
-        let mut seen: HashSet<Vec<i64>> = set.iter().cloned().collect();
-        while let Some(cur) = queue.pop_front() {
-            if seen.len() >= PAR_SPEC_BUDGET {
-                break;
-            }
-            for arm in &site.arms {
-                let Some(child) = eval_arm_args(arm, &cur) else {
-                    continue;
-                };
-                // Negative args are base-case territory, and a child that no
-                // longer carries threshold work stays on the sequential
-                // original — which is also what bounds the closure.
-                if child.iter().any(|a| *a < 0)
-                    || !work.worth_parallel(arm_callee(arm), &child)
-                    || !guards_hold(&site.guards, &child)
-                {
-                    continue;
-                }
-                if seen.len() >= PAR_SPEC_BUDGET {
-                    break;
-                }
-                if seen.insert(child.clone()) {
-                    queue.push_back(child);
-                }
-            }
+        // that actually reach the fork site. `worth_parallel` already
+        // refuses missed guards; keep the check explicit.
+        set.retain(|args| guards_hold(&site.guards, args) && work.worth_parallel(name, args));
+        if set.len() > PAR_SPEC_BUDGET {
+            // Prefer larger-magnitude vectors (more remaining work) if a
+            // program writes more than the lid of profitable const sites.
+            let mut ranked: Vec<Vec<i64>> = set.iter().cloned().collect();
+            ranked.sort_by(|a, b| {
+                b.iter()
+                    .sum::<i64>()
+                    .cmp(&a.iter().sum::<i64>())
+                    .then_with(|| b.cmp(a))
+            });
+            ranked.truncate(PAR_SPEC_BUDGET);
+            *set = ranked.into_iter().collect();
         }
-        *set = seen.into_iter().collect();
     }
-    demanded.retain(|name, set| {
-        set.retain(|args| work.worth_parallel(name, args));
-        !set.is_empty()
-    });
+    demanded.retain(|_, set| !set.is_empty());
     demanded
 }
 
@@ -1152,11 +1138,12 @@ fn main() {
 
         let demanded = collect_par_specialization_args(&ast, &sites);
         let set = demanded.get("fib").expect("fib demands");
+        assert_eq!(set.len(), 1, "top-site must not close the chain: {set:?}");
         assert!(set.contains(&vec![32]));
-        // This fib bottoms out at `n <= 2`, one level earlier than the shape
-        // the threshold is calibrated on, so its chain stops one level higher.
-        assert!(set.contains(&vec![22])); // chain toward threshold
-        assert!(!set.contains(&vec![21]));
+        assert!(
+            !set.contains(&vec![22]) && !set.contains(&vec![21]),
+            "derived children stay sequential: {set:?}"
+        );
     }
 
     #[test]
@@ -1325,6 +1312,31 @@ fn main() { return; }
     }
 
     #[test]
+    fn two_const_call_sites_are_independent_top_sites() {
+        let ast = parse(
+            r#"
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    let a = fib(22);
+    let b = fib(24);
+    return;
+}
+"#,
+        );
+        let pure = analyze_pure_fns(&ast);
+        let sites = analyze_par_fork_sites(&ast, &pure);
+        let demanded = collect_par_specialization_args(&ast, &sites);
+        let set = demanded.get("fib").expect("fib demands");
+        assert!(set.contains(&vec![22]));
+        assert!(set.contains(&vec![24]));
+        assert!(!set.contains(&vec![23]), "in-between levels are not evidence: {set:?}");
+        assert_eq!(set.len(), 2, "{set:?}");
+    }
+
+    #[test]
     fn below_threshold_and_dynamic_args_do_not_demand_specs() {
         let t = par_cost_threshold();
         let ast = parse(&format!(
@@ -1472,10 +1484,10 @@ fn main() { return; }
         let _ = par_work_units(&sites, "ping", &[40, 3]);
     }
 
-    /// `f(z - 1, x, y)` keeps a large param alive in every child, so the
-    /// closure only terminates because negative args and the budget cut it.
+    /// Top-site policy: only the const call is demanded, not the arm closure.
+    /// `f(z - 1, x, y)` would otherwise fan out combinatorially.
     #[test]
-    fn tak_specialization_closure_is_bounded() {
+    fn tak_top_site_does_not_close_arm_children() {
         let ast = parse(
             r#"
 fn tak(int x, int y, int z) -> int {
@@ -1498,10 +1510,10 @@ fn main() {
             set.contains(&vec![21, 12, 6]),
             "root call site must survive"
         );
-        assert!(
-            set.len() <= PAR_SPEC_BUDGET,
-            "budget exceeded: {}",
-            set.len()
+        assert_eq!(
+            set.len(),
+            1,
+            "arm children must not be specialized: {set:?}"
         );
         assert!(
             set.iter().all(|args| args.iter().all(|a| *a >= 0)),
