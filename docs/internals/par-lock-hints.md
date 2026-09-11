@@ -13,8 +13,8 @@ Related: [auto-par.md](auto-par.md) (F0–F2 IPA),
 Heap objects / user classes stay unshared by default (C0). Unlocked FD /
 FFI escapes refuse auto-par the same way. When a **call bag** (independent
 IPA arms: `f(…) ⊕ g(…)`, n-ary associative `+`/`*`/`^`, let-bound arms)
-would fork except for a shared escape, compile-time **info** names the
-edge: lock resource `R` across the parallel region. The compiler does **not**
+would fork except for shared escapes, compile-time **info** names **every**
+lockable edge on that bag (not only a primary `stdout`). The compiler does **not**
 insert a lock or auto-fork on the hint. A covering userland lock is a
 **coverage check** this cut; admit of shared steal is a later hold check /
 runtime assert. Missing lock → today’s sequential refuse.
@@ -27,10 +27,12 @@ user lock; claiming deadlock freedom; boiling every FFI type.
 Diagnostic **E0805** (`ParLockHint`), severity **info** (not an error).
 Emitted only when `COIL_AUTO_PAR` is on (same as IPA codegen).
 
-Unlocked (the user has not taken a covering lock):
+Unlocked (the user has not taken a covering lock). The resource list is
+comma-separated **all** named escapes, for example
+`` `stdout` (FD), `f` (FD), `invoke` (FFI handle) ``:
 
 ```
-this call bag in `{fn}` would be parallelizable if resource `{R}` ({kind}) is locked across the parallel region
+this call bag in `{fn}` would be parallelizable if resource `{R}` ({kind}), `{R2}` ({kind}) is locked across the parallel region
 ```
 
 `kind` is one of `FD` / `FFI handle` / `mutex` / `user object`. Help:
@@ -42,7 +44,7 @@ take a covering lock in userland (e.g. `thread::with_lock`); the compiler does n
 Covering (`with_lock` / `with_read` / `with_write` callback contains the bag):
 
 ```
-covering lock on `{R}` (mutex) around the call bag in `{fn}`; shared steal stays sequential this cut (missing lock remains today's refuse)
+covering lock on `{R}` (mutex) around the call bag in `{fn}`; lockable edges `{R}` (mutex), `{R2}` ({kind}); shared steal stays sequential this cut (missing lock remains today's refuse)
 ```
 
 Help:
@@ -62,6 +64,14 @@ No hint when:
 - The function is **pure** (F0–F2 already IPA or grain-refuses).
 - Impurity is not lockable (`panic` / `yield` / clocks / unknown).
 - There is no call-bag shape (a single `write` in `main` is not a bag).
+
+The walker names the full host IO / FFI / mutex / heap-mut surface Coil
+uses: `stdin` / `stdout` / `stderr`, `open` / `read` / `write*` / `close`,
+tcp/udp/`fs_*`, `dload` / `declare` / `invoke`, mutex and rwlock ops, and
+index / field stores. `format` / `to_bytes` / `from_bytes` are purity-IO
+but not lockable FD edges. If `open` (or another FD factory) is bound to a
+local, a later `write`/`close` through that local names the **binding**
+(e.g. `` `f` (FD) ``), not only the factory.
 
 Loop IPA with an impure body is **not** hinted this cut (expression call
 bags only). Grain is **not** required for a hint: the refuse reason is the
@@ -106,14 +116,15 @@ eligible for a later admit. Unlocked class fields stay C0 refuse.
 | Piece | Status |
 |---|---|
 | Internals note (this file) | this cut |
-| E0805 info on refused call bags, naming `R` | this cut |
+| E0805 info on refused call bags, listing **all** lockable edges | this cut |
 | Covering-lock detection; sequential + documented gate | this cut |
 | Auto-insert locks / auto-fork on hint | **never** (model) |
 | Runtime hold assert / admit steal | **not this cut** |
 | Loop-IPA impure-body hints | later |
 | Compiler per-FD locks | out of scope |
 
-Prove: one smoke that a refused FD escape emits the named hint; one covering
-mutex path that documents the gate and still stays sequential. A4
-`COIL_AUTO_PAR=0` flagships unchanged (hints are diagnostics; IPA off).
-Do not auto-merge — Architect accept for this note.
+Prove: stdout FD hint; `open`+`write` names the bound FD; FFI
+`dload`/`invoke`; stderr; a multi-edge bag whose hint text lists **both**
+resources; one covering mutex path that documents the gate and still stays
+sequential. A4 `COIL_AUTO_PAR=0` flagships unchanged (hints are diagnostics;
+IPA off). Do not auto-merge — Architect re-accept after this fix.

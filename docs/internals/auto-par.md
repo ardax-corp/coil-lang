@@ -271,8 +271,9 @@ Heap and publish the pointer at join (rooted through Layer A collect). User
 ## F3 — userland locks + hints (call-bag escapes)
 
 Unlocked FD / FFI / mutex / user-object escapes still **refuse** IPA (C0).
-When the shape is a would-be call bag, compile-time **E0805** info names the
-resource that a covering `thread::with_lock` would need. The compiler does
+When the shape is a would-be call bag, compile-time **E0805** info names
+**every** lockable edge on the bag (FD / FFI / mutex / heap object), not only
+`stdout`. The compiler does
 not insert locks or fork on the hint. A covering lock is detected and
 documented; shared steal stays sequential this cut. See
 [par-lock-hints.md](par-lock-hints.md) (Architect may discard).
