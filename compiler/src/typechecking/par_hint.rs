@@ -57,6 +57,7 @@ pub struct ParEscapeHint {
 }
 
 impl ParEscapeHint {
+    #[allow(dead_code)]
     pub fn primary_resource(&self) -> Option<&NamedEscape> {
         self.resources.first()
     }
