@@ -806,14 +806,14 @@ fn emit_term(
                 for (d, s) in t_moves {
                     out.push(move_op(d, s));
                 }
-                if !is_fallthrough(func, block.id, *taken) {
-                    out.push(IlOp::Jump {
-                        kind: IlJumpKind::Unconditional,
-                        target: block_lab[taken.index()],
-                        loc,
-                        hint: Default::default(),
-                    });
-                }
+                // f_lab is the next op; taken must JMP or true fallthrough
+                // lands on the false phi moves (encode_frame if-chain).
+                out.push(IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: block_lab[taken.index()],
+                    loc,
+                    hint: Default::default(),
+                });
                 out.push(IlOp::Label(f_lab));
                 for (d, s) in f_moves {
                     out.push(move_op(d, s));
