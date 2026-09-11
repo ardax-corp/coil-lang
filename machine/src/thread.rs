@@ -5,7 +5,7 @@ use std::collections::{HashSet, VecDeque};
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
 use std::thread;
 
@@ -73,6 +73,19 @@ fn max_worker_threads() -> usize {
 
 pub fn new_live_thread_registry() -> LiveThreadRegistry {
     Arc::new(Mutex::new(Vec::new()))
+}
+
+thread_local! {
+    static PORTABLE_ENCODE_COUNT: AtomicU64 = const { AtomicU64::new(0) };
+}
+
+/// Times [`value_to_portable`] ran on this thread (C1 prove: shared spawn stays 0).
+pub fn portable_encode_count() -> u64 {
+    PORTABLE_ENCODE_COUNT.with(|c| c.load(Ordering::Relaxed))
+}
+
+pub fn reset_portable_encode_count() {
+    PORTABLE_ENCODE_COUNT.with(|c| c.store(0, Ordering::Relaxed));
 }
 
 fn register_live_thread(registry: &LiveThreadRegistry, state: Arc<JoinState>) {
@@ -245,6 +258,8 @@ impl PartialEq for PortableValue {
 #[derive(Clone)]
 pub enum SpawnArg {
     Value(PortableValue),
+    /// Raw bits into the epoch Heap (C1). No [`value_to_portable`] walk.
+    Shared(u64),
     Sender(Arc<ChannelInner>),
     Receiver(Arc<ChannelInner>),
     Mutex(Arc<MutexInner>),
@@ -258,6 +273,7 @@ pub struct JoinState {
     join_handle: Mutex<Option<thread::JoinHandle<()>>>,
     detached: AtomicBool,
     joined: AtomicBool,
+    shared_epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
 }
 
 /// Join-state payload (reactor timed waits).
@@ -273,7 +289,18 @@ impl JoinState {
             join_handle: Mutex::new(None),
             detached: AtomicBool::new(false),
             joined: AtomicBool::new(false),
+            shared_epoch: None,
         }
+    }
+
+    pub(crate) fn with_shared_epoch(epoch: Arc<crate::shared_heap::SharedHeapEpoch>) -> Self {
+        let mut s = Self::new();
+        s.shared_epoch = Some(epoch);
+        s
+    }
+
+    pub(crate) fn shared_epoch(&self) -> bool {
+        self.shared_epoch.is_some()
     }
 
     pub(crate) fn store_result(&self, result: Result<PortableValue, ThreadErrorTag>) {
@@ -395,6 +422,9 @@ thread_local! {
 pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
+    begin_shared_steal: unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
+    end_shared_steal: unsafe fn(*mut ()),
+    debugger_attached: bool,
     spawn_context: Option<ThreadSpawnContext>,
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
     cpu_reactor: Option<std::sync::Arc<crate::reactor::Reactor>>,
@@ -416,10 +446,23 @@ impl HostStateGuard {
         let io_reactor = Some(std::sync::Arc::clone(vm.io_reactor()));
         let cpu_reactor = Some(std::sync::Arc::clone(vm.reactor()));
         let dload_gate = vm.dload_gate().clone();
+        let debugger_attached = {
+            #[cfg(any(test, feature = "debugger"))]
+            {
+                vm.debug_is_attached()
+            }
+            #[cfg(not(any(test, feature = "debugger")))]
+            {
+                false
+            }
+        };
         HOST_STATE.with(|c| {
             *c.borrow_mut() = Some(MachineHostState {
                 raw: (vm as *mut Machine<N>).cast(),
                 call_function: Self::call::<N>,
+                begin_shared_steal: Self::begin_steal::<N>,
+                end_shared_steal: Self::end_steal::<N>,
+                debugger_attached,
                 spawn_context,
                 io_reactor,
                 cpu_reactor,
@@ -431,6 +474,16 @@ impl HostStateGuard {
 
     unsafe fn call<const N: usize>(raw: *mut (), offset: u32, args: &[Value]) -> Value {
         unsafe { (*(raw.cast::<Machine<N>>())).call_function(offset, args) }
+    }
+
+    unsafe fn begin_steal<const N: usize>(
+        raw: *mut (),
+    ) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+        unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal() }
+    }
+
+    unsafe fn end_steal<const N: usize>(raw: *mut ()) {
+        unsafe { (*(raw.cast::<Machine<N>>())).end_shared_steal() }
     }
 }
 
@@ -458,6 +511,33 @@ fn host_spawn_context() -> Result<ThreadSpawnContext, ThreadErrorTag> {
             .and_then(|s| s.spawn_context.clone())
             .ok_or(ThreadErrorTag::Other)
     })
+}
+
+fn host_debugger_attached() -> bool {
+    HOST_STATE.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|s| s.debugger_attached)
+            .unwrap_or(false)
+    })
+}
+
+fn host_begin_shared_steal() -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag> {
+    HOST_STATE.with(|c| {
+        let state = c.borrow();
+        let Some(state) = state.as_ref() else {
+            return Err(ThreadErrorTag::Other);
+        };
+        Ok(unsafe { (state.begin_shared_steal)(state.raw) })
+    })?
+}
+
+fn host_end_shared_steal() {
+    HOST_STATE.with(|c| {
+        if let Some(state) = c.borrow().as_ref() {
+            unsafe { (state.end_shared_steal)(state.raw) }
+        }
+    });
 }
 
 /// Block on IO readiness using the bound VM's reactors (CPU help-steal when present).
@@ -678,11 +758,14 @@ fn alloc_enum(heap: &mut Heap, tag: u32, payload: impl Into<EnumPayload>) -> Val
     heap.alloc_enum_value(tag, payload)
 }
 
-fn is_immediate_value(heap: &Heap, v: Value) -> bool {
+pub(crate) fn is_immediate_value(heap: &Heap, v: Value) -> bool {
     v.raw().is_null() || !heap.contains_addr(v.raw())
 }
 
 pub fn value_to_portable(heap: &Heap, v: Value) -> Result<PortableValue, ThreadErrorTag> {
+    PORTABLE_ENCODE_COUNT.with(|c| {
+        c.fetch_add(1, Ordering::Relaxed);
+    });
     let mut visited: HashSet<u64, AddrHashBuilder> = HashSet::default();
     encode_value(heap, v, &mut visited)
 }
@@ -935,6 +1018,7 @@ pub fn value_to_spawn_arg(heap: &Heap, v: Value) -> Result<SpawnArg, ThreadError
 pub(crate) fn spawn_arg_to_value(heap: &mut Heap, arg: SpawnArg) -> Result<Value, ThreadErrorTag> {
     match arg {
         SpawnArg::Value(pv) => portable_to_value(heap, pv),
+        SpawnArg::Shared(raw) => Ok(Value::from(raw as *mut u8)),
         SpawnArg::Sender(inner) => {
             let (obj, _) = heap.alloc(ObjSender { inner }, Object::Sender);
             Ok(Value::from(obj.addr()))
@@ -1047,6 +1131,52 @@ fn try_host_spawn(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorT
     Ok(Value::from(obj.addr()))
 }
 
+pub fn host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Value {
+    let r = try_host_spawn_shared(heap, args);
+    as_result_value(heap, r)
+}
+
+fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
+    if !crate::shared_heap::runtime_enabled() || host_debugger_attached() {
+        return try_host_spawn(heap, args);
+    }
+    let ctx = match host_spawn_context() {
+        Ok(c) => c,
+        Err(_) => return try_host_spawn(heap, args),
+    };
+    let (entry, arity) = fn_entry_from_value(heap, args[0])?;
+    if args.len() > 1 && args.len() - 1 != arity as usize {
+        return Err(ThreadErrorTag::Other);
+    }
+    let all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
+    if !all_immediate && !crate::shared_heap::program_has_real_maps(&ctx.program) {
+        return try_host_spawn(heap, args);
+    }
+    let mut spawn_args = Vec::with_capacity(args.len().saturating_sub(1));
+    for v in &args[1..] {
+        if crate::shared_heap::is_c1_shareable(heap, *v) {
+            spawn_args.push(SpawnArg::Shared(v.raw() as u64));
+        } else {
+            return try_host_spawn(heap, args);
+        }
+    }
+    let epoch = host_begin_shared_steal()?;
+    let live_threads = Arc::clone(&ctx.live_threads);
+    let reactor = Arc::clone(&ctx.reactor);
+    let state = Arc::new(JoinState::with_shared_epoch(Arc::clone(&epoch)));
+    let mut job = crate::reactor::job_from_spawn_context(
+        ctx,
+        entry,
+        spawn_args,
+        Arc::clone(&state),
+    );
+    job.epoch = Some(epoch);
+    reactor.submit(job);
+    register_live_thread(&live_threads, Arc::clone(&state));
+    let (obj, _) = heap.alloc(ObjThread { state }, Object::Thread);
+    Ok(Value::from(obj.addr()))
+}
+
 pub fn host_join(heap: &mut Heap, args: &[Value]) -> Value {
     let r = try_host_join(heap, args[0]);
     as_result_value(heap, r)
@@ -1063,10 +1193,15 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
     if state.detached.load(Ordering::SeqCst) {
         return Err(ThreadErrorTag::JoinFailed);
     }
-    let portable = match host_spawn_context() {
-        Ok(ctx) => ctx.reactor.wait_join(&state)?,
-        Err(_) => state.wait_result()?,
+    let shared = state.shared_epoch();
+    let joined = match host_spawn_context() {
+        Ok(ctx) => ctx.reactor.wait_join(&state),
+        Err(_) => state.wait_result(),
     };
+    if shared {
+        host_end_shared_steal();
+    }
+    let portable = joined?;
     if let Some(h) = state.join_handle.lock().unwrap().take() {
         let _ = h.join();
     }
@@ -1439,6 +1574,7 @@ pub use host_recv as thread_recv;
 pub use host_rwlock as thread_rwlock;
 pub use host_send as thread_send;
 pub use host_spawn as thread_spawn;
+pub use host_spawn_shared as thread_spawn_shared;
 pub use host_try_lock as thread_try_lock;
 pub use host_try_read as thread_try_read;
 pub use host_try_recv as thread_try_recv;

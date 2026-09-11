@@ -2701,7 +2701,7 @@
         .unwrap();
         let prepared = prepare_cif_for_symbol(&sig, &lib, "apply_cb", &[]).unwrap();
         let args = [Value::from(cb_ptr as u64), Value::from(21_i64)];
-        let mut ctx = InvokeContext::new(&mut vm.heap as *mut Heap, &vm.struct_layouts);
+        let mut ctx = InvokeContext::new(vm.heap_mut() as *mut Heap, &vm.struct_layouts);
         let mut closure_ptrs = Vec::new();
         let ret = invoke_via_libffi(&prepared, &sig, &args, None, &mut ctx, &mut closure_ptrs)
             .unwrap()

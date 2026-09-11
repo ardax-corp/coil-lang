@@ -6014,6 +6014,47 @@ fn main() {
     assert_eq!(output, "328350,100");
 }
 
+/// C1 loop IPA emits `thread_spawn_shared` and skips `PortableValue` encode.
+#[test]
+fn auto_par_loop_uses_shared_heap_spawn() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par loop should compile");
+    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    assert!(
+        bytecode.iter().any(|b| {
+            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
+        }),
+        "loop IPA should HostInvoke thread_spawn_shared (id {shared_id})"
+    );
+    machine::thread::reset_portable_encode_count();
+    let before = machine::thread::portable_encode_count();
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "328350");
+    let encoded = machine::thread::portable_encode_count() - before;
+    assert_eq!(
+        encoded, 0,
+        "C1 shared-heap loop spawn must not walk PortableValue (saw {encoded} encodes)"
+    );
+}
+
 /// The reduction operator drives the fold: a `*` chunk pair recombines by `MUL`
 /// with `1` seeding every chunk but the first. A non-identity seed would square
 /// the accumulator's initial value.

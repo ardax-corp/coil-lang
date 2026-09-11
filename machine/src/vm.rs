@@ -324,7 +324,7 @@ struct FramePins {
 }
 
 pub struct Machine<const S: usize> {
-    heap: Heap,
+    heap: crate::memory::HeapSlot,
     stack: Stack<Value>,
     frames: ArrayVec<Frame, S>,
     /// Pin tables for frames that actually ran `ArrayPin`.
@@ -406,6 +406,8 @@ pub struct Machine<const S: usize> {
     gc_in_progress: bool,
     /// Nested `gc_collect` during a finalizer; run another cycle after.
     gc_deferred: bool,
+    /// Live C1 steal epoch (root). Helpers bind via [`HeapSlot`].
+    shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
 }
 
 impl<const S: usize> Default for Machine<S> {
@@ -425,7 +427,7 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
-            heap: Heap::default(),
+            heap: crate::memory::HeapSlot::default(),
             stack: Stack::with_capacity(cap),
             output: None,
             natives: crate::ffi::Natives::new(),
@@ -467,6 +469,7 @@ impl<const S: usize> Machine<S> {
             finalizer_pcs: std::collections::HashSet::default(),
             gc_in_progress: false,
             gc_deferred: false,
+            shared_epoch: None,
         }
     }
 
@@ -529,6 +532,11 @@ impl<const S: usize> Machine<S> {
     #[cfg(any(test, feature = "debugger"))]
     pub fn debug_controller(&self) -> Option<&DebugController> {
         self.debug.as_deref()
+    }
+
+    #[cfg(any(test, feature = "debugger"))]
+    pub fn debug_is_attached(&self) -> bool {
+        self.debug.is_some()
     }
 
     fn rebuild_pc_line_cache(&mut self) {
@@ -1100,6 +1108,12 @@ impl<const S: usize> Machine<S> {
     /// Complete a GC cycle (explicit `gc::collect` / tests). Finishes any
     /// in-flight incremental sweep first so unmarked survivors are not freed.
     fn gc_collect(&mut self) {
+        if self.heap.epoch_stw() {
+            if let Some(e) = &self.shared_epoch {
+                e.abort();
+            }
+            return;
+        }
         if self.gc_in_progress {
             self.gc_deferred = true;
             return;
@@ -1168,6 +1182,17 @@ impl<const S: usize> Machine<S> {
         if self.gc_in_progress {
             return;
         }
+        if self.heap.epoch_stw() {
+            if !self.heap.gc_is_idle() || self.heap.should_collect() {
+                if let Some(e) = &self.shared_epoch {
+                    e.abort();
+                }
+                if self.heap.is_borrowed() {
+                    self.panicked = true;
+                }
+            }
+            return;
+        }
         match self.heap.gc_phase() {
             crate::memory::GcPhase::Idle => {
                 if self.heap.should_collect() {
@@ -1188,7 +1213,8 @@ impl<const S: usize> Machine<S> {
     fn gc_mark_slice(&mut self) {
         // Drain mark at this safepoint so the mutator never runs while
         // `GcPhase::Marking` (SATB is then only needed on host stores).
-        while !self.heap.mark_quantum(self.heap.gc_work_quantum()) {}
+        let n = self.heap.gc_work_quantum();
+        while !self.heap.mark_quantum(n) {}
         self.gc_remark_vm_roots();
         while !self.heap.mark_quantum(usize::MAX) {}
         self.relocate_mapped_slots();
@@ -1754,7 +1780,7 @@ impl<const S: usize> Machine<S> {
     }
 
     pub fn heap_mut(&mut self) -> &mut Heap {
-        &mut self.heap
+        self.heap.get_mut()
     }
 
     /// Snapshot needed to spawn a worker on this program.
@@ -2181,7 +2207,7 @@ impl<const S: usize> Machine<S> {
     /// Read-only access to the heap. Used by the GC integration
     /// test to assert that the heap didn't grow unboundedly.
     pub fn heap(&self) -> &Heap {
-        &self.heap
+        self.heap.get()
     }
 
     /// True when a language-level `panic` aborted the last run.
@@ -2236,11 +2262,88 @@ impl<const S: usize> Machine<S> {
         self.ffi_closures.clear();
         self.gc_in_progress = false;
         self.gc_deferred = false;
-        if self.heap.slab_chunk_count() > 1 {
-            self.heap = Heap::default();
-        } else if self.heap.slab_chunk_count() == 1 {
-            self.heap.collect(&[]);
+        if self.heap.is_borrowed() {
+            return;
+        }
+        if self.heap.owned_mut().slab_chunk_count() > 1 {
+            *self.heap.owned_mut() = Heap::default();
+        } else if self.heap.owned_mut().slab_chunk_count() == 1 {
+            self.heap.owned_mut().collect(&[]);
             self.program_string_cache.fill(Value::default());
+        }
+    }
+
+    /// Drop frames / pins after a C1 shared-heap job. Does not unmap the
+    /// borrowed epoch Heap.
+    pub fn reset_shared_stack(&mut self) {
+        debug_assert!(
+            !self.heap.is_borrowed(),
+            "unbind the epoch Heap before resetting the helper stack"
+        );
+        self.frames = {
+            let mut frames = ArrayVec::default();
+            frames.consume();
+            frames
+        };
+        self.frame_pins.clear();
+        self.stack.seek(0);
+        self.resume_stack.clear();
+        self.nested_depth = 0;
+        self.nested_frame_depths.clear();
+        self.nested_return = None;
+        self.pending_ffi = None;
+        self.pending_io = None;
+        self.panicked = false;
+        self.gc_in_progress = false;
+        self.gc_deferred = false;
+    }
+
+    pub fn bind_shared_heap(&mut self, epoch: &std::sync::Arc<crate::shared_heap::SharedHeapEpoch>) {
+        self.heap.bind(epoch.heap_ptr());
+        self.shared_epoch = Some(std::sync::Arc::clone(epoch));
+    }
+
+    pub fn unbind_shared_heap(&mut self) {
+        self.heap.unbind();
+        self.shared_epoch = None;
+    }
+
+    /// Drain incremental GC and open a Layer A steal epoch on this Heap.
+    pub fn begin_shared_steal(
+        &mut self,
+    ) -> Result<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>, crate::thread::ThreadErrorTag>
+    {
+        if let Some(e) = &self.shared_epoch {
+            e.jobs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            return Ok(std::sync::Arc::clone(e));
+        }
+        if !self.heap.get().gc_is_idle() || self.heap.get().should_collect() {
+            self.gc_collect();
+        }
+        if !self.heap.get().gc_is_idle() {
+            return Err(crate::thread::ThreadErrorTag::Other);
+        }
+        let ptr = self.heap.owned_ptr();
+        let epoch = crate::shared_heap::SharedHeapEpoch::new(ptr);
+        self.heap
+            .owned_mut()
+            .enter_epoch_stw(epoch.alloc_lock());
+        epoch.jobs.store(1, std::sync::atomic::Ordering::SeqCst);
+        self.shared_epoch = Some(std::sync::Arc::clone(&epoch));
+        Ok(epoch)
+    }
+
+    pub fn end_shared_steal(&mut self) {
+        let Some(e) = &self.shared_epoch else {
+            return;
+        };
+        if e.jobs.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) != 1 {
+            return;
+        }
+        self.heap.owned_mut().exit_epoch_stw();
+        self.shared_epoch = None;
+        if self.heap.get().should_collect() {
+            self.gc_collect();
         }
     }
 
@@ -2396,7 +2499,7 @@ impl<const S: usize> Machine<S> {
                         }
                     };
                     let mut ctx = crate::ffi::InvokeContext::new(
-                        &mut self.heap as *mut Heap,
+                        self.heap.get_mut() as *mut Heap,
                         &self.struct_layouts,
                     );
                     let mut closure_ptrs = Vec::new();

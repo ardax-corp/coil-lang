@@ -7964,8 +7964,11 @@ impl Compiler {
         ) else {
             return false;
         };
-        let (Some(spawn_id), Some(join_id)) =
-            (self.native_id("thread_spawn"), self.native_id("thread_join"))
+        let (Some(spawn_id), Some(join_id)) = (
+            self.native_id("thread_spawn_shared")
+                .or_else(|| self.native_id("thread_spawn")),
+            self.native_id("thread_join"),
+        )
         else {
             return false;
         };

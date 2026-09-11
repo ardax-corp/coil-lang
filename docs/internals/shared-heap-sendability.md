@@ -3,10 +3,12 @@
 [COI-363](https://linear.app/ardax/issue/COI-363/e5-c0-shared-heap-sendability-design-stw)
 locks the sendability story for **shared-heap steal**. This note is the
 contract [COI-365](https://linear.app/ardax/issue/COI-365/e6-c1-shared-heap-loop-chunk-steal-stw)
-(C1) implements against. **No runtime rewrite in this ticket.**
+implements.
 
-Architect may **discard** this design and send C back to isolate. Do not treat
-the note as shipped VM behavior.
+**C1 status (E6):** counted-loop chunks use HostInvoke `thread_spawn_shared`
+(**137**, archive **minor 15**) on Layer A epoch STW. User `thread::spawn`
+stays isolate + `PortableValue`. Expression IPA (E7) is not this ticket.
+Do **not** merge [#403](https://github.com/ardax-corp/coil-lang/pull/403).
 
 Related: [auto-par.md](auto-par.md), [gc-incremental.md](gc-incremental.md),
 [mir-stack-maps.md](mir-stack-maps.md), [heap-identity.md](heap-identity.md),
@@ -180,9 +182,11 @@ next mark — not required for C1 int reduce.
 ### Why maps are mandatory
 
 S2b maps persist on `.hyc` / embed (archive **minor 14**, E1). Shared-heap
-steal is allowed only when `ThreadProgram.stack_maps` is **non-empty and
-real** (`has_real_maps` / `wire_thread_program_with_maps`). Pre-14 archives
-and unmapped allocating bodies stay **isolate**.
+steal of heap pointers is allowed only when `ThreadProgram.stack_maps` is
+**non-empty and real** (`has_real_maps` / `wire_thread_program_with_maps`).
+Layer A C1 **immediate-only** loop chunks may steal without maps because
+collect is forbidden in-epoch (abort instead). Pre-14 archives and unmapped
+**allocating** bodies stay **isolate**.
 
 Conservative operand-stack scanning on one mutator is the current fallback
 when maps are empty. With several mutators it is not a contract: a stolen
@@ -302,14 +306,14 @@ Eligibility (all must hold):
 5. Combine is associative fold of **private** partials on the joiner after
    join (same `ADD` / `MUL` as today).
 
-Runtime sketch (not in this PR):
+Runtime sketch (C1 / E6):
 
 1. `begin_steal` on the root Heap; register mutator stacks as they enter.
-2. Submit a job that carries `Value` args (or immediates in `SpawnArg` plus
-   a `Shared` variant). Skip `value_to_portable` for those args.
+2. Submit a job that carries `Value` args (`SpawnArg::Shared`). Skip
+   `value_to_portable` for those args.
 3. Worker `call_function` on a TLS stack bound to the Heap.
-4. Store an immediate (or frozen pointer) into `JoinState` without encoding
-   a graph.
+4. Store an immediate (or shared pointer bits) into `JoinState` without
+   encoding a graph.
 5. `end_steal`; joiner folds; Layer A collect if needed.
 
 Prove C1 with counted-loop boards, checksums vs sequential, RSS vs isolate

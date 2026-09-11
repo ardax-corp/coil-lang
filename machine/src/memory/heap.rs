@@ -7,6 +7,7 @@
 use std::alloc::Layout;
 use std::collections::HashMap;
 use std::ptr::{self, NonNull};
+use std::sync::Mutex;
 
 use common::unlikely;
 
@@ -54,6 +55,16 @@ pub struct Heap {
     gc_sweep_prev: Option<Object>,
     /// CString arena for the current FFI invoke (reset after each call).
     ffi_strings: Vec<std::ffi::CString>,
+    /// Layer A steal epoch: no collect; `alloc` takes [`Self::alloc_lock`].
+    epoch_stw: bool,
+    /// Non-null while a C1 steal epoch is live (points at the epoch mutex).
+    alloc_lock: *const Mutex<()>,
+}
+
+/// Machine-owned heap that can borrow the root Heap for a C1 steal job.
+pub struct HeapSlot {
+    owned: Heap,
+    borrowed: Option<NonNull<Heap>>,
 }
 
 impl Default for Heap {
@@ -75,7 +86,69 @@ impl Default for Heap {
             gc_sweep_cursor: None,
             gc_sweep_prev: None,
             ffi_strings: Vec::new(),
+            epoch_stw: false,
+            alloc_lock: ptr::null(),
         }
+    }
+}
+
+impl Default for HeapSlot {
+    fn default() -> Self {
+        Self {
+            owned: Heap::default(),
+            borrowed: None,
+        }
+    }
+}
+
+impl HeapSlot {
+    pub fn get(&self) -> &Heap {
+        match self.borrowed {
+            Some(p) => unsafe { p.as_ref() },
+            None => &self.owned,
+        }
+    }
+
+    pub fn get_mut(&mut self) -> &mut Heap {
+        match self.borrowed {
+            Some(mut p) => unsafe { p.as_mut() },
+            None => &mut self.owned,
+        }
+    }
+
+    pub fn owned_mut(&mut self) -> &mut Heap {
+        &mut self.owned
+    }
+
+    pub fn owned_ptr(&mut self) -> *mut Heap {
+        &mut self.owned
+    }
+
+    pub fn is_borrowed(&self) -> bool {
+        self.borrowed.is_some()
+    }
+
+    /// Bind this slot to the epoch Heap. The owned isolate slab is unused
+    /// until [`Self::unbind`].
+    pub fn bind(&mut self, heap: *mut Heap) {
+        self.borrowed = NonNull::new(heap);
+    }
+
+    pub fn unbind(&mut self) {
+        self.borrowed = None;
+    }
+}
+
+impl std::ops::Deref for HeapSlot {
+    type Target = Heap;
+    fn deref(&self) -> &Heap {
+        self.get()
+    }
+}
+
+impl std::ops::DerefMut for HeapSlot {
+    fn deref_mut(&mut self) -> &mut Heap {
+        self.get_mut()
     }
 }
 
@@ -114,12 +187,34 @@ impl Heap {
         Ok(Some(self.intern_ffi_bytes(&bytes)?))
     }
 
+    /// Layer A C1: steal epoch is live; collect is forbidden.
+    pub fn epoch_stw(&self) -> bool {
+        self.epoch_stw
+    }
+
+    pub fn enter_epoch_stw(&mut self, lock: &Mutex<()>) {
+        self.epoch_stw = true;
+        self.alloc_lock = lock as *const Mutex<()>;
+    }
+
+    pub fn exit_epoch_stw(&mut self) {
+        self.epoch_stw = false;
+        self.alloc_lock = ptr::null();
+    }
+
     /// Allocates an object and returns its handle. The object is pushed to the
     /// front of the list of allocated objects.
     pub fn alloc<T: GcSized, F>(&mut self, data: T, map: F) -> (Object, Gc<T>)
     where
         F: Fn(Gc<T>) -> Object,
     {
+        let epoch_lock = self.alloc_lock;
+        let _epoch_guard = if epoch_lock.is_null() {
+            None
+        } else {
+            let lock = unsafe { &*epoch_lock };
+            Some(lock.lock().unwrap_or_else(|e| e.into_inner()))
+        };
         let layout = Layout::new::<GcData<T>>();
         let slot = self.slab.alloc(layout).cast::<GcData<T>>();
         unsafe {
@@ -546,6 +641,9 @@ impl Heap {
     /// Complete collect without a `Machine`: mark `extra_roots` plus immortal
     /// enums, clear dead weaks, sweep.
     pub fn collect(&mut self, extra_roots: &[u64]) {
+        if self.epoch_stw {
+            return;
+        }
         if self.gc_phase == GcPhase::Sweeping {
             self.finish_sweep();
         }
