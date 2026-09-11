@@ -4641,6 +4641,133 @@ fn main() {
     }
 
     #[test]
+    fn d3_last_arm_payload_plus_const_checksum() {
+        let src = r#"
+enum Phase {
+    Low(int),
+    Mid(int),
+    High(int),
+}
+fn score_phase(Phase p) -> int {
+    return match p {
+        Phase::Low(v) => v,
+        Phase::Mid(x) => x + 1,
+        Phase::High(y) => y + 2,
+    };
+}
+fn main() {
+    if score_phase(Phase::Low(3)) != 3 { panic "low"; }
+    if score_phase(Phase::Mid(4)) != 5 { panic "mid"; }
+    if score_phase(Phase::High(5)) != 7 { panic "high"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile score_phase");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "last-arm payload plus const");
+    }
+
+    #[test]
+    fn d3_nested_rematch_keeps_outer_binding() {
+        let src = r#"
+enum Choice {
+    A(int),
+    B,
+}
+fn nested(Choice c) -> int {
+    return match c {
+        Choice::A(x) => match c {
+            Choice::A(y) => x + y,
+            Choice::B => -1,
+        },
+        Choice::B => 0,
+    };
+}
+fn main() {
+    if nested(Choice::A(21)) != 42 { panic "nested rematch"; }
+    if nested(Choice::B) != 0 { panic "nested B"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile nested rematch");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "nested rematch must keep outer binding");
+    }
+
+    #[test]
+    fn d3_nested_option_field_keeps_outer_binding() {
+        let src = r#"
+class BoxInt {
+    pub opt: Option<int>,
+}
+fn nested_same_field(BoxInt b) -> int {
+    return match b.opt {
+        Option::Some(v) => match b.opt {
+            Option::Some(v2) => v + v2,
+            Option::None => -1,
+        },
+        Option::None => 0,
+    };
+}
+fn triple(BoxInt box) -> int {
+    return match box.opt {
+        Option::Some(a) => match box.opt {
+            Option::Some(b) => match box.opt {
+                Option::Some(c) => a + b + c,
+                Option::None => -1,
+            },
+            Option::None => -2,
+        },
+        Option::None => 0,
+    };
+}
+fn main() {
+    let x = new BoxInt(Option::Some(21));
+    if nested_same_field(x) != 42 { panic "nested option field"; }
+    let y = new BoxInt(Option::Some(7));
+    if triple(y) != 21 { panic "triple nested"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile nested option field");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "nested option field must keep outer binding");
+    }
+
+    #[test]
+    fn d3_match_arm_let_trailing_value() {
+        let src = r#"
+enum Choice {
+    Value(int),
+    Stop,
+}
+fn choose(Choice choice) -> int {
+    return match choice {
+        Choice::Value(x) => {
+            let adjusted = x + 1;
+            adjusted
+        },
+        Choice::Stop => {
+            return 40;
+        },
+    };
+}
+fn main() {
+    if choose(Choice::Value(41)) != 42 { panic "choose value"; }
+    if choose(Choice::Stop) != 40 { panic "choose stop"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile choose");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "match arm let trailing value");
+    }
+
+    #[test]
     fn q6_for_in_array_sum_takes_vreduce() {
         let src = r#"
 fn sum(Vec<int> arr) -> int {
