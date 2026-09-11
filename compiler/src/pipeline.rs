@@ -7,8 +7,7 @@ use std::{
 };
 
 use common::{
-    archive_version_compatible, ArchivedArchivedProgram, ArchivedProgram, Byte, Instruction,
-    ProgramDebug, ARCHIVE_VERSION,
+    decode_archived_program, ArchivedProgram, Byte, Instruction, ProgramDebug, ARCHIVE_VERSION,
 };
 #[cfg(any(test, feature = "vm-wire"))]
 use machine::{FfiError, FfiSignature, FfiType, Heap, HostClosureFn, NativeFn};
@@ -16,8 +15,6 @@ use parser::{ast::Expression, Pratt, SimpleSpan};
 use reporting::{
     create_sink, Diagnostic, DiagnosticSink, ErrorCode, Message, ReportConfig, SourceId, SourceMap,
 };
-use rkyv::rancor::Error;
-
 use crate::host_grants::HostGrants;
 use crate::manifest::{
     default_module_roots, namespace_of_in_roots, resolve_mod_in_roots, resolve_use_in_roots,
@@ -1252,6 +1249,7 @@ impl Pipeline {
             debug_locs: self.compiler_lazy().debug_locs().to_vec(),
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             struct_layouts: self.archived_struct_layouts(),
+            operand_stack_slots: self.operand_stack_slots(),
             bytecode: self.bytecode,
         };
 
@@ -1620,47 +1618,21 @@ impl Pipeline {
         let mut buffer = Vec::with_capacity(1024);
         f.read_to_end(&mut buffer).expect("Unable to read file");
 
-        // Access the archived envelope. Note: `ArchivedProgram` is the
-        // SERIALIZABLE struct; rkyv's `Archive` derive generates a
-        // separate archived struct named `ArchivedArchivedProgram`
-        // (the derive just prepends `Archived` to the source name),
-        // which is the type `rkyv::access` expects.
-        let archived = rkyv::access::<ArchivedArchivedProgram, Error>(&buffer)
-            .expect("Unable to decode rkyv binary");
-
-        // Reject archives the current runtime cannot load (major mismatch
-        // or archive minor newer than this toolchain).
-        if !archive_version_compatible(u32::from(archived.version), ARCHIVE_VERSION) {
-            return Err(());
-        }
+        let decoded = decode_archived_program(&buffer).map_err(|_| ())?;
 
         if self.failed {
             return Err(());
         }
 
-        // Deserialize the archived `ArchivedVec<ArchivedByte>` back
-        // into an owned `Vec<Byte>` for the VM. rkyv's `Deserialize`
-        // impl for `ArchivedVec` handles the deep copy.
-        let bytecode = rkyv::deserialize::<Vec<Byte>, Error>(&archived.bytecode)
-            .expect("Unable to deserialize bytecode");
-        let constants = rkyv::deserialize::<Vec<u64>, Error>(&archived.constants)
-            .expect("Unable to deserialize constant pool");
-        let strings = rkyv::deserialize::<Vec<String>, Error>(&archived.strings)
-            .expect("Unable to deserialize string table");
-        let static_slot_count = u32::from(archived.static_slot_count);
-        let source_files = rkyv::deserialize::<Vec<String>, Error>(&archived.source_files)
-            .expect("Unable to deserialize source_files");
-        let debug_locs = rkyv::deserialize::<Vec<common::DebugLoc>, Error>(&archived.debug_locs)
-            .expect("Unable to deserialize debug_locs");
-
+        let program = decoded.program;
         Ok((
-            bytecode,
-            constants,
-            strings,
-            static_slot_count,
+            program.bytecode,
+            program.constants,
+            program.strings,
+            program.static_slot_count,
             ProgramDebug {
-                source_files,
-                debug_locs,
+                source_files: program.source_files,
+                debug_locs: program.debug_locs,
                 fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             },
         ))
@@ -1823,6 +1795,42 @@ fn main() {
             )
             .expect("fib(32) must compile");
         assert_eq!(pipeline.operand_stack_slots(), 512);
+    }
+
+    #[test]
+    fn fib32_archive_round_trip_persists_operand_stack_slots() {
+        use common::decode_archived_program;
+        use rkyv::rancor::Error;
+
+        let mut pipeline = Pipeline::new();
+        let src = r#"
+fn fib(int n) -> int {
+    if n <= 2 { return 1; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    let x = fib(32);
+    return;
+}
+"#;
+        let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+        let debug = pipeline.program_debug();
+        let program = ArchivedProgram {
+            version: ARCHIVE_VERSION,
+            static_slot_count: pipeline.static_slot_count(),
+            constants,
+            strings: pipeline.strings().to_vec(),
+            bytecode,
+            source_files: debug.source_files,
+            debug_locs: debug.debug_locs,
+            fn_symbols: debug.fn_symbols,
+            struct_layouts: pipeline.archived_struct_layouts(),
+            operand_stack_slots: pipeline.operand_stack_slots(),
+        };
+        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
+        assert!(decoded.operand_stack_slots_persisted);
+        assert_eq!(decoded.program.operand_stack_slots, 512);
     }
 
     #[test]

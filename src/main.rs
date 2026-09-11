@@ -84,6 +84,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
         debug_locs: debug.debug_locs,
         fn_symbols: debug.fn_symbols,
         struct_layouts: pipeline.archived_struct_layouts(),
+        operand_stack_slots: pipeline.operand_stack_slots(),
     };
 
     let bytes = match rkyv::to_bytes::<Error>(&program) {
@@ -869,6 +870,7 @@ mod tests {
             debug_locs: vec![common::DebugLoc::unknown()],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
+            operand_stack_slots: 256,
         })
         .unwrap();
         std::fs::write(&stale, bytes.as_slice()).unwrap();
@@ -891,6 +893,7 @@ mod tests {
             debug_locs: vec![common::DebugLoc::unknown()],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
+            operand_stack_slots: 256,
         };
         let ok_bytes = rkyv::to_bytes::<Error>(&ok_prog).unwrap();
         std::fs::write(&ok_path, ok_bytes.as_slice()).unwrap();
@@ -899,6 +902,7 @@ mod tests {
         assert!(loaded.strings.is_empty());
         assert_eq!(loaded.bytecode.len(), 1);
         assert!(loaded.struct_layouts.is_empty());
+        assert_eq!(loaded.operand_stack_slots, Some(256));
         let _ = std::fs::remove_file(&ok_path);
     }
 
