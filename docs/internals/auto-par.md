@@ -64,9 +64,11 @@ site's path guards, codegen emits a nullary specialization
 
 1. `MakeFn` of an in-hop child specialization when one exists, otherwise the
    arm's sequential callee with those concrete args.
-2. `thread_spawn` the first arm into the work-stealing reactor (no `GT` gate).
+2. `thread_spawn_shared` the first arm (HostInvoke **137**; isolate
+   `thread_spawn` when maps are missing for non-immediates, `COIL_SHARED_HEAP=0`,
+   debugger attached, or an arg misses the C0 whitelist). No `GT` gate.
 3. On `Ok(handle)`: evaluate remaining arms locally, `join` (help-steals), apply
-   the site's combine.
+   the site's combine. Shared join publishes raw `Value` bits (no graph copy).
 4. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
 
 Call sites with matching const args rewrite to `CALL` the specialization.
@@ -203,7 +205,7 @@ idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
 |-----|--------|
 | `COIL_MAX_WORKER_THREADS` | Pool size (1..=512). Default `available_parallelism` (min 2), or **1** when `CI` is set. `.cargo/config.toml` also sets this to `1` (`force = false`) for local cargo test runs. Export a higher value to profile parallelism. |
 | `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
-| `COIL_SHARED_HEAP` | `0` / `false` / `off` / `no` forces isolate `PortableValue` spawn for loop chunks (C1 off). Default on. |
+| `COIL_SHARED_HEAP` | `0` / `false` / `off` / `no` forces isolate `PortableValue` spawn for loop chunks and expression IPA (C1/C2 off). Default on. |
 
 `.hyc` / embed execute sizes each isolate operand stack from the persisted
 compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL
@@ -227,5 +229,11 @@ C1 shared-heap loop steal (COI-365 E6): counted-loop chunks submit
 they do not `reset_isolate_heap` unmap it). Layer A epoch STW: no collect
 during the steal; a stolen chunk that would GC aborts to sequential /
 isolate fallback; the joiner collects after `end_steal`. Maps are mandatory
-(empty maps → isolate). See
+for non-immediate args (empty maps → isolate). See
 [shared-heap-sendability.md](shared-heap-sendability.md).
+
+C2 expression IPA (COI-364 E7): AlwaysPar specializations emit the same
+`thread_spawn_shared`. Fib/tak args are immediates (Layer A may steal
+without maps). EnumCtor/Tuple arms allocate on the shared Heap and publish
+the pointer at join (rooted through Layer A collect). User `thread::spawn`
+stays isolate.

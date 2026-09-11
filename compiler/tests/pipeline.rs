@@ -6055,6 +6055,132 @@ fn main() {
     );
 }
 
+/// C2 expression IPA emits `thread_spawn_shared` and skips `PortableValue` encode.
+#[test]
+fn auto_par_fib_uses_shared_heap_spawn() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn fib(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", fib(22))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par fib should compile");
+    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    assert!(
+        bytecode.iter().any(|b| {
+            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
+        }),
+        "expression IPA should HostInvoke thread_spawn_shared (id {shared_id})"
+    );
+    machine::thread::reset_portable_encode_count();
+    let before = machine::thread::portable_encode_count();
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "17711");
+    let encoded = machine::thread::portable_encode_count() - before;
+    assert_eq!(
+        encoded, 0,
+        "C2 shared-heap fib spawn must not walk PortableValue (saw {encoded} encodes)"
+    );
+}
+
+/// EnumCtor IPA publishes heap pointers on the shared Heap (no graph copy).
+#[test]
+fn auto_par_enum_ctor_shared_heap_skips_portable_copy() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+#[max_depth(64)]
+fn build(int n) -> Tree {
+    if n <= 1 {
+        return Tree::Leaf();
+    }
+    return Tree::Node(build(n - 1), build(n - 2));
+}
+#[max_depth(64)]
+fn leaves(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(l, r) => leaves(l) + leaves(r),
+    };
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", leaves(build(21)))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par enum-ctor should compile");
+    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    assert!(
+        bytecode.iter().any(|b| {
+            matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id
+        }),
+        "enum-ctor IPA should HostInvoke thread_spawn_shared (id {shared_id})"
+    );
+    machine::thread::reset_portable_encode_count();
+    let before = machine::thread::portable_encode_count();
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "17711");
+    let encoded = machine::thread::portable_encode_count() - before;
+    assert_eq!(
+        encoded, 0,
+        "C2 shared-heap enum-ctor spawn must not walk PortableValue (saw {encoded} encodes)"
+    );
+}
+
+/// User `thread::spawn` stays isolate + `PortableValue` (C0 Q4).
+#[test]
+fn user_thread_spawn_still_encodes_portable_args() {
+    let src = r#"
+use thread::{join, spawn};
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn add1(int n) -> int {
+    return n + 1;
+}
+fn main() {
+    let t = spawn(add1, 41)?;
+    let v = join(t)?;
+    write(stdout(), to_bytes(format("%i", v)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("user spawn should compile");
+    let shared_id = common::THREAD_SPAWN_SHARED_ID as u32;
+    assert!(
+        bytecode.iter().all(|b| {
+            !(matches!(b.bytecode(), common::Instruction::CONST) && b.value_u32() == shared_id)
+        }),
+        "user thread::spawn must not emit thread_spawn_shared"
+    );
+    machine::thread::reset_portable_encode_count();
+    let before = machine::thread::portable_encode_count();
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "42");
+    let encoded = machine::thread::portable_encode_count() - before;
+    assert!(
+        encoded >= 1,
+        "isolate spawn must still encode PortableValue args (saw {encoded})"
+    );
+}
+
 /// The reduction operator drives the fold: a `*` chunk pair recombines by `MUL`
 /// with `1` seeding every chunk but the first. A non-identity seed would square
 /// the accumulator's initial value.
