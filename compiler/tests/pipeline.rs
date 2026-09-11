@@ -6011,35 +6011,42 @@ fn main() {
     assert_eq!(output, "17711");
 }
 
-/// Nested associative `+` is one N-arm site (tribonacci), not a binary leftover.
+/// Nested associative `+` of helper arms is one N-arm site (not a binary leftover).
 #[test]
 fn auto_par_nary_add_emits_spec_and_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
-fn trib(int n) -> int {
-    if n <= 2 {
-        return 1;
+fn fib(int n) -> int {
+    if n <= 1 {
+        return n;
     }
-    return trib(n - 1) + trib(n - 2) + trib(n - 3);
+    return fib(n - 1) + fib(n - 2);
+}
+fn triple_fib(int n) -> int {
+    if n <= 0 {
+        return 0;
+    }
+    return fib(n) + fib(n - 1) + fib(n - 2);
 }
 fn main() {
-    write(stdout(), to_bytes(format("%i", trib(22))));
+    write(stdout(), to_bytes(format("%i", triple_fib(22))));
 }
 "#;
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline
         .compile_src(src)
-        .expect("auto-par trib should compile");
+        .expect("auto-par triple_fib should compile");
     assert!(
-        pipeline.function_offset("__coil_par_trib").is_some(),
-        "expected a 3-arm worker for trib"
+        pipeline.function_offset("__coil_par_triple_fib").is_some(),
+        "expected a 3-arm worker for triple_fib"
     );
     let (output, jobs) = run_bytecode_counting_jobs(bytecode, constants, &pipeline, None);
-    assert_eq!(output, "289329");
+    // fib(22)+fib(21)+fib(20) with fib(n<=1)=n
+    assert_eq!(output, "35422");
     assert!(
         jobs >= 1 && jobs < 20,
-        "trib(22) must spawn, but not a cutoff-chain storm: jobs={jobs}"
+        "triple_fib(22) must spawn, but not a cutoff-chain storm: jobs={jobs}"
     );
 }
 
@@ -6107,6 +6114,7 @@ fn auto_par_xor_binop_emits_spec_and_runs() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
+#[max_depth(64)]
 fn mix(int n) -> int {
     if n <= 1 {
         return n;

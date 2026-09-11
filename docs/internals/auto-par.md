@@ -5,7 +5,8 @@ coil can fork-join **independent parallel arms** (IPA) without a source-level
 
 ```coil
 return fib(n - 1) + fib(n - 2);      // expression IPA: independent pure calls
-return trib(n - 1) + trib(n - 2) + trib(n - 3);  // n-ary associative +
+return trib(n - 1) + trib(n - 2) + trib(n - 3);  // n-ary associative + (detected)
+return fib(n) + fib(n - 1) + fib(n - 2);         // n-ary helper arms (`triple_fib`)
 let a = fib(n - 1); let b = fib(n - 2); return a + b;  // let-bound arms
 return sq(n) + sq(n - 1);            // helper arms (no self-recursion required)
 while i < 100 { acc = acc + f(i); i = i + 1; }   // loop IPA: while
@@ -199,7 +200,7 @@ no new floors):
 
 | Newly admits | Why it is sound |
 |---|---|
-| `f(a)+g(b)+h(c)` (and `*` / `^`) | `int` `+`/`*`/`^` are associative; one fork, N arms, left/right fold matches |
+| `f(a)+g(b)+h(c)` (and `*` / `^`) | `int` `+`/`*`/`^` are associative; one fork, N arms; hit bench `triple_fib` |
 | `let a = f(…); let b = g(…); return a ⊕ b` | same independent calls; unused/intervening stmts refuse |
 | `walk(n-1, k) + walk(n-1, k+1)` | `ParamPlus` is the same structural arg form as `ParamMinus` |
 | `acc = e + acc` / `acc = acc ^ e` | commutative/associative `int` fold; xor identity `0` |

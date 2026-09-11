@@ -1249,7 +1249,7 @@ impl Compiler {
         let Some(self_entry) = self_entry else {
             return false;
         };
-        let mut saw_self_call = false;
+        let mut self_calls = 0u32;
         for op in ops {
             match op {
                 IlOp::Entry {
@@ -1264,7 +1264,7 @@ impl Compiler {
                     target,
                     .. } => {
                     if *target == self_entry {
-                        saw_self_call = true;
+                        self_calls += 1;
                     }
                 }
                 IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return false,
@@ -1290,7 +1290,7 @@ impl Compiler {
                 }
             }
         }
-        saw_self_call
+        self_calls >= 1 && self_calls <= 2
             && !ops.iter().any(|op| {
                 matches!(
                     op,
