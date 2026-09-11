@@ -9,7 +9,7 @@ use std::ops::Range;
 use parser::ast::{EnumConstructPayload, Expression, Output};
 
 use super::par_profit::analyze_par_fork_sites;
-use super::purity::{EffectFlags, analyze_fn_effects, classify_host_name};
+use super::purity::{analyze_fn_effects, EffectFlags};
 
 /// Kind of shared resource a covering userland lock would name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -38,6 +38,14 @@ pub struct NamedEscape {
     pub name: String,
 }
 
+fn format_edges(resources: &[NamedEscape]) -> String {
+    resources
+        .iter()
+        .map(|r| format!("`{}` ({})", r.name, r.kind.as_label()))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Compile-time hint: this chunk would be parallelizable if `R` is locked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParEscapeHint {
@@ -53,27 +61,37 @@ impl ParEscapeHint {
         self.resources.first()
     }
 
-    /// Locked hint text (COI-369). Architect may discard the wording.
+    /// `` `stdout` (FD), `f` (FD) `` — every lockable edge, not only the first.
+    pub fn edges_text(&self) -> String {
+        format_edges(&self.resources)
+    }
+
+    /// Locked hint text (COI-369). Lists **all** named escapes on the bag.
     pub fn message(&self) -> String {
-        let Some(r) = self.primary_resource() else {
+        let edges = self.edges_text();
+        if edges.is_empty() {
             return format!(
                 "this call bag in `{}` would be parallelizable if a shared escape is locked across the parallel region",
                 self.fn_name
             );
-        };
+        }
         if self.covering_lock {
+            let lock = self
+                .resources
+                .iter()
+                .find(|r| r.kind == EscapeKind::Mutex)
+                .or_else(|| self.resources.first());
+            let lock_txt = lock
+                .map(|r| format!("`{}` ({})", r.name, r.kind.as_label()))
+                .unwrap_or_else(|| edges.clone());
             format!(
-                "covering lock on `{}` ({}) around the call bag in `{}`; shared steal stays sequential this cut (missing lock remains today's refuse)",
-                r.name,
-                r.kind.as_label(),
+                "covering lock on {lock_txt} around the call bag in `{}`; lockable edges {edges}; shared steal stays sequential this cut (missing lock remains today's refuse)",
                 self.fn_name
             )
         } else {
             format!(
-                "this call bag in `{}` would be parallelizable if resource `{}` ({}) is locked across the parallel region",
-                self.fn_name,
-                r.name,
-                r.kind.as_label()
+                "this call bag in `{}` would be parallelizable if resource {edges} is locked across the parallel region",
+                self.fn_name
             )
         }
     }
@@ -113,9 +131,6 @@ pub fn analyze_par_escape_hints(ast: &Output<'_>) -> Vec<ParEscapeHint> {
         if flags.is_pure() {
             continue;
         }
-        if !flags.is_lockable_escape() {
-            continue;
-        }
         let Some(body) = bodies.get(name.as_str()).copied() else {
             continue;
         };
@@ -142,15 +157,20 @@ pub fn analyze_par_escape_hints(ast: &Output<'_>) -> Vec<ParEscapeHint> {
             .get(name)
             .copied()
             .unwrap_or_else(EffectFlags::empty);
-        if flags.is_pure() || !flags.is_lockable_escape() {
+        if flags.is_pure() {
             continue;
         }
-        if let Some((span, resource)) = covering_lock_bag(body, &user_fns) {
+        if let Some((span, lock)) = covering_lock_bag(body, &user_fns) {
+            let mut resources = named_escapes_in_fn(name, &bodies, &user_fns);
+            if !resources.iter().any(|r| r.name == lock.name && r.kind == lock.kind)
+            {
+                resources.insert(0, lock);
+            }
             hinted.insert(name.clone());
             out.push(ParEscapeHint {
                 fn_name: name.clone(),
                 span,
-                resources: vec![resource],
+                resources,
                 covering_lock: true,
             });
         }
@@ -164,7 +184,11 @@ pub fn analyze_par_escape_hints(ast: &Output<'_>) -> Vec<ParEscapeHint> {
         if let Some(body) = bodies.get(hint.fn_name.as_str()) {
             if let Some((_, resource)) = covering_lock_bag(body, &user_fns) {
                 hint.covering_lock = true;
-                if !hint.resources.iter().any(|r| r.name == resource.name) {
+                if !hint
+                    .resources
+                    .iter()
+                    .any(|r| r.name == resource.name && r.kind == resource.kind)
+                {
                     hint.resources.insert(0, resource);
                 }
             }
@@ -224,7 +248,8 @@ fn named_escapes_in_fn(
         let Some(body) = bodies.get(&name) else {
             continue;
         };
-        walk_escapes(body, user_fns, &mut found, &mut stack);
+        let mut aliases = HashMap::new();
+        walk_escapes(body, user_fns, &mut found, &mut stack, &mut aliases);
     }
     found.into_iter().collect()
 }
@@ -234,6 +259,7 @@ fn walk_escapes(
     user_fns: &HashSet<String>,
     out: &mut BTreeSet<NamedEscape>,
     callees: &mut Vec<String>,
+    aliases: &mut HashMap<String, EscapeKind>,
 ) {
     match ast.1.as_ref() {
         Expression::Program(items)
@@ -244,7 +270,14 @@ fn walk_escapes(
         | Expression::Tuple(items)
         | Expression::If(items) => {
             for item in items {
-                walk_escapes(item, user_fns, out, callees);
+                walk_escapes(item, user_fns, out, callees, aliases);
+                if let Some((name, kind)) = let_escape_alias(item, aliases) {
+                    aliases.insert(name.to_string(), kind);
+                    out.insert(NamedEscape {
+                        kind,
+                        name: name.to_string(),
+                    });
+                }
             }
         }
         Expression::Statement(inner)
@@ -264,7 +297,7 @@ fn walk_escapes(
         | Expression::Readonly(inner)
         | Expression::OptionalAccess(inner, _)
         | Expression::Method(_, inner)
-        | Expression::Member(inner) => walk_escapes(inner, user_fns, out, callees),
+        | Expression::Member(inner) => walk_escapes(inner, user_fns, out, callees, aliases),
         Expression::Add(a, b)
         | Expression::Sub(a, b)
         | Expression::Mul(a, b)
@@ -286,45 +319,73 @@ fn walk_escapes(
         | Expression::Assignment(a, b)
         | Expression::CompoundAssign(a, _, b) => {
             note_heap_mut_lhs(a, out);
-            walk_escapes(a, user_fns, out, callees);
-            walk_escapes(b, user_fns, out, callees);
+            walk_escapes(a, user_fns, out, callees, aliases);
+            walk_escapes(b, user_fns, out, callees, aliases);
+        }
+        Expression::Adjust { target, .. } => {
+            note_heap_mut_lhs(target, out);
+            walk_escapes(target, user_fns, out, callees, aliases);
         }
         Expression::Call { name, args } => {
-            note_call_escape(name, args.as_deref(), user_fns, out, callees);
-            walk_escapes(name, user_fns, out, callees);
+            note_call_escape(name, args.as_deref(), user_fns, out, callees, aliases);
+            walk_escapes(name, user_fns, out, callees, aliases);
             for a in args.iter().flatten() {
-                walk_escapes(a, user_fns, out, callees);
+                walk_escapes(a, user_fns, out, callees, aliases);
             }
         }
-        Expression::Declare(_) | Expression::Invoke(_) => {
-            out.insert(NamedEscape {
-                kind: EscapeKind::Ffi,
-                name: "invoke".into(),
-            });
+        Expression::Dload(path) => {
+            walk_escapes(path, user_fns, out, callees, aliases);
+            note_ffi_names("dload", None, out);
+        }
+        Expression::Declare(args) => {
+            note_ffi_names("declare", Some(args), out);
+            for a in args {
+                walk_escapes(a, user_fns, out, callees, aliases);
+            }
+        }
+        Expression::Invoke(args) => {
+            note_ffi_names("invoke", Some(args), out);
+            for a in args {
+                walk_escapes(a, user_fns, out, callees, aliases);
+            }
+        }
+        Expression::Defer { body, .. } => walk_escapes(body, user_fns, out, callees, aliases),
+        Expression::Dict(fields) => {
+            for f in fields {
+                walk_escapes(&f.value, user_fns, out, callees, aliases);
+            }
+        }
+        Expression::Range { start, end, .. } => {
+            walk_escapes(start, user_fns, out, callees, aliases);
+            walk_escapes(end, user_fns, out, callees, aliases);
+        }
+        Expression::Shl(a, b) | Expression::Shr(a, b) => {
+            walk_escapes(a, user_fns, out, callees, aliases);
+            walk_escapes(b, user_fns, out, callees, aliases);
         }
         Expression::Construct { fields, .. } => match fields {
             EnumConstructPayload::Tuple(items) => {
                 for item in items {
-                    walk_escapes(item, user_fns, out, callees);
+                    walk_escapes(item, user_fns, out, callees, aliases);
                 }
             }
             EnumConstructPayload::Record(fields) => {
                 for f in fields {
-                    walk_escapes(&f.value, user_fns, out, callees);
+                    walk_escapes(&f.value, user_fns, out, callees, aliases);
                 }
             }
             EnumConstructPayload::Unit => {}
         },
         Expression::Branch(cond, body) => {
             if let Some(c) = cond {
-                walk_escapes(c, user_fns, out, callees);
+                walk_escapes(c, user_fns, out, callees, aliases);
             }
-            walk_escapes(body, user_fns, out, callees);
+            walk_escapes(body, user_fns, out, callees, aliases);
         }
         Expression::Match { scrutinee, arms } => {
-            walk_escapes(scrutinee, user_fns, out, callees);
+            walk_escapes(scrutinee, user_fns, out, callees, aliases);
             for arm in arms {
-                walk_escapes(&arm.body, user_fns, out, callees);
+                walk_escapes(&arm.body, user_fns, out, callees, aliases);
             }
         }
         Expression::Loop {
@@ -333,27 +394,27 @@ fn walk_escapes(
             body,
         } => {
             if let Some(id) = identifier {
-                walk_escapes(id, user_fns, out, callees);
+                walk_escapes(id, user_fns, out, callees, aliases);
             }
-            walk_escapes(iterable, user_fns, out, callees);
-            walk_escapes(body, user_fns, out, callees);
+            walk_escapes(iterable, user_fns, out, callees, aliases);
+            walk_escapes(body, user_fns, out, callees, aliases);
         }
         Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init)) => {
-            walk_escapes(init, user_fns, out, callees)
+            walk_escapes(init, user_fns, out, callees, aliases)
         }
-        Expression::LetDestructure { rhs, .. } => walk_escapes(rhs, user_fns, out, callees),
-        Expression::Lambda { body, .. } => walk_escapes(body, user_fns, out, callees),
+        Expression::LetDestructure { rhs, .. } => walk_escapes(rhs, user_fns, out, callees, aliases),
+        Expression::Lambda { body, .. } => walk_escapes(body, user_fns, out, callees, aliases),
         Expression::Function {
             body: Some(body), ..
-        } => walk_escapes(body, user_fns, out, callees),
+        } => walk_escapes(body, user_fns, out, callees, aliases),
         Expression::Index(base, Some(idx)) => {
-            walk_escapes(base, user_fns, out, callees);
-            walk_escapes(idx, user_fns, out, callees);
+            walk_escapes(base, user_fns, out, callees, aliases);
+            walk_escapes(idx, user_fns, out, callees, aliases);
         }
         Expression::Index(base, None) | Expression::Access(base, _) => {
-            walk_escapes(base, user_fns, out, callees)
+            walk_escapes(base, user_fns, out, callees, aliases)
         }
-        Expression::NamedArg(_, v) => walk_escapes(v, user_fns, out, callees),
+        Expression::NamedArg(_, v) => walk_escapes(v, user_fns, out, callees, aliases),
         _ => {}
     }
 }
@@ -379,6 +440,7 @@ fn note_call_escape(
     user_fns: &HashSet<String>,
     out: &mut BTreeSet<NamedEscape>,
     callees: &mut Vec<String>,
+    aliases: &HashMap<String, EscapeKind>,
 ) {
     let Some(callee) = callee_name(name) else {
         return;
@@ -392,21 +454,19 @@ fn note_call_escape(
         });
         return;
     }
-    let flags = classify_host_name(callee);
-    if flags.contains(EffectFlags::IO) {
-        if let Some(resource) = io_resource_name(short, args) {
-            out.insert(NamedEscape {
-                kind: EscapeKind::Fd,
-                name: resource.to_string(),
-            });
-        }
+    if is_format_like(short) {
         return;
     }
-    if flags.contains(EffectFlags::FFI) {
+    if is_fd_endpoint(short) {
+        let resource = fd_arg_name(args, aliases).unwrap_or_else(|| short.to_string());
         out.insert(NamedEscape {
-            kind: EscapeKind::Ffi,
-            name: short.to_string(),
+            kind: EscapeKind::Fd,
+            name: resource,
         });
+        return;
+    }
+    if is_ffi_host(short) {
+        note_ffi_names(short, args, out);
         return;
     }
     if is_mutex_host(short) {
@@ -421,6 +481,67 @@ fn note_call_escape(
     }
 }
 
+fn let_escape_alias<'a>(
+    item: &'a Output<'a>,
+    aliases: &HashMap<String, EscapeKind>,
+) -> Option<(&'a str, EscapeKind)> {
+    let Expression::Variable(name, Some(init)) = peel(item).1.as_ref() else {
+        return None;
+    };
+    init_escape_kind(init, aliases).map(|kind| (*name, kind))
+}
+
+fn init_escape_kind(init: &Output<'_>, aliases: &HashMap<String, EscapeKind>) -> Option<EscapeKind> {
+    let init = peel(init);
+    let init = match init.1.as_ref() {
+        Expression::Try(inner) => peel(inner),
+        _ => init,
+    };
+    if let Expression::Identifier(n) = init.1.as_ref() {
+        return aliases.get(*n).copied();
+    }
+    if matches!(
+        init.1.as_ref(),
+        Expression::Dload(_) | Expression::Declare(_) | Expression::Invoke(_)
+    ) {
+        return Some(EscapeKind::Ffi);
+    }
+    let Expression::Call { name, .. } = init.1.as_ref() else {
+        return None;
+    };
+    let callee = callee_name(name)?;
+    let short = callee.rsplit("::").next().unwrap_or(callee);
+    if is_format_like(short) {
+        return None;
+    }
+    if is_fd_endpoint(short) {
+        return Some(EscapeKind::Fd);
+    }
+    if is_ffi_host(short) {
+        return Some(EscapeKind::Ffi);
+    }
+    None
+}
+
+fn note_ffi_names(short: &str, args: Option<&[Output<'_>]>, out: &mut BTreeSet<NamedEscape>) {
+    out.insert(NamedEscape {
+        kind: EscapeKind::Ffi,
+        name: short.to_string(),
+    });
+    if let Some(name) = first_ident_arg(args) {
+        if name != short {
+            out.insert(NamedEscape {
+                kind: EscapeKind::Ffi,
+                name: name.to_string(),
+            });
+        }
+    }
+}
+
+fn is_format_like(short: &str) -> bool {
+    matches!(short, "format" | "to_bytes" | "from_bytes")
+}
+
 fn fd_factory_name(short: &str) -> Option<&'static str> {
     match short {
         "stdout" => Some("stdout"),
@@ -430,20 +551,43 @@ fn fd_factory_name(short: &str) -> Option<&'static str> {
     }
 }
 
-/// `format` / `to_bytes` are IO for purity but are not a lockable FD.
-fn io_resource_name(short: &str, args: Option<&[Output<'_>]>) -> Option<String> {
-    if matches!(short, "format" | "to_bytes" | "from_bytes") {
-        return None;
+fn is_ffi_host(short: &str) -> bool {
+    matches!(short, "dload" | "declare" | "invoke") || short.starts_with("ffi_")
+}
+
+/// Factories, `open`/`read`/`write*`/`close`, and tcp/udp/fs_* HostInvoke.
+fn is_fd_endpoint(short: &str) -> bool {
+    fd_factory_name(short).is_some() || is_fd_op(short)
+}
+
+fn fd_arg_name(
+    args: Option<&[Output<'_>]>,
+    aliases: &HashMap<String, EscapeKind>,
+) -> Option<String> {
+    let args = args?;
+    let first = args.first()?;
+    fd_expr_name(first, aliases)
+}
+
+fn fd_expr_name(expr: &Output<'_>, aliases: &HashMap<String, EscapeKind>) -> Option<String> {
+    let expr = peel(expr);
+    let expr = match expr.1.as_ref() {
+        Expression::Try(inner) => peel(inner),
+        _ => expr,
+    };
+    if let Some(n) = ident_name(expr) {
+        return Some(n.to_string());
     }
-    if let Some(factory) = fd_factory_name(short) {
-        return Some(factory.to_string());
-    }
-    if is_fd_op(short) {
-        return Some(
-            first_ident_arg(args)
-                .map(str::to_string)
-                .unwrap_or_else(|| short.to_string()),
-        );
+    if let Expression::Call { name, args } = expr.1.as_ref() {
+        let callee = callee_name(name)?;
+        let short = callee.rsplit("::").next().unwrap_or(callee);
+        if let Some(factory) = fd_factory_name(short) {
+            return Some(factory.to_string());
+        }
+        if is_fd_op(short) {
+            return fd_arg_name(args.as_deref(), aliases)
+                .or_else(|| Some(short.to_string()));
+        }
     }
     None
 }
@@ -455,9 +599,11 @@ fn is_fd_op(short: &str) -> bool {
             | "write_all"
             | "write_from"
             | "read"
+            | "read_to_end"
             | "open"
             | "close"
             | "connect"
+            | "connect_timeout"
             | "listen"
             | "accept"
             | "bind"
@@ -466,6 +612,13 @@ fn is_fd_op(short: &str) -> bool {
             | "shutdown"
             | "await_readable"
             | "await_writable"
+            | "drive"
+            | "wait_ready"
+            | "set_nodelay"
+            | "peer_addr"
+            | "local_addr"
+            | "local_port"
+            | "connect_tls"
     ) || short.starts_with("tcp_")
         || short.starts_with("udp_")
         || short.starts_with("fs_")
@@ -766,6 +919,7 @@ fn main() { return; }
             rec.resources
         );
         assert!(rec.message().contains("`stdout` (FD)"));
+        let _ = rec.primary_resource();
         assert!(hints.iter().all(|h| h.fn_name != "fib"));
     }
 
@@ -784,8 +938,238 @@ fn main() { return; }
         let hints = analyze_par_escape_hints(&ast);
         let rec = hints.iter().find(|h| h.fn_name == "rec").expect("rec hint");
         assert!(rec.covering_lock, "{hints:?}");
-        assert_eq!(rec.resources[0].name, "m");
-        assert!(rec.message().contains("covering lock on `m`"));
+        assert!(
+            rec.resources
+                .iter()
+                .any(|r| r.name == "m" && r.kind == EscapeKind::Mutex),
+            "{:?}",
+            rec.resources
+        );
+        assert!(rec.message().contains("covering lock on `m` (mutex)"));
+        assert!(rec.message().contains("lockable edges"));
+    }
+
+    #[test]
+    fn open_bound_local_is_named_on_write() {
+        let ast = parse(
+            r#"
+fn dump(int n) -> int {
+    let f = open("x", "w")?;
+    write(f, n);
+    return n;
+}
+fn rec(int n) -> int {
+    if n <= 1 { return dump(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let rec = analyze_par_escape_hints(&ast)
+            .into_iter()
+            .find(|h| h.fn_name == "rec")
+            .expect("rec hint");
+        assert!(
+            rec.resources
+                .iter()
+                .any(|r| r.name == "f" && r.kind == EscapeKind::Fd),
+            "open-bound local: {:?}",
+            rec.resources
+        );
+        assert!(rec.message().contains("`f` (FD)"));
+    }
+
+    #[test]
+    fn stderr_and_stdout_are_both_listed() {
+        let ast = parse(
+            r#"
+fn leaf(int n) -> int {
+    write(stdout(), n);
+    write(stderr(), n);
+    return n;
+}
+fn rec(int n) -> int {
+    if n <= 1 { return leaf(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let rec = analyze_par_escape_hints(&ast)
+            .into_iter()
+            .find(|h| h.fn_name == "rec")
+            .expect("rec hint");
+        let msg = rec.message();
+        assert!(
+            msg.contains("`stderr` (FD)") && msg.contains("`stdout` (FD)"),
+            "multi-edge hint: {msg} resources={:?}",
+            rec.resources
+        );
+        assert!(msg.contains(", "));
+    }
+
+    #[test]
+    fn ffi_invoke_and_dload_are_named() {
+        let ast = parse(
+            r#"
+fn poke(int n) -> int {
+    let lib = dload("plugin")?;
+    invoke(lib, 0, n);
+    return n;
+}
+fn rec(int n) -> int {
+    if n <= 1 { return poke(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let rec = analyze_par_escape_hints(&ast)
+            .into_iter()
+            .find(|h| h.fn_name == "rec")
+            .expect("rec hint");
+        let msg = rec.message();
+        assert!(
+            rec.resources.iter().any(|r| r.kind == EscapeKind::Ffi),
+            "{:?}",
+            rec.resources
+        );
+        assert!(
+            msg.contains("(FFI handle)"),
+            "FFI in hint: {msg} {:?}",
+            rec.resources
+        );
+        assert!(
+            rec.resources.iter().any(|r| r.name == "lib")
+                || rec.resources.iter().any(|r| r.name == "invoke")
+                || rec.resources.iter().any(|r| r.name == "dload"),
+            "{:?}",
+            rec.resources
+        );
+    }
+
+    #[test]
+    fn heap_index_store_is_named() {
+        let ast = parse(
+            r#"
+fn rec(int n) -> int {
+    if n <= 1 {
+        let a = [0];
+        a[0] = n;
+        return n;
+    }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let rec = analyze_par_escape_hints(&ast)
+            .into_iter()
+            .find(|h| h.fn_name == "rec")
+            .expect("rec hint");
+        assert!(
+            rec.resources
+                .iter()
+                .any(|r| r.name == "a" && r.kind == EscapeKind::HeapObject),
+            "{:?}",
+            rec.resources
+        );
+        assert!(rec.message().contains("`a` (user object)"));
+    }
+
+    #[test]
+    fn stdin_is_a_named_fd_edge() {
+        let ast = parse(
+            r#"
+fn leaf(int n) -> int {
+    let s = stdin();
+    read(s, n);
+    return n;
+}
+fn rec(int n) -> int {
+    if n <= 1 { return leaf(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let rec = analyze_par_escape_hints(&ast)
+            .into_iter()
+            .find(|h| h.fn_name == "rec")
+            .expect("rec hint");
+        assert!(
+            rec.resources.iter().any(|r| r.name == "s" || r.name == "stdin")
+                && rec.resources.iter().any(|r| r.kind == EscapeKind::Fd),
+            "{:?}",
+            rec.resources
+        );
+    }
+
+    #[test]
+    fn host_io_ffi_mutex_names_are_classified() {
+        for name in [
+            "stdin",
+            "stdout",
+            "stderr",
+            "open",
+            "read",
+            "write",
+            "write_all",
+            "write_from",
+            "close",
+            "connect",
+            "listen",
+            "accept",
+            "bind",
+            "send_to",
+            "recv_from",
+            "tcp_connect",
+            "udp_bind",
+            "fs_exists",
+            "dload",
+            "declare",
+            "invoke",
+            "with_lock",
+            "lock",
+            "unlock",
+            "with_read",
+            "with_write",
+        ] {
+            assert!(
+                is_fd_endpoint(name) || is_ffi_host(name) || is_mutex_host(name),
+                "unclassified lockable host `{name}`"
+            );
+        }
+        assert!(!is_fd_endpoint("format"));
+        assert!(!is_fd_endpoint("to_bytes"));
+        assert!(!is_fd_endpoint("panic"));
+    }
+
+    #[test]
+    fn ffi_and_fd_multi_edge_lists_both() {
+        let ast = parse(
+            r#"
+fn leaf(int n) -> int {
+    write(stdout(), n);
+    invoke(lib, 0, n);
+    return n;
+}
+fn rec(int n) -> int {
+    if n <= 1 { return leaf(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let rec = analyze_par_escape_hints(&ast)
+            .into_iter()
+            .find(|h| h.fn_name == "rec")
+            .expect("rec hint");
+        let msg = rec.message();
+        assert!(
+            msg.contains("`stdout` (FD)") && msg.contains("(FFI handle)"),
+            "both edges: {msg}"
+        );
     }
 
     #[test]
