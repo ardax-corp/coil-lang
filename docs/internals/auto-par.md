@@ -210,3 +210,8 @@ job the isolate heap is reset (unmap when more than one 64KiB slab chunk is
 mapped). Re-measure IPA RSS with a release `fib` archive compiled under
 `COIL_AUTO_PAR=1`, then `/usr/bin/time -f '%e %M' ./target/release/coil run fib.hyc`
 (and `COIL_MAX_WORKER_THREADS=1` for the nested-help case).
+
+Shared-heap steal (C) is **not** this path. C0 sendability (whitelist,
+freeze vs disjoint write vs refuse, STW maps, TLS stacks on one Heap) is
+[shared-heap-sendability.md](shared-heap-sendability.md) — docs only until
+Architect accepts ([COI-363](https://linear.app/ardax/issue/COI-363)).

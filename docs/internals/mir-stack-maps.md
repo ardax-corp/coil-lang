@@ -63,7 +63,9 @@ and relocate mapped slots on collect.
 2. ~~**Slot / frame maps**~~ — **S2b (this note).** Encode those roots
    for the interpreter (and later deopt) so a collect can update slots.
    Archive **minor 14** (COI-359 E1) persists maps for `.hyc` / embed.
-   Older same-major envelopes still load with empty maps.
+   Older same-major envelopes still load with empty maps. Shared-heap steal
+   (C0) **refuses** empty maps — isolate + `PortableValue` instead
+   ([shared-heap-sendability.md](shared-heap-sendability.md)).
 3. ~~**Specialize across GC**~~ — **S2c.** Mapped allocating bodies may
    take dense / LIR when otherwise eligible. Default remains refuse
    without maps.
