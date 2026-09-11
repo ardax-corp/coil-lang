@@ -819,7 +819,7 @@ fn lower_op(
         | IlOp::PrologueJmp { .. } => Err(LowerError::Refused(
             "non-numeric IL (classes/heap/calls stay on Value)".into(),
         )),
-        IlOp::String { idx, .. } if hints.allow_string => {
+        IlOp::String { idx, .. } if hints.allow_string || hints.allow_heap_fields => {
             tos.push(b.ins_string(*idx)?);
             Ok(())
         }
@@ -958,7 +958,7 @@ fn lower_byte(
             tos.push(after);
             Ok(())
         }
-        Instruction::STRING if hints.allow_string => {
+        Instruction::STRING if hints.allow_string || hints.allow_heap_fields => {
             tos.push(b.ins_string(byte.operand_u32())?);
             Ok(())
         }

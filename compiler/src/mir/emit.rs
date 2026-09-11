@@ -718,12 +718,17 @@ pub(super) fn emit_inst(
             }
         }
         MirInst::Deopt { .. } => {}
-        MirInst::String { .. }
-        | MirInst::Print { .. }
-        | MirInst::Format { .. }
-        | MirInst::Stringify { .. } => {
+        MirInst::String { dest, idx } => {
+            // Field-name keys (GetField/SetField). Not FORMAT/PRINT (Q9 R1).
+            out.push(IlOp::String { idx: *idx, loc });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::Print { .. } | MirInst::Format { .. } | MirInst::Stringify { .. } => {
             return Err(LowerError::Refused(
-                "dense emit refuses I4 string/format (Q9 R1 is MIR→LIR)".into(),
+                "dense emit refuses I4 print/format (Q9 R1 is MIR→LIR)".into(),
             ));
         }
     }

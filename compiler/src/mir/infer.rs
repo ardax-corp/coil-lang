@@ -217,8 +217,12 @@ fn infer_walk(
     let mut has_float_arith = false;
     let mut has_i64_arith = false;
     let mut slot_imm: HashMap<u32, i64> = HashMap::new();
+    // Map drafts always last-write recycled temps. Dense needs the same
+    // when the body boxes (InitTyped / Make*) or has heap fields — ctor
+    // temps become i64/bool after the object is stored (D1/D2).
     let reuse = mode == InferMode::Map
-        || (mode == InferMode::Dense && ops.iter().any(is_heap_field_op));
+        || (mode == InferMode::Dense
+            && (allow_alloc || ops.iter().any(is_heap_field_op)));
 
     for op in ops {
         match op {
@@ -443,7 +447,7 @@ fn infer_walk(
                     }
                     set_slot_reuse(&mut slot_ty, slot as u32, ty, reuse)?;
                 }
-                Instruction::STRING if mode.allows_string() => {
+                Instruction::STRING if mode.allows_string() || mode.allows_heap_fields() => {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::HeapRef),
@@ -511,7 +515,7 @@ fn infer_walk(
                     "RETURN ret_words {ret_words}"
                 )));
             }
-            IlOp::String { .. } if mode.allows_string() => {
+            IlOp::String { .. } if mode.allows_string() || mode.allows_heap_fields() => {
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(MirTy::HeapRef),
@@ -561,6 +565,7 @@ fn infer_walk(
                     *ret_words,
                     target.0,
                     calls,
+                    reuse,
                 )?;
             }
             // Convoy fused returns (Q7): same stack/types as Load/Const/Bin + RETURN.
@@ -1424,6 +1429,7 @@ fn apply_call(
     ret_words: u32,
     target: u32,
     calls: &DenseCallMap,
+    reuse: bool,
 ) -> Result<(), LowerError> {
     if !super::abi::ret_words_ok(ret_words) {
         return Err(LowerError::Refused(format!("CALL ret_words {ret_words}")));
@@ -1442,7 +1448,7 @@ fn apply_call(
             return Err(LowerError::Refused("CALL arity".into()));
         }
         for (cell, ty) in args.iter().zip(abi.params.iter()) {
-            paint(slot_ty, pool_ty, *cell, *ty)?;
+            paint_slots(slot_ty, pool_ty, *cell, *ty, reuse)?;
         }
         stack.push(Cell {
             origin: Origin::Tmp,
