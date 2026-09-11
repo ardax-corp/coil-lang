@@ -22,6 +22,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark + SATB + lazy sweep; moving GC deferred |
 | [SIMD](simd.md) | `coil-simd` — packed LA + V0/V1 `V*` opcode backend |
 | [Auto-par](auto-par.md) | Purity analysis + capped fork-join for recursive binops |
+| [Auto-par shapes](auto-par-shapes.md) | Post-MIR AlwaysPar picking; parked P0–P3 shape-selection redesign (docs only) |
 | [IO reactor](io-reactor.md) | Sync adapter waits + async `await_*` / CPU help-steal; HostInvoke **119**/`stream_attach`, **120**/`stream_park`; clocks **121–123**; M1 math **125–135** (archive minor 5: `atan`…`tanh`). `PI`/`E`/`TAU` → coil-stdlib `num` |
 | [Stack bounds](stack-bounds.md) | Recursion depth analysis and `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
