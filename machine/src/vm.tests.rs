@@ -2386,10 +2386,10 @@
     }
 
     fn install_program(vm: &mut Machine<512>, code: &[Byte]) {
-        vm.program_code = unsafe {
+        vm.program_code = Arc::new(unsafe {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
-        };
-        vm.program_constants.clear();
+        });
+        vm.program_constants = Arc::new(Vec::new());
     }
 
     /// Reentrant `call_function` runs bytecode at the given offset.
@@ -2428,6 +2428,48 @@
         let out = vm.call_function(0, &[Value::from(39_i64)]);
         assert_eq!(out.as_int(), 42);
         assert!(!vm.panicked());
+    }
+
+    #[test]
+    fn load_shared_program_pins_arc_without_copy() {
+        let archived = [Byte::new(Instruction::HALT)];
+        let code = Arc::new(unsafe {
+            std::slice::from_raw_parts(archived.as_ptr().cast::<RawByte>(), archived.len())
+                .to_vec()
+        });
+        let constants = Arc::new(Vec::<u64>::new());
+        let strings = Arc::new(vec!["hi".to_string()]);
+        let mut vm = Machine::<8>::default();
+        vm.load_shared_program(
+            Arc::clone(&code),
+            Arc::clone(&constants),
+            Arc::clone(&strings),
+        );
+        assert!(Arc::ptr_eq(&vm.program_code, &code));
+        assert!(Arc::ptr_eq(&vm.program_constants, &constants));
+        assert!(Arc::ptr_eq(&vm.program_strings, &strings));
+        assert_eq!(vm.call_function(0, &[]).as_int(), 0);
+    }
+
+    #[test]
+    fn reset_isolate_heap_collects_or_unmaps_slabs() {
+        let mut vm = Machine::<8>::default();
+        let _ = vm.heap_mut().intern("keep-one-chunk".into());
+        assert_eq!(vm.heap().slab_chunk_count(), 1);
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().slab_chunk_count(), 1);
+
+        for i in 0..4000u32 {
+            let _ = vm.heap_mut().intern(format!("s{i}"));
+        }
+        assert!(
+            vm.heap().slab_chunk_count() > 1,
+            "need multiple slabs to exercise unmap"
+        );
+        vm.reset_isolate_heap();
+        assert_eq!(vm.heap().slab_chunk_count(), 0);
+        assert_eq!(vm.heap().mapped_bytes(), 0);
+        assert_eq!(vm.heap().size(), 0);
     }
 
     /// Harness soft-pass checks `Result::Ok` via tag 0.

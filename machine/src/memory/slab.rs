@@ -54,6 +54,15 @@ impl Slab {
             .push(ptr);
     }
 
+    /// Mapped anonymous bytes (chunks stay mapped after sweep).
+    pub fn mapped_bytes(&self) -> usize {
+        self.chunks.len() * CHUNK
+    }
+
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
     /// True when `addr` is a slot origin in a mapped chunk (not necessarily
     /// live — poison is the header kind).
     pub fn contains_slot(&self, addr: u64) -> bool {
