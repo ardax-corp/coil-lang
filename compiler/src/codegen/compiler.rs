@@ -7574,7 +7574,7 @@ impl Compiler {
         short.rsplit("::").next().unwrap_or(short)
     }
 
-    /// Rewrite `f(N, …)` to `CALL __coil_par_f_N_…` when a specialization exists.
+    /// Rewrite `f(N, …)` to `CALL __coil_par_f(N, …, hops)` when a worker exists.
     fn try_emit_par_specialized_call(
         &mut self,
         fname: &str,
@@ -7595,23 +7595,35 @@ impl Compiler {
             vals.push(*n);
         }
         let key = Self::par_shape_key(fname);
+        let Some(site) = self.par_shapes.get(key) else {
+            return false;
+        };
+        if !crate::typechecking::guards_hold(&site.guards, &vals) {
+            return false;
+        }
         if !crate::typechecking::args_worth_parallel(&self.par_shapes, key, &vals) {
             return false;
         }
-        let spec = crate::typechecking::par_specialization_name(key, &vals);
+        let spec = crate::typechecking::par_worker_name(key);
         let Some(&offset) = self.functions.get(&spec) else {
             return false;
         };
-        bytecode.push(Byte::new(Instruction::CALL).with_call_packed(0, offset as u32));
+        for v in vals {
+            self.push_int_const_into(v, bytecode);
+        }
+        bytecode.push_const(crate::typechecking::PAR_SPEC_HOPS as i32);
+        bytecode.push(
+            Byte::new(Instruction::CALL).with_call_packed((args.len() as u32) + 1, offset as u32),
+        );
         true
     }
 
-    /// Emit nullary `__coil_par_{fn}_{args…}` clones that always fork (no RT threshold).
+    /// Emit one parameterized `__coil_par_{fn}(args…, hop)` AlwaysPar worker.
     fn emit_par_specializations_for(&mut self, bare_name: &str, table_key: &str) {
-        let Some(site) = self.par_shapes.get(bare_name).cloned() else {
+        if !self.par_workers.contains(bare_name) {
             return;
-        };
-        let Some(arg_sets) = self.par_spec_args.get(bare_name).cloned() else {
+        }
+        let Some(site) = self.par_shapes.get(bare_name).cloned() else {
             return;
         };
         let Some(&orig_offset) = self
@@ -7621,44 +7633,48 @@ impl Compiler {
         else {
             return;
         };
-        // Cheapest first so a parent clone can bind to in-hop child clones.
-        let mut ordered: Vec<Vec<i64>> = arg_sets.into_iter().collect();
-        ordered.sort_by(|a, b| (a.iter().sum::<i64>(), a).cmp(&(b.iter().sum::<i64>(), b)));
-        for args in &ordered {
-            self.emit_one_par_specialization(&site, args, orig_offset as u32);
-        }
+        self.emit_one_par_worker(&site, orig_offset as u32);
     }
 
-    /// Emit one always-fork nullary clone of `site.fn_name` at `parent_args`.
+    /// Parameterized AlwaysPar worker (COI-366 F1 / C2): live args + hop.
     ///
-    /// Evidence-gated AlwaysPar (COI-361 E3 / COI-364 E7): arm 0 is spawned
-    /// on `thread_spawn_shared`, remaining arms run inline, then join + combine.
-    /// In-hop child clones are used when they exist; deeper levels call the
-    /// sequential original. Failed spawn/join falls back to sequential arms.
-    fn emit_one_par_specialization(
-        &mut self,
-        site: &crate::typechecking::ParForkSite,
-        parent_args: &[i64],
-        orig_offset: u32,
-    ) {
-        if site.arms.len() < 2 || parent_args.len() != site.param_count {
+    /// Grain is the const-site rewrite. Inside the worker, hop and path
+    /// guards are depth/reachability — not a grain skip-threshold. Arm 0 is
+    /// `thread_spawn_shared`; remaining arms run inline; join + combine.
+    /// Self-arms with hop > 1 re-enter this worker; hop 0 / missed guards
+    /// CALL the sequential original.
+    fn emit_one_par_worker(&mut self, site: &crate::typechecking::ParForkSite, orig_offset: u32) {
+        if site.arms.len() < 2 {
             return;
         }
-        let spec_name = crate::typechecking::par_specialization_name(&site.fn_name, parent_args);
-        if self.functions.contains_key(&spec_name) {
+        if site
+            .guards
+            .iter()
+            .any(|g| matches!(g, crate::typechecking::par_profit::ParGuard::Opaque))
+        {
             return;
         }
-        let Some(child_args) = site
+        let crate::typechecking::ParArm::Call {
+            args: arm0_args, ..
+        } = &site.arms[0];
+        if arm0_args.len() > common::MAX_THREAD_SPAWN_ARGS {
+            return;
+        }
+        let self_arm0 = crate::typechecking::arm_callee(&site.arms[0]) == site.fn_name;
+        if self_arm0 && arm0_args.len() + 1 > common::MAX_THREAD_SPAWN_ARGS {
+            return;
+        }
+        let Some(seq_entries) = site
             .arms
             .iter()
-            .map(|arm| crate::typechecking::eval_arm_args(arm, parent_args))
-            .collect::<Option<Vec<Vec<i64>>>>()
+            .map(|arm| {
+                self.resolve_par_fn_entry(crate::typechecking::arm_callee(arm))
+                    .map(|e| e as u32)
+            })
+            .collect::<Option<Vec<u32>>>()
         else {
             return;
         };
-        if child_args[0].len() > common::MAX_THREAD_SPAWN_ARGS {
-            return;
-        }
         let Some((plan, push_order)) = self.par_combine_plan(site, orig_offset) else {
             return;
         };
@@ -7669,57 +7685,100 @@ impl Compiler {
         ) else {
             return;
         };
-        // Resolved before the clone is bound so an arm that reproduces
-        // `parent_args` cannot bind to the clone itself (infinite CALL).
-        let Some(callables) = site
-            .arms
-            .iter()
-            .zip(child_args.iter())
-            .map(|(arm, c)| self.par_arm_callable(arm, c))
-            .collect::<Option<Vec<_>>>()
-        else {
-            return;
-        };
 
-        self.bind_function_entry(spec_name.clone());
-        self.fn_arities.insert(spec_name.clone(), (0, false));
+        let worker_name = crate::typechecking::par_worker_name(&site.fn_name);
+        if self.functions.contains_key(&worker_name) {
+            return;
+        }
+        let n = site.param_count;
+        let hop_slot = n as u32;
+        let (worker_entry, _) = self.bind_function_entry(worker_name.clone());
+        let worker_entry = worker_entry as u32;
+        self.fn_arities
+            .insert(worker_name.clone(), (n as u32 + 1, false));
 
         let prev_fn_vars = std::mem::take(&mut self.context.variables);
         let prev_fn_table_key = self.current_function_table_key.take();
-        self.current_function_table_key = Some(spec_name.clone());
+        self.current_function_table_key = Some(worker_name.clone());
         self.context.variables = Interner::default();
+        for i in 0..n {
+            self.context.variables.intern(format!("__coil_par_p{i}"));
+        }
+        self.context.variables.intern("__coil_par_hop".to_string());
         let entry_sp = 0u32;
-
         let body_start = self.bytecode.len();
 
-        // MakeFn for arm 0 (nullary child clone, or the original with args).
-        let (entry0, arity0, push_args0) = callables[0];
-        self.bytecode.push_const(0);
-        self.bytecode
-            .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry0));
-        self.bytecode.push(
-            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity0, false)),
-        );
-        let fn_tmp = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(fn_tmp);
-
         let mut bb = BlockBuilder::new();
+        let seq_orig = bb.fresh_label(self.bytecode.il_mut());
         let have_handle = bb.fresh_label(self.bytecode.il_mut());
         let seq = bb.fresh_label(self.bytecode.il_mut());
         let done = bb.fresh_label(self.bytecode.il_mut());
 
-        // AlwaysPar: thread_spawn_shared (C2); isolate fallback is runtime.
+        for g in &site.guards {
+            let crate::typechecking::par_profit::ParGuard::Cmp {
+                lhs,
+                op,
+                rhs,
+                expect,
+            } = g
+            else {
+                continue;
+            };
+            self.emit_par_arg_form(lhs);
+            self.emit_par_arg_form(rhs);
+            self.bytecode
+                .push(Byte::new(Self::par_cmp_instruction(*op)));
+            let kind = if *expect {
+                BbJumpKind::JumpIfFalse
+            } else {
+                BbJumpKind::JumpIfTrue
+            };
+            bb.emit_jump_to(seq_orig, kind, self.bytecode.il_mut());
+        }
+        self.bytecode.push_load(hop_slot);
+        self.bytecode.push_const(0);
+        self.bytecode.push(Byte::new(Instruction::LEQ));
+        bb.emit_jump_to(seq_orig, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
+
+        let spawn_go = bb.fresh_label(self.bytecode.il_mut());
+        let spawn_nest = if self_arm0 {
+            let lab = bb.fresh_label(self.bytecode.il_mut());
+            self.bytecode.push_load(hop_slot);
+            self.bytecode.push_const(1);
+            self.bytecode.push(Byte::new(Instruction::GT));
+            bb.emit_jump_to(lab, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
+            Some(lab)
+        } else {
+            None
+        };
+        self.emit_par_make_fn(seq_entries[0], arm0_args.len() as u32);
+        let fn_tmp = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(fn_tmp);
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
         self.bytecode.push_load(fn_tmp);
-        let mut spawn_arity = 1;
-        if push_args0 {
-            for a in child_args[0].clone() {
-                self.push_int_const(a);
-                spawn_arity += 1;
-            }
+        for form in arm0_args {
+            self.emit_par_arg_form(form);
         }
-        self.bytecode.push_host_invoke(spawn_arity);
+        self.bytecode.push_host_invoke(1 + arm0_args.len() as u32);
+        bb.emit_jump_to(spawn_go, BbJumpKind::Unconditional, self.bytecode.il_mut());
+
+        if let Some(spawn_nest) = spawn_nest {
+            bb.bind_label(spawn_nest, self.bytecode.il_mut());
+            self.emit_par_make_fn(worker_entry, n as u32 + 1);
+            self.bytecode.push_store_pop(fn_tmp);
+            self.bytecode
+                .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
+            self.bytecode.push_load(fn_tmp);
+            for form in arm0_args {
+                self.emit_par_arg_form(form);
+            }
+            self.bytecode.push_load(hop_slot);
+            self.bytecode.push_const(1);
+            self.bytecode.push(Byte::new(Instruction::SUB));
+            self.bytecode.push_host_invoke(2 + arm0_args.len() as u32);
+        }
+        bb.bind_label(spawn_go, self.bytecode.il_mut());
 
         bb.emit_jump_to(
             have_handle,
@@ -7733,11 +7792,16 @@ impl Compiler {
         let handle_tmp = self.alloc_temp_slot();
         self.bytecode.push_store_pop(handle_tmp);
 
-        // Inline arms first, then join arm 0, every result is parked in a
-        // slot so the combine can push them in whatever order it needs.
-        let mut arm_tmps = vec![0u32; callables.len()];
-        for i in 1..callables.len() {
-            self.emit_par_arm_call_args(callables[i], &child_args[i]);
+        let mut arm_tmps = vec![0u32; site.arms.len()];
+        for i in 1..site.arms.len() {
+            self.emit_par_arm_invoke(
+                &site.arms[i],
+                seq_entries[i],
+                worker_entry,
+                hop_slot,
+                &site.fn_name,
+                &mut bb,
+            );
             let slot = self.alloc_temp_slot();
             self.bytecode.push_store_pop(slot);
             arm_tmps[i] = slot;
@@ -7747,8 +7811,6 @@ impl Compiler {
             .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
         self.bytecode.push_load(handle_tmp);
         self.bytecode.push_host_invoke(1);
-        // A failed join (worker result was not sendable, handle already taken)
-        // redoes the whole site sequentially rather than propagating an error.
         let joined = bb.fresh_label(self.bytecode.il_mut());
         bb.emit_jump_to(
             joined,
@@ -7767,26 +7829,121 @@ impl Compiler {
         self.emit_par_combine(&plan);
         bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
 
-        // Spawn failed: arms are pure, so evaluating them straight into the
-        // combine's push order is equivalent.
         bb.bind_label(seq, self.bytecode.il_mut());
         for &idx in &push_order {
-            self.emit_par_arm_call_args(callables[idx], &child_args[idx]);
+            self.emit_par_seq_arm(&site.arms[idx], seq_entries[idx]);
         }
         self.emit_par_combine(&plan);
 
         bb.bind_label(done, self.bytecode.il_mut());
+        self.bytecode.push_return();
 
+        bb.bind_label(seq_orig, self.bytecode.il_mut());
+        for i in 0..n {
+            self.bytecode.push_load(i as u32);
+        }
+        self.bytecode
+            .push(Byte::new(Instruction::CALL).with_call_packed(n as u32, orig_offset));
         self.bytecode.push_return();
 
         let body_end = self.bytecode.len();
-        self.record_fn_span(spec_name.clone(), body_start, body_end);
-        let entry = self.fn_entry_labels.get(&spec_name).copied();
+        self.record_fn_span(worker_name.clone(), body_start, body_end);
+        let entry = self.fn_entry_labels.get(&worker_name).copied();
         self.bytecode
-            .record_func_with_sp(spec_name, entry, body_start, body_end, entry_sp);
+            .record_func_with_sp(worker_name, entry, body_start, body_end, entry_sp);
         self.record_unboxed_class_fields();
         self.current_function_table_key = prev_fn_table_key;
         self.context.variables = prev_fn_vars;
+    }
+
+    fn par_cmp_instruction(op: crate::typechecking::par_profit::CmpOp) -> Instruction {
+        use crate::typechecking::par_profit::CmpOp;
+        match op {
+            CmpOp::Lt => Instruction::LE,
+            CmpOp::Leq => Instruction::LEQ,
+            CmpOp::Gt => Instruction::GT,
+            CmpOp::Geq => Instruction::GEQ,
+            CmpOp::Eq => Instruction::EQ,
+            CmpOp::Neq => Instruction::NEQ,
+        }
+    }
+
+    fn emit_par_arg_form(&mut self, form: &crate::typechecking::ArgForm) {
+        use crate::typechecking::ArgForm;
+        match form {
+            ArgForm::Const(k) => self.push_int_const(*k),
+            ArgForm::Param(i) => self.bytecode.push_load(*i as u32),
+            ArgForm::ParamMinus { param, sub } => {
+                self.bytecode.push_load(*param as u32);
+                self.push_int_const(*sub);
+                self.bytecode.push(Byte::new(Instruction::SUB));
+            }
+        }
+    }
+
+    fn emit_par_make_fn(&mut self, entry: u32, arity: u32) {
+        self.bytecode.push_const(0);
+        self.bytecode
+            .push(Byte::new(Instruction::CodePtr).with_operand_u32(entry));
+        self.bytecode.push(
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity, false)),
+        );
+    }
+
+    fn emit_par_seq_arm(&mut self, arm: &crate::typechecking::ParArm, entry: u32) {
+        let crate::typechecking::ParArm::Call { args, .. } = arm;
+        for form in args {
+            self.emit_par_arg_form(form);
+        }
+        self.bytecode
+            .push(Byte::new(Instruction::CALL).with_call_packed(args.len() as u32, entry));
+    }
+
+    /// Self-arm with hop > 1 re-enters the worker; otherwise sequential callee.
+    fn emit_par_arm_invoke(
+        &mut self,
+        arm: &crate::typechecking::ParArm,
+        seq_entry: u32,
+        worker_entry: u32,
+        hop_slot: u32,
+        site_fn: &str,
+        bb: &mut BlockBuilder,
+    ) {
+        let is_self = crate::typechecking::arm_callee(arm) == site_fn;
+        if !is_self {
+            self.emit_par_seq_arm(arm, seq_entry);
+            return;
+        }
+        let nest = bb.fresh_label(self.bytecode.il_mut());
+        let after = bb.fresh_label(self.bytecode.il_mut());
+        self.bytecode.push_load(hop_slot);
+        self.bytecode.push_const(1);
+        self.bytecode.push(Byte::new(Instruction::GT));
+        bb.emit_jump_to(nest, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
+        self.emit_par_seq_arm(arm, seq_entry);
+        bb.emit_jump_to(after, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        bb.bind_label(nest, self.bytecode.il_mut());
+        let crate::typechecking::ParArm::Call { args, .. } = arm;
+        for form in args {
+            self.emit_par_arg_form(form);
+        }
+        self.bytecode.push_load(hop_slot);
+        self.bytecode.push_const(1);
+        self.bytecode.push(Byte::new(Instruction::SUB));
+        self.bytecode.push(
+            Byte::new(Instruction::CALL).with_call_packed(args.len() as u32 + 1, worker_entry),
+        );
+        bb.bind_label(after, self.bytecode.il_mut());
+    }
+
+    fn push_int_const_into(&mut self, n: i64, bytecode: &mut CodeBuf) {
+        if (0..=i32::MAX as i64).contains(&n) {
+            bytecode.push_const(n as i32);
+        } else {
+            let bits = Value::from(n).raw() as u64;
+            let idx = self.intern_constant(bits);
+            bytecode.push_const_pool(idx);
+        }
     }
 
     /// Lower `site.combine` to a fold instruction plus the arm push order it
@@ -7833,9 +7990,7 @@ impl Compiler {
                 ))
             }
             ParCombine::Tuple => Some((
-                ParCombinePlan::Tuple {
-                    arity: arms as u32,
-                },
+                ParCombinePlan::Tuple { arity: arms as u32 },
                 (0..arms).collect(),
             )),
             ParCombine::EnumCtor {
@@ -7882,40 +8037,11 @@ impl Compiler {
                 // Unnamespaced bare keys sometimes live next to FQNs.
                 self.functions
                     .iter()
-                    .find(|(k, _)| k.rsplit("::").next() == Some(name) && !k.starts_with("__coil_par_"))
+                    .find(|(k, _)| {
+                        k.rsplit("::").next() == Some(name) && !k.starts_with("__coil_par_")
+                    })
                     .map(|(_, &off)| off)
             })
-    }
-
-    /// Callable for one arm: `(entry, arity, needs_push_args)`.
-    ///
-    /// An in-hop child specialization is invoked as its nullary clone;
-    /// otherwise the sequential callee is called with concrete args.
-    fn par_arm_callable(
-        &self,
-        arm: &crate::typechecking::ParArm,
-        child_args: &[i64],
-    ) -> Option<(u32, u32, bool)> {
-        let callee = crate::typechecking::arm_callee(arm);
-        if crate::typechecking::args_worth_parallel(&self.par_shapes, callee, child_args) {
-            let spec = crate::typechecking::par_specialization_name(callee, child_args);
-            if let Some(&off) = self.functions.get(&spec) {
-                return Some((off as u32, 0, false));
-            }
-        }
-        let entry = self.resolve_par_fn_entry(callee)? as u32;
-        Some((entry, child_args.len() as u32, true))
-    }
-
-    fn emit_par_arm_call_args(&mut self, callable: (u32, u32, bool), child_args: &[i64]) {
-        let (entry, arity, push_args) = callable;
-        if push_args {
-            for a in child_args.to_vec() {
-                self.push_int_const(a);
-            }
-        }
-        self.bytecode
-            .push(Byte::new(Instruction::CALL).with_call_packed(arity, entry));
     }
 
     // Loop IPA (chunked fork-join over an induction range)
@@ -15892,12 +16018,12 @@ impl Compiler {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
-            self.par_spec_args =
-                crate::typechecking::collect_par_specialization_args(ast, &self.par_shapes);
+            self.par_workers =
+                crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
             self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
         } else {
             self.par_shapes.clear();
-            self.par_spec_args.clear();
+            self.par_workers.clear();
             self.loop_par_sites = crate::typechecking::LoopParSites::new();
         }
         self.emit_builtin_dict_thunks();

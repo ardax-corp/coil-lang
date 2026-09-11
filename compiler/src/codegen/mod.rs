@@ -1,6 +1,6 @@
 use std::{
     borrow::Borrow,
-    collections::{BTreeSet, HashMap, HashSet},
+    collections::{HashMap, HashSet},
 };
 
 use common::{
@@ -976,8 +976,8 @@ pub struct Compiler {
     pure_fns: HashSet<String>,
     /// Detected independent-parallel-arm fork sites for pure fns.
     par_shapes: HashMap<String, crate::typechecking::ParForkSite>,
-    /// Concrete arg vectors requiring `__coil_par_*` specializations.
-    par_spec_args: HashMap<String, BTreeSet<Vec<i64>>>,
+    /// Functions that emit one parameterized `__coil_par_*` fork worker.
+    par_workers: HashSet<String>,
     /// Counted loops whose iterations are independent arms, by loop span.
     loop_par_sites: crate::typechecking::LoopParSites,
     /// Chunk workers emitted so far, for `__coil_par_loop_*` naming.
@@ -1087,7 +1087,7 @@ impl Default for Compiler {
             recursive_pure: HashSet::new(),
             pure_fns: HashSet::new(),
             par_shapes: HashMap::new(),
-            par_spec_args: HashMap::new(),
+            par_workers: HashSet::new(),
             loop_par_sites: crate::typechecking::LoopParSites::new(),
             loop_par_helpers: 0,
             operand_stack_slots: crate::typechecking::DEFAULT_OPERAND_STACK_SLOTS,
