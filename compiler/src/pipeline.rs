@@ -1799,7 +1799,7 @@ fn main() {
 
     #[test]
     fn fib32_archive_round_trip_persists_operand_stack_slots() {
-        use common::decode_archived_program;
+        use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
         use rkyv::rancor::Error;
 
         let mut pipeline = Pipeline::new();
