@@ -98,23 +98,14 @@ impl ConvoyPlan {
             }
         }
         for block in &func.blocks {
-            let mut counts: Vec<(ValueId, u32)> = Vec::new();
             for inst in &block.insts {
-                if let MirInst::MatchPayload { dest, scrutinee, .. } = inst {
-                    if let Some((_, n)) = counts.iter_mut().find(|(s, _)| *s == *scrutinee) {
-                        *n += 1;
-                    } else {
-                        counts.push((*scrutinee, 1));
-                    }
-                    let _ = dest;
+                if let MirInst::MatchPayload { dest, .. } = inst {
+                    need_slot[dest.index()] = true;
                 }
             }
-            for inst in &block.insts {
-                let MirInst::MatchPayload { dest, scrutinee, .. } = inst else {
-                    continue;
-                };
-                if counts.iter().any(|(s, n)| *s == *scrutinee && *n > 1) {
-                    need_slot[dest.index()] = true;
+            if let Some(Terminator::JumpIfMatch { payloads, .. }) = &block.term {
+                for d in payloads {
+                    need_slot[d.index()] = true;
                 }
             }
         }

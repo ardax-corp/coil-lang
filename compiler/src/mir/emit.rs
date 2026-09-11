@@ -1383,7 +1383,11 @@ fn emit_boxed_jump_if_match(
         loc,
         hint: Default::default(),
     });
-    stacked.clear();
+    if stacked.last() == Some(&scrutinee) {
+        stacked.pop();
+    } else {
+        stacked.clear();
+    }
     if !is_fallthrough(func, block.id, not_taken) {
         out.push(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
