@@ -1144,12 +1144,13 @@ fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, Threa
         Ok(c) => c,
         Err(_) => return try_host_spawn(heap, args),
     };
-    if !crate::shared_heap::program_has_real_maps(&ctx.program) {
-        return try_host_spawn(heap, args);
-    }
     let (entry, arity) = fn_entry_from_value(heap, args[0])?;
     if args.len() > 1 && args.len() - 1 != arity as usize {
         return Err(ThreadErrorTag::Other);
+    }
+    let all_immediate = args[1..].iter().all(|v| is_immediate_value(heap, *v));
+    if !all_immediate && !crate::shared_heap::program_has_real_maps(&ctx.program) {
+        return try_host_spawn(heap, args);
     }
     let mut spawn_args = Vec::with_capacity(args.len().saturating_sub(1));
     for v in &args[1..] {
