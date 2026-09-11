@@ -61,8 +61,8 @@ For each demanded constant argument vector whose **work score** exceeds
 site's path guards, codegen emits a nullary specialization
 `__coil_par_{f}_{a}_{b}_…` that **always** forks:
 
-1. `MakeFn` of the arm's sequential callee with those concrete args (never a
-   nested `__coil_par_*` clone).
+1. `MakeFn` of an in-hop child specialization when one exists, otherwise the
+   arm's sequential callee with those concrete args.
 2. `thread_spawn` the first arm into the work-stealing reactor (no `GT` gate).
 3. On `Ok(handle)`: evaluate remaining arms locally, `join` (help-steals), apply
    the site's combine.
@@ -70,14 +70,13 @@ site's path guards, codegen emits a nullary specialization
 
 Call sites with matching const args rewrite to `CALL` the specialization.
 Below-threshold / dynamic args stay on the original sequential `f` (no hot-path
-runtime threshold tax). Child arms of a clone always call that sequential `f`
-— there is no BFS close-down-to-cutoff (`__coil_par_fib_21…n`). That is the
-**top-site / evidence-gated** policy (COI-361 E3): only AST const calls whose
-work score exceeds the threshold become AlwaysPar clones. Two independent
-const sites (`fib(22)` and `fib(24)`) each fork once; a derived `fib(23)` does
-not. The old chain multiplied reactor spawn/join near the cutoff for little
-work; the threshold still admits the site, it just does not re-fork every
-level. `PAR_SPEC_BUDGET` (64) is only a code-size lid on distinct const sites.
+runtime threshold tax). Specializations start from those AST const calls and
+close **at most two** arm-transform hops (`PAR_SPEC_HOPS`). That is the
+**counted evidence gate** (COI-361 E3): the const call is the evidence, not
+AlwaysPar every level down to the cutoff (`__coil_par_fib_21…n`). A child that
+misses guards or falls to/below the work threshold stays sequential — the same
+profitability floor as before, not a skip-threshold. `PAR_SPEC_BUDGET` (64)
+remains a code-size lid.
 
 ### The work score
 
@@ -215,8 +214,9 @@ the `Arc` `ThreadProgram` image (no per-job bytecode `to_vec`); join-help
 checks out a TLS helper `Machine` instead of `Box::new` per steal; after each
 job the isolate heap is reset (unmap when more than one 64KiB slab chunk is
 mapped). Re-measure IPA with a release `fib` archive compiled under
-`COIL_AUTO_PAR=1`: spawn count is one top-site job (`Reactor::jobs_submitted`),
-then `/usr/bin/time -f '%e %M' ./target/release/coil run fib.hyc`
+`COIL_AUTO_PAR=1`: fewer `__coil_par_fib_*` clones than the cutoff chain
+(`PAR_SPEC_HOPS` = 2), `Reactor::jobs_submitted` below the nested-AlwaysPar
+storm, then `/usr/bin/time -f '%e %M' ./target/release/coil run fib.hyc`
 (and `COIL_MAX_WORKER_THREADS=1` for the nested-help case).
 
 Shared-heap steal (C) is **not** this path. C0 sendability (whitelist,
