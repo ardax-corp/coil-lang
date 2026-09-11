@@ -182,9 +182,11 @@ next mark — not required for C1 int reduce.
 ### Why maps are mandatory
 
 S2b maps persist on `.hyc` / embed (archive **minor 14**, E1). Shared-heap
-steal is allowed only when `ThreadProgram.stack_maps` is **non-empty and
-real** (`has_real_maps` / `wire_thread_program_with_maps`). Pre-14 archives
-and unmapped allocating bodies stay **isolate**.
+steal of heap pointers is allowed only when `ThreadProgram.stack_maps` is
+**non-empty and real** (`has_real_maps` / `wire_thread_program_with_maps`).
+Layer A C1 **immediate-only** loop chunks may steal without maps because
+collect is forbidden in-epoch (abort instead). Pre-14 archives and unmapped
+**allocating** bodies stay **isolate**.
 
 Conservative operand-stack scanning on one mutator is the current fallback
 when maps are empty. With several mutators it is not a contract: a stolen
