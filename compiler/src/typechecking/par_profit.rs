@@ -6,10 +6,11 @@
 //! tak-style `f(f(a), f(b), f(c))`, or `g(f(a), f(b))`. Arms are described
 //! structurally ([`ArgForm`]) rather than by function allowlists. Constant call
 //! sites whose fork-tree grain ([`par_work_grain`]) exceeds
-//! [`par_expr_grain`] rewrite to specialized nullary clones that always fork
-//! (fully static, no runtime grain checks). Evidence-gated: AST const
-//! calls plus a bounded number of derived hops — not AlwaysPar down to the
-//! cutoff (COI-361 E3).
+//! [`par_expr_grain`] rewrite to one parameterized fork worker
+//! ([`par_worker_name`]) that takes the live args. Grain is the const-site
+//! entry gate (no hot-path skip-threshold). Nested AlwaysPar is a hop/depth
+//! counter on that same worker — not a constellation of frozen arg clones
+//! (COI-366 F1).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -130,7 +131,7 @@ pub enum ParGuard {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParForkSite {
     pub fn_name: String,
-    /// Declared parameter count of the enclosing function (for specialization keys).
+    /// Declared parameter count of the enclosing function (worker arity, plus hop).
     pub param_count: usize,
     /// Independent pure calls (at least two).
     pub arms: Vec<ParArm>,
@@ -263,17 +264,11 @@ pub fn args_worth_parallel(
     WorkEstimate::new(sites).worth_parallel(fn_name, args)
 }
 
-/// Specialized nullary entry name for `fn_name` at concrete `args`.
+/// Parameterized fork-worker name for `fn_name`.
 ///
-/// `("fib", &[22])` → `__coil_par_fib_22`; `("tak", &[18, 12, 6])` →
-/// `__coil_par_tak_18_12_6`.
-pub fn par_specialization_name(fn_name: &str, args: &[i64]) -> String {
-    let mut out = format!("__coil_par_{fn_name}");
-    for a in args {
-        out.push('_');
-        out.push_str(&a.to_string());
-    }
-    out
+/// `fib` → `__coil_par_fib`; one worker per site, not per const-arg vector.
+pub fn par_worker_name(fn_name: &str) -> String {
+    format!("__coil_par_{fn_name}")
 }
 
 /// Concrete child args for `arm` given the enclosing call's `parent_args`.
@@ -309,81 +304,43 @@ pub fn analyze_par_fork_sites(
     out
 }
 
-/// Per-function cap on demanded specializations (code-size lid).
-const PAR_SPEC_BUDGET: usize = 64;
-
-/// Arm-transform hops from an AST const call that may still AlwaysPar.
+/// Arm-transform hops the parameterized worker may re-enter itself.
 ///
 /// Nested AlwaysPar down to the work cutoff used to emit `__coil_par_fib_21…n`.
-/// A small hop count is a counted evidence gate (COI-361 E3): the const call
-/// is the evidence, and a bounded number of derived children may fork to fill
-/// the reactor without near-cutoff spawn tax. Children that miss guards or
-/// fall to/below [`par_expr_grain`] stay sequential — the existing
-/// profitability floor, not a silent skip of admitted sites.
-const PAR_SPEC_HOPS: u32 = 2;
+/// A small hop count is a counted evidence gate (COI-361 E3 / COI-366 F1):
+/// the const call is the evidence, and the same worker decrements hop rather
+/// than cloning a frozen arg vector. Hop 0 / missed path guards fall through
+/// to the sequential original — not a grain skip-threshold on the hot path.
+pub const PAR_SPEC_HOPS: u32 = 2;
 
-/// Constant call-site arg vectors for fork-site functions.
+/// Functions that need one parameterized fork worker.
 ///
-/// Starts from AST-demanded const calls, then closes at most [`PAR_SPEC_HOPS`]
-/// arm transforms. Deeper derived vectors stay on the sequential original.
-pub fn collect_par_specialization_args(
+/// A name is demanded when some AST const call reaches its fork site (guards
+/// hold) with grain above [`par_expr_grain`]. Hops are depth on that worker,
+/// not extra demanded vectors.
+pub fn collect_par_worker_fns(
     ast: &Output<'_>,
     sites: &HashMap<String, ParForkSite>,
-) -> HashMap<String, BTreeSet<Vec<i64>>> {
+) -> HashSet<String> {
     let mut demanded: HashMap<String, BTreeSet<Vec<i64>>> = HashMap::new();
     let mut work = WorkEstimate::new(sites);
     collect_const_calls(ast, &mut work, &mut demanded);
-    for (name, set) in demanded.iter_mut() {
-        let Some(site) = sites.get(name) else {
+    let mut out = HashSet::new();
+    for (name, set) in demanded {
+        let Some(site) = sites.get(&name) else {
             continue;
         };
-        set.retain(|args| guards_hold(&site.guards, args) && work.worth_parallel(name, args));
-        let mut seen: HashMap<Vec<i64>, u32> = set.iter().cloned().map(|a| (a, 0u32)).collect();
-        let mut queue: Vec<(Vec<i64>, u32)> = set.iter().cloned().map(|a| (a, 0u32)).collect();
-        while let Some((cur, hops)) = queue.pop() {
-            if hops >= PAR_SPEC_HOPS || seen.len() >= PAR_SPEC_BUDGET {
-                continue;
-            }
-            for arm in &site.arms {
-                let Some(child) = eval_arm_args(arm, &cur) else {
-                    continue;
-                };
-                if child.iter().any(|a| *a < 0)
-                    || !work.worth_parallel(arm_callee(arm), &child)
-                    || !guards_hold(&site.guards, &child)
-                {
-                    continue;
-                }
-                if seen.len() >= PAR_SPEC_BUDGET {
-                    break;
-                }
-                let next = hops + 1;
-                match seen.get(&child) {
-                    Some(&old) if old <= next => {}
-                    _ => {
-                        seen.insert(child.clone(), next);
-                        if next < PAR_SPEC_HOPS {
-                            queue.push((child, next));
-                        }
-                    }
-                }
-            }
+        if site.guards.iter().any(|g| matches!(g, ParGuard::Opaque)) {
+            continue;
         }
-        *set = seen.into_keys().collect();
-        if set.len() > PAR_SPEC_BUDGET {
-            let mut ranked: Vec<Vec<i64>> = set.iter().cloned().collect();
-            ranked.sort_by(|a, b| {
-                b.iter()
-                    .sum::<i64>()
-                    .cmp(&a.iter().sum::<i64>())
-                    .then_with(|| b.cmp(a))
-            });
-            ranked.truncate(PAR_SPEC_BUDGET);
-            *set = ranked.into_iter().collect();
+        if set
+            .iter()
+            .any(|args| guards_hold(&site.guards, args) && work.worth_parallel(&name, args))
+        {
+            out.insert(name);
         }
     }
-    demanded.retain(|_, set| !set.is_empty());
-    demanded
+    out
 }
 
 // Fork-site detection
@@ -639,7 +596,7 @@ impl Scan<'_> {
                     }
                 }
             }
-        Expression::Loop { iterable, body, .. } => {
+            Expression::Loop { iterable, body, .. } => {
                 self.walk(iterable, on_return);
                 self.walk_guarded(body, on_return, ParGuard::Opaque);
             }
@@ -1160,13 +1117,14 @@ fn main() {
         assert_eq!(arm_args(fib, 0), [ArgForm::ParamMinus { param: 0, sub: 1 }]);
         assert_eq!(arm_args(fib, 1), [ArgForm::ParamMinus { param: 0, sub: 2 }]);
 
-        let demanded = collect_par_specialization_args(&ast, &sites);
-        let set = demanded.get("fib").expect("fib demands");
-        assert!(set.contains(&vec![32]));
-        assert!(set.contains(&vec![30]), "two hops from 32 must still fork: {set:?}");
+        let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
-            !set.contains(&vec![22]) && !set.contains(&vec![21]),
-            "must not close down to the cutoff: {set:?}"
+            demanded.contains("fib"),
+            "fib(32) must demand one parameterized worker: {demanded:?}"
+        );
+        assert!(
+            !demanded.contains("main"),
+            "only the fork-site function is demanded: {demanded:?}"
         );
     }
 
@@ -1352,14 +1310,12 @@ fn main() {
         );
         let pure = analyze_pure_fns(&ast);
         let sites = analyze_par_fork_sites(&ast, &pure);
-        let demanded = collect_par_specialization_args(&ast, &sites);
-        let set = demanded.get("fib").expect("fib demands");
-        assert!(set.contains(&vec![22]));
-        assert!(set.contains(&vec![24]));
+        let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
-            set.len() <= 8,
-            "two sites plus hops must stay small: {set:?}"
+            demanded.contains("fib"),
+            "two const sites still share one worker: {demanded:?}"
         );
+        assert_eq!(demanded.len(), 1, "one worker per function: {demanded:?}");
     }
 
     #[test]
@@ -1380,10 +1336,10 @@ fn main() {
         );
         let pure = analyze_pure_fns(&ast);
         let sites = analyze_par_fork_sites(&ast, &pure);
-        let demanded = collect_par_specialization_args(&ast, &sites);
+        let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
-            demanded.get("fib").is_none(),
-            "arg at the grain floor and dynamic args must not demand specs: {demanded:?}"
+            !demanded.contains("fib"),
+            "arg at the grain floor and dynamic args must not demand a worker: {demanded:?}"
         );
         assert!(!args_worth_parallel(&sites, "fib", &[20]));
         assert!(args_worth_parallel(&sites, "fib", &[21]));
@@ -1535,20 +1491,15 @@ fn main() {
         );
         let pure = analyze_pure_fns(&ast);
         let sites = analyze_par_fork_sites(&ast, &pure);
-        let demanded = collect_par_specialization_args(&ast, &sites);
-        let set = demanded.get("tak").expect("tak demands");
+        let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
-            set.contains(&vec![21, 12, 6]),
-            "root call site must survive"
+            demanded.contains("tak"),
+            "root call site must demand the tak worker"
         );
-        assert!(
-            set.len() <= 16,
-            "tak hops must not explode to cutoff fan-out: {}",
-            set.len()
-        );
-        assert!(
-            set.iter().all(|args| args.iter().all(|a| *a >= 0)),
-            "negative arg vectors must not be demanded: {set:?}"
+        assert_eq!(
+            demanded.len(),
+            1,
+            "tak must not grow a per-arg constellation: {demanded:?}"
         );
     }
 
@@ -1583,12 +1534,10 @@ fn main() {
                 expect: false,
             }]
         );
-        let demanded = collect_par_specialization_args(&ast, &sites);
-        let set = demanded.get("tak").expect("tak demands");
-        assert!(set.contains(&vec![21, 12, 6]));
+        let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
-            !set.contains(&vec![0, 0, 21]),
-            "base-case vector must not be specialized: {set:?}"
+            demanded.contains("tak"),
+            "profitable tak(21, 12, 6) still demands a worker"
         );
     }
 
@@ -1613,10 +1562,10 @@ fn main() {
             sites.get("f").map(|s| s.guards.as_slice()),
             Some(&[ParGuard::Opaque][..])
         );
-        let demanded = collect_par_specialization_args(&ast, &sites);
+        let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
-            demanded.get("f").is_none(),
-            "unevaluable guard must block specialization: {demanded:?}"
+            !demanded.contains("f"),
+            "unevaluable guard must block the worker: {demanded:?}"
         );
     }
 
@@ -1697,11 +1646,8 @@ fn main() { return; }
     }
 
     #[test]
-    fn specialization_names_cover_multi_arg() {
-        assert_eq!(par_specialization_name("fib", &[22]), "__coil_par_fib_22");
-        assert_eq!(
-            par_specialization_name("tak", &[18, 12, 6]),
-            "__coil_par_tak_18_12_6"
-        );
+    fn worker_names_are_per_site_not_per_arg() {
+        assert_eq!(par_worker_name("fib"), "__coil_par_fib");
+        assert_eq!(par_worker_name("tak"), "__coil_par_tak");
     }
 }

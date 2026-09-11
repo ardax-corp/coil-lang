@@ -45,8 +45,8 @@ pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sit
 #[allow(unused_imports)] // public API re-export
 pub use par_profit::{
     ArgForm, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites, args_worth_parallel,
-    arm_callee, collect_par_specialization_args, eval_arm_args, par_expr_grain, par_loop_grain,
-    par_specialization_name,
+    arm_callee, collect_par_worker_fns, eval_arm_args, guards_hold, par_expr_grain, par_loop_grain,
+    par_worker_name, PAR_SPEC_HOPS,
 };
 #[cfg(test)]
 pub use par_profit::par_work_grain;
