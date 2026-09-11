@@ -83,19 +83,20 @@ pub fn emit_lir(
                 continue;
             }
             let loc = func.loc_of(inst.dest());
-            if let MirInst::MatchPayload { dest, .. } = inst {
-                if is_jim_term_payload(func, *dest) || plan.tree[dest.index()] {
+            if let MirInst::MatchPayload { dest, scrutinee, index } = inst {
+                if is_jim_term_payload(func, *dest) {
                     continue;
                 }
-                out.push(IlOp::from_plain_byte(
-                    Byte::new(Instruction::Unpack).with_operand_u32(1),
-                    loc,
-                ));
-                if plan.need_slot[dest.index()] {
-                    out.push(IlOp::StorePop {
-                        slot: u32::from(regs[dest.index()]),
+                if *index == 0 {
+                    emit_last_arm_unpack(
+                        &mut out,
+                        func,
+                        block.id,
+                        *scrutinee,
+                        &plan,
+                        &regs,
                         loc,
-                    });
+                    );
                 }
                 continue;
             }
@@ -255,6 +256,27 @@ impl EmitPlan {
                 }
             }
         }
+        for block in &func.blocks {
+            let mut n_by_src: Vec<(ValueId, u32)> = Vec::new();
+            for inst in &block.insts {
+                if let MirInst::MatchPayload { scrutinee, .. } = inst {
+                    if let Some((_, n)) = n_by_src.iter_mut().find(|(s, _)| *s == *scrutinee) {
+                        *n += 1;
+                    } else {
+                        n_by_src.push((*scrutinee, 1));
+                    }
+                }
+            }
+            for inst in &block.insts {
+                let MirInst::MatchPayload { dest, scrutinee, .. } = inst else {
+                    continue;
+                };
+                if n_by_src.iter().any(|(s, n)| *s == *scrutinee && *n > 1) {
+                    need_slot[dest.index()] = true;
+                    tree[dest.index()] = false;
+                }
+            }
+        }
 
         Self {
             tree,
@@ -346,8 +368,11 @@ fn consume_match_tos(
         if *taken != block {
             continue;
         }
-        for dest in payloads.iter().rev() {
-            if plan.need_slot[dest.index()] {
+        if payloads.is_empty() {
+            continue;
+        }
+        if payloads.len() > 1 || payloads.iter().any(|d| plan.need_slot[d.index()]) {
+            for dest in payloads.iter().rev() {
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
                     loc,
@@ -357,30 +382,59 @@ fn consume_match_tos(
     }
 }
 
+fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {
+    let mut group = Vec::new();
+    for inst in &func.block(block).insts {
+        let MirInst::MatchPayload {
+            dest,
+            scrutinee: src,
+            index,
+        } = inst
+        else {
+            continue;
+        };
+        if *src != scrutinee || is_jim_term_payload(func, *dest) {
+            continue;
+        }
+        let i = *index as usize;
+        if group.len() <= i {
+            group.resize(i + 1, *dest);
+        }
+        group[i] = *dest;
+    }
+    group
+}
+
+fn emit_last_arm_unpack(
+    out: &mut Vec<IlOp>,
+    func: &MirFunc,
+    block: BlockId,
+    scrutinee: ValueId,
+    plan: &EmitPlan,
+    regs: &[u8],
+    loc: DebugLoc,
+) {
+    let group = last_arm_payloads(func, block, scrutinee);
+    let arity = group.len() as u32;
+    if arity == 0 {
+        return;
+    }
+    out.push(IlOp::from_plain_byte(
+        Byte::new(Instruction::Unpack).with_operand_u32(arity),
+        loc,
+    ));
+    if group.len() > 1 || group.iter().any(|d| plan.need_slot[d.index()]) {
+        for dest in group.iter().rev() {
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+    }
+}
+
 fn assign_needed(func: &MirFunc, plan: &EmitPlan) -> Result<(Vec<u8>, u8), LowerError> {
-    let n = func.types.len();
-    let mut reg = vec![0u8; n];
-    for (i, &p) in func.params.iter().enumerate() {
-        if i > 254 {
-            return Err(LowerError::Refused("too many params".into()));
-        }
-        reg[p.index()] = i as u8;
-    }
-    let mut next = func.params.len();
-    for i in 0..n {
-        if !plan.need_slot[i] {
-            continue;
-        }
-        if func.params.iter().any(|p| p.index() == i) {
-            continue;
-        }
-        if next > 254 {
-            return Err(LowerError::Refused("too many lir slots".into()));
-        }
-        reg[i] = next as u8;
-        next += 1;
-    }
-    Ok((reg, next as u8))
+    super::emit::assign_regs_prefer_payloads(func, &plan.need_slot)
 }
 
 fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
@@ -987,13 +1041,7 @@ fn emit_stack(
                         loc,
                     });
                 }
-                return Ok(());
             }
-            // Last-arm `Unpack`: miss TOS is still the scrutinee.
-            out.push(IlOp::from_plain_byte(
-                Byte::new(Instruction::Unpack).with_operand_u32(1),
-                loc,
-            ));
             Ok(())
         }
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),

@@ -97,6 +97,27 @@ impl ConvoyPlan {
                 need_slot[i] = true;
             }
         }
+        for block in &func.blocks {
+            let mut counts: Vec<(ValueId, u32)> = Vec::new();
+            for inst in &block.insts {
+                if let MirInst::MatchPayload { dest, scrutinee, .. } = inst {
+                    if let Some((_, n)) = counts.iter_mut().find(|(s, _)| *s == *scrutinee) {
+                        *n += 1;
+                    } else {
+                        counts.push((*scrutinee, 1));
+                    }
+                    let _ = dest;
+                }
+            }
+            for inst in &block.insts {
+                let MirInst::MatchPayload { dest, scrutinee, .. } = inst else {
+                    continue;
+                };
+                if counts.iter().any(|(s, n)| *s == *scrutinee && *n > 1) {
+                    need_slot[dest.index()] = true;
+                }
+            }
+        }
         for i in 0..n {
             if !rematerialize_const(func, &def[i]) {
                 continue;
@@ -136,8 +157,30 @@ impl ConvoyPlan {
             }
         }
 
-        let _ = convoy;
-        Self {
+        // Boxed match parks payloads in slots. Self-CALL dests must not stay
+        // B2-convoy there: unassigned dest regs are 0, so rematerialized
+        // `1 + item_check(left) + item_check(right)` would LOAD the param.
+        let has_match_payload = func.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::MatchPayload { .. }))
+        });
+        if has_match_payload {
+            for block in &func.blocks {
+                for inst in &block.insts {
+                    if is_tail_call_inst(block, inst) {
+                        continue;
+                    }
+                    if let MirInst::Call { dest, dest_hi, .. } = inst {
+                        need_slot[dest.index()] = true;
+                        if let Some(hi) = dest_hi {
+                            need_slot[hi.index()] = true;
+                        }
+                    }
+                }
+            }
+        }
+        ConvoyPlan {
             need_slot,
             def,
             self_entry,
