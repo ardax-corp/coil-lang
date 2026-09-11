@@ -57,8 +57,8 @@ full function bodies, including **irrefutable** match arms (`_` / binding);
 constructor-pattern arms stay opaque (AlwaysPar would skip the match). Forks
 never span exclusive alternatives.
 
-For each demanded constant argument vector whose **work score** exceeds
-`COIL_PAR_THRESHOLD` (default **20**), and that still reaches the fork under the
+For each demanded constant argument vector whose **fork-tree grain** `W`
+exceeds `COIL_PAR_THRESHOLD` (default **10945**), and that still reaches the fork under the
 site's path guards, codegen emits a nullary specialization
 `__coil_par_{f}_{a}_{b}_…` that **always** forks:
 
@@ -72,73 +72,73 @@ site's path guards, codegen emits a nullary specialization
 4. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
 
 Call sites with matching const args rewrite to `CALL` the specialization.
-Below-threshold / dynamic args stay on the original sequential `f` (no hot-path
-runtime threshold tax). Specializations start from those AST const calls and
+Below-floor / dynamic args stay on the original sequential `f` (no hot-path
+runtime grain tax). Specializations start from those AST const calls and
 close **at most two** arm-transform hops (`PAR_SPEC_HOPS`). That is the
 **counted evidence gate** (COI-361 E3): the const call is the evidence, not
 AlwaysPar every level down to the cutoff (`__coil_par_fib_21…n`). A child that
-misses guards or falls to/below the work threshold stays sequential — the same
+misses guards or falls to/below the grain floor stays sequential — the same
 profitability floor as before, not a skip-threshold. `PAR_SPEC_BUDGET` (64)
 remains a code-size lid.
 
-### The work score
+### Expression grain (`W`)
 
 A site's cost used to be `max(args)`, which reads argument *magnitude* as if it
 were work. It is not: `tak(24, 22, 20)` is 53 calls but outranked `fib(23)`.
+A later step converted the fork-tree node count back into **fib-units**
+(`score = min { n : Fib(n+1)-1 >= W }`) so `fib(n)` scored `n`. That
+mis-ranks every other shape and ties policy to one recurrence.
 
-Instead, `par_work_units(sites, f, args)` counts the **fork-site nodes** reachable
-from a concrete arg vector:
+`par_work_grain(sites, f, args)` counts the **fork-site nodes** reachable
+from a concrete arg vector and uses that count **directly**:
 
 ```
 W(f, args) = 0                                  if args miss f's guards, go
                                                 negative, or f has no fork site
            = 1 + Σ_arms W(callee, arm(args))    otherwise
+fork iff W > COIL_PAR_THRESHOLD
 ```
 
 Guard pruning is what makes this a work model rather than a size model: a child
 that fails the site's path conditions is a base case and contributes nothing.
 Arms into *other* pure functions recurse into that function's own site, so heavy
 helper arms count and trivial ones do not. The walk is memoized per arg vector
-and bounded by a depth cap, a memo-entry cap, and saturation at the cutoff.
+and bounded by a depth cap, a memo-entry cap, and saturation one node past the
+grain floor.
 
-`W` is then converted back into **threshold units** by inverting the same
-recurrence on the canonical shape — the units are “as much work as `fib(n)`”:
+The default floor **10945** is a profitability constant in **grain** (nodes),
+not “fib(n)”. It is `W(fib(20))` for the `n <= 1` recurrence
+(`Fib(21) - 1`): the same spawn-profitability point previously written as
+fib-unit 20. `fib(20)` still refuses, `fib(21)` still forks. The fair
+`tak(18, 12, 6)` load is **8398** grain — below that floor (fib-units used
+to round it up to 20). It stays sequential.
 
-```
-fib_nodes(n) = Fib(n + 1) - 1        // W for fib(n-1) + fib(n-2), base n <= 1
-score(args)  = min { n : fib_nodes(n) >= W }
-fork iff score > COIL_PAR_THRESHOLD
-```
-
-So the threshold keeps its old meaning on the shape it was calibrated on:
-`fib(n)` scores exactly `n`, and the default **20** still admits `fib(21)` and
-refuses `fib(20)`. What changed is everything that is *not* fib-shaped:
-
-| Site | `max(args)` | Work score | Real calls |
-|---|---|---|---|
-| `fib(21)` | 21 → fork | 21 → fork | 35 421 |
-| `fib(20)` | 20 → refuse | 20 → refuse | 21 891 |
-| `tak(18, 12, 6)` (fair bench) | 18 → refuse | 20 → refuse | 63 609 |
-| `tak(21, 12, 6)` | 21 → fork | 23 → fork | 230 613 |
-| `tak(24, 22, 20)` | 24 → fork | 5 → refuse | 53 |
-| `sq(n) + sq(n - 1)` at 22 | 22 → fork | 2 → refuse | 2 |
-| `fib(n) + fib(n - 1)` at 22 | 22 → fork | >20 → fork | 92 734 |
+| Site | `max(args)` | Grain `W` | Verdict (default floor) | Real calls |
+|---|---|---|---|---|
+| `fib(21)` | 21 | 17710 | fork | 35 421 |
+| `fib(20)` | 20 | 10945 | refuse | 21 891 |
+| `tak(18, 12, 6)` (fair bench) | 18 | 8398 | refuse | 63 609 |
+| `tak(21, 12, 6)` | 21 | >10945 | fork | 230 613 |
+| `tak(24, 22, 20)` | 24 | 53-scale | refuse | 53 |
+| `sq(n) + sq(n - 1)` at 22 | 22 | 1 | refuse | 2 |
+| `fib(n) + fib(n - 1)` at 22 | 22 | >10945 | fork | 92 734 |
 
 Every imprecision resolves *downwards* — an arm into a function with no fork
 site, a `SelfCall` combine's re-entry on joined values (unknowable statically),
-the caps — so the score is a lower bound on the tree and unknown structure can
+the caps — so `W` is a lower bound on the tree and unknown structure can
 only make a site refuse. `tak` is the interesting case: its arms rotate
 parameters, so a large component stays alive, but many children miss the `y < x`
 guard and the combine's re-entry is invisible. The fair benchmark
-load lands exactly *on* the cutoff and stays sequential; only a genuinely deeper
+load lands **below** the floor (`W = 8398`) and stays sequential; only a genuinely deeper
 tree crosses it.
 
-The default **20** is a profitability floor, not an arbitrary gate: forking below
-it (e.g. `COIL_PAR_THRESHOLD=12` on `fib(32)` or `tak(18,12,6)`) multiplies
+The default is a profitability floor, not an arbitrary gate: forking below
+it (e.g. `COIL_PAR_THRESHOLD=100` on `fib(32)` or `tak(18,12,6)`) multiplies
 reactor spawn/join work and is typically **slower** than sequential, and very
 low values can exhaust the specialization budget or overflow worker stacks.
 Raise the workload (larger const args) when you want IPA evidence; do not lower
-the threshold to “force” more forks.
+the grain floor to “force” more forks. Old fib-unit `N` corresponds to grain
+`Fib(N+1)-1` (for `n <= 1` fib).
 
 ## Loop IPA: chunked fork-join over an induction range
 
@@ -154,7 +154,7 @@ only when **every** gate holds:
 |---|---|
 | Shape | `while i < K` / `i <= K`, or counted `for x in START..END` / `..=` (Q6 literal), or `for x in r` when `r` is a const range local (B5) |
 | Induction | `while`: exactly one `i = i + 1` / `i += 1` / `i++` on a const-initialized local. `for`: the binding is the IV; the Q6 `+ 1` latch is implicit (no extra step in the body) |
-| Trip count | compile-time `[begin, end)` with `end - begin > COIL_PAR_THRESHOLD` (grain / isolate spawn floor — not fib-units) |
+| Trip count | compile-time `[begin, end)` with `end - begin > COIL_LOOP_GRAIN` (default **20**; trip-count grain — same spawn-floor idea as expression `W`, different unit) |
 | Reduction | exactly one `acc = acc + e` / `acc = acc * e` (or `+=` / `*=`) on a const-initialized local |
 | Independence | `e` never reads `acc`; the body reads only the IV, its own `let` temps and int literals |
 | Purity | body calls only pure user functions; no index / field / static writes, no branches, `break`, `return` or `yield` |
@@ -205,6 +205,8 @@ idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
 |-----|--------|
 | `COIL_MAX_WORKER_THREADS` | Pool size (1..=512). Default `available_parallelism` (min 2), or **1** when `CI` is set. `.cargo/config.toml` also sets this to `1` (`force = false`) for local cargo test runs. Export a higher value to profile parallelism. |
 | `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
+| `COIL_PAR_THRESHOLD` | Expression IPA grain floor (fork-tree nodes `W`). Default **10945**. |
+| `COIL_LOOP_GRAIN` | Counted-loop IPA trip-count floor. Default **20**. |
 | `COIL_SHARED_HEAP` | `0` / `false` / `off` / `no` forces isolate `PortableValue` spawn for loop chunks and expression IPA (C1/C2 off). Default on. |
 
 `.hyc` / embed execute sizes each isolate operand stack from the persisted

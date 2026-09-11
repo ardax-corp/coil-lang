@@ -45,11 +45,11 @@ pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sit
 #[allow(unused_imports)] // public API re-export
 pub use par_profit::{
     ArgForm, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites, args_worth_parallel,
-    arm_callee, collect_par_specialization_args, eval_arm_args, par_cost_threshold,
+    arm_callee, collect_par_specialization_args, eval_arm_args, par_expr_grain, par_loop_grain,
     par_specialization_name,
 };
 #[cfg(test)]
-pub use par_profit::par_work_units;
+pub use par_profit::par_work_grain;
 #[allow(unused_imports)] // public API re-export
 pub use purity::{
     EffectFlags, RecursivePureSet, analyze_fn_effects, analyze_pure_fns, analyze_recursive_fns,

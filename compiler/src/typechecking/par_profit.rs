@@ -5,9 +5,9 @@
 //! `f(a) ⊕ f(b)`, `h(a) + h(b)`, `E::V(f(a), f(b))`, `(f(a), f(b))`, the
 //! tak-style `f(f(a), f(b), f(c))`, or `g(f(a), f(b))`. Arms are described
 //! structurally ([`ArgForm`]) rather than by function allowlists. Constant call
-//! sites whose estimated **work** ([`par_work_units`]) exceeds
-//! [`par_cost_threshold`] rewrite to specialized nullary clones that always fork
-//! (fully static, no runtime threshold checks). Evidence-gated: AST const
+//! sites whose fork-tree grain ([`par_work_grain`]) exceeds
+//! [`par_expr_grain`] rewrite to specialized nullary clones that always fork
+//! (fully static, no runtime grain checks). Evidence-gated: AST const
 //! calls plus a bounded number of derived hops — not AlwaysPar down to the
 //! cutoff (COI-361 E3).
 
@@ -15,14 +15,38 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{EnumConstructPayload, Expression, Output, Pattern};
 
-/// Compile-time fork threshold (`COIL_PAR_THRESHOLD`, default 20).
-pub fn par_cost_threshold() -> i64 {
+/// Expression IPA grain floor (`COIL_PAR_THRESHOLD`).
+///
+/// Unit is fork-tree nodes `W`, not fib(n). Default [`DEFAULT_EXPR_GRAIN`]
+/// is `W(fib(20))` for the `n <= 1` recurrence (`Fib(21) - 1`): the spawn
+/// profitability floor previously written as fib-unit 20. Fork iff `W`
+/// is strictly greater.
+pub const DEFAULT_EXPR_GRAIN: i64 = 10_945;
+
+/// Loop IPA grain floor (`COIL_LOOP_GRAIN`). Unit is trip count of a
+/// counted `[begin, end)` range, not expression `W`. Isolate spawn still
+/// needs tens of trips, not thousands of fib-tree nodes.
+pub const DEFAULT_LOOP_GRAIN: i64 = 20;
+
+/// Compile-time expression grain floor (`COIL_PAR_THRESHOLD`).
+pub fn par_expr_grain() -> i64 {
     static T: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
     *T.get_or_init(|| {
         std::env::var("COIL_PAR_THRESHOLD")
             .ok()
             .and_then(|s| s.parse().ok())
-            .unwrap_or(20)
+            .unwrap_or(DEFAULT_EXPR_GRAIN)
+    })
+}
+
+/// Compile-time counted-loop grain floor (`COIL_LOOP_GRAIN`, default 20).
+pub fn par_loop_grain() -> i64 {
+    static T: std::sync::OnceLock<i64> = std::sync::OnceLock::new();
+    *T.get_or_init(|| {
+        std::env::var("COIL_LOOP_GRAIN")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(DEFAULT_LOOP_GRAIN)
     })
 }
 
@@ -141,38 +165,7 @@ pub fn guards_hold(guards: &[ParGuard], args: &[i64]) -> bool {
     })
 }
 
-// Structural work score
-
-/// Fork-site nodes in the tree of `fib(n) = fib(n-1) + fib(n-2)`, the shape the
-/// threshold is calibrated on: `W(k) = 1 + W(k-1) + W(k-2)`, `W(k <= 1) = 0`,
-/// which closes to `Fib(n + 1) - 1`. Saturates instead of overflowing.
-fn fib_tree_nodes(n: i64) -> i64 {
-    if n <= 1 {
-        return 0;
-    }
-    let (mut prev, mut cur) = (1i64, 1i64); // Fib(1), Fib(2)
-    for _ in 2..=n.min(FIB_UNITS_MAX) {
-        let next = prev.saturating_add(cur);
-        prev = cur;
-        cur = next;
-    }
-    cur.saturating_sub(1)
-}
-
-/// `Fib(n + 1)` overflows `i64` past this, so units saturate here.
-const FIB_UNITS_MAX: i64 = 91;
-
-/// Node counts back into threshold units: the smallest `n` whose `fib(n)` tree
-/// is at least this big. Exact inverse of [`fib_tree_nodes`], so a fib-shaped
-/// site at `n` scores exactly `n`.
-#[cfg(test)]
-fn fib_tree_units(nodes: i64) -> i64 {
-    let mut n = 0;
-    while n < FIB_UNITS_MAX && fib_tree_nodes(n) < nodes {
-        n += 1;
-    }
-    n
-}
+// Structural grain (fork-tree nodes W)
 
 /// Recursion depth at which the estimator stops descending and calls it a leaf.
 const WORK_MAX_DEPTH: u32 = 256;
@@ -180,16 +173,17 @@ const WORK_MAX_DEPTH: u32 = 256;
 /// Distinct arg vectors the estimator will memoize before giving up.
 const WORK_MEMO_CAP: usize = 1 << 14;
 
-/// Bounded structural estimate of the work below a fork site.
+/// Bounded structural estimate of the grain below a fork site.
 ///
 /// Counts the fork-site nodes a concrete arg vector reaches through the arms'
 /// [`ArgForm`] transforms, pruning children that miss the site's guards — those
 /// are base cases and do no forkable work. Every imprecision (opaque callees, a
 /// `SelfCall` combine's re-entry on joined values, the caps below) resolves
 /// *downwards*, so the count is a lower bound: unknown structure only refuses.
+/// Compared **directly** to [`par_expr_grain`] — no fib-unit inversion.
 struct WorkEstimate<'a> {
     sites: &'a HashMap<String, ParForkSite>,
-    /// Counting past the cutoff cannot change the verdict, so totals stop here.
+    /// Counting past the floor cannot change the verdict, so totals stop here.
     cap: i64,
     memo: HashMap<(&'a str, Vec<i64>), i64>,
 }
@@ -198,21 +192,20 @@ impl<'a> WorkEstimate<'a> {
     fn new(sites: &'a HashMap<String, ParForkSite>) -> Self {
         Self {
             sites,
-            cap: fib_tree_nodes(par_cost_threshold()).saturating_add(1),
+            cap: par_expr_grain().saturating_add(1),
             memo: HashMap::new(),
         }
     }
 
-    /// Work below `fn_name(args)` in threshold units, saturating one unit past
-    /// the cutoff (scores at or below it are exact).
+    /// Fork-tree grain below `fn_name(args)`, saturating one node past the
+    /// floor (scores at or below it are exact).
     #[cfg(test)]
-    fn units(&mut self, fn_name: &str, args: &[i64]) -> i64 {
-        let nodes = self.nodes(fn_name, args, 0);
-        fib_tree_units(nodes)
+    fn grain(&mut self, fn_name: &str, args: &[i64]) -> i64 {
+        self.nodes(fn_name, args, 0)
     }
 
     fn worth_parallel(&mut self, fn_name: &str, args: &[i64]) -> bool {
-        self.nodes(fn_name, args, 0) > fib_tree_nodes(par_cost_threshold())
+        self.nodes(fn_name, args, 0) > par_expr_grain()
     }
 
     fn nodes(&mut self, fn_name: &str, args: &[i64], depth: u32) -> i64 {
@@ -254,14 +247,14 @@ impl<'a> WorkEstimate<'a> {
     }
 }
 
-/// Structural work below `fn_name(args)`'s fork site, in [`par_cost_threshold`]
-/// units (a fib-shaped site at `n` scores `n`). Saturates at `threshold + 1`.
+/// Fork-tree grain below `fn_name(args)`'s fork site (nodes `W`).
+/// Saturates at [`par_expr_grain`] `+ 1`.
 #[cfg(test)]
-pub fn par_work_units(sites: &HashMap<String, ParForkSite>, fn_name: &str, args: &[i64]) -> i64 {
-    WorkEstimate::new(sites).units(fn_name, args)
+pub fn par_work_grain(sites: &HashMap<String, ParForkSite>, fn_name: &str, args: &[i64]) -> i64 {
+    WorkEstimate::new(sites).grain(fn_name, args)
 }
 
-/// True when `fn_name(args)` carries more work than [`par_cost_threshold`].
+/// True when `fn_name(args)` carries more grain than [`par_expr_grain`].
 pub fn args_worth_parallel(
     sites: &HashMap<String, ParForkSite>,
     fn_name: &str,
@@ -325,7 +318,7 @@ const PAR_SPEC_BUDGET: usize = 64;
 /// A small hop count is a counted evidence gate (COI-361 E3): the const call
 /// is the evidence, and a bounded number of derived children may fork to fill
 /// the reactor without near-cutoff spawn tax. Children that miss guards or
-/// fall to/below [`par_cost_threshold`] stay sequential — the existing
+/// fall to/below [`par_expr_grain`] stay sequential — the existing
 /// profitability floor, not a silent skip of admitted sites.
 const PAR_SPEC_HOPS: u32 = 2;
 
@@ -1371,39 +1364,38 @@ fn main() {
 
     #[test]
     fn below_threshold_and_dynamic_args_do_not_demand_specs() {
-        let t = par_cost_threshold();
-        let ast = parse(&format!(
+        let ast = parse(
             r#"
-fn fib(int n) -> int {{
-    if n <= 1 {{ return n; }}
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
     return fib(n - 1) + fib(n - 2);
-}}
-fn main() {{
-    let k = {t};
-    let a = fib({t});
+}
+fn main() {
+    let k = 20;
+    let a = fib(20);
     let b = fib(k);
     return;
-}}
-"#
-        ));
+}
+"#,
+        );
         let pure = analyze_pure_fns(&ast);
         let sites = analyze_par_fork_sites(&ast, &pure);
         let demanded = collect_par_specialization_args(&ast, &sites);
         assert!(
             demanded.get("fib").is_none(),
-            "arg == threshold and dynamic args must not demand specs: {demanded:?}"
+            "arg at the grain floor and dynamic args must not demand specs: {demanded:?}"
         );
-        assert!(!args_worth_parallel(&sites, "fib", &[t]));
-        assert!(args_worth_parallel(&sites, "fib", &[t + 1]));
+        assert!(!args_worth_parallel(&sites, "fib", &[20]));
+        assert!(args_worth_parallel(&sites, "fib", &[21]));
         assert!(!args_worth_parallel(&sites, "fib", &[]));
-        assert!(!args_worth_parallel(&sites, "nosuch", &[t + 1]));
+        assert!(!args_worth_parallel(&sites, "nosuch", &[21]));
     }
 
-    /// The score is expressed in fib-equivalent units, so the canonical shape
-    /// scores its own argument and the threshold keeps its old meaning there.
+    /// Grain is `W` itself. For `n <= 1` fib, `W(n) = Fib(n+1) - 1`, and
+    /// `W(20) = DEFAULT_EXPR_GRAIN` so the floor still admits `fib(21)`.
     #[test]
-    fn fib_shape_scores_its_own_argument() {
-        let t = par_cost_threshold();
+    fn fib_shape_scores_fork_tree_grain() {
+        let floor = par_expr_grain();
         let sites = sites_of(
             r#"
 fn fib(int n) -> int {
@@ -1413,17 +1405,16 @@ fn fib(int n) -> int {
 fn main() { return; }
 "#,
         );
-        for n in 2..=t {
-            assert_eq!(
-                par_work_units(&sites, "fib", &[n]),
-                n,
-                "fib({n}) must score {n} units"
-            );
-        }
-        // Above the cutoff the count saturates — the verdict cannot change.
-        assert_eq!(par_work_units(&sites, "fib", &[t + 1]), t + 1);
-        assert_eq!(par_work_units(&sites, "fib", &[32]), t + 1);
+        assert_eq!(par_work_grain(&sites, "fib", &[2]), 1);
+        assert_eq!(par_work_grain(&sites, "fib", &[5]), 7);
+        assert_eq!(par_work_grain(&sites, "fib", &[20]), 10_945);
+        assert_eq!(par_work_grain(&sites, "fib", &[20]), floor);
+        // Above the floor the count saturates — the verdict cannot change.
+        assert_eq!(par_work_grain(&sites, "fib", &[21]), floor + 1);
+        assert_eq!(par_work_grain(&sites, "fib", &[32]), floor + 1);
         assert!(args_worth_parallel(&sites, "fib", &[32]));
+        assert!(!args_worth_parallel(&sites, "fib", &[20]));
+        assert!(args_worth_parallel(&sites, "fib", &[21]));
     }
 
     /// Arms into a callee with no fork site (or none at all) are leaves, so a
@@ -1443,7 +1434,8 @@ fn main() { return; }
 "#,
         );
         assert!(sites.contains_key("pair_sq"), "fork site still detected");
-        assert_eq!(par_work_units(&sites, "pair_sq", &[22]), 2);
+        // One fork-site node; helper callees contribute 0.
+        assert_eq!(par_work_grain(&sites, "pair_sq", &[22]), 1);
         assert!(!args_worth_parallel(&sites, "pair_sq", &[22]));
     }
 
@@ -1470,11 +1462,13 @@ fn main() { return; }
 
     /// Rotating `tak` arms keep a large component alive, but most children miss
     /// the `y < x` guard and the `SelfCall` combine's re-entry is unknowable,
-    /// so the fair benchmark load scores just *under* the cutoff and refuses.
-    /// Only a load with a genuinely deeper tree crosses it.
+    /// so the fair benchmark load scores **8398** grain — below the
+    /// fib-calibrated floor **10945**. Fib-unit inversion used to report this
+    /// as unit 20 (`Fib(21)-1 = 10945` is the next invert bucket). Only a
+    /// genuinely deeper tree crosses the floor.
     #[test]
     fn fair_tak_load_scores_below_threshold() {
-        let t = par_cost_threshold();
+        let floor = par_expr_grain();
         let sites = sites_of(
             r#"
 fn tak(int x, int y, int z) -> int {
@@ -1486,12 +1480,16 @@ fn tak(int x, int y, int z) -> int {
 fn main() { return; }
 "#,
         );
-        assert_eq!(par_work_units(&sites, "tak", &[18, 12, 6]), t);
+        assert_eq!(par_work_grain(&sites, "tak", &[18, 12, 6]), 8398);
+        assert!(
+            8398 < floor,
+            "fair tak grain must sit below the fib-calibrated floor"
+        );
         assert!(
             !args_worth_parallel(&sites, "tak", &[18, 12, 6]),
             "the fair tak(18, 12, 6) load must stay sequential"
         );
-        // `max(args)` alone rated this above the threshold; it is 53 calls.
+        // `max(args)` alone rated this above the floor; it is 53 calls.
         assert!(
             !args_worth_parallel(&sites, "tak", &[24, 22, 20]),
             "a narrow x - y gap is cheap however large the args"
@@ -1514,7 +1512,7 @@ fn main() { return; }
 "#,
         );
         assert!(sites.contains_key("ping"), "fork site detected");
-        let _ = par_work_units(&sites, "ping", &[40, 3]);
+        let _ = par_work_grain(&sites, "ping", &[40, 3]);
     }
 
     /// Top-site policy: only the const call is demanded, not the arm closure.

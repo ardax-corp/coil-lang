@@ -5648,7 +5648,7 @@ fn main() {
     assert_eq!(output, "144");
 }
 
-/// Constant sites above `COIL_PAR_THRESHOLD` must emit `__coil_par_*` and stay correct.
+/// Constant sites above the expression grain floor must emit `__coil_par_*` and stay correct.
 #[test]
 fn auto_par_fib_above_threshold_emits_spec_and_runs() {
     let src = r#"
