@@ -1026,7 +1026,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some(common::SIMD_AXPY_REDUCE_NATIVE)
+            Some(common::THREAD_SPAWN_SHARED_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1297,6 +1297,10 @@ mod tests {
             registrations.get(end).map(|(n, _)| n.as_str()),
             Some(common::SIMD_AXPY_REDUCE_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 1);
+        assert_eq!(
+            registrations.get(end + 1).map(|(n, _)| n.as_str()),
+            Some(common::THREAD_SPAWN_SHARED_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 2);
     }
 }
