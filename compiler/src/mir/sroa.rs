@@ -21,6 +21,9 @@ pub fn sroa(func: &mut MirFunc) -> usize {
         // Reconstruct may Alloc the same elems immediately after StoreIndex.
         // A later sibling zip with the same recipe must stay a fresh object.
         let mut pending_reuse: Option<(Vec<ValueId>, ValueId)> = None;
+        // Identity for a barrier dest is the paired Alloc/ArrayPush, not
+        // `roots.first()` — intern keys / other HeapRefs sort first (D2).
+        let mut pending_alloc: Option<ValueId> = None;
         for inst in &block.insts {
             match inst {
                 MirInst::Alloc {
@@ -41,9 +44,19 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                         live_obj.insert(elems.clone(), *dest);
                     }
                     pending_reuse = None;
+                    pending_alloc = Some(*dest);
+                }
+                MirInst::Alloc { dest, .. } | MirInst::ArrayPush { dest, .. } => {
+                    pending_alloc = Some(*dest);
+                    pending_reuse = None;
                 }
                 MirInst::GcBarrier { dest, roots, .. } => {
-                    if let Some(&r0) = roots.first() {
+                    let ident = pending_alloc
+                        .filter(|a| roots.is_empty() || roots.contains(a))
+                        .or_else(|| {
+                            roots.iter().copied().find(|r| alloc_of.contains_key(r))
+                        });
+                    if let Some(r0) = ident {
                         let obj = subst.get(&r0).copied().unwrap_or(r0);
                         subst.insert(*dest, obj);
                         if let Some(elems) = alloc_of.get(&r0).cloned() {
@@ -58,6 +71,7 @@ pub fn sroa(func: &mut MirFunc) -> usize {
                             }
                         }
                     }
+                    pending_alloc = None;
                 }
                 MirInst::StoreIndex { array, .. } => {
                     let arr = subst.get(array).copied().unwrap_or(*array);
@@ -190,5 +204,55 @@ mod tests {
             .filter(|i| matches!(i, MirInst::Alloc { .. }))
             .count();
         assert_eq!(allocs, 2, "later zip must not reuse mutated a; {func:?}");
+    }
+
+    #[test]
+    fn object_barrier_does_not_alias_string_intern() {
+        use crate::mir::{LocalId, MirGcKind, MirTy};
+        let mut b = MirBuilder::new("box");
+        let intern = b.ins_string(0).unwrap();
+        b.def_local(LocalId(0), intern).unwrap();
+        let val = b.ins_const(MirConst::I64(1)).unwrap();
+        let obj = b
+            .ins_alloc(
+                MirAllocKind::Object {
+                    type_id: 1,
+                    nfields: 1,
+                },
+                Vec::new(),
+            )
+            .unwrap();
+        let live = b
+            .ins_gc_barrier(MirGcKind::Safepoint, vec![obj])
+            .unwrap();
+        let _st = b
+            .ins_heap_field_store(live, val, None, Some(0))
+            .unwrap();
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(val)).unwrap();
+        let mut func = b.finish().unwrap();
+        let _ = sroa(&mut func);
+        let mut intern_id = None;
+        let mut alloc_id = None;
+        let mut store_obj = None;
+        for inst in func.blocks.iter().flat_map(|bl| bl.insts.iter()) {
+            match inst {
+                MirInst::String { dest, .. } => intern_id = Some(*dest),
+                MirInst::Alloc { dest, .. } => alloc_id = Some(*dest),
+                MirInst::HeapFieldStore { object, .. } => store_obj = Some(*object),
+                _ => {}
+            }
+        }
+        let intern_id = intern_id.expect("string intern");
+        let alloc_id = alloc_id.expect("object alloc");
+        let store_obj = store_obj.expect("field store");
+        assert_ne!(
+            store_obj, intern_id,
+            "barrier dest must not become intern; {func}"
+        );
+        assert_eq!(
+            store_obj, alloc_id,
+            "field object is the instance; {func}"
+        );
     }
 }

@@ -694,15 +694,6 @@ pub(super) fn emit_inst(
                     if alloc_r != live {
                         out.push(move_op(alloc_r, live));
                     }
-                    // One-object bodies: field SSA may still sit in a STRING
-                    // intern slot; seed those regs from the instance.
-                    if object_allocs(func) <= 1 {
-                        for r in field_object_regs(func, regs) {
-                            if r != live {
-                                out.push(move_op(r, live));
-                            }
-                        }
-                    }
                 } else {
                     emit_dense_push(out, elems, regs, scratch, loc)?;
                     out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
@@ -1661,32 +1652,6 @@ pub(super) fn il_for_alloc(
                 .with_operand_u32(common::pack_init_typed(type_id, nfields)),
         )),
     }
-}
-
-fn object_allocs(func: &MirFunc) -> usize {
-    func.blocks
-        .iter()
-        .flat_map(|b| b.insts.iter())
-        .filter(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Object { .. }, .. }))
-        .count()
-}
-
-fn field_object_regs(func: &MirFunc, regs: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    for block in &func.blocks {
-        for inst in &block.insts {
-            let obj = match inst {
-                MirInst::HeapFieldLoad { object, .. }
-                | MirInst::HeapFieldStore { object, .. } => *object,
-                _ => continue,
-            };
-            let r = regs[obj.index()];
-            if !out.contains(&r) {
-                out.push(r);
-            }
-        }
-    }
-    out
 }
 
 fn object_make_dest_reg(
