@@ -7631,10 +7631,8 @@ impl Compiler {
 
     /// Emit one always-fork nullary clone of `site.fn_name` at `parent_args`.
     ///
-    /// Evidence-gated AlwaysPar (COI-361 E3): arm 0 is spawned, remaining arms
-    /// run inline, then join + combine. In-hop child clones are used when they
-    /// exist; deeper levels call the sequential original. Failed spawn/join
-    /// falls back to sequential arms.
+    /// Evidence-gated AlwaysPar (COI-361 E3 / COI-364 E7): arm 0 is spawned
+    /// on `thread_spawn_shared`, remaining arms run inline, then join + combine.
     fn emit_one_par_specialization(
         &mut self,
         site: &crate::typechecking::ParForkSite,
