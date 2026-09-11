@@ -2214,7 +2214,18 @@ fn main() {
         assert!(text.contains("jumpifmatch"), "{text}");
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        if let Ok(dense) = emit_dense(&f, Some(Label(0)), &mut pool, false) {
+            assert!(
+                dense.iter().any(|op| matches!(
+                    op,
+                    IlOp::Jump {
+                        kind: IlJumpKind::JumpIfMatch { tag: 1, .. },
+                        ..
+                    }
+                )),
+                "D3 boxed JumpIfMatch reconstruct"
+            );
+        }
     }
 
     #[test]
@@ -4515,6 +4526,106 @@ fn main() {
             )),
             "last arm must keep y + 2"
         );
+    }
+
+    #[test]
+    fn d3_unpack_arity2_lowers_and_emits_lir() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::Unpack).with_operand_u32(2),
+                loc,
+            },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Load { slot: 2, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("pair");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        hints.allow_match = true;
+        let f = try_lower_numeric(&ops, &hints).expect("D3 Unpack arity 2");
+        f.verify().unwrap();
+        let payloads: Vec<_> = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter_map(|i| match i {
+                MirInst::MatchPayload { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads, vec![0, 1], "per-index MatchPayload maps: {payloads:?}");
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "pair", 1, &mut pool).expect("D3 LIR Unpack 2");
+        let unpacks: Vec<u32> = lir
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
+                    Some(byte.operand_u32())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unpacks, vec![2], "LIR must emit one Unpack arity 2; got {unpacks:?}");
+    }
+
+    #[test]
+    fn d3_binary_trees_item_check_checksum_and_unpack() {
+        let src = r#"
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+#[max_depth(64)]
+fn item_check(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(left, right) => 1 + item_check(left) + item_check(right),
+    };
+}
+fn main() {
+    let n = item_check(Tree::Node(Tree::Leaf(), Tree::Node(Tree::Leaf(), Tree::Leaf())));
+    if n != 5 {
+        panic "item_check checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile item_check");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "item_check")
+            .expect("item_check");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let unpack = bc[start..end]
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Unpack)
+            .count();
+        let unpack_arity: Vec<u32> = bc[start..end]
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Unpack)
+            .map(|b| b.operand_u32())
+            .collect();
+        assert_eq!(
+            unpack, 1,
+            "item_check should keep one payload Unpack; arity={unpack_arity:?}"
+        );
+        assert_eq!(unpack_arity, vec![2], "item_check Node unpack is arity 2");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "binary_trees must run");
     }
 
     #[test]
