@@ -453,6 +453,15 @@ fn run_bytecode(
     pipeline: &Pipeline,
     entry: Option<&std::path::Path>,
 ) -> String {
+    run_bytecode_counting_jobs(bytecode, constants, pipeline, entry).0
+}
+
+fn run_bytecode_counting_jobs(
+    bytecode: Vec<common::Byte>,
+    constants: Vec<u64>,
+    pipeline: &Pipeline,
+    entry: Option<&std::path::Path>,
+) -> (String, usize) {
     let operand_slots = pipeline.operand_stack_slots() as usize;
     let shared = SharedBuf::new();
     let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
@@ -468,8 +477,9 @@ fn run_bytecode(
         pipeline.strings(),
         pipeline.static_slot_count(),
     );
+    let jobs = machine.reactor().jobs_submitted();
     let _ = machine.restore_output();
-    shared.into_utf8()
+    (shared.into_utf8(), jobs)
 }
 
 fn run_src_with_grants(
@@ -5663,16 +5673,20 @@ fn main() {
         "expected static specialization for fib(22)"
     );
     assert!(
-        pipeline.function_offset("__coil_par_fib_21").is_some(),
-        "expected chain specialization for fib(21)"
+        pipeline.function_offset("__coil_par_fib_21").is_none(),
+        "top-site AlwaysPar must not emit the cutoff chain"
     );
     // Default threshold is 20 — exact threshold stays sequential.
     assert!(
         pipeline.function_offset("__coil_par_fib_20").is_none(),
         "fib(20) must not get a parallel specialization"
     );
-    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    let (output, jobs) = run_bytecode_counting_jobs(bytecode, constants, &pipeline, None);
     assert_eq!(output, "17711");
+    assert_eq!(
+        jobs, 1,
+        "top-site fib(22) must spawn once, not the cutoff chain"
+    );
 }
 
 /// An `EnumCtor` combine forks both arms into a constructor, not a binop.
@@ -5808,6 +5822,12 @@ fn main() {
     );
     assert!(
         pipeline
+            .function_offset("__coil_par_tak_20_12_6")
+            .is_none(),
+        "tak arm children must not grow nested AlwaysPar clones"
+    );
+    assert!(
+        pipeline
             .function_offset("__coil_par_tak_24_22_20")
             .is_none(),
         "a narrow x - y gap must not specialize"
@@ -5898,6 +5918,10 @@ fn main() {
     assert!(
         pipeline.function_offset("__coil_par_pair_fib_22").is_some(),
         "expected a specialization for pair_fib(22)"
+    );
+    assert!(
+        pipeline.function_offset("__coil_par_fib_22").is_none(),
+        "helper arms must stay sequential (no nested fib AlwaysPar)"
     );
     // fib(22) + fib(21)
     let output = run_bytecode(bytecode, constants, &pipeline, None);
