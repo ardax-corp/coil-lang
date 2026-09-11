@@ -36,6 +36,10 @@ Objects **do not move**. `relocate_mapped_slots` stays identity.
 - Concurrent mark on OS worker threads
 - Write barriers on stack stores (remark covers roots)
 - Cranelift, PGO, register-VM, extra MIR island score-chasing
+- Multi-mutator GC while steal jobs run. Shared-heap C0 is STW (epoch
+  collect-after-join first, cooperative handshake if a steal must collect).
+  See [shared-heap-sendability.md](shared-heap-sendability.md). Incremental
+  S4 stays single-mutator.
 
 ## Invariants
 
