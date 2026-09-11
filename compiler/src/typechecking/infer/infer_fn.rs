@@ -109,8 +109,8 @@ impl Checker {
             uncaptured.remove(n);
         }
 
-        // File-level imports are global names, not closure captures.
-        // Rebind virtual + disk-module schemes after isolating the env.
+        // File-level imports and module-visible named `fn`s are globals,
+        // not closure captures. Rebind after isolating the env.
         let import_rebinds =
             self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 

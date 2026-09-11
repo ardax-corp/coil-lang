@@ -110,7 +110,8 @@ impl Env {
     }
 
     /// Replace all frames with a single empty frame; return the previous stack.
-    /// Used by lambdas so only explicit `use` captures + params are visible.
+    /// Used by lambdas so only explicit `use` captures + params are visible
+    /// (imports and module-visible named `fn`s are rebound after this).
     pub fn take_and_isolate(&mut self) -> Vec<Frame> {
         std::mem::replace(&mut self.frames, vec![Frame::new()])
     }

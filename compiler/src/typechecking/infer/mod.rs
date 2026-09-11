@@ -165,8 +165,9 @@ pub struct Checker {
     scope_bindings: HashMap<String, BuiltinExport>,
 
     /// Local names bound by disk-module `use` (e.g. `io::sync::write_all`).
-    /// Like virtual imports, these are file-level globals — not lambda/defer
-    /// captures — and must be rebound after `take_and_isolate`.
+    /// Like virtual imports and module-visible named `fn`s, these are
+    /// file-level globals — not lambda/defer captures — and must be rebound
+    /// after `take_and_isolate`.
     disk_imports: HashSet<String>,
 
     /// Interned module / def identities. Persists across multi-file
