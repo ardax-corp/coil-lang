@@ -4618,11 +4618,23 @@ fn main() {
             .filter(|b| *b.bytecode() == Instruction::Unpack)
             .map(|b| b.operand_u32())
             .collect();
+        let names: Vec<_> = bc[start..end]
+            .iter()
+            .map(|b| format!("{}#{}", b.bytecode().mnemonic(), b.operand_u32()))
+            .collect();
         assert_eq!(
             unpack, 1,
-            "item_check should keep one payload Unpack; arity={unpack_arity:?}"
+            "item_check should keep one payload Unpack; arity={unpack_arity:?} ops={names:?}"
         );
         assert_eq!(unpack_arity, vec![2], "item_check Node unpack is arity 2");
+        assert!(
+            names.iter().any(|n| n.starts_with("Seek#")),
+            "D3 reconstruct reserves payload/call slots; ops={names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.starts_with("STORE#")),
+            "D3 parks Unpack payloads and CALL dests; ops={names:?}"
+        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "binary_trees must run");

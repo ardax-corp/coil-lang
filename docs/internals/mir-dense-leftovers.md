@@ -8,7 +8,8 @@ gate ([opt-generalization.md](opt-generalization.md) A0).
 
 Tip: D0 [COI-354](https://linear.app/ardax/issue/COI-354) (`7960eed2`).
 D1 [COI-355](https://linear.app/ardax/issue/COI-355) (`e046af78`).
-D2 [COI-356](https://linear.app/ardax/issue/COI-356) dense field / Object make (this PR).
+D2 [COI-356](https://linear.app/ardax/issue/COI-356) (`0cbc2dce`, #409).
+D3 [COI-357](https://linear.app/ardax/issue/COI-357) boxed multi-payload match (this PR).
 
 ## Cross-check (open Linear / landed PRs)
 
@@ -16,16 +17,17 @@ D2 [COI-356](https://linear.app/ardax/issue/COI-356) dense field / Object make (
 |-------|--------|----------------------|----------|
 | [COI-351](https://linear.app/ardax/issue/COI-351) C2 | **Done** (#401) | Numeric free-fn Range param / two-slot `CALL`/`RETURN`; counted `for` without `GetField` | User `Iterator` / coro / dict / heap-field Range → [COI-353](https://linear.app/ardax/issue/COI-353) **C2b** (Todo). Not this wave. |
 | [COI-350](https://linear.app/ardax/issue/COI-350) C3 | **Done** (#402) | Compiler-internal `DraftDeoptMap`, named-let remap, sparse emit locs | P5 resume, incomplete convoy maps, per-PC locals. Debugger, not a hot-path densify. |
-| [COI-344](https://linear.app/ardax/issue/COI-344) B6 | **Done** (#396) | Mapped `ArrayPush` / `DenseArrayPush` (archive **4.11**); CALL+`Make*` / `InitTyped` drafts bind | Unmapped **class** edges were D1; `DenseMake` has no Object kind; `item_check` still fuse (match wall, not maps) |
+| [COI-344](https://linear.app/ardax/issue/COI-344) B6 | **Done** (#396) | Mapped `ArrayPush` / `DenseArrayPush` (archive **4.11**); CALL+`Make*` / `InitTyped` drafts bind | Unmapped **class** edges were D1; `item_check` match wall was D3 |
 | [COI-335](https://linear.app/ardax/issue/COI-335) A2 | **Done** (#379) | `DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` / `DenseMake` / `DensePush` | Field / Object natives were D2 |
 | [COI-355](https://linear.app/ardax/issue/COI-355) D1 | **Done** (#408) | Sound GC maps across `InitTyped`+`SetField`/`GetField` on escaping named objects | Dense field / Object `DenseMake` → **D2** (this PR). Escaping `self` stays boxed-once (Q2) |
-| [COI-356](https://linear.app/ardax/issue/COI-356) D2 | **Done** (this PR) | `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` (archive **4.12**); cost gate can keep field loops | LIR still `HeapField`. I3 unboxed stays MIR→LIR. Printing `main` stays fuse |
+| [COI-356](https://linear.app/ardax/issue/COI-356) D2 | **Done** (#409) | `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` (archive **4.12**); cost gate can keep field loops | LIR still `HeapField`. I3 unboxed stays MIR→LIR. Printing `main` stays fuse |
+| [COI-357](https://linear.app/ardax/issue/COI-357) D3 | **Done** (this PR) | Per-index `MatchPayload` + existing `JumpIfMatch`/`Unpack(n)` reconstruct; match bodies park CALL dests | Cost gate. Printing `main` stays fuse. No trees opcode |
 | [COI-340](https://linear.app/ardax/issue/COI-340) B2 | **Done** (#392) | Self-`CALL` convoy so tight `fib`/`tak` can win the gate | Other lifted bodies may still lose on Seek / boxed reconstruct |
-| [COI-354](https://linear.app/ardax/issue/COI-354) D0 | **Done** (#407) | `slot_env` follows trivial-phi subst so in-loop `ArrayPush` + pin loops verify; `nsieve` keeps dense-native | Straight-line / select still lose on `emit_cost`; multi-payload match stays later |
+| [COI-354](https://linear.app/ardax/issue/COI-354) D0 | **Done** (#407) | `slot_env` follows trivial-phi subst so in-loop `ArrayPush` + pin loops verify; `nsieve` keeps dense-native | Straight-line / select still lose on `emit_cost` |
 | [COI-347](https://linear.app/ardax/issue/COI-347) B9 | **Done** (#399) | Q9 R3 maps `FORMAT`/`STRINGIFY` | Dense infer still refuses table ops. Unicode/regex → [COI-348](https://linear.app/ardax/issue/COI-348) **B10** |
 | [COI-352](https://linear.app/ardax/issue/COI-352) C1b | Todo | N>2 modeled `CALL`/`RETURN` | Archive encoding. Not majority until that ABI exists. |
 
-No Linear ticket today for leftover boxed multi-payload match (D3).
+D3 boxed multi-payload match is [COI-357](https://linear.app/ardax/issue/COI-357).
 
 ## Inventory (#405 ranking, verified on tip)
 
@@ -70,8 +72,8 @@ B6 majority grow/Make* plus D1 class/field maps.
 **What is true:** `refuses_alloc` covers `Make*` / `InitTyped` / `ArrayPush`
 / `FORMAT`/`STRINGIFY`. S2b drafts bind those when infer types the body
 (B6 typed one-word `CALL`; D1 types heap GetField/SetField/LoadField).
-`binary_trees` `bottom_up` MakeEnum can map; `item_check` is refused for
-**arity-2 match**, not missing maps.
+`binary_trees` `bottom_up` MakeEnum can map; `item_check` was refused for
+**arity-2 match**, not missing maps. D3 reconstructs that Unpack.
 
 **Hunch that does not hold:** “Unmapped alloc still means `Vec.push`.”
 `Vec.push` is a mapped grow safepoint. Field ops are still
@@ -140,24 +142,26 @@ identical.
 
 ### 5. Boxed multi-payload match (`binary_trees` `item_check`)
 
-**Status:** hard wall. Unchanged after Q8 (#388) / B6.
+**Status:** **landed** ([COI-357](https://linear.app/ardax/issue/COI-357)).
 
-**What is true:** `JumpIfMatch` / `Unpack` arity > 1 → `LirRefuse::Match` /
-`Unpack`. Q8 densifies niche / two-slot register `Br` (arity ≤ 1). Boxed
-unary `JumpIfMatch` may LIR (I2). `item_check` is `Tree::Node(left, right)`
-→ one `Unpack` of arity 2. `aot_p3_binary_trees_make_enum_inventory`
-requires that Unpack and zero `MakeEnum` on the walk.
+**What is true:** Per-index `MatchPayload` maps + existing `JumpIfMatch` /
+one `Unpack(n)` (TOS last word, then `STORE`). Q8 still densifies niche /
+two-slot register `Br` (arity ≤ 1). Boxed unary may LIR (I2). `item_check`
+is `Tree::Node(left, right)` — one `Unpack` of arity 2. Match bodies park
+self-`CALL` dests so `1 + item_check(left) + item_check(right)` does not
+reload the param. `aot_p3_binary_trees_make_enum_inventory` still wants
+that Unpack and zero `MakeEnum` on the walk.
 
 **Hunch that does not hold:** “Trees stay fuse because `bottom_up` is
-unmapped alloc.” B6 maps CALL+`MakeEnum`. The walk is the match wall.
+unmapped alloc.” B6 maps CALL+`MakeEnum`. The walk was the match wall.
 
-**Blocker:** per-index payload maps + dense/LIR reconstruct of multi-word
-`Unpack`. Foundational island, not a keep-rate tweak.
+**Blocker for keep:** none for boxed multi-payload match. Cost gate still
+on. Printing `main` stays fuse.
 
 **Perf surface:** flagship `binary_trees.hy` (`item_check` hot). Other
 boxed multi-payload enums.
 
-**Effort:** large (island). Do not sneak a trees-shaped opcode.
+**Effort:** done. Regular Unpack reconstruct, not a trees opcode.
 
 ## Ranked kick order (Dimitar)
 
@@ -168,7 +172,7 @@ Majority programs + cost gate. One ticket at a time. A4 on every code PR.
 | **P0** | Keep-rate on bodies that **already lift** | **Landed** [COI-354](https://linear.app/ardax/issue/COI-354): `nsieve` keeps dense. Residual: other Seek/box losers | Skip-the-gate. Vanity microbench. |
 | **P1** | Class `new` / field **maps** (B6 leftover) | **Landed** [COI-355](https://linear.app/ardax/issue/COI-355): maps bind on `InitTyped`+field. Escaping identity stays boxed-once (Q2). | Re-doing `ArrayPush` maps. Unboxing escaped `self`. |
 | **P2** | Dense-native field / Object `DenseMake` (A2 leftover) | **Landed** [COI-356](https://linear.app/ardax/issue/COI-356): `DenseFieldLoad`/`DenseFieldStore`/`DenseMakeObject`. Cost gate can keep field loops. | Bench-shaped `GetField` fuse. |
-| **P3** | Boxed multi-payload match | Flagship + real enums. Hard wall. Bigger than P0–P2. | Trees opcode. Forcing dense `main`. |
+| **P3** | Boxed multi-payload match | **Landed** [COI-357](https://linear.app/ardax/issue/COI-357): `Unpack(n)` + per-index maps. Cost gate. | Trees opcode. Forcing dense `main`. |
 
 **Do not kick now:** whole-`main` dense format (4); C2b user Iterator
 ([COI-353](https://linear.app/ardax/issue/COI-353)); C1b N>2
@@ -207,6 +211,7 @@ Opt generalization board, same shape as B6/C2 (tip SHA, prove, A4):
    `self` stays boxed-once. Cost gate still on. Flagships flat.
 
 4. **P3 — Boxed multi-payload match (`Unpack` arity > 1)**  
+   **Landed** [COI-357](https://linear.app/ardax/issue/COI-357).
    I2 leftover. `binary_trees` `item_check`. Per-index payload maps.
    Checksum; flagships flat or better. No trees opcode.
 
