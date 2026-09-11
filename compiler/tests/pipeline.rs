@@ -5983,7 +5983,7 @@ use string::{format, to_bytes};
 fn dump(int n) -> int {
     let f = match open("coil_f3_open_hint.bin", "w") {
         Result::Ok(h) => h,
-        Result::Err(e) => panic e.message,
+        Result::Err(_) => panic "open failed",
     };
     write(f, to_bytes(format("%i", n)));
     return n;
