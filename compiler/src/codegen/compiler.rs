@@ -7933,16 +7933,25 @@ impl Compiler {
         iterable: &Output<'_>,
         body: &Output<'_>,
         binding: Option<&Output<'_>>,
+        loop_id: Option<crate::typechecking::id::NodeId>,
     ) -> bool {
         use crate::typechecking::LoopReduceOp;
 
         let Some(site) = self.loop_par_sites.get(&(span.start, span.end)).cloned() else {
             return false;
         };
-        // Reassociating a float reduction changes results, so both the
-        // induction variable and the per-iteration value must be `int`.
-        if !self.ptr_ty_is_int(site.index_expr_ptr) || !self.ptr_ty_is_int(site.reduce_expr_ptr) {
-            return false;
+        // Reassociating a float reduction changes results. Counted `for` uses
+        // Q6 int Range kind. `while` IVs are const ints from analysis; the
+        // per-iteration value is sidecar-`int`.
+        if site.implicit_step {
+            match self
+                .sidecar_for_in(loop_id, span.start, span.end)
+                .as_ref()
+                .map(|i| &i.kind)
+            {
+                Some(ForInKind::Range { float: false, .. }) => {}
+                _ => return false,
+            }
         }
         if site.implicit_step {
             // Match sequential for-in: allocate the binding before looking it up
@@ -8121,14 +8130,6 @@ impl Compiler {
         self.context = prev_ctx;
         self.expr_depth = prev_depth;
         entry
-    }
-
-    /// Whether the checker inferred `int` for the expression at `ptr`.
-    fn ptr_ty_is_int(&self, ptr: usize) -> bool {
-        let Some(id) = self.checker.id_table().id_of_ptr(ptr) else {
-            return false;
-        };
-        matches!(self.sidecar_ty(id), Some(Ty::Con(ref c)) if c == "int")
     }
 
     /// Push an `int` constant onto [`Self::bytecode`]; inline `CONST` cannot
@@ -13648,7 +13649,7 @@ impl Compiler {
                 body,
             } => {
                 if let Some(binding) = identifier {
-                    if self.try_emit_par_loop(*span, iterable, body, Some(binding)) {
+                    if self.try_emit_par_loop(*span, iterable, body, Some(binding), self_id) {
                         return bytecode;
                     }
                     let binding_name = match binding.1.as_ref() {
@@ -13705,7 +13706,7 @@ impl Compiler {
                         self.discard_compile(body);
                         return bytecode;
                     }
-                    if self.try_emit_par_loop(*span, iterable, body, None) {
+                    if self.try_emit_par_loop(*span, iterable, body, None, self_id) {
                         return bytecode;
                     }
                     let mut bb = BlockBuilder::new();

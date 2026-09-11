@@ -16,7 +16,7 @@ test("literal for-range reduce") {
 test("inclusive for-range reduce") {
     let acc = 0;
     for x in 1..=40 {
-        acc += x;
+        acc = acc + x;
     }
     assert(acc == 820)?;
 }

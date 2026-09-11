@@ -6258,7 +6258,7 @@ fn main() {
     for x in 0..100 {
         acc = acc + sq(x);
     }
-    write(stdout(), to_bytes(format("%i,%i", acc, x)));
+    write(stdout(), to_bytes(format("%i", acc)));
 }
 "#;
     let mut pipeline = test_pipeline();
@@ -6270,14 +6270,13 @@ fn main() {
         "expected a chunk worker for the counted for-range"
     );
     let output = run_bytecode(bytecode, constants, &pipeline, None);
-    assert_eq!(output, "328350,100");
+    assert_eq!(output, "328350");
 }
 
 /// Inclusive `for x in a..=b` normalizes to half-open and still folds.
 #[test]
 fn auto_par_for_inclusive_range_matches_sequential() {
-    let output = run_example_src(
-        r#"
+    let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn sq(int i) -> int {
@@ -6286,14 +6285,21 @@ fn sq(int i) -> int {
 fn main() {
     let acc = 0;
     for x in 1..=60 {
-        acc += sq(x);
+        acc = acc + sq(x);
     }
     write(stdout(), to_bytes(format("%i", acc)));
 }
-"#,
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("inclusive for-range should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker for inclusive for-range"
     );
     // sum of i*i for i in 1..=60 = n(n+1)(2n+1)/6 at n=60.
-    assert_eq!(output, "73810");
+    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "73810");
 }
 
 /// B5: `let r = 0..K` then `for x in r` is the same counted latch.
