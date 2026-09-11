@@ -167,7 +167,9 @@ Codegen emits one private **chunk worker** per site,
 returning the partial. For `for`, the worker emits the unit step after the body.
 At the loop site:
 
-1. `MakeFn` the worker, then `thread_spawn(worker, mid, end, identity)` — the
+1. `MakeFn` the worker, then `thread_spawn_shared(worker, mid, end, identity)`
+   (HostInvoke **137**; falls back to isolate `thread_spawn` when maps are
+   missing, `COIL_SHARED_HEAP=0`, or an arg misses the C1 whitelist) — the
    upper chunk starts from the operator's identity (`0` for `+`, `1` for `*`) so
    the accumulator's initial value is counted exactly once.
 2. Call the worker inline for `[begin, mid)` seeded with the live `acc`.
@@ -201,29 +203,29 @@ idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
 |-----|--------|
 | `COIL_MAX_WORKER_THREADS` | Pool size (1..=512). Default `available_parallelism` (min 2), or **1** when `CI` is set. `.cargo/config.toml` also sets this to `1` (`force = false`) for local cargo test runs. Export a higher value to profile parallelism. |
 | `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
-| `COIL_PAR_THRESHOLD` | Compile-time profitability cutoff — fork-site work score and loop trip count (default 20). |
+| `COIL_SHARED_HEAP` | `0` / `false` / `off` / `no` forces isolate `PortableValue` spawn for loop chunks (C1 off). Default on. |
 
 `.hyc` / embed execute sizes each isolate operand stack from the persisted
 compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL
 heuristic; that is not an IPA policy change. Minor 14 stores S2b maps so
 archive/embed GC relocate matches compile-and-run; older maps stay empty.
+Minor 15 appends HostInvoke `thread_spawn_shared` (**137**) for C1 loop-chunk
+steal. Pre-15 archives never emit that id.
 
 Pool workers pin a TLS local deque tagged with the owning reactor identity.
 `submit` / join-help only push or pop that deque when it belongs to the same
 reactor; otherwise work goes through the shared injector. That keeps concurrent
 `Machine`s (parallel tests) and nested reactors from cross-feeding jobs.
 
-Isolate-per-job tax (COI-360 E2, still no shared heap): workers execute from
-the `Arc` `ThreadProgram` image (no per-job bytecode `to_vec`); join-help
-checks out a TLS helper `Machine` instead of `Box::new` per steal; after each
-job the isolate heap is reset (unmap when more than one 64KiB slab chunk is
-mapped). Re-measure IPA with a release `fib` archive compiled under
-`COIL_AUTO_PAR=1`: fewer `__coil_par_fib_*` clones than the cutoff chain
-(`PAR_SPEC_HOPS` = 2), `Reactor::jobs_submitted` below the nested-AlwaysPar
-storm, then `/usr/bin/time -f '%e %M' ./target/release/coil run fib.hyc`
-(and `COIL_MAX_WORKER_THREADS=1` for the nested-help case).
+Isolate-per-job tax (COI-360 E2): workers execute from the `Arc`
+`ThreadProgram` image; join-help checks out a TLS helper `Machine`; after an
+**isolate** job the private heap is reset (unmap when more than one 64KiB slab
+is mapped). User `thread::spawn` stays on this path.
 
-Shared-heap steal (C) is **not** this path. C0 sendability (whitelist,
-freeze vs disjoint write vs refuse, STW maps, TLS stacks on one Heap) is
-[shared-heap-sendability.md](shared-heap-sendability.md) — docs only until
-Architect accepts ([COI-363](https://linear.app/ardax/issue/COI-363)).
+C1 shared-heap loop steal (COI-365 E6): counted-loop chunks submit
+`SpawnArg::Shared` `Value` bits onto one Heap (helpers **bind** that Heap;
+they do not `reset_isolate_heap` unmap it). Layer A epoch STW: no collect
+during the steal; a stolen chunk that would GC aborts to sequential /
+isolate fallback; the joiner collects after `end_steal`. Maps are mandatory
+(empty maps → isolate). See
+[shared-heap-sendability.md](shared-heap-sendability.md).
