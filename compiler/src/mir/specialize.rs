@@ -74,7 +74,9 @@ pub fn try_specialize_body_side(
     // fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
     // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
-    // StoreIndex emit dense-native. CALL / HostInvoke box at the ABI
+    // StoreIndex emit dense-native. D2: heap LoadField / GetField /
+    // SetField emit DenseField*; Object Alloc is DenseMakeObject.
+    // CALL / HostInvoke box at the ABI
     // edge via DensePush. S2l: try dense so SROA / LICM can delete work;
     // keep residual in-loop Make* only when reconstruct is dense-native
     // and cost ≤ fuse-IL. Post-loop-only `return [x]` stays fuse-IL
@@ -113,6 +115,7 @@ pub fn try_specialize_body_side(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     hints.allow_effects = true;
+    hints.allow_heap_fields = true;
     let _heap_index = super::infer::has_heap_index(ops);
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params

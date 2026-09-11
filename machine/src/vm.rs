@@ -1478,6 +1478,14 @@ impl<const S: usize> Machine<S> {
         }
     }
 
+    #[inline]
+    fn member_value(member: Member) -> Value {
+        match member {
+            Member::Value(v) => v,
+            Member::Object(o) => Value::from(o.addr()),
+        }
+    }
+
     /// Copy `n` stack values in declaration order (`stack[base..base+n]`).
     /// Used by MakeTuple / MakeArray. Args stay on the stack for GC rooting
     /// until the caller seeks past them after allocation.
@@ -2523,7 +2531,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::DenseArrayPush as u8);
+            promise!(*bc as u8 <= Instruction::DenseMakeObject as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3891,6 +3899,92 @@ impl<const S: usize> Machine<S> {
                             .runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
                     }
                     self.stack[sp + dest] = target_val;
+                    self.maybe_gc_after_alloc(ip);
+                }
+                Instruction::DenseFieldLoad => {
+                    let (flags, dest, obj, c) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + obj < stack_cap);
+                    let addr = self.stack[sp + obj].raw() as u64;
+                    let named = flags & common::dense::FIELD_NAMED != 0;
+                    let result = if named {
+                        promise!(sp + c < stack_cap);
+                        let key = Self::intern_key(&mut self.heap, self.stack[sp + c]);
+                        match Self::find_object_by_addr(&self.heap, addr) {
+                            Some(crate::memory::Object::Instance(gc)) => {
+                                gc.as_ref().get(key).map(Self::member_value)
+                            }
+                            _ => None,
+                        }
+                    } else {
+                        let field_index = c as usize;
+                        match Self::find_object_by_addr(&self.heap, addr) {
+                            Some(Object::Enum(enum_ref)) => {
+                                let enum_ref = enum_ref.as_ref();
+                                promise!(field_index < enum_ref.payload.len());
+                                Some(Self::member_value(unsafe {
+                                    *enum_ref.payload.get_unchecked(field_index)
+                                }))
+                            }
+                            Some(Object::Instance(gc)) => {
+                                if let Some(n) = gc.as_ref().slot_len() {
+                                    promise!(field_index < n);
+                                    Some(Self::member_value(
+                                        gc.as_ref()
+                                            .slot(field_index)
+                                            .unwrap_or(Member::Value(Value::default())),
+                                    ))
+                                } else {
+                                    Some(Value::default())
+                                }
+                            }
+                            _ => Some(Value::default()),
+                        }
+                    };
+                    let Some(result) = result else {
+                        return self.runtime_panic("no such field", ip.saturating_sub(1));
+                    };
+                    self.stack[sp + dest] = result;
+                }
+                Instruction::DenseFieldStore => {
+                    let (flags, dest, obj, c) = opcode.dense_abc_parts();
+                    promise!(sp + dest < stack_cap);
+                    promise!(sp + obj < stack_cap);
+                    let value = self.stack[sp + dest];
+                    let addr = self.stack[sp + obj].raw() as u64;
+                    let named = flags & common::dense::FIELD_NAMED != 0;
+                    if let Some(crate::memory::Object::Instance(mut gc)) =
+                        Self::find_object_by_addr(&self.heap, addr)
+                    {
+                        if named {
+                            promise!(sp + c < stack_cap);
+                            let key = Self::intern_key(&mut self.heap, self.stack[sp + c]);
+                            gc.as_mut()
+                                .set(key, Self::value_as_member(&self.heap, value));
+                        } else {
+                            let idx = c as usize;
+                            promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
+                            gc.as_mut()
+                                .set_slot(idx, Self::value_as_member(&self.heap, value));
+                        }
+                    } else {
+                        return self.runtime_panic(
+                            "SetField on non-instance",
+                            ip.saturating_sub(1),
+                        );
+                    }
+                }
+                Instruction::DenseMakeObject => {
+                    let (dest, nfields, type_id) =
+                        common::dense::unpack_make_object(opcode.operand_u32());
+                    let dest = dest as usize;
+                    promise!(sp + dest < stack_cap);
+                    let (_, mut r) = self.heap.alloc(
+                        ObjInstance::with_type_id_and_fields(type_id, nfields as usize),
+                        Object::Instance,
+                    );
+                    let _ = r.as_mut();
+                    self.stack[sp + dest] = Value::from(r.as_ptr().addr() as u64);
                     self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::ArrayPush => {

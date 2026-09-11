@@ -182,7 +182,8 @@ Post A0–C3 denser-MIR leftovers (D0 keep-rate, class `new`, dense field, Q9
 **D0** ([COI-354](https://linear.app/ardax/issue/COI-354)): `nsieve` keeps
 dense-native after lift (`slot_env` follows trivial-phi subst). Cost gate
 unchanged. **D1** ([COI-355](https://linear.app/ardax/issue/COI-355)): class
-`new` / field maps. Tree-shake / BB reorder is a separate surface
+`new` / field maps. **D2** ([COI-356](https://linear.app/ardax/issue/COI-356)):
+dense-native field / Object make. Tree-shake / BB reorder is a separate surface
 ([#405](https://github.com/ardax-corp/coil-lang/pull/405)).
 
 ## Non-goals

@@ -12,10 +12,11 @@
 //! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
 //! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on
 //! every mode (dense reconstruct is register `Br`). Counted `for` (Q6)
-//! is ordinary i64 + index IL — no extra refuse. Still refuse class
-//! field / unmapped alloc / residual `Byte` /
-//! `Pow` / `AND`/`OR`. Q9 R1: LIR infer accepts `STRING` / `PRINT` /
-//! `FORMAT` / `STRINGIFY`; dense infer still refuses those table ops.
+//! is ordinary i64 + index IL — no extra refuse. Still refuse unmapped
+//! alloc / residual `Byte` / `Pow` / `AND`/`OR`. **D2**: dense infer types
+//! heap `GetField` / `SetField` / `LoadField`. Q9 R1: LIR infer accepts
+//! `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; dense infer still refuses
+//! those table ops.
 //! R2 opens `from_bytes` / `to_bytes` HostInvoke on dense. R3 maps
 //! `FORMAT` / `STRINGIFY` like I5 alloc. S2c maps
 //! allow alloc. Compare-only stays fuse-IL. Q7 unfuses convoy
@@ -194,9 +195,9 @@ impl InferMode {
         matches!(self, Self::Lir | Self::Map)
     }
 
-    /// D1: map lift types heap GetField / SetField / LoadField (not dense).
+    /// D1/D2: map and dense lifts type heap GetField / SetField / LoadField.
     fn allows_heap_fields(self) -> bool {
-        matches!(self, Self::Map)
+        matches!(self, Self::Map | Self::Dense)
     }
 }
 
@@ -216,7 +217,12 @@ fn infer_walk(
     let mut has_float_arith = false;
     let mut has_i64_arith = false;
     let mut slot_imm: HashMap<u32, i64> = HashMap::new();
-    let reuse = mode == InferMode::Map;
+    // Map drafts always last-write recycled temps. Dense needs the same
+    // when the body boxes (InitTyped / Make*) or has heap fields — ctor
+    // temps become i64/bool after the object is stored (D1/D2).
+    let reuse = mode == InferMode::Map
+        || (mode == InferMode::Dense
+            && (allow_alloc || ops.iter().any(is_heap_field_op)));
 
     for op in ops {
         match op {
@@ -429,6 +435,8 @@ fn infer_walk(
                     apply_array_push(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
                 Instruction::DenseArrayPush if mode.allows_alloc(allow_alloc) => {}
+                Instruction::DenseFieldLoad | Instruction::DenseFieldStore => {}
+                Instruction::DenseMakeObject if mode.allows_alloc(allow_alloc) => {}
                 Instruction::INC | Instruction::DEC => {
                     let (slot, _, is_float) = byte.inc_dec_parts();
                     let ty = if is_float { MirTy::F64 } else { MirTy::I64 };
@@ -439,7 +447,7 @@ fn infer_walk(
                     }
                     set_slot_reuse(&mut slot_ty, slot as u32, ty, reuse)?;
                 }
-                Instruction::STRING if mode.allows_string() => {
+                Instruction::STRING if mode.allows_string() || mode.allows_heap_fields() => {
                     stack.push(Cell {
                         origin: Origin::Tmp,
                         ty: Some(MirTy::HeapRef),
@@ -507,7 +515,7 @@ fn infer_walk(
                     "RETURN ret_words {ret_words}"
                 )));
             }
-            IlOp::String { .. } if mode.allows_string() => {
+            IlOp::String { .. } if mode.allows_string() || mode.allows_heap_fields() => {
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(MirTy::HeapRef),
@@ -557,6 +565,7 @@ fn infer_walk(
                     *ret_words,
                     target.0,
                     calls,
+                    reuse,
                 )?;
             }
             // Convoy fused returns (Q7): same stack/types as Load/Const/Bin + RETURN.
@@ -945,6 +954,22 @@ pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
         }
     }
     any
+}
+
+/// Heap GetField / SetField / LoadField (fuse-IL or residual dense).
+fn is_heap_field_op(op: &IlOp) -> bool {
+    match op {
+        IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => true,
+        IlOp::Byte { byte, .. } => matches!(
+            *byte.bytecode(),
+            Instruction::GetField
+                | Instruction::SetField
+                | Instruction::LoadField
+                | Instruction::DenseFieldLoad
+                | Instruction::DenseFieldStore
+        ),
+        _ => false,
+    }
 }
 
 /// Heap-index / store / pin / ArrayLen — S3 may specialize these with maps.
@@ -1404,6 +1429,7 @@ fn apply_call(
     ret_words: u32,
     target: u32,
     calls: &DenseCallMap,
+    reuse: bool,
 ) -> Result<(), LowerError> {
     if !super::abi::ret_words_ok(ret_words) {
         return Err(LowerError::Refused(format!("CALL ret_words {ret_words}")));
@@ -1422,7 +1448,7 @@ fn apply_call(
             return Err(LowerError::Refused("CALL arity".into()));
         }
         for (cell, ty) in args.iter().zip(abi.params.iter()) {
-            paint(slot_ty, pool_ty, *cell, *ty)?;
+            paint_slots(slot_ty, pool_ty, *cell, *ty, reuse)?;
         }
         stack.push(Cell {
             origin: Origin::Tmp,

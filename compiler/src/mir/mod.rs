@@ -4030,8 +4030,11 @@ fn main() {
         assert!(
             hot_bc
                 .iter()
-                .any(|b| *b.bytecode() == Instruction::InitTyped),
-            "escaping named local stays InitTyped; opcodes={:?}",
+                .any(|b| matches!(
+                    *b.bytecode(),
+                    Instruction::InitTyped | Instruction::DenseMakeObject
+                )),
+            "escaping named local stays boxed-once; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
@@ -4046,7 +4049,7 @@ fn main() {
     }
 
     #[test]
-    fn pipeline_field_hot_binds_maps_stays_fuse_il() {
+    fn pipeline_field_hot_keeps_dense_native() {
         let src = r#"
 class Point {
     pub x: int,
@@ -4079,7 +4082,7 @@ fn main() {
             p.stack_maps()
                 .iter()
                 .any(|m| !m.safepoints.is_empty()),
-            "D1 field_hot InitTyped should bind maps: {:?}",
+            "D2 field_hot InitTyped should bind maps: {:?}",
             p.stack_maps()
         );
         let symbols = p.program_debug().fn_symbols;
@@ -4096,23 +4099,113 @@ fn main() {
             assert!(
                 slice
                     .iter()
-                    .all(|b| *b.bytecode() != Instruction::DenseBin),
-                "{name} must stay fuse-IL (cost / HeapField); opcodes={:?}",
+                    .any(|b| *b.bytecode() == Instruction::DenseBin),
+                "{name} must keep DenseBin; opcodes={:?}",
+                slice.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+            );
+            assert!(
+                slice.iter().any(|b| *b.bytecode() == Instruction::DenseFieldLoad),
+                "{name} must keep DenseFieldLoad; opcodes={:?}",
                 slice.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
             );
         }
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_field_store_loop_keeps_dense() {
+        let src = r#"
+class Point {
+    pub n: int,
+}
+impl Point {
+    pub fn bump() {
+        self.n = self.n + 1;
+    }
+}
+fn hot() -> int {
+    let p = new Point(0);
+    let i = 0;
+    while i < 4 {
+        p.bump();
+        i = i + 1;
+    }
+    return p.n;
+}
+fn main() {
+    if hot() != 4 {
+        panic "store checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile field store loop");
+        let symbols = p.program_debug().fn_symbols;
+        let bump = symbols
+            .iter()
+            .position(|s| s.name == "Point::bump")
+            .expect("Point::bump");
+        let start = symbols[bump].entry_pc as usize;
+        let end = symbols
+            .get(bump + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let bump_bc = &bc[start..end];
         assert!(
-            bc.iter().any(|b| matches!(
-                *b.bytecode(),
-                Instruction::GetField | Instruction::LoadField | Instruction::SetField
-            )),
-            "escaping field ops stay fuse-IL; opcodes={:?}",
-            bc.iter()
-                .map(|b| b.bytecode().mnemonic())
-                .collect::<Vec<_>>()
+            bump_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::DenseFieldLoad),
+            "escaping self store DenseFieldLoad; opcodes={:?}",
+            bump_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
+        );
+        assert!(
+            bump_bc
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::DenseFieldStore),
+            "escaping self store DenseFieldStore; opcodes={:?}",
+            bump_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+    }
+
+    #[test]
+    fn pipeline_if_chain_phi_taken_not_fallthrough() {
+        let src = r#"
+fn pick(int n) -> int {
+    let nb = 0;
+    if n == 1 {
+        nb = 1;
+    }
+    if n == 2 {
+        nb = 2;
+    }
+    if n >= 5 {
+        nb = 5;
+    }
+    return nb;
+}
+fn main() {
+    if pick(0) != 0 {
+        panic "nb0";
+    }
+    if pick(1) != 1 {
+        panic "nb1";
+    }
+    if pick(2) != 2 {
+        panic "nb2";
+    }
+    if pick(7) != 5 {
+        panic "nb5";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile if-chain");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "if-chain phi taken edge");
     }
 
     #[test]

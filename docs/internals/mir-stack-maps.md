@@ -15,9 +15,10 @@ and relocate mapped slots on collect.
   `ArrayPush` / `DenseArrayPush` lower to `MirInst::ArrayPush` plus a
   barrier (B6 grow). `FORMAT` / `STRINGIFY` pair the same way (Q9 R3).
   Heap `GetField` / `SetField` / `LoadField` lower on the map path so
-  CALL/`InitTyped`+field drafts bind (D1). `bind_drafts` counts those
-  opcodes and `DenseMake`. Escaping `self` stays boxed-once (Q2); I3
-  non-escaping stays unboxed. Dense field ops are D2.
+  CALL/`InitTyped`+field drafts bind (D1). Dense emit reconstructs those as
+  `DenseFieldLoad` / `DenseFieldStore` and Object `DenseMakeObject` (D2).
+  `bind_drafts` counts those opcodes and `DenseMake`. Escaping `self`
+  stays boxed-once (Q2); I3 non-escaping stays unboxed.
 - [`fill_live_roots`](../../compiler/src/mir/gc.rs) (on `MirBuilder::finish`
   and text parse) sets `GcBarrier.roots` and `MirFunc.gc_roots` to the live
   heap-word SSA values at the edge: the new object plus other live heap

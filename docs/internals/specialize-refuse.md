@@ -92,7 +92,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range_param.hy` | dense counted i64 | **C2** Range parameter |
 | `range_sum` | `for_in_range_ret.hy` | dense counted i64 | **C2** returned Range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
-| `hot` | `field_hot.hy` | fuse-IL + maps | **D1** InitTyped+GetField maps; HeapField LIR wall; cost gate; `main` prints |
+| `hot` | `field_hot.hy` | dense + maps | **D2** `DenseFieldLoad` / `DenseMakeObject`; cost gate; `main` prints |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |
 | sibling `TailCall` (even/odd) | `tail_sibling.hy` | dense or fuse-IL | **B7** stack-arg `TailCall` + cost gate |
 | self two-slot `CALL` / `RETURN` | `self_two_slot.hy` / `option_self_call.hy` | dense, LIR, or fuse-IL | **C1** dest + `dest_hi`; cost gate vs fuse |
@@ -146,5 +146,7 @@ dense after lift: `slot_env` follows trivial-phi subst so in-loop
 `ArrayPush` verifies. Cost gate unchanged (no skip-the-gate).
 **D1** ([COI-355](https://linear.app/ardax/issue/COI-355)) maps
 `InitTyped`+`SetField`/`GetField` on escaping named objects. Escaping
-`self` stays boxed-once (Q2). I3 non-escaping stays unboxed. Cost gate
-still refuses boxed reconstruct. Dense field ops are D2.
+`self` stays boxed-once (Q2). I3 non-escaping stays unboxed.
+**D2** ([COI-356](https://linear.app/ardax/issue/COI-356)) reconstructs
+those as `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` so the
+cost gate can keep field loops. LIR still `HeapField`.

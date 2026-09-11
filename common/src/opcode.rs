@@ -402,6 +402,16 @@ pub enum Instruction {
     /// Operand: `[23:16]` dest, `[15:8]` array slot, `[7:0]` value slot
     /// (`dense_abc` flags unused). Dest receives the same array identity.
     DenseArrayPush,
+    /// Dense `LoadField` / named `GetField` (COI-356 D2). Stack-neutral.
+    /// Operand: `[31:24]` flags (bit 0 = named key in `c`), `[23:16]` dest,
+    /// `[15:8]` object slot, `[7:0]` field index or name slot.
+    DenseFieldLoad,
+    /// Dense `SetField`. Same packing as [`Self::DenseFieldLoad`].
+    /// Dest slot holds the stored value (and is the SSA dest).
+    DenseFieldStore,
+    /// Dense `InitTyped` (COI-356 D2). Stack-neutral Object make.
+    /// Operand: `[31:24]` dest, `[23:16]` nfields, `[15:0]` type_id.
+    DenseMakeObject,
 }
 
 impl From<u8> for Instruction {
@@ -493,9 +503,24 @@ pub mod dense {
 
     /// [`super::Instruction::DenseIndex`] / [`super::Instruction::DenseStoreIndex`] flag.
     pub const HEAP_UNCHECKED: u8 = 1;
+    /// [`super::Instruction::DenseFieldLoad`] / [`super::Instruction::DenseFieldStore`]:
+    /// `c` is a name slot (GetField), not a field index.
+    pub const FIELD_NAMED: u8 = 1;
     pub const MAKE_ARRAY: u8 = 0;
     pub const MAKE_TUPLE: u8 = 1;
     pub const MAKE_ENUM: u8 = 2;
+
+    /// Pack [`super::Instruction::DenseMakeObject`].
+    #[inline]
+    pub const fn pack_make_object(dest: u8, nfields: u8, type_id: u16) -> u32 {
+        ((dest as u32) << 24) | ((nfields as u32) << 16) | (type_id as u32)
+    }
+
+    /// Unpack [`pack_make_object`]: `(dest, nfields, type_id)`.
+    #[inline]
+    pub const fn unpack_make_object(operand: u32) -> (u8, u8, u32) {
+        ((operand >> 24) as u8, (operand >> 16) as u8, operand & 0xFFFF)
+    }
 
     #[inline]
     pub const fn pack_cmp(lane: u8, pred: u8) -> u8 {
@@ -703,6 +728,9 @@ impl Instruction {
             Self::DenseMake => "DenseMake",
             Self::DensePush => "DensePush",
             Self::DenseArrayPush => "DenseArrayPush",
+            Self::DenseFieldLoad => "DenseFieldLoad",
+            Self::DenseFieldStore => "DenseFieldStore",
+            Self::DenseMakeObject => "DenseMakeObject",
         }
     }
 }
@@ -1713,13 +1741,18 @@ mod tests {
         assert_eq!(push.dense_move_parts(), (2, 6));
         let grow = Byte::new(Instruction::DenseArrayPush).with_dense_abc(0, 3, 1, 2);
         assert_eq!(grow.dense_abc_parts(), (0, 3, 1, 2));
+        let fl = Byte::new(Instruction::DenseFieldLoad).with_dense_abc(0, 4, 1, 0);
+        assert_eq!(fl.dense_abc_parts(), (0, 4, 1, 0));
+        let mk = Byte::new(Instruction::DenseMakeObject)
+            .with_operand_u32(dense::pack_make_object(5, 2, 9));
+        assert_eq!(dense::unpack_make_object(mk.operand_u32()), (5, 2, 9));
     }
 
     #[test]
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DenseArrayPush as u8;
+        let last = Instruction::DenseMakeObject as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

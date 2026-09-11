@@ -4965,16 +4965,25 @@ fn main() {
         let names: Vec<_> = hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
         let inits = hot_bc
             .iter()
-            .filter(|b| matches!(b.bytecode(), Instruction::InitTyped))
+            .filter(|b| {
+                matches!(
+                    b.bytecode(),
+                    Instruction::InitTyped | Instruction::DenseMakeObject
+                )
+            })
             .count();
         assert_eq!(
             inits, 1,
             "call-arg boxes once; opcodes={names:?}"
         );
         assert!(
-            hot_bc
-                .iter()
-                .any(|b| matches!(b.bytecode(), Instruction::SetField | Instruction::LoadField)),
+            hot_bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::SetField
+                    | Instruction::LoadField
+                    | Instruction::DenseFieldLoad
+                    | Instruction::DenseFieldStore
+            )),
             "post-escape field store uses the boxed instance; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -5048,7 +5057,12 @@ fn main() {
             let names: Vec<_> = fn_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
             let inits = fn_bc
                 .iter()
-                .filter(|b| matches!(b.bytecode(), Instruction::InitTyped))
+                .filter(|b| {
+                    matches!(
+                        b.bytecode(),
+                        Instruction::InitTyped | Instruction::DenseMakeObject
+                    )
+                })
                 .count();
             assert_eq!(
                 inits, 1,
@@ -7802,9 +7816,11 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::InitTyped)),
-            "expected InitTyped for class ctor; opcodes: {:?}",
+            bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::InitTyped | Instruction::DenseMakeObject
+            )),
+            "expected InitTyped or DenseMakeObject for class ctor; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
@@ -7814,15 +7830,27 @@ fn main() {
         );
         let init = bc
             .iter()
-            .find(|b| matches!(b.bytecode(), Instruction::InitTyped))
-            .expect("InitTyped");
-        let (tid, nfields) = common::unpack_init_typed(init.operand_u32());
+            .find(|b| {
+                matches!(
+                    b.bytecode(),
+                    Instruction::InitTyped | Instruction::DenseMakeObject
+                )
+            })
+            .expect("object make");
+        let (tid, nfields) = if *init.bytecode() == Instruction::DenseMakeObject {
+            let (_, n, t) = common::dense::unpack_make_object(init.operand_u32());
+            (u32::from(t), u32::from(n))
+        } else {
+            common::unpack_init_typed(init.operand_u32())
+        };
         assert_ne!(tid, 0);
         assert_eq!(nfields, 1, "Box has one instance field");
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::LoadField)),
-            "typed field read should be LoadField; opcodes: {:?}",
+            bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::LoadField | Instruction::DenseFieldLoad
+            )),
+            "typed field read should be LoadField or DenseFieldLoad; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
     }

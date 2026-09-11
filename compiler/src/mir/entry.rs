@@ -31,7 +31,7 @@ pub enum LirRefuse {
     /// I6: HostInvoke (dense reconstructs; LIR emit does not).
     Host,
     /// Escaping / heap-backed field ops (LIR reconstruct wall; D1 maps
-    /// bind across them, D2 native reconstruct is later).
+    /// bind; D2 dense-native reconstruct is the keep path).
     HeapField,
     /// `BoxValue` / `UnboxValue`.
     Box,

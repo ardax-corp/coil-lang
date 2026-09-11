@@ -68,7 +68,7 @@ pub struct LowerHints {
     pub unboxed_fields: Vec<(u32, u32)>,
     /// I3: Load/Store of those slots become FieldLoad/FieldStore.
     pub allow_fields: bool,
-    /// D1: heap GetField / SetField / LoadField on escaping objects (maps).
+    /// Heap `GetField` / `SetField` / `LoadField` on escaping objects (D1 maps, D2 dense).
     pub allow_heap_fields: bool,
     /// I5: `MakeArray` / `MakeTuple` / `MakeEnum` / `InitTyped` → Alloc +
     /// GcBarrier with S2a live roots. S2c emit needs maps.
@@ -819,7 +819,7 @@ fn lower_op(
         | IlOp::PrologueJmp { .. } => Err(LowerError::Refused(
             "non-numeric IL (classes/heap/calls stay on Value)".into(),
         )),
-        IlOp::String { idx, .. } if hints.allow_string => {
+        IlOp::String { idx, .. } if hints.allow_string || hints.allow_heap_fields => {
             tos.push(b.ins_string(*idx)?);
             Ok(())
         }
@@ -958,7 +958,7 @@ fn lower_byte(
             tos.push(after);
             Ok(())
         }
-        Instruction::STRING if hints.allow_string => {
+        Instruction::STRING if hints.allow_string || hints.allow_heap_fields => {
             tos.push(b.ins_string(byte.operand_u32())?);
             Ok(())
         }
