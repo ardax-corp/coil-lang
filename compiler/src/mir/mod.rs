@@ -4171,6 +4171,44 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_if_chain_phi_taken_not_fallthrough() {
+        let src = r#"
+fn pick(int n) -> int {
+    let nb = 0;
+    if n == 1 {
+        nb = 1;
+    }
+    if n == 2 {
+        nb = 2;
+    }
+    if n >= 5 {
+        nb = 5;
+    }
+    return nb;
+}
+fn main() {
+    if pick(0) != 0 {
+        panic "nb0";
+    }
+    if pick(1) != 1 {
+        panic "nb1";
+    }
+    if pick(2) != 2 {
+        panic "nb2";
+    }
+    if pick(7) != 5 {
+        panic "nb5";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile if-chain");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "if-chain phi taken edge");
+    }
+
+    #[test]
     fn pipeline_result_int_stays_two_slot() {
         let src = r#"
 fn checked_div(int a, int b) -> Result<int, int> {
