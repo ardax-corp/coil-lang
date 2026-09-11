@@ -150,11 +150,11 @@ impl Reactor {
         steal_from_injector(&self.injector).or_else(|| steal_from_peers(&self.stealers))
     }
 
-    /// Run at most one stolen job on a fresh helper VM (IO wait overlap).
+    /// Run at most one stolen job on this thread's TLS helper VM.
     pub fn help_once(self: &Arc<Self>) {
         if let Some(job) = self.steal_job() {
-            let mut vm = machine_for_program(&job.program);
-            run_job_on_vm(&mut vm, job);
+            let program = Arc::clone(&job.program);
+            with_help_vm(&program, |vm| run_job_on_vm(vm, job));
         }
     }
 
@@ -175,8 +175,8 @@ impl Reactor {
                 return r;
             }
             if let Some(job) = self.steal_job() {
-                let mut vm = machine_for_program(&job.program);
-                run_job_on_vm(&mut vm, job);
+                let program = Arc::clone(&job.program);
+                with_help_vm(&program, |vm| run_job_on_vm(vm, job));
                 continue;
             }
             {
@@ -243,6 +243,9 @@ thread_local! {
     static LOCAL_WORKER: std::cell::RefCell<Option<LocalWorkerBinding>> =
         const { std::cell::RefCell::new(None) };
     static IS_POOL_WORKER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Reused join-help VMs (one live checkout per nested steal on this thread).
+    static HELP_VMS: std::cell::RefCell<Vec<Box<Machine<WORKER_STACK_SLOTS>>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 /// TLS binding of a work-stealing deque to the reactor that registered it.
@@ -290,6 +293,23 @@ fn machine_for_program(program: &ThreadProgram) -> Box<Machine<WORKER_STACK_SLOT
     Box::new(Machine::with_operand_capacity(
         program.operand_stack_slots as usize,
     ))
+}
+
+/// Checkout a TLS helper VM, run `f`, then return it with a bounded heap.
+fn with_help_vm<R>(program: &ThreadProgram, f: impl FnOnce(&mut Machine<WORKER_STACK_SLOTS>) -> R) -> R {
+    let mut vm = HELP_VMS
+        .with(|slot| slot.borrow_mut().pop())
+        .unwrap_or_else(|| machine_for_program(program));
+    ensure_operand_capacity(&mut vm, program.operand_stack_slots);
+    let out = f(&mut vm);
+    vm.reset_isolate_heap();
+    HELP_VMS.with(|slot| slot.borrow_mut().push(vm));
+    out
+}
+
+#[cfg(test)]
+fn help_vm_pool_len() -> usize {
+    HELP_VMS.with(|slot| slot.borrow().len())
 }
 
 fn ensure_operand_capacity(vm: &mut Machine<WORKER_STACK_SLOTS>, slots: u32) {
@@ -353,17 +373,15 @@ fn wait_join_on_worker(
         let job =
             with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref)).flatten();
         if let Some(job) = job {
-            // Heap-allocate the help VM so nested join-help does not blow the
-            // OS stack with stacked `Machine` values.
-            let mut vm = machine_for_program(&job.program);
-            run_job_on_vm(&mut vm, job);
+            let program = Arc::clone(&job.program);
+            with_help_vm(&program, |help| run_job_on_vm(help, job));
             continue;
         }
         // Also steal from this reactor's injector/peers when local is empty or
         // foreign — same as non-worker join help.
         if let Some(job) = reactor.steal_job() {
-            let mut vm = machine_for_program(&job.program);
-            run_job_on_vm(&mut vm, job);
+            let program = Arc::clone(&job.program);
+            with_help_vm(&program, |help| run_job_on_vm(help, job));
             continue;
         }
         {
@@ -426,10 +444,10 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             vm.with_output(SharedPrintWriter(Arc::clone(buf)));
             crate::io::set_shared_print_redirect(Some(Arc::clone(buf)));
         }
-        vm.load_program(
-            program.code.as_slice(),
-            program.constants.as_slice(),
-            program.strings.as_slice(),
+        vm.load_shared_program(
+            Arc::clone(&program.code),
+            Arc::clone(&program.constants),
+            Arc::clone(&program.strings),
         );
         vm.init_static_slots(program.static_slot_count);
 
@@ -457,6 +475,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     state.store_result(stored);
     reactor.inflight.fetch_sub(1, Ordering::SeqCst);
     reactor.notify();
+    vm.reset_isolate_heap();
 }
 
 /// Build a [`Job`] from spawn context + decoded args.
@@ -685,5 +704,31 @@ mod tests {
         });
         let vm = machine_for_program(&prog);
         assert_eq!(vm.operand_stack_capacity(), 1024);
+    }
+
+    #[test]
+    fn tls_help_vm_pool_reuses_and_nests() {
+        HELP_VMS.with(|slot| slot.borrow_mut().clear());
+        let prog = const_return_program(1);
+        with_help_vm(&prog, |_| {});
+        assert_eq!(help_vm_pool_len(), 1);
+        let first = HELP_VMS.with(|slot| {
+            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
+        });
+        with_help_vm(&prog, |_| {});
+        let second = HELP_VMS.with(|slot| {
+            slot.borrow().last().map(|vm| vm.as_ref() as *const Machine<WORKER_STACK_SLOTS>)
+        });
+        assert_eq!(first, second, "idle helper must be reused");
+
+        with_help_vm(&prog, |_| {
+            with_help_vm(&prog, |_| {});
+        });
+        assert_eq!(
+            help_vm_pool_len(),
+            2,
+            "nested join-help checks out a second VM and returns both"
+        );
+        HELP_VMS.with(|slot| slot.borrow_mut().clear());
     }
 }
