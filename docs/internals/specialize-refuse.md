@@ -21,8 +21,8 @@ rungs are **not** in this table — see ladders below and
 |------|-------|--------|
 | Unicode / regex in SSA | out of MIR | Q9 **R4** leftover after **B9** / R3 maps |
 | User `Iterator` / coro / dict / heap-field range `for` | fuse-IL | later Q6 rung |
-| Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR (I2) | later island |
-| Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | fuse-IL | later island |
+| Dense+match boxed `JumpIfMatch` (heap enum) | MIR→LIR or dense (D3) | cost gate |
+| Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | dense or LIR when reconstruct ≤ fuse | **D3** ([COI-357](https://linear.app/ardax/issue/COI-357)) |
 | Native deopt resume maps | compiler sidecar (`DraftDeoptMap`); not archived; emit skips `Deopt` | **I7** / **C3** — maps exist; P5 resume leftover |
 | Incomplete deopt maps (stack-only / convoy TOS) | native must refuse | **C3** leftover |
 | Unmapped alloc / GC safepoint | fuse-IL unless S2b draft binds | **B6** maps `ArrayPush` / CALL+`Make*`; **D1** maps InitTyped+field; leftover unmapped edges stay fuse-IL |
@@ -97,11 +97,11 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | sibling `TailCall` (even/odd) | `tail_sibling.hy` | dense or fuse-IL | **B7** stack-arg `TailCall` + cost gate |
 | self two-slot `CALL` / `RETURN` | `self_two_slot.hy` / `option_self_call.hy` | dense, LIR, or fuse-IL | **C1** dest + `dest_hi`; cost gate vs fuse |
 | `nsieve` | `nsieve.hy` | dense | **D0** native `DenseArrayPush` + Index/StoreIndex; cost gate still on |
-| `binary_trees` | `binary_trees.hy` | fuse-IL | heap / classes / recursion |
+| `binary_trees` | `binary_trees.hy` | `item_check` dense/LIR or fuse-IL; `main` fuse | **D3** Unpack arity 2; heap alloc + print `main` |
 | `option_local_match` / in-frame two-slot match + arith | `option_local_match.hy` | dense or fuse-IL | **Q8** register `Br`; cost gate vs LIR/fuse |
 | `*_churn` / `option_int_churn` / `result_int_churn` | several | dense, LIR, or fuse-IL | **B3** two-slot helper `CALL` / `RETURN`; cost gate vs fuse |
 | `hot` / match+call | `option_match_call.hy` | dense or LIR | **B3** two-slot CALL + Q8 `Br` |
-| `match_*` boxed enum | several | fuse-IL or LIR | boxed `JumpIfMatch` stays I2 LIR |
+| `match_*` boxed enum | several | dense, LIR, or fuse-IL | **I2** unary; **D3** multi-payload `Unpack`; cost gate |
 | `array_mut` | `array_mut.hy` | fuse-IL | `main` + write / format (Q9 R3 maps format; does not densify) |
 | `bump` | `looping_makearray.hy` | dense or SROA | mapped preheader or slot SROA |
 | `pack` | `s2d_inloop_pack_store.hy` | dense SROA | computed-index select |
@@ -150,3 +150,6 @@ dense after lift: `slot_env` follows trivial-phi subst so in-loop
 **D2** ([COI-356](https://linear.app/ardax/issue/COI-356)) reconstructs
 those as `DenseFieldLoad` / `DenseFieldStore` / `DenseMakeObject` so the
 cost gate can keep field loops. LIR still `HeapField`.
+**D3** ([COI-357](https://linear.app/ardax/issue/COI-357)) reconstructs
+boxed multi-payload `JumpIfMatch` / `Unpack(n)` with per-index maps.
+Keep/refuse is the cost gate. No trees opcode.

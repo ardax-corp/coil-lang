@@ -2214,7 +2214,18 @@ fn main() {
         assert!(text.contains("jumpifmatch"), "{text}");
         let g = parse_func(&text).expect(&text);
         g.verify().unwrap();
-        assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_err());
+        if let Ok(dense) = emit_dense(&f, Some(Label(0)), &mut pool, false) {
+            assert!(
+                dense.iter().any(|op| matches!(
+                    op,
+                    IlOp::Jump {
+                        kind: IlJumpKind::JumpIfMatch { tag: 1, .. },
+                        ..
+                    }
+                )),
+                "D3 boxed JumpIfMatch reconstruct"
+            );
+        }
     }
 
     #[test]
@@ -4515,6 +4526,245 @@ fn main() {
             )),
             "last arm must keep y + 2"
         );
+    }
+
+    #[test]
+    fn d3_unpack_arity2_lowers_and_emits_lir() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::Unpack).with_operand_u32(2),
+                loc,
+            },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Load { slot: 2, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("pair");
+        hints.slot_ty.insert(0, MirTy::I64);
+        hints.param_count = 1;
+        hints.allow_match = true;
+        let f = try_lower_numeric(&ops, &hints).expect("D3 Unpack arity 2");
+        f.verify().unwrap();
+        let payloads: Vec<_> = f
+            .blocks
+            .iter()
+            .flat_map(|b| b.insts.iter())
+            .filter_map(|i| match i {
+                MirInst::MatchPayload { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(payloads, vec![0, 1], "per-index MatchPayload maps: {payloads:?}");
+        let mut pool = Vec::new();
+        let lir = try_lower_abi_body(&ops, "pair", 1, &mut pool).expect("D3 LIR Unpack 2");
+        let unpacks: Vec<u32> = lir
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
+                    Some(byte.operand_u32())
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(unpacks, vec![2], "LIR must emit one Unpack arity 2; got {unpacks:?}");
+    }
+
+    #[test]
+    fn d3_binary_trees_item_check_checksum_and_unpack() {
+        let src = r#"
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+#[max_depth(64)]
+fn item_check(Tree t) -> int {
+    return match t {
+        Tree::Leaf => 1,
+        Tree::Node(left, right) => 1 + item_check(left) + item_check(right),
+    };
+}
+fn main() {
+    let n = item_check(Tree::Node(Tree::Leaf(), Tree::Node(Tree::Leaf(), Tree::Leaf())));
+    if n != 5 {
+        panic "item_check checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile item_check");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "item_check")
+            .expect("item_check");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let unpack = bc[start..end]
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Unpack)
+            .count();
+        let unpack_arity: Vec<u32> = bc[start..end]
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::Unpack)
+            .map(|b| b.operand_u32())
+            .collect();
+        let names: Vec<_> = bc[start..end]
+            .iter()
+            .map(|b| format!("{}#{}", b.bytecode().mnemonic(), b.operand_u32()))
+            .collect();
+        assert_eq!(
+            unpack, 1,
+            "item_check should keep one payload Unpack; arity={unpack_arity:?} ops={names:?}"
+        );
+        assert_eq!(unpack_arity, vec![2], "item_check Node unpack is arity 2");
+        assert!(
+            names.iter().any(|n| n.starts_with("Seek#")),
+            "D3 reconstruct reserves payload/call slots; ops={names:?}"
+        );
+        assert!(
+            names.iter().any(|n| n.starts_with("STORE#")),
+            "D3 parks Unpack payloads and CALL dests; ops={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "binary_trees must run");
+    }
+
+    #[test]
+    fn d3_last_arm_payload_plus_const_checksum() {
+        let src = r#"
+enum Phase {
+    Low(int),
+    Mid(int),
+    High(int),
+}
+fn score_phase(Phase p) -> int {
+    return match p {
+        Phase::Low(v) => v,
+        Phase::Mid(x) => x + 1,
+        Phase::High(y) => y + 2,
+    };
+}
+fn main() {
+    if score_phase(Phase::Low(3)) != 3 { panic "low"; }
+    if score_phase(Phase::Mid(4)) != 5 { panic "mid"; }
+    if score_phase(Phase::High(5)) != 7 { panic "high"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile score_phase");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "last-arm payload plus const");
+    }
+
+    #[test]
+    fn d3_nested_rematch_keeps_outer_binding() {
+        let src = r#"
+enum Choice {
+    A(int),
+    B,
+}
+fn nested(Choice c) -> int {
+    return match c {
+        Choice::A(x) => match c {
+            Choice::A(y) => x + y,
+            Choice::B => -1,
+        },
+        Choice::B => 0,
+    };
+}
+fn main() {
+    if nested(Choice::A(21)) != 42 { panic "nested rematch"; }
+    if nested(Choice::B) != 0 { panic "nested B"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile nested rematch");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "nested rematch must keep outer binding");
+    }
+
+    #[test]
+    fn d3_nested_option_field_keeps_outer_binding() {
+        let src = r#"
+class BoxInt {
+    pub opt: Option<int>,
+}
+fn nested_same_field(BoxInt b) -> int {
+    return match b.opt {
+        Option::Some(v) => match b.opt {
+            Option::Some(v2) => v + v2,
+            Option::None => -1,
+        },
+        Option::None => 0,
+    };
+}
+fn triple(BoxInt box) -> int {
+    return match box.opt {
+        Option::Some(a) => match box.opt {
+            Option::Some(b) => match box.opt {
+                Option::Some(c) => a + b + c,
+                Option::None => -1,
+            },
+            Option::None => -2,
+        },
+        Option::None => 0,
+    };
+}
+fn main() {
+    let x = new BoxInt(Option::Some(21));
+    if nested_same_field(x) != 42 { panic "nested option field"; }
+    let y = new BoxInt(Option::Some(7));
+    if triple(y) != 21 { panic "triple nested"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile nested option field");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "nested option field must keep outer binding");
+    }
+
+    #[test]
+    fn d3_match_arm_let_trailing_value() {
+        let src = r#"
+enum Choice {
+    Value(int),
+    Stop,
+}
+fn choose(Choice choice) -> int {
+    return match choice {
+        Choice::Value(x) => {
+            let adjusted = x + 1;
+            adjusted
+        },
+        Choice::Stop => {
+            return 40;
+        },
+    };
+}
+fn main() {
+    if choose(Choice::Value(41)) != 42 { panic "choose value"; }
+    if choose(Choice::Stop) != 40 { panic "choose stop"; }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile choose");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "match arm let trailing value");
     }
 
     #[test]

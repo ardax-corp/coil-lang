@@ -51,6 +51,8 @@ pub struct MirBuilder {
     pub skip_verify: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
     pub pending_loc: DebugLoc,
+    /// Last match-arm `Seek` (payload_base for arity-0 JumpIfMatch).
+    pub match_seek: Option<u32>,
 }
 
 impl MirBuilder {
@@ -67,6 +69,7 @@ impl MirBuilder {
             allow_effects: false,
             skip_verify: false,
             pending_loc: DebugLoc::unknown(),
+            match_seek: None,
         }
     }
 
@@ -426,9 +429,6 @@ impl MirBuilder {
         taken: BlockId,
         not_taken: BlockId,
     ) -> Result<(), MirError> {
-        if payloads.len() > 1 {
-            return Err(MirError::msg("I2 JumpIfMatch arity > 1"));
-        }
         let st = self.resolve_ty(scrutinee);
         if !st.is_specialized() {
             return Err(MirError::msg(format!("JumpIfMatch scrutinee is {st}")));
@@ -451,9 +451,6 @@ impl MirBuilder {
         index: u32,
         ty: MirTy,
     ) -> Result<ValueId, MirError> {
-        if index > 0 {
-            return Err(MirError::msg("I2 MatchPayload index > 0"));
-        }
         if !ty.is_specialized() {
             return Err(MirError::msg(format!("MatchPayload type {ty}")));
         }

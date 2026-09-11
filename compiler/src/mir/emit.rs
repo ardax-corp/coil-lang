@@ -93,6 +93,8 @@ pub fn emit_dense(
             out.push(IlOp::Label(block_lab[block.id.index()]));
         }
         let mut stacked: Vec<ValueId> = Vec::new();
+        let loc = func.term_loc(block.id);
+        seed_jim_taken_stack(&mut out, &mut stacked, func, block.id, &plan, &regs, loc);
         for inst in &block.insts {
             if inst.is_phi() {
                 continue;
@@ -128,6 +130,46 @@ pub fn emit_dense(
                     pool,
                     loc,
                 )?;
+                continue;
+            }
+            if let MirInst::MatchPayload {
+                dest,
+                scrutinee,
+                index,
+            } = inst
+            {
+                if is_jim_term_payload(func, *dest) {
+                    continue;
+                }
+                let st = func.ty(*scrutinee);
+                if matches!(st, MirTy::NicheOpt | MirTy::NicheRes) {
+                    if plan.needs_slot(*dest) {
+                        emit_inst(
+                            &mut out,
+                            inst,
+                            func,
+                            &regs,
+                            scratch,
+                            pool,
+                            loc,
+                            across_alloc,
+                        )?;
+                        stacked.clear();
+                    }
+                    continue;
+                }
+                if *index == 0 {
+                    emit_boxed_last_arm_unpack(
+                        &mut out,
+                        &mut stacked,
+                        func,
+                        block.id,
+                        *scrutinee,
+                        &plan,
+                        &regs,
+                        loc,
+                    );
+                }
                 continue;
             }
             if !plan.needs_slot(inst.dest()) {
@@ -182,29 +224,71 @@ pub(super) fn max_label_hint(entry: Option<Label>) -> u32 {
 }
 
 pub(super) fn assign_regs(func: &MirFunc, need_slot: &[bool]) -> Result<(Vec<u8>, u8), LowerError> {
+    assign_regs_prefer_payloads(func, need_slot)
+}
+
+pub(super) fn assign_regs_prefer_payloads(
+    func: &MirFunc,
+    need_slot: &[bool],
+) -> Result<(Vec<u8>, u8), LowerError> {
     let n = func.types.len();
     let mut reg = vec![0u8; n];
+    let mut taken = vec![false; n];
     for (i, &p) in func.params.iter().enumerate() {
         if i > 254 {
             return Err(LowerError::Refused("too many params".into()));
         }
         reg[p.index()] = i as u8;
+        taken[p.index()] = true;
     }
     let mut next = func.params.len();
+    next = assign_match_payload_regs(func, need_slot, &mut reg, &mut taken, next)?;
     for i in 0..n {
-        if !need_slot.get(i).copied().unwrap_or(false) {
-            continue;
-        }
-        if func.params.iter().any(|p| p.index() == i) {
+        if !need_slot.get(i).copied().unwrap_or(false) || taken[i] {
             continue;
         }
         if next > 254 {
             return Err(LowerError::Refused("too many dense slots".into()));
         }
         reg[i] = next as u8;
+        taken[i] = true;
         next += 1;
     }
     Ok((reg, next as u8))
+}
+
+fn assign_match_payload_regs(
+    func: &MirFunc,
+    need_slot: &[bool],
+    reg: &mut [u8],
+    taken: &mut [bool],
+    mut next: usize,
+) -> Result<usize, LowerError> {
+    let mut dests: Vec<(u32, ValueId)> = Vec::new();
+    for b in &func.blocks {
+        for inst in &b.insts {
+            if let MirInst::MatchPayload { dest, index, .. } = inst {
+                if !need_slot.get(dest.index()).copied().unwrap_or(false) {
+                    continue;
+                }
+                if taken[dest.index()] {
+                    continue;
+                }
+                dests.push((*index, *dest));
+            }
+        }
+    }
+    dests.sort_by_key(|(index, dest)| (*index, dest.0));
+    dests.dedup_by_key(|(_, dest)| dest.0);
+    for (_, dest) in dests {
+        if next > 254 {
+            return Err(LowerError::Refused("too many match payload slots".into()));
+        }
+        reg[dest.index()] = next as u8;
+        taken[dest.index()] = true;
+        next += 1;
+    }
+    Ok(next)
 }
 
 pub(super) fn next_emitted(func: &MirFunc, from: BlockId) -> Option<BlockId> {
@@ -872,16 +956,19 @@ fn emit_term(
         Terminator::JumpIfMatch {
             scrutinee,
             tag,
+            payloads,
             taken,
             not_taken,
-            ..
         } => {
             emit_dense_jump_if_match(
                 out,
+                stacked,
                 func,
+                plan,
                 block,
                 *scrutinee,
                 *tag,
+                payloads,
                 *taken,
                 *not_taken,
                 regs,
@@ -889,6 +976,7 @@ fn emit_term(
                 block_lab,
                 next_label,
                 reserved,
+                pool,
                 loc,
             )?;
         }
@@ -1043,10 +1131,13 @@ fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u16, LowerError> {
 
 fn emit_dense_jump_if_match(
     out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
     func: &MirFunc,
+    plan: &ConvoyPlan,
     block: &super::func::MirBlock,
     scrutinee: ValueId,
     tag: u32,
+    payloads: &[ValueId],
     taken: BlockId,
     not_taken: BlockId,
     regs: &[u8],
@@ -1054,13 +1145,28 @@ fn emit_dense_jump_if_match(
     block_lab: &[Label],
     next_label: &mut u32,
     reserved: &HashSet<u32>,
+    pool: &mut Vec<u64>,
     loc: DebugLoc,
 ) -> Result<(), LowerError> {
     let st = func.ty(scrutinee);
     if !matches!(st, MirTy::NicheOpt | MirTy::NicheRes) {
-        return Err(LowerError::Refused(
-            "dense JumpIfMatch is niche-only (boxed stays LIR)".into(),
-        ));
+        return emit_boxed_jump_if_match(
+            out,
+            stacked,
+            func,
+            plan,
+            block,
+            scrutinee,
+            tag,
+            payloads,
+            taken,
+            not_taken,
+            regs,
+            scratch,
+            block_lab,
+            pool,
+            loc,
+        );
     }
     if tag > 1 {
         return Err(LowerError::Refused(
@@ -1135,6 +1241,161 @@ fn emit_dense_jump_if_match(
         loc,
         hint: Default::default(),
     });
+    Ok(())
+}
+
+fn is_jim_term_payload(func: &MirFunc, dest: ValueId) -> bool {
+    func.blocks.iter().any(|b| {
+        matches!(
+            &b.term,
+            Some(Terminator::JumpIfMatch { payloads, .. }) if payloads.contains(&dest)
+        )
+    })
+}
+
+fn seed_jim_taken_stack(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    func: &MirFunc,
+    block: BlockId,
+    plan: &ConvoyPlan,
+    regs: &[u8],
+    loc: DebugLoc,
+) {
+    for pred in &func.preds()[block.index()] {
+        let Some(Terminator::JumpIfMatch {
+            taken,
+            payloads,
+            ..
+        }) = &func.block(*pred).term
+        else {
+            continue;
+        };
+        if *taken != block {
+            continue;
+        }
+        if payloads.is_empty() {
+            continue;
+        }
+        if payloads.len() > 1 || payloads.iter().any(|d| plan.needs_slot(*d)) {
+            for dest in payloads.iter().rev() {
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            stacked.clear();
+        } else {
+            stacked.clear();
+            stacked.extend(payloads.iter().copied());
+        }
+        return;
+    }
+}
+
+fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<ValueId> {
+    let mut group = Vec::new();
+    for inst in &func.block(block).insts {
+        let MirInst::MatchPayload {
+            dest,
+            scrutinee: src,
+            index,
+        } = inst
+        else {
+            continue;
+        };
+        if *src != scrutinee || is_jim_term_payload(func, *dest) {
+            continue;
+        }
+        let i = *index as usize;
+        if group.len() <= i {
+            group.resize(i + 1, *dest);
+        }
+        group[i] = *dest;
+    }
+    group
+}
+
+fn emit_boxed_last_arm_unpack(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    func: &MirFunc,
+    block: BlockId,
+    scrutinee: ValueId,
+    plan: &ConvoyPlan,
+    regs: &[u8],
+    loc: DebugLoc,
+) {
+    let group = last_arm_payloads(func, block, scrutinee);
+    let arity = group.len() as u32;
+    if arity == 0 {
+        return;
+    }
+    out.push(IlOp::from_plain_byte(
+        Byte::new(Instruction::Unpack).with_operand_u32(arity),
+        loc,
+    ));
+    if group.len() > 1 || group.iter().any(|d| plan.needs_slot(*d)) {
+        for dest in group.iter().rev() {
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        stacked.clear();
+    } else {
+        stacked.clear();
+        stacked.extend(group);
+    }
+}
+
+fn emit_boxed_jump_if_match(
+    out: &mut Vec<IlOp>,
+    stacked: &mut Vec<ValueId>,
+    func: &MirFunc,
+    plan: &ConvoyPlan,
+    block: &super::func::MirBlock,
+    scrutinee: ValueId,
+    tag: u32,
+    payloads: &[ValueId],
+    taken: BlockId,
+    not_taken: BlockId,
+    regs: &[u8],
+    scratch: u8,
+    block_lab: &[Label],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+) -> Result<(), LowerError> {
+    if !phi_moves(func, block.id, taken, regs, scratch).is_empty()
+        || !phi_moves(func, block.id, not_taken, regs, scratch).is_empty()
+    {
+        return Err(LowerError::Refused(
+            "dense boxed JumpIfMatch + phi moves (keep fuse-IL)".into(),
+        ));
+    }
+    emit_stack_value(out, stacked, scrutinee, func, plan, regs, pool, loc)?;
+    out.push(IlOp::Jump {
+        kind: IlJumpKind::JumpIfMatch {
+            tag,
+            arity: payloads.len() as u32,
+        },
+        target: block_lab[taken.index()],
+        loc,
+        hint: Default::default(),
+    });
+    if stacked.last() == Some(&scrutinee) {
+        stacked.pop();
+    } else {
+        stacked.clear();
+    }
+    if !is_fallthrough(func, block.id, not_taken) {
+        out.push(IlOp::Jump {
+            kind: IlJumpKind::Unconditional,
+            target: block_lab[not_taken.index()],
+            loc,
+            hint: Default::default(),
+        });
+    }
     Ok(())
 }
 

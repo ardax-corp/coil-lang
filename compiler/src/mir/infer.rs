@@ -11,8 +11,9 @@
 //! I6-typed HostInvoke including Q9 R2 `from_bytes` / `to_bytes`;
 //! heap index / `ArrayLen` / `StoreIndex` paint `heapref` lanes. **Q8**:
 //! niche slots and arity-≤1 `JumpIfMatch` / `Unpack` / `Seek` infer on
-//! every mode (dense reconstruct is register `Br`). Counted `for` (Q6)
-//! is ordinary i64 + index IL — no extra refuse. Still refuse unmapped
+//! every mode (dense reconstruct is register `Br`). **D3:** boxed
+//! `JumpIfMatch` / `Unpack` arity > 1 infer (per-index payloads). Counted
+//! `for` (Q6) is ordinary i64 + index IL — no extra refuse. Still refuse unmapped
 //! alloc / residual `Byte` / `Pow` / `AND`/`OR`. **D2**: dense infer types
 //! heap `GetField` / `SetField` / `LoadField`. Q9 R1: LIR infer accepts
 //! `STRING` / `PRINT` / `FORMAT` / `STRINGIFY`; dense infer still refuses
@@ -402,17 +403,21 @@ fn infer_walk(
                     apply_seek(&mut stack, &slot_ty, byte.operand_u32())?;
                 }
                 Instruction::Unpack => {
-                    let arity = byte.operand_u32();
-                    if arity > 1 {
-                        return Err(LowerError::Refused("Unpack arity > 1 (I2)".into()));
-                    }
-                    let _ = stack
+                    let arity = byte.operand_u32() as usize;
+                    let src = stack
                         .pop()
                         .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
-                    if arity == 1 {
+                    let ty = match src.ty {
+                        Some(MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef) => {
+                            MirTy::HeapRef
+                        }
+                        Some(other) => other,
+                        None => MirTy::I64,
+                    };
+                    for _ in 0..arity {
                         stack.push(Cell {
                             origin: Origin::Tmp,
-                            ty: Some(MirTy::I64),
+                            ty: Some(ty),
                             imm: None,
                         });
                     }
@@ -494,19 +499,15 @@ fn infer_walk(
                 }
             },
             IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfMatch { tag, arity },
+                kind: crate::il::IlJumpKind::JumpIfMatch { tag, .. },
                 ..
             } => {
-                if *arity > 1 {
-                    return Err(LowerError::Refused(
-                        "JumpIfMatch arity > 1 (keep fuse-IL)".into(),
-                    ));
-                }
                 let _ = tag;
                 if stack.is_empty() {
                     return Err(LowerError::Refused("JumpIfMatch stack".into()));
                 }
-                // Peek: miss fallthrough is the linear walk.
+                // Peek: miss fallthrough is the linear walk. Taken payloads
+                // are SSA `MatchPayload`s, not a second infer walk.
             }
             IlOp::Jump { .. } | IlOp::Halt { .. } => {}
             IlOp::Return { ret_words, .. } if super::abi::ret_words_ok(*ret_words) => {}

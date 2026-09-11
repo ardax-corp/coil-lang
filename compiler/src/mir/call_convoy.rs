@@ -97,6 +97,18 @@ impl ConvoyPlan {
                 need_slot[i] = true;
             }
         }
+        for block in &func.blocks {
+            for inst in &block.insts {
+                if let MirInst::MatchPayload { dest, .. } = inst {
+                    need_slot[dest.index()] = true;
+                }
+            }
+            if let Some(Terminator::JumpIfMatch { payloads, .. }) = &block.term {
+                for d in payloads {
+                    need_slot[d.index()] = true;
+                }
+            }
+        }
         for i in 0..n {
             if !rematerialize_const(func, &def[i]) {
                 continue;
@@ -136,8 +148,30 @@ impl ConvoyPlan {
             }
         }
 
-        let _ = convoy;
-        Self {
+        // Boxed match parks payloads in slots. Self-CALL dests must not stay
+        // B2-convoy there: unassigned dest regs are 0, so rematerialized
+        // `1 + item_check(left) + item_check(right)` would LOAD the param.
+        let has_match_payload = func.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::MatchPayload { .. }))
+        });
+        if has_match_payload {
+            for block in &func.blocks {
+                for inst in &block.insts {
+                    if is_tail_call_inst(block, inst) {
+                        continue;
+                    }
+                    if let MirInst::Call { dest, dest_hi, .. } = inst {
+                        need_slot[dest.index()] = true;
+                        if let Some(hi) = dest_hi {
+                            need_slot[hi.index()] = true;
+                        }
+                    }
+                }
+            }
+        }
+        ConvoyPlan {
             need_slot,
             def,
             self_entry,
