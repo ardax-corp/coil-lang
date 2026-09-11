@@ -51,6 +51,12 @@ Help:
 the compiler does not auto-fork on a covering lock yet; a later hold check / runtime assert may admit shared steal
 ```
 
+A covering bag that lives only in a lambda is detected on the AST. Coil
+lambdas cannot call outer `fn`s, so a typechecking covering example cannot
+be `with_lock` around `rec(n-1)+rec(n-2)` today; the compile smoke uses an
+unlocked mutex on the named-fn bag instead. The covering wording is covered
+by the AST unit test.
+
 No hint when:
 
 - The function is **pure** (F0–F2 already IPA or grain-refuses).

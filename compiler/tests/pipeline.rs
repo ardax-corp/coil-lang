@@ -5929,34 +5929,43 @@ fn main() {
     );
 }
 
-/// Covering `with_lock` around a call bag: document the gate, still sequential.
+/// Unlocked mutex on a call bag: named hint, still sequential (no auto-fork).
 #[test]
-fn auto_par_covering_lock_stays_sequential_and_hints() {
+fn auto_par_mutex_escape_hints_and_stays_sequential() {
     let src = r#"
 use thread::{mutex, with_lock};
+fn bump(Mutex m) {
+    with_lock(m, fn (int x) => (x + 1, 0))?;
+}
+#[max_depth(64)]
 fn rec(Mutex m, int n) -> int {
-    if n <= 1 { return 1; }
-    return with_lock(m, fn (int x) => (x, rec(m, n - 1) + rec(m, n - 2)))?;
+    if n <= 1 {
+        bump(m);
+        return n;
+    }
+    return rec(m, n - 1) + rec(m, n - 2);
 }
 fn main() {
     let m = mutex(0)?;
-    rec(m, 3)?;
+    rec(m, 3);
 }
 "#;
     let mut pipeline = test_pipeline();
     let _ = pipeline
         .compile_src(src)
-        .expect("covering-lock rec should compile");
+        .expect("mutex-escape rec should compile");
     assert!(
         pipeline.function_offset("__coil_par_rec").is_none(),
-        "covering lock must not auto-fork"
+        "unlocked mutex escape must not auto-fork"
     );
     assert!(
         pipeline.messages().iter().any(|m| {
             m.code() == Some(compiler::ErrorCode::ParLockHint)
-                && m.message().contains("covering lock on `m`")
+                && m.message().contains("call bag in `rec`")
+                && m.message().contains("`m` (mutex)")
+                && !m.message().contains("covering lock")
         }),
-        "F3 covering gate: {:?}",
+        "F3 must name the mutex escape: {:?}",
         pipeline
             .messages()
             .iter()
