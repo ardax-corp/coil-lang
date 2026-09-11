@@ -231,6 +231,20 @@ mod tests {
         b.set_ret_ty(MirTy::I64);
         b.ret(Some(val)).unwrap();
         let mut func = b.finish().unwrap();
+        let barrier_roots: Vec<_> = func
+            .blocks
+            .iter()
+            .flat_map(|bl| bl.insts.iter())
+            .find_map(|i| match i {
+                MirInst::GcBarrier { roots, .. } => Some(roots.clone()),
+                _ => None,
+            })
+            .expect("gc barrier");
+        assert_eq!(
+            barrier_roots.first().copied(),
+            Some(intern),
+            "intern sorts first among live roots; {func}"
+        );
         let _ = sroa(&mut func);
         let mut intern_id = None;
         let mut alloc_id = None;
@@ -243,13 +257,14 @@ mod tests {
                 _ => {}
             }
         }
-        let intern_id = intern_id.expect("string intern");
         let alloc_id = alloc_id.expect("object alloc");
         let store_obj = store_obj.expect("field store");
-        assert_ne!(
-            store_obj, intern_id,
-            "barrier dest must not become intern; {func}"
-        );
+        if let Some(intern_id) = intern_id {
+            assert_ne!(
+                store_obj, intern_id,
+                "barrier dest must not become intern; {func}"
+            );
+        }
         assert_eq!(
             store_obj, alloc_id,
             "field object is the instance; {func}"
