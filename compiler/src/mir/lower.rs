@@ -4,8 +4,9 @@
 //! optional sidecar: escaping classes, leftover unmapped heap, and residual
 //! `Byte` (except a small numeric set) refuse so the existing `Value`
 //! interpreter is unchanged. One-word `CALL` (Q7), multi-word `CALL` /
-//! `RETURN` (B3 / B7 / C1), and niche / two-slot match (Q8) lower; keep/refuse
-//! is the cost gate.
+//! `RETURN` (B3 / B7 / C1), niche / two-slot match (Q8), and boxed
+//! multi-payload `Unpack` / `JumpIfMatch` (D3) lower; keep/refuse is the
+//! cost gate.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -325,13 +326,23 @@ fn first_emitting_at(ops: &[IlOp], taken: Label) -> Option<&IlOp> {
     first_emitting(&ops[i + 1..])
 }
 
+fn taken_ops(ops: &[IlOp], taken: Label) -> &[IlOp] {
+    let Some(i) = ops.iter().position(|op| match op {
+        IlOp::Label(l) | IlOp::JoinLabel(l) => *l == taken,
+        _ => false,
+    }) else {
+        return &[];
+    };
+    &ops[i + 1..]
+}
+
 /// Boxed match codegen emits `JumpIfMatch` / last-arm `Unpack` arity 0;
-/// the VM still pushes a unary payload. Arity ≥ 1 is explicit. Arity 0
-/// recovers a payload when the taken arm is identity-`RETURN`, overlap
-/// `LOAD` / `BinSlotImm`, or a stack `Bin`.
+/// the VM still pushes a unary payload. Arity ≥ 1 is the payload count.
+/// Arity 0 recovers a payload when the taken arm is identity-`RETURN`,
+/// overlap `LOAD` / `BinSlotImm`, or a stack `Bin`.
 fn jim_taken_payloads(arity: u32, first: Option<&IlOp>) -> u32 {
     if arity >= 1 {
-        return 1;
+        return arity;
     }
     match first {
         Some(IlOp::Return { .. })
@@ -342,13 +353,63 @@ fn jim_taken_payloads(arity: u32, first: Option<&IlOp>) -> u32 {
     }
 }
 
+fn match_payload_ty(src_ty: MirTy) -> MirTy {
+    match src_ty {
+        MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef => MirTy::HeapRef,
+        other => other,
+    }
+}
+
+/// Bind `n` per-index payloads. Overlap `LOAD` / `BinSlotImm` maps
+/// declaration order onto consecutive reserved slots (`payload_base + i`).
+fn bind_match_payloads(
+    b: &mut MirBuilder,
+    src: ValueId,
+    n: u32,
+    next: Option<&IlOp>,
+    rest: &[IlOp],
+    tos: &mut Vec<ValueId>,
+    mut overlap: Option<&mut Vec<(LocalId, ValueId)>>,
+) -> Result<Vec<ValueId>, LowerError> {
+    let ty = match_payload_ty(b.func().ty(src));
+    let mut payloads = Vec::with_capacity(n as usize);
+    for i in 0..n {
+        payloads.push(b.ins_match_payload(src, i, ty)?);
+    }
+    if n == 0 {
+        return Ok(payloads);
+    }
+    if let Some(slot) = overlap_base(next, rest) {
+        for (i, &p) in payloads.iter().enumerate() {
+            let local = LocalId(slot + i as u32);
+            if let Some(ov) = overlap.as_mut() {
+                ov.push((local, p));
+            } else {
+                b.def_local(local, p)?;
+            }
+        }
+    } else {
+        tos.extend(payloads.iter().copied());
+    }
+    Ok(payloads)
+}
+
 /// Slot that receives the VM overlap write (`Seek` + reserved local).
 fn boxed_overlap_slot(first: Option<&IlOp>) -> Option<u32> {
     match first {
         Some(IlOp::Load { slot, .. }) => Some(*slot),
         Some(IlOp::BinSlotImm { slot, .. }) => Some(u32::from(*slot)),
+        Some(IlOp::Byte { byte, .. }) if *byte.bytecode() == Instruction::LOAD => {
+            byte.load_store_single_slot()
+        }
         _ => None,
     }
+}
+
+fn overlap_base(next: Option<&IlOp>, rest: &[IlOp]) -> Option<u32> {
+    boxed_overlap_slot(next).or_else(|| {
+        rest.iter().find_map(|op| boxed_overlap_slot(Some(op)))
+    })
 }
 
 fn split_blocks(ops: &[IlOp]) -> Vec<(usize, usize)> {
@@ -517,11 +578,6 @@ fn emit_term(
             if !hints.allow_match {
                 return Err(LowerError::Refused("JumpIfMatch / classes".into()));
             }
-            if *arity > 1 {
-                return Err(LowerError::Refused(
-                    "JumpIfMatch arity > 1 (keep fuse-IL)".into(),
-                ));
-            }
             let scrutinee = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("JumpIfMatch stack".into()))?;
@@ -531,27 +587,24 @@ fn emit_term(
             let not_taken =
                 fallthrough.ok_or_else(|| LowerError::Refused("JumpIfMatch fallthrough".into()))?;
             let first = first_emitting_at(ops, *target);
+            let taken_rest = taken_ops(ops, *target);
             let n_payloads = jim_taken_payloads(*arity, first);
-            let mut payloads = Vec::new();
-            if n_payloads == 1 {
-                let ty = match b.func().ty(scrutinee) {
-                    MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef => MirTy::HeapRef,
-                    other => other,
-                };
-                payloads.push(b.ins_match_payload(scrutinee, 0, ty)?);
-            }
             let mut taken_stack = tos.clone();
-            // Boxed overlap: payload lands in a reserved slot (`LOAD` /
-            // `BinSlotImm` first). Identity `Case(x) => x` leaves it on TOS.
-            if n_payloads == 1 {
-                if let (Some(slot), Some(&p)) = (boxed_overlap_slot(first), payloads.first()) {
-                    overlap_defs
-                        .entry(taken)
-                        .or_default()
-                        .push((LocalId(slot), p));
-                } else {
-                    taken_stack.extend(payloads.iter().copied());
-                }
+            let mut taken_overlap = Vec::new();
+            let payloads = bind_match_payloads(
+                b,
+                scrutinee,
+                n_payloads,
+                first,
+                taken_rest,
+                &mut taken_stack,
+                Some(&mut taken_overlap),
+            )?;
+            if !taken_overlap.is_empty() {
+                overlap_defs
+                    .entry(taken)
+                    .or_default()
+                    .extend(taken_overlap);
             }
             let mut miss_stack = tos.clone();
             miss_stack.push(scrutinee);
@@ -669,7 +722,7 @@ fn lower_op(
             tos.push(apply_bin(b, inst, lhs, rhs)?);
             Ok(())
         }
-        IlOp::Byte { byte, .. } => lower_byte(b, tos, byte, next, hints),
+        IlOp::Byte { byte, .. } => lower_byte(b, tos, byte, next, rest, hints),
         IlOp::Jump { .. }
         | IlOp::Return { .. }
         | IlOp::Halt { .. }
@@ -858,6 +911,7 @@ fn lower_byte(
     tos: &mut Vec<ValueId>,
     byte: &common::Byte,
     next: Option<&IlOp>,
+    rest: &[IlOp],
     hints: &LowerHints,
 ) -> Result<(), LowerError> {
     match *byte.bytecode() {
@@ -975,27 +1029,11 @@ fn lower_byte(
         inst if is_format_inst(inst) => Err(LowerError::Refused("format".into())),
         Instruction::Unpack if hints.allow_match => {
             let arity = byte.operand_u32();
-            if arity > 1 {
-                return Err(LowerError::Refused("Unpack arity > 1 (I2)".into()));
-            }
             let src = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
             let n_payloads = jim_taken_payloads(arity, next);
-            if n_payloads == 1 {
-                let ty = match b.func().ty(src) {
-                    MirTy::NicheOpt | MirTy::NicheRes | MirTy::HeapRef => MirTy::HeapRef,
-                    other => other,
-                };
-                let p = b.ins_match_payload(src, 0, ty)?;
-                // Last-arm overlap: `Unpack` writes the reserved slot; a
-                // following `LOAD` / `BinSlotImm` must see that local.
-                if let Some(slot) = boxed_overlap_slot(next) {
-                    b.def_local(LocalId(slot), p)?;
-                } else {
-                    tos.push(p);
-                }
-            }
+            bind_match_payloads(b, src, n_payloads, next, rest, tos, None)?;
             Ok(())
         }
         other => Err(LowerError::Refused(format!(
