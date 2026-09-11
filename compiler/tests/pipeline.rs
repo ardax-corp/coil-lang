@@ -4760,6 +4760,106 @@ fn main() {
     assert_eq!(output, "ad");
 }
 
+/// Top-level named `fn`s are callable from a lambda without `use` (empty captures).
+#[test]
+fn named_fn_callable_inside_lambda_without_capture() {
+    let output = run_example_src(
+        r#"
+use io::{stdout};
+use io::sync::{write_all};
+use string::{format, to_bytes};
+fn rec(int n) -> int { return n + 1; }
+fn main() {
+    let f = fn (int x) => rec(x);
+    write_all(stdout(), to_bytes(format("%i", f(41))));
+}
+"#,
+    );
+    assert_eq!(output, "42");
+}
+
+/// Capture-free `with_lock` callback may CALL a named `fn`.
+#[test]
+fn with_lock_lambda_calls_named_fn_without_capture() {
+    let output = run_example_src(
+        r#"
+use thread::{mutex, with_lock};
+use io::{stdout};
+use io::sync::{write_all};
+use string::{format, to_bytes};
+fn bump(int x) -> int { return x + 1; }
+fn main() {
+    let m = mutex(41)?;
+    let n = with_lock(m, fn (int x) => (bump(x), bump(x)))?;
+    write_all(stdout(), to_bytes(format("%i", n)));
+}
+"#,
+    );
+    assert_eq!(output, "42");
+}
+
+/// Capture-free `spawn` lambda may CALL a named `fn`.
+#[test]
+fn spawn_lambda_calls_named_fn_without_capture() {
+    let output = run_example_src(
+        r#"
+use thread::{spawn, join};
+use io::{stdout};
+use io::sync::{write_all};
+use string::{format, to_bytes};
+fn work() -> int { return 42; }
+fn main() {
+    let t = spawn(fn () => work())?;
+    write_all(stdout(), to_bytes(format("%i", join(t)?)));
+}
+"#,
+    );
+    assert_eq!(output, "42");
+}
+
+/// Capturing lambda is still refused by `with_lock` (runtime NotSendable).
+#[test]
+fn with_lock_still_rejects_capturing_lambda() {
+    let output = run_example_src(
+        r#"
+use thread::{mutex, with_lock};
+use io::{stdout};
+use io::sync::{write_all};
+use string::{format, to_bytes};
+fn main() {
+    let extra = 1;
+    let m = mutex(0)?;
+    let code = match with_lock(m, fn (int x) use (extra) => (x, extra)) {
+        Result.Ok(_) => 1,
+        Result.Err(_) => 0,
+    };
+    write_all(stdout(), to_bytes(format("%i", code)));
+}
+"#,
+    );
+    assert_eq!(output, "0");
+}
+
+/// Outer lambda still requires `use` to be called from another lambda.
+#[test]
+fn lambda_still_requires_outer_lambda_capture() {
+    let mut pipeline = test_pipeline();
+    let result = pipeline.compile_src(
+        r#"
+fn main() {
+    let g = fn (int x) => x;
+    let f = fn (int x) => g(x);
+    f(1);
+}
+"#,
+    );
+    assert!(
+        result.is_err(),
+        "outer lambda `g` must still require `use (g)`: {:?}",
+        pipeline.messages()
+    );
+}
+
 /// Disk-import rebind must not suppress explicit-capture checks for locals.
 #[test]
 fn disk_import_lambda_still_requires_local_capture() {

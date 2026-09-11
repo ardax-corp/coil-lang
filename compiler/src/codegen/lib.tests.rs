@@ -7243,6 +7243,38 @@ fn main() {
         );
     }
 
+    /// Lambda that only CALLs a top-level named `fn` is capture-free.
+    #[test]
+    fn lambda_named_fn_call_emits_call_with_empty_captures() {
+        use common::Instruction;
+        let (bc, _) = compile_src(
+            r#"
+fn rec(int n) -> int { return n + 1; }
+fn main() {
+    let f = fn (int x) => rec(x);
+    let y = f(41);
+}
+"#,
+        );
+        let make_fn: Vec<_> = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::MakeFn))
+            .collect();
+        assert!(
+            make_fn
+                .iter()
+                .any(|b| b.operand_u32() == make_fn_operand(0, 0, 1, false)),
+            "expected MakeFn(n_cap=0, n_filled=0, arity=1); got operands {:?}",
+            make_fn.iter().map(|b| b.operand_u32()).collect::<Vec<_>>()
+        );
+        assert!(
+            bc.iter()
+                .any(|b| matches!(b.bytecode(), Instruction::CALL)),
+            "lambda body must CALL the named fn; opcodes: {:?}",
+            bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
+        );
+    }
+
     /// Explicit-capture lambda must MakeFn with n_cap matching `use (...)`.
     #[test]
     fn lambda_emits_make_fn_with_capture_count() {
