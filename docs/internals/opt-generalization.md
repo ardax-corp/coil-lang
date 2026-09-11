@@ -147,7 +147,7 @@ list. Q6–Q9 first rungs turned most of those named commits into
 | Dense+match (stack vs regs) | **Q8:** niche / two-slot match may dense (register `Br`, cost gate). Boxed `JumpIfMatch` may LIR (I2) or dense (**D3** multi-payload). **B3:** two-slot `CALL` / `RETURN` may dense or LIR (cost gate) | Cost gate |
 | Multi-payload `Unpack` / `JumpIfMatch` arity > 1 | **D3:** per-index `MatchPayload` + existing `Unpack(n)` / `JumpIfMatch`. Keep when reconstruct ≤ fuse. `item_check` is the flagship | Cost gate ([COI-357](https://linear.app/ardax/issue/COI-357)) |
 | Debugger-attached / `-Og` | **B8:** may dense / LIR (cost gate). **C3:** compiler-internal deopt maps, named-let remap, sparse MIR `DebugLoc`. Emit still skips `Deopt`. Native resume / P5 stay leftover ([mir-deopt.md](mir-deopt.md)) | Ladder (**I7** / **B8** / **C3**) |
-| Unmapped alloc / GC safepoint | **B6:** `ArrayPush` / `DenseArrayPush` grow sites encode S2b maps; CALL+alloc drafts bind (one-word `CALL`). Cost gate still refuses boxed reconstruct. Multi-payload match stays a wall | Ladder + cost (maps); leftover unmapped edges stay fuse-IL |
+| Unmapped alloc / GC safepoint | **B6:** `ArrayPush` / `DenseArrayPush` grow sites encode S2b maps; CALL+alloc drafts bind (one-word `CALL`). Cost gate still refuses boxed reconstruct. Multi-payload match is **D3** | Ladder + cost (maps); leftover unmapped edges stay fuse-IL |
 | Residual `Byte` / `Pow` / `AND`/`OR` | Unchanged | Hard wall (later island) |
 | Compare-only (no arith) | Unchanged — fuse-IL or I8 LIR | Cost gate |
 
