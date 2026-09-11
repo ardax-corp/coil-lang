@@ -7621,8 +7621,7 @@ impl Compiler {
         else {
             return;
         };
-        // Cheapest arg vectors first: arms shrink their args, so a parent then
-        // finds its children's nullary clones already bound.
+        // Stable order only: arms call the sequential original, not child clones.
         let mut ordered: Vec<Vec<i64>> = arg_sets.into_iter().collect();
         ordered.sort_by(|a, b| (a.iter().sum::<i64>(), a).cmp(&(b.iter().sum::<i64>(), b)));
         for args in &ordered {
@@ -7632,9 +7631,10 @@ impl Compiler {
 
     /// Emit one always-fork nullary clone of `site.fn_name` at `parent_args`.
     ///
-    /// Arm 0 is spawned onto the work-stealing reactor, the remaining arms run
-    /// inline, and the joined results are folded by the site's combine. A
-    /// failed spawn falls back to evaluating every arm sequentially.
+    /// Top-site AlwaysPar (COI-361 E3): arm 0 is spawned onto the reactor as
+    /// the **sequential** original with concrete args, remaining arms run
+    /// inline the same way, then join + combine. Nested `__coil_par_*` clones
+    /// are not entered from here. A failed spawn falls back to sequential arms.
     fn emit_one_par_specialization(
         &mut self,
         site: &crate::typechecking::ParForkSite,
@@ -7888,20 +7888,14 @@ impl Compiler {
 
     /// Callable for one arm: `(entry, arity, needs_push_args)`.
     ///
-    /// A child level that is itself specialized is invoked as its nullary
-    /// clone; otherwise the callee is called with concrete args.
+    /// Arms always call the sequential original with concrete args. Nested
+    /// AlwaysPar clones are not evidence; only AST const sites rewrite.
     fn par_arm_callable(
         &self,
         arm: &crate::typechecking::ParArm,
         child_args: &[i64],
     ) -> Option<(u32, u32, bool)> {
         let callee = crate::typechecking::arm_callee(arm);
-        if crate::typechecking::args_worth_parallel(&self.par_shapes, callee, child_args) {
-            let spec = crate::typechecking::par_specialization_name(callee, child_args);
-            if let Some(&off) = self.functions.get(&spec) {
-                return Some((off as u32, 0, false));
-            }
-        }
         let entry = self.resolve_par_fn_entry(callee)? as u32;
         Some((entry, child_args.len() as u32, true))
     }
