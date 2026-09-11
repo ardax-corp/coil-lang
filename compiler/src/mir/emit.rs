@@ -687,8 +687,30 @@ pub(super) fn emit_inst(
                         base,
                     ),
                 ));
-            } else if let Some(op) = dense_make_object(*kind, regs[dest.index()], loc)? {
-                out.push(op);
+            } else if let Some(live) = object_make_dest_reg(*kind, *dest, func, regs) {
+                if let Some(op) = dense_make_object(*kind, live, loc)? {
+                    out.push(op);
+                    let alloc_r = regs[dest.index()];
+                    if alloc_r != live {
+                        out.push(move_op(alloc_r, live));
+                    }
+                    // One-object bodies: field SSA may still sit in a STRING
+                    // intern slot; seed those regs from the instance.
+                    if object_allocs(func) <= 1 {
+                        for r in field_object_regs(func, regs) {
+                            if r != live {
+                                out.push(move_op(r, live));
+                            }
+                        }
+                    }
+                } else {
+                    emit_dense_push(out, elems, regs, scratch, loc)?;
+                    out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
+                    out.push(IlOp::StorePop {
+                        slot: u32::from(live),
+                        loc,
+                    });
+                }
             } else {
                 emit_dense_push(out, elems, regs, scratch, loc)?;
                 out.push(il_for_alloc(*kind, elems.len() as u32, loc)?);
@@ -1639,6 +1661,65 @@ pub(super) fn il_for_alloc(
                 .with_operand_u32(common::pack_init_typed(type_id, nfields)),
         )),
     }
+}
+
+fn object_allocs(func: &MirFunc) -> usize {
+    func.blocks
+        .iter()
+        .flat_map(|b| b.insts.iter())
+        .filter(|i| matches!(i, MirInst::Alloc { kind: MirAllocKind::Object { .. }, .. }))
+        .count()
+}
+
+fn field_object_regs(func: &MirFunc, regs: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let obj = match inst {
+                MirInst::HeapFieldLoad { object, .. }
+                | MirInst::HeapFieldStore { object, .. } => *object,
+                _ => continue,
+            };
+            let r = regs[obj.index()];
+            if !out.contains(&r) {
+                out.push(r);
+            }
+        }
+    }
+    out
+}
+
+fn object_make_dest_reg(
+    kind: MirAllocKind,
+    alloc: ValueId,
+    func: &MirFunc,
+    regs: &[u8],
+) -> Option<u8> {
+    let MirAllocKind::Object { .. } = kind else {
+        return None;
+    };
+    let live = paired_barrier_for_alloc(func, alloc).unwrap_or(alloc);
+    Some(regs[live.index()])
+}
+
+/// Barrier dest that is the live InitTyped identity (users load this, not Alloc).
+fn paired_barrier_for_alloc(func: &MirFunc, alloc: ValueId) -> Option<ValueId> {
+    for block in &func.blocks {
+        let mut pending = false;
+        for inst in &block.insts {
+            match inst {
+                MirInst::Alloc { dest, .. } if *dest == alloc => pending = true,
+                MirInst::GcBarrier { dest, .. } if pending => return Some(*dest),
+                MirInst::Alloc { .. }
+                | MirInst::ArrayPush { .. }
+                | MirInst::Format { .. }
+                | MirInst::Stringify { .. } => pending = false,
+                _ if pending => pending = false,
+                _ => {}
+            }
+        }
+    }
+    None
 }
 
 /// Alloc dest paired with a `GcBarrier` dest in the same block.
