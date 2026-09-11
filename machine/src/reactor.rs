@@ -303,7 +303,13 @@ fn with_help_vm<R>(program: &ThreadProgram, f: impl FnOnce(&mut Machine<WORKER_S
     ensure_operand_capacity(&mut vm, program.operand_stack_slots);
     let out = f(&mut vm);
     vm.reset_isolate_heap();
-    HELP_VMS.with(|slot| slot.borrow_mut().push(vm));
+    HELP_VMS.with(|slot| {
+        let mut pool = slot.borrow_mut();
+        pool.push(vm);
+        // Nested steal can check out several VMs; keep one idle helper so
+        // peak RSS is not the high-water of every nest depth for the thread.
+        pool.truncate(1);
+    });
     out
 }
 
@@ -726,8 +732,8 @@ mod tests {
         });
         assert_eq!(
             help_vm_pool_len(),
-            2,
-            "nested join-help checks out a second VM and returns both"
+            1,
+            "nested join-help must not keep every nest depth idle"
         );
         HELP_VMS.with(|slot| slot.borrow_mut().clear());
     }
