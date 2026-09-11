@@ -18,6 +18,7 @@ pub mod loop_par;
 pub mod local_escape;
 pub mod index_facts;
 pub mod pretty;
+pub mod par_hint;
 pub mod par_profit;
 pub mod purity;
 pub mod return_layout;
@@ -43,6 +44,7 @@ pub use kind::Kind;
 #[allow(unused_imports)] // public API re-export
 pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sites};
 #[allow(unused_imports)] // public API re-export
+pub use par_hint::{analyze_par_escape_hints, EscapeKind, NamedEscape, ParEscapeHint};
 pub use par_profit::{
     ArgForm, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites, args_worth_parallel,
     arm_callee, collect_par_worker_fns, eval_arm_args, guards_hold, par_expr_grain, par_loop_grain,

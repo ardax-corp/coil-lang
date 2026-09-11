@@ -16048,6 +16048,15 @@ impl Compiler {
             self.par_workers =
                 crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
             self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
+            for hint in crate::typechecking::analyze_par_escape_hints(ast) {
+                let mut msg = Message::info(
+                    ErrorCode::ParLockHint,
+                    hint.message(),
+                    hint.span.clone(),
+                );
+                msg.with_help(hint.help());
+                self.messages.push(msg);
+            }
         } else {
             self.par_shapes.clear();
             self.par_workers.clear();

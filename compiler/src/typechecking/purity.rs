@@ -43,6 +43,17 @@ impl EffectFlags {
         self.0 == 0
     }
 
+    /// Effects a userland lock might cover for shared-heap steal (F3).
+    ///
+    /// IO / FFI / heap mutation / mutex. Yield, GC, clocks, and unknown
+    /// (`panic`) are not lockable edges.
+    pub const fn is_lockable_escape(self) -> bool {
+        self.contains(Self::IO)
+            || self.contains(Self::FFI)
+            || self.contains(Self::HEAP_MUT)
+            || self.contains(Self::THREAD)
+    }
+
     pub const fn contains(self, bit: u16) -> bool {
         self.0 & bit != 0
     }
