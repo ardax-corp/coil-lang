@@ -7920,7 +7920,8 @@ impl Compiler {
     // Loop IPA (chunked fork-join over an induction range)
 
     /// Emit a 2-way chunked fork-join for the counted loop at `span`, replacing
-    /// the sequential loop entirely. Returns `false`, with nothing emitted,     /// when any precondition fails, so the caller falls back to the plain loop.
+    /// the sequential loop entirely. Returns `false`, with nothing emitted,
+    /// when any precondition fails, so the caller falls back to the plain loop.
     ///
     /// The chunk worker is a private `(lo, hi, acc)` function holding the
     /// original body over `[lo, hi)`. `[mid, end)` is spawned onto the reactor
@@ -7929,8 +7930,9 @@ impl Compiler {
     fn try_emit_par_loop(
         &mut self,
         span: SimpleSpan,
-        cond: &Output<'_>,
+        iterable: &Output<'_>,
         body: &Output<'_>,
+        binding: Option<&Output<'_>>,
     ) -> bool {
         use crate::typechecking::LoopReduceOp;
 
@@ -7941,6 +7943,11 @@ impl Compiler {
         // induction variable and the per-iteration value must be `int`.
         if !self.ptr_ty_is_int(site.index_expr_ptr) || !self.ptr_ty_is_int(site.reduce_expr_ptr) {
             return false;
+        }
+        if site.implicit_step {
+            // Match sequential for-in: allocate the binding before looking it up
+            // so a shadowing `for x in` does not store into an outer `x`.
+            self.alloc_binding_slot(&site.index);
         }
         let (Some(index_slot), Some(acc_slot)) = (
             self.lookup_slot(&site.index),
@@ -7967,8 +7974,12 @@ impl Compiler {
         let identity = site.op.identity() as i32;
 
         // The chunk worker tests `i < hi` against its own bound, but the
-        // condition's NodeIds still have to be consumed in walk order.
-        self.discard_compile(cond);
+        // iterable (and for-in binding) NodeIds still have to be consumed in
+        // walk order: iterable → binding → body.
+        self.discard_compile(iterable);
+        if let Some(binding) = binding {
+            self.discard_compile(binding);
+        }
 
         let mut bb = BlockBuilder::new();
         let after_worker = bb.fresh_label(self.bytecode.il_mut());
@@ -8095,6 +8106,12 @@ impl Compiler {
         bb.emit_jump_to(exit, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
         let mut body_bc = self.do_compile(body);
         self.bytecode.append(&mut body_bc);
+        if site.implicit_step {
+            self.bytecode.push_load(INDEX_SLOT);
+            self.bytecode.push_const(1);
+            self.bytecode.push(Byte::new(Instruction::ADD));
+            self.bytecode.push_store_pop(INDEX_SLOT);
+        }
         bb.emit_jump_to(top, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit, self.bytecode.il_mut());
 
@@ -13631,6 +13648,9 @@ impl Compiler {
                 body,
             } => {
                 if let Some(binding) = identifier {
+                    if self.try_emit_par_loop(*span, iterable, body, Some(binding)) {
+                        return bytecode;
+                    }
                     let binding_name = match binding.1.as_ref() {
                         Expression::Identifier(n) => (*n).to_string(),
                         _ => "__for_in_x".to_string(),
@@ -13685,7 +13705,7 @@ impl Compiler {
                         self.discard_compile(body);
                         return bytecode;
                     }
-                    if self.try_emit_par_loop(*span, iterable, body) {
+                    if self.try_emit_par_loop(*span, iterable, body, None) {
                         return bytecode;
                     }
                     let mut bb = BlockBuilder::new();
