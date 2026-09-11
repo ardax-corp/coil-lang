@@ -57,29 +57,28 @@ full function bodies, including **irrefutable** match arms (`_` / binding);
 constructor-pattern arms stay opaque (AlwaysPar would skip the match). Forks
 never span exclusive alternatives.
 
-For each demanded constant argument vector whose **fork-tree grain** `W`
+For each demanded constant call whose **fork-tree grain** `W`
 exceeds `COIL_PAR_THRESHOLD` (default **10945**), and that still reaches the fork under the
-site's path guards, codegen emits a nullary specialization
-`__coil_par_{f}_{a}_{b}_…` that **always** forks:
+site's path guards, codegen emits **one** parameterized worker
+`__coil_par_{f}(args…, hop)` (COI-366 F1) that **always** forks:
 
-1. `MakeFn` of an in-hop child specialization when one exists, otherwise the
-   arm's sequential callee with those concrete args.
-2. `thread_spawn_shared` the first arm (HostInvoke **137**; isolate
+1. Path guards and `hop <= 0` fall through to the sequential original (reachability
+   / depth, not a grain skip-threshold).
+2. `MakeFn` the first arm: self-arms with `hop > 1` re-enter this worker with
+   `hop - 1` and live `ArgForm` args; otherwise the sequential callee.
+3. `thread_spawn_shared` that arm (HostInvoke **137**; isolate
    `thread_spawn` when maps are missing for non-immediates, `COIL_SHARED_HEAP=0`,
-   debugger attached, or an arg misses the C0 whitelist). No `GT` gate.
-3. On `Ok(handle)`: evaluate remaining arms locally, `join` (help-steals), apply
-   the site's combine. Shared join publishes raw `Value` bits (no graph copy).
-4. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
+   debugger attached, or an arg misses the C0 whitelist). No `GT` grain gate.
+4. On `Ok(handle)`: evaluate remaining arms locally (same hop policy), `join`
+   (help-steals), apply the site's combine. Shared join publishes raw `Value` bits
+   (no graph copy).
+5. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
 
-Call sites with matching const args rewrite to `CALL` the specialization.
-Below-floor / dynamic args stay on the original sequential `f` (no hot-path
-runtime grain tax). Specializations start from those AST const calls and
-close **at most two** arm-transform hops (`PAR_SPEC_HOPS`). That is the
-**counted evidence gate** (COI-361 E3): the const call is the evidence, not
-AlwaysPar every level down to the cutoff (`__coil_par_fib_21…n`). A child that
-misses guards or falls to/below the grain floor stays sequential — the same
-profitability floor as before, not a skip-threshold. `PAR_SPEC_BUDGET` (64)
-remains a code-size lid.
+Const call sites rewrite to an ordinary `CALL` of that worker (plus
+`PAR_SPEC_HOPS`, default **2**). Below-floor / dynamic / base-case args stay on
+the original sequential `f` (no hot-path runtime grain tax). Hops are depth on
+the same function — not a constellation of frozen `__coil_par_f_a_b_…`
+clones, and not AlwaysPar every level down to the cutoff.
 
 ### Expression grain (`W`)
 
@@ -138,7 +137,8 @@ reactor spawn/join work and is typically **slower** than sequential, and very
 low values can exhaust the specialization budget or overflow worker stacks.
 Raise the workload (larger const args) when you want IPA evidence; do not lower
 the grain floor to “force” more forks. Old fib-unit `N` corresponds to grain
-`Fib(N+1)-1` (for `n <= 1` fib).
+`Fib(N+1)-1` (for `n <= 1` fib). One worker per site also means lowering the
+floor cannot explode archive size via extra clones.
 
 ## Loop IPA: chunked fork-join over an induction range
 
@@ -234,8 +234,8 @@ isolate fallback; the joiner collects after `end_steal`. Maps are mandatory
 for non-immediate args (empty maps → isolate). See
 [shared-heap-sendability.md](shared-heap-sendability.md).
 
-C2 expression IPA (COI-364 E7): AlwaysPar specializations emit the same
-`thread_spawn_shared`. Fib/tak args are immediates (Layer A may steal
-without maps). EnumCtor/Tuple arms allocate on the shared Heap and publish
-the pointer at join (rooted through Layer A collect). User `thread::spawn`
-stays isolate.
+C2 expression IPA (COI-364 E7 / COI-366 F1): parameterized AlwaysPar
+workers emit the same `thread_spawn_shared`. Fib/tak args are immediates
+(Layer A may steal without maps). EnumCtor/Tuple arms allocate on the shared
+Heap and publish the pointer at join (rooted through Layer A collect). User
+`thread::spawn` stays isolate.

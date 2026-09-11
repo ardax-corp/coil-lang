@@ -5669,14 +5669,17 @@ fn main() {
         .compile_src(src)
         .expect("auto-par fib should compile");
     assert!(
-        pipeline.function_offset("__coil_par_fib_22").is_some(),
-        "expected static specialization for fib(22)"
+        pipeline.function_offset("__coil_par_fib").is_some(),
+        "expected one parameterized worker for fib"
     );
     assert!(
-        pipeline.function_offset("__coil_par_fib_21").is_some(),
-        "one hop from fib(22) still AlwaysPars"
+        pipeline.function_offset("__coil_par_fib_22").is_none(),
+        "must not emit a per-arg clone for fib(22)"
     );
-    // Default threshold is 20 — exact threshold stays sequential.
+    assert!(
+        pipeline.function_offset("__coil_par_fib_21").is_none(),
+        "hops are depth on the same worker, not __coil_par_fib_21"
+    );
     assert!(
         pipeline.function_offset("__coil_par_fib_20").is_none(),
         "fib(20) must not get a parallel specialization"
@@ -5722,8 +5725,8 @@ fn main() {
         .compile_src(src)
         .expect("auto-par enum-ctor should compile");
     assert!(
-        pipeline.function_offset("__coil_par_build_21").is_some(),
-        "expected an enum-ctor specialization for build(21)"
+        pipeline.function_offset("__coil_par_build").is_some(),
+        "expected an enum-ctor worker for build"
     );
     // `build` shares fib's recurrence, so the leaf count is fib(22).
     let output = run_bytecode(bytecode, constants, &pipeline, None);
@@ -5758,7 +5761,7 @@ fn main() {
         .compile_src(src)
         .expect("impure ctor-payload rec should still compile");
     assert!(
-        pipeline.function_offset("__coil_par_rec_22").is_none(),
+        pipeline.function_offset("__coil_par_rec").is_none(),
         "impurity inside a Construct payload must block auto-par"
     );
 }
@@ -5784,8 +5787,8 @@ fn main() {
         .compile_src(src)
         .expect("auto-par sub binop should compile");
     assert!(
-        pipeline.function_offset("__coil_par_diff_22").is_some(),
-        "expected a Sub specialization for diff(22)"
+        pipeline.function_offset("__coil_par_diff").is_some(),
+        "expected a Sub worker for diff"
     );
     let output = run_bytecode(bytecode, constants, &pipeline, None);
     // d(n)=d(n-1)-d(n-2) with d(0)=0,d(1)=1 is period-6; d(22)=-1.
@@ -5817,17 +5820,44 @@ fn main() {
         .compile_src(src)
         .expect("auto-par self-call should compile");
     assert!(
-        pipeline.function_offset("__coil_par_tak_21_12_6").is_some(),
-        "expected a multi-arg specialization for tak(21, 12, 6)"
+        pipeline.function_offset("__coil_par_tak").is_some(),
+        "expected a parameterized worker for tak(21, 12, 6)"
     );
     assert!(
-        pipeline
-            .function_offset("__coil_par_tak_24_22_20")
-            .is_none(),
-        "a narrow x - y gap must not specialize"
+        pipeline.function_offset("__coil_par_tak_21_12_6").is_none(),
+        "must not emit a per-arg tak clone"
     );
     let output = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(output, "12");
+}
+
+/// A narrow `x - y` gap is tiny work even with large components.
+#[test]
+fn auto_par_narrow_tak_stays_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+#[max_depth(4096)]
+fn tak(int a, int b, int c) -> int {
+    if b >= a {
+        return c;
+    }
+    return tak(tak(a - 1, b, c), tak(b - 1, c, a), tak(c - 1, a, b));
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", tak(24, 22, 20))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("narrow tak should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_tak").is_none(),
+        "a narrow x - y gap must not emit a worker"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "21");
 }
 
 /// The fair `tak(18, 12, 6)` benchmark load scores just under the threshold, so
@@ -5851,8 +5881,8 @@ fn main() {
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("fair tak should compile");
     assert!(
-        pipeline.function_offset("__coil_par_tak_18_12_6").is_none(),
-        "fair tak(18, 12, 6) must not get a parallel specialization"
+        pipeline.function_offset("__coil_par_tak").is_none(),
+        "fair tak(18, 12, 6) must not get a parallel worker"
     );
     let output = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(output, "7");
@@ -5881,8 +5911,8 @@ fn main() {
         .compile_src(src)
         .expect("impure rec should still compile");
     assert!(
-        pipeline.function_offset("__coil_par_rec_22").is_none(),
-        "impure recursion must not emit auto-par specializations"
+        pipeline.function_offset("__coil_par_rec").is_none(),
+        "impure recursion must not emit auto-par workers"
     );
 }
 
@@ -5910,11 +5940,11 @@ fn main() {
         .compile_src(src)
         .expect("helper-arm IPA should compile");
     assert!(
-        pipeline.function_offset("__coil_par_pair_fib_22").is_some(),
-        "expected a specialization for pair_fib(22)"
+        pipeline.function_offset("__coil_par_pair_fib").is_some(),
+        "expected a worker for pair_fib(22)"
     );
     assert!(
-        pipeline.function_offset("__coil_par_fib_22").is_none(),
+        pipeline.function_offset("__coil_par_fib").is_none(),
         "helper arms must stay sequential (no nested fib AlwaysPar)"
     );
     // fib(22) + fib(21)
@@ -5944,7 +5974,7 @@ fn main() {
         .compile_src(src)
         .expect("trivial helper arms should compile");
     assert!(
-        pipeline.function_offset("__coil_par_pair_sq_22").is_none(),
+        pipeline.function_offset("__coil_par_pair_sq").is_none(),
         "two multiplies must not buy a spawn"
     );
     // 22² + 21²
@@ -5974,8 +6004,8 @@ fn main() {
         .compile_src(src)
         .expect("match-arm IPA should compile");
     assert!(
-        pipeline.function_offset("__coil_par_fibm_22").is_some(),
-        "irrefutable match arm must still specialize"
+        pipeline.function_offset("__coil_par_fibm").is_some(),
+        "irrefutable match arm must still emit a worker"
     );
     let output = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(output, "17711");
