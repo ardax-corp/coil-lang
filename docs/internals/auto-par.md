@@ -267,3 +267,12 @@ workers emit the same `thread_spawn_shared`. Fib/tak args are immediates
 (Layer A may steal without maps). EnumCtor/Tuple arms allocate on the shared
 Heap and publish the pointer at join (rooted through Layer A collect). User
 `thread::spawn` stays isolate.
+
+## F3 — userland locks + hints (call-bag escapes)
+
+Unlocked FD / FFI / mutex / user-object escapes still **refuse** IPA (C0).
+When the shape is a would-be call bag, compile-time **E0805** info names the
+resource that a covering `thread::with_lock` would need. The compiler does
+not insert locks or fork on the hint. A covering lock is detected and
+documented; shared steal stays sequential this cut. See
+[par-lock-hints.md](par-lock-hints.md) (Architect may discard).
