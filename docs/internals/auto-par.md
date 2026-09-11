@@ -202,3 +202,11 @@ Pool workers pin a TLS local deque tagged with the owning reactor identity.
 `submit` / join-help only push or pop that deque when it belongs to the same
 reactor; otherwise work goes through the shared injector. That keeps concurrent
 `Machine`s (parallel tests) and nested reactors from cross-feeding jobs.
+
+Isolate-per-job tax (COI-360 E2, still no shared heap): workers execute from
+the `Arc` `ThreadProgram` image (no per-job bytecode `to_vec`); join-help
+checks out a TLS helper `Machine` instead of `Box::new` per steal; after each
+job the isolate heap is reset (unmap when more than one 64KiB slab chunk is
+mapped). Re-measure IPA RSS with a release `fib` archive compiled under
+`COIL_AUTO_PAR=1`, then `/usr/bin/time -f '%e %M' ./target/release/coil run fib.hyc`
+(and `COIL_MAX_WORKER_THREADS=1` for the nested-help case).
