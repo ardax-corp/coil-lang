@@ -5914,6 +5914,55 @@ fn main() {
         pipeline.function_offset("__coil_par_rec").is_none(),
         "impure recursion must not emit auto-par workers"
     );
+    assert!(
+        pipeline.messages().iter().any(|m| {
+            m.code() == Some(compiler::ErrorCode::ParLockHint)
+                && m.message().contains("`stdout` (FD)")
+                && m.message().contains("call bag in `rec`")
+        }),
+        "F3 must name the FD escape: {:?}",
+        pipeline
+            .messages()
+            .iter()
+            .map(|m| m.message())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// Covering `with_lock` around a call bag: document the gate, still sequential.
+#[test]
+fn auto_par_covering_lock_stays_sequential_and_hints() {
+    let src = r#"
+use thread::{mutex, with_lock};
+fn rec(Mutex m, int n) -> int {
+    if n <= 1 { return 1; }
+    return with_lock(m, fn (int x) => (x, rec(m, n - 1) + rec(m, n - 2)))?;
+}
+fn main() {
+    let m = mutex(0)?;
+    rec(m, 3)?;
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let _ = pipeline
+        .compile_src(src)
+        .expect("covering-lock rec should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_rec").is_none(),
+        "covering lock must not auto-fork"
+    );
+    assert!(
+        pipeline.messages().iter().any(|m| {
+            m.code() == Some(compiler::ErrorCode::ParLockHint)
+                && m.message().contains("covering lock on `m`")
+        }),
+        "F3 covering gate: {:?}",
+        pipeline
+            .messages()
+            .iter()
+            .map(|m| m.message())
+            .collect::<Vec<_>>()
+    );
 }
 
 /// Independent pure helper arms (not self-recursion) still fork-join — the
