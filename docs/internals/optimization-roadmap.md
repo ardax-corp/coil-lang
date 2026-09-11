@@ -362,22 +362,20 @@ existing opcode; fits append-only opcode ABI.
 
 ### 6. Auto-par fork-site profitability
 
-Priority: landed; the cutoff itself is unchanged.
+Priority: landed; F0 drops fib-unit inversion (COI-367).
 
-IPA specialization used to gate on `max(args)`, which reads argument
-*magnitude* as work. `par_profit.rs` now scores a fork site by counting the
-guard-pruned fork-site nodes a concrete arg vector reaches, then converts that
-count back into fib-equivalent units, so `COIL_PAR_THRESHOLD` keeps its
-calibration and the default stayed at **20**. What changed is only the verdict
-on shapes that are not fib-shaped: `tak(24, 22, 20)` (53 real calls) now
-refuses, and the fair `tak(18, 12, 6)` bench load lands exactly on the cutoff
-and stays sequential. Every imprecision resolves downwards, so unknown
-structure can only refuse. Full formula and verdict table in
-[auto-par](auto-par.md#the-work-score).
+IPA specialization used to invert guard-pruned fork-site nodes `W` into
+fib-equivalent units so `COIL_PAR_THRESHOLD` could stay **20**. F0 compares
+`W` **directly** to a grain floor (default **10945** = `W(fib(20))` =
+`Fib(21)-1`). Verdicts on the calibrated loads stay the same: `fib(21)`
+forks, `fib(20)` refuses, `tak(24, 22, 20)` refuses, and the fair
+`tak(18, 12, 6)` bench load lands on the floor and stays sequential. Loop IPA
+keeps trip-count grain via `COIL_LOOP_GRAIN` (default 20). Full formula and
+verdict table in [auto-par](auto-par.md#expression-grain-w).
 
 The work cost is compile-time and bounded by construction: the walk is memoized
 per `(fn, arg vector)`, capped at 256 levels deep and 2^14 memo entries, and
-saturates one node past the cutoff — counting further cannot change the answer.
+saturates one node past the grain floor — counting further cannot change the answer.
 The specialization closure on top of it is breadth-first and capped at 64
 clones per function. Nothing runs at execution time, and below-threshold or
 dynamic arg sites stay on the sequential original, so there is no hot-path
