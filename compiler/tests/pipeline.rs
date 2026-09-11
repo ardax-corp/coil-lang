@@ -9808,6 +9808,7 @@ fn main() {
         debug_locs: pipeline.program_debug().debug_locs,
         fn_symbols: Vec::new(),
         struct_layouts: Vec::new(),
+        operand_stack_slots: pipeline.operand_stack_slots(),
     };
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let archived =

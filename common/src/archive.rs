@@ -62,10 +62,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 /// 11 — dense-native `Vec` grow (COI-344 B6): `DenseArrayPush`.
 /// 12 — dense-native field / Object make (COI-356 D2): `DenseFieldLoad`
 ///      / `DenseFieldStore` / `DenseMakeObject`.
+/// 13 — persist analyzed `operand_stack_slots` (COI-358 E0). Older
+///      envelopes omit the field; loaders fall back to the Seek+CALL
+///      heuristic. Not an opcode / IPA change.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 12;
+pub const ARCHIVE_MINOR: u16 = 13;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -213,7 +216,46 @@ pub struct ArchivedProgram {
     pub fn_symbols: Vec<crate::debug::FnDebugSym>,
     /// `extern struct` C layouts (align/pad), restored on packaged / `.hyc` execute.
     pub struct_layouts: Vec<CStructLayout>,
+    /// Compiler-analyzed operand-stack capacity (minor 13+).
+    pub operand_stack_slots: u32,
 }
+
+/// Pre-minor-13 envelope. Loader fallback so older `.hyc` stay readable.
+#[derive(Clone, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
+pub struct ArchivedProgramV12 {
+    pub version: u32,
+    pub static_slot_count: u32,
+    pub constants: Vec<u64>,
+    pub strings: Vec<String>,
+    pub bytecode: Vec<Byte>,
+    pub source_files: Vec<String>,
+    pub debug_locs: Vec<DebugLoc>,
+    pub fn_symbols: Vec<crate::debug::FnDebugSym>,
+    pub struct_layouts: Vec<CStructLayout>,
+}
+
+/// Failed `.hyc` / embed envelope access.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ArchiveDecodeError {
+    Corrupt,
+    Version(u32),
+}
+
+/// Owned archive plus whether `operand_stack_slots` was on the wire.
+pub struct DecodedArchive {
+    pub program: ArchivedProgram,
+    pub operand_stack_slots_persisted: bool,
+}
+
+/// Default operand-stack guess for envelopes that omit the analyzed bound.
+pub const LEGACY_DEFAULT_OPERAND_STACK_SLOTS: u32 = 256;
+
+/// Hard ceiling matching the VM operand-stack limit (1 048 576 slots).
+pub const LEGACY_MAX_OPERAND_STACK_SLOTS: u32 = 1_048_576;
+
+/// First minor that stores [`ArchivedProgram::operand_stack_slots`].
+pub const OPERAND_STACK_SLOTS_MINOR: u16 = 13;
 
 pub use crate::opcode::Byte;
 
@@ -224,6 +266,83 @@ impl ArchivedProgram {
             debug_locs: self.debug_locs.clone(),
             fn_symbols: self.fn_symbols.clone(),
         }
+    }
+}
+
+impl ArchivedProgramV12 {
+    fn into_program(self) -> ArchivedProgram {
+        ArchivedProgram {
+            version: self.version,
+            static_slot_count: self.static_slot_count,
+            constants: self.constants,
+            strings: self.strings,
+            bytecode: self.bytecode,
+            source_files: self.source_files,
+            debug_locs: self.debug_locs,
+            fn_symbols: self.fn_symbols,
+            struct_layouts: self.struct_layouts,
+            operand_stack_slots: 0,
+        }
+    }
+}
+
+/// Seek+CALL heuristic used when the envelope has no persisted slot count.
+pub fn legacy_archive_operand_slots(bytecode: &[Byte]) -> u32 {
+    use crate::opcode::Instruction;
+    let has_seek = bytecode.iter().any(|b| *b.bytecode() == Instruction::Seek);
+    let has_call = bytecode
+        .iter()
+        .any(|b| matches!(*b.bytecode(), Instruction::CALL | Instruction::TailCall));
+    if has_seek && has_call {
+        LEGACY_MAX_OPERAND_STACK_SLOTS
+    } else {
+        LEGACY_DEFAULT_OPERAND_STACK_SLOTS
+    }
+}
+
+/// Prefer the persisted compiler bound; otherwise the pre-13 heuristic.
+pub fn resolve_archive_operand_slots(persisted: Option<u32>, bytecode: &[Byte]) -> u32 {
+    match persisted {
+        Some(slots) => slots.clamp(1, LEGACY_MAX_OPERAND_STACK_SLOTS),
+        None => legacy_archive_operand_slots(bytecode),
+    }
+}
+
+/// Access a `.hyc` blob. Same major + archive minor ≤ runtime; older
+/// envelopes without `operand_stack_slots` still load.
+pub fn decode_archived_program(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> {
+    use rkyv::rancor::Error;
+
+    let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
+        .ok()
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgram, Error>(archived).ok());
+    let legacy = rkyv::access::<ArchivedArchivedProgramV12, Error>(buffer)
+        .ok()
+        .and_then(|archived| rkyv::deserialize::<ArchivedProgramV12, Error>(archived).ok());
+
+    match (current, legacy) {
+        (Some(program), _)
+            if archive_version_compatible(program.version, ARCHIVE_VERSION)
+                && archive_minor(program.version) >= OPERAND_STACK_SLOTS_MINOR =>
+        {
+            Ok(DecodedArchive {
+                program,
+                operand_stack_slots_persisted: true,
+            })
+        }
+        (_, Some(old)) if archive_version_compatible(old.version, ARCHIVE_VERSION) => {
+            Ok(DecodedArchive {
+                program: old.into_program(),
+                operand_stack_slots_persisted: false,
+            })
+        }
+        (Some(program), _) if !archive_version_compatible(program.version, ARCHIVE_VERSION) => {
+            Err(ArchiveDecodeError::Version(program.version))
+        }
+        (_, Some(old)) if !archive_version_compatible(old.version, ARCHIVE_VERSION) => {
+            Err(ArchiveDecodeError::Version(old.version))
+        }
+        _ => Err(ArchiveDecodeError::Corrupt),
     }
 }
 
@@ -270,6 +389,7 @@ mod tests {
             ],
             fn_symbols: Vec::new(),
             struct_layouts: Vec::new(),
+            operand_stack_slots: LEGACY_DEFAULT_OPERAND_STACK_SLOTS,
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -296,6 +416,7 @@ mod tests {
                 debug_locs,
                 fn_symbols,
                 struct_layouts,
+                operand_stack_slots,
             } = p;
             let _ = (
                 version,
@@ -307,6 +428,7 @@ mod tests {
                 debug_locs,
                 fn_symbols,
                 struct_layouts,
+                operand_stack_slots,
             );
         };
     }
@@ -334,6 +456,7 @@ mod tests {
                 },
             ],
             struct_layouts: Vec::new(),
+            operand_stack_slots: LEGACY_DEFAULT_OPERAND_STACK_SLOTS,
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -350,9 +473,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 12);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 12));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.12");
+        assert_eq!(ARCHIVE_MINOR, 13);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 13));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.13");
     }
 
     #[test]
@@ -440,6 +563,7 @@ mod tests {
             debug_locs: vec![DebugLoc::unknown()],
             fn_symbols: Vec::new(),
             struct_layouts: vec![layout.clone()],
+            operand_stack_slots: 512,
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let archived =
@@ -450,6 +574,63 @@ mod tests {
         assert_eq!(back.struct_layouts[0].offsets, vec![0, 4, 8]);
         assert_eq!(back.struct_layouts[0].size, 12);
         assert_eq!(back.struct_layouts[0].align, 4);
+        assert_eq!(back.operand_stack_slots, 512);
+    }
+
+    #[test]
+    fn decode_persists_operand_stack_slots_on_current_minor() {
+        let program = ArchivedProgram {
+            version: ARCHIVE_VERSION,
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: vec![Byte::new(Instruction::HALT)],
+            source_files: vec![],
+            debug_locs: vec![DebugLoc::unknown()],
+            fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
+            operand_stack_slots: 512,
+        };
+        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
+        assert!(decoded.operand_stack_slots_persisted);
+        assert_eq!(decoded.program.operand_stack_slots, 512);
+        assert_eq!(
+            resolve_archive_operand_slots(Some(512), &decoded.program.bytecode),
+            512
+        );
+    }
+
+    #[test]
+    fn decode_pre13_envelope_omits_operand_stack_slots() {
+        let seek = Byte::new(Instruction::Seek).with_operand_u32(25);
+        let call = Byte::new(Instruction::CALL);
+        let old = ArchivedProgramV12 {
+            version: pack_archive_version(4, 12),
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: vec![seek, call, Byte::new(Instruction::HALT)],
+            source_files: vec![],
+            debug_locs: vec![DebugLoc::unknown(); 3],
+            fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
+        };
+        let bytes = rkyv::to_bytes::<Error>(&old).expect("serialize v12");
+        assert!(
+            rkyv::access::<ArchivedArchivedProgram, Error>(bytes.as_slice()).is_err(),
+            "current envelope must not silently read a pre-13 blob"
+        );
+        let decoded = decode_archived_program(bytes.as_slice()).expect("legacy decode");
+        assert!(!decoded.operand_stack_slots_persisted);
+        assert_eq!(
+            resolve_archive_operand_slots(None, &decoded.program.bytecode),
+            LEGACY_MAX_OPERAND_STACK_SLOTS
+        );
+        assert_eq!(
+            legacy_archive_operand_slots(&[Byte::new(Instruction::Seek)]),
+            LEGACY_DEFAULT_OPERAND_STACK_SLOTS
+        );
     }
 
     #[test]

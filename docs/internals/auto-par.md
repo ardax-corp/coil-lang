@@ -193,6 +193,10 @@ idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
 | `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
 | `COIL_PAR_THRESHOLD` | Compile-time profitability cutoff — fork-site work score and loop trip count (default 20). |
 
+`.hyc` / embed execute sizes each isolate operand stack from the persisted
+compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL
+heuristic; that is not an IPA policy change.
+
 Pool workers pin a TLS local deque tagged with the owning reactor identity.
 `submit` / join-help only push or pop that deque when it belongs to the same
 reactor; otherwise work goes through the shared injector. That keeps concurrent

@@ -6,13 +6,13 @@ use std::process::{Command, exit};
 use std::sync::Arc;
 
 use common::{
-    ARCHIVE_VERSION, ArchivedArchivedProgram, Byte, Instruction, NativeLock, ProgramDebug,
-    archive_version_compatible, default_natives_root, embedded_archive_slice,
-    format_archive_version, read_embedded_native_lock, read_package_trailer,
+    ARCHIVE_VERSION, ArchiveDecodeError, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
+    archive_version_compatible, decode_archived_program, default_natives_root,
+    embedded_archive_slice, format_archive_version, read_embedded_native_lock,
+    read_package_trailer, resolve_archive_operand_slots,
 };
 use machine::thread::ThreadProgram;
 use machine::{DloadGate, Machine, wire_standard_host_natives};
-use rkyv::rancor::Error;
 
 /// Errors loading a `.hyc` / embedded archive blob.
 #[derive(Debug)]
@@ -30,6 +30,8 @@ pub struct LoadedArchive {
     pub static_slots: u32,
     pub debug: ProgramDebug,
     pub struct_layouts: Vec<common::CStructLayout>,
+    /// Analyzed capacity when the envelope stored it (minor 13+).
+    pub operand_stack_slots: Option<u32>,
 }
 
 /// Deserialize an `ArchivedProgram` blob (from `.hyc` or an embedded slice).
@@ -45,37 +47,25 @@ pub fn load_archive_bytes(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
 }
 
 fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
-    let archived =
-        rkyv::access::<ArchivedArchivedProgram, Error>(buffer).map_err(|_| LoadErr::Corrupt)?;
-    let version = u32::from(archived.version);
-    if !archive_version_compatible(version, ARCHIVE_VERSION) {
-        return Err(LoadErr::Version(version));
-    }
-    let bytecode =
-        rkyv::deserialize::<Vec<Byte>, Error>(&archived.bytecode).map_err(|_| LoadErr::Corrupt)?;
-    let constants =
-        rkyv::deserialize::<Vec<u64>, Error>(&archived.constants).map_err(|_| LoadErr::Corrupt)?;
-    let strings =
-        rkyv::deserialize::<Vec<String>, Error>(&archived.strings).map_err(|_| LoadErr::Corrupt)?;
-    let static_slot_count = u32::from(archived.static_slot_count);
-    let source_files = rkyv::deserialize::<Vec<String>, Error>(&archived.source_files)
-        .map_err(|_| LoadErr::Corrupt)?;
-    let debug_locs = rkyv::deserialize::<Vec<common::DebugLoc>, Error>(&archived.debug_locs)
-        .map_err(|_| LoadErr::Corrupt)?;
-    let struct_layouts =
-        rkyv::deserialize::<Vec<common::CStructLayout>, Error>(&archived.struct_layouts)
-            .map_err(|_| LoadErr::Corrupt)?;
+    let decoded = decode_archived_program(buffer).map_err(|e| match e {
+        ArchiveDecodeError::Corrupt => LoadErr::Corrupt,
+        ArchiveDecodeError::Version(v) => LoadErr::Version(v),
+    })?;
+    let program = decoded.program;
     Ok(LoadedArchive {
-        bytecode,
-        constants,
-        strings,
-        static_slots: static_slot_count,
+        bytecode: program.bytecode,
+        constants: program.constants,
+        strings: program.strings,
+        static_slots: program.static_slot_count,
         debug: ProgramDebug {
-            source_files,
-            debug_locs,
+            source_files: program.source_files,
+            debug_locs: program.debug_locs,
             fn_symbols: Vec::new(),
         },
-        struct_layouts,
+        struct_layouts: program.struct_layouts,
+        operand_stack_slots: decoded
+            .operand_stack_slots_persisted
+            .then_some(program.operand_stack_slots),
     })
 }
 
@@ -98,24 +88,10 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 /// Host capability flags are **not** stored in `.hyc` and are **not** re-applied
 /// here. If the bytecode has the op, it runs. `dload` still uses lock hash /
 /// trusted integrity when `dload_gate` is supplied. `coil.toml` is not consulted.
-/// `.hyc` / embed execute does not store the compiler stack bound. Dense
-/// recursive frames (`Seek` + `CALL`/`TailCall`, Q7) need more than 256
-/// slots, so grow to [`machine::MAX_OPERAND_STACK_SLOTS`] for those archives.
+/// Minor 13+ stores the compiler stack bound. Older Seek+CALL archives still
+/// grow to [`machine::MAX_OPERAND_STACK_SLOTS`].
 pub fn archive_operand_slots(bytecode: &[Byte]) -> usize {
-    let has_seek = bytecode
-        .iter()
-        .any(|b| *b.bytecode() == Instruction::Seek);
-    let has_call = bytecode.iter().any(|b| {
-        matches!(
-            *b.bytecode(),
-            Instruction::CALL | Instruction::TailCall
-        )
-    });
-    if has_seek && has_call {
-        machine::MAX_OPERAND_STACK_SLOTS
-    } else {
-        machine::DEFAULT_OPERAND_STACK_SLOTS
-    }
+    common::legacy_archive_operand_slots(bytecode) as usize
 }
 
 pub fn execute_archived_program(
@@ -124,7 +100,8 @@ pub fn execute_archived_program(
     ffi_search_paths: Vec<PathBuf>,
     dload_gate: Option<DloadGate>,
 ) -> bool {
-    let slots = archive_operand_slots(&loaded.bytecode);
+    let slots =
+        resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode) as usize;
     let mut machine = Machine::<256>::with_operand_capacity(slots);
     wire_standard_host_natives(&mut machine);
     if let Some(gate) = dload_gate {
@@ -271,12 +248,8 @@ pub fn try_run_embedded() -> Option<bool> {
         ffi_search_paths.push(parent.join("lib"));
     }
 
-    let panicked = execute_archived_program(
-        &loaded,
-        Some(exe.as_path()),
-        ffi_search_paths,
-        dload_gate,
-    );
+    let panicked =
+        execute_archived_program(&loaded, Some(exe.as_path()), ffi_search_paths, dload_gate);
     Some(panicked)
 }
 
@@ -345,6 +318,7 @@ pub fn writer_for_format(pretty_on_stderr: bool) -> Box<dyn Write + Send> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use common::Instruction;
 
     #[test]
     fn sibling_bin_uses_host_exe_suffix() {
@@ -368,6 +342,29 @@ mod tests {
         assert_eq!(
             archive_operand_slots(&[seek]),
             machine::DEFAULT_OPERAND_STACK_SLOTS
+        );
+    }
+
+    #[test]
+    fn execute_uses_persisted_operand_stack_slots() {
+        let seek = Byte::new(Instruction::Seek).with_operand_u32(25);
+        let call = Byte::new(Instruction::CALL);
+        let loaded = LoadedArchive {
+            bytecode: vec![seek, call, Byte::new(Instruction::HALT)],
+            constants: vec![],
+            strings: vec![],
+            static_slots: 0,
+            debug: ProgramDebug::default(),
+            struct_layouts: vec![],
+            operand_stack_slots: Some(512),
+        };
+        assert_eq!(
+            resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode),
+            512
+        );
+        assert_eq!(
+            resolve_archive_operand_slots(None, &loaded.bytecode),
+            machine::MAX_OPERAND_STACK_SLOTS as u32
         );
     }
 }

@@ -12,6 +12,12 @@ The VM pre-allocates an operand stack sized from this analysis:
 [`Machine::with_operand_capacity`](../../machine/src/vm.rs) builds the VM; reactor
 workers resize when a job needs a larger stack.
 
+Archive **minor 13** (COI-358 E0) stores `operand_stack_slots` on
+[`ArchivedProgram`](../../common/src/archive.rs). `coil run foo.hyc` and
+`coil-embed` use that bound. Envelopes older than 4.13 still load (same
+major, older minor) and fall back to the Seek+CALL heuristic
+(`256` or `MAX_OPERAND_STACK_SLOTS`).
+
 ## Analysis
 
 After typecheck, [`analyze_stack_bounds`](../../compiler/src/typechecking/stack_bound.rs)
