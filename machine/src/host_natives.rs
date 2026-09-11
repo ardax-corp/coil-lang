@@ -87,6 +87,7 @@ pub fn build_standard_host_natives(
     push_math_libm_wiring(&mut out, &mut register_id, MATH_LIBM_M1_WIRING);
     // Append-only after math: MIR saxpy-reduce pack (compiler rewrite only).
     push_simd_axpy_reduce(&mut out, &mut register_id);
+    push_thread_spawn_shared(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -183,6 +184,30 @@ fn push_simd_axpy_reduce(
             args[4].as_float(),
         ))))
     })));
+}
+
+fn push_thread_spawn_shared(
+    out: &mut Vec<Arc<dyn NativeFn>>,
+    register_id: &mut impl FnMut(&str, usize),
+) {
+    use crate::thread;
+    let sig = FfiSignature::from_parts(
+        common::THREAD_SPAWN_SHARED_NATIVE.to_string(),
+        vec![FfiType::Int],
+        FfiType::Int,
+    )
+    .expect("thread_spawn_shared signature");
+    let id = out.len();
+    register_id(common::THREAD_SPAWN_SHARED_NATIVE, id);
+    let closure = |heap: &mut crate::Heap, args: &[Value]| {
+        Ok(Some(thread::thread_spawn_shared(heap, args)))
+    };
+    out.push(Arc::new(HostClosureFn::new_with_arity_range(
+        sig,
+        1,
+        1 + common::MAX_THREAD_SPAWN_ARGS,
+        closure,
+    )));
 }
 
 fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
@@ -1214,6 +1239,10 @@ mod tests {
         assert_eq!(
             common::host_native_id(common::SIMD_AXPY_REDUCE_NATIVE),
             Some(136)
+        );
+        assert_eq!(
+            common::host_native_id(common::THREAD_SPAWN_SHARED_NATIVE),
+            Some(137)
         );
     }
 

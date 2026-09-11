@@ -35,6 +35,8 @@ pub struct Job {
     pub ffi_base_dir: Option<PathBuf>,
     pub ffi_search_paths: Vec<PathBuf>,
     pub dload_gate: DloadGate,
+    /// C1 shared-heap steal (None = isolate + PortableValue).
+    pub epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
 }
 
 /// Per-root-VM work-stealing reactor.
@@ -432,6 +434,7 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
         ffi_base_dir,
         ffi_search_paths,
         dload_gate,
+        epoch,
     } = job;
 
     // A joining root help-steals jobs onto its *own* thread, so the print
@@ -444,6 +447,10 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     let prev_shared_print = redirected
         .then(|| crate::io::set_shared_print_redirect(None))
         .flatten();
+    if let Some(e) = &epoch {
+        vm.bind_shared_heap(e);
+    }
+    let shared = epoch.is_some();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         vm.install_natives(&natives);
         vm.set_thread_program(Arc::clone(&program));
@@ -464,7 +471,9 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             Arc::clone(&program.constants),
             Arc::clone(&program.strings),
         );
-        vm.init_static_slots(program.static_slot_count);
+        if !shared {
+            vm.init_static_slots(program.static_slot_count);
+        }
 
         let _guard = HostStateGuard::enter(vm);
         let mut child_args = Vec::with_capacity(args.len());
@@ -472,10 +481,14 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
             child_args.push(spawn_arg_to_value(vm.heap_mut(), a)?);
         }
         let ret = vm.call_function(entry, &child_args);
-        if vm.panicked() {
+        if vm.panicked() || epoch.as_ref().is_some_and(|e| e.is_aborted()) {
             return Err(ThreadErrorTag::JoinFailed);
         }
-        value_to_portable(vm.heap(), ret)
+        if shared {
+            Ok(PortableValue::Immediate(ret.raw() as u64))
+        } else {
+            value_to_portable(vm.heap(), ret)
+        }
     }));
     if redirected {
         crate::io::set_output_redirect(prev_output);
@@ -490,7 +503,12 @@ fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
     state.store_result(stored);
     reactor.inflight.fetch_sub(1, Ordering::SeqCst);
     reactor.notify();
-    vm.reset_isolate_heap();
+    if shared {
+        vm.unbind_shared_heap();
+        vm.reset_shared_stack();
+    } else {
+        vm.reset_isolate_heap();
+    }
 }
 
 /// Build a [`Job`] from spawn context + decoded args.
@@ -513,6 +531,7 @@ pub fn job_from_spawn_context(
         ffi_base_dir: ctx.ffi_base_dir,
         ffi_search_paths: ctx.ffi_search_paths,
         dload_gate: ctx.dload_gate,
+        epoch: None,
     }
 }
 
@@ -552,6 +571,7 @@ mod tests {
             ffi_base_dir: None,
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
+            epoch: None,
         };
         reactor.submit(job);
         state
@@ -650,6 +670,7 @@ mod tests {
             ffi_base_dir: None,
             ffi_search_paths: Vec::new(),
             dload_gate: DloadGate::deny_all(),
+            epoch: None,
         };
         // Must not push onto owner's deque — job goes to `foreign`'s injector.
         assert!(
