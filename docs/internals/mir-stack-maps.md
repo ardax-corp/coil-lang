@@ -29,8 +29,9 @@ and relocate mapped slots on collect.
   fuse-IL leftovers (`allow_alloc`) and encodes S2a slots per alloc site.
   After fuse/PC assign, [`bind_drafts`](../../compiler/src/mir/stackmap.rs)
   attaches [`FrameStackMap`](../../common/src/stack_map.rs) rows to those
-  bodies. Compile-and-run installs them on the VM. `.hyc` load does **not**
-  require maps (no archive bump): older archives stay conservative-stack GC.
+  bodies. Compile-and-run and `.hyc` / embed load (archive **minor 14+**)
+  install them on the VM via `wire_thread_program_with_maps`. Older
+  envelopes load with empty maps and stay conservative-stack GC.
 - Dense specialize / MIR→LIR **may cross alloc** when
   [`has_real_maps`](../../compiler/src/mir/stackmap.rs) is true (S2c /
   [COI-307](https://linear.app/ardax/issue/COI-307/s2c-specialize-lir-across-alloc-when-maps-exist)).
@@ -61,7 +62,8 @@ and relocate mapped slots on collect.
    heap words.
 2. ~~**Slot / frame maps**~~ — **S2b (this note).** Encode those roots
    for the interpreter (and later deopt) so a collect can update slots.
-   Archive bump only if load-time requires maps — S2b does not.
+   Archive **minor 14** (COI-359 E1) persists maps for `.hyc` / embed.
+   Older same-major envelopes still load with empty maps.
 3. ~~**Specialize across GC**~~ — **S2c.** Mapped allocating bodies may
    take dense / LIR when otherwise eligible. Default remains refuse
    without maps.

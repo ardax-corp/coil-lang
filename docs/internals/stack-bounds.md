@@ -18,6 +18,10 @@ Archive **minor 13** (COI-358 E0) stores `operand_stack_slots` on
 major, older minor) and fall back to the Seek+CALL heuristic
 (`256` or `MAX_OPERAND_STACK_SLOTS`).
 
+Archive **minor 14** (COI-359 E1) stores S2b stack maps on the same envelope.
+`.hyc` / embed GC relocate matches compile-and-run. Pre-14 archives load
+with empty maps (conservative stack scan), same as E0 execute.
+
 ## Analysis
 
 After typecheck, [`analyze_stack_bounds`](../../compiler/src/typechecking/stack_bound.rs)

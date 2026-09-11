@@ -195,7 +195,8 @@ idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
 
 `.hyc` / embed execute sizes each isolate operand stack from the persisted
 compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL
-heuristic; that is not an IPA policy change.
+heuristic; that is not an IPA policy change. Minor 14 stores S2b maps so
+archive/embed GC relocate matches compile-and-run; older maps stay empty.
 
 Pool workers pin a TLS local deque tagged with the owning reactor identity.
 `submit` / join-help only push or pop that deque when it belongs to the same

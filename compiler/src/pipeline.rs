@@ -1250,6 +1250,7 @@ impl Pipeline {
             fn_symbols: self.compiler_lazy().fn_debug_symbols(),
             struct_layouts: self.archived_struct_layouts(),
             operand_stack_slots: self.operand_stack_slots(),
+            stack_maps: self.stack_maps().to_vec(),
             bytecode: self.bytecode,
         };
 
@@ -1826,11 +1827,56 @@ fn main() {
             fn_symbols: debug.fn_symbols,
             struct_layouts: pipeline.archived_struct_layouts(),
             operand_stack_slots: pipeline.operand_stack_slots(),
+            stack_maps: pipeline.stack_maps().to_vec(),
         };
         let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
         let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
         assert!(decoded.operand_stack_slots_persisted);
         assert_eq!(decoded.program.operand_stack_slots, 512);
+        assert!(decoded.stack_maps_persisted);
+    }
+
+    #[test]
+    fn mapped_pair_archive_round_trip_persists_s2b_maps() {
+        use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
+        use rkyv::rancor::Error;
+
+        let mut pipeline = Pipeline::new();
+        let src = r#"
+fn pair(int a, int b) -> [int] {
+    return [a, b];
+}
+fn main() {
+    let xs = pair(3, 4);
+    let _ = xs[0] + xs[1];
+}
+"#;
+        let (bytecode, constants) = pipeline.compile_src(src).expect("compile");
+        assert!(
+            !pipeline.stack_maps().is_empty(),
+            "pair() should emit S2b maps"
+        );
+        let debug = pipeline.program_debug();
+        let program = ArchivedProgram {
+            version: ARCHIVE_VERSION,
+            static_slot_count: pipeline.static_slot_count(),
+            constants,
+            strings: pipeline.strings().to_vec(),
+            bytecode,
+            source_files: debug.source_files,
+            debug_locs: debug.debug_locs,
+            fn_symbols: debug.fn_symbols,
+            struct_layouts: pipeline.archived_struct_layouts(),
+            operand_stack_slots: pipeline.operand_stack_slots(),
+            stack_maps: pipeline.stack_maps().to_vec(),
+        };
+        let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
+        let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
+        assert!(decoded.stack_maps_persisted);
+        assert_eq!(
+            decoded.program.stack_maps.as_slice(),
+            pipeline.stack_maps()
+        );
     }
 
     #[test]

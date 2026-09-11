@@ -75,7 +75,7 @@ Prefer over new opcodes / IL opts:
 
 Soft baseline: `./scripts/poop_baseline.sh` (compile once, then `coil run` archives under `examples/perf/`). Hit-bench prove rule: [optimization-roadmap.md](../../../docs/internals/optimization-roadmap.md#hit-bench-prove-rule). PGO was removed ([#301](https://github.com/ardax-corp/coil-lang/pull/301)). See AGENTS.md user preferences.
 
-Current archive: **major 4 / minor 13** (`common/src/archive.rs`) — minor 13 persists `operand_stack_slots`; minor 12 is dense field / Object make; minor 11 is `DenseArrayPush`; minor 10 is dense-native heap ops (`DenseIndex` … `DensePush`); minor 9 is `VReduce` / `VFma` (S5b V1); minor 8 is compiler-only SIMD (`VLoad` … `VMove`); minor 7 is HostInvoke `simd_axpy_reduce` (**136**); minor 6 is MIR dense numeric opcodes; minor 5 is M1 math HostInvoke **125–135**.
+Current archive: **major 4 / minor 14** (`common/src/archive.rs`) — minor 14 persists S2b stack maps; minor 13 persists `operand_stack_slots`; minor 12 is dense field / Object make; minor 11 is `DenseArrayPush`; minor 10 is dense-native heap ops (`DenseIndex` … `DensePush`); minor 9 is `VReduce` / `VFma` (S5b V1); minor 8 is compiler-only SIMD (`VLoad` … `VMove`); minor 7 is HostInvoke `simd_axpy_reduce` (**136**); minor 6 is MIR dense numeric opcodes; minor 5 is M1 math HostInvoke **125–135**.
 
 | Tree | When to update |
 |------|----------------|

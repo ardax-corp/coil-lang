@@ -3,7 +3,6 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, exit};
-use std::sync::Arc;
 
 use common::{
     ARCHIVE_VERSION, ArchiveDecodeError, ArchivedArchivedProgram, Byte, NativeLock, ProgramDebug,
@@ -11,8 +10,7 @@ use common::{
     embedded_archive_slice, format_archive_version, read_embedded_native_lock,
     read_package_trailer, resolve_archive_operand_slots,
 };
-use machine::thread::ThreadProgram;
-use machine::{DloadGate, Machine, wire_standard_host_natives};
+use machine::{DloadGate, Machine, wire_standard_host_natives, wire_thread_program_with_maps};
 
 /// Errors loading a `.hyc` / embedded archive blob.
 #[derive(Debug)]
@@ -32,6 +30,8 @@ pub struct LoadedArchive {
     pub struct_layouts: Vec<common::CStructLayout>,
     /// Analyzed capacity when the envelope stored it (minor 13+).
     pub operand_stack_slots: Option<u32>,
+    /// S2b maps when the envelope stored them (minor 14+). Empty = conservative GC.
+    pub stack_maps: Vec<common::FrameStackMap>,
 }
 
 /// Deserialize an `ArchivedProgram` blob (from `.hyc` or an embedded slice).
@@ -66,6 +66,11 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
         operand_stack_slots: decoded
             .operand_stack_slots_persisted
             .then_some(program.operand_stack_slots),
+        stack_maps: if decoded.stack_maps_persisted {
+            program.stack_maps
+        } else {
+            Vec::new()
+        },
     })
 }
 
@@ -88,8 +93,9 @@ pub fn try_load_archive(path: &str) -> Result<LoadedArchive, LoadErr> {
 /// Host capability flags are **not** stored in `.hyc` and are **not** re-applied
 /// here. If the bytecode has the op, it runs. `dload` still uses lock hash /
 /// trusted integrity when `dload_gate` is supplied. `coil.toml` is not consulted.
-/// Minor 13+ stores the compiler stack bound. Older Seek+CALL archives still
-/// grow to [`machine::MAX_OPERAND_STACK_SLOTS`].
+/// Minor 13+ stores the compiler stack bound. Minor 14+ stores S2b maps;
+/// older archives keep empty maps (conservative stack GC). Seek+CALL
+/// archives still grow to [`machine::MAX_OPERAND_STACK_SLOTS`].
 pub fn archive_operand_slots(bytecode: &[Byte]) -> usize {
     common::legacy_archive_operand_slots(bytecode) as usize
 }
@@ -114,15 +120,16 @@ pub fn execute_archived_program(
         machine.register_struct_layout(machine::CStructLayout::from_archive(layout));
     }
 
-    machine.set_thread_program(Arc::new(ThreadProgram {
-        code: Arc::from(loaded.bytecode.clone()),
-        constants: Arc::from(loaded.constants.clone()),
-        strings: Arc::from(loaded.strings.clone()),
-        static_slot_count: loaded.static_slots,
-        debug: loaded.debug.clone(),
-        operand_stack_slots: slots as u32,
-        stack_maps: Vec::new(),
-    }));
+    wire_thread_program_with_maps(
+        &mut machine,
+        &loaded.bytecode,
+        &loaded.constants,
+        &loaded.strings,
+        loaded.static_slots,
+        loaded.debug.clone(),
+        slots as u32,
+        loaded.stack_maps.clone(),
+    );
     machine.set_program_debug(loaded.debug.clone());
     machine.run_raw(
         &loaded.bytecode,
@@ -357,6 +364,7 @@ mod tests {
             debug: ProgramDebug::default(),
             struct_layouts: vec![],
             operand_stack_slots: Some(512),
+            stack_maps: Vec::new(),
         };
         assert_eq!(
             resolve_archive_operand_slots(loaded.operand_stack_slots, &loaded.bytecode),
@@ -366,5 +374,38 @@ mod tests {
             resolve_archive_operand_slots(None, &loaded.bytecode),
             machine::MAX_OPERAND_STACK_SLOTS as u32
         );
+    }
+
+    #[test]
+    fn load_persists_stack_maps() {
+        use common::{ArchivedProgram, FrameStackMap, SlotMap, ARCHIVE_VERSION};
+        use rkyv::rancor::Error;
+
+        let maps = vec![FrameStackMap {
+            entry_pc: 0,
+            end_pc: 4,
+            frame_slots: vec![0],
+            safepoints: vec![SlotMap {
+                pc: 0,
+                slots: vec![0],
+            }],
+        }];
+        let program = ArchivedProgram {
+            version: ARCHIVE_VERSION,
+            static_slot_count: 0,
+            constants: vec![],
+            strings: vec![],
+            bytecode: vec![Byte::new(Instruction::HALT)],
+            source_files: vec![],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+            struct_layouts: Vec::new(),
+            operand_stack_slots: 256,
+            stack_maps: maps.clone(),
+        };
+        let bytes = rkyv::to_bytes::<Error>(&program).unwrap();
+        let loaded = load_archive_bytes(bytes.as_slice()).expect("load");
+        assert_eq!(loaded.stack_maps, maps);
+        assert_eq!(loaded.operand_stack_slots, Some(256));
     }
 }

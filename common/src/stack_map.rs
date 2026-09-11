@@ -1,11 +1,14 @@
 //! Interpreter slot / frame maps (S2b / COI-306).
 //!
-//! Encoded from S2a live-root sidecars. Not required to load a `.hyc`
-//! (older archives stay conservative-stack GC). Compile-and-run attaches
-//! maps in memory; no archive bump.
+//! Encoded from S2a live-root sidecars. Archive minor 14+ stores maps on
+//! `.hyc` / embed. Older envelopes load with empty maps (conservative stack
+//! GC), matching pre-E1 `execute_archived_program`.
+
+use rkyv::{Archive, Deserialize, Serialize};
 
 /// Live heap IL slots at one alloc / `GcBarrier` bytecode PC.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
 pub struct SlotMap {
     /// Absolute bytecode PC of the allocating opcode (safepoint).
     pub pc: u32,
@@ -14,7 +17,8 @@ pub struct SlotMap {
 }
 
 /// Per-function slot / frame map for bodies that allocate.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Archive, Serialize, Deserialize)]
+#[rkyv(compare(PartialEq))]
 pub struct FrameStackMap {
     /// Function entry PC (inclusive).
     pub entry_pc: u32,

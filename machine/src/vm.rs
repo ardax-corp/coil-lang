@@ -1683,7 +1683,7 @@ impl<const S: usize> Machine<S> {
         self.thread_program = Some(program);
     }
 
-    /// Attach S2b maps (compile-and-run). Empty keeps conservative stack GC.
+    /// Attach S2b maps (compile-and-run / archive load). Empty keeps conservative stack GC.
     pub fn set_stack_maps(&mut self, maps: Vec<common::FrameStackMap>) {
         self.stack_maps = maps;
     }
