@@ -7344,6 +7344,66 @@ fn main() {}
         );
     }
 
+    /// Direct CALL of a top-level named `fn` is not a capture.
+    #[test]
+    fn lambda_calls_named_fn_without_use() {
+        let (c, _) = check(
+            r#"
+fn rec(int n) -> int { return n + 1; }
+fn main() {
+    let f = fn (int x) => rec(x);
+    let _ = f(1);
+}
+"#,
+        );
+        assert!(
+            c.messages().is_empty(),
+            "named fn CALL must not require use: {:?}",
+            c.messages().iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Recursive named `fn` inside its own lambda still CALL-resolves.
+    #[test]
+    fn lambda_calls_enclosing_named_fn_without_use() {
+        let (c, _) = check(
+            r#"
+fn rec(int n) -> int {
+    let f = fn (int x) => rec(x);
+    return f(n);
+}
+fn main() { let _ = rec(0); }
+"#,
+        );
+        assert!(
+            c.messages().is_empty(),
+            "recursive named fn CALL must not require use: {:?}",
+            c.messages().iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+
+    /// Outer lambda / let-bound fn-value still needs `use`.
+    #[test]
+    fn lambda_uncaptured_fn_value_is_error() {
+        let msgs = assert_messages(
+            r#"
+fn main() {
+    let g = fn (int x) => x;
+    let f = fn (int x) => g(x);
+}
+"#,
+        );
+        assert!(
+            msgs.iter().any(|m| {
+                m.message().contains("cannot capture `g` without `use (g)`")
+                    || m.message().contains("Cannot find function `g`")
+                    || m.message().contains("Cannot find value `g`")
+            }),
+            "expected capture/unknown diagnostic for outer lambda `g`, got: {:?}",
+            msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+    }
+
     /// Lambda bodies cannot close over outer locals unless listed in `use`.
     #[test]
     fn lambda_uncaptured_outer_is_error() {

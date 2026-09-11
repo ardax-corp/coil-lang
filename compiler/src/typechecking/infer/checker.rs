@@ -6,7 +6,7 @@ use parser::ast::{
 };
 use reporting::{ErrorCode, Label, Message};
 
-use crate::typechecking::def_id::DefId;
+use crate::typechecking::def_id::{DefId, DefKind};
 use crate::typechecking::env::{Env, TyVarCounter, instantiate_with_kinds};
 use crate::typechecking::generics::{
     AssocTypeDecl, AssocTypeValue, Generics, InstanceDef, TypeClassDef,
@@ -2838,7 +2838,8 @@ impl Checker {
 
             Expression::Defer { captures, body } => {
                 // Same explicit-capture isolation as lambdas: outer locals
-                // are invisible unless listed in `use (…)`.
+                // are invisible unless listed in `use (…)` (named `fn`s
+                // rebound like imports).
                 let mut cap_bindings: Vec<(String, Ty)> = Vec::new();
                 for cap in captures {
                     match self.env.lookup(cap).cloned() {
@@ -5254,9 +5255,12 @@ impl Checker {
 
     //  Helpers
 
-    /// File-level imports (virtual + disk) are globals, not closure captures.
-    /// Snapshot their schemes, drop them from `uncaptured`, then rebind after
-    /// `take_and_isolate`.
+    /// File-level imports (virtual + disk) and module-visible named `fn`s
+    /// are globals, not closure captures. Snapshot their schemes, drop them
+    /// from `uncaptured`, then rebind after `take_and_isolate`.
+    ///
+    /// Outer locals and other function *values* (lambdas / `let`-bound) stay
+    /// in `uncaptured` and still need `use (…)`.
     fn snapshot_file_level_imports(
         &mut self,
         uncaptured: &mut HashSet<String>,
@@ -5291,7 +5295,38 @@ impl Checker {
                 rebinds.push((name, scheme));
             }
         }
+        self.snapshot_named_fns(uncaptured, &mut rebinds);
         rebinds
+    }
+
+    /// Top-level / module-visible named `fn`s (and `extern` decls) rebind like
+    /// imports. A later local that shadows the name stays a capture.
+    fn snapshot_named_fns(
+        &self,
+        uncaptured: &mut HashSet<String>,
+        rebinds: &mut Vec<(String, Scheme)>,
+    ) {
+        let names: Vec<String> = self
+            .local_defs
+            .iter()
+            .filter_map(|(name, &id)| {
+                let kind = self.def_interner.info(id)?.kind;
+                matches!(kind, DefKind::Fn | DefKind::Ffi).then(|| name.clone())
+            })
+            .collect();
+        for name in names {
+            let Some(env_scheme) = self.env.lookup(&name).cloned() else {
+                continue;
+            };
+            if let Some(&id) = self.local_defs.get(&name)
+                && let Some(def_scheme) = self.schemes_by_def.get(&id)
+                && env_scheme != *def_scheme
+            {
+                continue;
+            }
+            uncaptured.remove(&name);
+            rebinds.push((name, env_scheme));
+        }
     }
 
     fn rebind_file_level_imports(&mut self, rebinds: Vec<(String, Scheme)>) {

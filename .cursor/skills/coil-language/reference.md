@@ -21,7 +21,7 @@ field       rec.field (chained)
 match       match e { pat => expr, … }   // catch-all is `default` only (not `_`)
 if          if cond { … } else { … }
 block       { stmts; expr }
-lambda      fn (T x) use (y) => expr   // first-class fn values
+lambda      fn (T x) use (y) => expr   // first-class fn values; named fns CALL without use
 array lit   [1, 2, 3]
 tuple       (a, b)
 dict        { key: val, … }
