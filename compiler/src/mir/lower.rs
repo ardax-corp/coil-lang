@@ -339,7 +339,8 @@ fn taken_ops(ops: &[IlOp], taken: Label) -> &[IlOp] {
 /// Boxed match codegen emits `JumpIfMatch` / last-arm `Unpack` arity 0;
 /// the VM still pushes a unary payload. Arity ≥ 1 is the payload count.
 /// Arity 0 recovers a payload when the taken arm is identity-`RETURN`,
-/// overlap `LOAD` / `BinSlotImm`, or a stack `Bin`.
+/// overlap `LOAD` / `BinSlotImm`, a stack `Bin`, or a nested rematch
+/// (`Seek` / field reload of the same scrutinee).
 fn jim_taken_payloads(arity: u32, first: Option<&IlOp>) -> u32 {
     if arity >= 1 {
         return arity;
@@ -348,9 +349,29 @@ fn jim_taken_payloads(arity: u32, first: Option<&IlOp>) -> u32 {
         Some(IlOp::Return { .. })
         | Some(IlOp::Load { .. })
         | Some(IlOp::Bin { .. })
-        | Some(IlOp::BinSlotImm { .. }) => 1,
+        | Some(IlOp::BinSlotImm { .. })
+        | Some(IlOp::LoadField { .. })
+        | Some(IlOp::GetField { .. }) => 1,
+        Some(IlOp::Byte { byte, .. })
+            if matches!(
+                *byte.bytecode(),
+                Instruction::Seek
+                    | Instruction::LoadField
+                    | Instruction::GetField
+                    | Instruction::DenseFieldLoad
+            ) =>
+        {
+            1
+        }
         _ => 0,
     }
+}
+
+fn identity_taken_arm(first: Option<&IlOp>) -> bool {
+    matches!(
+        first,
+        Some(IlOp::Return { .. } | IlOp::ConstReturnImm { .. } | IlOp::Halt { .. })
+    )
 }
 
 fn match_payload_ty(src_ty: MirTy) -> MirTy {
@@ -362,6 +383,8 @@ fn match_payload_ty(src_ty: MirTy) -> MirTy {
 
 /// Bind `n` per-index payloads. Overlap `LOAD` / `BinSlotImm` maps
 /// declaration order onto consecutive reserved slots (`payload_base + i`).
+/// Nested rematch: a later arm's LOAD of an outer slot is not this JIM's
+/// overlap — `jim_seek` is the frame Seek before the match.
 fn bind_match_payloads(
     b: &mut MirBuilder,
     src: ValueId,
@@ -370,6 +393,8 @@ fn bind_match_payloads(
     rest: &[IlOp],
     tos: &mut Vec<ValueId>,
     mut overlap: Option<&mut Vec<(LocalId, ValueId)>>,
+    jim_seek: Option<u32>,
+    identity_return: bool,
 ) -> Result<Vec<ValueId>, LowerError> {
     let ty = match_payload_ty(b.func().ty(src));
     let mut payloads = Vec::with_capacity(n as usize);
@@ -379,7 +404,13 @@ fn bind_match_payloads(
     if n == 0 {
         return Ok(payloads);
     }
-    if let Some(slot) = overlap_base(next, rest) {
+    let mut slot = overlap_base(next, rest);
+    if let Some(base) = jim_seek {
+        if slot.is_some_and(|s| s < base) || (slot.is_none() && !identity_return) {
+            slot = Some(base);
+        }
+    }
+    if let Some(slot) = slot {
         for (i, &p) in payloads.iter().enumerate() {
             let local = LocalId(slot + i as u32);
             if let Some(ov) = overlap.as_mut() {
@@ -406,10 +437,14 @@ fn boxed_overlap_slot(first: Option<&IlOp>) -> Option<u32> {
     }
 }
 
+/// Overlap is the first reserved payload slot in this arm, not a later
+/// arm's LOAD and not a param/scrutinee reload (nested match).
 fn overlap_base(next: Option<&IlOp>, rest: &[IlOp]) -> Option<u32> {
-    boxed_overlap_slot(next).or_else(|| {
-        rest.iter().find_map(|op| boxed_overlap_slot(Some(op)))
-    })
+    let in_arm = rest.iter().take_while(|op| !is_term(op) && label_at(op).is_none());
+    boxed_overlap_slot(next)
+        .into_iter()
+        .chain(in_arm.filter_map(|op| boxed_overlap_slot(Some(op))))
+        .next()
 }
 
 fn split_blocks(ops: &[IlOp]) -> Vec<(usize, usize)> {
@@ -599,6 +634,8 @@ fn emit_term(
                 taken_rest,
                 &mut taken_stack,
                 Some(&mut taken_overlap),
+                b.match_seek,
+                identity_taken_arm(first),
             )?;
             if !taken_overlap.is_empty() {
                 overlap_defs
@@ -990,17 +1027,21 @@ fn lower_byte(
         Instruction::SetField if hints.allow_heap_fields => {
             lower_heap_set_field(b, tos, common::set_field_slot_index(byte.operand_u32()))
         }
-        Instruction::Seek if hints.allow_heap_fields => {
-            let n = byte.operand_u32();
-            if tos.is_empty() && n > 0 {
-                let slot = n - 1;
-                if hints.slot_ty.get(&slot) == Some(&MirTy::HeapRef) {
-                    tos.push(b.use_local(LocalId(slot), MirTy::HeapRef)?);
+        Instruction::Seek if hints.allow_match || hints.allow_heap_fields => {
+            if hints.allow_match {
+                b.match_seek = Some(byte.operand_u32());
+            }
+            if hints.allow_heap_fields {
+                let n = byte.operand_u32();
+                if tos.is_empty() && n > 0 {
+                    let slot = n - 1;
+                    if hints.slot_ty.get(&slot) == Some(&MirTy::HeapRef) {
+                        tos.push(b.use_local(LocalId(slot), MirTy::HeapRef)?);
+                    }
                 }
             }
             Ok(())
         }
-        Instruction::Seek if hints.allow_match => Ok(()),
         inst if is_alloc_inst(inst) && hints.allow_alloc => {
             let (type_id, nfields) = if inst == Instruction::InitTyped {
                 common::unpack_init_typed(byte.operand_u32())
@@ -1033,7 +1074,17 @@ fn lower_byte(
                 .pop()
                 .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
             let n_payloads = jim_taken_payloads(arity, next);
-            bind_match_payloads(b, src, n_payloads, next, rest, tos, None)?;
+            bind_match_payloads(
+                b,
+                src,
+                n_payloads,
+                next,
+                rest,
+                tos,
+                None,
+                None,
+                false,
+            )?;
             Ok(())
         }
         other => Err(LowerError::Refused(format!(

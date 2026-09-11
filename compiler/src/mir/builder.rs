@@ -51,6 +51,8 @@ pub struct MirBuilder {
     pub skip_verify: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
     pub pending_loc: DebugLoc,
+    /// Last match-arm `Seek` (payload_base for arity-0 JumpIfMatch).
+    pub match_seek: Option<u32>,
 }
 
 impl MirBuilder {
@@ -67,6 +69,7 @@ impl MirBuilder {
             allow_effects: false,
             skip_verify: false,
             pending_loc: DebugLoc::unknown(),
+            match_seek: None,
         }
     }
 
