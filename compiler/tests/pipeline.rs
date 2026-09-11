@@ -6011,6 +6011,132 @@ fn main() {
     assert_eq!(output, "17711");
 }
 
+/// Nested associative `+` of helper arms is one N-arm site (not a binary leftover).
+#[test]
+fn auto_par_nary_add_emits_spec_and_runs() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn fib(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn triple_fib(int n) -> int {
+    if n <= 0 {
+        return 0;
+    }
+    return fib(n) + fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", triple_fib(22))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par triple_fib should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_triple_fib").is_some(),
+        "expected a 3-arm worker for triple_fib"
+    );
+    let (output, jobs) = run_bytecode_counting_jobs(bytecode, constants, &pipeline, None);
+    // fib(22)+fib(21)+fib(20) with fib(n<=1)=n
+    assert_eq!(output, "35422");
+    assert!(
+        jobs >= 1 && jobs < 20,
+        "triple_fib(22) must spawn, but not a cutoff-chain storm: jobs={jobs}"
+    );
+}
+
+/// Let-bound independent calls are the same arms as an in-expression combine.
+#[test]
+fn auto_par_let_bound_arms_emits_spec_and_runs() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn fib(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    let a = fib(n - 1);
+    let b = fib(n - 2);
+    return a + b;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", fib(22))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("let-bound IPA should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_fib").is_some(),
+        "expected a worker for let-bound fib"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "17711");
+}
+
+/// `param + k` is a structural arg form (binary tree over n).
+#[test]
+fn auto_par_param_plus_emits_spec_and_runs() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn walk(int n, int k) -> int {
+    if n <= 0 {
+        return k;
+    }
+    return walk(n - 1, k) + walk(n - 1, k + 1);
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", walk(16, 0))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("param-plus IPA should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_walk").is_some(),
+        "expected a worker for walk(16, 0)"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "524288");
+}
+
+/// Xor combines are associative IPA arms.
+#[test]
+fn auto_par_xor_binop_emits_spec_and_runs() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+#[max_depth(64)]
+fn mix(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return mix(n - 1) ^ mix(n - 2);
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", mix(22))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par xor should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_mix").is_some(),
+        "expected a Xor worker for mix"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "1");
+}
+
 /// A pure counted loop above the threshold must split into chunk workers and
 /// still fold to the sequential sum.
 #[test]
@@ -6524,6 +6650,93 @@ fn main() {
     assert!(
         pipeline.function_offset("__coil_par_loop_1").is_some(),
         "expected a chunk worker for a const range local"
+    );
+    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
+}
+
+/// XOR reduction is associative with identity 0, so counted loops still chunk.
+#[test]
+fn auto_par_loop_xor_splits_and_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let acc = 0;
+    for x in 0..100 {
+        acc = acc ^ sq(x);
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par xor loop should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker for xor reduction"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "13452");
+}
+
+/// Enclosing const ints are worker immediates, not live captures.
+#[test]
+fn auto_par_loop_const_scale_splits() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let scale = 3;
+    let acc = 0;
+    for x in 0..100 {
+        acc = acc + scale * sq(x);
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par const-scale loop should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker for const-int scale"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "985050");
+}
+
+/// `acc = e + acc` is the same commutative reduction as `acc = acc + e`.
+#[test]
+fn auto_par_loop_commuted_add_splits() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let acc = 0;
+    for x in 0..100 {
+        acc = sq(x) + acc;
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("commuted add loop should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker for commuted add"
     );
     assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
 }

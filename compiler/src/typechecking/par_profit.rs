@@ -2,15 +2,16 @@
 //!
 //! A *fork site* is an expression whose operands are two or more mutually
 //! independent **pure** calls — self-recursion is common but not required:
-//! `f(a) ⊕ f(b)`, `h(a) + h(b)`, `E::V(f(a), f(b))`, `(f(a), f(b))`, the
-//! tak-style `f(f(a), f(b), f(c))`, or `g(f(a), f(b))`. Arms are described
-//! structurally ([`ArgForm`]) rather than by function allowlists. Constant call
-//! sites whose fork-tree grain ([`par_work_grain`]) exceeds
-//! [`par_expr_grain`] rewrite to one parameterized fork worker
-//! ([`par_worker_name`]) that takes the live args. Grain is the const-site
-//! entry gate (no hot-path skip-threshold). Nested AlwaysPar is a hop/depth
-//! counter on that same worker — not a constellation of frozen arg clones
-//! (COI-366 F1).
+//! `f(a) ⊕ f(b)`, n-ary `f(a)+g(b)+h(c)` for associative `+`/`*`/`^`,
+//! let-bound `let a = f(…); let b = g(…); return a ⊕ b`, `h(a) + h(b)`,
+//! `E::V(f(a), f(b))`, `(f(a), f(b))`, the tak-style `f(f(a), f(b), f(c))`,
+//! or `g(f(a), f(b))`. Arms are described structurally ([`ArgForm`]) rather
+//! than by function allowlists. Constant call sites whose fork-tree grain
+//! ([`par_work_grain`]) exceeds [`par_expr_grain`] rewrite to one parameterized
+//! fork worker ([`par_worker_name`]) that takes the live args. Grain is the
+//! const-site entry gate (no hot-path skip-threshold). Nested AlwaysPar is a
+//! hop/depth counter on that same worker — not a constellation of frozen arg
+//! clones (COI-366 F1). F2 broadens admission under those same gates (COI-368).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -52,11 +53,16 @@ pub fn par_loop_grain() -> i64 {
 }
 
 /// Binary op used at a [`ParCombine::BinOp`] fork site.
+///
+/// `Add` / `Mul` / `Xor` are associative (and commutative) on `int`, so a
+/// nested tree of the same op flattens to N arms. `Sub` is not: only a
+/// two-arm site is admitted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ParBinOp {
     Add,
     Sub,
     Mul,
+    Xor,
 }
 
 /// One argument of a self-call arm, expressed in terms of the enclosing
@@ -69,6 +75,8 @@ pub enum ArgForm {
     Param(usize),
     /// `param - sub` with `sub > 0`; requires an int-like parameter.
     ParamMinus { param: usize, sub: i64 },
+    /// `param + add` with `add > 0`; requires an int-like parameter.
+    ParamPlus { param: usize, add: i64 },
 }
 
 /// One independent arm of a fork site.
@@ -83,7 +91,8 @@ pub enum ParArm {
 /// The combine always consumes the arm results positionally and in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParCombine {
-    /// `arm0 ⊕ arm1` (exactly two arms).
+    /// `arm0 ⊕ arm1 [⊕ …]` — two arms for any op; three or more only when
+    /// [`ParBinOp`] is associative (`Add` / `Mul` / `Xor`).
     BinOp(ParBinOp),
     /// Rebuild by calling the enclosing fn with the arm results as args (tak-style).
     SelfCall,
@@ -288,6 +297,7 @@ fn eval_arg_form(form: &ArgForm, parent_args: &[i64]) -> Option<i64> {
         ArgForm::Const(k) => Some(*k),
         ArgForm::Param(i) => parent_args.get(*i).copied(),
         ArgForm::ParamMinus { param, sub } => parent_args.get(*param).map(|v| v - sub),
+        ArgForm::ParamPlus { param, add } => parent_args.get(*param).and_then(|v| v.checked_add(*add)),
     }
 }
 
@@ -424,6 +434,7 @@ fn detect_fork_site(
         ctx: &ctx,
         guards: Vec::new(),
         found: Vec::new(),
+        pure_lets: Vec::new(),
     };
     scan.walk(body, false);
     let found = scan.found;
@@ -469,6 +480,9 @@ struct Scan<'a> {
     ctx: &'a FnCtx<'a>,
     guards: Vec<ParGuard>,
     found: Vec<(bool, ParForkSite)>,
+    /// Pure-call `let`s immediately preceding the current statement in this
+    /// block, used to admit `let a = f(…); let b = g(…); return a ⊕ b`.
+    pure_lets: Vec<(String, ParArm)>,
 }
 
 impl Scan<'_> {
@@ -483,21 +497,47 @@ impl Scan<'_> {
     /// Statement list: each item may narrow the path condition for its successors.
     fn walk_block(&mut self, items: &[Output<'_>], on_return: bool) {
         let depth = self.guards.len();
+        // Nested fragments (parsed `let`) must not wipe the enclosing pending
+        // lets; only this block's statements share a trailing-let list.
+        let saved_lets = std::mem::take(&mut self.pure_lets);
         for item in items {
             self.walk(item, on_return);
             match diverging_if_negation(item, self.ctx) {
-                Some(guard) => self.guards.push(guard),
+                Some(guard) => {
+                    self.guards.push(guard);
+                    self.pure_lets.clear();
+                }
                 // Any other statement that might return leaves the path
                 // condition unknown for everything after it.
-                None if contains_return(item) => self.guards.push(ParGuard::Opaque),
-                None => {}
+                None if contains_return(item) => {
+                    self.guards.push(ParGuard::Opaque);
+                    self.pure_lets.clear();
+                }
+                None => self.note_pure_let(item),
             }
         }
         self.guards.truncate(depth);
+        self.pure_lets = saved_lets;
+    }
+
+    /// Track trailing `let name = pure_call(…)` so the next combine can name
+    /// those arms. Any other statement drops the pending list: a fork worker
+    /// re-emits only arms + combine, so prefix work would be skipped.
+    fn note_pure_let(&mut self, item: &Output<'_>) {
+        let Some((name, init)) = let_binding(item) else {
+            self.pure_lets.clear();
+            return;
+        };
+        let Some(arm) = pure_call_arm(init, self.ctx) else {
+            self.pure_lets.clear();
+            return;
+        };
+        self.pure_lets.retain(|(n, _)| n != name);
+        self.pure_lets.push((name.to_string(), arm));
     }
 
     fn walk(&mut self, ast: &Output<'_>, on_return: bool) {
-        if let Some(site) = match_fork(ast, self.ctx, &self.guards) {
+        if let Some(site) = match_fork(ast, self.ctx, &self.guards, &self.pure_lets) {
             self.found.push((on_return, site));
         }
         match ast.1.as_ref() {
@@ -539,6 +579,7 @@ impl Scan<'_> {
             | Expression::Mul(a, b)
             | Expression::Div(a, b)
             | Expression::Mod(a, b)
+            | Expression::Xor(a, b)
             | Expression::Eq(a, b)
             | Expression::Neq(a, b)
             | Expression::Le(a, b)
@@ -676,6 +717,7 @@ fn contains_return(ast: &Output<'_>) -> bool {
         | Expression::Mul(a, b)
         | Expression::Div(a, b)
         | Expression::Mod(a, b)
+        | Expression::Xor(a, b)
         | Expression::Eq(a, b)
         | Expression::Neq(a, b)
         | Expression::Le(a, b)
@@ -745,19 +787,25 @@ fn guard_operand(expr: &Output<'_>, ctx: &FnCtx<'_>) -> Option<ArgForm> {
             .copied()
             .unwrap_or(false)
             .then_some(form),
-        ArgForm::ParamMinus { .. } => Some(form),
+        ArgForm::ParamMinus { .. } | ArgForm::ParamPlus { .. } => Some(form),
     }
 }
 
 /// Recognize the IPA fork shapes at `expr` (no recursion into subtrees).
-fn match_fork(expr: &Output<'_>, ctx: &FnCtx<'_>, guards: &[ParGuard]) -> Option<ParForkSite> {
+fn match_fork(
+    expr: &Output<'_>,
+    ctx: &FnCtx<'_>,
+    guards: &[ParGuard],
+    lets: &[(String, ParArm)],
+) -> Option<ParForkSite> {
     let expr = peel(expr);
     match expr.1.as_ref() {
-        Expression::Add(a, b) => binop_site(ctx, guards, a, b, ParBinOp::Add),
-        Expression::Sub(a, b) => binop_site(ctx, guards, a, b, ParBinOp::Sub),
-        Expression::Mul(a, b) => binop_site(ctx, guards, a, b, ParBinOp::Mul),
+        Expression::Add(_, _) => assoc_binop_site(ctx, guards, lets, expr, ParBinOp::Add),
+        Expression::Sub(a, b) => binop_site(ctx, guards, lets, a, b, ParBinOp::Sub),
+        Expression::Mul(_, _) => assoc_binop_site(ctx, guards, lets, expr, ParBinOp::Mul),
+        Expression::Xor(_, _) => assoc_binop_site(ctx, guards, lets, expr, ParBinOp::Xor),
         Expression::Tuple(items) => {
-            let arms = pure_call_arms(items, ctx)?;
+            let arms = resolve_arms(items, ctx, lets)?;
             site(ctx, guards, arms, ParCombine::Tuple)
         }
         Expression::Construct {
@@ -765,7 +813,7 @@ fn match_fork(expr: &Output<'_>, ctx: &FnCtx<'_>, guards: &[ParGuard]) -> Option
             variant_name,
             fields: EnumConstructPayload::Tuple(items),
         } => {
-            let arms = pure_call_arms(items, ctx)?;
+            let arms = resolve_arms(items, ctx, lets)?;
             site(
                 ctx,
                 guards,
@@ -782,7 +830,7 @@ fn match_fork(expr: &Output<'_>, ctx: &FnCtx<'_>, guards: &[ParGuard]) -> Option
             fields: EnumConstructPayload::Record(fields),
         } => {
             let items: Vec<&Output<'_>> = fields.iter().map(|f| &f.value).collect();
-            let arms = pure_call_arm_refs(&items, ctx)?;
+            let arms = resolve_arm_refs(&items, ctx, lets)?;
             site(
                 ctx,
                 guards,
@@ -797,7 +845,7 @@ fn match_fork(expr: &Output<'_>, ctx: &FnCtx<'_>, guards: &[ParGuard]) -> Option
             name,
             args: Some(args),
         } => {
-            let arms = pure_call_arms(args, ctx)?;
+            let arms = resolve_arms(args, ctx, lets)?;
             let callee = callee_name(name)?;
             let combine = if callee == ctx.fn_name {
                 ParCombine::SelfCall
@@ -814,14 +862,51 @@ fn match_fork(expr: &Output<'_>, ctx: &FnCtx<'_>, guards: &[ParGuard]) -> Option
     }
 }
 
+fn assoc_binop_site(
+    ctx: &FnCtx<'_>,
+    guards: &[ParGuard],
+    lets: &[(String, ParArm)],
+    expr: &Output<'_>,
+    op: ParBinOp,
+) -> Option<ParForkSite> {
+    let mut leaves = Vec::new();
+    flatten_assoc(expr, op, &mut leaves)?;
+    let arms = resolve_arm_refs(&leaves, ctx, lets)?;
+    site(ctx, guards, arms, ParCombine::BinOp(op))
+}
+
+/// Flatten a left/right tree of the same associative op into operand leaves.
+fn flatten_assoc<'a>(
+    expr: &'a Output<'a>,
+    op: ParBinOp,
+    out: &mut Vec<&'a Output<'a>>,
+) -> Option<()> {
+    let expr = peel(expr);
+    let nested = match (op, expr.1.as_ref()) {
+        (ParBinOp::Add, Expression::Add(a, b))
+        | (ParBinOp::Mul, Expression::Mul(a, b))
+        | (ParBinOp::Xor, Expression::Xor(a, b)) => Some((a, b)),
+        _ => None,
+    };
+    if let Some((a, b)) = nested {
+        flatten_assoc(a, op, out)?;
+        flatten_assoc(b, op, out)?;
+        Some(())
+    } else {
+        out.push(expr);
+        Some(())
+    }
+}
+
 fn binop_site(
     ctx: &FnCtx<'_>,
     guards: &[ParGuard],
+    lets: &[(String, ParArm)],
     a: &Output<'_>,
     b: &Output<'_>,
     op: ParBinOp,
 ) -> Option<ParForkSite> {
-    let arms = vec![pure_call_arm(a, ctx)?, pure_call_arm(b, ctx)?];
+    let arms = vec![resolve_arm(a, ctx, lets)?, resolve_arm(b, ctx, lets)?];
     site(ctx, guards, arms, ParCombine::BinOp(op))
 }
 
@@ -843,20 +928,66 @@ fn site(
     })
 }
 
-/// Every operand must be an independent pure call: the combine consumes arm
-/// results positionally, so a mixed operand list is not representable.
-fn pure_call_arms(items: &[Output<'_>], ctx: &FnCtx<'_>) -> Option<Vec<ParArm>> {
+/// Every operand must be an independent pure call (or a let bound to one):
+/// the combine consumes arm results positionally, so a mixed operand list is
+/// not representable. Named lets must be used exactly once and exhaust the
+/// pending list — a reused binding is a loop-carried value, not two arms.
+fn resolve_arms(
+    items: &[Output<'_>],
+    ctx: &FnCtx<'_>,
+    lets: &[(String, ParArm)],
+) -> Option<Vec<ParArm>> {
     if items.len() < 2 {
         return None;
     }
-    items.iter().map(|i| pure_call_arm(i, ctx)).collect()
+    let refs: Vec<&Output<'_>> = items.iter().collect();
+    resolve_arm_refs(&refs, ctx, lets)
 }
 
-fn pure_call_arm_refs(items: &[&Output<'_>], ctx: &FnCtx<'_>) -> Option<Vec<ParArm>> {
+fn resolve_arm_refs(
+    items: &[&Output<'_>],
+    ctx: &FnCtx<'_>,
+    lets: &[(String, ParArm)],
+) -> Option<Vec<ParArm>> {
     if items.len() < 2 {
         return None;
     }
-    items.iter().map(|i| pure_call_arm(i, ctx)).collect()
+    let mut used = HashSet::new();
+    let mut arms = Vec::with_capacity(items.len());
+    for item in items {
+        let expr = peel(item);
+        if let Expression::Identifier(n) = expr.1.as_ref() {
+            if !used.insert(*n) {
+                return None;
+            }
+        }
+        arms.push(resolve_arm(item, ctx, lets)?);
+    }
+    if !lets.is_empty() {
+        let ident_names: HashSet<&str> = items
+            .iter()
+            .filter_map(|i| match peel(i).1.as_ref() {
+                Expression::Identifier(n) => Some(*n),
+                _ => None,
+            })
+            .collect();
+        if lets.iter().any(|(n, _)| !ident_names.contains(n.as_str())) {
+            return None;
+        }
+    }
+    Some(arms)
+}
+
+fn resolve_arm(expr: &Output<'_>, ctx: &FnCtx<'_>, lets: &[(String, ParArm)]) -> Option<ParArm> {
+    if let Some(arm) = pure_call_arm(expr, ctx) {
+        return Some(arm);
+    }
+    let Expression::Identifier(n) = peel(expr).1.as_ref() else {
+        return None;
+    };
+    lets.iter()
+        .find(|(name, _)| name == n)
+        .map(|(_, arm)| arm.clone())
 }
 
 fn pure_call_arm(expr: &Output<'_>, ctx: &FnCtx<'_>) -> Option<ParArm> {
@@ -908,6 +1039,43 @@ fn arg_form(expr: &Output<'_>, ctx: &FnCtx<'_>) -> Option<ArgForm> {
                     sub: *k,
                 })
         }
+        Expression::Add(lhs, rhs) => {
+            let (lhs, rhs) = (peel(lhs), peel(rhs));
+            let (p, k) = match (lhs.1.as_ref(), rhs.1.as_ref()) {
+                (Expression::Identifier(p), Expression::Integer(k)) => (*p, *k),
+                (Expression::Integer(k), Expression::Identifier(p)) => (*p, *k),
+                _ => return None,
+            };
+            if k <= 0 {
+                return None;
+            }
+            let idx = ctx.param_index(p)?;
+            ctx.param_int_like
+                .get(idx)
+                .copied()
+                .unwrap_or(false)
+                .then_some(ArgForm::ParamPlus {
+                    param: idx,
+                    add: k,
+                })
+        }
+        _ => None,
+    }
+}
+
+/// `let name = init` in either parsed form: a two-element `Fragment`
+/// (`Variable(name, None)` followed by the initializer) or `Variable` with an
+/// inline initializer.
+fn let_binding<'a>(item: &'a Output<'a>) -> Option<(&'a str, &'a Output<'a>)> {
+    match peel(item).1.as_ref() {
+        Expression::Variable(name, Some(init)) => Some((name, init)),
+        Expression::Fragment(items) => match items.as_slice() {
+            [binder, init] => match peel(binder).1.as_ref() {
+                Expression::Variable(name, None) => Some((name, init)),
+                _ => None,
+            },
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -958,6 +1126,7 @@ fn collect_const_calls(
         | Expression::Mul(a, b)
         | Expression::Div(a, b)
         | Expression::Mod(a, b)
+        | Expression::Xor(a, b)
         | Expression::Assignment(a, b)
         | Expression::Eq(a, b)
         | Expression::Neq(a, b)
@@ -1649,5 +1818,158 @@ fn main() { return; }
     fn worker_names_are_per_site_not_per_arg() {
         assert_eq!(par_worker_name("fib"), "__coil_par_fib");
         assert_eq!(par_worker_name("tak"), "__coil_par_tak");
+    }
+
+    /// Nested associative `+` flattens to N independent arms (tribonacci).
+    #[test]
+    fn detects_nary_add_fork() {
+        let sites = sites_of(
+            r#"
+fn trib(int n) -> int {
+    if n <= 2 { return n; }
+    return trib(n - 1) + trib(n - 2) + trib(n - 3);
+}
+fn main() { return; }
+"#,
+        );
+        let trib = sites.get("trib").expect("trib fork site");
+        assert_eq!(trib.combine, ParCombine::BinOp(ParBinOp::Add));
+        assert_eq!(trib.arms.len(), 3);
+        assert_eq!(
+            arm_args(trib, 2),
+            [ArgForm::ParamMinus { param: 0, sub: 3 }]
+        );
+        assert!(args_worth_parallel(&sites, "trib", &[22]));
+        assert!(!args_worth_parallel(&sites, "trib", &[10]));
+    }
+
+    #[test]
+    fn detects_xor_binop_fork() {
+        let sites = sites_of(
+            r#"
+fn mix(int n) -> int {
+    if n <= 1 { return n; }
+    return mix(n - 1) ^ mix(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let mix = sites.get("mix").expect("xor fork site");
+        assert_eq!(mix.combine, ParCombine::BinOp(ParBinOp::Xor));
+        assert_eq!(mix.arms.len(), 2);
+    }
+
+    /// `let a = f(…); let b = g(…); return a + b` is the same two arms.
+    #[test]
+    fn detects_let_bound_independent_arms() {
+        let sites = sites_of(
+            r#"
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    let a = fib(n - 1);
+    let b = fib(n - 2);
+    return a + b;
+}
+fn main() { return; }
+"#,
+        );
+        let fib = sites.get("fib").expect("let-bound fib fork");
+        assert_eq!(fib.combine, ParCombine::BinOp(ParBinOp::Add));
+        assert_eq!(fib.arms.len(), 2);
+        assert_eq!(
+            arm_args(fib, 0),
+            [ArgForm::ParamMinus { param: 0, sub: 1 }]
+        );
+        assert_eq!(
+            arm_args(fib, 1),
+            [ArgForm::ParamMinus { param: 0, sub: 2 }]
+        );
+        assert!(args_worth_parallel(&sites, "fib", &[21]));
+    }
+
+    /// Reusing a let is one value, not two independent calls.
+    #[test]
+    fn rejects_let_bound_reused_name() {
+        let sites = sites_of(
+            r#"
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    let a = fib(n - 1);
+    return a + a;
+}
+fn main() { return; }
+"#,
+        );
+        assert!(
+            !sites.contains_key("fib"),
+            "a + a must not fork the same let twice: {sites:?}"
+        );
+    }
+
+    /// Work between the lets and the combine would be dropped by the worker.
+    #[test]
+    fn rejects_let_bound_with_intervening_stmt() {
+        let sites = sites_of(
+            r#"
+fn bump(int n) -> int { return n + 1; }
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    let a = fib(n - 1);
+    let _ = bump(n);
+    let b = fib(n - 2);
+    return a + b;
+}
+fn main() { return; }
+"#,
+        );
+        assert!(
+            !sites.contains_key("fib"),
+            "intervening stmt must refuse let-bound IPA: {sites:?}"
+        );
+    }
+
+    /// `k + 1` is a structural arg form, not an allowlist.
+    #[test]
+    fn detects_param_plus_arm() {
+        let sites = sites_of(
+            r#"
+fn walk(int n, int k) -> int {
+    if n <= 0 { return k; }
+    return walk(n - 1, k) + walk(n - 1, k + 1);
+}
+fn main() { return; }
+"#,
+        );
+        let walk = sites.get("walk").expect("param-plus fork");
+        assert_eq!(walk.combine, ParCombine::BinOp(ParBinOp::Add));
+        assert_eq!(
+            arm_args(walk, 1),
+            [
+                ArgForm::ParamMinus { param: 0, sub: 1 },
+                ArgForm::ParamPlus { param: 1, add: 1 }
+            ]
+        );
+        assert!(args_worth_parallel(&sites, "walk", &[21, 0]));
+    }
+
+    /// Subtraction does not flatten: `(a-b)-c` is not `a-b-c` as three arms.
+    #[test]
+    fn sub_does_not_flatten_nary() {
+        let sites = sites_of(
+            r#"
+fn diff(int n) -> int {
+    if n <= 2 { return n; }
+    return diff(n - 1) - diff(n - 2) - diff(n - 3);
+}
+fn main() { return; }
+"#,
+        );
+        let diff = sites.get("diff").expect("sub fork");
+        assert_eq!(diff.combine, ParCombine::BinOp(ParBinOp::Sub));
+        assert_eq!(
+            diff.arms.len(),
+            2,
+            "non-associative sub must stay binary: {diff:?}"
+        );
     }
 }
