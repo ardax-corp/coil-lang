@@ -71,7 +71,8 @@ pub fn try_specialize_body_side(
     // maps FORMAT / STRINGIFY). Q6
     // counted `for` is i64 + index.
     // Q8: niche / two-slot match may dense when the reconstruct beats
-    // fuse-IL (boxed JumpIfMatch stays LIR). Alloc / InitTyped take
+    // fuse-IL. D3: boxed JumpIfMatch / multi-payload Unpack may dense
+    // (stack JIM + per-index MatchPayload; cost gate). Alloc / InitTyped take
     // dense only when S2b maps exist (S2c). S2d: mapped *preheader*
     // Make* + index loop may take dense. A2: Index / Make* / ArrayLen /
     // StoreIndex emit dense-native. D2: heap LoadField / GetField /
@@ -210,9 +211,9 @@ fn match_shaped_il(ops: &[IlOp]) -> bool {
     while i < ops.len() {
         match &ops[i] {
             IlOp::Jump {
-                kind: IlJumpKind::JumpIfMatch { arity, .. },
+                kind: IlJumpKind::JumpIfMatch { .. },
                 ..
-            } if *arity <= 1 => return true,
+            } => return true,
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => return true,
             IlOp::Dup { .. } => {
                 if peek_tag_or_niche_test(&ops[i + 1..]) {

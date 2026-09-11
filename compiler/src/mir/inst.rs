@@ -275,7 +275,8 @@ pub enum MirInst {
         target: crate::il::Label,
         args: Vec<ValueId>,
     },
-    /// Taken-edge payload of [`Terminator::JumpIfMatch`] (I2). Arity ≤ 1.
+    /// Taken-edge / last-arm payload of [`Terminator::JumpIfMatch`] or
+    /// `Unpack` (I2 / D3). `index` is the declaration-order payload word.
     MatchPayload {
         dest: ValueId,
         scrutinee: ValueId,
@@ -679,11 +680,12 @@ pub enum Terminator {
         taken: BlockId,
         not_taken: BlockId,
     },
-    /// Peek-match on a boxed / niche / two-slot enum word (I2).
+    /// Peek-match on a boxed / niche / two-slot enum word (I2 / D3).
     ///
-    /// Taken pops the scrutinee and binds `payloads` (arity ≤ 1), including
-    /// boxed-overlap `JumpIfMatch` arity 0 with a unary payload. Miss
-    /// leaves the scrutinee on the stack (same as bytecode `JumpIfMatch`).
+    /// Taken pops the scrutinee and binds `payloads` (declaration order;
+    /// last word TOS), including boxed-overlap `JumpIfMatch` arity 0 with
+    /// a unary payload. Miss leaves the scrutinee on the stack (same as
+    /// bytecode `JumpIfMatch`).
     JumpIfMatch {
         scrutinee: ValueId,
         tag: u32,

@@ -6,10 +6,10 @@
 //!    no hard refuse; `IlModule` keeps the reconstruct only when cost ≤ fuse.
 //!
 //! Hard refuse is **LIR reconstruct** walls: unmapped alloc, `CALL` /
-//! HostInvoke (emit cannot rebuild those), escaping fields, box,
-//! multi-payload match. Q6 counted `for`, Q7 one-word dense `CALL`, and
-//! Q8 niche / two-slot `Br` are not walls — they lift on the dense path;
-//! keep/refuse is the cost gate. LIR reconstructs multi-word `CALL`
+//! HostInvoke (emit cannot rebuild those), escaping fields, box.
+//! Q6 counted `for`, Q7 one-word dense `CALL`, Q8 niche / two-slot `Br`,
+//! and D3 boxed multi-payload `Unpack` / `JumpIfMatch` are not walls —
+//! they lift; keep/refuse is the cost gate. LIR reconstructs multi-word `CALL`
 //! (B3 / C1); one-word `CALL` / `TailCall` stay dense-or-fuse. Heap index
 //! is not a wall after A2. Fuse-IL stays the fallback.
 //! There is no second AST walker.
@@ -36,8 +36,10 @@ pub enum LirRefuse {
     /// `BoxValue` / `UnboxValue`.
     Box,
     /// `JumpIfMatch` / `Unpack` the reconstruct cannot model.
+    #[allow(dead_code)]
     Match,
-    /// `Unpack` arity > 1.
+    /// Residual `Unpack` the reconstruct cannot model.
+    #[allow(dead_code)]
     Unpack,
 }
 
@@ -45,9 +47,9 @@ pub enum LirRefuse {
 ///
 /// Eligible when there is no **LIR reconstruct** wall. Walls stay I5
 /// alloc without maps, HostInvoke/`CALL` (LIR emit cannot rebuild those
-/// — Q7 densifies one-word self-`CALL` instead), escaping fields, box,
-/// multi-payload `Unpack` / `JumpIfMatch` arity > 1. Counted `for` (Q6)
-/// and niche / two-slot match arity ≤ 1 (Q8) are not LIR walls. Q9 R1:
+/// — Q7 densifies one-word self-`CALL` instead), escaping fields, box.
+/// Counted `for` (Q6), niche / two-slot match (Q8), and boxed
+/// multi-payload `Unpack` / `JumpIfMatch` (D3) are not LIR walls. Q9 R1:
 /// `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` may lift. Q9 R3 maps
 /// `FORMAT` / `STRINGIFY` (unmapped format is an alloc wall). Q9 R2 densifies
 /// `from_bytes` / `to_bytes` HostInvoke (LIR still cannot reconstruct
@@ -98,19 +100,10 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
             IlOp::BoxValue { .. } | IlOp::UnboxValue { .. } => return Some(LirRefuse::Box),
             op if refuses_alloc(op) && !maps_ok => return Some(LirRefuse::Alloc),
             IlOp::Jump {
-                kind: crate::il::IlJumpKind::JumpIfMatch { arity, .. },
+                kind: crate::il::IlJumpKind::JumpIfMatch { .. },
                 ..
-            } => {
-                if *arity > 1 {
-                    return Some(LirRefuse::Match);
-                }
-            }
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {
-                // Multi-payload Unpack still needs per-index MatchPayload maps.
-                if byte.operand_u32() > 1 {
-                    return Some(LirRefuse::Unpack);
-                }
-            }
+            } => {}
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {}
             _ => {}
         }
     }
@@ -376,5 +369,33 @@ mod tests {
         ];
         assert_eq!(lir_refuse(&ops, &[]), None);
         assert!(lir_eligible(&ops, &[]));
+    }
+
+    #[test]
+    fn d3_unpack_arity2_is_not_a_lir_wall() {
+        let loc = loc();
+        let ops = [
+            IlOp::Load { slot: 0, loc },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfMatch { tag: 0, arity: 0 },
+                target: Label(1),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Byte {
+                byte: Byte::new(Instruction::Unpack).with_operand_u32(2),
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
+        let jim2 = [IlOp::Jump {
+            kind: IlJumpKind::JumpIfMatch { tag: 1, arity: 2 },
+            target: Label(1),
+            loc,
+            hint: Default::default(),
+        }];
+        assert_eq!(lir_refuse(&jim2, &[]), None);
     }
 }

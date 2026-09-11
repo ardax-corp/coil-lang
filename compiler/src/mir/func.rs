@@ -226,9 +226,6 @@ impl MirFunc {
                     ..
                 } => {
                     let _ = tag;
-                    if payloads.len() > 1 {
-                        return Err("JumpIfMatch arity > 1 (I2)".into());
-                    }
                     if !self.ty(*scrutinee).is_specialized() {
                         return Err(format!(
                             "JumpIfMatch scrutinee {} is {}",
@@ -472,11 +469,8 @@ impl MirFunc {
             MirInst::MatchPayload {
                 dest,
                 scrutinee,
-                index,
+                index: _,
             } => {
-                if *index > 0 {
-                    return Err(format!("{dest} MatchPayload index"));
-                }
                 if !self.ty(*scrutinee).is_specialized() {
                     return Err(format!("{dest} MatchPayload scrutinee type"));
                 }
