@@ -6,7 +6,8 @@ coil can fork-join **independent parallel arms** (IPA) without a source-level
 ```coil
 return fib(n - 1) + fib(n - 2);      // expression IPA: independent pure calls
 return sq(n) + sq(n - 1);            // helper arms (no self-recursion required)
-while i < 100 { acc = acc + f(i); i = i + 1; }   // loop IPA: iteration arms
+while i < 100 { acc = acc + f(i); i = i + 1; }   // loop IPA: while
+for x in 0..100 { acc = acc + f(x); }            // loop IPA: counted for/range
 ```
 
 Both go through the same four gates (purity, independence, profitability,
@@ -144,46 +145,49 @@ When the iterations only communicate through one **associative** reduction, any
 partition of the range folds to the sequential result, so the range splits into
 contiguous chunks that each accumulate a private partial.
 
-[`loop_par`](../../compiler/src/typechecking/loop_par.rs) admits a `while` loop
+[`loop_par`](../../compiler/src/typechecking/loop_par.rs) admits a counted loop
 only when **every** gate holds:
 
 | Gate | Requirement |
 |---|---|
-| Shape | `while i < K` / `i <= K`; body is a statement list |
-| Induction | exactly one `i = i + 1` / `i += 1` / `i++`; `i` is a const-initialized local |
-| Trip count | `K` is compile-time, and `end - begin > COIL_PAR_THRESHOLD` |
+| Shape | `while i < K` / `i <= K`, or counted `for x in START..END` / `..=` (Q6 literal), or `for x in r` when `r` is a const range local (B5) |
+| Induction | `while`: exactly one `i = i + 1` / `i += 1` / `i++` on a const-initialized local. `for`: the binding is the IV; the Q6 `+ 1` latch is implicit (no extra step in the body) |
+| Trip count | compile-time `[begin, end)` with `end - begin > COIL_PAR_THRESHOLD` (grain / isolate spawn floor — not fib-units) |
 | Reduction | exactly one `acc = acc + e` / `acc = acc * e` (or `+=` / `*=`) on a const-initialized local |
-| Independence | `e` never reads `acc`; the body reads only `i`, its own `let` temps and int literals |
+| Independence | `e` never reads `acc`; the body reads only the IV, its own `let` temps and int literals |
 | Purity | body calls only pure user functions; no index / field / static writes, no branches, `break`, `return` or `yield` |
 | Types | the induction variable and `e` both infer to `int` — float reduction is not associative |
 
-Ranges are normalized half-open (`i <= K` becomes `end = K + 1`), so a split is
-just a partition of `[begin, end)`.
+Ranges are normalized half-open (`i <= K` and `..=` become `end = K + 1`), so a
+split is just a partition of `[begin, end)`. Dynamic `for x in 0..n` / C2
+parameter ranges stay sequential (same refusal as `while i < n`).
 
 Codegen emits one private **chunk worker** per site,
 `__coil_par_loop_{n}(lo, hi, acc)`, holding the original body over `[lo, hi)` and
-returning the partial. At the loop site:
+returning the partial. For `for`, the worker emits the unit step after the body.
+At the loop site:
 
 1. `MakeFn` the worker, then `thread_spawn(worker, mid, end, identity)` — the
    upper chunk starts from the operator's identity (`0` for `+`, `1` for `*`) so
    the accumulator's initial value is counted exactly once.
 2. Call the worker inline for `[begin, mid)` seeded with the live `acc`.
 3. `thread_join` (help-steals), then fold the two partials with `ADD` / `MUL`.
-4. Store the fold into `acc` and set `i` to `end`, the value the sequential loop
+4. Store the fold into `acc` and set the IV to `end`, the value the sequential loop
    would have left behind.
 
 On a failed spawn or join, a single worker call covers `[begin, end)`.
 
+Array / dict / coro / user-`Iterator` `for` stays sequential: isolate IPA does not
+send the heap collection (that is C1 shared-heap steal, [COI-365](https://linear.app/ardax/issue/COI-365)).
+
 ## Deferred
 
-- C-style `for (let i = 0; i < N; i = i + 1)` — the analysis shape is the same,
-  but the step lives outside the body so the worker needs a second emit path.
-  (Const trip counts up to 8 already fully unroll, well below the threshold.)
-- Dynamic trip counts. Splitting `while i < n` needs a runtime `n > threshold`
-  branch; the first slice refuses to pay that tax.
+- Dynamic trip counts. Splitting `while i < n` / `for x in 0..n` needs a runtime
+  `n > threshold` branch; the first slice refuses to pay that tax.
 - More than two chunks, and nested / recursive chunking.
 - Conditionals in the body, float reductions, and reductions over `min` / `max`
   or user operators.
+- Array `for x in arr` disjoint-index reduce (needs shared heap or a copy).
 
 ## Work-stealing reactor
 

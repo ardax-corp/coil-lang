@@ -9,7 +9,9 @@
 //! Detection is structural — no function, module or benchmark allowlists — and
 //! fails closed. Anything the walk cannot prove independent (a nested branch, a
 //! read of an enclosing local, an impure call, a second reduction) simply
-//! leaves the loop sequential.
+//! leaves the loop sequential. Counted `for x in` / range (Q6 literal, B5
+//! const range locals) share this shape; the latch `+ 1` is implicit. Dynamic
+//! C2 trip counts stay sequential.
 
 use std::collections::{HashMap, HashSet};
 
@@ -48,6 +50,9 @@ pub struct LoopParSite {
     /// Reduction accumulator: a const-initialized local of an enclosing scope.
     pub acc: String,
     pub op: LoopReduceOp,
+    /// Counted `for x in` / range: the body does not contain the `+ 1` step;
+    /// the chunk worker emits it after each trip (Q6 latch lives in codegen).
+    pub implicit_step: bool,
     /// Pointer of the induction identifier's `Expression` (sidecar lookup).
     pub index_expr_ptr: usize,
     /// Pointer of `e` in `acc = acc ⊕ e`.
@@ -82,8 +87,16 @@ pub fn analyze_loop_par_sites(ast: &Output<'_>, pure_fns: &HashSet<String>) -> L
     scan.out
 }
 
-/// Locals proven to hold a compile-time int at the current program point.
-type ConstLocals = HashMap<String, i64>;
+/// Locals proven to hold a compile-time int or counted range at this point.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ConstVal {
+    Int(i64),
+    /// Half-open `[begin, end)`. Inclusive source ranges are normalized here.
+    Range { begin: i64, end: i64 },
+}
+
+/// Locals proven to hold a compile-time int or counted range at this point.
+type ConstLocals = HashMap<String, ConstVal>;
 
 struct Scan<'a> {
     pure_fns: &'a HashSet<String>,
@@ -100,8 +113,8 @@ impl Scan<'_> {
                 consts.remove(&name);
             }
             if let Some((name, init)) = let_binding(item) {
-                match int_literal(init) {
-                    Some(k) => consts.insert(name.to_string(), k),
+                match const_val(init, consts) {
+                    Some(v) => consts.insert(name.to_string(), v),
                     None => consts.remove(name),
                 };
             }
@@ -160,35 +173,81 @@ impl Scan<'_> {
                 identifier: None,
                 iterable,
                 body,
-            } => match self.match_counted_loop(iterable, body, consts) {
+            } => match self.match_counted_while(iterable, body, consts) {
                 Some(site) => {
                     self.out.insert((ast.0.start, ast.0.end), site);
                 }
                 None => self.walk_loop_body(ast, body, consts),
             },
-            Expression::Loop { body, .. } => {
-                self.walk_loop_body(ast, body, consts);
-            }
+            Expression::Loop {
+                identifier: Some(binding),
+                iterable,
+                body,
+            } => match self.match_counted_for_range(binding, iterable, body, consts) {
+                Some(site) => {
+                    self.out.insert((ast.0.start, ast.0.end), site);
+                }
+                None => self.walk_loop_body(ast, body, consts),
+            },
             _ => {}
         }
     }
 
     /// Match `while i < K { … }` against the loop-IPA shape.
-    fn match_counted_loop(
+    fn match_counted_while(
         &self,
         cond: &Output<'_>,
         body: &Output<'_>,
         consts: &ConstLocals,
     ) -> Option<LoopParSite> {
         let (index, index_expr_ptr, bound, inclusive) = counted_bound(cond, consts)?;
-        let begin = *consts.get(&index)?;
+        let ConstVal::Int(begin) = *consts.get(&index)? else {
+            return None;
+        };
         let end = if inclusive {
             bound.checked_add(1)?
         } else {
             bound
         };
-        // Profitability: the same cost cutoff the recursive IPA uses. A short
-        // loop cannot pay for a spawn plus a join.
+        self.finish_counted_site(body, index, index_expr_ptr, begin, end, consts, false)
+    }
+
+    /// Match `for x in START..END` / `..=`, or `for x in r` when `r` is a
+    /// const-initialized counted range local (Q6 literal / B5). Dynamic C2
+    /// params stay sequential — no runtime trip-count tax.
+    fn match_counted_for_range(
+        &self,
+        binding: &Output<'_>,
+        iterable: &Output<'_>,
+        body: &Output<'_>,
+        consts: &ConstLocals,
+    ) -> Option<LoopParSite> {
+        let binding = peel(binding);
+        let index = ident_name(binding)?;
+        let (begin, end) = counted_range(iterable, consts)?;
+        self.finish_counted_site(
+            body,
+            index.to_string(),
+            std::ptr::from_ref(binding) as *const Output<'_> as usize,
+            begin,
+            end,
+            consts,
+            true,
+        )
+    }
+
+    fn finish_counted_site(
+        &self,
+        body: &Output<'_>,
+        index: String,
+        index_expr_ptr: usize,
+        begin: i64,
+        end: i64,
+        consts: &ConstLocals,
+        implicit_step: bool,
+    ) -> Option<LoopParSite> {
+        // Profitability: trip count, not fib-units. A short loop cannot pay
+        // for a spawn plus a join (isolate grain).
         if end.checked_sub(begin)? <= par_cost_threshold() {
             return None;
         }
@@ -213,7 +272,8 @@ impl Scan<'_> {
                 StmtForm::Local { .. } => {}
             }
         }
-        if steps != 1 {
+        let expect_steps = if implicit_step { 0 } else { 1 };
+        if steps != expect_steps {
             return None;
         }
         let (acc, op, reduce_expr) = acc_op?;
@@ -223,7 +283,7 @@ impl Scan<'_> {
         // The accumulator must be a const-initialized local of an enclosing
         // scope: that proves it is a frame slot codegen can find, and that no
         // earlier statement left it with an unknown value.
-        if !consts.contains_key(acc) {
+        if !matches!(consts.get(acc), Some(ConstVal::Int(_))) {
             return None;
         }
 
@@ -254,6 +314,7 @@ impl Scan<'_> {
             end,
             acc: acc.to_string(),
             op,
+            implicit_step,
             index_expr_ptr,
             reduce_expr_ptr: std::ptr::from_ref(reduce_expr) as *const Output<'_> as usize,
         })
@@ -390,17 +451,53 @@ fn counted_bound(
     };
     let lhs = peel(lhs);
     let index = ident_name(lhs)?;
-    let bound = match peel(rhs).1.as_ref() {
-        Expression::Integer(k) => *k,
-        Expression::Identifier(n) => *consts.get(*n)?,
-        _ => return None,
-    };
+    let bound = const_int(rhs, consts)?;
     Some((
         index.to_string(),
         std::ptr::from_ref(lhs) as *const Output<'_> as usize,
         bound,
         inclusive,
     ))
+}
+
+/// Compile-time integer range on a for-in iterable, already half-open.
+fn counted_range(iterable: &Output<'_>, consts: &ConstLocals) -> Option<(i64, i64)> {
+    match const_val(iterable, consts)? {
+        ConstVal::Range { begin, end } => Some((begin, end)),
+        ConstVal::Int(_) => None,
+    }
+}
+
+fn const_val(expr: &Output<'_>, consts: &ConstLocals) -> Option<ConstVal> {
+    if let Some(k) = const_int(expr, consts) {
+        return Some(ConstVal::Int(k));
+    }
+    let expr = peel(expr);
+    match expr.1.as_ref() {
+        Expression::Range {
+            start,
+            end,
+            inclusive,
+        } => {
+            let begin = const_int(start, consts)?;
+            let end = const_int(end, consts)?;
+            let end = if *inclusive { end.checked_add(1)? } else { end };
+            Some(ConstVal::Range { begin, end })
+        }
+        Expression::Identifier(n) => consts.get(*n).copied(),
+        _ => None,
+    }
+}
+
+fn const_int(expr: &Output<'_>, consts: &ConstLocals) -> Option<i64> {
+    match peel(expr).1.as_ref() {
+        Expression::Integer(k) => Some(*k),
+        Expression::Identifier(n) => match consts.get(*n) {
+            Some(ConstVal::Int(k)) => Some(*k),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Statement list of a loop body, or `None` for a single-expression body.
@@ -619,6 +716,56 @@ fn main() {{
         assert_eq!(site.op, LoopReduceOp::Add);
         assert_eq!(site.trip_count(), 100);
         assert_eq!(site.midpoint(), 50);
+        assert!(!site.implicit_step);
+    }
+
+    #[test]
+    fn detects_literal_for_range() {
+        let site = one_site(&program(
+            r#"
+    let acc = 0;
+    for x in 0..100 {
+        acc = acc + sq(x);
+    }
+"#,
+        ));
+        assert_eq!(site.index, "x");
+        assert_eq!(site.acc, "acc");
+        assert_eq!((site.begin, site.end), (0, 100));
+        assert_eq!(site.op, LoopReduceOp::Add);
+        assert!(site.implicit_step);
+        assert_eq!(site.trip_count(), 100);
+        assert_eq!(site.midpoint(), 50);
+    }
+
+    #[test]
+    fn detects_inclusive_for_range() {
+        let site = one_site(&program(
+            r#"
+    let acc = 0;
+    for x in 1..=60 {
+        acc += sq(x);
+    }
+"#,
+        ));
+        assert_eq!((site.begin, site.end), (1, 61));
+        assert!(site.implicit_step);
+        assert_eq!(site.trip_count(), 60);
+    }
+
+    #[test]
+    fn detects_const_range_local() {
+        let site = one_site(&program(
+            r#"
+    let r = 0..100;
+    let acc = 0;
+    for x in r {
+        acc = acc + sq(x);
+    }
+"#,
+        ));
+        assert_eq!((site.begin, site.end), (0, 100));
+        assert!(site.implicit_step);
     }
 
     #[test]
@@ -690,6 +837,18 @@ fn main() {{
             .is_empty(),
             "trip count == threshold must stay sequential"
         );
+        assert!(
+            sites_of(&program(&format!(
+                r#"
+    let acc = 0;
+    for x in 0..{t} {{
+        acc = acc + sq(x);
+    }}
+"#
+            )))
+            .is_empty(),
+            "for-range trip count == threshold must stay sequential"
+        );
     }
 
     #[test]
@@ -712,6 +871,23 @@ fn main() { return; }
             )
             .is_empty(),
             "a parameter bound is not a compile-time trip count"
+        );
+        assert!(
+            sites_of(
+                r#"
+fn sq(int i) -> int { return i * i; }
+fn run(int n) -> int {
+    let acc = 0;
+    for x in 0..n {
+        acc = acc + sq(x);
+    }
+    return acc;
+}
+fn main() { return; }
+"#
+            )
+            .is_empty(),
+            "a parameter range end is not a compile-time trip count"
         );
     }
 

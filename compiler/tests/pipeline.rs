@@ -6244,6 +6244,152 @@ fn main() {
     assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "2470");
 }
 
+/// Counted `for x in 0..K` above the trip-count grain gate chunks like `while`.
+#[test]
+fn auto_par_for_range_sum_splits_and_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let acc = 0;
+    for x in 0..100 {
+        acc = acc + sq(x);
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par for-range should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker for the counted for-range"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "328350");
+}
+
+/// Inclusive `for x in a..=b` normalizes to half-open and still folds.
+#[test]
+fn auto_par_for_inclusive_range_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let acc = 0;
+    for x in 1..=60 {
+        acc = acc + sq(x);
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("inclusive for-range should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker for inclusive for-range"
+    );
+    // sum of i*i for i in 1..=60 = n(n+1)(2n+1)/6 at n=60.
+    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "73810");
+}
+
+/// B5: `let r = 0..K` then `for x in r` is the same counted latch.
+#[test]
+fn auto_par_for_const_range_local_splits() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let r = 0..100;
+    let acc = 0;
+    for x in r {
+        acc = acc + sq(x);
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("auto-par const range local should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "expected a chunk worker for a const range local"
+    );
+    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
+}
+
+/// Dynamic `for x in 0..n` (C2-shaped) stays sequential — no runtime grain tax.
+#[test]
+fn dynamic_for_range_skips_par_worker() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn run(int n) -> int {
+    let acc = 0;
+    for x in 0..n {
+        acc = acc + sq(x);
+    }
+    return acc;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", run(100))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("dynamic for-range should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_none(),
+        "a parameter range must not spawn"
+    );
+    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
+}
+
+/// A for-range at the trip-count floor stays sequential.
+#[test]
+fn below_threshold_for_range_skips_par_worker() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn main() {
+    let acc = 0;
+    for x in 0..20 {
+        acc = acc + sq(x);
+    }
+    write(stdout(), to_bytes(format("%i", acc)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("short for-range should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_none(),
+        "a 20-trip for-range cannot pay for a spawn"
+    );
+    assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "2470");
+}
+
 /// Nested CALL + `let x = f(); if x == k` must not hang: mem_fwd must not
 /// turn StorePop;Load into Dup;Store when the store extends tell past TOS
 /// (shared-stack CmpJmpf would eat the local — broke http `parse_url`).
