@@ -7,8 +7,15 @@ implements.
 
 **C1 status (E6):** counted-loop chunks use HostInvoke `thread_spawn_shared`
 (**137**, archive **minor 15**) on Layer A epoch STW. User `thread::spawn`
-stays isolate + `PortableValue`. Expression IPA (E7) is not this ticket.
-Do **not** merge [#403](https://github.com/ardax-corp/coil-lang/pull/403).
+stays isolate + `PortableValue`.
+
+**C2 status (E7):** expression IPA specializations emit the same
+`thread_spawn_shared`. Eligible arms (C0 whitelist args — fib/tak immediates)
+allocate and publish pointers on the shared Heap; join reconstructs
+`Value` bits without a `PortableValue` graph walk. Refuse (maps missing for
+non-immediates, `COIL_SHARED_HEAP=0`, debugger attached, non-whitelist args)
+keeps isolate + copy. No region bump (Q5 conservative). Do **not** merge
+[#403](https://github.com/ardax-corp/coil-lang/pull/403).
 
 Related: [auto-par.md](auto-par.md), [gc-incremental.md](gc-incremental.md),
 [mir-stack-maps.md](mir-stack-maps.md), [heap-identity.md](heap-identity.md),
@@ -321,13 +328,18 @@ IPA, A4. Flagships may not move; hit benches may.
 
 Failure: any gate miss → today’s isolate spawn or sequential worker call.
 
-## E7 (C2) preview
+## E7 (C2) — expression IPA without deep copy
 
-Expression IPA without deep copy uses the same whitelist. Fib-style arms
-that return immediates share nothing. Arms that allocate a small graph must
-either freeze it before the sibling reads it, or allocate into the shared
-Heap and publish the pointer at join (still one Heap, no copy). Nested
-AlwaysPar remains an E3 shape issue, not a sendability issue.
+Same HostInvoke **137** / Layer A epoch as C1. Fib-style arms that return
+immediates share nothing. Arms that allocate (EnumCtor / Tuple) allocate
+into the shared Heap and publish the pointer at join — the joiner roots
+those bits through Layer A collect before they land in a Coil slot. Nested
+AlwaysPar reuses the live epoch (`jobs` +1/−1); it is not a sendability
+issue.
+
+No region nursery (C0 Q5): worker temps live on the shared Heap until the
+joiner’s post-epoch collect. Runtime freeze bit skipped (Q2); IPA arms are
+pure and 0-capture `MakeFn`. User `thread::spawn` stays isolate (Q4).
 
 ## Open questions (Architect)
 

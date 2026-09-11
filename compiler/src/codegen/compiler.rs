@@ -7631,10 +7631,10 @@ impl Compiler {
 
     /// Emit one always-fork nullary clone of `site.fn_name` at `parent_args`.
     ///
-    /// Evidence-gated AlwaysPar (COI-361 E3): arm 0 is spawned, remaining arms
-    /// run inline, then join + combine. In-hop child clones are used when they
-    /// exist; deeper levels call the sequential original. Failed spawn/join
-    /// falls back to sequential arms.
+    /// Evidence-gated AlwaysPar (COI-361 E3 / COI-364 E7): arm 0 is spawned
+    /// on `thread_spawn_shared`, remaining arms run inline, then join + combine.
+    /// In-hop child clones are used when they exist; deeper levels call the
+    /// sequential original. Failed spawn/join falls back to sequential arms.
     fn emit_one_par_specialization(
         &mut self,
         site: &crate::typechecking::ParForkSite,
@@ -7662,10 +7662,11 @@ impl Compiler {
         let Some((plan, push_order)) = self.par_combine_plan(site, orig_offset) else {
             return;
         };
-        let Some(spawn_id) = self.native_id("thread_spawn") else {
-            return;
-        };
-        let Some(join_id) = self.native_id("thread_join") else {
+        let (Some(spawn_id), Some(join_id)) = (
+            self.native_id("thread_spawn_shared")
+                .or_else(|| self.native_id("thread_spawn")),
+            self.native_id("thread_join"),
+        ) else {
             return;
         };
         // Resolved before the clone is bound so an arm that reproduces
@@ -7707,7 +7708,7 @@ impl Compiler {
         let seq = bb.fresh_label(self.bytecode.il_mut());
         let done = bb.fresh_label(self.bytecode.il_mut());
 
-        // AlwaysPar: thread_spawn(fn[, child args…])
+        // AlwaysPar: thread_spawn_shared (C2); isolate fallback is runtime.
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
         self.bytecode.push_load(fn_tmp);

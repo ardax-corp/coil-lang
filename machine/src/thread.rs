@@ -79,7 +79,7 @@ thread_local! {
     static PORTABLE_ENCODE_COUNT: AtomicU64 = const { AtomicU64::new(0) };
 }
 
-/// Times [`value_to_portable`] ran on this thread (C1 prove: shared spawn stays 0).
+/// Times [`value_to_portable`] ran on this thread (C1/C2 prove: shared spawn stays 0).
 pub fn portable_encode_count() -> u64 {
     PORTABLE_ENCODE_COUNT.with(|c| c.load(Ordering::Relaxed))
 }
@@ -423,7 +423,7 @@ pub(crate) struct MachineHostState {
     raw: *mut (),
     call_function: unsafe fn(*mut (), u32, &[Value]) -> Value,
     begin_shared_steal: unsafe fn(*mut ()) -> Result<Arc<crate::shared_heap::SharedHeapEpoch>, ThreadErrorTag>,
-    end_shared_steal: unsafe fn(*mut ()),
+    end_shared_steal: unsafe fn(*mut (), Value),
     debugger_attached: bool,
     spawn_context: Option<ThreadSpawnContext>,
     io_reactor: Option<std::sync::Arc<crate::io_reactor::IoReactor>>,
@@ -482,8 +482,8 @@ impl HostStateGuard {
         unsafe { (*(raw.cast::<Machine<N>>())).begin_shared_steal() }
     }
 
-    unsafe fn end_steal<const N: usize>(raw: *mut ()) {
-        unsafe { (*(raw.cast::<Machine<N>>())).end_shared_steal() }
+    unsafe fn end_steal<const N: usize>(raw: *mut (), extra: Value) {
+        unsafe { (*(raw.cast::<Machine<N>>())).end_shared_steal(extra) }
     }
 }
 
@@ -532,10 +532,10 @@ fn host_begin_shared_steal() -> Result<Arc<crate::shared_heap::SharedHeapEpoch>,
     })?
 }
 
-fn host_end_shared_steal() {
+fn host_end_shared_steal(published: Value) {
     HOST_STATE.with(|c| {
         if let Some(state) = c.borrow().as_ref() {
-            unsafe { (state.end_shared_steal)(state.raw) }
+            unsafe { (state.end_shared_steal)(state.raw, published) }
         }
     });
 }
@@ -1198,14 +1198,28 @@ fn try_host_join(heap: &mut Heap, handle: Value) -> Result<Value, ThreadErrorTag
         Ok(ctx) => ctx.reactor.wait_join(&state),
         Err(_) => state.wait_result(),
     };
-    if shared {
-        host_end_shared_steal();
-    }
-    let portable = joined?;
     if let Some(h) = state.join_handle.lock().unwrap().take() {
         let _ = h.join();
     }
-    portable_to_value(heap, portable)
+    if shared {
+        match joined {
+            Ok(PortableValue::Immediate(raw)) => {
+                let published = Value::from(raw as *mut u8);
+                host_end_shared_steal(published);
+                Ok(published)
+            }
+            Ok(pv) => {
+                host_end_shared_steal(Value::default());
+                portable_to_value(heap, pv)
+            }
+            Err(tag) => {
+                host_end_shared_steal(Value::default());
+                Err(tag)
+            }
+        }
+    } else {
+        portable_to_value(heap, joined?)
+    }
 }
 
 pub fn host_detach(heap: &mut Heap, args: &[Value]) -> Value {

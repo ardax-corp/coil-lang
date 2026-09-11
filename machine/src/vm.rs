@@ -406,8 +406,10 @@ pub struct Machine<const S: usize> {
     gc_in_progress: bool,
     /// Nested `gc_collect` during a finalizer; run another cycle after.
     gc_deferred: bool,
-    /// Live C1 steal epoch (root). Helpers bind via [`HeapSlot`].
+    /// Live C1/C2 steal epoch (root). Helpers bind via [`HeapSlot`].
     shared_epoch: Option<std::sync::Arc<crate::shared_heap::SharedHeapEpoch>>,
+    /// Join result bits not yet stored on the operand stack (Layer A collect).
+    steal_join_root: Value,
 }
 
 impl<const S: usize> Default for Machine<S> {
@@ -470,6 +472,7 @@ impl<const S: usize> Machine<S> {
             gc_in_progress: false,
             gc_deferred: false,
             shared_epoch: None,
+            steal_join_root: Value::default(),
         }
     }
 
@@ -1251,6 +1254,12 @@ impl<const S: usize> Machine<S> {
         let mut roots = self.heap.take_gc_roots();
         for v in self.stack.as_slice() {
             let addr = v.heap_addr();
+            if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
+                roots.push(addr);
+            }
+        }
+        {
+            let addr = self.steal_join_root.heap_addr();
             if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
                 roots.push(addr);
             }
@@ -2273,7 +2282,7 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// Drop frames / pins after a C1 shared-heap job. Does not unmap the
+    /// Drop frames / pins after a C1/C2 shared-heap job. Does not unmap the
     /// borrowed epoch Heap.
     pub fn reset_shared_stack(&mut self) {
         debug_assert!(
@@ -2333,18 +2342,28 @@ impl<const S: usize> Machine<S> {
         Ok(epoch)
     }
 
-    pub fn end_shared_steal(&mut self) {
+    /// Close one shared-heap job. `published` is the join result, which is not
+    /// on the operand stack yet; Layer A collect must still treat it as a root.
+    pub fn end_shared_steal(&mut self, published: Value) {
         let Some(e) = &self.shared_epoch else {
             return;
         };
         if e.jobs.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) != 1 {
             return;
         }
-        self.heap.owned_mut().exit_epoch_stw();
+        // Exit STW on the epoch Heap (root owned slab, or the borrowed ptr).
+        unsafe {
+            (*e.heap_ptr()).exit_epoch_stw();
+        }
         self.shared_epoch = None;
+        if self.heap.is_borrowed() {
+            return;
+        }
+        self.steal_join_root = published;
         if self.heap.get().should_collect() {
             self.gc_collect();
         }
+        self.steal_join_root = Value::default();
     }
 
     /// Rewrite the first `JMP target` at or after `from` into `HALT` so setup

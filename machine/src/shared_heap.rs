@@ -1,8 +1,9 @@
-//! C1 shared-heap steal epoch (Layer A STW).
+//! C1/C2 shared-heap steal epoch (Layer A STW).
 //!
-//! Counted-loop chunks run as stolen jobs on one [`Heap`] and several stacks.
-//! No collect during the epoch; a chunk that would GC aborts to isolate /
-//! sequential fallback. See `docs/internals/shared-heap-sendability.md`.
+//! Counted-loop chunks and expression IPA arms run as stolen jobs on one
+//! [`Heap`] and several stacks. No collect during the epoch; a job that would
+//! GC aborts to isolate / sequential fallback. See
+//! `docs/internals/shared-heap-sendability.md`.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
