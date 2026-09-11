@@ -20,6 +20,16 @@ Actionable gaps in the compiler, VM, and language surface. For opcode/archive ru
 | Member visibility | **Implemented:** checker rejects private field/method access outside the owner's `impl` (`E0128`). `pub` members are visible everywhere. Top-level `fn` stays universally exportable (no module-level `pub` in this cut). `fn drop` stays private for inlining but remains callable as a lifecycle hook. | — |
 | Duplicate record fields | **Implemented:** parser rejects duplicate names in record literals, constructors, patterns, and enum variant field decls (`E0208`). Typechecker keeps the same check if parse is bypassed. | [COI-76](https://linear.app/ardax/issue/COI-76) |
 
+## Lambdas / captures
+
+Lambdas and `defer` isolate the env (`take_and_isolate`). File-level imports and **module-visible named `fn`s** rebind like globals — a lambda body may **CALL** them with empty captures (direct `CALL`, not a closure slot). Still require `use (…)` for outer **locals** / non-fn values and for other **function values** (anonymous lambdas or `let`-bound fn values). Nested named `fn`s inside another function are not module-visible and follow the local rule.
+
+`thread::with_lock` / `spawn` still reject capturing `ObjFn` at the host (`captures` / filled holes). Capture-free callbacks that only CALL named `fn`s are allowed.
+
+| Issue | Detail | Linear |
+|-------|--------|--------|
+| Named `fn` CALL from lambda | **Implemented:** in-scope top-level named `fn`s are not captures. | [COI-370](https://linear.app/ardax/issue/COI-370) |
+
 ## Userland footguns
 
 | Issue | Detail | Linear |

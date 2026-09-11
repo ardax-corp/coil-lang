@@ -53,9 +53,12 @@ Help:
 the compiler does not auto-fork on a covering lock yet; a later hold check / runtime assert may admit shared steal
 ```
 
-A covering bag that lives only in a lambda is detected on the AST. Coil
-lambdas cannot call outer `fn`s, so a typechecking covering example cannot
-be `with_lock` around `rec(n-1)+rec(n-2)` today; the compile smoke uses an
+A covering bag that lives only in a lambda is detected on the AST. Lambdas
+may **CALL** in-scope named `fn`s without `use (…)` (empty captures). Outer
+**locals** still need `use`, and capturing lambdas are not host-sendable
+(`with_lock` / spawn refuse `ObjFn` with captures). A typechecking covering
+example that also names outer locals therefore still needs `use` on those
+locals (and then cannot be passed to `with_lock`). The compile smoke uses an
 unlocked mutex on the named-fn bag instead. The covering wording is covered
 by the AST unit test.
 
