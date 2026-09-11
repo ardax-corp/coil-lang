@@ -104,8 +104,9 @@ stay MIR→LIR (I3).
 `field_hot` calls methods on a live object (`self` identity). Q2 boxes
 once. I3 is non-escaping locals only.
 
-**Blocker:** none for indexed class fields. Named `GetField`+`STRING` still
-fights dense table-op refuse. Dict field loops stay fuse-IL.
+**Blocker:** none for indexed class fields or named interned keys
+(`STRING` materialize + `DenseField*`). FORMAT/PRINT stay off dense
+(Q9 R1). Dict field loops stay fuse-IL.
 
 **Perf surface:** `field_hot` `hot`; field store loops.
 
