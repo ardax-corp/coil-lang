@@ -5974,6 +5974,147 @@ fn main() {
     );
 }
 
+/// `open` bound to a local: write through that FD names the binding, still sequential.
+#[test]
+fn auto_par_open_fd_hint_names_binding() {
+    let src = r#"
+use io::{open, write};
+use string::{format, to_bytes};
+fn dump(int n) -> int {
+    let f = match open("coil_f3_open_hint.bin", "w") {
+        Result::Ok(h) => h,
+        Result::Err(e) => panic e.message,
+    };
+    write(f, to_bytes(format("%i", n)));
+    return n;
+}
+#[max_depth(64)]
+fn rec(int n) -> int {
+    if n <= 1 { return dump(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() {
+    rec(3);
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let _ = pipeline
+        .compile_src(src)
+        .expect("open-escape rec should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_rec").is_none(),
+        "unlocked file FD must not auto-fork"
+    );
+    assert!(
+        pipeline.messages().iter().any(|m| {
+            m.code() == Some(compiler::ErrorCode::ParLockHint)
+                && m.message().contains("call bag in `rec`")
+                && m.message().contains("`f` (FD)")
+        }),
+        "F3 must name the open-bound FD: {:?}",
+        pipeline
+            .messages()
+            .iter()
+            .map(|m| m.message())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// stderr + stdout on one bag: hint text lists both edges.
+#[test]
+fn auto_par_stderr_stdout_multi_edge_hint() {
+    let src = r#"
+use io::{stdout, stderr, write};
+use string::{format, to_bytes};
+fn leaf(int n) -> int {
+    write(stdout(), to_bytes(format("%i", n)));
+    write(stderr(), to_bytes(format("%i", n)));
+    return n;
+}
+#[max_depth(64)]
+fn rec(int n) -> int {
+    if n <= 1 { return leaf(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() {
+    rec(3);
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let _ = pipeline
+        .compile_src(src)
+        .expect("stdio multi-edge rec should compile");
+    assert!(pipeline.function_offset("__coil_par_rec").is_none());
+    assert!(
+        pipeline.messages().iter().any(|m| {
+            m.code() == Some(compiler::ErrorCode::ParLockHint)
+                && m.message().contains("`stdout` (FD)")
+                && m.message().contains("`stderr` (FD)")
+                && m.message().contains(", ")
+        }),
+        "F3 must list both stdio edges: {:?}",
+        pipeline
+            .messages()
+            .iter()
+            .map(|m| m.message())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// FFI dload/invoke on a call bag: named FFI handle, still sequential.
+#[test]
+fn auto_par_ffi_invoke_hint_stays_sequential() {
+    let src = r#"
+use ffi::{declare, dload, invoke};
+use ffi::types::{Int};
+fn poke(int n) -> int {
+    let lib = match dload("plugin") {
+        Result::Ok(h) => h,
+        Result::Err(e) => panic e.message,
+    };
+    let id = match declare(lib, "noop", (Int,), Int) {
+        Result::Ok(v) => v,
+        Result::Err(e) => panic e.message,
+    };
+    let _ = match invoke(lib, id, (n,)) {
+        Result::Ok(v) => v,
+        Result::Err(_) => n,
+    };
+    return n;
+}
+#[max_depth(64)]
+fn rec(int n) -> int {
+    if n <= 1 { return poke(n); }
+    return rec(n - 1) + rec(n - 2);
+}
+fn main() {
+    rec(3);
+}
+"#;
+    let mut pipeline = test_pipeline();
+    pipeline.grant_dload_allow("plugin");
+    let _ = pipeline
+        .compile_src(src)
+        .expect("ffi-escape rec should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_rec").is_none(),
+        "unlocked FFI must not auto-fork"
+    );
+    assert!(
+        pipeline.messages().iter().any(|m| {
+            m.code() == Some(compiler::ErrorCode::ParLockHint)
+                && m.message().contains("call bag in `rec`")
+                && m.message().contains("(FFI handle)")
+        }),
+        "F3 must name the FFI escape: {:?}",
+        pipeline
+            .messages()
+            .iter()
+            .map(|m| m.message())
+            .collect::<Vec<_>>()
+    );
+}
+
 /// Independent pure helper arms (not self-recursion) still fork-join — the
 /// arms' own subtrees are what the work score charges the site for.
 #[test]
