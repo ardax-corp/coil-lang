@@ -67,10 +67,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      heuristic. Not an opcode / IPA change.
 /// 14 — persist S2b stack maps (COI-359 E1). Older envelopes load with
 ///      empty maps (conservative stack GC). Not an opcode / IPA change.
+/// 15 — HostInvoke `thread_spawn_shared` (**137**) for C1 shared-heap
+///      loop-chunk steal (COI-365 E6). Isolate `thread_spawn` is unchanged.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 14;
+pub const ARCHIVE_MINOR: u16 = 15;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -538,7 +540,7 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 14);
+        assert_eq!(ARCHIVE_MINOR, 15);
         assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 14));
         assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.14");
     }
