@@ -362,7 +362,8 @@ existing opcode; fits append-only opcode ABI.
 
 ### 6. Auto-par fork-site profitability
 
-Priority: landed; F0 drops fib-unit inversion (COI-367).
+Priority: landed; F0 drops fib-unit inversion (COI-367); F1 one parameterized
+fork worker per site (COI-366).
 
 IPA specialization used to invert guard-pruned fork-site nodes `W` into
 fib-equivalent units so `COIL_PAR_THRESHOLD` could stay **20**. F0 compares
@@ -377,10 +378,10 @@ verdict table in [auto-par](auto-par.md#expression-grain-w).
 The work cost is compile-time and bounded by construction: the walk is memoized
 per `(fn, arg vector)`, capped at 256 levels deep and 2^14 memo entries, and
 saturates one node past the grain floor — counting further cannot change the answer.
-The specialization closure on top of it is breadth-first and capped at 64
-clones per function. Nothing runs at execution time, and below-threshold or
-dynamic arg sites stay on the sequential original, so there is no hot-path
-threshold tax.
+F1 emits **one** parameterized worker per demanded site (`__coil_par_{f}`);
+nested AlwaysPar is `PAR_SPEC_HOPS` depth on that worker, not a constellation
+of frozen arg clones. Below-threshold or dynamic arg sites stay on the
+sequential original, so there is no hot-path grain skip-threshold.
 
 ## Cranelift JIT feasibility
 

@@ -9,7 +9,7 @@ implements.
 (**137**, archive **minor 15**) on Layer A epoch STW. User `thread::spawn`
 stays isolate + `PortableValue`.
 
-**C2 status (E7):** expression IPA specializations emit the same
+**C2 status (E7 / F1):** expression IPA parameterized workers emit the same
 `thread_spawn_shared`. Eligible arms (C0 whitelist args — fib/tak immediates)
 allocate and publish pointers on the shared Heap; join reconstructs
 `Value` bits without a `PortableValue` graph walk. Refuse (maps missing for

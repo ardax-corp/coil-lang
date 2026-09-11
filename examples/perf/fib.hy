@@ -1,7 +1,7 @@
 // CPU: plain naive fib recursion (cross-lang fair bench).
 // Sequential A4 row: compile with COIL_AUTO_PAR=0.
-// IPA hit bench (COI-361 E3): COIL_AUTO_PAR=1 — counted hops from fib(32),
-// not AlwaysPar clones all the way to the cutoff.
+// IPA hit bench (COI-366 F1): COIL_AUTO_PAR=1 — one parameterized worker
+// with hop/grain policy, not per-arg `__coil_par_fib_N` clones.
 // Checksum: fib(32) = 2178309.
 use io::{stdout};
 use io::sync::{write_all};
