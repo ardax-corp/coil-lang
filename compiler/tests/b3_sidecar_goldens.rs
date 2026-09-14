@@ -32,12 +32,14 @@ const CORPUS: &[&str] = &[
 /// A3 (COI-336) drops the named-reason checklist; `functions.hy` keeps LIR
 /// when cost ≤ fuse (fingerprint 400). B2 convoys recursive `fib` (same
 /// length; opcode mix changes).
+/// C2b (COI-353) slotted Range `to_vec` uses `LoadField` instead of
+/// `STRING`+`GetField` (same lengths; opcode mix / intern indices change).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "259c7f7110e2abd1_622"),
-    ("functions.hy", "806483c70f0a6d83_400"),
-    ("loops.hy", "ecae1dcfae84aaed_274"),
-    ("option_pair.hy", "1abbc7207ee1bcc6_397"),
-    ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
+    ("arithmetic.hy", "5d27d3b2f2fd2caf_622"),
+    ("functions.hy", "7d952f74fc2714ed_400"),
+    ("loops.hy", "012a9695c1f5cced_274"),
+    ("option_pair.hy", "4cf631c3aa9fbbce_397"),
+    ("user_trait_dispatch.hy", "cc3b9fa74b4f219f_162"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
