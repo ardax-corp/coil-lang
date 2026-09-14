@@ -171,7 +171,8 @@ length-stable `for-in`. Lowering consumes those facts as `IndexUnchecked` /
 `ArrayPin` / `IndexPinUnchecked`. Yield remains a barrier. Computed `MakeArray`
 (arity > 32 or non-immediates), `ArrayPush`, and host refuse the fact. [#192](https://github.com/ardax-corp/coil-lang/pull/192)
 nsieve checked `Index` went to 0; leftover cost on those sites was
-`find_object_by_addr` (addressed for proven loops by `IndexPin*`).
+`find_object_by_addr` (stack `IndexPin*` for fuse-IL; dense native reuses the
+same `frame_pins` table on `DenseIndex` / `DenseStoreIndex`, COI-372).
 
 The safety argument is the cursor, not liveness: the preheader `STORE t` floors the cursor at `t + 1`, and because the cursor is monotone in its input, proving every in-loop stack height stays at or above the header's proves every in-loop push lands above `t`. That is why the pass needs only `il::sp`, and why it works where `slot_promote` cannot — it *adds* a floor instead of removing one. Deliberately refused:
 
@@ -186,7 +187,7 @@ The safety argument is the cursor, not liveness: the preheader `STORE t` floors 
 | A body whose stack height dips below the header's | The preheader floor would not survive, so a later push could land on the temp |
 | A temp read before its def in the body, or outside the loop | The hoist changes what the earlier read observes; the cursor floor also stops protecting the slot once control leaves the loop |
 | **`0 <= i < len` with non-unit stride** | Implemented for invariant positive stride slots (`k += p`); dynamic or stored stride steps stay checked |
-| The `find_object_by_addr` lookup each unchecked `Index` still paid | **Addressed** for proven loops: `ArrayPin` + `IndexPin*` (archive minor 13). Unproven / non-loop `Index` still goes through header poison + mapped-slab range check — [heap-identity.md](heap-identity.md), not a HashSet. No second ArrayPtr — [array-pin.md](array-pin.md); not [COI-99](https://linear.app/ardax/issue/COI-99) |
+| The `find_object_by_addr` lookup each unchecked `Index` still paid | **Addressed** for proven stack loops: `ArrayPin` + `IndexPin*` (archive minor 13). Dense `HEAP_UNCHECKED` loops reuse the same pin table (COI-372) keyed by the array register, with an address check so a reused slot re-probes. Unproven / non-loop `Index` still goes through header poison + mapped-slab range check — [heap-identity.md](heap-identity.md), not a HashSet. No second ArrayPtr — [array-pin.md](array-pin.md); not [COI-99](https://linear.app/ardax/issue/COI-99) |
 
 **The caller-side predicate peel only pays when it spills nothing.** When a callee opens with a pure guard over its parameters and returns an immediate or a parameter from that arm, codegen evaluates the guard at the call site so base cases skip the frame. Arguments that compile to a single pure byte (one slot load, one constant) are re-materialized in both the guard and the argument prep instead of being stored to a temp, which drops one `STORE` plus one spill `LOAD` per argument and leaves the guard reading the caller's own locals (peel-heavy loop: 4.28G → 3.29G instructions, 189ms → 152ms). Anything longer than a byte still takes a temp, because the guard copy and the call copy would each pay for it.
 

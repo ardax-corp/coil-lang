@@ -241,15 +241,18 @@ or above the header's proves no in-loop push can reach `t`.
 [#192](https://github.com/ardax-corp/coil-lang/pull/192) checked `Index` in
 nsieve went to **0** (1:1 opcode swap; dispatch count stayed 469,895). Wall /
 cycle deltas on the poop matrix were within noise; the leftover cost on those
-sites was `find_object_by_addr`, which minor 13 pins for proven loops.
+sites was `find_object_by_addr`, which minor 13 pins for proven stack loops.
+MIR-specialized bodies emit `DenseIndex` / `DenseStoreIndex` instead of
+`IndexPin*`; COI-372 reuses the same `frame_pins` table from those opcodes
+(no new opcode). Unpinned stack `Index` `find_object_by_addr` (slab + poison)
+is leftover cost, not a new product.
 That reverses the original [COI-85](https://linear.app/ardax/issue/COI-85)
 "Index stays checked" decision; `LEQ` / `GEQ` still bind. Unproven, host, FFI,
 growing-array, alias-push, and impure helper-call loops stay checked. Pure user
 helpers on `b[i]` no longer block the proof
 ([COI-99](https://linear.app/ardax/issue/COI-99)).
 Pins *are* the ArrayPtr handle ([COI-198](https://linear.app/ardax/issue/COI-198));
-do not add a second opcode. Unpinned `Index` `find_object_by_addr` (slab +
-poison) is leftover cost, not a new product.
+do not add a second opcode.
 
 What is still open (full refusal table in
 [limitations](limitations.md#il-optimizations-low)):

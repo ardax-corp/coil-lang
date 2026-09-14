@@ -671,6 +671,95 @@
         assert_eq!(vm.pop().as_int(), 6);
     }
 
+    fn dense_index(flags: u8, dest: u8, arr: u8, idx: u8) -> Byte {
+        let op = ((flags as u32) << 24)
+            | ((dest as u32) << 16)
+            | ((arr as u32) << 8)
+            | (idx as u32);
+        Byte::new(Instruction::DenseIndex).with_operand_u32(op)
+    }
+
+    fn dense_store_index(flags: u8, dest: u8, arr: u8, idx: u8) -> Byte {
+        let op = ((flags as u32) << 24)
+            | ((dest as u32) << 16)
+            | ((arr as u32) << 8)
+            | (idx as u32);
+        Byte::new(Instruction::DenseStoreIndex).with_operand_u32(op)
+    }
+
+    /// COI-372: DenseIndex fills `frame_pins` from the array register so the
+    /// second index skips `find_object_by_addr`.
+    #[test]
+    fn dense_index_pins_array_register_across_repeated_reads() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::Seek).with_operand_u32(4),
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            const_int(0),
+            store_pop(1),
+            const_int(1),
+            store_pop(3),
+            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
+            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 3),
+            load(2),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 6);
+        assert_eq!(vm.live_pin_map_count(), 1);
+        let pin = vm.pinned_addr_for_test(0).expect("array slot pinned");
+        assert_ne!(pin, 0);
+    }
+
+    #[test]
+    fn dense_store_index_reuses_pin_and_writes() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::Seek).with_operand_u32(4),
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            const_int(1),
+            store_pop(1),
+            const_int(9),
+            store_pop(2),
+            dense_store_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
+            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
+            load(2),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 9);
+        assert_eq!(vm.live_pin_map_count(), 1);
+    }
+
+    #[test]
+    fn dense_index_reprobes_when_array_register_identity_changes() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::Seek).with_operand_u32(4),
+            const_int(1),
+            Byte::new(Instruction::MakeArray).with_operand_u32(1),
+            store_pop(0),
+            const_int(0),
+            store_pop(1),
+            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
+            const_int(9),
+            const_int(8),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            const_int(1),
+            store_pop(1),
+            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
+            load(2),
+            Byte::new(Instruction::HALT),
+        ]);
+        assert_eq!(vm.pop().as_int(), 8);
+        assert_eq!(vm.live_pin_map_count(), 1);
+    }
+
     #[test]
     fn call_without_array_pin_allocates_no_pin_map() {
         let mut vm = Machine::<8>::default();

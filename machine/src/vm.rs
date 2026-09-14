@@ -314,9 +314,10 @@ struct PendingIoWait {
     resume_sp: usize,
 }
 
-/// One frame's pinned arrays, keyed by `ArrayPin` operand (local slot).
-    ///
-/// Allocated lazily on first `ArrayPin`. Lookup is a vec index, not a hash.
+/// One frame's pinned arrays, keyed by local slot (`ArrayPin` operand or
+/// `DenseIndex` / `DenseStoreIndex` array register).
+///
+/// Allocated lazily on first pin. Lookup is a vec index, not a hash.
 struct FramePins {
     /// `frames.len()` at first pin (TailCall keeps the same depth).
     depth: usize,
@@ -327,7 +328,7 @@ pub struct Machine<const S: usize> {
     heap: crate::memory::HeapSlot,
     stack: Stack<Value>,
     frames: ArrayVec<Frame, S>,
-    /// Pin tables for frames that actually ran `ArrayPin`.
+    /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
     frame_pins: Vec<FramePins>,
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
@@ -861,7 +862,7 @@ impl<const S: usize> Machine<S> {
         self.frames.pop().get()
     }
 
-    /// Drop the pin table for the active frame if ArrayPin created one.
+    /// Drop the pin table for the active frame if this frame created one.
     #[inline]
     fn pop_pin_map_for_current_frame(&mut self) {
         let depth = self.frames.len();
@@ -878,6 +879,34 @@ impl<const S: usize> Machine<S> {
             return None;
         }
         pins.by_slot.get(slot as usize).copied().flatten()
+    }
+
+    /// Cached `Object` for `slot` when it still names `addr` (same identity).
+    #[inline]
+    fn pinned_object_matching(&self, slot: u32, addr: u64) -> Option<Object> {
+        let obj = self.pinned_object(slot)?;
+        if obj.addr() == addr {
+            Some(obj)
+        } else {
+            None
+        }
+    }
+
+    /// Slab-probe once per array register identity; reuse `frame_pins` after that.
+    ///
+    /// `DenseIndex` / `DenseStoreIndex` pass the array *register* as `slot`.
+    /// A hit requires the same address so a reused register re-probes. Pins are
+    /// GC roots (same extra liveness as `ArrayPin`).
+    #[inline(always)]
+    fn resolve_dense_index_object(&mut self, slot: u32, addr: u64) -> Option<Object> {
+        if let Some(obj) = self.pinned_object_matching(slot, addr) {
+            return Some(obj);
+        }
+        let obj = Self::find_object_by_addr(&self.heap, addr)?;
+        if matches!(obj, Object::Array(_) | Object::Tuple(_)) {
+            self.pin_current_array(slot, obj);
+        }
+        Some(obj)
     }
 
     /// Allocate a pin table only when this frame first pins an array.
@@ -1883,6 +1912,11 @@ impl<const S: usize> Machine<S> {
     #[cfg(test)]
     pub fn live_pin_map_count(&self) -> usize {
         self.frame_pins.len()
+    }
+
+    #[cfg(test)]
+    pub fn pinned_addr_for_test(&self, slot: u32) -> Option<u64> {
+        self.pinned_object(slot).map(|obj| obj.addr())
     }
 
     fn with_coroutine_mut(&self, addr: u64, f: impl FnOnce(&mut ObjCoroutine)) {
@@ -3970,7 +4004,7 @@ impl<const S: usize> Machine<S> {
                     let index = self.stack[sp + idx].as_int();
                     let addr = self.stack[sp + arr].raw() as u64;
                     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
-                    let result = match Self::find_object_by_addr(&self.heap, addr) {
+                    let result = match self.resolve_dense_index_object(arr as u32, addr) {
                         Some(crate::memory::Object::Array(gc)) => {
                             Self::read_indexed(&gc.as_ref().elements, index, unchecked)
                         }
@@ -3994,7 +4028,7 @@ impl<const S: usize> Machine<S> {
                     let addr = self.stack[sp + arr].raw() as u64;
                     let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
                     if let Some(crate::memory::Object::Array(mut gc)) =
-                        Self::find_object_by_addr(&self.heap, addr)
+                        self.resolve_dense_index_object(arr as u32, addr)
                     {
                         let elems = &mut gc.as_mut().elements;
                         if !Self::write_indexed(elems, index, value, unchecked) {
