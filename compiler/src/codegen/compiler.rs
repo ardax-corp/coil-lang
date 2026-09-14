@@ -10677,7 +10677,8 @@ impl Compiler {
         self.emit_for_in_array_loop(body, binding_name, true, None, false);
     }
 
-    /// Dict → `DictEntries` → array of `(string, V)` pairs → array for-in.
+    /// Dict → `DictEntries` (mapped MIR alloc) → array of `(string, V)`
+    /// pairs → array for-in (C2b rung 3).
     fn emit_for_in_dict(&mut self, iterable: &Output<'_>, body: &Output<'_>, binding_name: &str) {
         let mut iter_bc = self.do_compile(iterable);
         self.bytecode.append(&mut iter_bc);
@@ -10947,6 +10948,11 @@ impl Compiler {
                     *inclusive,
                     *float,
                 );
+                return;
+            }
+            Some(ForInCounted::Dict) => {
+                self.bytecode.push(Byte::new(Instruction::DictEntries));
+                self.emit_for_in_array_loop(body, binding_name, true, None, false);
                 return;
             }
             None => {}
