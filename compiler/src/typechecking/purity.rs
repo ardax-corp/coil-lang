@@ -495,6 +495,7 @@ fn collect_nested_fns(ast: &Output<'_>, facts: &mut HashMap<String, FnFacts>) {
         },
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {
@@ -669,6 +670,7 @@ fn walk_body(ast: &Output<'_>, facts: &mut FnFacts) {
         },
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {

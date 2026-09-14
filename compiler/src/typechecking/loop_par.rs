@@ -97,7 +97,10 @@ pub fn analyze_loop_par_sites(ast: &Output<'_>, pure_fns: &HashSet<String>) -> L
 enum ConstVal {
     Int(i64),
     /// Half-open `[begin, end)`. Inclusive source ranges are normalized here.
-    Range { begin: i64, end: i64 },
+    Range {
+        begin: i64,
+        end: i64,
+    },
 }
 
 /// Locals proven to hold a compile-time int or counted range at this point.
@@ -176,6 +179,7 @@ impl Scan<'_> {
             }
             Expression::Loop {
                 identifier: None,
+                pattern: None,
                 iterable,
                 body,
             } => match self.match_counted_while(iterable, body, consts) {
@@ -186,6 +190,7 @@ impl Scan<'_> {
             },
             Expression::Loop {
                 identifier: Some(binding),
+                pattern: None,
                 iterable,
                 body,
             } => match self.match_counted_for_range(binding, iterable, body, consts) {
@@ -194,6 +199,7 @@ impl Scan<'_> {
                 }
                 None => self.walk_loop_body(ast, body, consts),
             },
+            Expression::Loop { body, .. } => self.walk_loop_body(ast, body, consts),
             _ => {}
         }
     }
@@ -300,7 +306,9 @@ impl Scan<'_> {
         for form in &forms {
             match form {
                 StmtForm::Local { name, init } => {
-                    if *name == index || *name == acc || !self.independent(init, &index, acc, &locals, consts, &mut captures)
+                    if *name == index
+                        || *name == acc
+                        || !self.independent(init, &index, acc, &locals, consts, &mut captures)
                     {
                         return None;
                     }
@@ -486,10 +494,7 @@ fn commute_reduce<'a>(
 }
 
 /// `i < K` / `i <= K` with a compile-time `K`: `(index, index span, K, inclusive)`.
-fn counted_bound(
-    cond: &Output<'_>,
-    consts: &ConstLocals,
-) -> Option<(String, usize, i64, bool)> {
+fn counted_bound(cond: &Output<'_>, consts: &ConstLocals) -> Option<(String, usize, i64, bool)> {
     let cond = peel(cond);
     let (lhs, rhs, inclusive) = match cond.1.as_ref() {
         Expression::Le(a, b) => (a, b, false),
@@ -720,9 +725,8 @@ mod tests {
         let owned = Box::leak(src.to_string().into_boxed_str());
         let ast = Pratt::default().parse(owned).expect("parse");
         let pure = analyze_pure_fns(&ast);
-        let mut sites: Vec<LoopParSite> = analyze_loop_par_sites(&ast, &pure)
-            .into_values()
-            .collect();
+        let mut sites: Vec<LoopParSite> =
+            analyze_loop_par_sites(&ast, &pure).into_values().collect();
         sites.sort_by(|a, b| a.begin.cmp(&b.begin));
         sites
     }

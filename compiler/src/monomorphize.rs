@@ -718,6 +718,7 @@ where
             iterable,
             body,
             identifier,
+            pattern: _,
         } => {
             f(iterable);
             if let Some(identifier) = identifier {
@@ -730,6 +731,24 @@ where
             for arm in arms {
                 f(&arm.body);
             }
+        }
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => {
+            f(scrutinee);
+            f(&then_arm.body);
+            f(&else_arm.body);
+        }
+        Expression::WhileLet {
+            scrutinee,
+            then_arm,
+            on_miss,
+        } => {
+            f(scrutinee);
+            f(&then_arm.body);
+            f(&on_miss.body);
         }
         Expression::Function {
             docs: _,

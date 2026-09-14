@@ -163,7 +163,9 @@ pub fn analyze_par_escape_hints(ast: &Output<'_>) -> Vec<ParEscapeHint> {
         }
         if let Some((span, lock)) = covering_lock_bag(body, &user_fns) {
             let mut resources = named_escapes_in_fn(name, &bodies, &user_fns);
-            if !resources.iter().any(|r| r.name == lock.name && r.kind == lock.kind)
+            if !resources
+                .iter()
+                .any(|r| r.name == lock.name && r.kind == lock.kind)
             {
                 resources.insert(0, lock);
             }
@@ -391,6 +393,7 @@ fn walk_escapes(
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {
@@ -403,7 +406,9 @@ fn walk_escapes(
         Expression::Variable(_, Some(init)) | Expression::Constant(_, Some(init)) => {
             walk_escapes(init, user_fns, out, callees, aliases)
         }
-        Expression::LetDestructure { rhs, .. } => walk_escapes(rhs, user_fns, out, callees, aliases),
+        Expression::LetDestructure { rhs, .. } => {
+            walk_escapes(rhs, user_fns, out, callees, aliases)
+        }
         Expression::Lambda { body, .. } => walk_escapes(body, user_fns, out, callees, aliases),
         Expression::Function {
             body: Some(body), ..
@@ -492,7 +497,10 @@ fn let_escape_alias<'a>(
     init_escape_kind(init, aliases).map(|kind| (*name, kind))
 }
 
-fn init_escape_kind(init: &Output<'_>, aliases: &HashMap<String, EscapeKind>) -> Option<EscapeKind> {
+fn init_escape_kind(
+    init: &Output<'_>,
+    aliases: &HashMap<String, EscapeKind>,
+) -> Option<EscapeKind> {
     let init = peel(init);
     let init = match init.1.as_ref() {
         Expression::Try(inner) => peel(inner),
@@ -586,8 +594,7 @@ fn fd_expr_name(expr: &Output<'_>, aliases: &HashMap<String, EscapeKind>) -> Opt
             return Some(factory.to_string());
         }
         if is_fd_op(short) {
-            return fd_arg_name(args.as_deref(), aliases)
-                .or_else(|| Some(short.to_string()));
+            return fd_arg_name(args.as_deref(), aliases).or_else(|| Some(short.to_string()));
         }
     }
     None
@@ -1099,7 +1106,9 @@ fn main() { return; }
             .find(|h| h.fn_name == "rec")
             .expect("rec hint");
         assert!(
-            rec.resources.iter().any(|r| r.name == "s" || r.name == "stdin")
+            rec.resources
+                .iter()
+                .any(|r| r.name == "s" || r.name == "stdin")
                 && rec.resources.iter().any(|r| r.kind == EscapeKind::Fd),
             "{:?}",
             rec.resources

@@ -297,7 +297,9 @@ fn eval_arg_form(form: &ArgForm, parent_args: &[i64]) -> Option<i64> {
         ArgForm::Const(k) => Some(*k),
         ArgForm::Param(i) => parent_args.get(*i).copied(),
         ArgForm::ParamMinus { param, sub } => parent_args.get(*param).map(|v| v - sub),
-        ArgForm::ParamPlus { param, add } => parent_args.get(*param).and_then(|v| v.checked_add(*add)),
+        ArgForm::ParamPlus { param, add } => {
+            parent_args.get(*param).and_then(|v| v.checked_add(*add))
+        }
     }
 }
 
@@ -1054,10 +1056,7 @@ fn arg_form(expr: &Output<'_>, ctx: &FnCtx<'_>) -> Option<ArgForm> {
                 .get(idx)
                 .copied()
                 .unwrap_or(false)
-                .then_some(ArgForm::ParamPlus {
-                    param: idx,
-                    add: k,
-                })
+                .then_some(ArgForm::ParamPlus { param: idx, add: k })
         }
         _ => None,
     }
@@ -1195,6 +1194,7 @@ fn collect_const_calls(
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {
@@ -1876,14 +1876,8 @@ fn main() { return; }
         let fib = sites.get("fib").expect("let-bound fib fork");
         assert_eq!(fib.combine, ParCombine::BinOp(ParBinOp::Add));
         assert_eq!(fib.arms.len(), 2);
-        assert_eq!(
-            arm_args(fib, 0),
-            [ArgForm::ParamMinus { param: 0, sub: 1 }]
-        );
-        assert_eq!(
-            arm_args(fib, 1),
-            [ArgForm::ParamMinus { param: 0, sub: 2 }]
-        );
+        assert_eq!(arm_args(fib, 0), [ArgForm::ParamMinus { param: 0, sub: 1 }]);
+        assert_eq!(arm_args(fib, 1), [ArgForm::ParamMinus { param: 0, sub: 2 }]);
         assert!(args_worth_parallel(&sites, "fib", &[21]));
     }
 

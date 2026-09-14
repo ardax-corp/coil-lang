@@ -606,8 +606,27 @@ fn collect_free_idents<'a>(
                 collect_free_idents(&arm.body, bound, free);
             }
         }
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => {
+            collect_free_idents(scrutinee, bound, free);
+            collect_free_idents(&then_arm.body, bound, free);
+            collect_free_idents(&else_arm.body, bound, free);
+        }
+        Expression::WhileLet {
+            scrutinee,
+            then_arm,
+            on_miss,
+        } => {
+            collect_free_idents(scrutinee, bound, free);
+            collect_free_idents(&then_arm.body, bound, free);
+            collect_free_idents(&on_miss.body, bound, free);
+        }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {
@@ -1152,14 +1171,52 @@ fn rewrite_expr_inline<'a>(
                 },
             )
         }
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => at(
+            span,
+            Expression::IfLet {
+                scrutinee: rw(scrutinee),
+                then_arm: MatchArm {
+                    pattern: then_arm.pattern.clone(),
+                    body: rw(&then_arm.body),
+                },
+                else_arm: MatchArm {
+                    pattern: else_arm.pattern.clone(),
+                    body: rw(&else_arm.body),
+                },
+            },
+        ),
+        Expression::WhileLet {
+            scrutinee,
+            then_arm,
+            on_miss,
+        } => at(
+            span,
+            Expression::WhileLet {
+                scrutinee: rw(scrutinee),
+                then_arm: MatchArm {
+                    pattern: then_arm.pattern.clone(),
+                    body: rw(&then_arm.body),
+                },
+                on_miss: MatchArm {
+                    pattern: on_miss.pattern.clone(),
+                    body: rw(&on_miss.body),
+                },
+            },
+        ),
         Expression::Loop {
             identifier,
+            pattern,
             iterable,
             body,
         } => at(
             span,
             Expression::Loop {
                 identifier: identifier.as_ref().map(|id| rw(id)),
+                pattern: pattern.clone(),
                 iterable: rw(iterable),
                 body: rw(body),
             },

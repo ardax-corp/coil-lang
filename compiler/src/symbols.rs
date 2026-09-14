@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    ops::Range,
-    path::PathBuf,
-};
+use std::{collections::HashMap, ops::Range, path::PathBuf};
 
 use parser::ast::{EnumConstructPayload, EnumVariantPayload, Expression, Output};
 
@@ -85,10 +81,9 @@ impl SymbolIndex {
                 Expression::TypeAlias { name, .. } => (*name, SymbolKind::TypeAlias),
                 Expression::StaticDecl { name, .. } => (*name, SymbolKind::Variable),
                 Expression::AttrDecl { name, .. } => (*name, SymbolKind::Method),
-                Expression::Use { name, alias, .. } => (
-                    alias.as_deref().unwrap_or(name),
-                    SymbolKind::Namespace,
-                ),
+                Expression::Use { name, alias, .. } => {
+                    (alias.as_deref().unwrap_or(name), SymbolKind::Namespace)
+                }
                 _ => continue,
             };
             let range = span.start..span.end;
@@ -291,6 +286,7 @@ impl SymbolIndex {
                 }
                 Expression::Loop {
                     identifier,
+                    pattern: _,
                     iterable,
                     body,
                 } => {
@@ -364,11 +360,34 @@ impl SymbolIndex {
                         visit_output(index, file, &arm.body);
                     }
                 }
+                Expression::IfLet {
+                    scrutinee,
+                    then_arm,
+                    else_arm,
+                } => {
+                    visit_output(index, file, scrutinee);
+                    visit_output(index, file, &then_arm.body);
+                    visit_output(index, file, &else_arm.body);
+                }
+                Expression::WhileLet {
+                    scrutinee,
+                    then_arm,
+                    on_miss,
+                } => {
+                    visit_output(index, file, scrutinee);
+                    visit_output(index, file, &then_arm.body);
+                    visit_output(index, file, &on_miss.body);
+                }
                 Expression::AssocTypeDef { ty, .. } => visit_output(index, file, ty),
             }
         }
 
-        visit(self, file, expression.1.as_ref(), expression.0.start..expression.0.end);
+        visit(
+            self,
+            file,
+            expression.1.as_ref(),
+            expression.0.start..expression.0.end,
+        );
     }
 
     /// Attach checker [`DefId`]s for names resolved in this file (locals + `use`).

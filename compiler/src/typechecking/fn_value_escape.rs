@@ -203,6 +203,7 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {

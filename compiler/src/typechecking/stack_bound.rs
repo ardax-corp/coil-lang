@@ -616,6 +616,7 @@ fn walk_self_calls<'a>(
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {
@@ -1329,6 +1330,7 @@ fn walk_entry_sites(
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {
