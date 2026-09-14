@@ -2831,7 +2831,7 @@ impl<const S: usize> Machine<S> {
                 promise!(ip < code_len);
                 let peek = unsafe { code.get_unchecked(ip) };
                 if dispatch::is_hot(*peek.bytecode()) {
-                    if let Some(msg) = dispatch::run_hot_streak(
+                    match dispatch::run_hot_streak(
                         &mut self.stack,
                         &mut sp,
                         &mut ip,
@@ -2843,10 +2843,19 @@ impl<const S: usize> Machine<S> {
                         &mut self.dense_obj_addr,
                         &mut self.dense_obj,
                         &self.finalizer_pcs,
+                        &mut self.nested_depth,
+                        &mut self.nested_frame_depths,
+                        &mut self.nested_return,
+                        &mut self.resume_stack,
+                        &self.io_reactor,
                         stack_cap,
                         dispatch_mode,
                     ) {
-                        return self.runtime_panic(msg, ip.saturating_sub(1));
+                        Some(dispatch::HotStop::Panic(msg)) => {
+                            return self.runtime_panic(msg, ip.saturating_sub(1));
+                        }
+                        Some(dispatch::HotStop::Done(paused)) => return paused,
+                        None => {}
                     }
                     continue;
                 }

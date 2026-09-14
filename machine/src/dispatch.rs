@@ -9,8 +9,8 @@
 //! - `1` / `table` / unset — fn-pointer trampoline (default)
 //! - `2` / `hotmatch` — compact match over the same hot subset
 //!
-//! `COIL_THREADED_CALL=0` keeps `CALL` / `TailCall` on the giant match (A/B).
-//! Unset / `1` threads them. `RETURN` stays on the match (see docs).
+//! `COIL_THREADED_CALL=1` and `COIL_THREADED_RETURN=1` together thread
+//! `CALL`/`TailCall`/`RETURN`/imm-slot fuses (A/B; default off — fib/tak lose).
 //!
 //! Debugger-attached runs stay on the giant match so per-op stops still fire.
 
@@ -76,16 +76,24 @@ fn env_flag_enabled(name: &str, default: bool) -> bool {
     }
 }
 
-/// `CALL` / `TailCall` on the trampoline (default on; `COIL_THREADED_CALL=0` A/B).
+/// `CALL` / `TailCall` on the trampoline. Default off: fib/tak lose to match.
 pub(super) fn call_is_hot() -> bool {
     static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| env_flag_enabled("COIL_THREADED_CALL", true))
+    *CACHED.get_or_init(|| env_flag_enabled("COIL_THREADED_CALL", false))
+}
+
+/// `RETURN` and fused returns. Default off (same A/B as CALL).
+pub(super) fn return_is_hot() -> bool {
+    static CACHED: OnceLock<bool> = OnceLock::new();
+    *CACHED.get_or_init(|| env_flag_enabled("COIL_THREADED_RETURN", false))
 }
 
 trait CallFrames {
     fn rewrite_call(&mut self, caller_ip: usize, callee_sp: usize);
     fn rewrite_indirect_call(&mut self, return_ip: usize, callee_sp: usize);
     fn top_sp(&self) -> usize;
+    fn caller_ip_sp(&self) -> (usize, usize);
+    fn pop_sp(&mut self) -> usize;
     fn len(&self) -> usize;
 }
 
@@ -112,28 +120,50 @@ impl<const S: usize> CallFrames for ArrayVec<Frame, S> {
     }
 
     #[inline(always)]
+    fn caller_ip_sp(&self) -> (usize, usize) {
+        let f = self.get();
+        (f.tell(), f.get())
+    }
+
+    #[inline(always)]
+    fn pop_sp(&mut self) -> usize {
+        self.pop().get()
+    }
+
+    #[inline(always)]
     fn len(&self) -> usize {
         ArrayVec::len(self)
     }
 }
 
-struct HotCtx<'a> {
+struct HotExtra<'a> {
+    frames: &'a mut dyn CallFrames,
+    frames_len: usize,
+    frame_pins: &'a mut Vec<FramePins>,
+    dense_obj_addr: &'a mut u64,
+    dense_obj: &'a mut Option<Object>,
+    finalizer_pcs: &'a std::collections::HashSet<u32, crate::AddrHashBuilder>,
+    nested_depth: &'a mut u32,
+    nested_frame_depths: &'a mut Vec<usize>,
+    nested_return: &'a mut Option<Value>,
+    resume_stack: &'a mut Vec<super::ResumeCtx>,
+    io_reactor: &'a std::sync::Arc<crate::io_reactor::IoReactor>,
+    execute_done: Option<bool>,
+}
+
+struct HotCtx<'a, 'e> {
     stack: &'a mut Stack<Value>,
     sp: usize,
     ip: usize,
     code: &'a [Byte],
     constants: &'a [u64],
     heap: &'a mut Heap,
-    frames: &'a mut dyn CallFrames,
-    frame_pins: &'a mut Vec<FramePins>,
-    dense_obj_addr: &'a mut u64,
-    dense_obj: &'a mut Option<Object>,
-    finalizer_pcs: &'a std::collections::HashSet<u32, crate::AddrHashBuilder>,
     stack_cap: usize,
     panic_msg: Option<&'static str>,
+    extra: &'e mut HotExtra<'a>,
 }
 
-type Handler = fn(&mut HotCtx<'_>, Byte);
+type Handler = fn(&mut HotCtx<'_, '_>, Byte);
 
 #[inline(always)]
 pub(super) fn is_hot(bc: Instruction) -> bool {
@@ -626,12 +656,12 @@ fn claim_finalizer(heap: &Heap, v: Value) -> bool {
 }
 
 #[inline(always)]
-fn do_call(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn do_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let (arity, target) = opcode.call_parts();
     promise!(ctx.stack.tell() >= arity);
     if arity == 1
-        && unlikely(!ctx.finalizer_pcs.is_empty())
-        && ctx.finalizer_pcs.contains(&(target as u32))
+        && unlikely(!ctx.extra.finalizer_pcs.is_empty())
+        && ctx.extra.finalizer_pcs.contains(&(target as u32))
     {
         promise!(ctx.stack.tell() >= 1);
         let self_val = ctx.stack[ctx.stack.tell() - 1];
@@ -643,20 +673,24 @@ fn do_call(ctx: &mut HotCtx<'_>, opcode: Byte) {
     }
     let callee_sp = ctx.stack.tell() - arity;
     if likely(target != 0) {
-        ctx.frames.rewrite_call(ctx.ip, callee_sp);
+        ctx.extra.frames.rewrite_call(ctx.ip, callee_sp);
         ctx.sp = callee_sp;
+        ctx.extra.frames_len = ctx.extra.frames.len();
         set_jump_target(&mut ctx.ip, target, ctx.code);
     } else {
-        ctx.frames.rewrite_indirect_call(ctx.ip + 1, callee_sp);
+        ctx.extra
+            .frames
+            .rewrite_indirect_call(ctx.ip + 1, callee_sp);
         ctx.sp = callee_sp;
+        ctx.extra.frames_len = ctx.extra.frames.len();
     }
 }
 
 #[inline(always)]
-fn do_tail_call(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn do_tail_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let (arity, target) = opcode.call_parts();
     promise!(ctx.stack.tell() >= arity);
-    let callee_sp = ctx.frames.top_sp();
+    let callee_sp = ctx.extra.frames.top_sp();
     let src = ctx.stack.tell() - arity;
     ctx.stack.copy_slots(callee_sp, src, arity);
     ctx.stack.seek(callee_sp + arity);
@@ -664,80 +698,180 @@ fn do_tail_call(ctx: &mut HotCtx<'_>, opcode: Byte) {
     set_jump_target(&mut ctx.ip, target, ctx.code);
 }
 
-fn apply_jump(ctx: &mut HotCtx<'_>, target: Option<usize>) {
+fn with_coro_mut(heap: &Heap, addr: u64, f: impl FnOnce(&mut crate::ObjCoroutine)) {
+    let mut current = heap.head_for_lookup();
+    while let Some(reference) = current {
+        if reference.addr() == addr {
+            if let Object::Coroutine(gc) = reference {
+                f(gc.payload_mut());
+            }
+            return;
+        }
+        current = reference.get_next();
+    }
+}
+
+#[inline(always)]
+fn pop_frame_pins(frame_pins: &mut Vec<FramePins>, frames_len: usize) {
+    if frame_pins.last().is_some_and(|p| p.depth == frames_len) {
+        frame_pins.pop();
+    }
+}
+
+#[inline(always)]
+fn capture_nested(ctx: &mut HotCtx<'_, '_>, ret_val: Value) -> bool {
+    if unlikely(*ctx.extra.nested_depth > 0) {
+        let nested_target = ctx.extra.nested_frame_depths.last().copied().unwrap_or(0);
+        if ctx.extra.frames_len == nested_target {
+            *ctx.extra.nested_return = Some(ret_val);
+            return true;
+        }
+    }
+    false
+}
+
+#[inline(always)]
+fn after_return_hot(ctx: &mut HotCtx<'_, '_>) {
+    let (ip, sp) = ctx.extra.frames.caller_ip_sp();
+    ctx.ip = ip;
+    ctx.sp = sp;
+    if unlikely(!ctx.extra.resume_stack.is_empty())
+        && let Some(rctx) = ctx.extra.resume_stack.last()
+        && ctx.extra.frames_len <= rctx.frame_depth
+    {
+        let coro_ptr = rctx.coro.as_ptr() as u64;
+        let old_wait = {
+            let mut taken = None;
+            with_coro_mut(ctx.heap, coro_ptr, |coro| {
+                if coro.yield_from.is_some() {
+                    return;
+                }
+                taken = coro.io_wait.take();
+                coro.state = crate::CoroState::Done;
+                coro.saved_stack.clear();
+                coro.saved_frames.clear();
+                coro.yield_from = None;
+            });
+            taken
+        };
+        if let Some(tok) = old_wait {
+            ctx.extra.io_reactor.cancel_wait(tok);
+        }
+        ctx.extra.resume_stack.pop();
+    }
+}
+
+#[inline(always)]
+fn finish_return(ctx: &mut HotCtx<'_, '_>, ret_val: Value) {
+    if capture_nested(ctx, ret_val) {
+        ctx.extra.execute_done = Some(false);
+        return;
+    }
+    pop_frame_pins(ctx.extra.frame_pins, ctx.extra.frames_len);
+    let return_sp = ctx.extra.frames.pop_sp();
+    ctx.extra.frames_len -= 1;
+    ctx.stack.seek(return_sp);
+    ctx.stack.push(ret_val);
+    after_return_hot(ctx);
+}
+
+#[inline(always)]
+fn do_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    if unlikely(opcode.return_words() >= 2) {
+        promise!(ctx.stack.tell() >= 2);
+        let tag = ctx.stack.pop();
+        let payload = ctx.stack.pop();
+        if capture_nested(ctx, payload) {
+            ctx.extra.execute_done = Some(false);
+            return;
+        }
+        pop_frame_pins(ctx.extra.frame_pins, ctx.extra.frames_len);
+        let return_sp = ctx.extra.frames.pop_sp();
+        ctx.extra.frames_len -= 1;
+        ctx.stack.seek(return_sp);
+        ctx.stack.push(payload);
+        ctx.stack.push(tag);
+        after_return_hot(ctx);
+    } else {
+        let ret_val = ctx.stack.pop();
+        finish_return(ctx, ret_val);
+    }
+}
+
+fn apply_jump(ctx: &mut HotCtx<'_, '_>, target: Option<usize>) {
     if let Some(target) = target {
         set_jump_target(&mut ctx.ip, target, ctx.code);
     }
 }
 
-fn cold(_ctx: &mut HotCtx<'_>, _opcode: Byte) {}
+fn cold(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
 
 #[inline(never)]
-fn op_dense_bin(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_dense_cmp(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_cmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_dense_const(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_const(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_const(ctx.stack, ctx.sp, &opcode, ctx.constants, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_dense_move(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_move(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_move(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_dense_cast(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_cast(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cast(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_dense_unary(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_unary(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_load(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     load(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_store(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     store(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_seek(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_seek(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     seek(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_jmp(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_jmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
 }
 
 #[inline(never)]
-fn op_jmpf(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if !ctx.stack.pop().as_bool() {
         set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
     }
 }
 
 #[inline(never)]
-fn op_jmpt(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if ctx.stack.pop().as_bool() {
         set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
     }
 }
 
 #[inline(never)]
-fn op_bin_slot_slot_jmpf(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_bin_slot_slot_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
         bin_slot_slot_jmp(
@@ -753,7 +887,7 @@ fn op_bin_slot_slot_jmpf(ctx: &mut HotCtx<'_>, opcode: Byte) {
 }
 
 #[inline(never)]
-fn op_bin_slot_slot_jmpt(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_bin_slot_slot_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
         bin_slot_slot_jmp(
@@ -769,7 +903,7 @@ fn op_bin_slot_slot_jmpt(ctx: &mut HotCtx<'_>, opcode: Byte) {
 }
 
 #[inline(never)]
-fn op_bin_slot_imm_jmpf(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_bin_slot_imm_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
         bin_slot_imm_jmp(
@@ -785,7 +919,7 @@ fn op_bin_slot_imm_jmpf(ctx: &mut HotCtx<'_>, opcode: Byte) {
 }
 
 #[inline(never)]
-fn op_bin_slot_imm_jmpt(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_bin_slot_imm_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
         bin_slot_imm_jmp(
@@ -801,36 +935,36 @@ fn op_bin_slot_imm_jmpt(ctx: &mut HotCtx<'_>, opcode: Byte) {
 }
 
 #[inline(never)]
-fn op_cmp_jmpf(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_cmp_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = cmp_jmp(ctx.stack, &opcode, ctx.constants, ctx.heap, false);
     apply_jump(ctx, target);
 }
 
 #[inline(never)]
-fn op_cmp_jmpt(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_cmp_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = cmp_jmp(ctx.stack, &opcode, ctx.constants, ctx.heap, true);
     apply_jump(ctx, target);
 }
 
 #[inline(never)]
-fn op_log_not_jmpf(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_log_not_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = log_not_jmp(ctx.stack, &opcode, ctx.constants, false);
     apply_jump(ctx, target);
 }
 
 #[inline(never)]
-fn op_log_not_jmpt(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_log_not_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = log_not_jmp(ctx.stack, &opcode, ctx.constants, true);
     apply_jump(ctx, target);
 }
 
 #[inline(never)]
-fn op_bin_slot_imm(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_bin_slot_imm(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     bin_slot_imm(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_bin_slot_imm_store(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_bin_slot_imm_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     bin_slot_imm_store(
         ctx.stack,
         ctx.sp,
@@ -842,21 +976,21 @@ fn op_bin_slot_imm_store(ctx: &mut HotCtx<'_>, opcode: Byte) {
 }
 
 #[inline(never)]
-fn op_bin_slot_slot_store(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_bin_slot_slot_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     bin_slot_slot_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_dense_index(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if dense_index(
         ctx.stack,
         ctx.sp,
         &opcode,
         ctx.heap,
-        ctx.frames.len(),
-        ctx.frame_pins,
-        ctx.dense_obj_addr,
-        ctx.dense_obj,
+        ctx.extra.frames_len,
+        ctx.extra.frame_pins,
+        ctx.extra.dense_obj_addr,
+        ctx.extra.dense_obj,
         ctx.stack_cap,
     )
     .is_err()
@@ -866,16 +1000,16 @@ fn op_dense_index(ctx: &mut HotCtx<'_>, opcode: Byte) {
 }
 
 #[inline(never)]
-fn op_dense_store_index(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_store_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     match dense_store_index(
         ctx.stack,
         ctx.sp,
         &opcode,
         ctx.heap,
-        ctx.frames.len(),
-        ctx.frame_pins,
-        ctx.dense_obj_addr,
-        ctx.dense_obj,
+        ctx.extra.frames_len,
+        ctx.extra.frame_pins,
+        ctx.extra.dense_obj_addr,
+        ctx.extra.dense_obj,
         ctx.stack_cap,
     ) {
         Ok(()) => {}
@@ -885,32 +1019,61 @@ fn op_dense_store_index(ctx: &mut HotCtx<'_>, opcode: Byte) {
 }
 
 #[inline(never)]
-fn op_dense_array_len(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_array_len(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_array_len(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap);
 }
 
 #[inline(never)]
-fn op_dense_field_load(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_field_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if dense_field_load(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() {
         ctx.panic_msg = Some("no such field");
     }
 }
 
 #[inline(never)]
-fn op_dense_field_store(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_dense_field_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if dense_field_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() {
         ctx.panic_msg = Some("SetField on non-instance");
     }
 }
 
 #[inline(never)]
-fn op_call(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     do_call(ctx, opcode);
 }
 
 #[inline(never)]
-fn op_tail_call(ctx: &mut HotCtx<'_>, opcode: Byte) {
+fn op_tail_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     do_tail_call(ctx, opcode);
+}
+
+#[inline(never)]
+fn op_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    do_return(ctx, opcode);
+}
+
+#[inline(never)]
+fn op_const_return_imm(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let ret_val = Value::from(opcode.operand_u32() as i32 as i64 as u64);
+    finish_return(ctx, ret_val);
+}
+
+#[inline(never)]
+fn op_load_return_slot(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let slot = opcode.operand_u32() as usize;
+    promise!(ctx.sp + slot < ctx.stack_cap);
+    let ret_val = ctx.stack[ctx.sp + slot];
+    finish_return(ctx, ret_val);
+}
+
+#[inline(never)]
+fn op_bin_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let tos = ctx.stack.tell();
+    promise!(tos >= 2);
+    let rhs = ctx.stack[tos - 1];
+    let lhs = ctx.stack[tos - 2];
+    let ret_val = crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, ctx.heap);
+    finish_return(ctx, ret_val);
 }
 
 fn build_table() -> [Handler; 256] {
@@ -926,26 +1089,29 @@ fn build_table() -> [Handler; 256] {
     t[Instruction::DenseArrayLen as usize] = op_dense_array_len;
     t[Instruction::DenseFieldLoad as usize] = op_dense_field_load;
     t[Instruction::DenseFieldStore as usize] = op_dense_field_store;
-    t[Instruction::LOAD as usize] = op_load;
-    t[Instruction::STORE as usize] = op_store;
-    t[Instruction::Seek as usize] = op_seek;
     t[Instruction::JMP as usize] = op_jmp;
     t[Instruction::JMPF as usize] = op_jmpf;
     t[Instruction::JMPT as usize] = op_jmpt;
     t[Instruction::BinSlotSlotJmpf as usize] = op_bin_slot_slot_jmpf;
     t[Instruction::BinSlotSlotJmpt as usize] = op_bin_slot_slot_jmpt;
-    t[Instruction::BinSlotImmJmpf as usize] = op_bin_slot_imm_jmpf;
-    t[Instruction::BinSlotImmJmpt as usize] = op_bin_slot_imm_jmpt;
     t[Instruction::CmpJmpf as usize] = op_cmp_jmpf;
     t[Instruction::CmpJmpt as usize] = op_cmp_jmpt;
     t[Instruction::LogNotJmpf as usize] = op_log_not_jmpf;
     t[Instruction::LogNotJmpt as usize] = op_log_not_jmpt;
-    t[Instruction::BinSlotImm as usize] = op_bin_slot_imm;
-    t[Instruction::BinSlotImmStore as usize] = op_bin_slot_imm_store;
     t[Instruction::BinSlotSlotStore as usize] = op_bin_slot_slot_store;
-    if call_is_hot() {
+    // Imm-slot fuses share the fib/tak kernel with CALL/RETURN. Threading
+    // them without both call and return bounces out of the trampoline.
+    if call_is_hot() && return_is_hot() {
+        t[Instruction::BinSlotImm as usize] = op_bin_slot_imm;
+        t[Instruction::BinSlotImmStore as usize] = op_bin_slot_imm_store;
+        t[Instruction::BinSlotImmJmpf as usize] = op_bin_slot_imm_jmpf;
+        t[Instruction::BinSlotImmJmpt as usize] = op_bin_slot_imm_jmpt;
         t[Instruction::CALL as usize] = op_call;
         t[Instruction::TailCall as usize] = op_tail_call;
+        t[Instruction::RETURN as usize] = op_return;
+        t[Instruction::ConstReturnImm as usize] = op_const_return_imm;
+        t[Instruction::LoadReturnSlot as usize] = op_load_return_slot;
+        t[Instruction::BinReturn as usize] = op_bin_return;
     }
     t
 }
@@ -963,7 +1129,7 @@ fn copy_byte(code: &[Byte], ip: usize) -> Byte {
 }
 
 #[inline(always)]
-fn exec_hot(ctx: &mut HotCtx<'_>, bc: Instruction, opcode: Byte) {
+fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
     match bc {
         Instruction::DenseBin => dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
         Instruction::DenseCmp => dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
@@ -1073,10 +1239,10 @@ fn exec_hot(ctx: &mut HotCtx<'_>, bc: Instruction, opcode: Byte) {
                 ctx.sp,
                 &opcode,
                 ctx.heap,
-                ctx.frames.len(),
-                ctx.frame_pins,
-                ctx.dense_obj_addr,
-                ctx.dense_obj,
+                ctx.extra.frames_len,
+                ctx.extra.frame_pins,
+                ctx.extra.dense_obj_addr,
+                ctx.extra.dense_obj,
                 ctx.stack_cap,
             )
             .is_err()
@@ -1089,10 +1255,10 @@ fn exec_hot(ctx: &mut HotCtx<'_>, bc: Instruction, opcode: Byte) {
             ctx.sp,
             &opcode,
             ctx.heap,
-            ctx.frames.len(),
-            ctx.frame_pins,
-            ctx.dense_obj_addr,
-            ctx.dense_obj,
+            ctx.extra.frames_len,
+            ctx.extra.frame_pins,
+            ctx.extra.dense_obj_addr,
+            ctx.extra.dense_obj,
             ctx.stack_cap,
         ) {
             Ok(()) => {}
@@ -1114,12 +1280,31 @@ fn exec_hot(ctx: &mut HotCtx<'_>, bc: Instruction, opcode: Byte) {
         }
         Instruction::CALL if call_is_hot() => do_call(ctx, opcode),
         Instruction::TailCall if call_is_hot() => do_tail_call(ctx, opcode),
+        Instruction::RETURN if return_is_hot() => do_return(ctx, opcode),
+        Instruction::ConstReturnImm if return_is_hot() => {
+            let ret_val = Value::from(opcode.operand_u32() as i32 as i64 as u64);
+            finish_return(ctx, ret_val);
+        }
+        Instruction::LoadReturnSlot if return_is_hot() => {
+            let slot = opcode.operand_u32() as usize;
+            promise!(ctx.sp + slot < ctx.stack_cap);
+            let ret_val = ctx.stack[ctx.sp + slot];
+            finish_return(ctx, ret_val);
+        }
+        Instruction::BinReturn if return_is_hot() => {
+            let tos = ctx.stack.tell();
+            promise!(tos >= 2);
+            let rhs = ctx.stack[tos - 1];
+            let lhs = ctx.stack[tos - 2];
+            let ret_val = crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, ctx.heap);
+            finish_return(ctx, ret_val);
+        }
         _ => {}
     }
 }
 
 #[inline(never)]
-fn table_loop(ctx: &mut HotCtx<'_>) {
+fn table_loop(ctx: &mut HotCtx<'_, '_>) {
     let handlers = table();
     let code_len = ctx.code.len();
     loop {
@@ -1137,14 +1322,14 @@ fn table_loop(ctx: &mut HotCtx<'_>) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         h(ctx, opcode);
-        if unlikely(ctx.panic_msg.is_some()) {
+        if unlikely(ctx.panic_msg.is_some() || ctx.extra.execute_done.is_some()) {
             return;
         }
     }
 }
 
 #[inline(never)]
-fn hotmatch_loop(ctx: &mut HotCtx<'_>) {
+fn hotmatch_loop(ctx: &mut HotCtx<'_, '_>) {
     let code_len = ctx.code.len();
     loop {
         if unlikely(ctx.ip >= code_len) {
@@ -1160,14 +1345,19 @@ fn hotmatch_loop(ctx: &mut HotCtx<'_>) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         exec_hot(ctx, bc, opcode);
-        if unlikely(ctx.panic_msg.is_some()) {
+        if unlikely(ctx.panic_msg.is_some() || ctx.extra.execute_done.is_some()) {
             return;
         }
     }
 }
 
+pub(super) enum HotStop {
+    Panic(&'static str),
+    Done(bool),
+}
+
 /// Consume a streak of hot ops at `*ip`. Leaves `*ip` on the first cold op
-/// (or `code.len()`). Returns a panic message when a hot heap op fails.
+/// (or `code.len()`).
 #[inline(never)]
 pub(super) fn run_hot_streak<const S: usize>(
     stack: &mut Stack<Value>,
@@ -1181,9 +1371,29 @@ pub(super) fn run_hot_streak<const S: usize>(
     dense_obj_addr: &mut u64,
     dense_obj: &mut Option<Object>,
     finalizer_pcs: &std::collections::HashSet<u32, crate::AddrHashBuilder>,
+    nested_depth: &mut u32,
+    nested_frame_depths: &mut Vec<usize>,
+    nested_return: &mut Option<Value>,
+    resume_stack: &mut Vec<super::ResumeCtx>,
+    io_reactor: &std::sync::Arc<crate::io_reactor::IoReactor>,
     stack_cap: usize,
     mode: Mode,
-) -> Option<&'static str> {
+) -> Option<HotStop> {
+    let frames_len = frames.len();
+    let mut extra = HotExtra {
+        frames: frames as &mut dyn CallFrames,
+        frames_len,
+        frame_pins,
+        dense_obj_addr,
+        dense_obj,
+        finalizer_pcs,
+        nested_depth,
+        nested_frame_depths,
+        nested_return,
+        resume_stack,
+        io_reactor,
+        execute_done: None,
+    };
     let mut ctx = HotCtx {
         stack,
         sp: *sp,
@@ -1191,13 +1401,9 @@ pub(super) fn run_hot_streak<const S: usize>(
         code,
         constants,
         heap,
-        frames: frames as &mut dyn CallFrames,
-        frame_pins,
-        dense_obj_addr,
-        dense_obj,
-        finalizer_pcs,
         stack_cap,
         panic_msg: None,
+        extra: &mut extra,
     };
     match mode {
         Mode::Table => table_loop(&mut ctx),
@@ -1206,7 +1412,11 @@ pub(super) fn run_hot_streak<const S: usize>(
     }
     *ip = ctx.ip;
     *sp = ctx.sp;
-    ctx.panic_msg
+    if let Some(msg) = ctx.panic_msg {
+        Some(HotStop::Panic(msg))
+    } else {
+        ctx.extra.execute_done.map(HotStop::Done)
+    }
 }
 
 #[cfg(test)]
@@ -1227,21 +1437,22 @@ mod tests {
     fn hot_subset_and_table_slots() {
         assert!(is_hot(Instruction::DenseBin));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
-        assert!(is_hot(Instruction::BinSlotImmJmpf));
         assert!(is_hot(Instruction::DenseIndex));
-        assert!(is_hot(Instruction::LOAD));
-        assert!(is_hot(Instruction::Seek));
+        assert!(!is_hot(Instruction::LOAD));
+        assert!(!is_hot(Instruction::Seek));
         assert!(!is_hot(Instruction::HALT));
+        assert!(!is_hot(Instruction::CALL));
         assert!(!is_hot(Instruction::RETURN));
+        assert!(!is_hot(Instruction::BinSlotImmJmpf));
         let t = table();
         assert!(!core::ptr::fn_addr_eq(
             t[Instruction::DenseBin as usize],
             cold as Handler
         ));
-        assert!(core::ptr::fn_addr_eq(
-            t[Instruction::RETURN as usize],
-            cold as Handler
-        ));
+        assert_eq!(
+            !core::ptr::fn_addr_eq(t[Instruction::RETURN as usize], cold as Handler),
+            return_is_hot()
+        );
         assert_eq!(
             !core::ptr::fn_addr_eq(t[Instruction::CALL as usize], cold as Handler),
             call_is_hot()
