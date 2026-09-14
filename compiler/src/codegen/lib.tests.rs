@@ -2281,17 +2281,33 @@ fn main() { let c = new Counter(0, 3); for x in c { write(stdout(), to_bytes(for
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::CALL))
             .count();
+        let box_value = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::BoxValue))
+            .count();
         let jump_if_match = bc
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::JumpIfMatch))
+            .count();
+        let eq = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::EQ))
+            .count();
+        let tag_jmp = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::JMPF | Instruction::JMPT))
             .count();
         assert!(
             calls >= 2,
             "custom for-in should CALL into_iter and next; got {calls}"
         );
+        assert_eq!(
+            box_value, 0,
+            "custom for-in must not BoxValue the carrier; got {box_value}"
+        );
         assert!(
-            jump_if_match >= 1,
-            "custom for-in should JumpIfMatch on Option::None; got {jump_if_match}"
+            jump_if_match >= 1 || eq >= 1 || tag_jmp >= 1,
+            "custom for-in should JumpIfMatch, EQ, or two-slot tag JMP on Option::None; jim={jump_if_match} eq={eq} tag_jmp={tag_jmp}"
         );
     }
 

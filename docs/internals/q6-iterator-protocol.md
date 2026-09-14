@@ -45,8 +45,12 @@ type level). Runtime lowering:
    `LoadField` 0/1 and uses the same counted latch. Bare `for x in r` on
    a live-in param pair can DestProp-peel back onto entry slots.
 5. **Tuple** — temp array, then (1).
-6. **Dict / coro / user `Iterator`** — existing protocol. Stay fuse-IL
-   until a later rung (match / CALL / resume).
+6. **Dict / coro** — existing protocol. Stay fuse-IL until later rungs
+   (match / CALL / resume). **User `Iterator::next`** (C2b rung 2) keeps
+   `into_iter` then `next` → `Option` (Q8 two-slot / niche match + B3
+   CALL) when `IntoIter` is not a counted builtin. If `IntoIter` is
+   array / homogeneous tuple / numeric Range, `into_iter` then the
+   matching Q6 counted latch (no `Iterator` instance required).
 
 No new opcode. No env toggle. Keep/refuse is checksum + cost gate.
 Counted const `for` / range with an associative int reduce may also
@@ -70,6 +74,11 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
 - `examples/perf/for_in_range_array.hy` — array-held Range helper is
   the same dense counted i64 (C2b rung 1).
 
+- `examples/perf/for_in_iter.hy` — user `Iterator::next` helper is two-slot
+  Option tag JMP + CALL (dense when cost ≤ fuse; C2b rung 2).
+- `examples/perf/for_in_iter_range.hy` — `into_iter` → `Range<int>` helper
+  is the same dense counted i64 (C2b rung 2).
+
 Flagships do not need this island.
 
 ## Later rungs
@@ -82,7 +91,8 @@ Ranked as **B5** in [opt-generalization.md](opt-generalization.md) B0
   returned numeric Range as two-slot `[start, end]`. **C2b rung 1** lands
   heap-field / array-held Range (`LoadField` 0/1, no `GetField` /
   `STRING` / `MakeDict` in the helper). Escaped fn values and method
-  `self` still box. User `Iterator` / coro / dict for-in stay refuse
-  (rungs 2–4).
-- User `Iterator::next` on MIR (needs Q8 dense+match or LIR + CALL)
+  `self` still box. **C2b rung 2** lands user `Iterator::next` on MIR
+  (Q8 dense+match or LIR + CALL) and counted `into_iter` when `IntoIter`
+  is array / tuple / numeric Range. Dict / coro for-in stay refuse
+  (rungs 3–4).
 - Coro / dict for-in
