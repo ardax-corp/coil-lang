@@ -5108,6 +5108,142 @@ fn main() {
     }
 
     #[test]
+    fn q6_for_in_iter_next_sum_takes_dense() {
+        let src = r#"
+class Counter {
+    pub cur: int,
+    pub end: int,
+}
+impl IntoIterator for Counter {
+    type Item = int;
+    type IntoIter = Counter;
+    fn into_iter(Counter c) -> Counter {
+        return c;
+    }
+}
+impl Iterator for Counter {
+    type Item = int;
+    fn next(Counter c) -> Option<int> {
+        if c.cur < c.end {
+            let v = c.cur;
+            c.cur = c.cur + 1;
+            return Option::Some(v);
+        }
+        return Option::None;
+    }
+}
+fn iter_sum(Counter c) -> int {
+    let acc = 0;
+    for x in c {
+        acc = acc + x;
+    }
+    return acc;
+}
+fn main() {
+    if iter_sum(new Counter(0, 5)) != 10 {
+        panic "iter next checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile iterator next for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "iter_sum")
+            .expect("iter_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "C2b Iterator::next for-in should DenseBin; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::CALL),
+            "Iterator::next helper keeps CALL; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::BoxValue),
+            "for-in must not BoxValue the carrier; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::MakeDict | Instruction::GetField | Instruction::STRING
+            )),
+            "Iterator::next helper must not GetField; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "iter next checksum");
+    }
+
+    #[test]
+    fn q6_for_in_iter_range_sum_takes_dense() {
+        let src = r#"
+class Holder {
+    pub start: int,
+    pub end: int,
+}
+impl IntoIterator for Holder {
+    type Item = int;
+    type IntoIter = Range<int>;
+    fn into_iter(Holder h) -> Range<int> {
+        return h.start..h.end;
+    }
+}
+fn range_sum(Holder h) -> int {
+    let acc = 0;
+    for x in h {
+        acc = acc + x;
+    }
+    return acc;
+}
+fn main() {
+    if range_sum(new Holder(0, 5)) != 10 {
+        panic "iter range checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile into_iter range for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "range_sum")
+            .expect("range_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            "C2b into_iter Range for-in should DenseBin; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| !matches!(
+                *b.bytecode(),
+                Instruction::MakeDict | Instruction::GetField | Instruction::STRING
+                    | Instruction::BoxValue
+            )),
+            "into_iter Range helper must not GetField/BoxValue; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "iter range checksum");
+    }
+
+    #[test]
     fn q6_for_in_range_assign_to_x_keeps_trip_count() {
         let src = r#"
 fn trips() -> int {
