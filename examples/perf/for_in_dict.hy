@@ -1,6 +1,5 @@
 // C2b / Q6 rung 3: dict for-in as DictEntries then counted array latch.
-// Helper sums entry values (`p[1]`). `main` stays format. Coro for-in
-// is still refuse (rung 4).
+// Helper sums entry values (`p[1]`). `main` stays format.
 use io::{stdout};
 use io::sync::{write_all};
 use string::{format, to_bytes};

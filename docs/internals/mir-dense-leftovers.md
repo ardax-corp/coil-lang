@@ -15,8 +15,8 @@ D3 [COI-357](https://linear.app/ardax/issue/COI-357) boxed multi-payload match (
 
 | Ticket | Status | What actually landed | Leftover |
 |-------|--------|----------------------|----------|
-| [COI-351](https://linear.app/ardax/issue/COI-351) C2 | **Done** (#401) | Numeric free-fn Range param / two-slot `CALL`/`RETURN`; counted `for` without `GetField` | Dict for-in → [COI-353](https://linear.app/ardax/issue/COI-353) **C2b** rung 3 (this PR). Coro → rung 4. |
-| [COI-353](https://linear.app/ardax/issue/COI-353) C2b | **Rung 3 this PR** | Dict for-in on MIR (`DictEntries` / `MakeDict` mapped; counted latch; dense or LIR). Counted `into_iter` when `IntoIter` is a dict | Coro for-in (rung 4). Keep issue open. |
+| [COI-351](https://linear.app/ardax/issue/COI-351) C2 | **Done** (#401) | Numeric free-fn Range param / two-slot `CALL`/`RETURN`; counted `for` without `GetField` | Heap-field / Iterator / dict / coro → [COI-353](https://linear.app/ardax/issue/COI-353) **C2b** (complete this PR). |
+| [COI-353](https://linear.app/ardax/issue/COI-353) C2b | **Rung 4 this PR (complete)** | Coro for-in on MIR (`MakeCoro` mapped alloc; `ResumeCoro` / `DoneCoro`; dense or LIR). Prior rungs: heap-field Range, user `Iterator::next`, dict | None. |
 | [COI-350](https://linear.app/ardax/issue/COI-350) C3 | **Done** (#402) | Compiler-internal `DraftDeoptMap`, named-let remap, sparse emit locs | P5 resume, incomplete convoy maps, per-PC locals. Debugger, not a hot-path densify. |
 | [COI-344](https://linear.app/ardax/issue/COI-344) B6 | **Done** (#396) | Mapped `ArrayPush` / `DenseArrayPush` (archive **4.11**); CALL+`Make*` / `InitTyped` drafts bind | Unmapped **class** edges were D1; `item_check` match wall was D3 |
 | [COI-335](https://linear.app/ardax/issue/COI-335) A2 | **Done** (#379) | `DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` / `DenseMake` / `DensePush` | Field / Object natives were D2 |
@@ -175,8 +175,7 @@ Majority programs + cost gate. One ticket at a time. A4 on every code PR.
 | **P2** | Dense-native field / Object `DenseMake` (A2 leftover) | **Landed** [COI-356](https://linear.app/ardax/issue/COI-356): `DenseFieldLoad`/`DenseFieldStore`/`DenseMakeObject`. Cost gate can keep field loops. | Bench-shaped `GetField` fuse. |
 | **P3** | Boxed multi-payload match | **Landed** [COI-357](https://linear.app/ardax/issue/COI-357): `Unpack(n)` + per-index maps. Cost gate. | Trees opcode. Forcing dense `main`. |
 
-**Do not kick now:** whole-`main` dense format (4); C2b coro for-in
-([COI-353](https://linear.app/ardax/issue/COI-353) rung 4); C1b N>2
+**Do not kick now:** whole-`main` dense format (4); C1b N>2
 ([COI-352](https://linear.app/ardax/issue/COI-352)); B10 unicode
 ([COI-348](https://linear.app/ardax/issue/COI-348)); C3 P5 resume;
 tree-shake / BB reorder (#405).

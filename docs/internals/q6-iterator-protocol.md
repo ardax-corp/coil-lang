@@ -54,8 +54,8 @@ type level). Runtime lowering:
    CALL) when `IntoIter` is not a counted builtin. If `IntoIter` is
    array / homogeneous tuple / numeric Range / dict, `into_iter` then the
    matching Q6 counted latch (no `Iterator` instance required).
-8. **Coro** — existing protocol. Stay fuse-IL until rung 4
-   (`ResumeCoro`).
+8. **Coro** — existing protocol (`ResumeCoro` / `DoneCoro`, skip
+   completion). MIR dense or LIR when cost ≤ fuse (C2b rung 4).
 
 No new opcode. No env toggle. Keep/refuse is checksum + cost gate.
 Counted const `for` / range with an associative int reduce may also
@@ -85,6 +85,8 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
   is the same dense counted i64 (C2b rung 2).
 - `examples/perf/for_in_dict.hy` — dict for-in helper is `DictEntries`
   plus counted Index / `DenseBin` when cost ≤ fuse (C2b rung 3).
+- `examples/perf/for_in_coro.hy` — coro for-in helper is `ResumeCoro` /
+  `DoneCoro` (dense or LIR when cost ≤ fuse; C2b rung 4).
 
 Flagships do not need this island.
 
@@ -102,5 +104,5 @@ Ranked as **B5** in [opt-generalization.md](opt-generalization.md) B0
   (Q8 dense+match or LIR + CALL) and counted `into_iter` when `IntoIter`
   is array / tuple / numeric Range. **C2b rung 3** maps `DictEntries` /
   `MakeDict` so dict for-in (keys/values via entry pairs) may dense or
-  LIR. Coro for-in stays refuse (rung 4).
-- Coro for-in
+  LIR. **C2b rung 4** maps `MakeCoro` / `ResumeCoro` / `DoneCoro` so
+  coro for-in may dense or LIR.
