@@ -330,6 +330,9 @@ pub struct Machine<const S: usize> {
     frames: ArrayVec<Frame, S>,
     /// Pin tables for frames that ran `ArrayPin` or a dense heap index.
     frame_pins: Vec<FramePins>,
+    /// Last dense-index array identity (predicted hit in counted loops).
+    dense_obj_addr: u64,
+    dense_obj: Option<Object>,
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
@@ -430,6 +433,8 @@ impl<const S: usize> Machine<S> {
         Self {
             frames,
             frame_pins: Vec::new(),
+            dense_obj_addr: 0,
+            dense_obj: None,
             heap: crate::memory::HeapSlot::default(),
             stack: Stack::with_capacity(cap),
             output: None,
@@ -644,6 +649,7 @@ impl<const S: usize> Machine<S> {
         self.frames = ArrayVec::default();
         self.frames.consume();
         self.frame_pins.clear();
+        self.clear_dense_obj_cache();
         self.panicked = false;
         self.pending_ffi = None;
         self.pending_io = None;
@@ -872,6 +878,18 @@ impl<const S: usize> Machine<S> {
     }
 
     #[inline]
+    fn clear_dense_obj_cache(&mut self) {
+        self.dense_obj_addr = 0;
+        self.dense_obj = None;
+    }
+
+    #[inline]
+    fn remember_dense_obj(&mut self, addr: u64, obj: Object) {
+        self.dense_obj_addr = addr;
+        self.dense_obj = Some(obj);
+    }
+
+    #[inline]
     fn pinned_object(&self, slot: u32) -> Option<Object> {
         let depth = self.frames.len();
         let pins = self.frame_pins.last()?;
@@ -892,19 +910,23 @@ impl<const S: usize> Machine<S> {
         }
     }
 
-    /// Slab-probe once per array register identity; reuse `frame_pins` after that.
+    /// Reuse a cached `Object` while the array address is unchanged (COI-372).
     ///
-    /// `DenseIndex` / `DenseStoreIndex` pass the array *register* as `slot`.
-    /// A hit requires the same address so a reused register re-probes. Pins are
-    /// GC roots (same extra liveness as `ArrayPin`).
+    /// Predicted last-addr hit first; then `frame_pins[arr]` (ArrayPin / prior
+    /// dense index); then the slab. Pins and the last-addr cell are GC roots.
     #[inline(always)]
     fn resolve_dense_index_object(&mut self, slot: u32, addr: u64) -> Option<Object> {
+        if likely(addr != 0 && addr == self.dense_obj_addr) {
+            return self.dense_obj;
+        }
         if let Some(obj) = self.pinned_object_matching(slot, addr) {
+            self.remember_dense_obj(addr, obj);
             return Some(obj);
         }
         let obj = Self::find_object_by_addr(&self.heap, addr)?;
         if matches!(obj, Object::Array(_) | Object::Tuple(_)) {
             self.pin_current_array(slot, obj);
+            self.remember_dense_obj(addr, obj);
         }
         Some(obj)
     }
@@ -1312,6 +1334,9 @@ impl<const S: usize> Machine<S> {
             for obj in pins.by_slot.iter().flatten() {
                 roots.push(obj.addr());
             }
+        }
+        if let Some(obj) = self.dense_obj {
+            roots.push(obj.addr());
         }
         // `FfiLoad` keeps `ObjLibrary` in `userland_libraries` for the VM
         // lifetime; the Coil handle is only an addr. Root those keys so GC
@@ -1919,6 +1944,11 @@ impl<const S: usize> Machine<S> {
         self.pinned_object(slot).map(|obj| obj.addr())
     }
 
+    #[cfg(test)]
+    pub fn dense_cache_addr_for_test(&self) -> u64 {
+        self.dense_obj_addr
+    }
+
     fn with_coroutine_mut(&self, addr: u64, f: impl FnOnce(&mut ObjCoroutine)) {
         let mut current = self.heap.head_for_lookup();
         while let Some(reference) = current {
@@ -2291,6 +2321,7 @@ impl<const S: usize> Machine<S> {
             frames
         };
         self.frame_pins.clear();
+        self.clear_dense_obj_cache();
         self.stack.seek(0);
         self.resume_stack.clear();
         self.statics.fill(Value::default());
@@ -2329,6 +2360,7 @@ impl<const S: usize> Machine<S> {
             frames
         };
         self.frame_pins.clear();
+        self.clear_dense_obj_cache();
         self.stack.seek(0);
         self.resume_stack.clear();
         self.nested_depth = 0;

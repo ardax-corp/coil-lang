@@ -94,10 +94,11 @@ helpers are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)).
 ### Who consumes it
 
 The four `*Pin*` index/store opcodes, and **`DenseIndex` / `DenseStoreIndex`**
-(COI-372). Dense native does not emit `ArrayPin`; the VM fills the same
-`frame_pins` table on the first index of an array register and reuses that
-`Object` while `stack[arr].addr` still matches. An identity change (register
-reuse) misses and re-probes.
+(COI-372). Dense native does not emit `ArrayPin`. The VM keeps a predicted
+last-addr `Object` plus the same `frame_pins` table keyed by the array
+register: first index of an identity probes the slab; later hits skip it
+while the address matches. An identity change misses and re-probes. The
+last-addr cell is a GC root (cleared on isolate / shared-stack reset).
 
 `Index` / `IndexUnchecked` / `StoreIndex` / `StoreIndexUnchecked` still call
 `Heap::find_object_by_addr`. So do `ArrayLen`, `ArrayPush`, `GetField`,
@@ -114,6 +115,7 @@ There is no generation or pin-token opcode. A pin dies when:
   register already held a different identity);
 - coroutine yield drops tables for unwound frames. Pins are not saved across
   yield; `ArrayPin` / the next `DenseIndex` after resume allocates again.
+- isolate / shared-stack reset clears the last-addr dense cache.
 
 `CALL` / `CallIndirect` / `call_function` do not push a pin table. The caller's
 table (if any) stays keyed by its frame depth and is still a GC root.
