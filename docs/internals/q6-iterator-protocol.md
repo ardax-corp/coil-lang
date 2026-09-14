@@ -35,12 +35,14 @@ type level). Runtime lowering:
 3. **First-class range value** (`let r = 0..n; for x in r`) — unboxed
    `[start, end]` locals (inclusive lives in `Range` vs `RangeInclusive`).
    Same counted latch as (2). Escape (`to_vec`, pass as a value, method
-   `self`) still boxes `{start,end,inclusive}`.
+   `self`) still boxes a slotted `{start,end}` object (`InitTyped`;
+   inclusive lives in the type).
 4. **Parameter / returned numeric Range** (C2) — free-fn params and
    direct `CALL`/`RETURN` use the same `[start, end]` pair. A local bind
    (`let iter = r`) then uses the B5 counted latch. `for x in make(n)`
-   and `let r = make(n)` stay counted. Escaped fn values, inherent
-   methods, and heap-field dicts still `GetField`. Bare `for x in r` on
+   and `let r = make(n)` stay counted. Escaped fn values and method `self`
+   still box. Heap-field / array-held Range (C2b rung 1) unpacks
+   `LoadField` 0/1 and uses the same counted latch. Bare `for x in r` on
    a live-in param pair can DestProp-peel back onto entry slots.
 5. **Tuple** — temp array, then (1).
 6. **Dict / coro / user `Iterator`** — existing protocol. Stay fuse-IL
@@ -63,6 +65,10 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
   is the same dense counted i64 (C2).
 - `examples/perf/for_in_range_ret.hy` — returned `Range<int>` bind is
   the same dense counted i64 (C2).
+- `examples/perf/for_in_range_field.hy` — class-field Range helper is
+  the same dense counted i64 (C2b rung 1).
+- `examples/perf/for_in_range_array.hy` — array-held Range helper is
+  the same dense counted i64 (C2b rung 1).
 
 Flagships do not need this island.
 
@@ -73,7 +79,10 @@ Ranked as **B5** in [opt-generalization.md](opt-generalization.md) B0
 
 - First-class range unpack without I4 `STRING` / heap `GetField` — **landed**
   for unboxed locals (`let r = 0..n`). **C2** lands free-fn param /
-  returned numeric Range as two-slot `[start, end]`. Heap-field dicts,
-  escaped fn values, and method `self` still `GetField`.
+  returned numeric Range as two-slot `[start, end]`. **C2b rung 1** lands
+  heap-field / array-held Range (`LoadField` 0/1, no `GetField` /
+  `STRING` / `MakeDict` in the helper). Escaped fn values and method
+  `self` still box. User `Iterator` / coro / dict for-in stay refuse
+  (rungs 2–4).
 - User `Iterator::next` on MIR (needs Q8 dense+match or LIR + CALL)
 - Coro / dict for-in

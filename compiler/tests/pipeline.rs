@@ -2976,6 +2976,18 @@ fn example_perf_for_in_range_ret_prints_checksum() {
 }
 
 #[test]
+fn example_perf_for_in_range_field_prints_checksum() {
+    let output = run_example("examples/perf/for_in_range_field.hy");
+    assert_eq!(output, "12884115456");
+}
+
+#[test]
+fn example_perf_for_in_range_array_prints_checksum() {
+    let output = run_example("examples/perf/for_in_range_array.hy");
+    assert_eq!(output, "12884115456");
+}
+
+#[test]
 fn for_in_continue_skips_body_and_still_increments() {
     let output = run_example_src(
         r#"

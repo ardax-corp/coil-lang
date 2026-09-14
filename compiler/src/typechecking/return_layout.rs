@@ -30,6 +30,21 @@ pub const TWO_WORD_RANGE_KIND: &str = "__range";
 /// Unboxed first-class `RangeInclusive<T>` local: slots are `[start, end]`.
 pub const TWO_WORD_RANGE_INCLUSIVE_KIND: &str = "__range_inc";
 
+/// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
+pub const RANGE_HEAP_TYPE_ID: u32 = common::RANGE_HEAP_TYPE_ID;
+
+/// Heap `RangeInclusive` `InitTyped` id. Inclusive lives in the type, not a slot.
+pub const RANGE_INCLUSIVE_HEAP_TYPE_ID: u32 = common::RANGE_INCLUSIVE_HEAP_TYPE_ID;
+
+/// Slotted heap object for an escaped numeric range (`start` = 0, `end` = 1).
+pub fn range_heap_type_id(inclusive: bool) -> u32 {
+    if inclusive {
+        RANGE_INCLUSIVE_HEAP_TYPE_ID
+    } else {
+        RANGE_HEAP_TYPE_ID
+    }
+}
+
 pub fn is_range_kind(kind: &str) -> bool {
     kind == TWO_WORD_RANGE_KIND || kind == TWO_WORD_RANGE_INCLUSIVE_KIND
 }
@@ -330,6 +345,9 @@ fn shape() -> Shape {
         assert!(!is_range_kind(TWO_WORD_PRODUCT_KIND));
         assert_eq!(range_kind_inclusive(range_kind(false)), Some(false));
         assert_eq!(range_kind_inclusive(range_kind(true)), Some(true));
+        assert_ne!(range_heap_type_id(false), 0);
+        assert_ne!(range_heap_type_id(true), 0);
+        assert_ne!(range_heap_type_id(false), range_heap_type_id(true));
     }
 
     #[test]

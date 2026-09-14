@@ -91,6 +91,8 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range_value.hy` | dense counted i64 | **B5** first-class range local |
 | `range_sum` | `for_in_range_param.hy` | dense counted i64 | **C2** Range parameter |
 | `range_sum` | `for_in_range_ret.hy` | dense counted i64 | **C2** returned Range |
+| `range_sum` | `for_in_range_field.hy` | dense counted i64 | **C2b** heap-field Range |
+| `range_sum` | `for_in_range_array.hy` | dense counted i64 | **C2b** array-held Range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `hot` | `field_hot.hy` | dense + maps | **D2** `DenseFieldLoad` / `DenseMakeObject`; cost gate; `main` prints |
 | `tak` / `fib` | `tak.hy` / `fib.hy` | dense or fuse-IL | **Q7** + **B2** convoy; keep when cost ≤ fuse |

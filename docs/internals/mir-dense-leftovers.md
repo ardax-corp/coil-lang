@@ -15,7 +15,8 @@ D3 [COI-357](https://linear.app/ardax/issue/COI-357) boxed multi-payload match (
 
 | Ticket | Status | What actually landed | Leftover |
 |-------|--------|----------------------|----------|
-| [COI-351](https://linear.app/ardax/issue/COI-351) C2 | **Done** (#401) | Numeric free-fn Range param / two-slot `CALL`/`RETURN`; counted `for` without `GetField` | User `Iterator` / coro / dict / heap-field Range → [COI-353](https://linear.app/ardax/issue/COI-353) **C2b** (Todo). Not this wave. |
+| [COI-351](https://linear.app/ardax/issue/COI-351) C2 | **Done** (#401) | Numeric free-fn Range param / two-slot `CALL`/`RETURN`; counted `for` without `GetField` | User `Iterator` / coro / dict for-in → [COI-353](https://linear.app/ardax/issue/COI-353) **C2b** rungs 2–4. Heap-field Range is rung 1. |
+| [COI-353](https://linear.app/ardax/issue/COI-353) C2b | **Rung 1 this PR** | Heap-field / array-held numeric Range counted `for` (`LoadField`, no `GetField`) | User `Iterator::next` / dict for-in / coro for-in (rungs 2–4). Keep issue open. |
 | [COI-350](https://linear.app/ardax/issue/COI-350) C3 | **Done** (#402) | Compiler-internal `DraftDeoptMap`, named-let remap, sparse emit locs | P5 resume, incomplete convoy maps, per-PC locals. Debugger, not a hot-path densify. |
 | [COI-344](https://linear.app/ardax/issue/COI-344) B6 | **Done** (#396) | Mapped `ArrayPush` / `DenseArrayPush` (archive **4.11**); CALL+`Make*` / `InitTyped` drafts bind | Unmapped **class** edges were D1; `item_check` match wall was D3 |
 | [COI-335](https://linear.app/ardax/issue/COI-335) A2 | **Done** (#379) | `DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` / `DenseMake` / `DensePush` | Field / Object natives were D2 |
