@@ -3000,6 +3000,12 @@ fn example_perf_for_in_iter_range_prints_checksum() {
 }
 
 #[test]
+fn example_perf_for_in_dict_prints_checksum() {
+    let output = run_example("examples/perf/for_in_dict.hy");
+    assert_eq!(output, "3456");
+}
+
+#[test]
 fn for_in_continue_skips_body_and_still_increments() {
     let output = run_example_src(
         r#"

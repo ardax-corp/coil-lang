@@ -2521,6 +2521,41 @@ fn main() {
     }
 
     #[test]
+    fn c2b_dict_entries_lowers_and_maps() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::byte(Byte::new(Instruction::DictEntries)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("entries");
+        hints.allow_alloc = true;
+        hints.slot_ty.insert(0, MirTy::HeapRef);
+        let f = try_lower_numeric(&ops, &hints).expect("lower DictEntries");
+        f.verify().unwrap();
+        assert!(f.has_gc_edge());
+        assert!(f.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    MirInst::Alloc {
+                        kind: MirAllocKind::DictEntries,
+                        ..
+                    }
+                )
+            })
+        }));
+        let draft = super::stackmap::try_build_draft(&ops, "entries", 1, &[], &[]).expect("maps");
+        assert_eq!(draft.sites.len(), 1);
+        let mut pool = Vec::new();
+        assert!(
+            try_lower_abi_body(&ops, "entries", 1, &mut pool).is_some(),
+            "mapped DictEntries may take LIR"
+        );
+    }
+
+    #[test]
     fn b6_nsieve_binds_grow_maps() {
         let src = r#"
 fn fill(int n) -> int {
@@ -5249,6 +5284,61 @@ fn main() {
         p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "iter range checksum");
+    }
+
+    #[test]
+    fn q6_for_in_dict_sum_takes_dense_or_lir() {
+        let src = r#"
+fn dict_sum() -> int {
+    let acc = 0;
+    let d = { a: 1, b: 2, c: 3, d: 4 };
+    for p in d {
+        acc = acc + p[1];
+    }
+    return acc;
+}
+fn main() {
+    if dict_sum() != 10 {
+        panic "dict sum checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile dict for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "dict_sum")
+            .expect("dict_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let dense = body
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseBin);
+        let mapped = body
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DictEntries);
+        assert!(
+            dense || mapped,
+            "C2b dict for-in should DenseBin or mapped DictEntries; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DictEntries),
+            "dict for-in keeps DictEntries; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::GetField),
+            "dict for-in helper must not GetField; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "dict sum checksum");
     }
 
     #[test]
