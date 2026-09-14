@@ -58,16 +58,29 @@ poop -d 6000 './target/release/coil run /tmp/m.hyc'   # with the env set per pro
 
 Checksums: mandelbrot `625885`, fib `2178309`.
 
+`poop` panics on this host (`perf_event` / stripped binary); wall A/B used `hyperfine`.
+
+## Measured (release, fat LTO, `COIL_AUTO_PAR=0`, same `.hyc`)
+
+Confirm run (~30 min-runs, x86_64):
+
+| Bench | match | table | hotmatch |
+|---|---|---|---|
+| mandelbrot | 27.2 ± 0.4 ms | **24.1 ± 1.3 ms** (~1.13× vs match) | 26.1 ± 0.3 ms (~1.04×) |
+| fib | 67.3 ± 1.7 ms | 66.3 ± 0.8 ms (wash) | 66.1 ± 0.6 ms (wash) |
+
+Checksums identical across the three modes.
+
 ## Go / no-go for G1 (COI-374)
 
-Fill after the release A/B in the PR:
+**Go.** The outlined fn-pointer trampoline is a measurable wall win on
+mandelbrot `.hyc` (~13%) with a fib wash (CALL-heavy, as expected). Compact
+`hotmatch` also beats the giant match, but loses to `table`.
 
-- **Go** if `table` (or `hotmatch`) shows a clear wall win on mandelbrot `.hyc`
-  with matching checksums and no fib regression that swamps the win.
-- **No-go / park G1** if both outlined paths lose or wash vs the giant match.
-  Stable fn-ptr trampolines share one call site with the match jump table; the
-  musttail *prediction* win is not available without nightly `become`. Do not
-  migrate the rest of the ISA onto a losing trampoline.
+G1 should grow the hot table (remaining dense heap ops, fused `BinSlot*`,
+`CALL`/`RETURN`/`TailCall` only after a dedicated A/B). Keep `become` /
+nightly off the production path. Do not treat inner `fused.rs` eval tables
+as the same result; that path was ~2% slower.
 
 ## I-cache / inlining
 
