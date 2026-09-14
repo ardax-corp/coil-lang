@@ -4966,3 +4966,30 @@
         let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
         assert_eq!(s, "closed");
     }
+
+    #[test]
+    fn coi_373_hot_dispatch_modes_agree_on_dense_move() {
+        let ty = common::dense::TY_I64;
+        let packed_const = ((ty as u32 & 0x7F) << 24) | 7;
+        let packed_move = (1u32 << 8) | 0;
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(2),
+            Byte::new(Instruction::DenseConst).with_operand_u32(packed_const),
+            Byte::new(Instruction::DenseMove).with_operand_u32(packed_move),
+            Byte::new(Instruction::LOAD).with_load_store_slot(1),
+            Byte::new(Instruction::HALT),
+        ];
+        let run = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(&code, &[], &[], 0);
+            super::dispatch::override_mode(None);
+            vm.pop().as_int()
+        };
+        let match_v = run(super::dispatch::Mode::Match);
+        let table_v = run(super::dispatch::Mode::Table);
+        let hot_v = run(super::dispatch::Mode::HotMatch);
+        assert_eq!(match_v, 7);
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
