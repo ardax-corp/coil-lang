@@ -8718,7 +8718,7 @@ impl Compiler {
 
     /// Inherent `Range::to_vec` / `RangeInclusive::to_vec` bodies.
     ///
-    /// Unpacks the slotted heap Range (`LoadField` 0/1) and fills a `Vec`
+    /// Unpacks the runtime `{start,end}` object and fills a `Vec`
     /// with the same step as `for` (`+1` / `+1.0`). Float uses a sibling
     /// `__float_to_vec` thunk selected at the call site.
     fn emit_range_method_thunks(&mut self) {
@@ -8775,13 +8775,17 @@ impl Compiler {
             return;
         }
         self.bind_function_entry(fqn);
-        // slot 0 = self (slotted Range); 1 = cur; 2 = end; 3 = out vec
+        // slot 0 = self (range object); 1 = cur; 2 = end; 3 = out vec
+        let start_idx = self.intern_string("start");
         self.bytecode.push_load(0);
-        self.bytecode.push_load_field(0);
+        self.bytecode.push_string(start_idx);
+        self.bytecode.push_get_field();
         self.bytecode.push_store_pop(1);
 
+        let end_idx = self.intern_string("end");
         self.bytecode.push_load(0);
-        self.bytecode.push_load_field(1);
+        self.bytecode.push_string(end_idx);
+        self.bytecode.push_get_field();
         self.bytecode.push_store_pop(2);
 
         self.bytecode.push_make_array(0);

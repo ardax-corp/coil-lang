@@ -1400,7 +1400,10 @@ impl ObjInstance {
     pub fn get(&self, key: RefString) -> Option<Member> {
         match &self.storage {
             InstanceStorage::Table(table) => table.get(key),
-            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => None,
+            InstanceStorage::Inline { .. } | InstanceStorage::Spill(_) => {
+                let slot = common::range_heap_field_slot(self.type_id, &key.as_ref().data)?;
+                self.slot(slot)
+            }
         }
     }
 

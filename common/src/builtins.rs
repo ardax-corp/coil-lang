@@ -170,6 +170,24 @@ pub fn is_builtin_vec_type(name: &str) -> bool {
     name == BUILTIN_VEC_TYPE
 }
 
+/// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
+pub const RANGE_HEAP_TYPE_ID: u32 = 0xFFFE;
+
+/// Heap `RangeInclusive` `InitTyped` id. Inclusive lives in the type, not a slot.
+pub const RANGE_INCLUSIVE_HEAP_TYPE_ID: u32 = 0xFFFD;
+
+/// `Some(slot)` when `type_id` is a slotted numeric Range and `name` is `start`/`end`.
+pub fn range_heap_field_slot(type_id: u32, name: &str) -> Option<usize> {
+    if type_id != RANGE_HEAP_TYPE_ID && type_id != RANGE_INCLUSIVE_HEAP_TYPE_ID {
+        return None;
+    }
+    match name {
+        "start" => Some(0),
+        "end" => Some(1),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -183,5 +201,16 @@ mod tests {
             !prod.contains("TimeError") && !prod.contains("BUILTIN_TIME_ERROR"),
             "compiler TimeError enum must stay deleted"
         );
+    }
+
+    #[test]
+    fn range_heap_slots_are_start_end() {
+        assert_eq!(range_heap_field_slot(RANGE_HEAP_TYPE_ID, "start"), Some(0));
+        assert_eq!(
+            range_heap_field_slot(RANGE_INCLUSIVE_HEAP_TYPE_ID, "end"),
+            Some(1)
+        );
+        assert_eq!(range_heap_field_slot(1, "start"), None);
+        assert_eq!(range_heap_field_slot(RANGE_HEAP_TYPE_ID, "inclusive"), None);
     }
 }

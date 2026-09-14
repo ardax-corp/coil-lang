@@ -31,10 +31,10 @@ pub const TWO_WORD_RANGE_KIND: &str = "__range";
 pub const TWO_WORD_RANGE_INCLUSIVE_KIND: &str = "__range_inc";
 
 /// Heap `Range` `InitTyped` id. High so user class ids (from 1) stay put.
-pub const RANGE_HEAP_TYPE_ID: u32 = 0xFFFE;
+pub const RANGE_HEAP_TYPE_ID: u32 = common::RANGE_HEAP_TYPE_ID;
 
 /// Heap `RangeInclusive` `InitTyped` id. Inclusive lives in the type, not a slot.
-pub const RANGE_INCLUSIVE_HEAP_TYPE_ID: u32 = 0xFFFD;
+pub const RANGE_INCLUSIVE_HEAP_TYPE_ID: u32 = common::RANGE_INCLUSIVE_HEAP_TYPE_ID;
 
 /// Slotted heap object for an escaped numeric range (`start` = 0, `end` = 1).
 pub fn range_heap_type_id(inclusive: bool) -> u32 {
