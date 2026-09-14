@@ -1,0 +1,38 @@
+;; symbols
+    56  nsieve
+
+=== bytecode ===
+;; fn nsieve  bc[56..88)
+00056  Seek             slot=22
+00057  DenseConst       op=0x1040001
+00058  DensePush        op=0x100
+00059  CALL             arity=1 target=3 (Vec::with_capacity)
+00060  STORE            slot=1
+00061  DenseConst       op=0x1020000
+00062  DenseMove        op=0x602
+00063  BinSlotSlotJmpf  op=GT a=0 pool_idx=7
+00064  DenseArrayPush   op=0x50104
+00065  DenseBin         op=0x60604
+00066  JMP              target=63
+00067  DenseConst       op=0x1070000
+00068  DenseConst       op=0x1080002
+00069  DenseConst       op=0x1090000
+00070  DenseConst       op=0x10c0001
+00071  DenseMove        op=0x1208
+00072  DenseMove        op=0x1407
+00073  BinSlotSlotJmpf  op=GT a=0 pool_idx=8
+00074  DenseIndex       op=0x10b0112
+00075  BinSlotImmJmpf   op=EQ slot=11 pool_idx=9
+00076  DenseBin         op=0xd140c
+00077  DenseBin         op=0xe1212
+00078  DenseMove        op=0x110e
+00079  BinSlotSlotJmpf  op=GT a=0 pool_idx=10
+00080  DenseMove        op=0x1009
+00081  DenseStoreIndex  op=0x1100111
+00082  DenseBin         op=0x111211
+00083  JMP              target=79
+00084  DenseMove        op=0x140d
+00085  DenseBin         op=0x12120c
+00086  JMP              target=73
+00087  LoadReturnSlot   slot=20
+

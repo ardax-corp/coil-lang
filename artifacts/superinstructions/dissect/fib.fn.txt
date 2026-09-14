@@ -1,0 +1,13 @@
+;; symbols
+    52  fib
+
+=== bytecode ===
+;; fn fib  bc[52..59)
+00052  BinSlotImmJmpt   op=LEQ slot=0 pool_idx=7
+00053  BinSlotImm       op=SUB slot=0 imm=1
+00054  CALL             arity=1 target=52 (fib)
+00055  BinSlotImm       op=SUB slot=0 imm=2
+00056  CALL             arity=1 target=52 (fib)
+00057  BinReturn        op=ADD
+00058  ConstReturnImm   imm=1
+

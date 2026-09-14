@@ -1,0 +1,130 @@
+;; symbols
+     3  Vec::with_capacity
+     7  io::sync::write_all
+    88  main
+    56  nsieve
+
+=== bytecode ===
+;; fn <prologue>  bc[0..3)
+00000  CALL             arity=0 target=0
+00001  JMP              target=88 (main)
+00002  HALT
+;; fn Vec::with_capacity  bc[3..7)
+00003  CONST            imm=111
+00004  LOAD             slot=0
+00005  HostInvoke       arity=1
+00006  RETURN
+
+;; fn io::sync::write_all  bc[7..56)
+00007  CONST            imm=0
+00008  STORE            slot=2
+00009  LOAD             slot=1
+00010  ArrayLen
+00011  STORE            slot=3
+00012  BinSlotSlotJmpf  op=LE a=2 pool_idx=2
+00013  Seek             slot=4
+00014  LOAD             slot=2
+00015  STORE            slot=6
+00016  CONST            imm=93
+00017  LOAD             s0=0,s1=1,s2=2
+00018  HostInvoke       arity=3
+00019  JumpIfMatch      tag=0 pool_idx=3
+00020  JumpIfMatch      tag=1 pool_idx=4
+00021  LOAD             slot=7
+00022  CONST            imm=1
+00023  RETURN           op=0x2
+00024  POP
+00025  LOAD             slot=0
+00026  STORE            slot=8
+00027  CONST            imm=8
+00028  LOAD             slot=0
+00029  HostInvoke       arity=1
+00030  DUPLICATE
+00031  LogNot
+00032  JMPT             target=35
+00033  CONST            imm=1
+00034  RETURN           op=0x2
+00035  POP
+00036  JMP              target=51
+00037  BinSlotImmJmpf   op=EQ slot=7 pool_idx=5
+00038  LOAD             slot=0
+00039  STORE            slot=8
+00040  CONST            imm=8
+00041  LOAD             slot=0
+00042  HostInvoke       arity=1
+00043  DUPLICATE
+00044  LogNot
+00045  JMPT             target=48
+00046  CONST            imm=1
+00047  RETURN           op=0x2
+00048  POP
+00049  BinSlotImmJmpf   op=NEQ slot=7 pool_idx=6
+00050  BinSlotSlotStore op=ADD a=2 b=7 dest=2
+00051  POP
+00052  JMP              target=12
+00053  CONST            imm=0
+00054  DUPLICATE
+00055  RETURN           op=0x2
+
+;; fn nsieve  bc[56..88)
+00056  Seek             slot=22
+00057  DenseConst       op=0x1040001
+00058  DensePush        op=0x100
+00059  CALL             arity=1 target=3 (Vec::with_capacity)
+00060  STORE            slot=1
+00061  DenseConst       op=0x1020000
+00062  DenseMove        op=0x602
+00063  BinSlotSlotJmpf  op=GT a=0 pool_idx=7
+00064  DenseArrayPush   op=0x50104
+00065  DenseBin         op=0x60604
+00066  JMP              target=63
+00067  DenseConst       op=0x1070000
+00068  DenseConst       op=0x1080002
+00069  DenseConst       op=0x1090000
+00070  DenseConst       op=0x10c0001
+00071  DenseMove        op=0x1208
+00072  DenseMove        op=0x1407
+00073  BinSlotSlotJmpf  op=GT a=0 pool_idx=8
+00074  DenseIndex       op=0x10b0112
+00075  BinSlotImmJmpf   op=EQ slot=11 pool_idx=9
+00076  DenseBin         op=0xd140c
+00077  DenseBin         op=0xe1212
+00078  DenseMove        op=0x110e
+00079  BinSlotSlotJmpf  op=GT a=0 pool_idx=10
+00080  DenseMove        op=0x1009
+00081  DenseStoreIndex  op=0x1100111
+00082  DenseBin         op=0x111211
+00083  JMP              target=79
+00084  DenseMove        op=0x140d
+00085  DenseBin         op=0x12120c
+00086  JMP              target=73
+00087  LoadReturnSlot   slot=20
+
+;; fn main  bc[88..114)
+00088  CONST            imm=1
+00089  HostInvoke       arity=0
+00090  STORE            slot=0
+00091  CONST            imm=16384
+00092  CALL             arity=1 target=56 (nsieve)
+00093  STORE            slot=1
+00094  STRING           op=0x4
+00095  LOAD             slot=1
+00096  FORMAT           op=0x1
+00097  STORE            slot=2
+00098  CONST            imm=11
+00099  LOAD             slot=2
+00100  HostInvoke       arity=1
+00101  STORE            slot=3
+00102  LOAD             s0=0,s1=3
+00103  CALL             arity=2 target=7 (io::sync::write_all)
+00104  STORE            s0=6,s1=9
+00105  BinSlotImm       op=EQ slot=6 imm=0
+00106  JMPF             target=110
+00107  LOAD             slot=9
+00108  MakeEnum         tag=0 arity=1
+00109  JMP              target=112
+00110  LOAD             slot=9
+00111  MakeEnum         tag=1 arity=1
+00112  POP
+00113  ConstReturnImm   imm=0
+

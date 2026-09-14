@@ -1,0 +1,18 @@
+optimization stats:
+  iterations: 1
+  ops eliminated: 7
+  ops added: 10
+  functions inlined: 0
+  loops unrolled: 0
+  loads eliminated: 2
+  stores eliminated: 2
+  branches optimized: 0
+  blocks reordered: 0
+  passes:
+    canon: 1 change(s), Δops 0
+    copy_prop: 1 change(s), Δops 0
+    dead_block: 1 change(s), Δops -1
+    licm: 1 change(s), Δops 4
+    loop_bounds: 1 change(s), Δops 6
+    slot_promote: 1 change(s), Δops -4
+    stack_dce: 1 change(s), Δops -2

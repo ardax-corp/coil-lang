@@ -1,0 +1,30 @@
+;; symbols
+    56  fill
+
+=== bytecode ===
+;; fn fill  bc[56..80)
+00056  Seek             slot=22
+00057  DenseConst       op=0x1020000
+00058  DenseArrayLen    op=0x400
+00059  DenseConst       op=0x10c0001
+00060  DenseConst       op=0x1060000
+00061  DenseConst       op=0x113fff8
+00062  DenseConst       op=0x1140008
+00063  DenseBin         op=0x5120413
+00064  BinSlotSlotJmpf  op=LE a=6 pool_idx=9
+00065  VBin             op=0x22000000
+00066  VBin             op=0x20010600
+00067  VBin             op=0x20100
+00068  VStore           op=0x1020006
+00069  DenseBin         op=0x60614
+00070  JMP              target=64
+00071  BinSlotSlotJmpf  op=LE a=6 pool_idx=10
+00072  DenseMove        op=0xb06
+00073  DenseStoreIndex  op=0x10b0006
+00074  CONST            imm=1
+00075  STORE            slot=21
+00076  DenseBin         op=0x60615
+00077  JMP              target=71
+00078  DenseArrayLen    op=0xf00
+00079  LoadReturnSlot   slot=15
+

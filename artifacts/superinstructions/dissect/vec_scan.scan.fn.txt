@@ -1,0 +1,29 @@
+;; symbols
+    80  scan
+
+=== bytecode ===
+;; fn scan  bc[80..103)
+00080  Seek             slot=23
+00081  DenseConst       op=0x1010000
+00082  DenseConst       op=0x10d0001
+00083  DenseArrayLen    op=0x400
+00084  DenseConst       op=0x1050000
+00085  DenseMove        op=0x1101
+00086  DenseConst       op=0x114fff8
+00087  DenseConst       op=0x1150008
+00088  DenseBin         op=0x5130414
+00089  BinSlotSlotJmpf  op=LE a=5 pool_idx=11
+00090  VLoad            op=0x1000005
+00091  VReduce          op=0x1110000
+00092  DenseBin         op=0x50515
+00093  JMP              target=89
+00094  BinSlotSlotJmpf  op=LE a=5 pool_idx=12
+00095  DenseIndex       op=0x10b0005
+00096  DenseBin         op=0xc110b
+00097  DenseMove        op=0x110c
+00098  CONST            imm=1
+00099  STORE            slot=22
+00100  DenseBin         op=0x50516
+00101  JMP              target=94
+00102  LoadReturnSlot   slot=17
+
