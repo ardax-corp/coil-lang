@@ -679,6 +679,41 @@ pub(super) fn emit_inst(
                     .with_dense_move(regs[dest.index()], regs[array.index()]),
             ));
         }
+        MirInst::ResumeCoro {
+            dest,
+            handle,
+            send,
+        } => {
+            if let Some(s) = send {
+                out.push(IlOp::Load {
+                    slot: u32::from(regs[s.index()]),
+                    loc,
+                });
+            }
+            out.push(IlOp::Load {
+                slot: u32::from(regs[handle.index()]),
+                loc,
+            });
+            let has_send = u32::from(send.is_some());
+            out.push(byte(
+                Byte::new(Instruction::ResumeCoro).with_operand_u32(has_send),
+            ));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
+        MirInst::DoneCoro { dest, handle } => {
+            out.push(IlOp::Load {
+                slot: u32::from(regs[handle.index()]),
+                loc,
+            });
+            out.push(byte(Byte::new(Instruction::DoneCoro)));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::ArrayPush {
             dest,
             array,
@@ -1830,7 +1865,7 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             Ok(Some(packed as u8))
         }
         MirAllocKind::Object { .. } => Ok(None),
-        MirAllocKind::Dict | MirAllocKind::DictEntries => Ok(None),
+        MirAllocKind::Dict | MirAllocKind::DictEntries | MirAllocKind::Coro { .. } => Ok(None),
     }
 }
 
@@ -1920,6 +1955,13 @@ pub(super) fn il_for_alloc(
             ))
         }
         MirAllocKind::DictEntries => Ok(IlOp::byte(Byte::new(Instruction::DictEntries))),
+        MirAllocKind::Coro { target } => Ok(IlOp::Entry {
+            kind: crate::il::EntryKind::MakeCoro,
+            arity,
+            target,
+            loc,
+            ret_words: 1,
+        }),
     }
 }
 

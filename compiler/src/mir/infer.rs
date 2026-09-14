@@ -442,6 +442,17 @@ fn infer_walk(
                 Instruction::DictEntries if mode.allows_alloc(allow_alloc) => {
                     apply_dict_entries(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
+                Instruction::ResumeCoro => {
+                    apply_resume_coro(
+                        &mut stack,
+                        &mut slot_ty,
+                        &mut pool_ty,
+                        byte.operand_u32() & 1 != 0,
+                    )?;
+                }
+                Instruction::DoneCoro => {
+                    apply_done_coro(&mut stack, &mut slot_ty, &mut pool_ty)?;
+                }
                 Instruction::MakeDict if mode.allows_alloc(allow_alloc) => {
                     push_map_alloc(&mut stack, (byte.operand_u32() as usize).saturating_mul(2))?;
                 }
@@ -574,6 +585,13 @@ fn infer_walk(
                     calls,
                     reuse,
                 )?;
+            }
+            IlOp::Entry {
+                kind: EntryKind::MakeCoro,
+                arity,
+                ..
+            } if mode.allows_alloc(allow_alloc) => {
+                apply_make_coro(&mut stack, *arity)?;
             }
             // Convoy fused returns (Q7): same stack/types as Load/Const/Bin + RETURN.
             IlOp::LoadReturnSlot { slot, .. } => {
@@ -793,6 +811,25 @@ fn infer_walk(
                     imm: None,
                 });
             }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ResumeCoro => {
+                if byte.operand_u32() & 1 != 0 {
+                    let _ = stack.pop();
+                }
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::I64),
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DoneCoro => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::Bool),
+                    imm: None,
+                });
+            }
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::MakeDict => {
                 let n = (byte.operand_u32() as usize).saturating_mul(2);
                 for _ in 0..n {
@@ -855,7 +892,7 @@ fn infer_walk(
                 let _ = stack.pop();
             }
             IlOp::Entry {
-                kind: EntryKind::Call | EntryKind::TailCall,
+                kind: EntryKind::Call | EntryKind::TailCall | EntryKind::MakeCoro,
                 arity,
                 ret_words,
                 ..
@@ -1180,6 +1217,67 @@ fn apply_array_push(
         if ty.is_word_lane() {
             paint(slot_ty, pool_ty, val, ty)?;
         }
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::HeapRef),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_resume_coro(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+    has_send: bool,
+) -> Result<(), LowerError> {
+    let handle = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("ResumeCoro stack".into()))?;
+    paint(slot_ty, pool_ty, handle, MirTy::HeapRef)?;
+    if has_send {
+        let send = stack
+            .pop()
+            .ok_or_else(|| LowerError::Refused("ResumeCoro send stack".into()))?;
+        if let Some(ty) = send.ty {
+            if ty.is_word_lane() {
+                paint(slot_ty, pool_ty, send, ty)?;
+            }
+        }
+    }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::I64),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_done_coro(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+) -> Result<(), LowerError> {
+    let handle = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("DoneCoro stack".into()))?;
+    paint(slot_ty, pool_ty, handle, MirTy::HeapRef)?;
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::Bool),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_make_coro(stack: &mut Vec<Cell>, arity: u32) -> Result<(), LowerError> {
+    let n = arity as usize;
+    if stack.len() < n {
+        return Err(LowerError::Refused("MakeCoro stack".into()));
+    }
+    for _ in 0..n {
+        let _ = stack.pop();
     }
     stack.push(Cell {
         origin: Origin::Tmp,

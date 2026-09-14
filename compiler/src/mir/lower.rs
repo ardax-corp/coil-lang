@@ -844,6 +844,14 @@ fn lower_op(
             }
             Ok(())
         }
+        IlOp::Entry {
+            kind: EntryKind::MakeCoro,
+            arity,
+            target,
+            ..
+        } if hints.allow_alloc => {
+            lower_alloc(b, tos, MirAllocKind::Coro { target: *target }, *arity)
+        }
         IlOp::Index { .. } if hints.allow_index => lower_index(b, tos, next, hints, false),
         IlOp::IndexUnchecked { .. } if hints.allow_index => {
             lower_index(b, tos, next, hints, true)
@@ -1020,6 +1028,30 @@ fn lower_byte(
         }
         Instruction::DictEntries if hints.allow_alloc => {
             lower_alloc(b, tos, MirAllocKind::DictEntries, 1)
+        }
+        Instruction::ResumeCoro => {
+            let has_send = byte.operand_u32() & 1 != 0;
+            let handle = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("ResumeCoro stack".into()))?;
+            let send = if has_send {
+                Some(
+                    tos.pop()
+                        .ok_or_else(|| LowerError::Refused("ResumeCoro send stack".into()))?,
+                )
+            } else {
+                None
+            };
+            let dest_ty = use_result_ty(hints, next, MirTy::I64);
+            tos.push(b.ins_resume_coro(handle, send, dest_ty)?);
+            Ok(())
+        }
+        Instruction::DoneCoro => {
+            let handle = tos
+                .pop()
+                .ok_or_else(|| LowerError::Refused("DoneCoro stack".into()))?;
+            tos.push(b.ins_done_coro(handle)?);
+            Ok(())
         }
         Instruction::MakeDict if hints.allow_alloc => {
             let fields = byte.operand_u32() as usize;

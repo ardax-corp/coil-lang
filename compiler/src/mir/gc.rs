@@ -85,6 +85,10 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
         {
             Some("heap/dict")
         }
+        IlOp::Entry {
+            kind: crate::il::EntryKind::MakeCoro,
+            ..
+        } => Some("heap/coro"),
         _ => None,
     }
 }
@@ -406,6 +410,16 @@ mod tests {
                 Byte::new(Instruction::MakeDict).with_operand_u32(1)
             )),
             Some("heap/dict")
+        );
+        assert_eq!(
+            refuse_reason(&IlOp::Entry {
+                kind: crate::il::EntryKind::MakeCoro,
+                arity: 0,
+                target: crate::il::Label(0),
+                loc,
+                ret_words: 1,
+            }),
+            Some("heap/coro")
         );
     }
 

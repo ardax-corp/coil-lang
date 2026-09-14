@@ -2556,6 +2556,76 @@ fn main() {
     }
 
     #[test]
+    fn c2b_resume_coro_lowers() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::byte(Byte::new(Instruction::ResumeCoro)),
+            IlOp::byte(Byte::new(Instruction::DoneCoro)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("resume");
+        hints.slot_ty.insert(0, MirTy::HeapRef);
+        let f = try_lower_numeric(&ops, &hints).expect("lower ResumeCoro");
+        f.verify().unwrap();
+        assert!(f.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::ResumeCoro { .. }))
+        }));
+        assert!(f.blocks.iter().any(|b| {
+            b.insts
+                .iter()
+                .any(|i| matches!(i, MirInst::DoneCoro { .. }))
+        }));
+        let mut pool = Vec::new();
+        assert!(
+            try_lower_abi_body(&ops, "resume", 1, &mut pool).is_some(),
+            "ResumeCoro may take LIR"
+        );
+    }
+
+    #[test]
+    fn c2b_make_coro_lowers_and_maps() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(0)),
+            IlOp::Entry {
+                kind: crate::il::EntryKind::MakeCoro,
+                arity: 0,
+                target: Label(1),
+                loc,
+                ret_words: 1,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut hints = LowerHints::new("makecoro");
+        hints.allow_alloc = true;
+        let f = try_lower_numeric(&ops, &hints).expect("lower MakeCoro");
+        f.verify().unwrap();
+        assert!(f.has_gc_edge());
+        assert!(f.blocks.iter().any(|b| {
+            b.insts.iter().any(|i| {
+                matches!(
+                    i,
+                    MirInst::Alloc {
+                        kind: MirAllocKind::Coro { .. },
+                        ..
+                    }
+                )
+            })
+        }));
+        let draft = super::stackmap::try_build_draft(&ops, "makecoro", 1, &[], &[]).expect("maps");
+        assert_eq!(draft.sites.len(), 1);
+        let mut pool = Vec::new();
+        assert!(
+            try_lower_abi_body(&ops, "makecoro", 1, &mut pool).is_some(),
+            "mapped MakeCoro may take LIR"
+        );
+    }
+
+    #[test]
     fn b6_nsieve_binds_grow_maps() {
         let src = r#"
 fn fill(int n) -> int {
@@ -5339,6 +5409,71 @@ fn main() {
         p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
         assert!(!vm.panicked(), "dict sum checksum");
+    }
+
+    #[test]
+    fn q6_for_in_coro_sum_takes_dense_or_lir() {
+        let src = r#"
+async fn gen() {
+    let i = 0;
+    while i < 5 {
+        yield i;
+        i = i + 1;
+    }
+}
+fn coro_sum() -> int {
+    let acc = 0;
+    for x in gen() {
+        acc = acc + x;
+    }
+    return acc;
+}
+fn main() {
+    if coro_sum() != 10 {
+        panic "coro sum checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile coro for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "coro_sum")
+            .expect("coro_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let dense = body
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseBin);
+        let mapped = body
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::ResumeCoro);
+        assert!(
+            dense || mapped,
+            "C2b coro for-in should DenseBin or mapped ResumeCoro; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::ResumeCoro),
+            "coro for-in keeps ResumeCoro; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DoneCoro),
+            "coro for-in keeps DoneCoro; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::GetField),
+            "coro for-in helper must not GetField; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "coro sum checksum");
     }
 
     #[test]
