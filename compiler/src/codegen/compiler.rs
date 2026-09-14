@@ -8981,6 +8981,40 @@ impl Compiler {
         crate::typechecking::return_layout::two_word_return_enum(&self.checker, &ty)
     }
 
+    /// Trait methods live under `Class__Type__method` FQNs that `env` lookup
+    /// misses. Pin two-slot `RETURN` from the instance assoc types so for-in
+    /// `into_iter` / `next` keep Range / `Option<int>` pairs (C2b rung 2).
+    fn pin_trait_method_pair_return(
+        &self,
+        class: &str,
+        method: &str,
+        arg_tys: &[Ty],
+        fqn: &str,
+    ) {
+        let Some(instance) = self
+            .checker
+            .generics()
+            .find_instance_relaxed(class, arg_tys)
+        else {
+            return;
+        };
+        let ty = match (class, method) {
+            ("Iterator", "next") => instance
+                .assoc_tys
+                .get("Item")
+                .map(|v| crate::typechecking::ty::option_ty(v.ty.clone())),
+            ("IntoIterator", "into_iter") => {
+                instance.assoc_tys.get("IntoIter").map(|v| v.ty.clone())
+            }
+            _ => None,
+        };
+        let Some(ty) = ty else {
+            return;
+        };
+        let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &ty);
+        self.pin_two_word_return_kind(fqn, kind);
+    }
+
     /// Two-slot `RETURN` (operand `2`): pops the callee frame's `[payload,
     /// tag]` and re-pushes both for the caller. Old archives never set this
     /// operand, so they stay one word.
@@ -9781,6 +9815,13 @@ impl Compiler {
             };
             result.push(concrete);
             current = ret;
+        }
+        if class == "Iterator" || class == "IntoIterator" {
+            for slot in &mut result {
+                if slot.as_ref().and_then(Self::ty_to_value_tag) == Some(ValueTag::Instance) {
+                    *slot = None;
+                }
+            }
         }
         result
     }
@@ -10921,6 +10962,13 @@ impl Compiler {
             .tag_for(common::BUILTIN_OPTION_ENUM, "None")
             .unwrap_or(0);
         let niche_next = item_ty.is_some_and(|ty| Self::niche_heap_only_ty(ty, &self.checker));
+        // Trait FQNs miss `env` lookup; pin `Option<Item>` so CALL is two-slot
+        // even if a prior one-word cache landed first.
+        if let Some(item) = item_ty {
+            let opt = crate::typechecking::ty::option_ty(item.clone());
+            let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &opt);
+            self.pin_two_word_return_kind(next_fqn, kind);
+        }
         let two_slot_next = self.two_word_return_kind(next_fqn).is_some();
 
         let it_slot = self.alloc_temp_slot();
@@ -10949,16 +10997,15 @@ impl Compiler {
                 self.bytecode.il_mut(),
             );
         } else if two_slot_next {
-            // Q8: `[payload, tag]` — None when tag == none_tag.
-            self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-            self.bytecode.push_const(none_tag as i32);
-            self.bytecode.push(Byte::new(Instruction::EQ));
-            bb.emit_jump_to(
+            // Q8/B3: CALL leaves `[payload, tag]`. JMPF on the tag (None = 0)
+            // — do not emit `EQ 0; JMPT` (instcombine inverts that to
+            // jump-if-nonzero and exits on the first Some).
+            bb.emit_jump_to_hinted(
                 exit_label,
-                BbJumpKind::JumpIfTrue,
+                BbJumpKind::JumpIfFalse,
+                FuseHint::nofuse_value_under_jmp(),
                 self.bytecode.il_mut(),
             );
-            self.bytecode.push_pop();
         } else {
             bb.emit_jump_to(
                 exit_label,
@@ -10987,10 +11034,7 @@ impl Compiler {
 
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
-        if niche_next {
-            self.bytecode.push_pop();
-        } else if two_slot_next {
-            self.bytecode.push_pop();
+        if niche_next || two_slot_next {
             self.bytecode.push_pop();
         }
     }
@@ -14095,6 +14139,7 @@ impl Compiler {
                             let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                             let unbox_tys =
                                 self.instance_method_unbox_tys(class, method_name, &arg_tys);
+                            self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                             self.compile_function_output_with_name(method, fqn, &unbox_tys, 1);
                         }
                         Expression::Method(_, body) => {
@@ -14108,6 +14153,7 @@ impl Compiler {
                                 let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                                 let unbox_tys =
                                     self.instance_method_unbox_tys(class, method_name, &arg_tys);
+                                self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
                                 self.compile_function_output_with_name(body, fqn, &unbox_tys, 1);
                             } else {
                                 self.consume_function_signature_output(body);
