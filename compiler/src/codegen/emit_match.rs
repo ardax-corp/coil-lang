@@ -7,7 +7,7 @@ impl Compiler {
     pub(super) fn compile_match_expr<'compiler>(
         &mut self,
         scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
+        arms: &[&MatchArm<'compiler>],
     ) -> CodeBuf {
         if self.try_compile_scalar_enum_match(scrutinee, arms) {
             return CodeBuf::new();
@@ -54,7 +54,7 @@ impl Compiler {
     fn try_compile_scalar_enum_match<'compiler>(
         &mut self,
         scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
+        arms: &[&MatchArm<'compiler>],
     ) -> bool {
         if arms.is_empty() {
             return false;
@@ -168,7 +168,7 @@ impl Compiler {
     fn try_compile_frame_local_match<'compiler>(
         &mut self,
         scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
+        arms: &[&MatchArm<'compiler>],
     ) -> bool {
         if arms.is_empty() {
             return false;
@@ -340,7 +340,7 @@ impl Compiler {
     fn try_compile_niche_option_match<'compiler>(
         &mut self,
         scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
+        arms: &[&MatchArm<'compiler>],
     ) -> bool {
         if arms.len() != 2 || !self.expr_is_niche_option(scrutinee) {
             return false;
@@ -450,7 +450,7 @@ impl Compiler {
     fn try_compile_unit_result_niche_match<'compiler>(
         &mut self,
         scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
+        arms: &[&MatchArm<'compiler>],
     ) -> bool {
         if arms.len() != 2 || !self.expr_is_unit_result_niche(scrutinee) {
             return false;
@@ -555,7 +555,7 @@ impl Compiler {
     fn try_compile_niche_result_match<'compiler>(
         &mut self,
         scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
+        arms: &[&MatchArm<'compiler>],
     ) -> bool {
         if arms.len() != 2 || !self.expr_is_niche_result(scrutinee) {
             return false;
@@ -680,7 +680,7 @@ impl Compiler {
     pub(super) fn compile_match_expr_boxed<'compiler>(
         &mut self,
         scrutinee: &Output<'compiler>,
-        arms: &[MatchArm<'compiler>],
+        arms: &[&MatchArm<'compiler>],
     ) -> CodeBuf {
         let mut bytecode = CodeBuf::new();
         if arms.is_empty() {
