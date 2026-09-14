@@ -231,6 +231,18 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
             write!(f, "{dest} = {name} {array}, {index}, {value}")
         }
         MirInst::ArrayLen { dest, array } => write!(f, "{dest} = arraylen {array}"),
+        MirInst::ResumeCoro {
+            dest,
+            handle,
+            send,
+        } => {
+            write!(f, "{dest} = resumecoro {handle}")?;
+            if let Some(s) = send {
+                write!(f, ", {s}")?;
+            }
+            Ok(())
+        }
+        MirInst::DoneCoro { dest, handle } => write!(f, "{dest} = donecoro {handle}"),
         MirInst::ArrayPush {
             dest,
             array,
@@ -243,6 +255,7 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                     write!(f, " {type_id}, {nfields}")?;
                 }
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
+                MirAllocKind::Coro { target } => write!(f, " {}", target.0)?,
                 MirAllocKind::Array
                 | MirAllocKind::Tuple
                 | MirAllocKind::Dict
@@ -608,6 +621,25 @@ impl<'a> Parser<'a> {
             ensure_ty(types, dest, MirTy::I64);
             return Ok(MirInst::ArrayLen { dest, array });
         }
+        if op == "resumecoro" {
+            let handle = self.value()?;
+            let send = if self.eat(',') {
+                Some(self.value()?)
+            } else {
+                None
+            };
+            ensure_ty(types, dest, MirTy::I64);
+            return Ok(MirInst::ResumeCoro {
+                dest,
+                handle,
+                send,
+            });
+        }
+        if op == "donecoro" {
+            let handle = self.value()?;
+            ensure_ty(types, dest, MirTy::Bool);
+            return Ok(MirInst::DoneCoro { dest, handle });
+        }
         if op == "arraypush" {
             let array = self.value()?;
             self.expect(',')?;
@@ -752,9 +784,13 @@ impl<'a> Parser<'a> {
                 },
                 "dict" => MirAllocKind::Dict,
                 "dictentries" => MirAllocKind::DictEntries,
+                "coro" => MirAllocKind::Coro {
+                    target: crate::il::Label(self.uint()? as u32),
+                },
                 _ => return Err(ParseError(format!("unknown alloc {kind_s}"))),
             };
             let mut elems = Vec::new();
+            let _ = self.eat(',');
             if self.peek('v') {
                 elems.push(self.value()?);
                 while self.eat(',') {

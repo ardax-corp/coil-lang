@@ -649,6 +649,49 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// `ResumeCoro` (C2b). Dest type is the yield word.
+    pub fn ins_resume_coro(
+        &mut self,
+        handle: ValueId,
+        send: Option<ValueId>,
+        dest_ty: MirTy,
+    ) -> Result<ValueId, MirError> {
+        let ht = self.resolve_ty(handle);
+        if ht != MirTy::HeapRef && ht != MirTy::Value {
+            return Err(MirError::msg(format!("ResumeCoro handle is {ht}")));
+        }
+        if let Some(s) = send {
+            let st = self.resolve_ty(s);
+            if !st.is_word_lane() && st != MirTy::Value {
+                return Err(MirError::msg(format!("ResumeCoro send is {st}")));
+            }
+        }
+        if !dest_ty.is_word_lane() && dest_ty != MirTy::Value {
+            return Err(MirError::msg(format!("ResumeCoro dest is {dest_ty}")));
+        }
+        let dest = self.alloc(dest_ty);
+        self.push(MirInst::ResumeCoro {
+            dest,
+            handle: self.resolve(handle),
+            send: send.map(|s| self.resolve(s)),
+        })?;
+        Ok(dest)
+    }
+
+    /// `DoneCoro` (C2b). Dest is `bool`.
+    pub fn ins_done_coro(&mut self, handle: ValueId) -> Result<ValueId, MirError> {
+        let ht = self.resolve_ty(handle);
+        if ht != MirTy::HeapRef && ht != MirTy::Value {
+            return Err(MirError::msg(format!("DoneCoro handle is {ht}")));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::DoneCoro {
+            dest,
+            handle: self.resolve(handle),
+        })?;
+        Ok(dest)
+    }
+
     /// In-place grow (B6). Dest is `heapref`. Pair with [`Self::ins_gc_barrier`].
     pub fn ins_array_push(
         &mut self,

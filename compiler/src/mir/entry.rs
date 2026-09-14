@@ -92,6 +92,14 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 ..
             } if super::abi::is_multi_word_ret(*ret_words)
                 && super::abi::ret_words_ok(*ret_words) => {}
+            IlOp::Entry {
+                kind: crate::il::EntryKind::MakeCoro,
+                ..
+            } if maps_ok => {}
+            IlOp::Entry {
+                kind: crate::il::EntryKind::MakeCoro,
+                ..
+            } => return Some(LirRefuse::Alloc),
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
             IlOp::HostInvoke { .. } => return Some(LirRefuse::Host),
             IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => {
@@ -315,6 +323,39 @@ mod tests {
         ];
         assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
         assert_eq!(lir_refuse_with(&ops, &[], true), None);
+    }
+
+    #[test]
+    fn c2b_mapped_make_coro_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Label(Label(0)),
+            IlOp::Entry {
+                kind: crate::il::EntryKind::MakeCoro,
+                arity: 0,
+                target: Label(1),
+                loc,
+                ret_words: 1,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), Some(LirRefuse::Alloc));
+        assert_eq!(lir_refuse_with(&ops, &[], true), None);
+        assert!(!lir_eligible(&ops, &[]));
+    }
+
+    #[test]
+    fn c2b_resume_coro_is_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::Label(Label(0)),
+            IlOp::Load { slot: 0, loc },
+            IlOp::byte(Byte::new(Instruction::ResumeCoro)),
+            IlOp::byte(Byte::new(Instruction::DoneCoro)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
     }
 
     #[test]

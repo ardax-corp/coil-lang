@@ -469,6 +469,8 @@ fn expr_key(inst: &MirInst) -> Option<ExprKey> {
         | MirInst::Index { .. }
         | MirInst::StoreIndex { .. }
         | MirInst::ArrayLen { .. }
+        | MirInst::ResumeCoro { .. }
+        | MirInst::DoneCoro { .. }
         | MirInst::ArrayPush { .. }
         | MirInst::Alloc { .. }
         | MirInst::GcBarrier { .. }

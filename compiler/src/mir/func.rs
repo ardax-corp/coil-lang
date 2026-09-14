@@ -454,6 +454,27 @@ impl MirFunc {
                     return Err(format!("{dest} ArrayLen dest type"));
                 }
             }
+            MirInst::ResumeCoro { dest, handle, send } => {
+                if self.ty(*handle) != MirTy::HeapRef {
+                    return Err(format!("{dest} ResumeCoro handle is not heapref"));
+                }
+                if !self.ty(*dest).is_word_lane() {
+                    return Err(format!("{dest} ResumeCoro dest type"));
+                }
+                if let Some(s) = send {
+                    if !self.ty(*s).is_word_lane() {
+                        return Err(format!("{dest} ResumeCoro send type"));
+                    }
+                }
+            }
+            MirInst::DoneCoro { dest, handle } => {
+                if self.ty(*handle) != MirTy::HeapRef {
+                    return Err(format!("{dest} DoneCoro handle is not heapref"));
+                }
+                if self.ty(*dest) != MirTy::Bool {
+                    return Err(format!("{dest} DoneCoro dest type"));
+                }
+            }
             MirInst::ArrayPush {
                 dest,
                 array,

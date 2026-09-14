@@ -680,6 +680,21 @@ fn emit_stored(
                 loc,
             });
         }
+        MirInst::ResumeCoro {
+            dest,
+            handle,
+            send,
+        } => {
+            emit_lir_resume(out, *dest, *handle, *send, func, plan, regs, pool, loc, true)?;
+        }
+        MirInst::DoneCoro { dest, handle } => {
+            emit_stack(out, *handle, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
+        }
         MirInst::ArrayPush {
             dest,
             array,
@@ -817,6 +832,38 @@ fn emit_alloc_stack(
         emit_stack(out, *e, func, plan, regs, pool, loc)?;
     }
     out.push(il_for_alloc(kind, elems.len() as u32, loc)?);
+    Ok(())
+}
+
+fn emit_lir_resume(
+    out: &mut Vec<IlOp>,
+    dest: ValueId,
+    handle: ValueId,
+    send: Option<ValueId>,
+    func: &MirFunc,
+    plan: &EmitPlan,
+    regs: &[u8],
+    pool: &mut Vec<u64>,
+    loc: DebugLoc,
+    always_store: bool,
+) -> Result<(), LowerError> {
+    if let Some(s) = send {
+        emit_stack(out, s, func, plan, regs, pool, loc)?;
+    }
+    emit_stack(out, handle, func, plan, regs, pool, loc)?;
+    out.push(IlOp::from_plain_byte(
+        Byte::new(Instruction::ResumeCoro).with_operand_u32(u32::from(send.is_some())),
+        loc,
+    ));
+    if always_store || plan.need_slot[dest.index()] {
+        if !always_store {
+            out.push(IlOp::Dup { loc });
+        }
+        out.push(IlOp::StorePop {
+            slot: u32::from(regs[dest.index()]),
+            loc,
+        });
+    }
     Ok(())
 }
 
@@ -1004,6 +1051,25 @@ fn emit_stack(
         MirInst::ArrayLen { dest, array } => {
             emit_stack(out, *array, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::ArrayLen), loc));
+            if plan.need_slot[dest.index()] {
+                out.push(IlOp::Dup { loc });
+                out.push(IlOp::StorePop {
+                    slot: u32::from(regs[dest.index()]),
+                    loc,
+                });
+            }
+            Ok(())
+        }
+        MirInst::ResumeCoro {
+            dest,
+            handle,
+            send,
+        } => emit_lir_resume(
+            out, *dest, *handle, *send, func, plan, regs, pool, loc, false,
+        ),
+        MirInst::DoneCoro { dest, handle } => {
+            emit_stack(out, *handle, func, plan, regs, pool, loc)?;
+            out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::Dup { loc });
                 out.push(IlOp::StorePop {

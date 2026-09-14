@@ -338,6 +338,18 @@ pub enum MirInst {
         dest: ValueId,
         array: ValueId,
     },
+    /// `ResumeCoro` (C2b). Handle is [`MirTy::HeapRef`]. Dest is the yield
+    /// word. `send` is present when the opcode has_send bit is set.
+    ResumeCoro {
+        dest: ValueId,
+        handle: ValueId,
+        send: Option<ValueId>,
+    },
+    /// `DoneCoro` (C2b). Dest is [`MirTy::Bool`].
+    DoneCoro {
+        dest: ValueId,
+        handle: ValueId,
+    },
     /// In-place `Vec` / array grow (B6). Dest is the same `HeapRef` identity.
     /// Always a GC safepoint; pair with [`Self::GcBarrier`].
     ArrayPush {
@@ -414,6 +426,10 @@ pub enum MirAllocKind {
     Dict,
     /// `DictEntries`: dict heapref → array of `(string, V)` pairs (C2b).
     DictEntries,
+    /// `MakeCoro`: args → coroutine handle (C2b). Target is the async body.
+    Coro {
+        target: crate::il::Label,
+    },
 }
 
 impl MirAllocKind {
@@ -425,6 +441,7 @@ impl MirAllocKind {
             Self::Enum { .. } => "enum",
             Self::Dict => "dict",
             Self::DictEntries => "dictentries",
+            Self::Coro { .. } => "coro",
         }
     }
 }
@@ -498,6 +515,8 @@ impl MirInst {
             | Self::Index { dest, .. }
             | Self::StoreIndex { dest, .. }
             | Self::ArrayLen { dest, .. }
+            | Self::ResumeCoro { dest, .. }
+            | Self::DoneCoro { dest, .. }
             | Self::ArrayPush { dest, .. }
             | Self::Alloc { dest, .. }
             | Self::GcBarrier { dest, .. }
@@ -580,6 +599,14 @@ impl MirInst {
                 ..
             } => vec![*array, *index, *value],
             Self::ArrayLen { array, .. } => vec![*array],
+            Self::ResumeCoro { handle, send, .. } => {
+                let mut v = vec![*handle];
+                if let Some(s) = send {
+                    v.push(*s);
+                }
+                v
+            }
+            Self::DoneCoro { handle, .. } => vec![*handle],
             Self::ArrayPush { array, value, .. } => vec![*array, *value],
             Self::Alloc { elems, .. } => elems.clone(),
             Self::GcBarrier { roots, .. } => roots.clone(),
@@ -649,6 +676,13 @@ impl MirInst {
                 *value = map(*value);
             }
             Self::ArrayLen { array, .. } => *array = map(*array),
+            Self::ResumeCoro { handle, send, .. } => {
+                *handle = map(*handle);
+                if let Some(s) = send {
+                    *s = map(*s);
+                }
+            }
+            Self::DoneCoro { handle, .. } => *handle = map(*handle),
             Self::ArrayPush { array, value, .. } => {
                 *array = map(*array);
                 *value = map(*value);

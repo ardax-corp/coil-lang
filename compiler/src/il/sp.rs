@@ -229,6 +229,14 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
             Some(1 - 2 * arity)
         }
         Instruction::DictEntries => Some(0),
+        Instruction::ResumeCoro => {
+            if byte.operand_u32() & 1 != 0 {
+                Some(-1)
+            } else {
+                Some(0)
+            }
+        }
+        Instruction::DoneCoro => Some(0),
         Instruction::MakeEnum => Some(1 - byte.operand_u16(1) as i32),
         Instruction::CALL => {
             let (arity, _) = byte.call_parts();
