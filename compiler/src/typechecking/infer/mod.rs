@@ -77,11 +77,23 @@ pub enum ForInKind {
     /// `float` selects LEF/LEQF/ADDF + step `1.0`; otherwise int/byte
     /// opcodes (LE/LEQ/ADD + step `1`).
     Range { inclusive: bool, float: bool },
-    /// Dictionary ABI: `into_iter` then `next` → `Option<Item>`.
+    /// User `IntoIterator`: `into_iter` then a counted builtin `IntoIter`
+    /// (array / tuple / numeric range) or `Iterator::next` → `Option<Item>`.
     Custom {
         into_iter_fqn: String,
-        next_fqn: String,
+        /// `None` when [`Self::Custom::counted`] desugars `IntoIter`.
+        next_fqn: Option<String>,
+        counted: Option<ForInCounted>,
     },
+}
+
+/// Counted `IntoIter` shapes for user `into_iter` (C2b rung 2).
+/// Dict / coro stay on `Iterator::next` or refuse — not this desugar.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ForInCounted {
+    Array,
+    Tuple { arity: usize },
+    Range { inclusive: bool, float: bool },
 }
 
 /// Side-table entry for for-in codegen, keyed by the Loop node id.

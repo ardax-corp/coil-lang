@@ -15421,6 +15421,32 @@ impl Checker {
                     .map(|v| v.ty.clone())
                     .unwrap_or_else(|| Ty::Var(self.counter.fresh()));
                 let into_fqn = into_inst.method_fqns.get("into_iter").cloned();
+                let into_iter_ty = apply_ty_prune(&self.subst, &into_iter_ty);
+                if let Some(into_iter_fqn) = into_fqn.clone()
+                    && let Some((counted_item, counted)) =
+                        self.counted_into_iter_kind(&into_iter_ty, iterable_range)
+                {
+                    self.unify(
+                        &item,
+                        &counted_item,
+                        iterable_range,
+                        "IntoIterator counted Item",
+                    );
+                    let item_ty = apply_ty_prune(&self.subst, &item);
+                    self.record_for_in_info(
+                        loop_id,
+                        loop_range,
+                        ForInInfo {
+                            kind: ForInKind::Custom {
+                                into_iter_fqn,
+                                next_fqn: None,
+                                counted: Some(counted),
+                            },
+                            item_ty: item_ty.clone(),
+                        },
+                    );
+                    return Some(item_ty);
+                }
                 match self.find_unique_instance("Iterator", &[into_iter_ty.clone()], iterable_range)
                 {
                     Ok(Some(iter_inst)) => {
@@ -15442,7 +15468,8 @@ impl Checker {
                                     ForInInfo {
                                         kind: ForInKind::Custom {
                                             into_iter_fqn,
-                                            next_fqn,
+                                            next_fqn: Some(next_fqn),
+                                            counted: None,
                                         },
                                         item_ty: item_ty.clone(),
                                     },
@@ -15561,6 +15588,23 @@ impl Checker {
             }
             _ => None,
         }
+    }
+
+    /// Array / tuple / numeric Range `IntoIter` can reuse Q6 counted
+    /// desugar after `into_iter`. Dict and coro stay off this path.
+    fn counted_into_iter_kind(
+        &mut self,
+        into_iter_ty: &Ty,
+        range: &Range<usize>,
+    ) -> Option<(Ty, ForInCounted)> {
+        let (item, kind) = self.builtin_for_in_kind(into_iter_ty, range)?;
+        let counted = match kind {
+            ForInKind::Array => ForInCounted::Array,
+            ForInKind::Tuple { arity } => ForInCounted::Tuple { arity },
+            ForInKind::Range { inclusive, float } => ForInCounted::Range { inclusive, float },
+            ForInKind::Dict | ForInKind::Coroutine | ForInKind::Custom { .. } => return None,
+        };
+        Some((item, counted))
     }
 
     /// `for` over `Range<T>` / `RangeInclusive<T>`, iteration needs a
