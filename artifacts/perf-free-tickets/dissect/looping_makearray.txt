@@ -1,0 +1,69 @@
+;; symbols
+     3  bump
+    49  main
+
+=== bytecode ===
+;; fn <prologue>  bc[0..3)
+00000  CALL             arity=0 target=0
+00001  JMP              target=49 (main)
+00002  HALT
+;; fn bump  bc[3..49)
+00003  Seek             slot=24
+00004  DenseConst       op=0x1010004
+00005  DenseConst       op=0x103003f
+00006  DenseConst       op=0x1070000
+00007  DenseConst       op=0x1090001
+00008  DenseMove        op=0xc07
+00009  DenseMove        op=0x1107
+00010  DenseMove        op=0x1307
+00011  DenseMove        op=0x1507
+00012  DenseMove        op=0x1707
+00013  LOAD             slot=12
+00014  CONST            imm=200000
+00015  CmpJmpf          op=LE target=45
+00016  DenseBin         op=0x4020c01
+00017  DenseBin         op=0x9040203
+00018  DenseBin         op=0x5050401
+00019  DenseBin         op=0x60205
+00020  DenseCmp         op=0x4080607
+00021  BinSlotImmJmpf   op=EQ slot=6 pool_idx=2
+00022  DenseMove        op=0xa11
+00023  JMP              target=31
+00024  BinSlotImmJmpf   op=EQ slot=6 pool_idx=3
+00025  DenseMove        op=0xa13
+00026  JMP              target=31
+00027  BinSlotImmJmpf   op=EQ slot=6 pool_idx=4
+00028  DenseMove        op=0xa15
+00029  JMP              target=31
+00030  DenseMove        op=0xa17
+00031  DenseBin         op=0xb0a09
+00032  LOAD             slot=8
+00033  JMPF             target=36
+00034  DenseMove        op=0x110b
+00035  JMP              target=43
+00036  BinSlotImmJmpf   op=EQ slot=6 pool_idx=5
+00037  DenseMove        op=0x130b
+00038  JMP              target=43
+00039  BinSlotImmJmpf   op=EQ slot=6 pool_idx=6
+00040  DenseMove        op=0x150b
+00041  JMP              target=43
+00042  DenseMove        op=0x170b
+00043  DenseBin         op=0xc0c09
+00044  JMP              target=13
+00045  DenseBin         op=0xd1113
+00046  DenseBin         op=0xe0d15
+00047  DenseBin         op=0xf0e17
+00048  LoadReturnSlot   slot=15
+
+;; fn main  bc[49..59)
+00049  CALL             arity=0 target=3 (bump)
+00050  STORE            slot=0
+00051  CONST            imm=200000
+00052  STORE            slot=1
+00053  LOAD             slot=0
+00054  CONST            imm=200000
+00055  CmpJmpf          op=NEQ target=58
+00056  STRING           op=0x2
+00057  Panic
+00058  ConstReturnImm   imm=0
+

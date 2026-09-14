@@ -1,0 +1,53 @@
+=== total opcode histogram ===
+     18  DenseBin
+     13  LOAD
+     12  CONST
+     10  STORE
+      9  DenseMove
+      8  JMP
+      7  DenseConst
+      5  BinSlotSlotJmpf
+      5  HostInvoke
+      5  POP
+      4  RETURN
+      3  CALL
+      3  DUPLICATE
+      3  DenseCast
+      2  Seek
+      2  JumpIfMatch
+      2  LogNot
+      2  JMPT
+      2  BinSlotImmJmpf
+      2  MakeEnum
+      1  io::sync::write_all
+      1  main
+      1  mandelbrot
+      1  HALT
+      1  ArrayLen
+      1  BinSlotSlotStore
+      1  LoadReturnSlot
+      1  STRING
+      1  FORMAT
+      1  BinSlotImm
+      1  JMPF
+      1  ConstReturnImm
+
+=== index-family counts ===
+      1  ArrayLen
+
+=== DenseIndex / DenseStoreIndex flags ===
+
+=== per-function (index family + CALL/Seek/HostInvoke) ===
+
+[<prologue>]
+  other: {'CALL': 1, 'JMP': 1}
+
+[io::sync::write_all]
+  index: {'ArrayLen': 1}
+  other: {'Seek': 1, 'HostInvoke': 3, 'LOAD': 8, 'STORE': 5, 'BinSlotSlotJmpf': 1, 'BinSlotImmJmpf': 2, 'JMP': 2}
+
+[main]
+  other: {'CALL': 2, 'HostInvoke': 2, 'FORMAT': 1, 'LOAD': 5, 'STORE': 5, 'JMP': 1}
+
+[mandelbrot]
+  other: {'Seek': 1, 'DenseBin': 18, 'DenseMove': 9, 'DenseConst': 7, 'BinSlotSlotJmpf': 4, 'JMP': 4}
