@@ -94,7 +94,7 @@ unless the reconstruct is a select diamond or leftover in-loop `Make*`.
 | `range_sum` | `for_in_range_ret.hy` | dense counted i64 | **C2** returned Range |
 | `range_sum` | `for_in_range_field.hy` | dense counted i64 | **C2b** heap-field Range |
 | `range_sum` | `for_in_range_array.hy` | dense counted i64 | **C2b** array-held Range |
-| `iter_sum` | `for_in_iter.hy` | dense two-slot match + CALL | **C2b** user `Iterator::next` |
+| `iter_sum` | `for_in_iter.hy` | dense or fuse-IL two-slot CALL+tag JMP | **C2b** user `Iterator::next`; cost gate |
 | `range_sum` | `for_in_iter_range.hy` | dense counted i64 | **C2b** `into_iter` → Range |
 | `main` | `operators_loop.hy` | fuse-IL | `Pow` / bitwise |
 | `hot` | `field_hot.hy` | dense + maps | **D2** `DenseFieldLoad` / `DenseMakeObject`; cost gate; `main` prints |

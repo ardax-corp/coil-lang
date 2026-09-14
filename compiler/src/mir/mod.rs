@@ -5159,9 +5159,17 @@ fn main() {
             .unwrap_or(bc.len());
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let dense = body
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseBin);
+        let two_slot_tag = body.windows(2).any(|w| {
+            matches!(w[0].bytecode(), Instruction::CALL)
+                && w[0].call_ret_words() == 2
+                && matches!(w[1].bytecode(), Instruction::JMPF | Instruction::JMPT)
+        });
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
-            "C2b Iterator::next for-in should DenseBin; opcodes={names:?}"
+            dense || two_slot_tag,
+            "C2b Iterator::next should DenseBin or two-slot CALL+tag JMP; opcodes={names:?}"
         );
         assert!(
             body.iter().any(|b| *b.bytecode() == Instruction::CALL),

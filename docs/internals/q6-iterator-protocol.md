@@ -74,8 +74,8 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
 - `examples/perf/for_in_range_array.hy` — array-held Range helper is
   the same dense counted i64 (C2b rung 1).
 
-- `examples/perf/for_in_iter.hy` — user `Iterator::next` helper is dense
-  two-slot Option match + CALL (C2b rung 2).
+- `examples/perf/for_in_iter.hy` — user `Iterator::next` helper is two-slot
+  Option tag JMP + CALL (dense when cost ≤ fuse; C2b rung 2).
 - `examples/perf/for_in_iter_range.hy` — `into_iter` → `Range<int>` helper
   is the same dense counted i64 (C2b rung 2).
 
