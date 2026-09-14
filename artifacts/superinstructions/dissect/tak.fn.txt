@@ -1,0 +1,19 @@
+;; symbols
+    52  tak
+
+=== bytecode ===
+;; fn tak  bc[52..65)
+00052  BinSlotSlotJmpt  op=LEQ a=0 pool_idx=7
+00053  BinSlotImm       op=SUB slot=0 imm=1
+00054  LOAD             s0=1,s1=2
+00055  CALL             arity=3 target=52 (tak)
+00056  BinSlotImm       op=SUB slot=1 imm=1
+00057  LOAD             s0=2,s1=0
+00058  CALL             arity=3 target=52 (tak)
+00059  BinSlotImm       op=SUB slot=2 imm=1
+00060  LOAD             s0=0,s1=1
+00061  CALL             arity=3 target=52 (tak)
+00062  TailCall         arity=3 target=52 (tak)
+00063  ConstReturnImm   imm=0
+00064  LoadReturnSlot   slot=2
+

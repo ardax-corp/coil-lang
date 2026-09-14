@@ -1,0 +1,23 @@
+;; symbols
+    71  item_check
+
+=== bytecode ===
+;; fn item_check  bc[71..88)
+00071  Seek             slot=5
+00072  LOAD             slot=0
+00073  JumpIfMatch      tag=0 pool_idx=10
+00074  Unpack           arity=2
+00075  STORE            s0=2,s1=1
+00076  LOAD             slot=1
+00077  CALL             arity=1 target=71 (item_check)
+00078  STORE            slot=3
+00079  LOAD             slot=2
+00080  CALL             arity=1 target=71 (item_check)
+00081  STORE            slot=4
+00082  CONST            imm=1
+00083  LOAD             slot=3
+00084  ADD
+00085  LOAD             slot=4
+00086  BinReturn        op=ADD
+00087  ConstReturnImm   imm=1
+

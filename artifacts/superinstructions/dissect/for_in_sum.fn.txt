@@ -1,0 +1,29 @@
+;; symbols
+    56  sum
+
+=== bytecode ===
+;; fn sum  bc[56..79)
+00056  Seek             slot=23
+00057  DenseConst       op=0x10d0001
+00058  DenseConst       op=0x1010000
+00059  DenseArrayLen    op=0x400
+00060  DenseConst       op=0x1050000
+00061  DenseMove        op=0x1201
+00062  DenseConst       op=0x114fff8
+00063  DenseConst       op=0x1150008
+00064  DenseBin         op=0x5130414
+00065  BinSlotSlotJmpf  op=LE a=5 pool_idx=9
+00066  VLoad            op=0x1000005
+00067  VReduce          op=0x1120000
+00068  DenseBin         op=0x50515
+00069  JMP              target=65
+00070  BinSlotSlotJmpf  op=LE a=5 pool_idx=10
+00071  DenseIndex       op=0x10a0005
+00072  DenseBin         op=0xc120a
+00073  DenseMove        op=0x120c
+00074  CONST            imm=1
+00075  STORE            slot=22
+00076  DenseBin         op=0x50516
+00077  JMP              target=70
+00078  LoadReturnSlot   slot=18
+

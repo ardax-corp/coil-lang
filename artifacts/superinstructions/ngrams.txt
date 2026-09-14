@@ -1,0 +1,74 @@
+# Weighted opcode n-grams (fn-body weight ≈ hottest loop trips)
+## Bigrams
+15491072	DenseBin ; DenseBin
+15400000	LOAD ; CALL
+15000000	BinSlotImm ; LOAD
+14456618	CALL ; BinSlotImm
+8913236	BinSlotImm ; CALL
+8630272	DenseConst ; DenseConst
+5480448	DenseBin ; DenseMove
+5251072	DenseMove ; DenseMove
+5000000	BinSlotSlotJmpt ; BinSlotImm
+5000000	CALL ; TailCall
+5000000	TailCall ; ConstReturnImm
+5000000	ConstReturnImm ; LoadReturnSlot
+4556618	BinReturn ; ConstReturnImm
+4456618	BinSlotImmJmpt ; BinSlotImm
+4356618	CALL ; BinReturn
+4233216	DenseMove ; BinSlotSlotJmpf
+3840000	JMP ; DenseBin
+2560000	BinSlotSlotJmpf ; DenseCast
+2560000	DenseCast ; DenseBin
+2560000	DenseMove ; JMP
+2197504	DenseBin ; JMP
+1673216	Seek ; DenseConst
+1640448	JMP ; LoadReturnSlot
+1542144	DenseBin ; BinSlotSlotJmpf
+1280000	DenseConst ; DenseCast
+1280000	DenseCast ; DenseMove
+1280000	BinSlotSlotJmpf ; DenseBin
+1280000	BinSlotSlotJmpf ; JMP
+531072	CALL ; STORE
+491520	DenseConst ; DenseMove
+400000	STORE ; LOAD
+360448	BinSlotSlotJmpf ; DenseIndex
+262144	DenseConst ; DenseArrayLen
+262144	DenseArrayLen ; DenseConst
+262144	DenseConst ; DenseBin
+262144	JMP ; BinSlotSlotJmpf
+262144	CONST ; STORE
+262144	STORE ; DenseBin
+229376	DenseMove ; DenseConst
+229376	BinSlotSlotJmpf ; VLoad
+
+## Trigrams
+15000000	BinSlotImm ; LOAD ; CALL
+10000000	LOAD ; CALL ; BinSlotImm
+10000000	CALL ; BinSlotImm ; LOAD
+8960000	DenseBin ; DenseBin ; DenseBin
+6727680	DenseConst ; DenseConst ; DenseConst
+5000000	BinSlotSlotJmpt ; BinSlotImm ; LOAD
+5000000	LOAD ; CALL ; TailCall
+5000000	CALL ; TailCall ; ConstReturnImm
+5000000	TailCall ; ConstReturnImm ; LoadReturnSlot
+4456618	BinSlotImmJmpt ; BinSlotImm ; CALL
+4456618	BinSlotImm ; CALL ; BinSlotImm
+4456618	CALL ; BinSlotImm ; CALL
+4356618	BinSlotImm ; CALL ; BinReturn
+4356618	CALL ; BinReturn ; ConstReturnImm
+3971072	DenseMove ; DenseMove ; BinSlotSlotJmpf
+3971072	DenseBin ; DenseBin ; DenseMove
+2560000	DenseMove ; BinSlotSlotJmpf ; DenseCast
+2560000	BinSlotSlotJmpf ; DenseCast ; DenseBin
+2560000	DenseCast ; DenseBin ; DenseBin
+2560000	DenseBin ; DenseMove ; DenseMove
+2560000	JMP ; DenseBin ; DenseBin
+2560000	DenseBin ; DenseMove ; JMP
+1509376	Seek ; DenseConst ; DenseConst
+1280000	DenseConst ; DenseConst ; DenseCast
+1280000	DenseConst ; DenseCast ; DenseMove
+1280000	DenseCast ; DenseMove ; DenseMove
+1280000	DenseMove ; DenseMove ; DenseMove
+1280000	DenseMove ; BinSlotSlotJmpf ; DenseBin
+1280000	BinSlotSlotJmpf ; DenseBin ; DenseBin
+1280000	DenseBin ; DenseBin ; BinSlotSlotJmpf

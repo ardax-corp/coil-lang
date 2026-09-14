@@ -1,0 +1,15 @@
+;; symbols
+    62  bottom_up
+
+=== bytecode ===
+;; fn bottom_up  bc[62..71)
+00062  BinSlotImmJmpt   op=EQ slot=0 pool_idx=9
+00063  BinSlotImm       op=SUB slot=0 imm=1
+00064  CALL             arity=1 target=62 (bottom_up)
+00065  BinSlotImm       op=SUB slot=0 imm=1
+00066  CALL             arity=1 target=62 (bottom_up)
+00067  MakeEnum         tag=1 arity=2
+00068  RETURN
+00069  MakeEnum         tag=0 arity=0
+00070  RETURN
+
