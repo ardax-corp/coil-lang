@@ -4993,3 +4993,47 @@
         assert_eq!(table_v, match_v);
         assert_eq!(hot_v, match_v);
     }
+
+    fn run_pool_modes(code: &[Byte], pool: &[u64]) -> (i64, i64, i64) {
+        let run = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(code, pool, &[], 0);
+            super::dispatch::override_mode(None);
+            vm.pop().as_int()
+        };
+        (
+            run(super::dispatch::Mode::Match),
+            run(super::dispatch::Mode::Table),
+            run(super::dispatch::Mode::HotMatch),
+        )
+    }
+
+    #[test]
+    fn coi_374_hot_dispatch_modes_agree_on_fused_fib() {
+        let (code, pool) = fused_fib_bytecode(13);
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        assert_eq!(match_v, 233);
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_374_hot_dispatch_modes_agree_on_dense_index() {
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(4),
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            const_int(1),
+            store_pop(1),
+            dense_index(common::dense::HEAP_UNCHECKED, 2, 0, 1),
+            load(2),
+            Byte::new(Instruction::HALT),
+        ];
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        assert_eq!(match_v, 6);
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }

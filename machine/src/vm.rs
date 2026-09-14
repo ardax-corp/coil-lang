@@ -18,10 +18,9 @@ use common::{
 };
 
 use crate::{
-    AddrHashBuilder, CStructLayout, CoroState, Frame, GcData, Heap, Member, ObjArray, ObjBoxed,
-    EnumPayload, ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object,
-    RefCoroutine,
-    Stack,
+    AddrHashBuilder, CStructLayout, CoroState, EnumPayload, Frame, GcData, Heap, Member, ObjArray,
+    ObjBoxed, ObjCoroutine, ObjEnum, ObjFn, ObjInstance, ObjPolyFn, ObjString, ObjTuple, Object,
+    RefCoroutine, Stack,
 };
 #[cfg(any(test, feature = "debugger"))]
 use crate::{DebugController, StopReason};
@@ -343,6 +342,79 @@ struct FramePins {
     /// `frames.len()` at first pin (TailCall keeps the same depth).
     depth: usize,
     by_slot: Vec<Option<Object>>,
+}
+
+#[inline]
+fn pinned_object_in(frame_pins: &[FramePins], frames_len: usize, slot: u32) -> Option<Object> {
+    let pins = frame_pins.last()?;
+    if pins.depth != frames_len {
+        return None;
+    }
+    pins.by_slot.get(slot as usize).copied().flatten()
+}
+
+#[inline]
+fn pinned_object_matching_in(
+    frame_pins: &[FramePins],
+    frames_len: usize,
+    slot: u32,
+    addr: u64,
+) -> Option<Object> {
+    let obj = pinned_object_in(frame_pins, frames_len, slot)?;
+    if obj.addr() == addr { Some(obj) } else { None }
+}
+
+#[inline]
+fn pin_current_array_in(
+    frame_pins: &mut Vec<FramePins>,
+    frames_len: usize,
+    slot: u32,
+    obj: Object,
+) {
+    let idx = slot as usize;
+    if let Some(pins) = frame_pins.last_mut() {
+        if pins.depth == frames_len {
+            if pins.by_slot.len() <= idx {
+                pins.by_slot.resize(idx + 1, None);
+            }
+            pins.by_slot[idx] = Some(obj);
+            return;
+        }
+    }
+    let mut by_slot = vec![None; idx + 1];
+    by_slot[idx] = Some(obj);
+    frame_pins.push(FramePins {
+        depth: frames_len,
+        by_slot,
+    });
+}
+
+/// Reuse a cached `Object` while the array address is unchanged (COI-372).
+#[inline(always)]
+fn resolve_dense_index_object_in(
+    heap: &Heap,
+    frames_len: usize,
+    frame_pins: &mut Vec<FramePins>,
+    dense_obj_addr: &mut u64,
+    dense_obj: &mut Option<Object>,
+    slot: u32,
+    addr: u64,
+) -> Option<Object> {
+    if likely(addr != 0 && addr == *dense_obj_addr) {
+        return *dense_obj;
+    }
+    if let Some(obj) = pinned_object_matching_in(frame_pins, frames_len, slot, addr) {
+        *dense_obj_addr = addr;
+        *dense_obj = Some(obj);
+        return Some(obj);
+    }
+    let obj = heap.find_object_by_addr(addr)?;
+    if matches!(obj, Object::Array(_) | Object::Tuple(_)) {
+        pin_current_array_in(frame_pins, frames_len, slot, obj);
+        *dense_obj_addr = addr;
+        *dense_obj = Some(obj);
+    }
+    Some(obj)
 }
 
 pub struct Machine<const S: usize> {
@@ -874,7 +946,10 @@ impl<const S: usize> Machine<S> {
 
     /// `ObjEnum` at an exact slot. Heap-heap Result `Err` (`pointer | 1`) is
     /// not an enum cell, do not strip bit 0 here (GC marking already does).
-    fn find_enum_exact(heap: &Heap, addr: u64) -> Option<crate::memory::Gc<crate::memory::ObjEnum>> {
+    fn find_enum_exact(
+        heap: &Heap,
+        addr: u64,
+    ) -> Option<crate::memory::Gc<crate::memory::ObjEnum>> {
         if addr & 1 != 0 {
             return None;
         }
@@ -912,23 +987,13 @@ impl<const S: usize> Machine<S> {
 
     #[inline]
     fn pinned_object(&self, slot: u32) -> Option<Object> {
-        let depth = self.frames.len();
-        let pins = self.frame_pins.last()?;
-        if pins.depth != depth {
-            return None;
-        }
-        pins.by_slot.get(slot as usize).copied().flatten()
+        pinned_object_in(&self.frame_pins, self.frames.len(), slot)
     }
 
     /// Cached `Object` for `slot` when it still names `addr` (same identity).
     #[inline]
     fn pinned_object_matching(&self, slot: u32, addr: u64) -> Option<Object> {
-        let obj = self.pinned_object(slot)?;
-        if obj.addr() == addr {
-            Some(obj)
-        } else {
-            None
-        }
+        pinned_object_matching_in(&self.frame_pins, self.frames.len(), slot, addr)
     }
 
     /// Reuse a cached `Object` while the array address is unchanged (COI-372).
@@ -937,38 +1002,21 @@ impl<const S: usize> Machine<S> {
     /// dense index); then the slab. Pins and the last-addr cell are GC roots.
     #[inline(always)]
     fn resolve_dense_index_object(&mut self, slot: u32, addr: u64) -> Option<Object> {
-        if likely(addr != 0 && addr == self.dense_obj_addr) {
-            return self.dense_obj;
-        }
-        if let Some(obj) = self.pinned_object_matching(slot, addr) {
-            self.remember_dense_obj(addr, obj);
-            return Some(obj);
-        }
-        let obj = Self::find_object_by_addr(&self.heap, addr)?;
-        if matches!(obj, Object::Array(_) | Object::Tuple(_)) {
-            self.pin_current_array(slot, obj);
-            self.remember_dense_obj(addr, obj);
-        }
-        Some(obj)
+        resolve_dense_index_object_in(
+            &self.heap,
+            self.frames.len(),
+            &mut self.frame_pins,
+            &mut self.dense_obj_addr,
+            &mut self.dense_obj,
+            slot,
+            addr,
+        )
     }
 
     /// Allocate a pin table only when this frame first pins an array.
     #[inline]
     fn pin_current_array(&mut self, slot: u32, obj: Object) {
-        let depth = self.frames.len();
-        let idx = slot as usize;
-        if let Some(pins) = self.frame_pins.last_mut() {
-            if pins.depth == depth {
-                if pins.by_slot.len() <= idx {
-                    pins.by_slot.resize(idx + 1, None);
-                }
-                pins.by_slot[idx] = Some(obj);
-                return;
-            }
-        }
-        let mut by_slot = vec![None; idx + 1];
-        by_slot[idx] = Some(obj);
-        self.frame_pins.push(FramePins { depth, by_slot });
+        pin_current_array_in(&mut self.frame_pins, self.frames.len(), slot, obj);
     }
 
     fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Option<Value> {
@@ -1297,7 +1345,8 @@ impl<const S: usize> Machine<S> {
         if !queue.is_empty() {
             for (val, _) in &queue {
                 if let Some(obj) = Self::find_object_by_addr(&self.heap, val.raw() as u64) {
-                    self.heap.satb_shade_member(crate::memory::Member::Object(obj));
+                    self.heap
+                        .satb_shade_member(crate::memory::Member::Object(obj));
                 }
             }
             while !self.heap.mark_quantum(usize::MAX) {}
@@ -2085,9 +2134,7 @@ impl<const S: usize> Machine<S> {
         sp: &mut usize,
         req: crate::io::IoParkRequest,
     ) {
-        let token = self
-            .io_reactor
-            .register_wait(req.handle, req.interest);
+        let token = self.io_reactor.register_wait(req.handle, req.interest);
         let coro_ptr = self
             .resume_stack
             .last()
@@ -2394,7 +2441,10 @@ impl<const S: usize> Machine<S> {
         self.gc_deferred = false;
     }
 
-    pub fn bind_shared_heap(&mut self, epoch: &std::sync::Arc<crate::shared_heap::SharedHeapEpoch>) {
+    pub fn bind_shared_heap(
+        &mut self,
+        epoch: &std::sync::Arc<crate::shared_heap::SharedHeapEpoch>,
+    ) {
         self.heap.bind(epoch.heap_ptr());
         self.shared_epoch = Some(std::sync::Arc::clone(epoch));
     }
@@ -2421,9 +2471,7 @@ impl<const S: usize> Machine<S> {
         }
         let ptr = self.heap.owned_ptr();
         let epoch = crate::shared_heap::SharedHeapEpoch::new(ptr);
-        self.heap
-            .owned_mut()
-            .enter_epoch_stw(epoch.alloc_lock());
+        self.heap.owned_mut().enter_epoch_stw(epoch.alloc_lock());
         epoch.jobs.store(1, std::sync::atomic::Ordering::SeqCst);
         self.shared_epoch = Some(std::sync::Arc::clone(&epoch));
         Ok(epoch)
@@ -2457,9 +2505,8 @@ impl<const S: usize> Machine<S> {
     /// can run without falling through into `main`.
     pub fn halt_first_jump_to(&mut self, from: usize, target: u32) {
         let owned = Arc::make_mut(&mut self.program_code);
-        let code: &mut [Byte] = unsafe {
-            std::slice::from_raw_parts_mut(owned.as_mut_ptr().cast(), owned.len())
-        };
+        let code: &mut [Byte] =
+            unsafe { std::slice::from_raw_parts_mut(owned.as_mut_ptr().cast(), owned.len()) };
         for b in code.iter_mut().skip(from) {
             if matches!(b.bytecode(), Instruction::JMP) && b.operand_u32() == target {
                 *b = Byte::new(Instruction::HALT);
@@ -2752,8 +2799,8 @@ impl<const S: usize> Machine<S> {
     /// dynamic instruction counts identical. A single outlined copy matches
     /// the non-LTO `machine` codegen (already identical to `main`'s).
     /// Prefetch + fused jump tables live *inside* this outlined copy.
-    /// Hot dense/jmp ops may divert into `dispatch` (COI-373 G0) when
-    /// `COIL_THREADED_DISPATCH` is not `match`.
+    /// Hot dense/jmp/call-adjacent ops may divert into `dispatch` (COI-374 G1)
+    /// when `COIL_THREADED_DISPATCH` is not `match`.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
@@ -2784,16 +2831,32 @@ impl<const S: usize> Machine<S> {
                 promise!(ip < code_len);
                 let peek = unsafe { code.get_unchecked(ip) };
                 if dispatch::is_hot(*peek.bytecode()) {
-                    dispatch::run_hot_streak(
+                    match dispatch::run_hot_streak(
                         &mut self.stack,
-                        sp,
+                        &mut sp,
                         &mut ip,
                         code,
                         constants,
-                        &self.heap,
+                        &mut self.heap,
+                        &mut self.frames,
+                        &mut self.frame_pins,
+                        &mut self.dense_obj_addr,
+                        &mut self.dense_obj,
+                        &self.finalizer_pcs,
+                        &mut self.nested_depth,
+                        &mut self.nested_frame_depths,
+                        &mut self.nested_return,
+                        &mut self.resume_stack,
+                        &self.io_reactor,
                         stack_cap,
                         dispatch_mode,
-                    );
+                    ) {
+                        Some(dispatch::HotStop::Panic(msg)) => {
+                            return self.runtime_panic(msg, ip.saturating_sub(1));
+                        }
+                        Some(dispatch::HotStop::Done(paused)) => return paused,
+                        None => {}
+                    }
                     continue;
                 }
             }
@@ -2841,44 +2904,23 @@ impl<const S: usize> Machine<S> {
                     // After all pops, keep the shared operand/local cursor at or
                     // past the highest written slot so later pushes do not
                     // clobber multi-slot locals (fixed `[T; N]` on stack).
-                    let count = opcode.load_store_count();
-                    let mut max_slot = sp;
-                    for i in 0..count {
-                        let slot = sp + opcode.load_store_slot_at(i) as usize;
-                        promise!(slot < stack_cap);
-                        max_slot = max_slot.max(slot);
-                        let val = self.stack.pop();
-                        self.stack[slot] = val;
-                    }
-                    let need = max_slot + 1;
-                    if self.stack.tell() < need {
-                        self.stack.seek(need);
-                    }
+                    dispatch::store(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::Seek => {
                     // Frame-relative cursor: operands[31:0] = slot offset from `sp`.
-                    let slot = opcode.operand_u32() as usize;
-                    let abs = sp + slot;
-                    promise!(abs <= stack_cap);
-                    self.stack.seek(abs);
+                    dispatch::seek(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::OptionNicheToHeap => {
-                    return self.runtime_panic(
-                        "retired opcode OptionNicheToHeap",
-                        ip.saturating_sub(1),
-                    );
+                    return self
+                        .runtime_panic("retired opcode OptionNicheToHeap", ip.saturating_sub(1));
                 }
                 Instruction::HeapOptionToNiche => {
-                    return self.runtime_panic(
-                        "retired opcode HeapOptionToNiche",
-                        ip.saturating_sub(1),
-                    );
+                    return self
+                        .runtime_panic("retired opcode HeapOptionToNiche", ip.saturating_sub(1));
                 }
                 Instruction::PairJumpIfTag => {
-                    return self.runtime_panic(
-                        "retired opcode PairJumpIfTag",
-                        ip.saturating_sub(1),
-                    );
+                    return self
+                        .runtime_panic("retired opcode PairJumpIfTag", ip.saturating_sub(1));
                 }
                 Instruction::PairToHeap => {
                     return self.runtime_panic("retired opcode PairToHeap", ip.saturating_sub(1));
@@ -2890,12 +2932,7 @@ impl<const S: usize> Machine<S> {
                     return self.runtime_panic("retired opcode ReturnPair", ip.saturating_sub(1));
                 }
                 Instruction::LOAD => {
-                    let count = opcode.load_store_count();
-                    for i in 0..count {
-                        let slot = opcode.load_store_slot_at(i) as usize;
-                        promise!(sp + slot < stack_cap);
-                        self.stack.push(self.stack[sp + slot]);
-                    }
+                    dispatch::load(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::INC => {
                     let (slot, prefix, is_float) = opcode.inc_dec_parts();
@@ -3037,11 +3074,12 @@ impl<const S: usize> Machine<S> {
                                     }
                                     Some('s') => {
                                         chars.next();
-                                        let string_val =
-                                            (unsafe { &*params.pop().as_ptr::<GcData<ObjString>>() })
-                                                .as_ref()
-                                                .data
-                                                .as_str();
+                                        let string_val = (unsafe {
+                                            &*params.pop().as_ptr::<GcData<ObjString>>()
+                                        })
+                                        .as_ref()
+                                        .data
+                                        .as_str();
                                         // Allocated::<crate::String>::new(params.pop().as_ptr());
                                         message.push_str(string_val);
                                     }
@@ -3239,56 +3277,40 @@ impl<const S: usize> Machine<S> {
                 }
                 // (same shape as `BinSlotSlot`) to avoid two temp pushes.
                 Instruction::BinSlotImm => {
-                    let (op, slot, imm) = opcode.bin_slot_imm_parts();
-                    promise!(sp + slot < stack_cap);
-                    let lhs = self.stack[sp + slot];
-                    let rhs = Value::from(imm);
-                    let result = crate::fused::eval_bin(op, lhs, rhs, &self.heap);
-                    self.stack.push(result);
+                    dispatch::bin_slot_imm(&mut self.stack, sp, opcode, &self.heap, stack_cap);
                 }
                 Instruction::CmpJmpf | Instruction::CmpJmpt => {
-                    let (op, t) = opcode.cmp_jmpf_parts();
-                    let target = if opcode.cmp_jmpf_is_pool() {
-                        promise!(t < constants.len());
-                        unsafe { *constants.get_unchecked(t) as usize }
-                    } else {
-                        t
-                    };
-                    let tos = self.stack.tell();
-                    promise!(tos >= 2);
-                    let rhs = self.stack[tos - 1];
-                    let lhs = self.stack[tos - 2];
-                    self.stack.seek(tos - 2);
-                    let taken = crate::fused::eval_cmp(op, lhs, rhs, &self.heap);
-                    if taken == matches!(*bc, Instruction::CmpJmpt) {
+                    if let Some(target) = dispatch::cmp_jmp(
+                        &mut self.stack,
+                        opcode,
+                        constants,
+                        &self.heap,
+                        matches!(*bc, Instruction::CmpJmpt),
+                    ) {
                         set_jump_target(&mut ip, target, code);
                     }
                 }
                 // Fused `LOAD slot; CONST imm; <cond>; JMPF/JMPT` without stack traffic.
                 Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
-                    let (op, slot, pool_idx) = opcode.bin_slot_imm_jmpf_parts();
-                    promise!(pool_idx < constants.len());
-                    let packed = unsafe { *constants.get_unchecked(pool_idx) };
-                    let imm = packed as u32 as i32 as i64;
-                    let target = (packed >> 32) as usize;
-                    promise!(sp + slot < stack_cap);
-                    let lhs = self.stack[sp + slot];
-                    let rhs = Value::from(imm);
-                    let taken = crate::fused::eval_cmp(op, lhs, rhs, &self.heap);
-                    if taken == matches!(*bc, Instruction::BinSlotImmJmpt) {
+                    if let Some(target) = dispatch::bin_slot_imm_jmp(
+                        &self.stack,
+                        sp,
+                        opcode,
+                        constants,
+                        &self.heap,
+                        stack_cap,
+                        matches!(*bc, Instruction::BinSlotImmJmpt),
+                    ) {
                         set_jump_target(&mut ip, target, code);
                     }
                 }
                 Instruction::LogNotJmpf | Instruction::LogNotJmpt => {
-                    let t = opcode.log_not_jmpf_target();
-                    let target = if opcode.log_not_jmpf_is_pool() {
-                        promise!(t < constants.len());
-                        unsafe { *constants.get_unchecked(t) as usize }
-                    } else {
-                        t
-                    };
-                    let val = self.stack.pop();
-                    if (val.as_int() == 0) == matches!(*bc, Instruction::LogNotJmpt) {
+                    if let Some(target) = dispatch::log_not_jmp(
+                        &mut self.stack,
+                        opcode,
+                        constants,
+                        matches!(*bc, Instruction::LogNotJmpt),
+                    ) {
                         set_jump_target(&mut ip, target, code);
                     }
                 }
@@ -3308,37 +3330,23 @@ impl<const S: usize> Machine<S> {
                 }
                 // Fused `LOAD src; CONST imm; <op>; STORE dest`, pool packs (dest<<32)|imm.
                 Instruction::BinSlotImmStore => {
-                    let (op, slot, pool_idx) = opcode.bin_slot_imm_store_parts();
-                    promise!(pool_idx < constants.len());
-                    let packed = unsafe { *constants.get_unchecked(pool_idx) };
-                    let imm = packed as u32 as i32 as i64;
-                    let dest = (packed >> 32) as usize;
-                    promise!(sp + slot < stack_cap);
-                    let lhs = self.stack[sp + slot];
-                    let rhs = Value::from(imm);
-                    let result = crate::fused::eval_bin(op, lhs, rhs, &self.heap);
-                    let dest_idx = sp + dest;
-                    promise!(dest_idx < stack_cap);
-                    self.stack[dest_idx] = result;
-                    let tell = self.stack.tell();
-                    if tell < dest_idx + 1 {
-                        self.stack.seek(dest_idx + 1);
-                    }
+                    dispatch::bin_slot_imm_store(
+                        &mut self.stack,
+                        sp,
+                        opcode,
+                        constants,
+                        &self.heap,
+                        stack_cap,
+                    );
                 }
                 Instruction::BinSlotSlotStore => {
-                    let (op, a, b, dest) = opcode.bin_slot_slot_store_parts();
-                    promise!(sp + a < stack_cap);
-                    promise!(sp + b < stack_cap);
-                    promise!(sp + dest < stack_cap);
-                    let va = self.stack[sp + a];
-                    let vb = self.stack[sp + b];
-                    let result = crate::fused::eval_bin(op, va, vb, &self.heap);
-                    let dest_idx = sp + dest;
-                    self.stack[dest_idx] = result;
-                    let tell = self.stack.tell();
-                    if tell < dest_idx + 1 {
-                        self.stack.seek(dest_idx + 1);
-                    }
+                    dispatch::bin_slot_slot_store(
+                        &mut self.stack,
+                        sp,
+                        opcode,
+                        &self.heap,
+                        stack_cap,
+                    );
                 }
                 Instruction::LoadReturnSlot => {
                     let slot = opcode.operand_u32() as usize;
@@ -3369,7 +3377,8 @@ impl<const S: usize> Machine<S> {
                     promise!(tos >= 2);
                     let rhs = self.stack[tos - 1];
                     let lhs = self.stack[tos - 2];
-                    let ret_val = crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.heap);
+                    let ret_val =
+                        crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, &self.heap);
                     if self.capture_nested_return(ret_val) {
                         return false;
                     }
@@ -3571,10 +3580,7 @@ impl<const S: usize> Machine<S> {
                             self.stack.push(Value::from(0i64));
                         }
                         crate::HostOp::Ordinary => {
-                            let native = self
-                                .natives
-                                .get_by_id(fn_id)
-                                .expect("id checked above");
+                            let native = self.natives.get_by_id(fn_id).expect("id checked above");
                             let args = &self.stack.top_window(consume)[1..];
                             let layout = crate::host_enum::HostEnumLayout::from_operand(
                                 opcode.operand_u32(),
@@ -3592,9 +3598,7 @@ impl<const S: usize> Machine<S> {
                                         if !self.resume_stack.is_empty() {
                                             // Inside a coroutine: register for batch
                                             // poll and yield (do not park the VM).
-                                            self.cooperative_io_await_yield(
-                                                &mut ip, &mut sp, req,
-                                            );
+                                            self.cooperative_io_await_yield(&mut ip, &mut sp, req);
                                         } else {
                                             self.frames.get_mut().set(sp);
                                             self.pending_io = Some(PendingIoWait {
@@ -3625,16 +3629,12 @@ impl<const S: usize> Machine<S> {
                     }
                 }
                 Instruction::HostInvokeNiche => {
-                    return self.runtime_panic(
-                        "retired opcode HostInvokeNiche",
-                        ip.saturating_sub(1),
-                    );
+                    return self
+                        .runtime_panic("retired opcode HostInvokeNiche", ip.saturating_sub(1));
                 }
                 Instruction::FloatChainStore => {
-                    return self.runtime_panic(
-                        "retired opcode FloatChainStore",
-                        ip.saturating_sub(1),
-                    );
+                    return self
+                        .runtime_panic("retired opcode FloatChainStore", ip.saturating_sub(1));
                 }
                 // Fused `BinSlotSlot <arith>; CONST pool; CmpJmpf/CmpJmpt`, no stack traffic.
                 Instruction::BinSlotSlotConstJmpf => {
@@ -3656,7 +3656,8 @@ impl<const S: usize> Machine<S> {
                     let va = self.stack[sp + a].as_float();
                     let vb = self.stack[sp + b].as_float();
                     let mag = crate::fused::eval_f64_bin(bin_op, va, vb);
-                    let rhs = Value::from(unsafe { *constants.get_unchecked(float_idx) }).as_float();
+                    let rhs =
+                        Value::from(unsafe { *constants.get_unchecked(float_idx) }).as_float();
                     let taken = crate::fused::eval_f64_cmp(cmp_op, mag, rhs);
                     if taken == matches!(*bc, Instruction::BinSlotSlotConstJmpt) {
                         set_jump_target(&mut ip, target, code);
@@ -3736,16 +3737,14 @@ impl<const S: usize> Machine<S> {
                     // Declaration order; keep args on stack through alloc for rooting.
                     let values = Self::stack_copy_decl(&self.stack, base, n);
                     let addr = if matches!(opcode.bytecode(), Instruction::MakeTuple) {
-                        let (object, _) = self.heap.alloc(
-                            ObjTuple { elements: values },
-                            Object::Tuple,
-                        );
+                        let (object, _) = self
+                            .heap
+                            .alloc(ObjTuple { elements: values }, Object::Tuple);
                         object.addr()
                     } else {
-                        let (object, _) = self.heap.alloc(
-                            ObjArray { elements: values },
-                            Object::Array,
-                        );
+                        let (object, _) = self
+                            .heap
+                            .alloc(ObjArray { elements: values }, Object::Array);
                         object.addr()
                     };
                     self.stack.seek(base);
@@ -3834,18 +3833,13 @@ impl<const S: usize> Machine<S> {
                     let key = Self::intern_key(&mut self.heap, name_val);
                     let target_addr = target_val.raw() as u64;
                     let result = match Self::find_object_by_addr(&self.heap, target_addr) {
-                        Some(crate::memory::Object::Instance(gc)) => {
-                            match gc.as_ref().get(key) {
-                                Some(crate::memory::Member::Value(v)) => v,
-                                Some(crate::memory::Member::Object(o)) => Value::from(o.addr()),
-                                None => {
-                                    return self.runtime_panic(
-                                        "no such field",
-                                        ip.saturating_sub(1),
-                                    );
-                                }
+                        Some(crate::memory::Object::Instance(gc)) => match gc.as_ref().get(key) {
+                            Some(crate::memory::Member::Value(v)) => v,
+                            Some(crate::memory::Member::Object(o)) => Value::from(o.addr()),
+                            None => {
+                                return self.runtime_panic("no such field", ip.saturating_sub(1));
                             }
-                        }
+                        },
                         _ => {
                             return self.runtime_panic("no such field", ip.saturating_sub(1));
                         }
@@ -3865,10 +3859,8 @@ impl<const S: usize> Machine<S> {
                             gc.as_mut()
                                 .set_slot(idx, Self::value_as_member(&self.heap, value));
                         } else {
-                            return self.runtime_panic(
-                                "SetField on non-instance",
-                                ip.saturating_sub(1),
-                            );
+                            return self
+                                .runtime_panic("SetField on non-instance", ip.saturating_sub(1));
                         }
                         self.stack.push(value);
                     } else {
@@ -3883,10 +3875,8 @@ impl<const S: usize> Machine<S> {
                             let member = Self::value_as_member(&self.heap, value);
                             gc.as_mut().set(key, member);
                         } else {
-                            return self.runtime_panic(
-                                "SetField on non-instance",
-                                ip.saturating_sub(1),
-                            );
+                            return self
+                                .runtime_panic("SetField on non-instance", ip.saturating_sub(1));
                         }
                         self.stack.push(value);
                     }
@@ -3903,14 +3893,10 @@ impl<const S: usize> Machine<S> {
                     {
                         let arr = gc.as_mut();
                         if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
-                            return self
-                                .runtime_panic("index out of bounds", ip.saturating_sub(1));
+                            return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
                         }
                     } else {
-                        return self.runtime_panic(
-                            "StoreIndex on non-array",
-                            ip.saturating_sub(1),
-                        );
+                        return self.runtime_panic("StoreIndex on non-array", ip.saturating_sub(1));
                     }
                     self.stack.push(value);
                 }
@@ -3922,14 +3908,11 @@ impl<const S: usize> Machine<S> {
                     if let Some(Object::Array(mut gc)) = self.pinned_object(slot) {
                         let arr = gc.as_mut();
                         if !Self::write_indexed(&mut arr.elements, index, value, unchecked) {
-                            return self
-                                .runtime_panic("index out of bounds", ip.saturating_sub(1));
+                            return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
                         }
                     } else {
-                        return self.runtime_panic(
-                            "StoreIndexPin on non-array",
-                            ip.saturating_sub(1),
-                        );
+                        return self
+                            .runtime_panic("StoreIndexPin on non-array", ip.saturating_sub(1));
                     }
                     self.stack.push(value);
                 }
@@ -3946,10 +3929,7 @@ impl<const S: usize> Machine<S> {
                     dispatch::dense_move(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::DenseUnary => {
-                    let (kind, dest, src) = opcode.dense_unary_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + src < stack_cap);
-                    self.stack[sp + dest] = crate::dense::eval_unary(kind, self.stack[sp + src]);
+                    dispatch::dense_unary(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::DenseCast => {
                     dispatch::dense_cast(&mut self.stack, sp, opcode, stack_cap);
@@ -3987,7 +3967,8 @@ impl<const S: usize> Machine<S> {
                         Value::from(0i64)
                     };
                     let z = [0u64; common::simd::LANES];
-                    let lhs = if splat || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64)
+                    let lhs = if splat
+                        || matches!(kind, common::simd::IOTA_I64 | common::simd::IOTA_F64)
                     {
                         &z
                     } else {
@@ -4021,8 +4002,7 @@ impl<const S: usize> Machine<S> {
                     promise!(vsrc < common::simd::NREGS);
                     promise!(sp + dest < stack_cap);
                     let acc = self.stack[sp + dest];
-                    self.stack[sp + dest] =
-                        crate::simd::eval_vreduce(ty, acc, &self.vregs[vsrc]);
+                    self.stack[sp + dest] = crate::simd::eval_vreduce(ty, acc, &self.vregs[vsrc]);
                 }
                 Instruction::VFma => {
                     let (ty, dest, a, b) = opcode.dense_abc_parts();
@@ -4038,67 +4018,46 @@ impl<const S: usize> Machine<S> {
                     self.vregs[dest] = out;
                 }
                 Instruction::DenseIndex => {
-                    let (flags, dest, arr, idx) = opcode.dense_abc_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + arr < stack_cap);
-                    promise!(sp + idx < stack_cap);
-                    let index = self.stack[sp + idx].as_int();
-                    let addr = self.stack[sp + arr].raw() as u64;
-                    let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
-                    let result = match self.resolve_dense_index_object(arr as u32, addr) {
-                        Some(crate::memory::Object::Array(gc)) => {
-                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
-                        }
-                        Some(crate::memory::Object::Tuple(gc)) => {
-                            Self::read_indexed(&gc.as_ref().elements, index, unchecked)
-                        }
-                        _ => None,
-                    };
-                    let Some(result) = result else {
+                    if dispatch::dense_index(
+                        &mut self.stack,
+                        sp,
+                        opcode,
+                        &self.heap,
+                        self.frames.len(),
+                        &mut self.frame_pins,
+                        &mut self.dense_obj_addr,
+                        &mut self.dense_obj,
+                        stack_cap,
+                    )
+                    .is_err()
+                    {
                         return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
-                    };
-                    self.stack[sp + dest] = result;
+                    }
                 }
                 Instruction::DenseStoreIndex => {
-                    let (flags, dest, arr, idx) = opcode.dense_abc_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + arr < stack_cap);
-                    promise!(sp + idx < stack_cap);
-                    let value = self.stack[sp + dest];
-                    let index = self.stack[sp + idx].as_int();
-                    let addr = self.stack[sp + arr].raw() as u64;
-                    let unchecked = flags & common::dense::HEAP_UNCHECKED != 0;
-                    if let Some(crate::memory::Object::Array(mut gc)) =
-                        self.resolve_dense_index_object(arr as u32, addr)
-                    {
-                        let elems = &mut gc.as_mut().elements;
-                        if !Self::write_indexed(elems, index, value, unchecked) {
-                            return self
-                                .runtime_panic("index out of bounds", ip.saturating_sub(1));
+                    match dispatch::dense_store_index(
+                        &mut self.stack,
+                        sp,
+                        opcode,
+                        &self.heap,
+                        self.frames.len(),
+                        &mut self.frame_pins,
+                        &mut self.dense_obj_addr,
+                        &mut self.dense_obj,
+                        stack_cap,
+                    ) {
+                        Ok(()) => {}
+                        Err(dispatch::DenseFail::IndexOob) => {
+                            return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
                         }
-                    } else {
-                        return self.runtime_panic(
-                            "StoreIndex on non-array",
-                            ip.saturating_sub(1),
-                        );
+                        Err(_) => {
+                            return self
+                                .runtime_panic("StoreIndex on non-array", ip.saturating_sub(1));
+                        }
                     }
                 }
                 Instruction::DenseArrayLen => {
-                    let (dest, arr) = opcode.dense_move_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + arr < stack_cap);
-                    let addr = self.stack[sp + arr].raw() as u64;
-                    let len = match Self::find_object_by_addr(&self.heap, addr) {
-                        Some(crate::memory::Object::Array(gc)) => gc.as_ref().elements.len(),
-                        Some(crate::memory::Object::Tuple(gc)) => gc.as_ref().elements.len(),
-                        Some(crate::memory::Object::String(gc)) => gc.as_ref().data.len(),
-                        Some(crate::memory::Object::Instance(gc)) => gc
-                            .as_ref()
-                            .slot_len()
-                            .unwrap_or_else(|| gc.as_ref().iter_fields().count()),
-                        _ => 0,
-                    };
-                    self.stack[sp + dest] = Value::from(len as i64);
+                    dispatch::dense_array_len(&mut self.stack, sp, opcode, &self.heap, stack_cap);
                 }
                 Instruction::DenseMake => {
                     let (kind, dest, arity, base) = opcode.dense_abc_parts();
@@ -4112,18 +4071,19 @@ impl<const S: usize> Machine<S> {
                     }
                     let values = Self::stack_copy_decl(&self.stack, sp + base, arity);
                     let addr = if kind == common::dense::MAKE_TUPLE {
-                        let (object, _) =
-                            self.heap.alloc(ObjTuple { elements: values }, Object::Tuple);
+                        let (object, _) = self
+                            .heap
+                            .alloc(ObjTuple { elements: values }, Object::Tuple);
                         object.addr()
                     } else if kind >= common::dense::MAKE_ENUM {
                         let tag = u32::from(kind - common::dense::MAKE_ENUM);
                         let payload = Self::dense_enum_payload(&self.heap, &values);
-                        let (object, _) =
-                            self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
+                        let (object, _) = self.heap.alloc(ObjEnum { tag, payload }, Object::Enum);
                         object.addr()
                     } else {
-                        let (object, _) =
-                            self.heap.alloc(ObjArray { elements: values }, Object::Array);
+                        let (object, _) = self
+                            .heap
+                            .alloc(ObjArray { elements: values }, Object::Array);
                         object.addr()
                     };
                     self.stack[sp + dest] = Value::from(addr);
@@ -4146,83 +4106,37 @@ impl<const S: usize> Machine<S> {
                     let target_val = self.stack[sp + arr];
                     let value = self.stack[sp + val];
                     if !self.array_push_value(target_val, value) {
-                        return self
-                            .runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
+                        return self.runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
                     }
                     self.stack[sp + dest] = target_val;
                     self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::DenseFieldLoad => {
-                    let (flags, dest, obj, c) = opcode.dense_abc_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + obj < stack_cap);
-                    let addr = self.stack[sp + obj].raw() as u64;
-                    let named = flags & common::dense::FIELD_NAMED != 0;
-                    let result = if named {
-                        promise!(sp + c < stack_cap);
-                        let key = Self::intern_key(&mut self.heap, self.stack[sp + c]);
-                        match Self::find_object_by_addr(&self.heap, addr) {
-                            Some(crate::memory::Object::Instance(gc)) => {
-                                gc.as_ref().get(key).map(Self::member_value)
-                            }
-                            _ => None,
-                        }
-                    } else {
-                        let field_index = c as usize;
-                        match Self::find_object_by_addr(&self.heap, addr) {
-                            Some(Object::Enum(enum_ref)) => {
-                                let enum_ref = enum_ref.as_ref();
-                                promise!(field_index < enum_ref.payload.len());
-                                Some(Self::member_value(unsafe {
-                                    *enum_ref.payload.get_unchecked(field_index)
-                                }))
-                            }
-                            Some(Object::Instance(gc)) => {
-                                if let Some(n) = gc.as_ref().slot_len() {
-                                    promise!(field_index < n);
-                                    Some(Self::member_value(
-                                        gc.as_ref()
-                                            .slot(field_index)
-                                            .unwrap_or(Member::Value(Value::default())),
-                                    ))
-                                } else {
-                                    Some(Value::default())
-                                }
-                            }
-                            _ => Some(Value::default()),
-                        }
-                    };
-                    let Some(result) = result else {
+                    if dispatch::dense_field_load(
+                        &mut self.stack,
+                        sp,
+                        opcode,
+                        &mut self.heap,
+                        stack_cap,
+                    )
+                    .is_err()
+                    {
                         return self.runtime_panic("no such field", ip.saturating_sub(1));
-                    };
-                    self.stack[sp + dest] = result;
+                    }
                 }
                 Instruction::DenseFieldStore => {
-                    let (flags, dest, obj, c) = opcode.dense_abc_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + obj < stack_cap);
-                    let value = self.stack[sp + dest];
-                    let addr = self.stack[sp + obj].raw() as u64;
-                    let named = flags & common::dense::FIELD_NAMED != 0;
-                    if let Some(crate::memory::Object::Instance(mut gc)) =
-                        Self::find_object_by_addr(&self.heap, addr)
-                    {
-                        if named {
-                            promise!(sp + c < stack_cap);
-                            let key = Self::intern_key(&mut self.heap, self.stack[sp + c]);
-                            gc.as_mut()
-                                .set(key, Self::value_as_member(&self.heap, value));
-                        } else {
-                            let idx = c as usize;
-                            promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
-                            gc.as_mut()
-                                .set_slot(idx, Self::value_as_member(&self.heap, value));
+                    match dispatch::dense_field_store(
+                        &mut self.stack,
+                        sp,
+                        opcode,
+                        &mut self.heap,
+                        stack_cap,
+                    ) {
+                        Ok(()) => {}
+                        Err(_) => {
+                            return self
+                                .runtime_panic("SetField on non-instance", ip.saturating_sub(1));
                         }
-                    } else {
-                        return self.runtime_panic(
-                            "SetField on non-instance",
-                            ip.saturating_sub(1),
-                        );
                     }
                 }
                 Instruction::DenseMakeObject => {
@@ -4246,8 +4160,7 @@ impl<const S: usize> Machine<S> {
                     let value = self.stack.pop();
                     let target_val = self.stack.pop();
                     if !self.array_push_value(target_val, value) {
-                        return self
-                            .runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
+                        return self.runtime_panic("ArrayPush on non-array", ip.saturating_sub(1));
                     }
                     self.stack.push(target_val);
                     self.maybe_gc_after_alloc(ip);
@@ -4474,14 +4387,11 @@ impl<const S: usize> Machine<S> {
                         Value::from(0_i64)
                     };
                     let addr = handle.raw() as u64;
-                    if let Some(Object::Coroutine(gc)) =
-                        Self::find_object_by_addr(&self.heap, addr)
+                    if let Some(Object::Coroutine(gc)) = Self::find_object_by_addr(&self.heap, addr)
                     {
                         if gc.as_ref().state == CoroState::Done {
-                            return self.runtime_panic(
-                                "resumed after completion",
-                                ip.saturating_sub(1),
-                            );
+                            return self
+                                .runtime_panic("resumed after completion", ip.saturating_sub(1));
                         } else if let Some(sub) = gc.as_ref().yield_from {
                             self.with_coroutine_mut(gc.as_ptr() as u64, |c| {
                                 c.pending_send = send_val;
@@ -5031,7 +4941,6 @@ impl<const S: usize> Drop for Machine<S> {
         self.run_remaining_finalizers();
     }
 }
-
 
 #[cfg(test)]
 #[path = "vm.tests.rs"]
