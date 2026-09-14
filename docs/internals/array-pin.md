@@ -93,10 +93,16 @@ helpers are not a barrier ([COI-99](https://linear.app/ardax/issue/COI-99)).
 
 ### Who consumes it
 
-Only the four `*Pin*` index/store opcodes. `Index` / `IndexUnchecked` /
-`StoreIndex` / `StoreIndexUnchecked` still call `Heap::find_object_by_addr`.
-So do `ArrayLen`, `ArrayPush`, `GetField`, `SetField`, and the `Vec` host
-natives in `machine/src/vec_ops.rs`.
+The four `*Pin*` index/store opcodes, and **`DenseIndex` / `DenseStoreIndex`**
+(COI-372). Dense native does not emit `ArrayPin`; the VM fills the same
+`frame_pins` table on the first index of an array register and reuses that
+`Object` while `stack[arr].addr` still matches. An identity change (register
+reuse) misses and re-probes.
+
+`Index` / `IndexUnchecked` / `StoreIndex` / `StoreIndexUnchecked` still call
+`Heap::find_object_by_addr`. So do `ArrayLen`, `ArrayPush`, `GetField`,
+`SetField`, `VLoad` / `VStore`, and the `Vec` host natives in
+`machine/src/vec_ops.rs`.
 
 ### Invalidation
 
@@ -104,9 +110,10 @@ There is no generation or pin-token opcode. A pin dies when:
 
 - the frame pops (`RETURN`, `pop_call_frame`, yield unwind) and that frame
   had a table;
-- `ArrayPin` overwrites the same slot;
+- `ArrayPin` overwrites the same slot (so does a dense index whose array
+  register already held a different identity);
 - coroutine yield drops tables for unwound frames. Pins are not saved across
-  yield; `ArrayPin` after resume allocates again.
+  yield; `ArrayPin` / the next `DenseIndex` after resume allocates again.
 
 `CALL` / `CallIndirect` / `call_function` do not push a pin table. The caller's
 table (if any) stays keyed by its frame depth and is still a GC root.
@@ -164,17 +171,18 @@ check, then header poison (`kind == 0` → miss). That is not a HashSet probe.
 | Unproven / dynamic `Index` / `StoreIndex` | `rewrite_array_pins` requires `index_at_proven` / `store_index_at_proven` (induction index + length-invariant array slot) |
 | `Index` outside a counted loop | No preheader pin |
 | `LEQ` / `GEQ` headers, growing arrays, impure calls, host, FFI, yield | Length proof refuses; Unchecked and pin both stay off |
+| First `DenseIndex` / `DenseStoreIndex` of a register identity | Lazy pin fill (COI-372); later hits skip the slab while the address matches |
 | `ArrayLen`, `ArrayPush`, `Vec` host natives | Different opcodes; not rewritten |
-| Tuple `Index` | `ArrayPin` only inserts `Object::Array` |
+| Tuple `Index` | `ArrayPin` only inserts `Object::Array` (dense index may pin a tuple on that path) |
 | `examples/perf/binary_trees.hy` | Recursive `Tree` alloc + `match`, not array `Index` |
 
 [#192](https://github.com/ardax-corp/coil-lang/pull/192) reported nsieve checked
 `Index` → 0 with dispatch count unchanged and poop wall / cycle deltas within
 noise; leftover on those sites was `find_object_by_addr` (then a HashSet
-probe; now slab + poison). Minor 13 pins those
-sites (`IndexPinUnchecked` / `StoreIndexPinUnchecked` / `ArrayPin` in nsieve
-bytecode). This note does not claim a cycle win for pins beyond that opcode
-swap — re-run `./scripts/poop_baseline.sh` if a number is needed.
+probe; now slab + poison). Minor 13 pins fuse-IL sites. MIR-specialized
+`nsieve` / `vec_scan` loops emit `DenseIndex` / `DenseStoreIndex`; COI-372
+caches `Object` in `frame_pins` from those opcodes (no new opcode, bytecode
+unchanged).
 
 ## What a future ArrayPtr would add
 
