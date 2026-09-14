@@ -45,12 +45,17 @@ type level). Runtime lowering:
    `LoadField` 0/1 and uses the same counted latch. Bare `for x in r` on
    a live-in param pair can DestProp-peel back onto entry slots.
 5. **Tuple** — temp array, then (1).
-6. **Dict / coro** — existing protocol. Stay fuse-IL until later rungs
-   (match / CALL / resume). **User `Iterator::next`** (C2b rung 2) keeps
+6. **Dict** — `DictEntries` then the array counted latch (1). Items are
+   `(string, V)` pairs (keys at `[0]`, values at `[1]`; that is the
+   entries surface). Homogeneous values only. User `into_iter` that
+   returns a dict uses the same path.
+7. **User `Iterator::next`** (C2b rung 2) keeps
    `into_iter` then `next` → `Option` (Q8 two-slot / niche match + B3
    CALL) when `IntoIter` is not a counted builtin. If `IntoIter` is
-   array / homogeneous tuple / numeric Range, `into_iter` then the
+   array / homogeneous tuple / numeric Range / dict, `into_iter` then the
    matching Q6 counted latch (no `Iterator` instance required).
+8. **Coro** — existing protocol. Stay fuse-IL until rung 4
+   (`ResumeCoro`).
 
 No new opcode. No env toggle. Keep/refuse is checksum + cost gate.
 Counted const `for` / range with an associative int reduce may also
@@ -78,6 +83,8 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
   Option tag JMP + CALL (dense when cost ≤ fuse; C2b rung 2).
 - `examples/perf/for_in_iter_range.hy` — `into_iter` → `Range<int>` helper
   is the same dense counted i64 (C2b rung 2).
+- `examples/perf/for_in_dict.hy` — dict for-in helper is `DictEntries`
+  plus counted Index / `DenseBin` when cost ≤ fuse (C2b rung 3).
 
 Flagships do not need this island.
 
@@ -93,6 +100,7 @@ Ranked as **B5** in [opt-generalization.md](opt-generalization.md) B0
   `STRING` / `MakeDict` in the helper). Escaped fn values and method
   `self` still box. **C2b rung 2** lands user `Iterator::next` on MIR
   (Q8 dense+match or LIR + CALL) and counted `into_iter` when `IntoIter`
-  is array / tuple / numeric Range. Dict / coro for-in stay refuse
-  (rungs 3–4).
-- Coro / dict for-in
+  is array / tuple / numeric Range. **C2b rung 3** maps `DictEntries` /
+  `MakeDict` so dict for-in (keys/values via entry pairs) may dense or
+  LIR. Coro for-in stays refuse (rung 4).
+- Coro for-in

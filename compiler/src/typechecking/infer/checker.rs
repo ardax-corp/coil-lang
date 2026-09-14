@@ -15590,8 +15590,8 @@ impl Checker {
         }
     }
 
-    /// Array / tuple / numeric Range `IntoIter` can reuse Q6 counted
-    /// desugar after `into_iter`. Dict and coro stay off this path.
+    /// Array / tuple / numeric Range / dict `IntoIter` can reuse Q6
+    /// counted desugar after `into_iter`. Coro stays off this path.
     fn counted_into_iter_kind(
         &mut self,
         into_iter_ty: &Ty,
@@ -15602,7 +15602,8 @@ impl Checker {
             ForInKind::Array => ForInCounted::Array,
             ForInKind::Tuple { arity } => ForInCounted::Tuple { arity },
             ForInKind::Range { inclusive, float } => ForInCounted::Range { inclusive, float },
-            ForInKind::Dict | ForInKind::Coroutine | ForInKind::Custom { .. } => return None,
+            ForInKind::Dict => ForInCounted::Dict,
+            ForInKind::Coroutine | ForInKind::Custom { .. } => return None,
         };
         Some((item, counted))
     }

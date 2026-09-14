@@ -410,6 +410,10 @@ pub enum MirAllocKind {
     Enum {
         tag: u32,
     },
+    /// `MakeDict` — elems are interleaved value/name words (2 per field).
+    Dict,
+    /// `DictEntries`: dict heapref → array of `(string, V)` pairs (C2b).
+    DictEntries,
 }
 
 impl MirAllocKind {
@@ -419,6 +423,8 @@ impl MirAllocKind {
             Self::Tuple => "tuple",
             Self::Object { .. } => "object",
             Self::Enum { .. } => "enum",
+            Self::Dict => "dict",
+            Self::DictEntries => "dictentries",
         }
     }
 }

@@ -1830,6 +1830,7 @@ fn dense_make_kind(kind: MirAllocKind) -> Result<Option<u8>, LowerError> {
             Ok(Some(packed as u8))
         }
         MirAllocKind::Object { .. } => Ok(None),
+        MirAllocKind::Dict | MirAllocKind::DictEntries => Ok(None),
     }
 }
 
@@ -1912,6 +1913,13 @@ pub(super) fn il_for_alloc(
             Byte::new(Instruction::InitTyped)
                 .with_operand_u32(common::pack_init_typed(type_id, nfields)),
         )),
+        MirAllocKind::Dict => {
+            let fields = arity / 2;
+            Ok(IlOp::byte(
+                Byte::new(Instruction::MakeDict).with_operand_u32(fields),
+            ))
+        }
+        MirAllocKind::DictEntries => Ok(IlOp::byte(Byte::new(Instruction::DictEntries))),
     }
 }
 

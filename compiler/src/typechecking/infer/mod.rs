@@ -87,13 +87,15 @@ pub enum ForInKind {
     },
 }
 
-/// Counted `IntoIter` shapes for user `into_iter` (C2b rung 2).
-/// Dict / coro stay on `Iterator::next` or refuse — not this desugar.
+/// Counted `IntoIter` shapes for user `into_iter` (C2b).
+/// Coro stays on `Iterator::next` or refuse — not this desugar.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForInCounted {
     Array,
     Tuple { arity: usize },
     Range { inclusive: bool, float: bool },
+    /// `DictEntries` then the array latch (C2b rung 3).
+    Dict,
 }
 
 /// Side-table entry for for-in codegen, keyed by the Loop node id.

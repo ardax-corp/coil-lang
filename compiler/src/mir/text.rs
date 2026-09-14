@@ -243,10 +243,21 @@ fn write_inst(f: &mut std::fmt::Formatter<'_>, func: &MirFunc, inst: &MirInst) -
                     write!(f, " {type_id}, {nfields}")?;
                 }
                 MirAllocKind::Enum { tag } => write!(f, " {tag}")?,
-                MirAllocKind::Array | MirAllocKind::Tuple => {}
+                MirAllocKind::Array
+                | MirAllocKind::Tuple
+                | MirAllocKind::Dict
+                | MirAllocKind::DictEntries => {}
             }
             for (i, e) in elems.iter().enumerate() {
-                if i == 0 && matches!(kind, MirAllocKind::Array | MirAllocKind::Tuple) {
+                if i == 0
+                    && matches!(
+                        kind,
+                        MirAllocKind::Array
+                            | MirAllocKind::Tuple
+                            | MirAllocKind::Dict
+                            | MirAllocKind::DictEntries
+                    )
+                {
                     write!(f, " {e}")?;
                 } else {
                     write!(f, ", {e}")?;
@@ -739,6 +750,8 @@ impl<'a> Parser<'a> {
                 "enum" => MirAllocKind::Enum {
                     tag: self.uint()? as u32,
                 },
+                "dict" => MirAllocKind::Dict,
+                "dictentries" => MirAllocKind::DictEntries,
                 _ => return Err(ParseError(format!("unknown alloc {kind_s}"))),
             };
             let mut elems = Vec::new();

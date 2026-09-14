@@ -77,6 +77,14 @@ pub fn refuse_reason(op: &IlOp) -> Option<&'static str> {
         {
             Some("heap/format")
         }
+        IlOp::Byte { byte, .. }
+            if matches!(
+                *byte.bytecode(),
+                Instruction::DictEntries | Instruction::MakeDict
+            ) =>
+        {
+            Some("heap/dict")
+        }
         _ => None,
     }
 }
@@ -388,6 +396,16 @@ mod tests {
         assert_eq!(
             refuse_reason(&IlOp::byte(Byte::new(Instruction::STRINGIFY))),
             Some("heap/format")
+        );
+        assert_eq!(
+            refuse_reason(&IlOp::byte(Byte::new(Instruction::DictEntries))),
+            Some("heap/dict")
+        );
+        assert_eq!(
+            refuse_reason(&IlOp::byte(
+                Byte::new(Instruction::MakeDict).with_operand_u32(1)
+            )),
+            Some("heap/dict")
         );
     }
 

@@ -167,6 +167,8 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
             | Instruction::DenseArrayPush
             | Instruction::FORMAT
             | Instruction::STRINGIFY
+            | Instruction::DictEntries
+            | Instruction::MakeDict
     )
 }
 
