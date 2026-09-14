@@ -2,13 +2,13 @@
 //!
 //! Preserves `//` comments and emits attached `///` docs on declarations.
 
-use chumsky::span::SimpleSpan;
 use crate::ast::{
-    AdjustOp, AssignOp, Attribute, EnumConstructPayload, EnumVariantPayload, ExternFunction,
-    ExternStructDecl, Expression, FieldModifier, LetPattern, Output, Pattern, RecordFieldDecl,
+    AdjustOp, AssignOp, Attribute, EnumConstructPayload, EnumVariantPayload, Expression,
+    ExternFunction, ExternStructDecl, FieldModifier, LetPattern, Output, Pattern, RecordFieldDecl,
     RecordFieldValue, TypeParam, Visibility, WhereConstraint,
 };
 use crate::Pratt;
+use chumsky::span::SimpleSpan;
 use reporting::Message;
 
 const INDENT: &str = "    ";
@@ -518,7 +518,9 @@ impl Formatter {
                 }
                 self.push_str("]");
             }
-            Expression::Access(_, _) | Expression::OptionalAccess(_, _) | Expression::Call { .. } => {
+            Expression::Access(_, _)
+            | Expression::OptionalAccess(_, _)
+            | Expression::Call { .. } => {
                 if let Some(parts) = collect_member_chain(expr) {
                     self.fmt_member_chain(&parts);
                 } else {
@@ -661,6 +663,7 @@ impl Formatter {
 
             Expression::Loop {
                 identifier,
+                pattern,
                 iterable,
                 body,
             } => {
@@ -671,12 +674,55 @@ impl Formatter {
                     self.fmt_output(iterable);
                     self.push_str(" ");
                     self.fmt_block_or_inline(body);
+                } else if let Some(pat) = pattern {
+                    self.push_str("for ");
+                    self.fmt_let_pattern(pat);
+                    self.push_str(" in ");
+                    self.fmt_output(iterable);
+                    self.push_str(" ");
+                    self.fmt_block_or_inline(body);
                 } else {
                     self.push_str("while ");
                     self.fmt_output(iterable);
                     self.push_str(" ");
                     self.fmt_block_or_inline(body);
                 }
+            }
+
+            Expression::IfLet {
+                scrutinee,
+                then_arm,
+                else_arm,
+            } => {
+                self.push_str("if let ");
+                self.fmt_pattern(&then_arm.pattern);
+                self.push_str(" = ");
+                self.fmt_output(scrutinee);
+                self.push_str(" ");
+                self.fmt_block_or_inline(&then_arm.body);
+                if !matches!(else_arm.body.1.as_ref(), Expression::Block(items) if items.is_empty())
+                {
+                    self.push_str(" else ");
+                    match else_arm.body.1.as_ref() {
+                        Expression::IfLet { .. } | Expression::If(_) => {
+                            self.fmt_output(&else_arm.body);
+                        }
+                        _ => self.fmt_block_or_inline(&else_arm.body),
+                    }
+                }
+            }
+
+            Expression::WhileLet {
+                scrutinee,
+                then_arm,
+                ..
+            } => {
+                self.push_str("while let ");
+                self.fmt_pattern(&then_arm.pattern);
+                self.push_str(" = ");
+                self.fmt_output(scrutinee);
+                self.push_str(" ");
+                self.fmt_block_or_inline(&then_arm.body);
             }
 
             Expression::Match { scrutinee, arms } => {
@@ -1102,9 +1148,9 @@ impl Formatter {
         let Some((first_path, _, _)) = use_parts(items[0].1.as_ref()) else {
             return;
         };
-        let same_namespace = items.iter().all(|item| {
-            use_parts(item.1.as_ref()).is_some_and(|(path, _, _)| path == first_path)
-        });
+        let same_namespace = items
+            .iter()
+            .all(|item| use_parts(item.1.as_ref()).is_some_and(|(path, _, _)| path == first_path));
         let root_len = if same_namespace { first_path.len() } else { 1 };
         let root = &first_path[..root_len];
 
@@ -1831,13 +1877,13 @@ fn can_group_uses(items: &[Output<'_>]) -> bool {
     if first_path.is_empty() {
         return false;
     }
-    let same_namespace = items.iter().all(|item| {
-        use_parts(item.1.as_ref()).is_some_and(|(path, _, _)| path == first_path)
-    });
+    let same_namespace = items
+        .iter()
+        .all(|item| use_parts(item.1.as_ref()).is_some_and(|(path, _, _)| path == first_path));
     same_namespace
-        || items.iter().all(|item| {
-            use_parts(item.1.as_ref()).is_some_and(|(path, _, _)| path.len() + 1 > 3)
-        })
+        || items
+            .iter()
+            .all(|item| use_parts(item.1.as_ref()).is_some_and(|(path, _, _)| path.len() + 1 > 3))
 }
 
 fn is_bare_return(expr: &Expression<'_>) -> bool {
@@ -1855,7 +1901,9 @@ fn stmt_needs_semicolon(expr: &Expression<'_>) -> bool {
         Expression::ExprStatement(_)
             | Expression::If(_)
             | Expression::Block(_)
-            |             Expression::Loop { .. }
+            | Expression::Loop { .. }
+            | Expression::IfLet { .. }
+            | Expression::WhileLet { .. }
             | Expression::Defer { .. }
     )
 }
@@ -1973,7 +2021,9 @@ mod tests {
         assert!(formatted.contains("use io::{stdout, open};"));
         assert!(formatted.contains("};\n\nfn main"));
         assert!(!formatted.contains("stdout;\n\nuse"));
-        Pratt::default().parse(&formatted).expect("grouped use parses");
+        Pratt::default()
+            .parse(&formatted)
+            .expect("grouped use parses");
     }
 
     #[test]
@@ -2017,13 +2067,17 @@ mod tests {
         let deep = "use a::b::c::one;\nuse a::b::d::two;\nfn main() { return; }\n";
         let formatted = format_source(deep).unwrap();
         assert!(formatted.contains("use a::{b::c::one, b::d::two};"));
-        Pratt::default().parse(&formatted).expect("deep grouped use parses");
+        Pratt::default()
+            .parse(&formatted)
+            .expect("deep grouped use parses");
 
         let shallow = "use a::b::one;\nuse a::c::two;\nfn main() { return; }\n";
         let formatted = format_source(shallow).unwrap();
         assert!(!formatted.contains("use a::{"));
         assert!(formatted.contains("use a::b::one;\nuse a::c::two;"));
-        Pratt::default().parse(&formatted).expect("shallow use parses");
+        Pratt::default()
+            .parse(&formatted)
+            .expect("shallow use parses");
     }
 
     #[test]
@@ -2059,10 +2113,7 @@ mod tests {
             "enum E { Foo { x: int, y: int } }\nfn main() { E::Foo { x: 1, x: 2 }; }\n",
         )
         .expect_err("duplicate construct fields must not format");
-        assert_eq!(
-            construct.code(),
-            Some(reporting::ErrorCode::DuplicateField)
-        );
+        assert_eq!(construct.code(), Some(reporting::ErrorCode::DuplicateField));
         assert!(
             construct.message().contains("Duplicate field `x`"),
             "got {}",
@@ -2071,10 +2122,7 @@ mod tests {
 
         let enum_decl = format_source("enum E { Foo { x: int, x: int } }\n")
             .expect_err("duplicate enum field decls must not format");
-        assert_eq!(
-            enum_decl.code(),
-            Some(reporting::ErrorCode::DuplicateField)
-        );
+        assert_eq!(enum_decl.code(), Some(reporting::ErrorCode::DuplicateField));
         assert!(
             enum_decl.message().contains("Duplicate field `x`"),
             "got {}",

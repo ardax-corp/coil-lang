@@ -16,12 +16,11 @@ use std::{
 
 pub use chumsky::span::SimpleSpan;
 use chumsky::{
-    IterParser, Parser,
     error::{Rich, RichReason},
     extra,
     pratt::{infix, left, none, postfix, prefix, right},
     prelude::{any, choice, empty, just, none_of, recursive},
-    text,
+    text, IterParser, Parser,
 };
 use reporting::{ErrorCode, Label, Message};
 
@@ -97,8 +96,7 @@ fn duplicate_field_error<'src>(
     names: impl IntoIterator<Item = &'src str>,
     span: SimpleSpan,
 ) -> Option<Rich<'src, char>> {
-    first_duplicate_name(names)
-        .map(|name| Rich::custom(span, format!("Duplicate field `{name}`")))
+    first_duplicate_name(names).map(|name| Rich::custom(span, format!("Duplicate field `{name}`")))
 }
 
 fn is_duplicate_field_parse_error(err: &Rich<'_, char>) -> bool {
@@ -157,12 +155,9 @@ impl<'pratt> Pratt<'pratt> {
         &self,
     ) -> impl Parser<'pratt, &'pratt str, &'pratt str, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        choice((
-            just('\\').then(any()).ignored(),
-            none_of('"').ignored(),
-        ))
-        .repeated()
-        .to_slice()
+        choice((just('\\').then(any()).ignored(), none_of('"').ignored()))
+            .repeated()
+            .to_slice()
     }
 
     fn string(
@@ -214,24 +209,19 @@ impl<'pratt> Pratt<'pratt> {
             .clone()
             .then(
                 op!(";")
-                    .ignore_then(
-                        choice((
-                            text::int(10)
-                                .to_slice()
-                                .from_str::<i64>()
-                                .validate(|v: Result<i64, _>, _, _| v.unwrap_or(0))
-                                .map_with(|n, e| (e.span(), Box::new(Expression::Integer(n)))),
-                            text::ident().padded().map_with(output!(Type)),
-                        )),
-                    )
+                    .ignore_then(choice((
+                        text::int(10)
+                            .to_slice()
+                            .from_str::<i64>()
+                            .validate(|v: Result<i64, _>, _, _| v.unwrap_or(0))
+                            .map_with(|n, e| (e.span(), Box::new(Expression::Integer(n)))),
+                        text::ident().padded().map_with(output!(Type)),
+                    )))
                     .or_not(),
             )
             .delimited_by(op!('['), op!(']'))
             .map_with(|(elem, n_opt), e| match n_opt {
-                Some(n) => (
-                    e.span(),
-                    Box::new(Expression::Array(vec![elem, n])),
-                ),
+                Some(n) => (e.span(), Box::new(Expression::Array(vec![elem, n]))),
                 None => (e.span(), Box::new(Expression::Array(vec![elem]))),
             });
         let tuple_type = self.tuple_atom(type_ann.clone());
@@ -332,8 +322,8 @@ impl<'pratt> Pratt<'pratt> {
     fn single_type_param(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, TypeParam<'pratt>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         use crate::ast::Kind;
 
         let kind_ann = recursive(|kind| {
@@ -377,8 +367,8 @@ impl<'pratt> Pratt<'pratt> {
     fn type_param_list(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Vec<TypeParam<'pratt>>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         self.single_type_param()
             .separated_by(op!(","))
             .allow_trailing()
@@ -684,9 +674,7 @@ impl<'pratt> Pratt<'pratt> {
                 ),
                 postfix(
                     Precedence::Primary as u16,
-                    expr.clone()
-                        .map(Some)
-                        .delimited_by(op!('['), op!(']')),
+                    expr.clone().map(Some).delimited_by(op!('['), op!(']')),
                     |lhs, index, e| (e.span(), Box::new(Expression::Index(lhs, index))),
                 ),
                 postfix(
@@ -791,10 +779,12 @@ impl<'pratt> Pratt<'pratt> {
             });
         let rest_arg = self
             .docs_prefix()
-            .then(ty_parser
-            .clone()
-            .then_ignore(just("...").padded())
-            .then(text::ident().padded()))
+            .then(
+                ty_parser
+                    .clone()
+                    .then_ignore(just("...").padded())
+                    .then(text::ident().padded()),
+            )
             .map_with(|(docs, (ty, name)), e| {
                 (
                     e.span(),
@@ -808,9 +798,7 @@ impl<'pratt> Pratt<'pratt> {
             });
         let fixed_arg = self
             .docs_prefix()
-            .then(ty_parser
-            .clone()
-            .then(text::ident().padded()))
+            .then(ty_parser.clone().then(text::ident().padded()))
             .map_with(|(docs, (ty, name)), e| {
                 (
                     e.span(),
@@ -935,13 +923,9 @@ impl<'pratt> Pratt<'pratt> {
     /// Parse one `where` constraint: `Convert<A, B>` or unary `Num<T>`.
     fn where_constraint(
         &self,
-    ) -> impl Parser<
-        'pratt,
-        &'pratt str,
-        ast::WhereConstraint<'pratt>,
-        extra::Err<Rich<'pratt, char>>,
-    > + Clone
-    + 'pratt {
+    ) -> impl Parser<'pratt, &'pratt str, ast::WhereConstraint<'pratt>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt {
         text::ident()
             .padded()
             .then(
@@ -963,7 +947,7 @@ impl<'pratt> Pratt<'pratt> {
         Vec<ast::WhereConstraint<'pratt>>,
         extra::Err<Rich<'pratt, char>>,
     > + Clone
-    + 'pratt {
+           + 'pratt {
         keyword!("where")
             .ignore_then(
                 self.where_constraint()
@@ -1196,33 +1180,54 @@ impl<'pratt> Pratt<'pratt> {
         expr: E,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        keyword!("while")
-            .ignore_then(expr)
-            .then(self.block(stmt))
-            .map_with(|(iterable, body), e| {
-                (
-                    e.span(),
-                    Box::new(Expression::Loop {
-                        identifier: None,
-                        iterable,
-                        body,
-                    }),
-                )
-            })
+        choice((
+            keyword!("while")
+                .ignore_then(keyword!("let"))
+                .ignore_then(self.pattern())
+                .then_ignore(op!("="))
+                .then(expr.clone())
+                .then(self.block(stmt.clone()))
+                .map_with(|((pattern, scrutinee), body), e| {
+                    let on_miss = MatchArm {
+                        pattern: (e.span(), Pattern::Default),
+                        body: (e.span(), Box::new(Expression::Break)),
+                    };
+                    (
+                        e.span(),
+                        Box::new(Expression::WhileLet {
+                            scrutinee,
+                            then_arm: MatchArm { pattern, body },
+                            on_miss,
+                        }),
+                    )
+                }),
+            keyword!("while")
+                .ignore_then(expr)
+                .then(self.block(stmt))
+                .map_with(|(iterable, body), e| {
+                    (
+                        e.span(),
+                        Box::new(Expression::Loop {
+                            identifier: None,
+                            pattern: None,
+                            iterable,
+                            body,
+                        }),
+                    )
+                }),
+        ))
     }
 
     fn c_style_for_removed(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        keyword!("for")
-            .ignore_then(op!("("))
-            .try_map(|_, span| {
-                Err::<Output<'pratt>, _>(Rich::custom(
-                    span,
-                    "C-style `for` loops were removed; use `while` or `for x in`",
-                ))
-            })
+        keyword!("for").ignore_then(op!("(")).try_map(|_, span| {
+            Err::<Output<'pratt>, _>(Rich::custom(
+                span,
+                "C-style `for` loops were removed; use `while` or `for x in`",
+            ))
+        })
     }
 
     fn for_<
@@ -1238,17 +1243,30 @@ impl<'pratt> Pratt<'pratt> {
         expr: E,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        // For-in: `for x in expr { body }` → Loop { identifier: Some(x), … }
+        // For-in: `for x in expr` (ident node, flagship-stable) or
+        // `for (k, v) in expr` / `for _` / `for { … }` via LetPattern.
+        // Tried before `c_style_for_removed` so `for (` is a tuple pattern.
+        let ident_bind = text::ident()
+            .padded()
+            .map_with(output!(Identifier))
+            .map(|identifier| (Some(identifier), None));
+        let pattern_bind = choice((
+            just("_").padded().to(LetPattern::Wildcard),
+            self.let_tuple_pattern(),
+            self.let_record_pattern(),
+        ))
+        .map(|pattern| (None, Some(pattern)));
         keyword!("for")
-            .ignore_then(text::ident().padded().map_with(output!(Identifier)))
+            .ignore_then(choice((pattern_bind, ident_bind)))
             .then_ignore(keyword!("in"))
             .then(expr)
             .then(self.block(stmt))
-            .map_with(|((identifier, iterable), body), e| {
+            .map_with(|(((identifier, pattern), iterable), body), e| {
                 (
                     e.span(),
                     Box::new(Expression::Loop {
-                        identifier: Some(identifier),
+                        identifier,
+                        pattern,
                         iterable,
                         body,
                     }),
@@ -1269,36 +1287,54 @@ impl<'pratt> Pratt<'pratt> {
         expr: E,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        // `recursive` enables `else if` to call back into this parser.
+        // `recursive` enables `else if` / `else if let` to call back.
         recursive(|if_parser| {
-            keyword!("if")
+            let else_tail = keyword!("else")
+                .ignore_then(choice((
+                    self.block(stmt.clone()).labelled("block `{ ... }`"),
+                    if_parser.clone(),
+                )))
+                .or_not();
+
+            let if_let = keyword!("if")
+                .ignore_then(keyword!("let"))
+                .ignore_then(self.pattern())
+                .then_ignore(op!("="))
+                .then(expr.clone().labelled("condition"))
+                .then(self.block(stmt.clone()).labelled("block `{ ... }`"))
+                .then(else_tail.clone())
+                .map_with(|(((pattern, scrutinee), then_body), else_clause), e| {
+                    let else_body = else_clause
+                        .unwrap_or_else(|| (e.span(), Box::new(Expression::Block(Vec::new()))));
+                    (
+                        e.span(),
+                        Box::new(Expression::IfLet {
+                            scrutinee,
+                            then_arm: MatchArm {
+                                pattern,
+                                body: then_body,
+                            },
+                            else_arm: MatchArm {
+                                pattern: (e.span(), Pattern::Default),
+                                body: else_body,
+                            },
+                        }),
+                    )
+                });
+
+            let if_bool = keyword!("if")
                 .ignore_then(expr.clone().labelled("condition"))
                 .then(self.block(stmt.clone()).labelled("block `{ ... }`"))
-                .then(
-                    keyword!("else")
-                        .ignore_then(choice((
-                            // `else { body }` — a Block.
-                            self.block(stmt.clone()).labelled("block `{ ... }`"),
-                            // `else if ...` — recurse into the if-parser.
-                            if_parser,
-                        )))
-                        .or_not(),
-                )
+                .then(else_tail)
                 .map_with(|((cond, body), else_clause), e| {
                     let then_branch: Output =
                         (e.span(), Box::new(Expression::Branch(Some(cond), body)));
                     let mut branches: Vec<Output> = vec![then_branch];
                     if let Some(else_output) = else_clause {
                         match else_output.1.as_ref() {
-                            // `else if c2 {b2} [else {b3} ...]` — the
-                            // inner `if_parser` returned a fully-
-                            // formed If whose branches we flatten
-                            // into ours.
                             Expression::If(more_branches) => {
                                 branches.extend(more_branches.iter().cloned());
                             }
-                            // `else { body }` — a Block. Wrap as the
-                            // terminal Branch(None, body).
                             _ => {
                                 branches.push((
                                     e.span(),
@@ -1308,7 +1344,9 @@ impl<'pratt> Pratt<'pratt> {
                         }
                     }
                     (e.span(), Box::new(Expression::If(branches)))
-                })
+                });
+
+            choice((if_let, if_bool))
         })
     }
 
@@ -1421,8 +1459,9 @@ impl<'pratt> Pratt<'pratt> {
     /// Zero or more leading `///` lines before a declaration.
     fn docs_prefix(
         &self,
-    ) -> impl Parser<'pratt, &'pratt str, Vec<&'pratt str>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
+    ) -> impl Parser<'pratt, &'pratt str, Vec<&'pratt str>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt {
         self.doc_comment_line().repeated().collect()
     }
 
@@ -1452,8 +1491,7 @@ impl<'pratt> Pratt<'pratt> {
         expr: T,
     ) -> impl Parser<'pratt, &'pratt str, Output<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
     {
-        expr.then_ignore(op!(';'))
-            .map_with(output!(ExprStatement))
+        expr.then_ignore(op!(';')).map_with(output!(ExprStatement))
     }
 
     fn break_(
@@ -1494,8 +1532,8 @@ impl<'pratt> Pratt<'pratt> {
             choice((
                 self.break_(),
                 self.continue_(),
-                self.c_style_for_removed(),
                 self.for_(stmt.clone(), expr.clone()),
+                self.c_style_for_removed(),
                 self.while_(stmt.clone(), expr.clone()),
                 self.if_(stmt.clone(), expr.clone()),
                 self.block(stmt.clone()),
@@ -1796,8 +1834,8 @@ impl<'pratt> Pratt<'pratt> {
     fn extern_arg_list(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, (Output<'pratt>, bool), extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         #[derive(Clone)]
         enum ExternArg<'a> {
             Fixed(Output<'a>),
@@ -1936,8 +1974,8 @@ impl<'pratt> Pratt<'pratt> {
     fn attr_list(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, Vec<Attribute<'pratt>>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         let attr_float = text::int(10)
             .then(just('.').then(text::int(10)))
             .to_slice()
@@ -2378,10 +2416,7 @@ impl<'pratt> Pratt<'pratt> {
             .then(keyword!("pub").or_not())
             .then(self.func_after_docs(stmt))
             .map_with(|(((docs, attrs_before), vis), mut func), e| {
-                if let Expression::Function {
-                    docs: d, attrs, ..
-                } = func.1.as_mut()
-                {
+                if let Expression::Function { docs: d, attrs, .. } = func.1.as_mut() {
                     *d = docs;
                     if !attrs_before.is_empty() {
                         attrs.splice(0..0, attrs_before);
@@ -2464,16 +2499,16 @@ impl<'pratt> Pratt<'pratt> {
     fn let_destructure_lhs(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, LetPattern<'pratt>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         choice((self.let_tuple_pattern(), self.let_record_pattern()))
     }
 
     fn let_tuple_pattern(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, LetPattern<'pratt>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         let inner = self.let_pattern();
         // Require a comma (or trailing comma) so `(a)` is not a
         // 1-tuple — same rule as tuple literals.
@@ -2494,8 +2529,8 @@ impl<'pratt> Pratt<'pratt> {
     fn let_record_pattern(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, LetPattern<'pratt>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         let field = text::ident()
             .padded()
             .then(op!(":").ignore_then(self.let_pattern()).or_not())
@@ -2520,8 +2555,8 @@ impl<'pratt> Pratt<'pratt> {
     fn let_pattern(
         &self,
     ) -> impl Parser<'pratt, &'pratt str, LetPattern<'pratt>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         recursive(|pattern_parser| {
             let record_field = text::ident()
                 .padded()
@@ -2597,13 +2632,9 @@ impl<'pratt> Pratt<'pratt> {
     >(
         &self,
         expr: T,
-    ) -> impl Parser<
-        'pratt,
-        &'pratt str,
-        Option<Vec<Output<'pratt>>>,
-        extra::Err<Rich<'pratt, char>>,
-    > + Clone
-    + 'pratt {
+    ) -> impl Parser<'pratt, &'pratt str, Option<Vec<Output<'pratt>>>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt {
         // Named call-site arg: `ident : expr` → `NamedArg`. Tried before
         // bare `expr` so `f(a: 1)` does not parse as a labelled type /
         // weird binary form. Positional `expr` still wins when there is
@@ -2893,8 +2924,8 @@ impl<'pratt> Pratt<'pratt> {
         expr: E,
         stmt: S,
     ) -> impl Parser<'pratt, &'pratt str, MatchArm<'pratt>, extra::Err<Rich<'pratt, char>>>
-    + Clone
-    + 'pratt {
+           + Clone
+           + 'pratt {
         // Use only handles built inside the surrounding `recursive(|expr| …)`.
         let brace_body = self.brace_body(stmt, expr.clone());
 
@@ -2907,8 +2938,9 @@ impl<'pratt> Pratt<'pratt> {
     /// A match-arm pattern: wildcard, binding, or qualified constructor (tuple or record payload).
     fn pattern(
         &self,
-    ) -> impl Parser<'pratt, &'pratt str, PatternOutput<'pratt>, extra::Err<Rich<'pratt, char>>> + Clone + 'pratt
-    {
+    ) -> impl Parser<'pratt, &'pratt str, PatternOutput<'pratt>, extra::Err<Rich<'pratt, char>>>
+           + Clone
+           + 'pratt {
         recursive(|pattern_parser| {
             let record_pattern_field = text::ident()
                 .padded()
@@ -2969,18 +3001,16 @@ impl<'pratt> Pratt<'pratt> {
                 .then_ignore(just("::").padded())
                 .then(text::ident().padded())
                 .then(payload_choice)
-                .map_with(
-                    |((enum_name, variant_name), payload), e| {
-                        (
-                            e.span(),
-                            Pattern::Constructor {
-                                enum_name,
-                                variant_name,
-                                payload,
-                            },
-                        )
-                    },
-                );
+                .map_with(|((enum_name, variant_name), payload), e| {
+                    (
+                        e.span(),
+                        Pattern::Constructor {
+                            enum_name,
+                            variant_name,
+                            payload,
+                        },
+                    )
+                });
 
             choice((
                 just("_")
@@ -3094,12 +3124,7 @@ impl<'pratt> Pratt<'pratt> {
         let scalar_lit = choice((
             op!("-")
                 .ignore_then(self.int())
-                .map_with(|inner, e| {
-                    (
-                        e.span(),
-                        Box::new(Expression::Negate(inner)),
-                    )
-                }),
+                .map_with(|inner, e| (e.span(), Box::new(Expression::Negate(inner)))),
             self.float(),
             self.int(),
             self.string(),
@@ -3107,18 +3132,14 @@ impl<'pratt> Pratt<'pratt> {
             keyword!("false").map_with(|_, e| (e.span(), Box::new(Expression::Bool(false)))),
         ));
 
-        let discriminant = op!("=")
-            .ignore_then(scalar_lit)
-            .or_not();
+        let discriminant = op!("=").ignore_then(scalar_lit).or_not();
 
         self.docs_prefix()
             .then(text::ident().padded())
             .then(payload_choice)
             .then(discriminant)
             .validate(|(((docs, name), payload), discriminant), e, emitter| {
-                if discriminant.is_some()
-                    && !matches!(payload, EnumVariantPayload::Unit)
-                {
+                if discriminant.is_some() && !matches!(payload, EnumVariantPayload::Unit) {
                     emitter.emit(Rich::custom(
                         e.span(),
                         "scalar discriminant `=` cannot mix with a tuple or record payload",
@@ -3232,9 +3253,7 @@ fn parse_error_help(input: &str, err: &Rich<'_, char>) -> Option<String> {
         RichReason::Custom(msg) if msg.starts_with("Duplicate field `") => {
             Some("record fields must have unique names".to_string())
         }
-        RichReason::Custom(msg)
-            if msg.contains("missing a type") || msg.contains("name: Type") =>
-        {
+        RichReason::Custom(msg) if msg.contains("missing a type") || msg.contains("name: Type") => {
             Some(
                 "function parameters are written `Type name`, not `name` or `name: Type`"
                     .to_string(),
@@ -3261,9 +3280,7 @@ fn parse_error_help(input: &str, err: &Rich<'_, char>) -> Option<String> {
 /// Detect missing / Rust-style parameter types from the chumsky failure and nearby source.
 fn missing_param_type_message(input: &str, err: &Rich<'_, char>) -> Option<String> {
     match err.reason() {
-        RichReason::Custom(msg)
-            if msg.contains("missing a type") || msg.contains("name: Type") =>
-        {
+        RichReason::Custom(msg) if msg.contains("missing a type") || msg.contains("name: Type") => {
             return Some(msg.to_string());
         }
         RichReason::ExpectedFound { expected, found }
@@ -3312,19 +3329,18 @@ fn missing_param_type_message(input: &str, err: &Rich<'_, char>) -> Option<Strin
     None
 }
 
-
 #[cfg(test)]
 #[path = "tests/tests.rs"]
 mod tests;
 #[cfg(test)]
-#[path = "tests/tests_error_handling.rs"]
-mod tests_error_handling;
+#[path = "tests/tests_classes.rs"]
+mod tests_classes;
 #[cfg(test)]
 #[path = "tests/tests_diagnostics.rs"]
 mod tests_diagnostics;
 #[cfg(test)]
-#[path = "tests/tests_classes.rs"]
-mod tests_classes;
+#[path = "tests/tests_error_handling.rs"]
+mod tests_error_handling;
 #[cfg(test)]
 #[path = "tests/tests_generics.rs"]
 mod tests_generics;
