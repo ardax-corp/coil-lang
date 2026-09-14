@@ -28,7 +28,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Stack bounds](stack-bounds.md) | Recursion depth analysis and `#[max_depth]` |
 | [Collections VM split](collections-vm-split.md) | Userland collections vs VM primitives |
 | [Debug line table](debug-info.md) | `source_files` / `debug_locs` in `.hyc` |
-| [Superinstruction candidates](superinstructions-candidates.md) | Investigation: existing fused ops, hot unfused sequences on flagship/hit benches, refuse sites, ticket split |
+| [Superinstruction candidates](superinstructions-candidates.md) | [COI-378](https://linear.app/ardax/issue/COI-378) S0: fused-op inventory, S1–S8 refine notes, extras that do not need specialize-keep |
 | [Opcodes](opcodes.md) | Selected bytecode ops behind builtins |
 | [Dissect](dissect.md) | `coil dissect` — in-memory bytecode / IL / AST dump |
 | [Debugger](debugger.md) | `coil debug` — GDB-style REPL / batch debugger |
