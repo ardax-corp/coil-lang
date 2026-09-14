@@ -284,6 +284,27 @@ fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
     prefetch_code(code, target);
 }
 
+#[inline(always)]
+fn note_dispatch_at(ip: usize, stack: &Stack<Value>, sp: usize) {
+    #[cfg(any(test, feature = "vm_profile"))]
+    {
+        VM_DISPATCH_COUNT.with(|c| c.fetch_add(1, Ordering::Relaxed));
+        VM_CURSOR_TRACE.with(|t| {
+            let mut t = t.borrow_mut();
+            if t.len() < CURSOR_TRACE_CAP {
+                t.push((ip as u32, (stack.tell().saturating_sub(sp)) as u32));
+            }
+        });
+    }
+    #[cfg(not(any(test, feature = "vm_profile")))]
+    {
+        let _ = (ip, stack, sp);
+    }
+}
+
+#[path = "dispatch.rs"]
+mod dispatch;
+
 // type External = fn(&[Value]) -> Value;
 
 type OutputSink = Box<dyn IoWrite + Send>;
@@ -2665,6 +2686,8 @@ impl<const S: usize> Machine<S> {
     /// dynamic instruction counts identical. A single outlined copy matches
     /// the non-LTO `machine` codegen (already identical to `main`'s).
     /// Prefetch + fused jump tables live *inside* this outlined copy.
+    /// Hot dense/jmp ops may divert into `dispatch` (COI-373 G0) when
+    /// `COIL_THREADED_DISPATCH` is not `match`.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
@@ -2673,6 +2696,7 @@ impl<const S: usize> Machine<S> {
         let mut sp = self.frames.get_mut().get();
         let stack_cap = self.stack.capacity();
         let code_len = code.len();
+        let dispatch_mode = dispatch::mode();
 
         while ip < code_len {
             #[cfg(any(test, feature = "debugger"))]
@@ -2685,16 +2709,30 @@ impl<const S: usize> Machine<S> {
                 return true;
             }
 
-            #[cfg(any(test, feature = "vm_profile"))]
-            VM_DISPATCH_COUNT.with(|c| c.fetch_add(1, Ordering::Relaxed));
+            #[cfg(any(test, feature = "debugger"))]
+            let debug_attached = self.debug.is_some();
+            #[cfg(not(any(test, feature = "debugger")))]
+            let debug_attached = false;
 
-            #[cfg(any(test, feature = "vm_profile"))]
-            VM_CURSOR_TRACE.with(|t| {
-                let mut t = t.borrow_mut();
-                if t.len() < CURSOR_TRACE_CAP {
-                    t.push((ip as u32, (self.stack.tell().saturating_sub(sp)) as u32));
+            if dispatch_mode != dispatch::Mode::Match && !debug_attached {
+                promise!(ip < code_len);
+                let peek = unsafe { code.get_unchecked(ip) };
+                if dispatch::is_hot(*peek.bytecode()) {
+                    dispatch::run_hot_streak(
+                        &mut self.stack,
+                        sp,
+                        &mut ip,
+                        code,
+                        constants,
+                        &self.heap,
+                        stack_cap,
+                        dispatch_mode,
+                    );
+                    continue;
                 }
-            });
+            }
+
+            note_dispatch_at(ip, &self.stack, sp);
 
             // SAFETY: loop condition guarantees `ip < code.len()`.
             promise!(ip < code_len);
@@ -3190,17 +3228,15 @@ impl<const S: usize> Machine<S> {
                 }
                 // Fused `BinSlotSlot; JMPF/JMPT`, pool packs (target<<32)|b.
                 Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
-                    let (op, a, pool_idx) = opcode.bin_slot_slot_jmpf_parts();
-                    promise!(pool_idx < constants.len());
-                    let packed = unsafe { *constants.get_unchecked(pool_idx) };
-                    let b = (packed as u32 & 0xFF) as usize;
-                    let target = (packed >> 32) as usize;
-                    promise!(sp + a < stack_cap);
-                    promise!(sp + b < stack_cap);
-                    let va = self.stack[sp + a];
-                    let vb = self.stack[sp + b];
-                    let taken = crate::fused::eval_cmp(op, va, vb, &self.heap);
-                    if taken == matches!(*bc, Instruction::BinSlotSlotJmpt) {
+                    if let Some(target) = dispatch::bin_slot_slot_jmp(
+                        &self.stack,
+                        sp,
+                        opcode,
+                        constants,
+                        &self.heap,
+                        stack_cap,
+                        matches!(*bc, Instruction::BinSlotSlotJmpt),
+                    ) {
                         set_jump_target(&mut ip, target, code);
                     }
                 }
@@ -3832,40 +3868,16 @@ impl<const S: usize> Machine<S> {
                     self.stack.push(value);
                 }
                 Instruction::DenseBin => {
-                    let (kind, dest, lhs, rhs) = opcode.dense_abc_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + lhs < stack_cap);
-                    promise!(sp + rhs < stack_cap);
-                    let va = self.stack[sp + lhs];
-                    let vb = self.stack[sp + rhs];
-                    self.stack[sp + dest] = crate::dense::eval_bin(kind, va, vb);
+                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::DenseCmp => {
-                    let (kind, dest, lhs, rhs) = opcode.dense_abc_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + lhs < stack_cap);
-                    promise!(sp + rhs < stack_cap);
-                    let va = self.stack[sp + lhs];
-                    let vb = self.stack[sp + rhs];
-                    self.stack[sp + dest] = crate::dense::eval_cmp(kind, va, vb);
+                    dispatch::dense_cmp(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::DenseConst => {
-                    let (ty, dest, payload, is_pool) = opcode.dense_const_parts();
-                    promise!(sp + dest < stack_cap);
-                    let raw = if is_pool {
-                        let idx = payload as usize;
-                        promise!(idx < constants.len());
-                        unsafe { *constants.get_unchecked(idx) }
-                    } else {
-                        payload as i16 as i64 as u64
-                    };
-                    self.stack[sp + dest] = crate::dense::eval_const(ty, raw);
+                    dispatch::dense_const(&mut self.stack, sp, opcode, constants, stack_cap);
                 }
                 Instruction::DenseMove => {
-                    let (dest, src) = opcode.dense_move_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + src < stack_cap);
-                    self.stack[sp + dest] = self.stack[sp + src];
+                    dispatch::dense_move(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::DenseUnary => {
                     let (kind, dest, src) = opcode.dense_unary_parts();
@@ -3874,10 +3886,7 @@ impl<const S: usize> Machine<S> {
                     self.stack[sp + dest] = crate::dense::eval_unary(kind, self.stack[sp + src]);
                 }
                 Instruction::DenseCast => {
-                    let (kind, dest, src) = opcode.dense_unary_parts();
-                    promise!(sp + dest < stack_cap);
-                    promise!(sp + src < stack_cap);
-                    self.stack[sp + dest] = crate::dense::eval_cast(kind, self.stack[sp + src]);
+                    dispatch::dense_cast(&mut self.stack, sp, opcode, stack_cap);
                 }
                 Instruction::VLoad => {
                     let (ty, vdest, arr, idx) = opcode.dense_abc_parts();
