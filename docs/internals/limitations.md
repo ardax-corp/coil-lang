@@ -19,6 +19,7 @@ Actionable gaps in the compiler, VM, and language surface. For opcode/archive ru
 | Let-polymorphism / Algorithm W | **Decided (explicit generics only):** `Env::generalize` is test-only; production `let` is `Scheme::mono`. Polymorphic values are `fn f<T>` / `class C<T>` (and trait bounds), not inferred at `let`. Headers no longer claim Algorithm W. | — |
 | Member visibility | **Implemented:** checker rejects private field/method access outside the owner's `impl` (`E0128`). `pub` members are visible everywhere. Top-level `fn` stays universally exportable (no module-level `pub` in this cut). `fn drop` stays private for inlining but remains callable as a lifecycle hook. | — |
 | Duplicate record fields | **Implemented:** parser rejects duplicate names in record literals, constructors, patterns, and enum variant field decls (`E0208`). Typechecker keeps the same check if parse is bypassed. | [COI-76](https://linear.app/ardax/issue/COI-76) |
+| Binding patterns | **Implemented:** `for` reuses `LetPattern` (`for (k, v) in d`, `for _`, records). `if let P = e` / `while let P = e` reuse match `Pattern` (including `else` / `else if let`). C-style `for (;;)` stays a parse error. | [COI-371](https://linear.app/ardax/issue/COI-371) |
 
 ## Lambdas / captures
 
