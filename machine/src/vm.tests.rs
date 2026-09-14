@@ -711,6 +711,7 @@
         assert_eq!(vm.live_pin_map_count(), 1);
         let pin = vm.pinned_addr_for_test(0).expect("array slot pinned");
         assert_ne!(pin, 0);
+        assert_eq!(vm.dense_cache_addr_for_test(), pin);
     }
 
     #[test]
