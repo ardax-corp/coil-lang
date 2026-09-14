@@ -1,5 +1,5 @@
 use super::*;
-use crate::typechecking::{CStructDef, ForInInfo, ForInKind};
+use crate::typechecking::{CStructDef, ForInCounted, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
 #[path = "emit_call.rs"]
@@ -10618,6 +10618,24 @@ impl Compiler {
         self.emit_for_in_array_loop(body, binding_name, true, None, false);
     }
 
+    /// Tuple already on the stack (user `into_iter` returning a tuple).
+    fn emit_for_in_tuple_on_stack(
+        &mut self,
+        body: &Output<'_>,
+        binding_name: &str,
+        arity: usize,
+    ) {
+        let tup_slot = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(tup_slot);
+        for i in 0..arity {
+            self.bytecode.push_load(tup_slot);
+            self.bytecode.push_const(i as i32);
+            self.bytecode.push_index();
+        }
+        self.bytecode.push_make_array(arity as u32);
+        self.emit_for_in_array_loop(body, binding_name, true, None, false);
+    }
+
     /// Dict → `DictEntries` → array of `(string, V)` pairs → array for-in.
     fn emit_for_in_dict(&mut self, iterable: &Output<'_>, body: &Output<'_>, binding_name: &str) {
         let mut iter_bc = self.do_compile(iterable);
@@ -10707,6 +10725,19 @@ impl Compiler {
             }
         }
 
+        self.emit_for_in_range_latch(body, binding_name, cur_slot, end_slot, inclusive, float);
+    }
+
+    /// Counted `cur`/`end` latch after the pair is already in slots (Q6 / C2b).
+    fn emit_for_in_range_latch(
+        &mut self,
+        body: &Output<'_>,
+        binding_name: &str,
+        cur_slot: u32,
+        end_slot: u32,
+        inclusive: bool,
+        float: bool,
+    ) {
         // Consume binding Identifier NodeId (iterable → binding → body).
         let _ = self.next_emit_id();
         let alias_iv = !crate::const_fold::body_assigns_ident(body, binding_name);
@@ -10825,34 +10856,74 @@ impl Compiler {
         bb.bind_label(exit_label, self.bytecode.il_mut());
     }
 
-    /// User `IntoIterator` / `Iterator`: `into_iter` then `next` → Option.
+    /// User `IntoIterator`: `into_iter` then counted `IntoIter` or
+    /// `Iterator::next` → Option match + CALL (C2b rung 2).
     ///
-    /// Trait instance methods unbox type-parameter args in their prologue
-    /// (`ValueTag::Instance` for classes), so call sites must `BoxValue`
-    /// the carrier before the direct CALL.
+    /// Trait prologues `UnboxValue` type-parameter args. For-in passes the
+    /// raw carrier: `UnboxValue` already pass-throughs non-boxed objects,
+    /// and skipping `BoxValue` lets the helper lift (Q8 match / B3 CALL).
+    /// Keep two-slot `Option` / Range on the stack (`unbox_enum_context`).
     fn emit_for_in_custom(
         &mut self,
         iterable: &Output<'_>,
         body: &Output<'_>,
         binding_name: &str,
         into_iter_fqn: &str,
-        next_fqn: &str,
+        next_fqn: Option<&str>,
+        counted: Option<&ForInCounted>,
         item_ty: Option<&Ty>,
     ) {
+        let mut iter_bc = self.do_compile(iterable);
+        self.bytecode.append(&mut iter_bc);
+        self.unbox_enum_context += 1;
+        if !self.emit_named_entry_on_module(into_iter_fqn, 1, crate::il::EntryKind::Call) {
+            self.missing_call_target(into_iter_fqn, iterable.0.into_range());
+        }
+        self.unbox_enum_context -= 1;
+
+        match counted {
+            Some(ForInCounted::Array) => {
+                self.emit_for_in_array_loop(body, binding_name, true, None, false);
+                return;
+            }
+            Some(ForInCounted::Tuple { arity }) => {
+                self.emit_for_in_tuple_on_stack(body, binding_name, *arity);
+                return;
+            }
+            Some(ForInCounted::Range {
+                inclusive,
+                float,
+            }) => {
+                let cur_slot = self.alloc_temp_slot();
+                let end_slot = self.alloc_temp_slot();
+                self.bytecode.push_store_pop(end_slot);
+                self.bytecode.push_store_pop(cur_slot);
+                self.emit_for_in_range_latch(
+                    body,
+                    binding_name,
+                    cur_slot,
+                    end_slot,
+                    *inclusive,
+                    *float,
+                );
+                return;
+            }
+            None => {}
+        }
+
+        let Some(next_fqn) = next_fqn else {
+            self.missing_call_target(into_iter_fqn, iterable.0.into_range());
+            return;
+        };
+
         let none_tag = self
             .checker
             .tag_for(common::BUILTIN_OPTION_ENUM, "None")
             .unwrap_or(0);
-        let carrier_tag = ValueTag::Instance as u32;
         let niche_next = item_ty.is_some_and(|ty| Self::niche_heap_only_ty(ty, &self.checker));
+        let two_slot_next = self.two_word_return_kind(next_fqn).is_some();
 
         let it_slot = self.alloc_temp_slot();
-        let mut iter_bc = self.do_compile(iterable);
-        self.bytecode.append(&mut iter_bc);
-        self.bytecode.push_box_value(carrier_tag);
-        if !self.emit_named_entry_on_module(into_iter_fqn, 1, crate::il::EntryKind::Call) {
-            self.missing_call_target(into_iter_fqn, iterable.0.into_range());
-        }
         self.bytecode.push_store_pop(it_slot);
 
         let _ = self.next_emit_id();
@@ -10864,10 +10935,11 @@ impl Compiler {
         bb.bind_label(top_label, self.bytecode.il_mut());
 
         self.bytecode.push_load(it_slot);
-        self.bytecode.push_box_value(carrier_tag);
+        self.unbox_enum_context += 1;
         if !self.emit_named_entry_on_module(next_fqn, 1, crate::il::EntryKind::Call) {
             self.missing_call_target(next_fqn, iterable.0.into_range());
         }
+        self.unbox_enum_context -= 1;
 
         if niche_next {
             Self::push_niche_eq_zero(&mut self.bytecode);
@@ -10876,8 +10948,18 @@ impl Compiler {
                 BbJumpKind::JumpIfTrue,
                 self.bytecode.il_mut(),
             );
+        } else if two_slot_next {
+            // Q8: `[payload, tag]` — None when tag == none_tag.
+            self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+            self.bytecode.push_const(none_tag as i32);
+            self.bytecode.push(Byte::new(Instruction::EQ));
+            bb.emit_jump_to(
+                exit_label,
+                BbJumpKind::JumpIfTrue,
+                self.bytecode.il_mut(),
+            );
+            self.bytecode.push_pop();
         } else {
-            // `Option::None` → exit (JumpIfMatch pops unit None).
             bb.emit_jump_to(
                 exit_label,
                 BbJumpKind::JumpIfMatch {
@@ -10886,7 +10968,6 @@ impl Compiler {
                 },
                 self.bytecode.il_mut(),
             );
-            // Fall-through: Some(v), unpack payload into binding.
             self.bytecode
                 .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
         }
@@ -10907,6 +10988,9 @@ impl Compiler {
         bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
         bb.bind_label(exit_label, self.bytecode.il_mut());
         if niche_next {
+            self.bytecode.push_pop();
+        } else if two_slot_next {
+            self.bytecode.push_pop();
             self.bytecode.push_pop();
         }
     }
@@ -13834,13 +13918,15 @@ impl Compiler {
                         ForInKind::Custom {
                             into_iter_fqn,
                             next_fqn,
+                            counted,
                         } => {
                             self.emit_for_in_custom(
                                 iterable,
                                 body,
                                 &binding_name,
                                 &into_iter_fqn,
-                                &next_fqn,
+                                next_fqn.as_deref(),
+                                counted.as_ref(),
                                 item_ty.as_ref(),
                             );
                         }
