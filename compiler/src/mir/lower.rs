@@ -1018,6 +1018,13 @@ fn lower_byte(
             tos.push(b.ins_gc_barrier(MirGcKind::Safepoint, vec![obj])?);
             Ok(())
         }
+        Instruction::DictEntries if hints.allow_alloc => {
+            lower_alloc(b, tos, MirAllocKind::DictEntries, 1)
+        }
+        Instruction::MakeDict if hints.allow_alloc => {
+            let fields = byte.operand_u32() as usize;
+            lower_alloc(b, tos, MirAllocKind::Dict, (fields * 2) as u32)
+        }
         Instruction::GetField if hints.allow_heap_fields => {
             lower_heap_get_field(b, tos, next, hints)
         }

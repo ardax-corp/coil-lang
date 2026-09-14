@@ -439,6 +439,12 @@ fn infer_walk(
                 Instruction::ArrayPush if mode.allows_alloc(allow_alloc) => {
                     apply_array_push(&mut stack, &mut slot_ty, &mut pool_ty)?;
                 }
+                Instruction::DictEntries if mode.allows_alloc(allow_alloc) => {
+                    apply_dict_entries(&mut stack, &mut slot_ty, &mut pool_ty)?;
+                }
+                Instruction::MakeDict if mode.allows_alloc(allow_alloc) => {
+                    push_map_alloc(&mut stack, (byte.operand_u32() as usize).saturating_mul(2))?;
+                }
                 Instruction::DenseArrayPush if mode.allows_alloc(allow_alloc) => {}
                 Instruction::DenseFieldLoad | Instruction::DenseFieldStore => {}
                 Instruction::DenseMakeObject if mode.allows_alloc(allow_alloc) => {}
@@ -773,6 +779,25 @@ fn infer_walk(
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayPush => {
                 let _ = stack.pop();
                 let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::HeapRef),
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DictEntries => {
+                let _ = stack.pop();
+                stack.push(Cell {
+                    origin: Origin::Tmp,
+                    ty: Some(MirTy::HeapRef),
+                    imm: None,
+                });
+            }
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::MakeDict => {
+                let n = (byte.operand_u32() as usize).saturating_mul(2);
+                for _ in 0..n {
+                    let _ = stack.pop();
+                }
                 stack.push(Cell {
                     origin: Origin::Tmp,
                     ty: Some(MirTy::HeapRef),
@@ -1156,6 +1181,23 @@ fn apply_array_push(
             paint(slot_ty, pool_ty, val, ty)?;
         }
     }
+    stack.push(Cell {
+        origin: Origin::Tmp,
+        ty: Some(MirTy::HeapRef),
+        imm: None,
+    });
+    Ok(())
+}
+
+fn apply_dict_entries(
+    stack: &mut Vec<Cell>,
+    slot_ty: &mut HashMap<u32, MirTy>,
+    pool_ty: &mut [Option<MirTy>],
+) -> Result<(), LowerError> {
+    let dict = stack
+        .pop()
+        .ok_or_else(|| LowerError::Refused("DictEntries stack".into()))?;
+    paint(slot_ty, pool_ty, dict, MirTy::HeapRef)?;
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(MirTy::HeapRef),
