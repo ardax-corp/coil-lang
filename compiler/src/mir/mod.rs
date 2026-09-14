@@ -5415,6 +5415,61 @@ fn main() {
     }
 
     #[test]
+    fn q6_for_in_dict_pairs_sum_takes_dense_or_lir() {
+        let src = r#"
+fn dict_sum() -> int {
+    let acc = 0;
+    let d = { a: 1, b: 2, c: 3, d: 4 };
+    for (k, v) in d {
+        acc = acc + v;
+    }
+    return acc;
+}
+fn main() {
+    if dict_sum() != 10 {
+        panic "dict pair sum checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile dict pair for-in");
+        let symbols = p.program_debug().fn_symbols;
+        let i = symbols
+            .iter()
+            .position(|s| s.name == "dict_sum")
+            .expect("dict_sum");
+        let start = symbols[i].entry_pc as usize;
+        let end = symbols
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        let dense = body
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DenseBin);
+        let mapped = body
+            .iter()
+            .any(|b| *b.bytecode() == Instruction::DictEntries);
+        assert!(
+            dense || mapped,
+            "C2b dict for (k,v) should DenseBin or mapped DictEntries; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().any(|b| *b.bytecode() == Instruction::DictEntries),
+            "dict for (k,v) keeps DictEntries; opcodes={names:?}"
+        );
+        assert!(
+            body.iter().all(|b| *b.bytecode() != Instruction::GetField),
+            "dict for (k,v) helper must not GetField; opcodes={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "dict pair sum checksum");
+    }
+
+    #[test]
     fn q6_for_in_coro_sum_takes_dense_or_lir() {
         let src = r#"
 async fn gen() {

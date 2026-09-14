@@ -424,6 +424,7 @@ fn walk_tree(
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => walk_loop(checker, ast, identifier.as_ref(), iterable, body, pure, env, calls),
@@ -1000,6 +1001,7 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {

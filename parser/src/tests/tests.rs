@@ -1,7 +1,7 @@
     use crate::Pratt;
     use crate::ast::{
-        AdjustOp, AssignOp, EnumConstructPayload, EnumVariantPayload, Expression, MatchArm,
-        Pattern, PatternPayload,
+        AdjustOp, AssignOp, EnumConstructPayload, EnumVariantPayload, Expression, LetPattern,
+        MatchArm, Pattern, PatternPayload,
     };
     use chumsky::Parser;
 
@@ -301,6 +301,7 @@
                     identifier,
                     iterable,
                     body,
+                    ..
                 } => {
                     match identifier.as_ref().map(|i| i.1.as_ref()) {
                         Some(Expression::Identifier(name)) => assert_eq!(*name, "x"),
@@ -326,6 +327,74 @@
             rendered.contains("counter()"),
             "expected iterable in Display, got {rendered:?}"
         );
+    }
+
+    #[test]
+    fn for_in_tuple_pattern_parses() {
+        let ast = decl_ast!("for (k, v) in d { write(\"%s\", k); }");
+        match ast {
+            Expression::Statement(inner) => match inner.1.as_ref() {
+                Expression::Loop {
+                    identifier,
+                    pattern,
+                    ..
+                } => {
+                    assert!(identifier.is_none());
+                    match pattern.as_ref() {
+                        Some(LetPattern::Tuple(parts)) => assert_eq!(parts.len(), 2),
+                        other => panic!("expected tuple LetPattern, got {:?}", other),
+                    }
+                }
+                other => panic!("expected for-in Loop, got {:?}", other),
+            },
+            other => panic!("expected statement wrapper, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn if_let_parses() {
+        let ast = decl_ast!("if let Option::Some(x) = o { x = x; }");
+        match ast {
+            Expression::Statement(inner) => match inner.1.as_ref() {
+                Expression::IfLet {
+                    then_arm,
+                    else_arm,
+                    ..
+                } => {
+                    assert!(matches!(
+                        then_arm.pattern.1,
+                        Pattern::Constructor {
+                            variant_name: "Some",
+                            ..
+                        }
+                    ));
+                    assert!(matches!(else_arm.pattern.1, Pattern::Default));
+                }
+                other => panic!("expected IfLet, got {:?}", other),
+            },
+            other => panic!("expected statement wrapper, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn while_let_parses() {
+        let ast = decl_ast!("while let Option::Some(x) = nxt() { x = x; }");
+        match ast {
+            Expression::Statement(inner) => match inner.1.as_ref() {
+                Expression::WhileLet { then_arm, on_miss, .. } => {
+                    assert!(matches!(
+                        then_arm.pattern.1,
+                        Pattern::Constructor {
+                            variant_name: "Some",
+                            ..
+                        }
+                    ));
+                    assert!(matches!(on_miss.body.1.as_ref(), Expression::Break));
+                }
+                other => panic!("expected WhileLet, got {:?}", other),
+            },
+            other => panic!("expected statement wrapper, got {:?}", other),
+        }
     }
 
     #[test]

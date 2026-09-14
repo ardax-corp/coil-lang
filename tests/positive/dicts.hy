@@ -35,3 +35,11 @@ test("for in dict yields key-value pairs") {
     }
     assert(seen == 3)?;
 }
+
+test("for in dict binds key and value") {
+    let seen = 0;
+    for (k, v) in { a: 1, b: 2 } {
+        seen = seen + v;
+    }
+    assert(seen == 3)?;
+}

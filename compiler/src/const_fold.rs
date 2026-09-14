@@ -3,8 +3,8 @@
 use std::collections::HashMap;
 
 use parser::{
-    SimpleSpan,
     ast::{Expression, Output},
+    SimpleSpan,
 };
 
 /// A scalar value known at compile time.
@@ -111,10 +111,7 @@ fn eval_len_call<'a>(
     eval_len_operand(&args[0], env)
 }
 
-fn eval_len_operand<'a>(
-    ast: &Output<'a>,
-    env: &HashMap<String, ConstValue>,
-) -> Option<ConstValue> {
+fn eval_len_operand<'a>(ast: &Output<'a>, env: &HashMap<String, ConstValue>) -> Option<ConstValue> {
     match ast.1.as_ref() {
         Expression::String(s) => {
             let unescaped = s
@@ -258,7 +255,11 @@ pub fn strength_mul_to_shl<'a>(
         match eval_expr(side, env)? {
             ConstValue::Int(k) => {
                 let shift = strength_mul_int(k)?;
-                if shift == 0 { None } else { Some(shift) }
+                if shift == 0 {
+                    None
+                } else {
+                    Some(shift)
+                }
             }
             _ => None,
         }
@@ -296,10 +297,7 @@ pub fn strength_div_to_shr<'a>(
 }
 
 /// `true` when `expr` folds to an integer ≥ 0 (safe for signed `>>` ≡ `/ 2^n`).
-pub fn strength_div_dividend_nonneg(
-    expr: &Output<'_>,
-    env: &HashMap<String, ConstValue>,
-) -> bool {
+pub fn strength_div_dividend_nonneg(expr: &Output<'_>, env: &HashMap<String, ConstValue>) -> bool {
     matches!(eval_expr(expr, env), Some(ConstValue::Int(k)) if k >= 0)
 }
 
@@ -563,10 +561,29 @@ fn body_assigns_ident_walk<'a>(node: &Output<'a>, name: &str) -> bool {
                     .iter()
                     .any(|arm| body_assigns_ident_walk(&arm.body, name))
         }
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => {
+            body_assigns_ident_walk(scrutinee, name)
+                || body_assigns_ident_walk(&then_arm.body, name)
+                || body_assigns_ident_walk(&else_arm.body, name)
+        }
+        Expression::WhileLet {
+            scrutinee,
+            then_arm,
+            on_miss,
+        } => {
+            body_assigns_ident_walk(scrutinee, name)
+                || body_assigns_ident_walk(&then_arm.body, name)
+                || body_assigns_ident_walk(&on_miss.body, name)
+        }
         Expression::Loop {
             iterable,
             body,
             identifier,
+            pattern: _,
         } => {
             body_assigns_ident_walk(iterable, name)
                 || identifier
@@ -592,8 +609,7 @@ fn body_has_continue_walk<'a>(node: &Output<'a>) -> bool {
         | Expression::Group(inner) => body_has_continue_walk(inner),
         Expression::If(branches) => branches.iter().any(|b| {
             if let Expression::Branch(cond, body) = b.1.as_ref() {
-                cond.as_ref().is_some_and(body_has_continue_walk)
-                    || body_has_continue_walk(body)
+                cond.as_ref().is_some_and(body_has_continue_walk) || body_has_continue_walk(body)
             } else {
                 false
             }
@@ -602,6 +618,16 @@ fn body_has_continue_walk<'a>(node: &Output<'a>) -> bool {
             body_has_continue_walk(scrutinee)
                 || arms.iter().any(|arm| body_has_continue_walk(&arm.body))
         }
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => {
+            body_has_continue_walk(scrutinee)
+                || body_has_continue_walk(&then_arm.body)
+                || body_has_continue_walk(&else_arm.body)
+        }
+        Expression::WhileLet { .. } => false,
         _ => false,
     }
 }
@@ -627,6 +653,24 @@ fn body_has_loop_control_walk<'a>(node: &Output<'a>) -> bool {
         Expression::Match { scrutinee, arms } => {
             body_has_loop_control_walk(scrutinee)
                 || arms.iter().any(|arm| body_has_loop_control_walk(&arm.body))
+        }
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => {
+            body_has_loop_control_walk(scrutinee)
+                || body_has_loop_control_walk(&then_arm.body)
+                || body_has_loop_control_walk(&else_arm.body)
+        }
+        Expression::WhileLet {
+            then_arm,
+            on_miss,
+            scrutinee,
+        } => {
+            body_has_loop_control_walk(scrutinee)
+                || body_has_loop_control_walk(&then_arm.body)
+                || body_has_loop_control_walk(&on_miss.body)
         }
         Expression::Loop { body, .. } => body_has_loop_control_walk(body),
         _ => false,
@@ -1031,11 +1075,9 @@ mod tests {
                 SimpleSpan::from(0..1),
                 Box::new(Expression::Loop {
                     identifier: None,
+                    pattern: None,
                     iterable: int_expr(1),
-                    body: (
-                        SimpleSpan::from(0..1),
-                        Box::new(Expression::Continue),
-                    ),
+                    body: (SimpleSpan::from(0..1), Box::new(Expression::Continue)),
                 }),
             )])),
         );

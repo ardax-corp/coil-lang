@@ -47,8 +47,9 @@ type level). Runtime lowering:
 5. **Tuple** — temp array, then (1).
 6. **Dict** — `DictEntries` then the array counted latch (1). Items are
    `(string, V)` pairs (keys at `[0]`, values at `[1]`; that is the
-   entries surface). Homogeneous values only. User `into_iter` that
-   returns a dict uses the same path.
+   entries surface). `for (k, v) in d` is the same lowering plus let-pattern
+   binds (`k`/`v` instead of `p[0]`/`p[1]`). Homogeneous values only. User
+   `into_iter` that returns a dict uses the same path.
 7. **User `Iterator::next`** (C2b rung 2) keeps
    `into_iter` then `next` → `Option` (Q8 two-slot / niche match + B3
    CALL) when `IntoIter` is not a counted builtin. If `IntoIter` is
@@ -85,6 +86,8 @@ dynamic `0..n` stays sequential. See [auto-par.md](auto-par.md).
   is the same dense counted i64 (C2b rung 2).
 - `examples/perf/for_in_dict.hy` — dict for-in helper is `DictEntries`
   plus counted Index / `DenseBin` when cost ≤ fuse (C2b rung 3).
+- `examples/perf/for_in_dict_pairs.hy` — same island with `for (k, v) in d`
+  (COI-371).
 - `examples/perf/for_in_coro.hy` — coro for-in helper is `ResumeCoro` /
   `DoneCoro` (dense or LIR when cost ≤ fuse; C2b rung 4).
 

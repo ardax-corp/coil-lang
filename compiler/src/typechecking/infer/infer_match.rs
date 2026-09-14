@@ -12,7 +12,12 @@ use super::*;
 
 impl Checker {
 
-    pub(super) fn infer_match(&mut self, scrutinee: &Output, arms: &[MatchArm], range: Range<usize>) -> Ty {
+    pub(super) fn infer_match(
+        &mut self,
+        scrutinee: &Output,
+        arms: &[&MatchArm],
+        range: Range<usize>,
+    ) -> Ty {
         let scrutinee_ty = self.infer(scrutinee);
         let resolved_scrutinee = apply_ty_prune(&self.subst, &scrutinee_ty);
 

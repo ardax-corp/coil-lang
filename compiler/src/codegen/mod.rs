@@ -258,7 +258,7 @@ fn is_instance_method_fqn(checker: &Checker, name: &str) -> bool {
     })
 }
 
-fn group_arms_by_outer_tag(arms: &[MatchArm], checker: &Checker) -> Vec<TagGroup> {
+fn group_arms_by_outer_tag(arms: &[&MatchArm], checker: &Checker) -> Vec<TagGroup> {
     let mut groups: Vec<TagGroup> = Vec::new();
     let mut tag_to_idx: HashMap<u32, usize> = HashMap::new();
     for (i, arm) in arms.iter().enumerate() {

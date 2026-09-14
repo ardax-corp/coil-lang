@@ -106,14 +106,11 @@ fn analyze_scope(checker: &mut Checker, ast: &Output<'_>) {
 
 fn collect_candidates(checker: &Checker, ast: &Output<'_>, cands: &mut HashMap<String, Candidate>) {
     match ast.1.as_ref() {
-        Expression::Function { .. }
-        | Expression::Lambda { .. }
-        | Expression::TestCase { .. } => {}
+        Expression::Function { .. } | Expression::Lambda { .. } | Expression::TestCase { .. } => {}
         Expression::Fragment(items) if items.len() == 2 => {
             if let Some(name) = binder_name(&items[0]) {
                 let rhs = peel(&items[1]);
-                if is_in_frame_ctor(rhs) && candidate_is_unbox(checker, &items[0], &items[1], rhs)
-                {
+                if is_in_frame_ctor(rhs) && candidate_is_unbox(checker, &items[0], &items[1], rhs) {
                     let ids = (nid(checker, &items[0]), nid(checker, rhs));
                     if let (Some(binder), Some(rhs_id)) = ids {
                         let is_class = instantiate_is_unbox(checker, rhs)
@@ -397,7 +394,9 @@ fn mark_direct_match_constructs(checker: &mut Checker, ast: &Output<'_>) {
                 mark_direct_match_constructs(checker, &arm.body);
             }
         }
-        _ => walk_children(ast, &mut |child| mark_direct_match_constructs(checker, child)),
+        _ => walk_children(ast, &mut |child| {
+            mark_direct_match_constructs(checker, child)
+        }),
     }
 }
 
@@ -464,16 +463,14 @@ fn is_in_frame_ctor(ast: &Output<'_>) -> bool {
     let peeled = peel(ast);
     match peeled.1.as_ref() {
         Expression::Construct { fields, .. } => !payload_contains_construct(fields),
-        Expression::Instantiate(_, args) => {
-            args.as_ref().is_none_or(|a| {
-                a.iter().all(|e| {
-                    !matches!(
-                        peel(e).1.as_ref(),
-                        Expression::Construct { .. } | Expression::Instantiate(_, _)
-                    )
-                })
+        Expression::Instantiate(_, args) => args.as_ref().is_none_or(|a| {
+            a.iter().all(|e| {
+                !matches!(
+                    peel(e).1.as_ref(),
+                    Expression::Construct { .. } | Expression::Instantiate(_, _)
+                )
             })
-        }
+        }),
         _ => false,
     }
 }
@@ -656,9 +653,9 @@ fn enum_name(ty: &Ty) -> Option<&str> {
 
 fn ty_of(checker: &Checker, node: &Output<'_>) -> Option<Ty> {
     let id = nid(checker, node)?;
-    checker.lookup_at(id).or_else(|| {
-        checker.lookup_for_codegen_span(node.0.start, node.0.end)
-    })
+    checker
+        .lookup_at(id)
+        .or_else(|| checker.lookup_for_codegen_span(node.0.start, node.0.end))
 }
 
 fn nid(checker: &Checker, node: &Output<'_>) -> Option<NodeId> {
@@ -776,6 +773,7 @@ fn walk_children(ast: &Output<'_>, f: &mut dyn FnMut(&Output<'_>)) {
         }
         Expression::Loop {
             identifier,
+            pattern: _,
             iterable,
             body,
         } => {
@@ -929,7 +927,6 @@ fn main() {
         );
     }
 
-
     #[test]
     fn method_receiver_escapes() {
         let src = r#"
@@ -1014,8 +1011,7 @@ fn main() {
         };
         let _ = src_ast;
         assert!(
-            side.frame_local_ids().is_empty()
-                || side.frame_local_ids().len() < 3,
+            side.frame_local_ids().is_empty() || side.frame_local_ids().len() < 3,
             "escaping Some should not unbox the call argument; ids={:?}",
             side.frame_local_ids()
         );

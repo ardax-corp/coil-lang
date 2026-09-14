@@ -3006,6 +3006,12 @@ fn example_perf_for_in_dict_prints_checksum() {
 }
 
 #[test]
+fn example_perf_for_in_dict_pairs_prints_checksum() {
+    let output = run_example("examples/perf/for_in_dict_pairs.hy");
+    assert_eq!(output, "3456");
+}
+
+#[test]
 fn example_perf_for_in_coro_prints_checksum() {
     let output = run_example("examples/perf/for_in_coro.hy");
     assert_eq!(output, "193536");

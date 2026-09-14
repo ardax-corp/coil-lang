@@ -5,7 +5,9 @@
 
 use std::collections::HashMap;
 
-use parser::ast::{EnumConstructPayload, EnumVariantPayload, Expression, Output, Pattern, PatternPayload};
+use parser::ast::{
+    EnumConstructPayload, EnumVariantPayload, Expression, Output, Pattern, PatternPayload,
+};
 
 /// Stable identifier for an AST node (minted in pre-walk visit order).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -297,9 +299,11 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
             iterable,
             body,
             identifier,
+            pattern: _,
         } => {
             // For-in binds `identifier` before the body; visit order must
-            // match infer (iterable → binding → body).
+            // match infer (iterable → binding → body). Pattern for-in has
+            // no Identifier node.
             pre_walk(iterable, table);
             if let Some(i) = identifier {
                 pre_walk(i, table);
@@ -314,6 +318,30 @@ fn pre_walk_children(node: &Output, table: &mut IdTable) {
                 pre_walk_pattern(&arm.pattern.1, table);
                 pre_walk(&arm.body, table);
             }
+        }
+
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => {
+            pre_walk(scrutinee, table);
+            pre_walk_pattern(&then_arm.pattern.1, table);
+            pre_walk(&then_arm.body, table);
+            pre_walk_pattern(&else_arm.pattern.1, table);
+            pre_walk(&else_arm.body, table);
+        }
+
+        Expression::WhileLet {
+            scrutinee,
+            then_arm,
+            on_miss,
+        } => {
+            pre_walk(scrutinee, table);
+            pre_walk_pattern(&then_arm.pattern.1, table);
+            pre_walk(&then_arm.body, table);
+            pre_walk_pattern(&on_miss.pattern.1, table);
+            pre_walk(&on_miss.body, table);
         }
 
         Expression::EnumDecl { variants, .. } => {

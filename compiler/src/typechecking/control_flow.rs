@@ -5,7 +5,7 @@ use std::ops::Range;
 use parser::ast::{Expression, Output};
 use reporting::{ErrorCode, Label, Message};
 
-use super::const_eval::{ConstVal, eval_bool_const};
+use super::const_eval::{eval_bool_const, ConstVal};
 
 /// Result of analyzing a function body for exits / warnings.
 #[derive(Debug, Default)]
@@ -135,13 +135,52 @@ fn walk(
                 .all(|arm| walk(&arm.body, lookup, pending_defers, messages, inside_infinite))
         }
 
+        Expression::IfLet {
+            then_arm, else_arm, ..
+        } => {
+            walk(
+                &then_arm.body,
+                lookup,
+                pending_defers,
+                messages,
+                inside_infinite,
+            ) && walk(
+                &else_arm.body,
+                lookup,
+                pending_defers,
+                messages,
+                inside_infinite,
+            )
+        }
+
+        Expression::WhileLet {
+            then_arm, on_miss, ..
+        } => {
+            walk(
+                &then_arm.body,
+                lookup,
+                pending_defers,
+                messages,
+                inside_infinite,
+            );
+            walk(
+                &on_miss.body,
+                lookup,
+                pending_defers,
+                messages,
+                inside_infinite,
+            );
+            false
+        }
+
         Expression::Loop {
             identifier,
+            pattern,
             iterable,
             body,
         } => {
             // for-in never proven infinite.
-            if identifier.is_some() {
+            if identifier.is_some() || pattern.is_some() {
                 walk(body, lookup, pending_defers, messages, inside_infinite);
                 return false;
             }
@@ -176,6 +215,7 @@ pub fn is_infinite_loop(expr: &Output<'_>, lookup: &dyn Fn(&str) -> Option<Const
         | Expression::Group(inner) => is_infinite_loop(inner, lookup),
         Expression::Loop {
             identifier: None,
+            pattern: None,
             iterable,
             body,
         } => eval_bool_const(iterable, lookup) == Some(true) && !may_break(body, 0),
@@ -206,6 +246,12 @@ fn may_break(expr: &Output<'_>, depth: usize) -> bool {
         Expression::If(branches) => branches.iter().any(|b| may_break(b, depth)),
         Expression::Branch(_, body) => may_break(body, depth),
         Expression::Match { arms, .. } => arms.iter().any(|a| may_break(&a.body, depth)),
+        Expression::IfLet {
+            then_arm, else_arm, ..
+        } => may_break(&then_arm.body, depth) || may_break(&else_arm.body, depth),
+        Expression::WhileLet {
+            then_arm, on_miss, ..
+        } => may_break(&then_arm.body, depth + 1) || may_break(&on_miss.body, depth + 1),
         Expression::Loop { body, .. } => may_break(body, depth + 1),
         Expression::Defer { body, .. } => may_break(body, depth),
         _ => false,
@@ -252,8 +298,8 @@ fn warn_defer_never(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parser::SimpleSpan;
     use parser::ast::Expression;
+    use parser::SimpleSpan;
 
     fn out<'a>(expr: Expression<'a>) -> Output<'a> {
         (SimpleSpan::from(0..0), Box::new(expr))
@@ -266,6 +312,7 @@ mod tests {
     fn while_loop<'a>(cond: Expression<'a>, body: Output<'a>) -> Output<'a> {
         out(Expression::Loop {
             identifier: None,
+            pattern: None,
             iterable: out(cond),
             body,
         })
@@ -319,11 +366,10 @@ mod tests {
         ]);
         let cf = analyze_fn_body(&body, &|_| None);
         assert!(cf.always_exits);
-        assert!(
-            cf.messages
-                .iter()
-                .any(|m| m.code() == Some(ErrorCode::UnreachableCode))
-        );
+        assert!(cf
+            .messages
+            .iter()
+            .any(|m| m.code() == Some(ErrorCode::UnreachableCode)));
     }
 
     #[test]
@@ -338,11 +384,10 @@ mod tests {
         ]);
         let cf = analyze_fn_body(&body, &|_| None);
         assert!(cf.always_exits);
-        assert!(
-            cf.messages
-                .iter()
-                .any(|m| m.code() == Some(ErrorCode::DeferNeverRuns))
-        );
+        assert!(cf
+            .messages
+            .iter()
+            .any(|m| m.code() == Some(ErrorCode::DeferNeverRuns)));
     }
 
     fn stmt(inner: Output<'_>) -> Output<'_> {

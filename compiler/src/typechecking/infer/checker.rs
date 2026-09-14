@@ -2549,30 +2549,52 @@ impl Checker {
                 }
                 self.infer(body)
             }
-            Expression::Match { scrutinee, arms } => self.infer_match(scrutinee, arms, range),
+            Expression::Match { scrutinee, arms } => {
+                let arm_refs: Vec<&parser::ast::MatchArm> = arms.iter().collect();
+                self.infer_match(scrutinee, &arm_refs, range)
+            }
+            Expression::IfLet {
+                scrutinee,
+                then_arm,
+                else_arm,
+            } => {
+                let ty = self.infer_match(scrutinee, &[then_arm, else_arm], range);
+                ty
+            }
+            Expression::WhileLet {
+                scrutinee,
+                then_arm,
+                on_miss,
+            } => {
+                let _ = self.infer_match(scrutinee, &[then_arm, on_miss], range);
+                unit_ty()
+            }
             Expression::Loop {
                 identifier,
+                pattern,
                 iterable,
                 body,
             } => {
-                if let Some(binding) = identifier {
-                    // `for x in expr { body }`, IntoIterator / Iterator protocol
-                    // (builtin arrays, homogeneous tuples/dicts, coroutines, or
-                    // user `impl`s). Bind `x : Item`.
+                if identifier.is_some() || pattern.is_some() {
+                    // `for x in expr { body }` / `for (k, v) in …`
                     let it = self.infer(iterable);
                     let resolved = apply_ty_prune(&self.subst, &it);
                     let elem_ty = self
                         .resolve_for_in_iterable(&resolved, id, &iterable.0.into_range(), &range)
                         .unwrap_or_else(|| Ty::Var(self.counter.fresh()));
                     self.env.push();
-                    if let Expression::Identifier(name) = binding.1.as_ref() {
-                        self.env
-                            .insert_top(name.to_string(), Scheme::mono(elem_ty.clone()));
-                        self.record_codegen_var_type(name.to_string(), elem_ty.clone());
+                    if let Some(pat) = pattern {
+                        let _ = self.infer_let_pattern(pat, &elem_ty, &range);
+                    } else if let Some(binding) = identifier {
+                        if let Expression::Identifier(name) = binding.1.as_ref() {
+                            self.env
+                                .insert_top(name.to_string(), Scheme::mono(elem_ty.clone()));
+                            self.record_codegen_var_type(name.to_string(), elem_ty.clone());
+                        }
+                        // Consume the binding node's ID (pre-walk order) now that
+                        // the name is in scope.
+                        let _ = self.infer(binding);
                     }
-                    // Consume the binding node's ID (pre-walk order) now that
-                    // the name is in scope.
-                    let _ = self.infer(binding);
                     let _ = self.infer(body);
                     self.env.pop();
                     unit_ty()
@@ -12360,6 +12382,7 @@ impl Checker {
                 iterable,
                 body,
                 identifier,
+            pattern: _,
             } => {
                 self.pre_pass_ffi_invoke_param_flow_walk(iterable, local_class_scopes);
                 if let Some(identifier) = identifier {
@@ -12372,6 +12395,24 @@ impl Checker {
                 for arm in arms {
                     self.pre_pass_ffi_invoke_param_flow_walk(&arm.body, local_class_scopes);
                 }
+            }
+            Expression::IfLet {
+                scrutinee,
+                then_arm,
+                else_arm,
+            } => {
+                self.pre_pass_ffi_invoke_param_flow_walk(scrutinee, local_class_scopes);
+                self.pre_pass_ffi_invoke_param_flow_walk(&then_arm.body, local_class_scopes);
+                self.pre_pass_ffi_invoke_param_flow_walk(&else_arm.body, local_class_scopes);
+            }
+            Expression::WhileLet {
+                scrutinee,
+                then_arm,
+                on_miss,
+            } => {
+                self.pre_pass_ffi_invoke_param_flow_walk(scrutinee, local_class_scopes);
+                self.pre_pass_ffi_invoke_param_flow_walk(&then_arm.body, local_class_scopes);
+                self.pre_pass_ffi_invoke_param_flow_walk(&on_miss.body, local_class_scopes);
             }
             Expression::Method(_, body) => {
                 self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
@@ -13231,6 +13272,7 @@ impl Checker {
                 iterable,
                 body,
                 identifier,
+            pattern: _,
             } => {
                 self.pre_register_enums_walk(iterable, errors);
                 if let Some(i) = identifier {
@@ -13242,11 +13284,26 @@ impl Checker {
             Expression::Match { scrutinee, arms } => {
                 self.pre_register_enums_walk(scrutinee, errors);
                 for arm in arms {
-                    // Patterns are not expressions, no recursion
-                    // into the pattern body. (Constructor patterns
-                    // contain only nested patterns.)
                     self.pre_register_enums_walk(&arm.body, errors);
                 }
+            }
+            Expression::IfLet {
+                scrutinee,
+                then_arm,
+                else_arm,
+            } => {
+                self.pre_register_enums_walk(scrutinee, errors);
+                self.pre_register_enums_walk(&then_arm.body, errors);
+                self.pre_register_enums_walk(&else_arm.body, errors);
+            }
+            Expression::WhileLet {
+                scrutinee,
+                then_arm,
+                on_miss,
+            } => {
+                self.pre_register_enums_walk(scrutinee, errors);
+                self.pre_register_enums_walk(&then_arm.body, errors);
+                self.pre_register_enums_walk(&on_miss.body, errors);
             }
 
             // The `EnumDecl` arm above handles every EnumDecl in

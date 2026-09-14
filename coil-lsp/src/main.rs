@@ -1960,6 +1960,24 @@ fn walk_children(expression: &Expression<'_>, offset: usize, out: &mut Vec<Range
                 collect_spans_containing(&arm.body, offset, out);
             }
         }
+        Expression::IfLet {
+            scrutinee,
+            then_arm,
+            else_arm,
+        } => {
+            collect_spans_containing(scrutinee, offset, out);
+            collect_spans_containing(&then_arm.body, offset, out);
+            collect_spans_containing(&else_arm.body, offset, out);
+        }
+        Expression::WhileLet {
+            scrutinee,
+            then_arm,
+            on_miss,
+        } => {
+            collect_spans_containing(scrutinee, offset, out);
+            collect_spans_containing(&then_arm.body, offset, out);
+            collect_spans_containing(&on_miss.body, offset, out);
+        }
         _ => {}
     }
 }

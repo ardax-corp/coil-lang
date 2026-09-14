@@ -370,8 +370,26 @@ pub enum Expression<'expr> {
 
     Loop {
         identifier: Option<Output<'expr>>,
+        /// Irrefutable `for` pattern when the binding is not a bare ident
+        /// (`for (k, v) in d`). `None` for `for x in` and for `while`.
+        pattern: Option<LetPattern<'expr>>,
         iterable: Output<'expr>,
         body: Output<'expr>,
+    },
+
+    /// `if let P = e { then } [else …]`. `else_arm` is always present
+    /// (`default => {}` when the source has no `else`) so NodeId lockstep holds.
+    IfLet {
+        scrutinee: Output<'expr>,
+        then_arm: MatchArm<'expr>,
+        else_arm: MatchArm<'expr>,
+    },
+
+    /// `while let P = e { body }`. `on_miss` is `default => break`.
+    WhileLet {
+        scrutinee: Output<'expr>,
+        then_arm: MatchArm<'expr>,
+        on_miss: MatchArm<'expr>,
     },
 
     Variable(&'expr str, Option<Output<'expr>>),
@@ -1132,12 +1150,36 @@ impl<'a> Display for Expression<'a> {
             }
             Self::Loop {
                 identifier,
+                pattern,
                 iterable,
                 body,
-            } => match identifier {
-                Some(ident) => write!(f, "for {} in {} {{\n{}}}", ident.1, iterable.1, body.1),
-                None => write!(f, "while {} {{\n{}}}", iterable.1, body.1),
+            } => match (identifier, pattern) {
+                (Some(ident), _) => {
+                    write!(f, "for {} in {} {{\n{}}}", ident.1, iterable.1, body.1)
+                }
+                (None, Some(pat)) => {
+                    write!(f, "for {} in {} {{\n{}}}", pat, iterable.1, body.1)
+                }
+                (None, None) => write!(f, "while {} {{\n{}}}", iterable.1, body.1),
             },
+            Self::IfLet {
+                scrutinee,
+                then_arm,
+                else_arm,
+            } => write!(
+                f,
+                "if let {} = {} {{\n{}}} else {{\n{}}}",
+                then_arm.pattern.1, scrutinee.1, then_arm.body.1, else_arm.body.1
+            ),
+            Self::WhileLet {
+                scrutinee,
+                then_arm,
+                ..
+            } => write!(
+                f,
+                "while let {} = {} {{\n{}}}",
+                then_arm.pattern.1, scrutinee.1, then_arm.body.1
+            ),
             Self::Break => write!(f, "break"),
             Self::Continue => write!(f, "continue"),
             Self::Assignment(n, e) => {

@@ -12,6 +12,22 @@ type FinalizeIlOut = Option<crate::dissect::IlSnapshot>;
 #[cfg(not(any(test, feature = "dissect")))]
 type FinalizeIlOut = ();
 
+struct ForInBind<'a> {
+    name: &'a str,
+    consume_id: bool,
+    pattern: Option<&'a parser::ast::LetPattern<'a>>,
+}
+
+impl<'a> ForInBind<'a> {
+    fn ident(name: &'a str) -> Self {
+        Self {
+            name,
+            consume_id: true,
+            pattern: None,
+        }
+    }
+}
+
 fn apply_debug_slot_remaps(
     locals: &mut HashMap<String, HashMap<String, u32>>,
     remaps: &HashMap<String, HashMap<u32, u32>>,
@@ -6707,6 +6723,7 @@ impl Compiler {
                 iterable,
                 body,
                 identifier,
+                pattern: _,
             } => {
                 Self::walk_expr_calls(iterable, pred)
                     || identifier
@@ -6755,6 +6772,24 @@ impl Compiler {
                     || arms
                         .iter()
                         .any(|arm| Self::walk_expr_calls(&arm.body, pred))
+            }
+            Expression::IfLet {
+                scrutinee,
+                then_arm,
+                else_arm,
+            } => {
+                Self::walk_expr_calls(scrutinee, pred)
+                    || Self::walk_expr_calls(&then_arm.body, pred)
+                    || Self::walk_expr_calls(&else_arm.body, pred)
+            }
+            Expression::WhileLet {
+                scrutinee,
+                then_arm,
+                on_miss,
+            } => {
+                Self::walk_expr_calls(scrutinee, pred)
+                    || Self::walk_expr_calls(&then_arm.body, pred)
+                    || Self::walk_expr_calls(&on_miss.body, pred)
             }
             Expression::Access(recv, _) | Expression::OptionalAccess(recv, _) => {
                 Self::walk_expr_calls(recv, pred)
@@ -6888,6 +6923,7 @@ impl Compiler {
                     iterable,
                     body,
                     identifier,
+            pattern: _,
                 } => {
                     body_calls_later_fn(iterable, impl_idx, free_fn_pos)
                         || identifier.as_ref().is_some_and(|id| {
@@ -6910,6 +6946,24 @@ impl Compiler {
                         || arms.iter().any(|arm| {
                             body_calls_later_fn(&arm.body, impl_idx, free_fn_pos)
                         })
+                }
+                Expression::IfLet {
+                    scrutinee,
+                    then_arm,
+                    else_arm,
+                } => {
+                    body_calls_later_fn(scrutinee, impl_idx, free_fn_pos)
+                        || body_calls_later_fn(&then_arm.body, impl_idx, free_fn_pos)
+                        || body_calls_later_fn(&else_arm.body, impl_idx, free_fn_pos)
+                }
+                Expression::WhileLet {
+                    scrutinee,
+                    then_arm,
+                    on_miss,
+                } => {
+                    body_calls_later_fn(scrutinee, impl_idx, free_fn_pos)
+                        || body_calls_later_fn(&then_arm.body, impl_idx, free_fn_pos)
+                        || body_calls_later_fn(&on_miss.body, impl_idx, free_fn_pos)
                 }
                 Expression::Access(recv, _) => body_calls_later_fn(recv, impl_idx, free_fn_pos),
                 _ => false,
@@ -10544,6 +10598,18 @@ impl Compiler {
         }
     }
 
+    fn emit_for_in_pattern_binds(
+        &mut self,
+        slot: u32,
+        pattern: Option<&parser::ast::LetPattern<'_>>,
+    ) {
+        if let Some(pat) = pattern {
+            let mut binds = CodeBuf::new();
+            self.emit_let_pattern_binds(pat, slot, &mut binds);
+            self.bytecode.append(&mut binds);
+        }
+    }
+
     /// `for x in` over an array already on the operand stack (or just
     /// compiled). Observationally identical to `ArrayIter::next`.
     ///
@@ -10552,7 +10618,7 @@ impl Compiler {
     fn emit_for_in_array_loop(
         &mut self,
         body: &Output<'_>,
-        binding_name: &str,
+        bind: &ForInBind<'_>,
         array_already_on_stack: bool,
         iterable: Option<&Output<'_>>,
         pin: bool,
@@ -10580,8 +10646,10 @@ impl Compiler {
         }
 
         // Consume binding Identifier NodeId (iterable → binding → body).
-        let _ = self.next_emit_id();
-        let binding_slot = self.alloc_binding_slot(binding_name);
+        if bind.consume_id {
+            let _ = self.next_emit_id();
+        }
+        let binding_slot = self.alloc_binding_slot(bind.name);
 
         // Counted protocol: no `continue` → while-shaped latch (body==latch)
         // so MIR vectorize / dense can match `while i < len`.
@@ -10612,6 +10680,7 @@ impl Compiler {
             self.bytecode.push_index();
         }
         self.bytecode.push_store_pop(binding_slot);
+        self.emit_for_in_pattern_binds(binding_slot, bind.pattern);
 
         self.loop_stack
             .push((continue_label.unwrap_or(top_label), exit_label));
@@ -10643,7 +10712,7 @@ impl Compiler {
         &mut self,
         iterable: &Output<'_>,
         body: &Output<'_>,
-        binding_name: &str,
+        bind: &ForInBind<'_>,
         arity: usize,
     ) {
         let tup_slot = self.alloc_temp_slot();
@@ -10656,14 +10725,14 @@ impl Compiler {
             self.bytecode.push_index();
         }
         self.bytecode.push_make_array(arity as u32);
-        self.emit_for_in_array_loop(body, binding_name, true, None, false);
+        self.emit_for_in_array_loop(body, bind, true, None, false);
     }
 
     /// Tuple already on the stack (user `into_iter` returning a tuple).
     fn emit_for_in_tuple_on_stack(
         &mut self,
         body: &Output<'_>,
-        binding_name: &str,
+        bind: &ForInBind<'_>,
         arity: usize,
     ) {
         let tup_slot = self.alloc_temp_slot();
@@ -10674,16 +10743,16 @@ impl Compiler {
             self.bytecode.push_index();
         }
         self.bytecode.push_make_array(arity as u32);
-        self.emit_for_in_array_loop(body, binding_name, true, None, false);
+        self.emit_for_in_array_loop(body, bind, true, None, false);
     }
 
     /// Dict → `DictEntries` (mapped MIR alloc) → array of `(string, V)`
     /// pairs → array for-in (C2b rung 3).
-    fn emit_for_in_dict(&mut self, iterable: &Output<'_>, body: &Output<'_>, binding_name: &str) {
+    fn emit_for_in_dict(&mut self, iterable: &Output<'_>, body: &Output<'_>, bind: &ForInBind<'_>) {
         let mut iter_bc = self.do_compile(iterable);
         self.bytecode.append(&mut iter_bc);
         self.bytecode.push(Byte::new(Instruction::DictEntries));
-        self.emit_for_in_array_loop(body, binding_name, true, None, false);
+        self.emit_for_in_array_loop(body, bind, true, None, false);
     }
 
     /// Lazy range for-in (`int`/`byte`/`float`).
@@ -10700,7 +10769,7 @@ impl Compiler {
         &mut self,
         iterable: &Output<'_>,
         body: &Output<'_>,
-        binding_name: &str,
+        bind: &ForInBind<'_>,
         inclusive: bool,
         float: bool,
     ) {
@@ -10709,8 +10778,10 @@ impl Compiler {
                 && !crate::const_fold::body_has_loop_control(body)
             {
                 if let Some(trips) = crate::const_fold::range_trip_count(start, end, inclusive) {
-                    let _ = self.next_emit_id();
-                    let binding_slot = self.alloc_binding_slot(binding_name);
+                    if bind.consume_id {
+                        let _ = self.next_emit_id();
+                    }
+                    let binding_slot = self.alloc_binding_slot(bind.name);
                     let _ = self.next_emit_id();
                     if let Some(ConstValue::Int(s)) = crate::const_fold::eval_expr(start, self.const_env())
                     {
@@ -10719,9 +10790,10 @@ impl Compiler {
                             let mut trip_bc = CodeBuf::new();
                             self.emit_const_value(&ConstValue::Int(val), &mut trip_bc);
                             trip_bc.push_store_pop(binding_slot);
-                            let mut body_bc = self.do_compile(body);
-                            trip_bc.append(&mut body_bc);
                             self.bytecode.append(&mut trip_bc);
+                            self.emit_for_in_pattern_binds(binding_slot, bind.pattern);
+                            let mut body_bc = self.do_compile(body);
+                            self.bytecode.append(&mut body_bc);
                         }
                         return;
                     }
@@ -10767,23 +10839,26 @@ impl Compiler {
             }
         }
 
-        self.emit_for_in_range_latch(body, binding_name, cur_slot, end_slot, inclusive, float);
+        self.emit_for_in_range_latch(body, bind, cur_slot, end_slot, inclusive, float);
     }
 
     /// Counted `cur`/`end` latch after the pair is already in slots (Q6 / C2b).
     fn emit_for_in_range_latch(
         &mut self,
         body: &Output<'_>,
-        binding_name: &str,
+        bind: &ForInBind<'_>,
         cur_slot: u32,
         end_slot: u32,
         inclusive: bool,
         float: bool,
     ) {
         // Consume binding Identifier NodeId (iterable → binding → body).
-        let _ = self.next_emit_id();
-        let alias_iv = !crate::const_fold::body_assigns_ident(body, binding_name);
-        let binding_slot = self.alloc_binding_slot(binding_name);
+        if bind.consume_id {
+            let _ = self.next_emit_id();
+        }
+        let alias_iv = bind.pattern.is_none()
+            && !crate::const_fold::body_assigns_ident(body, bind.name);
+        let binding_slot = self.alloc_binding_slot(bind.name);
         if alias_iv {
             // `x` is the IV (while-shaped). A copy DestProp-kills the increment.
             self.bytecode.push_load(cur_slot);
@@ -10823,6 +10898,7 @@ impl Compiler {
             self.bytecode.push_load(cur_slot);
             self.bytecode.push_store_pop(binding_slot);
         }
+        self.emit_for_in_pattern_binds(binding_slot, bind.pattern);
 
         self.loop_stack
             .push((continue_label.unwrap_or(top_label), exit_label));
@@ -10858,14 +10934,16 @@ impl Compiler {
 
     /// Coroutine for-in: resume → bind; skip body when `done` (completion
     /// value excluded). Same layout as the Phase CORO for-in path.
-    fn emit_for_in_coro(&mut self, iterable: &Output<'_>, body: &Output<'_>, binding_name: &str) {
+    fn emit_for_in_coro(&mut self, iterable: &Output<'_>, body: &Output<'_>, bind: &ForInBind<'_>) {
         let handle_slot = self.alloc_temp_slot();
         let mut iter_bc = self.do_compile(iterable);
         self.bytecode.append(&mut iter_bc);
         self.bytecode.push_store_pop(handle_slot);
 
-        let _ = self.next_emit_id();
-        let binding_slot = self.alloc_binding_slot(binding_name);
+        if bind.consume_id {
+            let _ = self.next_emit_id();
+        }
+        let binding_slot = self.alloc_binding_slot(bind.name);
 
         let mut bb = BlockBuilder::new();
         let top_label = bb.fresh_label(self.bytecode.il_mut());
@@ -10876,6 +10954,7 @@ impl Compiler {
         self.bytecode
             .push(Byte::new(Instruction::ResumeCoro).with_operand_u32(0));
         self.bytecode.push_store_pop(binding_slot);
+        self.emit_for_in_pattern_binds(binding_slot, bind.pattern);
 
         self.bytecode.push_load(handle_slot);
         self.bytecode.push(Byte::new(Instruction::DoneCoro));
@@ -10909,7 +10988,7 @@ impl Compiler {
         &mut self,
         iterable: &Output<'_>,
         body: &Output<'_>,
-        binding_name: &str,
+        bind: &ForInBind<'_>,
         into_iter_fqn: &str,
         next_fqn: Option<&str>,
         counted: Option<&ForInCounted>,
@@ -10925,11 +11004,11 @@ impl Compiler {
 
         match counted {
             Some(ForInCounted::Array) => {
-                self.emit_for_in_array_loop(body, binding_name, true, None, false);
+                self.emit_for_in_array_loop(body, bind, true, None, false);
                 return;
             }
             Some(ForInCounted::Tuple { arity }) => {
-                self.emit_for_in_tuple_on_stack(body, binding_name, *arity);
+                self.emit_for_in_tuple_on_stack(body, bind, *arity);
                 return;
             }
             Some(ForInCounted::Range {
@@ -10942,7 +11021,7 @@ impl Compiler {
                 self.bytecode.push_store_pop(cur_slot);
                 self.emit_for_in_range_latch(
                     body,
-                    binding_name,
+                    bind,
                     cur_slot,
                     end_slot,
                     *inclusive,
@@ -10952,7 +11031,7 @@ impl Compiler {
             }
             Some(ForInCounted::Dict) => {
                 self.bytecode.push(Byte::new(Instruction::DictEntries));
-                self.emit_for_in_array_loop(body, binding_name, true, None, false);
+                self.emit_for_in_array_loop(body, bind, true, None, false);
                 return;
             }
             None => {}
@@ -10980,8 +11059,10 @@ impl Compiler {
         let it_slot = self.alloc_temp_slot();
         self.bytecode.push_store_pop(it_slot);
 
-        let _ = self.next_emit_id();
-        let binding_slot = self.alloc_binding_slot(binding_name);
+        if bind.consume_id {
+            let _ = self.next_emit_id();
+        }
+        let binding_slot = self.alloc_binding_slot(bind.name);
 
         let mut bb = BlockBuilder::new();
         let top_label = bb.fresh_label(self.bytecode.il_mut());
@@ -11025,6 +11106,7 @@ impl Compiler {
                 .push(Byte::new(Instruction::Unpack).with_operand_u32(1));
         }
         self.bytecode.push_store_pop(binding_slot);
+        self.emit_for_in_pattern_binds(binding_slot, bind.pattern);
 
         self.loop_stack.push((top_label, exit_label));
         self.loop_bbs.push(bb);
@@ -11220,6 +11302,7 @@ impl Compiler {
             }
             Loop {
                 identifier,
+                pattern: _,
                 iterable,
                 body,
             } => {
@@ -13926,17 +14009,30 @@ impl Compiler {
             // `for x in`: IntoIterator/Iterator (array/tuple/dict/coro/custom)
             Expression::Loop {
                 identifier,
+                pattern,
                 iterable,
                 body,
             } => {
-                if let Some(binding) = identifier {
-                    if self.try_emit_par_loop(*span, iterable, body, Some(binding), self_id) {
-                        return bytecode;
-                    }
-                    let binding_name = match binding.1.as_ref() {
-                        Expression::Identifier(n) => (*n).to_string(),
-                        _ => "__for_in_x".to_string(),
+                if identifier.is_some() || pattern.is_some() {
+                    let binding_owned;
+                    let bind = if let Some(pat) = pattern {
+                        ForInBind {
+                            name: "__for_item",
+                            consume_id: false,
+                            pattern: Some(pat),
+                        }
+                    } else {
+                        binding_owned = match identifier.as_ref().unwrap().1.as_ref() {
+                            Expression::Identifier(n) => (*n).to_string(),
+                            _ => "__for_in_x".to_string(),
+                        };
+                        ForInBind::ident(&binding_owned)
                     };
+                    if let Some(binding) = identifier {
+                        if self.try_emit_par_loop(*span, iterable, body, Some(binding), self_id) {
+                            return bytecode;
+                        }
+                    }
                     let info = self.sidecar_for_in(self_id, span.start, span.end);
                     let item_ty = info.as_ref().map(|i| i.item_ty.clone());
                     let kind = info.map(|i| i.kind).unwrap_or(ForInKind::Coroutine);
@@ -13947,23 +14043,23 @@ impl Compiler {
                                 || self.typed_sidecar.is_for_in_pin_span(span.start, span.end);
                             self.emit_for_in_array_loop(
                                 body,
-                                &binding_name,
+                                &bind,
                                 false,
                                 Some(iterable),
                                 pin,
                             );
                         }
                         ForInKind::Tuple { arity } => {
-                            self.emit_for_in_tuple(iterable, body, &binding_name, arity);
+                            self.emit_for_in_tuple(iterable, body, &bind, arity);
                         }
                         ForInKind::Dict => {
-                            self.emit_for_in_dict(iterable, body, &binding_name);
+                            self.emit_for_in_dict(iterable, body, &bind);
                         }
                         ForInKind::Coroutine => {
-                            self.emit_for_in_coro(iterable, body, &binding_name);
+                            self.emit_for_in_coro(iterable, body, &bind);
                         }
                         ForInKind::Range { inclusive, float } => {
-                            self.emit_for_in_range(iterable, body, &binding_name, inclusive, float);
+                            self.emit_for_in_range(iterable, body, &bind, inclusive, float);
                         }
                         ForInKind::Custom {
                             into_iter_fqn,
@@ -13973,7 +14069,7 @@ impl Compiler {
                             self.emit_for_in_custom(
                                 iterable,
                                 body,
-                                &binding_name,
+                                &bind,
                                 &into_iter_fqn,
                                 next_fqn.as_deref(),
                                 counted.as_ref(),
@@ -15530,7 +15626,50 @@ impl Compiler {
             }
             // Forward: scrutinee, JUMP_IF_MATCH cascade, last-arm UNPACK/POP/STORE.
             // Reverse: arm bindings + bodies; non-first arms JMP to end.
-            Expression::Match { scrutinee, arms } => bytecode.append(&mut self.compile_match_expr(scrutinee, arms)),
+            Expression::Match { scrutinee, arms } => {
+                let arm_refs: Vec<&parser::ast::MatchArm> = arms.iter().collect();
+                bytecode.append(&mut self.compile_match_expr(scrutinee, &arm_refs));
+            }
+            Expression::IfLet {
+                scrutinee,
+                then_arm,
+                else_arm,
+            } => {
+                // Statement form: same join as `let _ = match` so Standard
+                // invert-guard / dest-prop cannot eat arm side-effect stores.
+                let prev = self.suppress_match_fusion_barrier;
+                self.suppress_match_fusion_barrier = true;
+                bytecode.append(&mut self.compile_match_expr(scrutinee, &[then_arm, else_arm]));
+                self.suppress_match_fusion_barrier = prev;
+                Self::discard_statement_value(&mut self.bytecode);
+            }
+            Expression::WhileLet {
+                scrutinee,
+                then_arm,
+                on_miss,
+            } => {
+                let mut bb = BlockBuilder::new();
+                let top_label = bb.fresh_label(self.bytecode.il_mut());
+                let exit_label = bb.fresh_label(self.bytecode.il_mut());
+                bb.bind_label(top_label, self.bytecode.il_mut());
+                self.loop_stack.push((top_label, exit_label));
+                self.loop_bbs.push(bb);
+                let prev = self.suppress_match_fusion_barrier;
+                self.suppress_match_fusion_barrier = true;
+                let mut match_bc = self.compile_match_expr(scrutinee, &[then_arm, on_miss]);
+                self.bytecode.append(&mut match_bc);
+                self.suppress_match_fusion_barrier = prev;
+                Self::discard_statement_value(&mut self.bytecode);
+                let mut bb = self
+                    .loop_bbs
+                    .pop()
+                    .expect("loop builder stack balanced for while let");
+                self.loop_stack
+                    .pop()
+                    .expect("loop label stack balanced for while let");
+                bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
+                bb.bind_label(exit_label, self.bytecode.il_mut());
+            }
             // Parser maps `default` to Pattern::Default; arm consumes NodeId only.
             Expression::Default(_) => (),
 
