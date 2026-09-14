@@ -1,0 +1,3 @@
+*.hyc
+package/
+flames/*.perf-script.txt

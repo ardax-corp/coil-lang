@@ -1,0 +1,111 @@
+;; symbols
+     3  io::sync::write_all
+    65  main
+    52  tak
+
+=== bytecode ===
+;; fn <prologue>  bc[0..3)
+00000  CALL             arity=0 target=0
+00001  JMP              target=65 (main)
+00002  HALT
+;; fn io::sync::write_all  bc[3..52)
+00003  CONST            imm=0
+00004  STORE            slot=2
+00005  LOAD             slot=1
+00006  ArrayLen
+00007  STORE            slot=3
+00008  BinSlotSlotJmpf  op=LE a=2 pool_idx=2
+00009  Seek             slot=4
+00010  LOAD             slot=2
+00011  STORE            slot=6
+00012  CONST            imm=93
+00013  LOAD             s0=0,s1=1,s2=2
+00014  HostInvoke       arity=3
+00015  JumpIfMatch      tag=0 pool_idx=3
+00016  JumpIfMatch      tag=1 pool_idx=4
+00017  LOAD             slot=7
+00018  CONST            imm=1
+00019  RETURN           op=0x2
+00020  POP
+00021  LOAD             slot=0
+00022  STORE            slot=8
+00023  CONST            imm=8
+00024  LOAD             slot=0
+00025  HostInvoke       arity=1
+00026  DUPLICATE
+00027  LogNot
+00028  JMPT             target=31
+00029  CONST            imm=1
+00030  RETURN           op=0x2
+00031  POP
+00032  JMP              target=47
+00033  BinSlotImmJmpf   op=EQ slot=7 pool_idx=5
+00034  LOAD             slot=0
+00035  STORE            slot=8
+00036  CONST            imm=8
+00037  LOAD             slot=0
+00038  HostInvoke       arity=1
+00039  DUPLICATE
+00040  LogNot
+00041  JMPT             target=44
+00042  CONST            imm=1
+00043  RETURN           op=0x2
+00044  POP
+00045  BinSlotImmJmpf   op=NEQ slot=7 pool_idx=6
+00046  BinSlotSlotStore op=ADD a=2 b=7 dest=2
+00047  POP
+00048  JMP              target=8
+00049  CONST            imm=0
+00050  DUPLICATE
+00051  RETURN           op=0x2
+
+;; fn tak  bc[52..65)
+00052  BinSlotSlotJmpt  op=LEQ a=0 pool_idx=7
+00053  BinSlotImm       op=SUB slot=0 imm=1
+00054  LOAD             s0=1,s1=2
+00055  CALL             arity=3 target=52 (tak)
+00056  BinSlotImm       op=SUB slot=1 imm=1
+00057  LOAD             s0=2,s1=0
+00058  CALL             arity=3 target=52 (tak)
+00059  BinSlotImm       op=SUB slot=2 imm=1
+00060  LOAD             s0=0,s1=1
+00061  CALL             arity=3 target=52 (tak)
+00062  TailCall         arity=3 target=52 (tak)
+00063  ConstReturnImm   imm=0
+00064  LoadReturnSlot   slot=2
+
+;; fn main  bc[65..98)
+00065  CONST            imm=1
+00066  HostInvoke       arity=0
+00067  STORE            slot=0
+00068  JMP              target=71
+00069  CONST            imm=6
+00070  JMP              target=75
+00071  CONST            imm=18
+00072  CONST            imm=12
+00073  CONST            imm=6
+00074  CALL             arity=3 target=52 (tak)
+00075  STORE            slot=1
+00076  LOAD             slot=1
+00077  STORE            slot=2
+00078  STRING           op=0x4
+00079  LOAD             slot=1
+00080  FORMAT           op=0x1
+00081  STORE            slot=3
+00082  CONST            imm=11
+00083  LOAD             slot=3
+00084  HostInvoke       arity=1
+00085  STORE            slot=4
+00086  LOAD             s0=0,s1=4
+00087  CALL             arity=2 target=3 (io::sync::write_all)
+00088  STORE            s0=7,s1=10
+00089  BinSlotImm       op=EQ slot=7 imm=0
+00090  JMPF             target=94
+00091  LOAD             slot=10
+00092  MakeEnum         tag=0 arity=1
+00093  JMP              target=96
+00094  LOAD             slot=10
+00095  MakeEnum         tag=1 arity=1
+00096  POP
+00097  ConstReturnImm   imm=0
+

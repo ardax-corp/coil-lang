@@ -1,0 +1,189 @@
+;; symbols
+     3  io::sync::write_all
+    52  main
+
+=== bytecode ===
+;; fn <prologue>  bc[0..3)
+00000  CALL             arity=0 target=0
+00001  JMP              target=52 (main)
+00002  HALT
+;; fn io::sync::write_all  bc[3..52)
+00003  CONST            imm=0
+00004  STORE            slot=2
+00005  LOAD             slot=1
+00006  ArrayLen
+00007  STORE            slot=3
+00008  BinSlotSlotJmpf  op=LE a=2 pool_idx=4
+00009  Seek             slot=4
+00010  LOAD             slot=2
+00011  STORE            slot=6
+00012  CONST            imm=93
+00013  LOAD             s0=0,s1=1,s2=2
+00014  HostInvoke       arity=3
+00015  JumpIfMatch      tag=0 pool_idx=5
+00016  JumpIfMatch      tag=1 pool_idx=6
+00017  LOAD             slot=7
+00018  CONST            imm=1
+00019  RETURN           op=0x2
+00020  POP
+00021  LOAD             slot=0
+00022  STORE            slot=8
+00023  CONST            imm=8
+00024  LOAD             slot=0
+00025  HostInvoke       arity=1
+00026  DUPLICATE
+00027  LogNot
+00028  JMPT             target=31
+00029  CONST            imm=1
+00030  RETURN           op=0x2
+00031  POP
+00032  JMP              target=47
+00033  BinSlotImmJmpf   op=EQ slot=7 pool_idx=7
+00034  LOAD             slot=0
+00035  STORE            slot=8
+00036  CONST            imm=8
+00037  LOAD             slot=0
+00038  HostInvoke       arity=1
+00039  DUPLICATE
+00040  LogNot
+00041  JMPT             target=44
+00042  CONST            imm=1
+00043  RETURN           op=0x2
+00044  POP
+00045  BinSlotImmJmpf   op=NEQ slot=7 pool_idx=8
+00046  BinSlotSlotStore op=ADD a=2 b=7 dest=2
+00047  POP
+00048  JMP              target=8
+00049  CONST            imm=0
+00050  DUPLICATE
+00051  RETURN           op=0x2
+
+;; fn main  bc[52..179)
+00052  CONST            imm=0
+00053  STORE            slot=0
+00054  CONST            imm=0
+00055  STORE            slot=1
+00056  CONST            imm=0
+00057  STORE            slot=2
+00058  CONST            imm=0
+00059  STORE            slot=3
+00060  CONST            imm=0
+00061  STORE            slot=4
+00062  CONST            imm=0
+00063  STORE            slot=5
+00064  CONST            imm=0
+00065  STORE            slot=6
+00066  CONST            imm=0
+00067  STORE            slot=7
+00068  CONST            imm=0
+00069  STORE            slot=8
+00070  BinSlotImmJmpf   op=LE slot=8 pool_idx=9
+00071  BinSlotImm       op=MOD slot=8 imm=8
+00072  DUPLICATE
+00073  CONST            imm=63
+00074  SHR
+00075  CONST            imm=8
+00076  BITAND
+00077  ADD
+00078  STORE            slot=9
+00079  BinSlotImmJmpf   op=EQ slot=9 pool_idx=10
+00080  LOAD             slot=0
+00081  STORE            slot=10
+00082  JMP              target=109
+00083  BinSlotImmJmpf   op=EQ slot=9 pool_idx=11
+00084  LOAD             slot=1
+00085  STORE            slot=10
+00086  JMP              target=109
+00087  BinSlotImmJmpf   op=EQ slot=9 pool_idx=12
+00088  LOAD             slot=2
+00089  STORE            slot=10
+00090  JMP              target=109
+00091  BinSlotImmJmpf   op=EQ slot=9 pool_idx=13
+00092  LOAD             slot=3
+00093  STORE            slot=10
+00094  JMP              target=109
+00095  BinSlotImmJmpf   op=EQ slot=9 pool_idx=14
+00096  LOAD             slot=4
+00097  STORE            slot=10
+00098  JMP              target=109
+00099  BinSlotImmJmpf   op=EQ slot=9 pool_idx=15
+00100  LOAD             slot=5
+00101  STORE            slot=10
+00102  JMP              target=109
+00103  BinSlotImmJmpf   op=EQ slot=9 pool_idx=16
+00104  LOAD             slot=6
+00105  STORE            slot=10
+00106  JMP              target=109
+00107  LOAD             slot=7
+00108  STORE            slot=10
+00109  BinSlotImmStore  op=ADD src=10 pool_idx=2
+00110  BinSlotImmJmpf   op=EQ slot=9 pool_idx=17
+00111  LOAD             slot=11
+00112  STORE            slot=0
+00113  JMP              target=140
+00114  BinSlotImmJmpf   op=EQ slot=9 pool_idx=18
+00115  LOAD             slot=11
+00116  STORE            slot=1
+00117  JMP              target=140
+00118  BinSlotImmJmpf   op=EQ slot=9 pool_idx=19
+00119  LOAD             slot=11
+00120  STORE            slot=2
+00121  JMP              target=140
+00122  BinSlotImmJmpf   op=EQ slot=9 pool_idx=20
+00123  LOAD             slot=11
+00124  STORE            slot=3
+00125  JMP              target=140
+00126  BinSlotImmJmpf   op=EQ slot=9 pool_idx=21
+00127  LOAD             slot=11
+00128  STORE            slot=4
+00129  JMP              target=140
+00130  BinSlotImmJmpf   op=EQ slot=9 pool_idx=22
+00131  LOAD             slot=11
+00132  STORE            slot=5
+00133  JMP              target=140
+00134  BinSlotImmJmpf   op=EQ slot=9 pool_idx=23
+00135  LOAD             slot=11
+00136  STORE            slot=6
+00137  JMP              target=140
+00138  LOAD             slot=11
+00139  STORE            slot=7
+00140  BinSlotImmStore  op=ADD src=8 pool_idx=3
+00141  JMP              target=70
+00142  CONST            imm=1
+00143  HostInvoke       arity=0
+00144  STORE            slot=9
+00145  BinSlotSlot      op=ADD a=0 b=1
+00146  LOAD             slot=2
+00147  ADD
+00148  LOAD             slot=3
+00149  ADD
+00150  LOAD             slot=4
+00151  ADD
+00152  LOAD             slot=5
+00153  ADD
+00154  LOAD             slot=6
+00155  ADD
+00156  LOAD             slot=7
+00157  ADD
+00158  STORE            slot=10
+00159  STRING           op=0x4
+00160  LOAD             slot=10
+00161  FORMAT           op=0x1
+00162  STORE            slot=11
+00163  CONST            imm=11
+00164  LOAD             slot=11
+00165  HostInvoke       arity=1
+00166  STORE            slot=12
+00167  LOAD             s0=9,s1=12
+00168  CALL             arity=2 target=3 (io::sync::write_all)
+00169  STORE            s0=15,s1=18
+00170  BinSlotImm       op=EQ slot=15 imm=0
+00171  JMPF             target=175
+00172  LOAD             slot=18
+00173  MakeEnum         tag=0 arity=1
+00174  JMP              target=177
+00175  LOAD             slot=18
+00176  MakeEnum         tag=1 arity=1
+00177  POP
+00178  ConstReturnImm   imm=0
+

@@ -1,0 +1,9 @@
+compile_mandelbrot      compilerish= 98.1%  machine=  0.0%  other=  1.9%  tot=1184553629
+hy_mandelbrot           compilerish= 38.0%  machine= 59.5%  other=  2.5%  tot=1409227645
+hy_tak                  compilerish= 60.8%  machine=  7.2%  other= 32.0%  tot=1063189540
+hyc_binary_trees        compilerish=  0.0%  machine= 96.9%  other=  3.1%  tot=1026078207
+hyc_fib                 compilerish=  0.1%  machine= 99.4%  other=  0.5%  tot=2310932736
+hyc_mandelbrot          compilerish=  0.1%  machine= 98.8%  other=  1.1%  tot=1713139372
+hyc_nsieve              compilerish=  0.3%  machine= 74.4%  other= 25.4%  tot=399197582
+hyc_tak                 compilerish=  0.4%  machine= 80.8%  other= 18.8%  tot=239719151
+pkg_fib                 compilerish=  0.0%  machine= 95.3%  other=  4.7%  tot=1983951802

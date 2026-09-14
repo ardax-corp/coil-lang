@@ -1,0 +1,65 @@
+=== total opcode histogram ===
+     14  LOAD
+     12  CONST
+     11  STORE
+      7  JMP
+      6  HostInvoke
+      6  DenseConst
+      6  DenseMove
+      5  RETURN
+      5  POP
+      5  DenseBin
+      4  CALL
+      4  BinSlotSlotJmpf
+      3  DUPLICATE
+      3  BinSlotImmJmpf
+      2  Seek
+      2  JumpIfMatch
+      2  LogNot
+      2  JMPT
+      2  MakeEnum
+      1  Vec::with_capacity
+      1  io::sync::write_all
+      1  main
+      1  nsieve
+      1  HALT
+      1  ArrayLen
+      1  BinSlotSlotStore
+      1  DensePush
+      1  DenseArrayPush
+      1  DenseIndex
+      1  DenseStoreIndex
+      1  LoadReturnSlot
+      1  STRING
+      1  FORMAT
+      1  BinSlotImm
+      1  JMPF
+      1  ConstReturnImm
+
+=== index-family counts ===
+      1  ArrayLen
+      1  DenseIndex
+      1  DenseStoreIndex
+
+=== DenseIndex / DenseStoreIndex flags ===
+  nsieve               pc=   74 DenseIndex       flags=1 unchecked=True op=0x10b0112
+  nsieve               pc=   81 DenseStoreIndex  flags=1 unchecked=True op=0x1100111
+
+=== per-function (index family + CALL/Seek/HostInvoke) ===
+
+[<prologue>]
+  other: {'CALL': 1, 'JMP': 1}
+
+[Vec::with_capacity]
+  other: {'HostInvoke': 1, 'LOAD': 1}
+
+[io::sync::write_all]
+  index: {'ArrayLen': 1}
+  other: {'Seek': 1, 'HostInvoke': 3, 'LOAD': 8, 'STORE': 5, 'BinSlotSlotJmpf': 1, 'BinSlotImmJmpf': 2, 'JMP': 2}
+
+[main]
+  other: {'CALL': 2, 'HostInvoke': 2, 'FORMAT': 1, 'LOAD': 5, 'STORE': 5, 'JMP': 1}
+
+[nsieve]
+  index: {'DenseStoreIndex': 1, 'DenseIndex': 1}
+  other: {'CALL': 1, 'Seek': 1, 'STORE': 1, 'DenseBin': 5, 'DenseMove': 6, 'DenseConst': 6, 'BinSlotSlotJmpf': 3, 'BinSlotImmJmpf': 1, 'JMP': 3}

@@ -1,0 +1,15 @@
+mandelbrot hyc 10364
+mandelbrot hy 10300
+mandelbrot pkg 10360
+tak hyc 10416
+tak hy 10336
+tak pkg 10352
+nsieve hyc 10500
+nsieve hy 10372
+nsieve pkg 10364
+binary_trees hyc 10352
+binary_trees hy 10752
+binary_trees pkg 10312
+fib hyc 10348
+fib hy 10544
+fib pkg 10516

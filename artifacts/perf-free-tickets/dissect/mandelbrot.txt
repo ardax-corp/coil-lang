@@ -1,0 +1,139 @@
+;; symbols
+     3  io::sync::write_all
+    99  main
+    52  mandelbrot
+
+=== bytecode ===
+;; fn <prologue>  bc[0..3)
+00000  CALL             arity=0 target=0
+00001  JMP              target=99 (main)
+00002  HALT
+;; fn io::sync::write_all  bc[3..52)
+00003  CONST            imm=0
+00004  STORE            slot=2
+00005  LOAD             slot=1
+00006  ArrayLen
+00007  STORE            slot=3
+00008  BinSlotSlotJmpf  op=LE a=2 pool_idx=10
+00009  Seek             slot=4
+00010  LOAD             slot=2
+00011  STORE            slot=6
+00012  CONST            imm=93
+00013  LOAD             s0=0,s1=1,s2=2
+00014  HostInvoke       arity=3
+00015  JumpIfMatch      tag=0 pool_idx=11
+00016  JumpIfMatch      tag=1 pool_idx=12
+00017  LOAD             slot=7
+00018  CONST            imm=1
+00019  RETURN           op=0x2
+00020  POP
+00021  LOAD             slot=0
+00022  STORE            slot=8
+00023  CONST            imm=8
+00024  LOAD             slot=0
+00025  HostInvoke       arity=1
+00026  DUPLICATE
+00027  LogNot
+00028  JMPT             target=31
+00029  CONST            imm=1
+00030  RETURN           op=0x2
+00031  POP
+00032  JMP              target=47
+00033  BinSlotImmJmpf   op=EQ slot=7 pool_idx=13
+00034  LOAD             slot=0
+00035  STORE            slot=8
+00036  CONST            imm=8
+00037  LOAD             slot=0
+00038  HostInvoke       arity=1
+00039  DUPLICATE
+00040  LogNot
+00041  JMPT             target=44
+00042  CONST            imm=1
+00043  RETURN           op=0x2
+00044  POP
+00045  BinSlotImmJmpf   op=NEQ slot=7 pool_idx=14
+00046  BinSlotSlotStore op=ADD a=2 b=7 dest=2
+00047  POP
+00048  JMP              target=8
+00049  CONST            imm=0
+00050  DUPLICATE
+00051  RETURN           op=0x2
+
+;; fn mandelbrot  bc[52..99)
+00052  Seek             slot=37
+00053  DenseConst       op=0x1020000
+00054  DenseConst       op=0x1050000
+00055  DenseConst       op=0x83160008
+00056  DenseConst       op=0x11c0001
+00057  DenseConst       op=0x830f0003
+00058  DenseConst       op=0x83110006
+00059  DenseConst       op=0x83090000
+00060  DenseCast        op=0x300
+00061  DenseMove        op=0x2002
+00062  DenseMove        op=0x2402
+00063  BinSlotSlotJmpf  op=GT a=0 pool_idx=15
+00064  DenseCast        op=0x620
+00065  DenseBin         op=0xd070603
+00066  DenseBin         op=0xa080707
+00067  DenseBin         op=0xb0a0809
+00068  DenseMove        op=0x1f05
+00069  DenseMove        op=0x1e24
+00070  BinSlotSlotJmpf  op=GT a=0 pool_idx=16
+00071  DenseCast        op=0xc1f
+00072  DenseBin         op=0xd0d0c03
+00073  DenseBin         op=0xa0e0d0d
+00074  DenseBin         op=0xb100e0f
+00075  DenseMove        op=0x1d05
+00076  DenseMove        op=0x2111
+00077  DenseMove        op=0x1b11
+00078  BinSlotSlotJmpf  op=GT a=1 pool_idx=17
+00079  DenseBin         op=0xc132121
+00080  DenseBin         op=0xc141b1b
+00081  DenseBin         op=0xa151314
+00082  BinSlotSlotJmpf  op=GTF a=21 pool_idx=18
+00083  JMP              target=92
+00084  DenseBin         op=0xb171314
+00085  DenseBin         op=0xa181710
+00086  DenseBin         op=0xc19211b
+00087  DenseBin         op=0xa1a1919
+00088  DenseBin         op=0xa1b1a0a
+00089  DenseBin         op=0x1d1d1c
+00090  DenseMove        op=0x2118
+00091  JMP              target=78
+00092  DenseBin         op=0x1e1e1d
+00093  DenseBin         op=0x1f1f1c
+00094  JMP              target=70
+00095  DenseBin         op=0x20201c
+00096  DenseMove        op=0x241e
+00097  JMP              target=63
+00098  LoadReturnSlot   slot=36
+
+;; fn main  bc[99..126)
+00099  CONST            imm=1
+00100  HostInvoke       arity=0
+00101  STORE            slot=0
+00102  CONST            imm=160
+00103  CONST            imm=50
+00104  CALL             arity=2 target=52 (mandelbrot)
+00105  STORE            slot=1
+00106  STRING           op=0x4
+00107  LOAD             slot=1
+00108  FORMAT           op=0x1
+00109  STORE            slot=2
+00110  CONST            imm=11
+00111  LOAD             slot=2
+00112  HostInvoke       arity=1
+00113  STORE            slot=3
+00114  LOAD             s0=0,s1=3
+00115  CALL             arity=2 target=3 (io::sync::write_all)
+00116  STORE            s0=6,s1=9
+00117  BinSlotImm       op=EQ slot=6 imm=0
+00118  JMPF             target=122
+00119  LOAD             slot=9
+00120  MakeEnum         tag=0 arity=1
+00121  JMP              target=124
+00122  LOAD             slot=9
+00123  MakeEnum         tag=1 arity=1
+00124  POP
+00125  ConstReturnImm   imm=0
+

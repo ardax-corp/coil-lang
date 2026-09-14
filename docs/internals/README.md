@@ -17,6 +17,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [IL opt contracts](../../compiler/src/il/opt/README.md) | Per-pass input / output / refusals / solo tests (D1) |
 | [Limitations](limitations.md) | Known gaps, workarounds, and tracking |
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
+| [Perf free tickets](perf-free-tickets.md) | Investigation-only (2026-09-14, `cf7a193c`): flagship `.hyc` vs `coil .hy` vs package; bounds-check hypothesis **disproved** on this set; ranked follow-ups |
 | [Array pins](array-pin.md) | Shipped `ArrayPin` / `IndexPin*` handle (COI-198) |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
 | [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark + SATB + lazy sweep; moving GC deferred |
