@@ -4840,7 +4840,7 @@ impl Compiler {
 
     /// `Some(kind)` when `expr` is a Range literal, an already-unboxed
     /// range local (`[start, end]`), or a two-word Range-returning call.
-    /// Boxed dict ranges stay one word.
+    /// Heap-field / array Range stays one word until for-in unpack.
     fn expr_unboxed_range_kind(&self, expr: &Output<'_>) -> Option<String> {
         let cur = unwrap_expr_output(expr);
         match cur.1.as_ref() {
@@ -4859,7 +4859,7 @@ impl Compiler {
     }
 
     /// Direct CALL args / returns: `[start, end]` from a literal, unboxed
-    /// local, two-word call, or a leftover heap dict.
+    /// local, two-word call, or a leftover heap Range object.
     fn emit_range_pair_from_expr(&mut self, bytecode: &mut CodeBuf, expr: &Output<'_>) {
         let cur = unwrap_expr_output(expr);
         match cur.1.as_ref() {
@@ -4895,22 +4895,20 @@ impl Compiler {
         }
     }
 
-    /// Heap `{start,end,inclusive}` on TOS → `[start, end]` via GetField.
+    /// Heap slotted Range on TOS → `[start, end]` via LoadField (C2b).
     fn emit_unbox_range_dict_to_pair(&mut self, bytecode: &mut CodeBuf) {
         self.expr_depth += 1;
         let tmp = self.alloc_temp_slot();
         self.expr_depth -= 1;
         bytecode.push_store_pop(tmp);
         bytecode.push_load(tmp);
-        self.emit_raw_string_literal(bytecode, "start");
-        bytecode.push_get_field();
+        bytecode.push_load_field(0);
         bytecode.push_load(tmp);
-        self.emit_raw_string_literal(bytecode, "end");
-        bytecode.push_get_field();
+        bytecode.push_load_field(1);
     }
 
     /// Free-fn numeric Range params use two CALL slots when the fn is not
-    /// taken as a value. Inherent / instance methods keep the boxed dict.
+    /// Inherent / instance methods keep the boxed Range object.
     fn callee_has_unboxed_range_params(&self, name: &str) -> bool {
         let lookup = strip_overload_key(name);
         if self.is_fn_value_escaped(lookup) || self.is_fn_value_escaped(name) {
@@ -4986,13 +4984,22 @@ impl Compiler {
         end_slot: u32,
         inclusive: bool,
     ) {
+        let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
+        bytecode.push(
+            Byte::new(Instruction::InitTyped)
+                .with_operand_u32(common::pack_init_typed(type_id, 2)),
+        );
+        let tmp_inst = self.alloc_temp_slot();
+        bytecode.push_store_pop(tmp_inst);
         bytecode.push_load(start_slot);
-        self.emit_raw_string_literal(bytecode, "start");
+        bytecode.push_load(tmp_inst);
+        bytecode.push_set_field_slot(0);
+        bytecode.push_pop();
         bytecode.push_load(end_slot);
-        self.emit_raw_string_literal(bytecode, "end");
-        bytecode.push_const(if inclusive { 1 } else { 0 });
-        self.emit_raw_string_literal(bytecode, "inclusive");
-        bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(3));
+        bytecode.push_load(tmp_inst);
+        bytecode.push_set_field_slot(1);
+        bytecode.push_pop();
+        bytecode.push_seek(tmp_inst + 1);
     }
 
     /// Compile `rhs` as `[payload, tag]` and store both into `name`.
@@ -8711,7 +8718,7 @@ impl Compiler {
 
     /// Inherent `Range::to_vec` / `RangeInclusive::to_vec` bodies.
     ///
-    /// Unpacks the runtime dict `{start,end,inclusive}` and fills a `Vec`
+    /// Unpacks the slotted heap Range (`LoadField` 0/1) and fills a `Vec`
     /// with the same step as `for` (`+1` / `+1.0`). Float uses a sibling
     /// `__float_to_vec` thunk selected at the call site.
     fn emit_range_method_thunks(&mut self) {
@@ -8768,17 +8775,13 @@ impl Compiler {
             return;
         }
         self.bind_function_entry(fqn);
-        // slot 0 = self (range dict); 1 = cur; 2 = end; 3 = out vec
-        let start_idx = self.intern_string("start");
+        // slot 0 = self (slotted Range); 1 = cur; 2 = end; 3 = out vec
         self.bytecode.push_load(0);
-        self.bytecode.push_string(start_idx);
-        self.bytecode.push_get_field();
+        self.bytecode.push_load_field(0);
         self.bytecode.push_store_pop(1);
 
-        let end_idx = self.intern_string("end");
         self.bytecode.push_load(0);
-        self.bytecode.push_string(end_idx);
-        self.bytecode.push_get_field();
+        self.bytecode.push_load_field(1);
         self.bytecode.push_store_pop(2);
 
         self.bytecode.push_make_array(0);
@@ -10624,8 +10627,8 @@ impl Compiler {
     /// Fast path when the iterable is a `Range` literal: locals for
     /// `cur`/`end` only, no heap. Unboxed first-class range locals,
     /// numeric Range parameters, and two-word Range-returning calls
-    /// reuse those `[start, end]` slots. Escaped / heap dicts still
-    /// unpack via `GetField`.
+    /// reuse those `[start, end]` slots. Heap-field / array Range
+    /// unpacks via `LoadField` (C2b).
     ///
     /// `float` selects LEF/LEQF/ADDF with step `1.0`; otherwise LE/LEQ/ADD
     /// with step `1` (shared by `int` and `byte`).
@@ -10691,33 +10694,12 @@ impl Compiler {
                 self.bytecode.push_load(end_from);
                 self.bytecode.push_store_pop(end_slot);
             }
-            _ if self
-                .expr_unboxed_range_kind(iterable)
-                .is_some_and(|k| crate::typechecking::return_layout::is_range_kind(&k)) =>
-            {
+            _ => {
                 let mut pair = CodeBuf::new();
                 self.emit_range_pair_from_expr(&mut pair, iterable);
                 self.bytecode.append(&mut pair);
                 self.bytecode.push_store_pop(end_slot);
                 self.bytecode.push_store_pop(cur_slot);
-            }
-            _ => {
-                let range_slot = self.alloc_temp_slot();
-                let mut iter_bc = self.do_compile(iterable);
-                self.bytecode.append(&mut iter_bc);
-                self.bytecode.push_store_pop(range_slot);
-
-                self.bytecode.push_load(range_slot);
-                let start_idx = self.intern_string("start");
-                self.bytecode.push_string(start_idx);
-                self.bytecode.push_get_field();
-                self.bytecode.push_store_pop(cur_slot);
-
-                self.bytecode.push_load(range_slot);
-                let end_idx = self.intern_string("end");
-                self.bytecode.push_string(end_idx);
-                self.bytecode.push_get_field();
-                self.bytecode.push_store_pop(end_slot);
             }
         }
 
@@ -13491,7 +13473,7 @@ impl Compiler {
                 let arity = items.len() as u32;
                 bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(arity));
             }
-            // Lazy range value: dict `{ start, end, inclusive }` on escape.
+            // Lazy range value: slotted `{start,end}` object on escape.
             // Unboxed locals / two-word context keep `[start, end]` only
             // (`inclusive` lives in the type / bind kind). Direct
             // `for x in 0..n` uses the no-heap fast path instead.
@@ -13506,13 +13488,17 @@ impl Compiler {
                     let mut end_bc = self.do_compile(end);
                     bytecode.append(&mut end_bc);
                 } else {
-                    self.emit_raw_string_literal(&mut bytecode, "start");
+                    self.expr_depth += 1;
+                    let start_tmp = self.alloc_temp_slot();
+                    self.expr_depth -= 1;
+                    bytecode.push_store_pop(start_tmp);
                     let mut end_bc = self.do_compile(end);
                     bytecode.append(&mut end_bc);
-                    self.emit_raw_string_literal(&mut bytecode, "end");
-                    bytecode.push_const(if *inclusive { 1 } else { 0 });
-                    self.emit_raw_string_literal(&mut bytecode, "inclusive");
-                    bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(3));
+                    self.expr_depth += 1;
+                    let end_tmp = self.alloc_temp_slot();
+                    self.expr_depth -= 1;
+                    bytecode.push_store_pop(end_tmp);
+                    self.emit_box_range_slots(&mut bytecode, start_tmp, end_tmp, *inclusive);
                 }
             }
             Expression::Index(target, Some(index)) => {
