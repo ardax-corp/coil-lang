@@ -301,6 +301,7 @@
                     identifier,
                     iterable,
                     body,
+                    ..
                 } => {
                     match identifier.as_ref().map(|i| i.1.as_ref()) {
                         Some(Expression::Identifier(name)) => assert_eq!(*name, "x"),
