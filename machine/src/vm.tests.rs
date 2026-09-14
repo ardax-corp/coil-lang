@@ -672,11 +672,19 @@
     }
 
     fn dense_index(flags: u8, dest: u8, arr: u8, idx: u8) -> Byte {
-        Byte::new(Instruction::DenseIndex).with_dense_abc(flags, dest, arr, idx)
+        let op = ((flags as u32) << 24)
+            | ((dest as u32) << 16)
+            | ((arr as u32) << 8)
+            | (idx as u32);
+        Byte::new(Instruction::DenseIndex).with_operand_u32(op)
     }
 
     fn dense_store_index(flags: u8, dest: u8, arr: u8, idx: u8) -> Byte {
-        Byte::new(Instruction::DenseStoreIndex).with_dense_abc(flags, dest, arr, idx)
+        let op = ((flags as u32) << 24)
+            | ((dest as u32) << 16)
+            | ((arr as u32) << 8)
+            | (idx as u32);
+        Byte::new(Instruction::DenseStoreIndex).with_operand_u32(op)
     }
 
     /// COI-372: DenseIndex fills `frame_pins` from the array register so the
