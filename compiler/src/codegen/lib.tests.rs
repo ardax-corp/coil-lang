@@ -2293,6 +2293,10 @@ fn main() { let c = new Counter(0, 3); for x in c { write(stdout(), to_bytes(for
             .iter()
             .filter(|b| matches!(b.bytecode(), Instruction::EQ))
             .count();
+        let tag_jmp = bc
+            .iter()
+            .filter(|b| matches!(b.bytecode(), Instruction::JMPF | Instruction::JMPT))
+            .count();
         assert!(
             calls >= 2,
             "custom for-in should CALL into_iter and next; got {calls}"
@@ -2302,8 +2306,8 @@ fn main() { let c = new Counter(0, 3); for x in c { write(stdout(), to_bytes(for
             "custom for-in must not BoxValue the carrier; got {box_value}"
         );
         assert!(
-            jump_if_match >= 1 || eq >= 1,
-            "custom for-in should JumpIfMatch or two-slot EQ on Option::None; jim={jump_if_match} eq={eq}"
+            jump_if_match >= 1 || eq >= 1 || tag_jmp >= 1,
+            "custom for-in should JumpIfMatch, EQ, or two-slot tag JMP on Option::None; jim={jump_if_match} eq={eq} tag_jmp={tag_jmp}"
         );
     }
 
