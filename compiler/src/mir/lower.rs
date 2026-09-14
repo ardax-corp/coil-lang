@@ -473,7 +473,7 @@ fn split_blocks(ops: &[IlOp]) -> Vec<(usize, usize)> {
 fn is_term(op: &IlOp) -> bool {
     match op {
         IlOp::Entry {
-            kind: EntryKind::Call,
+            kind: EntryKind::Call | EntryKind::MakeCoro,
             ..
         } => false,
         IlOp::Jump { .. }

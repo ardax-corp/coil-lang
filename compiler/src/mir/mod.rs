@@ -2562,11 +2562,14 @@ fn main() {
             IlOp::Label(Label(0)),
             IlOp::Load { slot: 0, loc },
             IlOp::byte(Byte::new(Instruction::ResumeCoro)),
+            IlOp::StorePop { slot: 1, loc },
+            IlOp::Load { slot: 0, loc },
             IlOp::byte(Byte::new(Instruction::DoneCoro)),
             IlOp::Return { loc, ret_words: 1 },
         ];
         let mut hints = LowerHints::new("resume");
         hints.slot_ty.insert(0, MirTy::HeapRef);
+        hints.slot_ty.insert(1, MirTy::I64);
         let f = try_lower_numeric(&ops, &hints).expect("lower ResumeCoro");
         f.verify().unwrap();
         assert!(f.blocks.iter().any(|b| {
