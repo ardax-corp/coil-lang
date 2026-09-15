@@ -44,10 +44,10 @@ Until then S1–S5 are dense-emit (or VM peek) only.
 | **S4** | [COI-379](https://linear.app/ardax/issue/COI-379) | `DenseIndex` + imm cmp + jmpf | `nsieve` p-loop: `DenseIndex ; BinSlotImmJmpf EQ` (`flags[p] == 1`). | dense emit | **Done (ISA pack).** Two-word `DenseIndexJmpf` (archive **minor 18**): first `dense_abc` on the opcode, payload word is the fused `*Jmpf` (same stream-width as `DenseBinJmpf`). Real 2→1 on the p-loop `flags[p] == 1`. Stacks with [COI-372](https://linear.app/ardax/issue/COI-372) last-addr `Object` cache. Index stays dense-native (not `IndexPin`). `fib` bytecode unchanged; keep `unlikely(is_hot)`. |
 | **S5** | [COI-382](https://linear.app/ardax/issue/COI-382) | Index/StoreIndex stride pair | Inner k-loop is **`DenseMove ; DenseStoreIndex ; DenseBin ; JMP`** — store of 0 with `k = k + p`. **No** `DenseIndex` in that loop. | table/hotmatch VM peek | **Done (peek, no opcode).** Table/hotmatch consume trailing `DenseBin`/`DenseBin2` then `JMP` in the `DenseStoreIndex` handler (one dispatch for store + IV bump + latch). Bytecode unchanged (`DenseMove` stays its own op). No archive bump; not ALWAYS_HOT growth. Giant match stays three-dispatch on store/bin/jmp. `fib` has no this shape; keep `unlikely(is_hot)`. Not consecutive Index+Store of the same cell. |
 | **S6** | [COI-383](https://linear.app/ardax/issue/COI-383) | `DenseMove` coalesce | `mandelbrot` **9** `DenseMove` (φ / latch copies). Pairs: `DenseMove ; DenseMove ; BinSlotSlotJmpf`. | MIR destprop / dense emit | **Done (peep, no opcode).** Sink φ incomings past last use of the dest, then the existing latch overwrite aliases `i = i+1` / mandelbrot `tr`→`zr`. Identity `DenseMove` drop. No new opcode; LOAD/STORE cost 2 vs `DenseMove` 1 unchanged. Nested-accumulator interference coalesce was unsound (SROA pack checksum) and is not shipped. |
-| **S7** | [COI-384](https://linear.app/ardax/issue/COI-384) | Fuse-IL peep parity for S1–S5 shapes | `fib`/`tak`/`item_check`/`bottom_up` stay fuse-IL. Stack `*Jmpf` / `BinSlotImm` / `BinReturn` **already fire** (`fib` is 7 ops). Dense S1–S5 shapes do not appear on these bodies. | IL peep | Real fuse-IL gaps are **not** S1–S5 copies: `item_check` `CONST ; LOAD ; ADD` (canon Unknown-SP after match); `bottom_up` `MakeEnum ; RETURN`. Do not densify `main`/FORMAT. Pick one of those as the S7 hit, or drop S7 if “parity” meant “already true for stack fuses.” |
+| **S7** | [COI-384](https://linear.app/ardax/issue/COI-384) | Fuse-IL peep parity for S1–S5 shapes | `fib`/`tak`/`item_check`/`bottom_up` stay fuse-IL. Stack `*Jmpf` / `BinSlotImm` / `BinReturn` **already fire** (`fib` is 7 ops). Dense S1–S5 shapes do not appear on these bodies. | IL peep | **Done (peep, no opcode).** `item_check` `CONST; LOAD; ADD` → `BinSlotImm`: fuse-select matches const-left commute bins (shape appears after slot-promote, past canon); canon also swaps `Const; Load; op` without Known SP. `bottom_up` MakeEnum+RETURN is X3. Do not densify `main`/FORMAT. Dense S1–S5 “parity” remains N/A on fuse-IL flagships. |
 | **S8** | [COI-385](https://linear.app/ardax/issue/COI-385) | Fusion not blocked on specialize keep | Cost gate / `lir_eligible` do **not** currently refuse because a packed op appeared (none exist yet). The live block is **`Dense*` as residual `Byte` → fuse-select Cold**. `emit_cost` weights `Seek` and LOAD/STORE, not opcode novelty. | typed `IlOp` for `Dense*` **or** keep packing in dense emit | One-line lift if S1–S5 should share fuse-select: lift `DenseBin`/`DenseCast`/`DenseIndex`/`DenseStoreIndex`/`DenseMove` in `from_plain_byte`. Do **not** make specialize keep a prerequisite. Print `main` stays fuse-IL by design. |
 
-Kick order (project ladder, still valid): **S8 note first** (this doc) → **S2** (landed, two-word `DenseBin2`) → **S1** (landed, two-word `DenseBinJmpf`) → **S4** (landed, two-word `DenseIndexJmpf`) → **S6** → **S3** (landed, table/hotmatch peek) → **S5** (landed, table/hotmatch peek) → **S7** (after choosing a real fuse-IL hit).
+Kick order (project ladder, still valid): **S8 note first** (this doc) → **S2** (landed, two-word `DenseBin2`) → **S1** (landed, two-word `DenseBinJmpf`) → **S4** (landed, two-word `DenseIndexJmpf`) → **S6** → **S3** (landed, table/hotmatch peek) → **S5** (landed, table/hotmatch peek) → **S7** (landed, `item_check` const-left `BinSlotImm`).
 
 ---
 
@@ -67,7 +67,7 @@ Not ready without a gate (still not specialize-keep):
 
 | Extra | Gate |
 |-------|------|
-| `item_check` `CONST ; LOAD ; ADD` → `BinSlotImm` | `il/canon.rs` refuses Unknown SP (match join). Candidate S7 hit, not a new opcode. |
+| `item_check` `CONST ; LOAD ; ADD` → `BinSlotImm` | **Done (COI-384 S7).** Fuse-select const-left commute peep; canon no longer needs Known SP for `Const; Load; op`. |
 | `BinSlotImm` for pool float imm | `is_int_bin_op` / `const_inline_value`. No flagship still on fuse-IL float. |
 
 Blocked (do not file as kick tickets): revive `FloatChainStore`; CALL-prep superinstructions (`fib`/`tak` — frame dominates); fuse across `FuseHint::nofuse_value_under_jmp`; two-word `RETURN` into `*Return`; residual `Byte` windows (FORMAT/FFI/`Seek`); dense infer `Pow`/`AND`/`OR`; LIR HostInvoke reconstruct; scalar IEEE FMA.
@@ -90,7 +90,7 @@ production.
 | `LogNotJmpf` / `LogNotJmpt` | `LogNot; JMPF/T` | fuse-select |
 | `BinSlotImmStore` | `LOAD; CONST; int-bin; STORE` | fuse-select (`is_int_bin_op` only) |
 | `BinSlotSlotStore` | `LOAD; LOAD; bin; STORE` | fuse-select (int+float) |
-| `BinSlotImm` | `LOAD; CONST; int-bin` | fuse-select (**int only**) |
+| `BinSlotImm` | `LOAD; CONST; int-bin` **or** `CONST; LOAD; commute-int-bin` | fuse-select (**int only**; const-left is COI-384) |
 | `BinSlotSlot` | `LOAD; LOAD\|DUP; bin` | fuse-select (int+float) |
 | `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` / `MakeEnumReturn` | producer + one-word `RETURN` | fuse-select + convoy (`MakeEnumReturn` is fuse-select only) |
 | packed `LOAD`/`STORE` n=2/3 | adjacent singles | fuse-select |
@@ -137,7 +137,7 @@ they are not emitted. `BinSlotSlotConstJmpt` still has a live handler.
 | `il/lower.rs` `is_one_word_return` | `*Return` on `RETURN` width 2 | would drop hi word |
 | `il/lower.rs` `is_int_bin_op` | float `BinSlotImm` | pool `CONST` |
 | `il/lower.rs` `try_fuse_slots` | `FloatChainStore` / `BinSlotSlotConstJmpf` | “not emitted” |
-| `il/canon.rs` | `Const; Load; op` swap | Unknown SP; float; non-commutative ops |
+| `il/canon.rs` | `Load; Load; op` swap | Unknown SP; float; non-commutative ops. `Const; Load; op` is stack-relative (COI-384). |
 | COI-87 / `opt/cfg.rs` | invert loop headers to `*Jmpt` | headers stay `*Jmpf` |
 | `seek_back_edge` | Seek latch on Standard | off except `-O3` |
 | `mir/entry.rs` `hard_refuse` | MIR→LIR leftover | Call / Host / heap field / Box / unmapped alloc |
@@ -203,7 +203,7 @@ order-of-magnitude, not `vm_profile`).
 
 **fib:** `BinSlotImmJmpt ; BinSlotImm ; CALL ; BinSlotImm ; CALL ; BinReturn ; ConstReturnImm`.
 
-**item_check:** `JumpIfMatch ; Unpack ; packed STORE ; LOAD ; CALL ; … ; CONST ; LOAD ; ADD ; LOAD ; BinReturn`.
+**item_check:** `JumpIfMatch ; Unpack ; packed STORE ; LOAD ; CALL ; … ; BinSlotImm ADD ; LOAD ; BinReturn` (COI-384: `CONST; LOAD; ADD` fused).
 
 **bottom_up:** `MakeEnumReturn` twice (Leaf arity-0, Node arity-2; COI-388 X3).
 

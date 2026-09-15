@@ -208,16 +208,18 @@ Does not use tell for rewrite (alias map only).
 **Flag:** `canon` (default on). **Fn:** `il::canon::canonicalize_operand_order`.
 Uses **`sp`**.
 
-- **Input:** Known-SP windows `Const; Load; op`, demote-able `ConstPool; Load;
-  int-op`, or `Load a; Load b; op` with `a > b`.
+- **Input:** `Const; Load; op` (any SP), demote-able `ConstPool; Load;
+  int-op`, or Known-SP `Load a; Load b; op` with `a > b`.
 - **Output:** Const on RHS; low-then-high load order; ordered-cmp polarity flip
   (`LE`↔`GT`, `LEQ`↔`GEQ`). Int `ConstPool` may demote to inline `Const`. Stack
   height and labels unchanged.
-- **Refusals:** Unknown SP (counted in `CanonStats::refused_unknown_sp`); float
-  ops; residual `Byte`; non-commutative `SUB`/`DIV`/`MOD`/`SHL`/`SHR`/`Pow`. No
-  float reassoc.
+- **Refusals:** Unknown SP on `Load; Load; op` only (counted in
+  `CanonStats::refused_unknown_sp`); float ops; residual `Byte`; non-commutative
+  `SUB`/`DIV`/`MOD`/`SHL`/`SHR`/`Pow`. No float reassoc. `Const; Load; op` is
+  stack-relative and does not consult SP (COI-384).
 - **Tests:** `il/canon.rs` `const_load_add_swaps_to_load_const_add`,
-  `unknown_sp_refused`, `const_load_sub_refused`.
+  `const_load_add_swaps_after_unknown_sp`, `load_load_unknown_sp_still_refused`,
+  `const_load_sub_refused`.
 
 ## `algebraic`
 
