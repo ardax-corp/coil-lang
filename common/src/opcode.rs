@@ -433,6 +433,16 @@ pub enum Instruction {
     /// (`[31:16]` tag, `[15:0]` arity). Fuse-select only; two-word `RETURN`
     /// must not fuse (would drop the hi word). Archive **minor 19** (COI-388 X3).
     MakeEnumReturn,
+    /// [`Self::DenseBin`] then an unconditional [`Self::JMP`] (COI-387 X2).
+    /// Operand is the bin `dense_abc`. The following code word is the `JMP`.
+    /// Counted-loop latch (nsieve k-loop, SIMD remainder `i += 1`). Not S1
+    /// (not a cmp) and not S2 (not two bins). Archive **minor 20**.
+    DenseBinJmp,
+    /// [`Self::DenseBin2`] then an unconditional [`Self::JMP`] (COI-387 X2).
+    /// Operand is the first `dense_abc`; the next word is the payload
+    /// [`Self::DenseBin`]; the third word is the `JMP`. Mandelbrot inner
+    /// latch after S2 packing. Sequential IEEE; not `FloatChainStore`.
+    DenseBin2Jmp,
 }
 
 impl From<u8> for Instruction {
@@ -577,22 +587,28 @@ pub mod dense {
     }
 
     /// Stream width of `op`: [`super::Instruction::DenseBin2`],
-    /// [`super::Instruction::DenseBinJmpf`], and
-    /// [`super::Instruction::DenseIndexJmpf`] consume the following payload word.
+    /// [`super::Instruction::DenseBinJmpf`],
+    /// [`super::Instruction::DenseIndexJmpf`], and
+    /// [`super::Instruction::DenseBinJmp`] consume the following payload word.
+    /// [`super::Instruction::DenseBin2Jmp`] consumes two payload words
+    /// (second bin + `JMP`).
     #[inline]
     #[must_use]
     pub fn stream_width(op: super::Instruction) -> usize {
         match op {
             super::Instruction::DenseBin2
             | super::Instruction::DenseBinJmpf
-            | super::Instruction::DenseIndexJmpf => 2,
+            | super::Instruction::DenseIndexJmpf
+            | super::Instruction::DenseBinJmp => 2,
+            super::Instruction::DenseBin2Jmp => 3,
             _ => 1,
         }
     }
 
     /// Visit each numeric bin in program order (`DenseBin`, both halves of
-    /// [`super::Instruction::DenseBin2`], and the bin half of
-    /// [`super::Instruction::DenseBinJmpf`]).
+    /// [`super::Instruction::DenseBin2`] / [`super::Instruction::DenseBin2Jmp`],
+    /// and the bin half of [`super::Instruction::DenseBinJmpf`] /
+    /// [`super::Instruction::DenseBinJmp`]).
     pub fn for_each_bin(code: &[super::Byte], mut visit: impl FnMut(u8, usize, usize, usize)) {
         let mut i = 0;
         while i < code.len() {
@@ -612,10 +628,20 @@ pub mod dense {
                         i += 1;
                     }
                 }
-                super::Instruction::DenseBinJmpf => {
+                super::Instruction::DenseBinJmpf | super::Instruction::DenseBinJmp => {
                     let (k, d, a, b) = code[i].dense_abc_parts();
                     visit(k, d, a, b);
                     i += 2;
+                }
+                super::Instruction::DenseBin2Jmp => {
+                    let (k, d, a, b) = code[i].dense_abc_parts();
+                    visit(k, d, a, b);
+                    i += 1;
+                    if i < code.len() {
+                        let (k2, d2, a2, b2) = code[i].dense_abc_parts();
+                        visit(k2, d2, a2, b2);
+                        i += 2;
+                    }
                 }
                 _ => i += 1,
             }
@@ -859,6 +885,8 @@ impl Instruction {
             Self::DenseBinJmpf => "DenseBinJmpf",
             Self::DenseIndexJmpf => "DenseIndexJmpf",
             Self::MakeEnumReturn => "MakeEnumReturn",
+            Self::DenseBinJmp => "DenseBinJmp",
+            Self::DenseBin2Jmp => "DenseBin2Jmp",
         }
     }
 }
@@ -1883,6 +1911,12 @@ mod tests {
         let ix = Byte::new(Instruction::DenseIndexJmpf).with_dense_abc(dense::HEAP_UNCHECKED, 5, 1, 2);
         assert_eq!(ix.dense_abc_parts(), (dense::HEAP_UNCHECKED, 5, 1, 2));
         assert_eq!(dense::stream_width(Instruction::DenseIndexJmpf), 2);
+        let latch = Byte::new(Instruction::DenseBinJmp).with_dense_abc(dense::IADD64, 2, 2, 7);
+        assert_eq!(latch.dense_abc_parts(), (dense::IADD64, 2, 2, 7));
+        assert_eq!(dense::stream_width(Instruction::DenseBinJmp), 2);
+        let latch2 = Byte::new(Instruction::DenseBin2Jmp).with_dense_abc(dense::FADD64, 3, 1, 2);
+        assert_eq!(latch2.dense_abc_parts(), (dense::FADD64, 3, 1, 2));
+        assert_eq!(dense::stream_width(Instruction::DenseBin2Jmp), 3);
         assert_eq!(dense::bin_kind_name(dense::FMUL64), "FMUL64");
     }
 
@@ -1890,7 +1924,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::MakeEnumReturn as u8;
+        let last = Instruction::DenseBin2Jmp as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
