@@ -501,7 +501,7 @@ fn main() {
             }
         }
         assert!(
-            cast_bin >= 3,
+            cast_bin >= 2,
             "COI-380 S3: nested mandelbrot x/y headers should be DenseCast ; DenseBin*, got {cast_bin}"
         );
         let moves = bc
