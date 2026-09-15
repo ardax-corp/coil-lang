@@ -166,7 +166,7 @@ in-memory on the same `Pipeline`. `--opt-stats` is IL-pass counters only.
 | `examples/perf/tak.hy` | `7` | `tak` | fuse-IL + packed `LOAD` + `TailCall` |
 | `examples/perf/nsieve.hy` | `1900` | `nsieve` | dense-native Index/Store + `*Jmpf` |
 | `examples/perf/binary_trees.hy` | `135854` | `item_check`, `bottom_up` | fuse-IL |
-| `examples/perf/dense_cast_bin.hy` | `333166333500000` | `hot` | dense i2f + `DenseBin2` (S3 peek) |
+| `examples/perf/dense_cast_bin.hy` | `2000001000000` | `hot` | dense i2f + DenseBin (S3 peek) |
 | `examples/perf/for_in_sum.hy` | `12884115456` | `sum` | `VLoad`/`VReduce` + scalar tail |
 | `examples/perf/vec_scan.hy` | `536739840` | `scan`, `fill` | `V*` + scalar tail |
 
