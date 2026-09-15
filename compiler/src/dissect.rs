@@ -318,6 +318,13 @@ fn format_operands(
                 common::dense::bin_kind_name(kind)
             )
         }
+        Instruction::DenseBinJmpf => {
+            let (kind, dest, a, b) = byte.dense_abc_parts();
+            format!(
+                "kind={} dest={dest} a={a} b={b}",
+                common::dense::bin_kind_name(kind)
+            )
+        }
         _ => {
             let o = byte.operand_u32();
             if o == 0 {
@@ -353,6 +360,24 @@ pub fn format_bytecode_section(
                 "{pc:05}  DenseBin2        {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1}",
                 common::dense::bin_kind_name(k0),
                 common::dense::bin_kind_name(k1)
+            );
+            pc += 2;
+            continue;
+        }
+        if *byte.bytecode() == Instruction::DenseBinJmpf && pc + 1 < end {
+            let tail = &bytecode[pc + 1];
+            let (k0, d0, a0, b0) = byte.dense_abc_parts();
+            let jmp = format_operands(*tail.bytecode(), tail, constants, pc_names);
+            let extra = if jmp.is_empty() {
+                String::new()
+            } else {
+                format!(" {jmp}")
+            };
+            let _ = writeln!(
+                out,
+                "{pc:05}  DenseBinJmpf     {} r{d0}=r{a0},r{b0} ; {}{extra}",
+                common::dense::bin_kind_name(k0),
+                tail.bytecode().mnemonic()
             );
             pc += 2;
             continue;
@@ -648,6 +673,29 @@ mod tests {
         assert!(
             !out.contains("\n00001  DenseBin"),
             "payload DenseBin should not be a second dispatch line:\n{out}"
+        );
+        assert!(out.contains("HALT"));
+    }
+
+    #[test]
+    fn format_dense_bin_jmpf_skips_payload_word() {
+        let empty = HashMap::new();
+        let bc = [
+            Byte::new(Instruction::DenseBinJmpf).with_dense_abc(common::dense::FADD64, 5, 3, 4),
+            Byte::new(Instruction::BinSlotSlotJmpf).with_bin_slot_slot_jmpf(
+                Instruction::GTF as u8,
+                5,
+                0,
+            ),
+            Byte::new(Instruction::HALT),
+        ];
+        let out = format_bytecode_section("hot", 0, 3, &bc, &[], &empty);
+        assert!(out.contains("DenseBinJmpf"));
+        assert!(out.contains("FADD64"));
+        assert!(out.contains("BinSlotSlotJmpf"));
+        assert!(
+            !out.contains("\n00001  BinSlotSlotJmpf"),
+            "payload jmp should not be a second dispatch line:\n{out}"
         );
         assert!(out.contains("HALT"));
     }
