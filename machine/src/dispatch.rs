@@ -165,10 +165,16 @@ struct HotCtx<'a, 'e> {
 
 type Handler = fn(&mut HotCtx<'_, '_>, Byte);
 
+struct HotTable {
+    /// First so `is_hot` only needs this cache line, not the 2 KiB handler array.
+    hot_bits: [u64; 4],
+    handlers: [Handler; 256],
+}
+
 #[inline(always)]
 pub(super) fn is_hot(bc: Instruction) -> bool {
-    let h = table()[bc as u8 as usize];
-    !core::ptr::fn_addr_eq(h, cold as Handler)
+    let i = bc as u8 as usize;
+    (table().hot_bits[i >> 6] >> (i & 63)) & 1 != 0
 }
 
 #[inline(always)]
@@ -1097,7 +1103,7 @@ fn op_bin_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     finish_return(ctx, ret_val);
 }
 
-fn build_table() -> [Handler; 256] {
+fn build_table() -> HotTable {
     let mut t = [cold as Handler; 256];
     t[Instruction::DenseBin as usize] = op_dense_bin;
     t[Instruction::DenseBin2 as usize] = op_dense_bin2;
@@ -1135,11 +1141,20 @@ fn build_table() -> [Handler; 256] {
         t[Instruction::LoadReturnSlot as usize] = op_load_return_slot;
         t[Instruction::BinReturn as usize] = op_bin_return;
     }
-    t
+    let mut hot_bits = [0u64; 4];
+    for (i, h) in t.iter().enumerate() {
+        if !core::ptr::fn_addr_eq(*h, cold as Handler) {
+            hot_bits[i >> 6] |= 1u64 << (i & 63);
+        }
+    }
+    HotTable {
+        handlers: t,
+        hot_bits,
+    }
 }
 
-fn table() -> &'static [Handler; 256] {
-    static CELL: OnceLock<[Handler; 256]> = OnceLock::new();
+fn table() -> &'static HotTable {
+    static CELL: OnceLock<HotTable> = OnceLock::new();
     CELL.get_or_init(build_table)
 }
 
@@ -1331,7 +1346,7 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
 
 #[inline(never)]
 fn table_loop(ctx: &mut HotCtx<'_, '_>) {
-    let handlers = table();
+    let handlers = &table().handlers;
     let code_len = ctx.code.len();
     loop {
         if unlikely(ctx.ip >= code_len) {
@@ -1471,7 +1486,11 @@ mod tests {
         assert!(!is_hot(Instruction::CALL));
         assert!(!is_hot(Instruction::RETURN));
         assert!(!is_hot(Instruction::BinSlotImmJmpf));
-        let t = table();
+        assert!(!is_hot(Instruction::BinSlotImm));
+        assert!(!is_hot(Instruction::BinSlotImmJmpt));
+        assert!(!is_hot(Instruction::BinReturn));
+        assert!(!is_hot(Instruction::ConstReturnImm));
+        let t = &table().handlers;
         assert!(!core::ptr::fn_addr_eq(
             t[Instruction::DenseBin as usize],
             cold as Handler
