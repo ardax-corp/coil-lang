@@ -3916,16 +3916,15 @@ impl<const S: usize> Machine<S> {
                     }
                     self.stack.push(value);
                 }
-                Instruction::DenseBin => {
+                Instruction::DenseBin | Instruction::DenseBin2 => {
                     dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
-                }
-                Instruction::DenseBin2 => {
-                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
-                    promise!(ip < code_len);
-                    let tail = unsafe { code.get_unchecked(ip) };
-                    ip += 1;
-                    prefetch_code(code, ip);
-                    dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
+                    if unlikely(*bc as u8 == Instruction::DenseBin2 as u8) {
+                        promise!(ip < code_len);
+                        let tail = unsafe { code.get_unchecked(ip) };
+                        ip += 1;
+                        prefetch_code(code, ip);
+                        dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
+                    }
                 }
                 Instruction::DenseCmp => {
                     dispatch::dense_cmp(&mut self.stack, sp, opcode, stack_cap);
