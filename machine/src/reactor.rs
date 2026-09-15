@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, OnceLock, RwLock};
 use std::thread;
+#[cfg(test)]
 use std::time::Duration;
 
 use crossbeam_deque::{Injector, Steal, Stealer, Worker};
@@ -407,21 +408,18 @@ fn worker_loop(reactor: Arc<Reactor>) {
         if reactor.shutdown.load(Ordering::SeqCst) {
             break;
         }
-        let job = with_owned_local_worker(&reactor, |local_ref| reactor.find_job(local_ref))
-            .flatten();
-        match job {
-            Some(job) => {
-                ensure_operand_capacity(&mut vm, job.program.operand_stack_slots);
-                vm.set_reactor(Arc::clone(&reactor));
-                run_job_on_vm(&mut vm, job);
-            }
-            None => {
-                if let Some(job) = park_idle_worker(&reactor) {
-                    ensure_operand_capacity(&mut vm, job.program.operand_stack_slots);
-                    vm.set_reactor(Arc::clone(&reactor));
-                    run_job_on_vm(&mut vm, job);
-                }
-            }
+        // No inflight work: park without walking empty deques (COI-391).
+        let job = if reactor.inflight() == 0 {
+            park_idle_worker(&reactor)
+        } else {
+            with_owned_local_worker(&reactor, |local_ref| reactor.find_job(local_ref))
+                .flatten()
+                .or_else(|| park_idle_worker(&reactor))
+        };
+        if let Some(job) = job {
+            ensure_operand_capacity(&mut vm, job.program.operand_stack_slots);
+            vm.set_reactor(Arc::clone(&reactor));
+            run_job_on_vm(&mut vm, job);
         }
     }
 
@@ -442,10 +440,12 @@ fn park_idle_worker(reactor: &Reactor) -> Option<Job> {
     if reactor.shutdown.load(Ordering::SeqCst) {
         return None;
     }
-    if let Some(job) = with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref))
-        .flatten()
-    {
-        return Some(job);
+    if reactor.inflight() > 0 {
+        if let Some(job) =
+            with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref)).flatten()
+        {
+            return Some(job);
+        }
     }
     reactor.idle_waits.fetch_add(1, Ordering::Relaxed);
     match reactor.sleep_cvar.wait(g) {
