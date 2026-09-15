@@ -60,7 +60,7 @@ kept dense / vectorize / fuse-IL. No `try_specialize_body` change.
 |-------|-------|-----|-------|------------------------|
 | **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` → `emit.rs` `emit_const` (`DenseConst`) | **Done (emit, no opcode).** Remainder IV bump is `DenseConst ; DenseBin ; JMP` (2 dispatches vs stack `CONST ; STORE ; DenseBin`). Existing `DenseConst` only; no specialize-keep; print `main` / FORMAT unchanged. |
 | **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | dense emit or VM peek | Not S1 (not a cmp) and not S2 (not two bins). Counted-loop latch. |
-| **X3** | `MakeEnum ; RETURN` fuse (one-word heap) | `bottom_up` (`MakeEnum ; RETURN` twice) | IL peep — `MakeEnum` is **typed** `IlOp`, `Return` is typed | Body is fuse-IL; fuse-select simply has no pattern. Reuse `is_one_word_return`. |
+| **X3** | `MakeEnum ; RETURN` fuse (one-word heap) | `bottom_up` (`MakeEnum ; RETURN` twice) | IL peep — `MakeEnum` is **typed** `IlOp`, `Return` is typed | **Done (fuse-select).** `MakeEnumReturn` (archive **minor 19**): same packing as `MakeEnum`. Two sites on `bottom_up` (Leaf arity-0, Node arity-2). Reuses `is_one_word_return` (no two-word RETURN). Not ALWAYS_HOT — alloc+return stays on the giant match like `MakeEnum`/`RETURN` (`unlikely(is_hot)`). Print `main` / FORMAT unchanged. |
 | **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/vm.rs` peek | **Not shipped** — S2 took the ISA pack (`DenseBin2`). Pick one; do not add peek on top. |
 
 Not ready without a gate (still not specialize-keep):
@@ -92,7 +92,7 @@ production.
 | `BinSlotSlotStore` | `LOAD; LOAD; bin; STORE` | fuse-select (int+float) |
 | `BinSlotImm` | `LOAD; CONST; int-bin` | fuse-select (**int only**) |
 | `BinSlotSlot` | `LOAD; LOAD\|DUP; bin` | fuse-select (int+float) |
-| `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` | producer + one-word `RETURN` | fuse-select + convoy |
+| `LoadReturnSlot` / `ConstReturnImm` / `BinReturn` / `MakeEnumReturn` | producer + one-word `RETURN` | fuse-select + convoy (`MakeEnumReturn` is fuse-select only) |
 | packed `LOAD`/`STORE` n=2/3 | adjacent singles | fuse-select |
 
 `invert_branch_over_jump`: `JMPF A; JMP B; A:` → `JMPT B`. **Loop headers
@@ -195,6 +195,8 @@ order-of-magnitude, not `vm_profile`).
 **fib:** `BinSlotImmJmpt ; BinSlotImm ; CALL ; BinSlotImm ; CALL ; BinReturn ; ConstReturnImm`.
 
 **item_check:** `JumpIfMatch ; Unpack ; packed STORE ; LOAD ; CALL ; … ; CONST ; LOAD ; ADD ; LOAD ; BinReturn`.
+
+**bottom_up:** `MakeEnumReturn` twice (Leaf arity-0, Node arity-2; COI-388 X3).
 
 **sum/scan tail:** `DenseConst ; DenseBin ; JMP` (COI-386 X1; was `CONST ; STORE ; DenseBin`).
 

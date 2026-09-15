@@ -2880,6 +2880,65 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_bottom_up_fuses_make_enum_return() {
+        let src = r#"
+enum Tree {
+    Leaf,
+    Node(Tree, Tree),
+}
+#[max_depth(8)]
+fn bottom_up(int depth) -> Tree {
+    if depth == 0 {
+        return Tree::Leaf();
+    }
+    return Tree::Node(bottom_up(depth - 1), bottom_up(depth - 1));
+}
+fn main() {
+    let _ = bottom_up(2);
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile bottom_up");
+        let syms = p.program_debug().fn_symbols;
+        let i = syms
+            .iter()
+            .position(|s| s.name == "bottom_up")
+            .expect("bottom_up");
+        let start = syms[i].entry_pc as usize;
+        let end = syms
+            .get(i + 1)
+            .map(|s| s.entry_pc as usize)
+            .unwrap_or(bc.len());
+        let body = &bc[start..end];
+        let fused = body
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::MakeEnumReturn)
+            .count();
+        let leftover = body
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::MakeEnum)
+            .count();
+        let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
+        assert_eq!(
+            fused, 2,
+            "COI-388: Leaf + Node should be MakeEnumReturn; ops={names:?}"
+        );
+        assert_eq!(
+            leftover, 0,
+            "COI-388: bottom_up must not leave MakeEnum; RETURN; ops={names:?}"
+        );
+        assert!(
+            body.iter()
+                .all(|b| *b.bytecode() != Instruction::FORMAT),
+            "must not densify/print main into bottom_up; ops={names:?}"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "bottom_up after MakeEnumReturn");
+    }
+
+    #[test]
     fn i5_init_typed_lowers_object_alloc() {
         let loc = loc();
         let ops = vec![

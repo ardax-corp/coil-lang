@@ -1517,7 +1517,7 @@ fn aot_p2_nsieve_dispatch_regression() {
     );
 }
 
-/// P3 + P4 baseline: `bottom_up` allocates both `Tree` variants (2 `MakeEnum`)
+/// P3 + P4 baseline: `bottom_up` allocates both `Tree` variants (2 `MakeEnumReturn`)
 /// per level and `item_check` unpacks without re-allocating.
 #[test]
 fn aot_p3_binary_trees_make_enum_inventory() {
@@ -1529,7 +1529,8 @@ fn aot_p3_binary_trees_make_enum_inventory() {
     let mut total_calls = 0usize;
     for name in ["bottom_up", "item_check", "main"] {
         let (start, end) = fn_pc_range(&syms, name, bc.len());
-        let make_enum = count_opcodes_in(&bc, start, end, Instruction::MakeEnum);
+        let make_enum = count_opcodes_in(&bc, start, end, Instruction::MakeEnum)
+            + count_opcodes_in(&bc, start, end, Instruction::MakeEnumReturn);
         let make_tuple = count_opcodes_in(&bc, start, end, Instruction::MakeTuple);
         let make_array = count_opcodes_in(&bc, start, end, Instruction::MakeArray);
         let calls = count_opcodes_in(&bc, start, end, Instruction::CALL);
@@ -1544,9 +1545,19 @@ fn aot_p3_binary_trees_make_enum_inventory() {
 
     let (bottom_up_start, bottom_up_end) = fn_pc_range(&syms, "bottom_up", bc.len());
     assert_eq!(
-        count_opcodes_in(&bc, bottom_up_start, bottom_up_end, Instruction::MakeEnum),
+        count_opcodes_in(
+            &bc,
+            bottom_up_start,
+            bottom_up_end,
+            Instruction::MakeEnumReturn
+        ),
         2,
-        "bottom_up should allocate exactly Leaf + Node"
+        "bottom_up should allocate exactly Leaf + Node via MakeEnumReturn"
+    );
+    assert_eq!(
+        count_opcodes_in(&bc, bottom_up_start, bottom_up_end, Instruction::MakeEnum),
+        0,
+        "COI-388: bottom_up MakeEnum should fuse with RETURN"
     );
     let (check_start, check_end) = fn_pc_range(&syms, "item_check", bc.len());
     assert_eq!(
