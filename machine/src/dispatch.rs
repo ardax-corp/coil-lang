@@ -16,6 +16,7 @@
 
 use std::cell::Cell;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::{
     ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Value, likely, promise,
@@ -52,15 +53,19 @@ pub(super) fn mode() -> Mode {
         return over;
     }
     static CACHED: OnceLock<Mode> = OnceLock::new();
-    *CACHED.get_or_init(|| match std::env::var("COIL_THREADED_DISPATCH") {
-        Ok(v) => parse_mode(&v),
-        Err(_) => Mode::Table,
+    *CACHED.get_or_init(|| {
+        refresh_opt_call_return_hot();
+        match std::env::var("COIL_THREADED_DISPATCH") {
+            Ok(v) => parse_mode(&v),
+            Err(_) => Mode::Table,
+        }
     })
 }
 
 #[cfg(test)]
 pub(super) fn override_mode(mode: Option<Mode>) {
     MODE_OVERRIDE.with(|c| c.set(mode));
+    refresh_opt_call_return_hot();
 }
 
 fn env_flag_enabled(name: &str, default: bool) -> bool {
@@ -165,16 +170,77 @@ struct HotCtx<'a, 'e> {
 
 type Handler = fn(&mut HotCtx<'_, '_>, Byte);
 
-struct HotTable {
-    /// First so `is_hot` only needs this cache line, not the 2 KiB handler array.
-    hot_bits: [u64; 4],
-    handlers: [Handler; 256],
+const fn hot_bit(op: Instruction) -> (usize, u64) {
+    let i = op as u8 as usize;
+    (i >> 6, 1u64 << (i & 63))
+}
+
+const fn or_hot(mut bits: [u64; 4], op: Instruction) -> [u64; 4] {
+    let (word, mask) = hot_bit(op);
+    bits[word] |= mask;
+    bits
+}
+
+/// Default trampoline ops (not CALL/RETURN/imm). `.rodata` so fib never loads
+/// the 2 KiB handler table — that peek was the ~14% identical-bytecode tax.
+const ALWAYS_HOT: [u64; 4] = {
+    let mut b = [0u64; 4];
+    b = or_hot(b, Instruction::DenseBin);
+    b = or_hot(b, Instruction::DenseBin2);
+    b = or_hot(b, Instruction::DenseCmp);
+    b = or_hot(b, Instruction::DenseConst);
+    b = or_hot(b, Instruction::DenseMove);
+    b = or_hot(b, Instruction::DenseCast);
+    b = or_hot(b, Instruction::DenseUnary);
+    b = or_hot(b, Instruction::DenseIndex);
+    b = or_hot(b, Instruction::DenseStoreIndex);
+    b = or_hot(b, Instruction::DenseArrayLen);
+    b = or_hot(b, Instruction::DenseFieldLoad);
+    b = or_hot(b, Instruction::DenseFieldStore);
+    b = or_hot(b, Instruction::JMP);
+    b = or_hot(b, Instruction::JMPF);
+    b = or_hot(b, Instruction::JMPT);
+    b = or_hot(b, Instruction::BinSlotSlotJmpf);
+    b = or_hot(b, Instruction::BinSlotSlotJmpt);
+    b = or_hot(b, Instruction::CmpJmpf);
+    b = or_hot(b, Instruction::CmpJmpt);
+    b = or_hot(b, Instruction::LogNotJmpf);
+    b = or_hot(b, Instruction::LogNotJmpt);
+    b = or_hot(b, Instruction::BinSlotSlotStore);
+    b
+};
+
+const OPT_HOT: [u64; 4] = {
+    let mut b = [0u64; 4];
+    b = or_hot(b, Instruction::BinSlotImm);
+    b = or_hot(b, Instruction::BinSlotImmStore);
+    b = or_hot(b, Instruction::BinSlotImmJmpf);
+    b = or_hot(b, Instruction::BinSlotImmJmpt);
+    b = or_hot(b, Instruction::CALL);
+    b = or_hot(b, Instruction::TailCall);
+    b = or_hot(b, Instruction::RETURN);
+    b = or_hot(b, Instruction::ConstReturnImm);
+    b = or_hot(b, Instruction::LoadReturnSlot);
+    b = or_hot(b, Instruction::BinReturn);
+    b
+};
+
+static OPT_CALL_RETURN_HOT: AtomicBool = AtomicBool::new(false);
+
+fn refresh_opt_call_return_hot() {
+    OPT_CALL_RETURN_HOT.store(call_is_hot() && return_is_hot(), Ordering::Relaxed);
 }
 
 #[inline(always)]
 pub(super) fn is_hot(bc: Instruction) -> bool {
     let i = bc as u8 as usize;
-    (table().hot_bits[i >> 6] >> (i & 63)) & 1 != 0
+    if (ALWAYS_HOT[i >> 6] >> (i & 63)) & 1 != 0 {
+        return true;
+    }
+    if !OPT_CALL_RETURN_HOT.load(Ordering::Relaxed) {
+        return false;
+    }
+    (OPT_HOT[i >> 6] >> (i & 63)) & 1 != 0
 }
 
 #[inline(always)]
@@ -1103,7 +1169,8 @@ fn op_bin_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     finish_return(ctx, ret_val);
 }
 
-fn build_table() -> HotTable {
+fn build_table() -> [Handler; 256] {
+    refresh_opt_call_return_hot();
     let mut t = [cold as Handler; 256];
     t[Instruction::DenseBin as usize] = op_dense_bin;
     t[Instruction::DenseBin2 as usize] = op_dense_bin2;
@@ -1141,20 +1208,11 @@ fn build_table() -> HotTable {
         t[Instruction::LoadReturnSlot as usize] = op_load_return_slot;
         t[Instruction::BinReturn as usize] = op_bin_return;
     }
-    let mut hot_bits = [0u64; 4];
-    for (i, h) in t.iter().enumerate() {
-        if !core::ptr::fn_addr_eq(*h, cold as Handler) {
-            hot_bits[i >> 6] |= 1u64 << (i & 63);
-        }
-    }
-    HotTable {
-        handlers: t,
-        hot_bits,
-    }
+    t
 }
 
-fn table() -> &'static HotTable {
-    static CELL: OnceLock<HotTable> = OnceLock::new();
+fn table() -> &'static [Handler; 256] {
+    static CELL: OnceLock<[Handler; 256]> = OnceLock::new();
     CELL.get_or_init(build_table)
 }
 
@@ -1346,7 +1404,7 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
 
 #[inline(never)]
 fn table_loop(ctx: &mut HotCtx<'_, '_>) {
-    let handlers = &table().handlers;
+    let handlers = table();
     let code_len = ctx.code.len();
     loop {
         if unlikely(ctx.ip >= code_len) {
@@ -1476,6 +1534,7 @@ mod tests {
 
     #[test]
     fn hot_subset_and_table_slots() {
+        let _ = table();
         assert!(is_hot(Instruction::DenseBin));
         assert!(is_hot(Instruction::DenseBin2));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
@@ -1483,14 +1542,20 @@ mod tests {
         assert!(!is_hot(Instruction::LOAD));
         assert!(!is_hot(Instruction::Seek));
         assert!(!is_hot(Instruction::HALT));
-        assert!(!is_hot(Instruction::CALL));
-        assert!(!is_hot(Instruction::RETURN));
-        assert!(!is_hot(Instruction::BinSlotImmJmpf));
-        assert!(!is_hot(Instruction::BinSlotImm));
-        assert!(!is_hot(Instruction::BinSlotImmJmpt));
-        assert!(!is_hot(Instruction::BinReturn));
-        assert!(!is_hot(Instruction::ConstReturnImm));
-        let t = &table().handlers;
+        assert_eq!(
+            is_hot(Instruction::CALL),
+            call_is_hot() && return_is_hot()
+        );
+        assert_eq!(
+            is_hot(Instruction::RETURN),
+            call_is_hot() && return_is_hot()
+        );
+        assert!(!is_hot(Instruction::BinSlotImmJmpf) || (call_is_hot() && return_is_hot()));
+        assert!(!is_hot(Instruction::BinSlotImm) || (call_is_hot() && return_is_hot()));
+        assert!(!is_hot(Instruction::BinSlotImmJmpt) || (call_is_hot() && return_is_hot()));
+        assert!(!is_hot(Instruction::BinReturn) || (call_is_hot() && return_is_hot()));
+        assert!(!is_hot(Instruction::ConstReturnImm) || (call_is_hot() && return_is_hot()));
+        let t = table();
         assert!(!core::ptr::fn_addr_eq(
             t[Instruction::DenseBin as usize],
             cold as Handler
