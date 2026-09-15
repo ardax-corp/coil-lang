@@ -232,6 +232,12 @@ type mismatch, and self-only φs stay. No dead-block rewrite (dense emit
 fallthrough) and no new opcodes. A following CSE can share the forwarded
 uses. Hit bench: `examples/perf/mir_destprop.hy`.
 
+Disagreeing latch copies are not DestProp. COI-383 **S6** sinks the
+incoming def past the last use of the φ dest, then dense emit aliases
+non-interfering φ dest/incoming slots (plus a residual `DenseMove`
+dest-rewrite peep). No new opcode; LOAD/STORE cost 2 vs `DenseMove` 1 is
+unchanged.
+
 ## P9 — MIR IV strength reduction (COI-283)
 
 After DestProp, a **lite LSR** rewrites `iv * invariant` to an add
