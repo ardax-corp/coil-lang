@@ -176,7 +176,7 @@ mod tests {
         )
     }
 
-    fn fn_ops<'a>(bc: &'a [Byte], symbols: &[common::debug::FnDebugSym], name: &str) -> &'a [Byte] {
+    fn fn_ops<'a>(bc: &'a [Byte], symbols: &[common::FnDebugSym], name: &str) -> &'a [Byte] {
         let start = symbols
             .iter()
             .find(|s| s.name == name)
@@ -195,7 +195,7 @@ mod tests {
     fn assert_vectorize_tail_dense_const(ops: &[Byte], fn_name: &str) {
         let names: Vec<_> = ops.iter().map(|b| b.bytecode().mnemonic()).collect();
         let stack_iv = ops.windows(3).any(|w| {
-            matches!(*w[0].bytecode(), Instruction::CONST | Instruction::ConstPool)
+            *w[0].bytecode() == Instruction::CONST
                 && matches!(*w[1].bytecode(), Instruction::STORE | Instruction::StorePop)
                 && *w[2].bytecode() == Instruction::DenseBin
         });
