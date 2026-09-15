@@ -4,7 +4,9 @@
 //! arms of a join can become the same `ValueId` (`a + 0` / `a * 1` → `a`).
 //! This pass re-runs the trivial-φ rule: uses see the source. Disagreeing
 //! args, type mismatch, and self-only φs stay. No dead-block rewrite (dense
-//! emit fallthrough) and no register coalesce (emit already does latch).
+//! emit fallthrough). Latch copies that still disagree are register-coalesced
+//! at emit (COI-383 S6); [`sink_phi_incomings`] schedules those defs late so
+//! overwrite is legal.
 
 use std::collections::{HashMap, HashSet};
 
@@ -93,6 +95,82 @@ fn trivial_src(
         }
     }
     same
+}
+
+/// Sink φ incoming defs to the end of the predecessor (COI-383 S6).
+///
+/// Mandelbrot `tr` is computed while `zr` is still live for `zi'`. Moving
+/// `tr` after that last use lets emit alias the header φ with `tr` and drop
+/// the latch `DenseMove`.
+pub fn sink_phi_incomings(func: &mut MirFunc) {
+    let fed = phi_dests_fed(func);
+    for block in &mut func.blocks {
+        if block.insts.len() < 2 {
+            continue;
+        }
+        let mut i = 0;
+        while i + 1 < block.insts.len() {
+            let dest = block.insts[i].dest();
+            let Some(phi_dests) = fed.get(&(block.id, dest)) else {
+                i += 1;
+                continue;
+            };
+            let mut j = i;
+            while j + 1 < block.insts.len() {
+                let next = &block.insts[j + 1];
+                if !next.operands().iter().any(|u| phi_dests.contains(u)) {
+                    break;
+                }
+                if !can_sink_past(&block.insts[j], next) {
+                    break;
+                }
+                block.insts.swap(j, j + 1);
+                j += 1;
+            }
+            i += 1;
+        }
+    }
+}
+
+fn phi_dests_fed(func: &MirFunc) -> HashMap<(super::inst::BlockId, ValueId), HashSet<ValueId>> {
+    let mut fed: HashMap<(super::inst::BlockId, ValueId), HashSet<ValueId>> = HashMap::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let MirInst::Phi { dest, args, .. } = inst else {
+                break;
+            };
+            for (pred, src) in args {
+                fed.entry((*pred, *src)).or_default().insert(*dest);
+            }
+        }
+    }
+    fed
+}
+
+fn can_sink_past(inst: &MirInst, next: &MirInst) -> bool {
+    if !is_sinkable(inst) || !is_sink_barrier_ok(next) {
+        return false;
+    }
+    let dest = inst.dest();
+    if next.operands().contains(&dest) || inst.operands().contains(&next.dest()) {
+        return false;
+    }
+    true
+}
+
+fn is_sinkable(inst: &MirInst) -> bool {
+    matches!(
+        inst,
+        MirInst::Const { .. }
+            | MirInst::Bin { .. }
+            | MirInst::Cmp { .. }
+            | MirInst::Unary { .. }
+            | MirInst::Cast { .. }
+    )
+}
+
+fn is_sink_barrier_ok(next: &MirInst) -> bool {
+    !next.is_phi() && !next.is_effect_barrier() && !next.is_gc_edge() && !next.is_deopt_edge()
 }
 
 fn resolve(subst: &HashMap<ValueId, ValueId>, mut v: ValueId) -> ValueId {
@@ -269,5 +347,37 @@ bb2:
             })
             .unwrap();
         assert_eq!(mul, (f.params[0], f.params[0]));
+    }
+
+    #[test]
+    fn sinks_latch_incoming_past_last_use_of_phi() {
+        let src = r#"
+func @zr(v0: f64, v1: f64, v2: f64) -> f64 {
+bb0:
+    jump bb1
+bb1:
+    v3 = phi.f64 [bb0: v0, bb2: v6]
+    v4 = phi.f64 [bb0: v1, bb2: v7]
+    v8 = fcmp.ogt v3, v2
+    brif v8, bb2, bb3
+bb2:
+    v5 = fadd v3, v2
+    v7 = fadd v4, v3
+    v6 = fadd v5, v2
+    jump bb1
+bb3:
+    return v3
+}
+"#;
+        let mut f = parse_func(src).expect(src);
+        f.verify().unwrap();
+        sink_phi_incomings(&mut f);
+        f.verify().unwrap();
+        let insts = &f.block(crate::mir::BlockId(2)).insts;
+        let last = insts.last().expect("latch body");
+        assert!(
+            matches!(last, MirInst::Bin { dest, .. } if dest.0 == 6),
+            "tr (v6) must sink after zi' (v7): {insts:?}"
+        );
     }
 }
