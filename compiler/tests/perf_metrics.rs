@@ -1619,6 +1619,19 @@ fn aot_p3_binary_trees_make_enum_inventory() {
         1,
         "item_check should keep one payload Unpack"
     );
+    let check_ops: Vec<_> = bc[check_start..check_end]
+        .iter()
+        .map(|b| *b.bytecode())
+        .collect();
+    assert!(
+        count_opcodes_in(&bc, check_start, check_end, Instruction::BinSlotImm) >= 1,
+        "COI-384: item_check `1 + left` should fuse CONST;LOAD;ADD → BinSlotImm; ops={check_ops:?}"
+    );
+    assert_eq!(
+        count_opcodes_in(&bc, check_start, check_end, Instruction::ADD),
+        0,
+        "COI-384: residual stack ADD in item_check after BinSlotImm; ops={check_ops:?}"
+    );
 
     let (main_start, main_end) = fn_pc_range(&syms, "main", bc.len());
     assert_eq!(
