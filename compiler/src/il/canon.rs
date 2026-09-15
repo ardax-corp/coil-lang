@@ -1,12 +1,17 @@
 //! Operand-order canonicalization for stack IL.
 //!
-//! Rewrites Known-SP windows into preferred forms so fuse-select, algebraic
-//! peeps, and GVN/CSE match more often:
+//! Rewrites windows into preferred forms so fuse-select, algebraic peeps, and
+//! GVN/CSE match more often:
 //! - `Const; Load; op` → `Load; Const; op'` (const on RHS)
 //! - `ConstPool; Load; int-op` → demote pool to inline `Const` when safe, then swap
 //! - `Load a; Load b; op` with `a > b` → swapped loads (+ cmp polarity flip)
 //!
-//! Refuses: Unknown SP, float ops, residual `Byte`, and non-commutative ops
+//! `Const; Load; op` is stack-relative (two independent pushes then a bin), so
+//! it does not need Known SP — COI-384 / match-join / `Unpack` poison must not
+//! block `BinSlotImm`. `Load; Load; op` still requires Known SP (join height
+//! disagreement can mean the loads are not a lone bin pair).
+//!
+//! Refuses: float ops, residual `Byte`, and non-commutative ops
 //! (`SUB`/`DIV`/`MOD`/`SHL`/`SHR`/`Pow`). No float reassoc.
 
 use std::cell::RefCell;
@@ -61,7 +66,10 @@ fn acc(f: impl FnOnce(&mut CanonStats)) {
     LAST_STATS.with(|c| f(&mut c.borrow_mut()));
 }
 
-/// Normalize operand order in place when SP-in is Known for the window.
+/// Normalize operand order in place.
+///
+/// `Const; Load; op` does not consult SP. `Load; Load; op` still requires
+/// Known SP-in on the three-op window.
 ///
 /// `pool` supplies `ConstPool` payloads for int demotion; pass an empty slice
 /// to disable demotion.
@@ -74,17 +82,6 @@ pub fn canonicalize_operand_order(ops: &mut Vec<IlOp>, pool: &[u64]) {
     let mut i = 0;
     while i < ops.len() {
         if i + 2 < ops.len() {
-            let known = info.sp_before(i).is_known()
-                && info.sp_before(i + 1).is_known()
-                && info.sp_before(i + 2).is_known();
-            if !known {
-                if matches_rewrite_shape(&ops[i], &ops[i + 1], &ops[i + 2], pool) {
-                    acc(|s| s.refused_unknown_sp = s.refused_unknown_sp.saturating_add(1));
-                }
-                out.push(ops[i].clone());
-                i += 1;
-                continue;
-            }
             if let Some((rewritten, demoted, flipped)) =
                 try_const_or_pool_load_bin(&ops[i], &ops[i + 1], &ops[i + 2], pool)
             {
@@ -99,6 +96,17 @@ pub fn canonicalize_operand_order(ops: &mut Vec<IlOp>, pool: &[u64]) {
                 });
                 out.extend(rewritten);
                 i += 3;
+                continue;
+            }
+            let known = info.sp_before(i).is_known()
+                && info.sp_before(i + 1).is_known()
+                && info.sp_before(i + 2).is_known();
+            if !known {
+                if try_load_load_bin(&ops[i], &ops[i + 1], &ops[i + 2]).is_some() {
+                    acc(|s| s.refused_unknown_sp = s.refused_unknown_sp.saturating_add(1));
+                }
+                out.push(ops[i].clone());
+                i += 1;
                 continue;
             }
             if let Some((rewritten, flipped)) =
@@ -119,10 +127,6 @@ pub fn canonicalize_operand_order(ops: &mut Vec<IlOp>, pool: &[u64]) {
         i += 1;
     }
     *ops = out;
-}
-
-fn matches_rewrite_shape(a: &IlOp, b: &IlOp, c: &IlOp, pool: &[u64]) -> bool {
-    try_const_or_pool_load_bin(a, b, c, pool).is_some() || try_load_load_bin(a, b, c).is_some()
 }
 
 fn is_commute_keep(op: Instruction) -> bool {
@@ -150,7 +154,8 @@ fn flip_ordered_cmp(op: Instruction) -> Option<Instruction> {
     })
 }
 
-fn swap_binop(op: Instruction) -> Option<Instruction> {
+/// Opcode after swapping the two stack operands (`None` if not a safe swap).
+pub(crate) fn swap_binop(op: Instruction) -> Option<Instruction> {
     if is_commute_keep(op) {
         Some(op)
     } else {
@@ -428,13 +433,41 @@ mod tests {
     }
 
     #[test]
-    fn unknown_sp_refused() {
+    fn const_load_add_swaps_after_unknown_sp() {
         reset_canon_stats();
         let mut ops = vec![
             IlOp::byte(common::Byte::new(Instruction::FfiInvoke)),
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::Load {
                 slot: 0,
+                loc: loc(),
+            },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc: loc(),
+            },
+        ];
+        canonicalize_operand_order(&mut ops, &[]);
+        assert!(matches!(ops[0], IlOp::Byte { .. }));
+        assert!(matches!(ops[1], IlOp::Load { slot: 0, .. }));
+        assert!(matches!(ops[2], IlOp::Const { imm: 1, .. }));
+        assert!(matches!(ops[3], IlOp::Bin { op: Instruction::ADD, .. }));
+        let s = last_canon_stats();
+        assert_eq!(s.const_load_swaps, 1);
+        assert_eq!(s.refused_unknown_sp, 0);
+    }
+
+    #[test]
+    fn load_load_unknown_sp_still_refused() {
+        reset_canon_stats();
+        let mut ops = vec![
+            IlOp::byte(common::Byte::new(Instruction::FfiInvoke)),
+            IlOp::Load {
+                slot: 3,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 1,
                 loc: loc(),
             },
             IlOp::Bin {
