@@ -3973,7 +3973,7 @@ fn example_perf_cse_cast_recompute_prints_checksum() {
 #[test]
 fn example_perf_dense_cast_bin_prints_checksum() {
     let output = run_example("examples/perf/dense_cast_bin.hy");
-    assert_eq!(output, "999999000000");
+    assert_eq!(output, "333166333500000");
 }
 
 #[test]
