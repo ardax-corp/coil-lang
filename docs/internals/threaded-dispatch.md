@@ -60,8 +60,11 @@ host / coro / SIMD / alloc ops share a `rest` slot that bounces to
 - packed `LOAD` / `STORE` / `StorePop` / `Seek`
 - imm-slot fuses (`BinSlotImm*`)
 
-`hotmatch` still only consumes the G1 hot subset. Table mode diverts on
-`is_hot || !is_kernel` so fib’s CALL kernel never enters the trampoline.
+`hotmatch` still only consumes the G1 hot subset. Table mode still diverts on
+`unlikely(is_hot)` only (G1). Remaining ops in `execute` go through
+`_ => exec_rest` so fib does not bounce on stack `ADD` between CALLs. Once a
+hot streak is active, non-kernel table slots (arith / rest) run until a kernel
+op.
 
 ## CALL / RETURN (A/B, default off)
 

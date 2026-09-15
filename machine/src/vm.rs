@@ -2857,9 +2857,9 @@ impl<const S: usize> Machine<S> {
                 let peek = unsafe { code.get_unchecked(ip) };
                 let peek_bc = *peek.bytecode();
                 // Fib never takes this; keep the giant match as fall-through.
-                let take_table = dispatch::is_hot(peek_bc)
-                    || (dispatch_mode == dispatch::Mode::Table && !dispatch::is_kernel(peek_bc));
-                if unlikely(take_table) {
+                // Remaining (non-hot) ops use `_ => exec_rest` in this match —
+                // do not divert `!is_kernel` or fib bounces on stack ADD.
+                if unlikely(dispatch::is_hot(peek_bc)) {
                     match dispatch::run_hot_streak(
                         &mut self.stack,
                         &mut sp,
