@@ -317,8 +317,6 @@ pub(super) fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool
     next_emitted(func, from) == Some(to)
 }
 
-/// Alias a header φ dest with its latch incoming when the dest is dead after
-/// that incoming is defined (so `i = i + 1` is a dest-overwrite, not a move).
 /// Alias a header φ dest with an incoming when the live ranges do not overlap
 /// (COI-383 S6). Latch edges first so `i = i + 1` dest-overwrites. Nested
 /// accumulators (`sum` across x/y) coalesce without a local latch def.
@@ -355,6 +353,56 @@ pub(super) fn coalesce_safe_latch_phis(
         try_alias(&mut regs, dest, src, &assigned, &live);
     }
     regs
+}
+
+/// Conservative in-place latch overwrite for MIR→LIR (no interference scan).
+pub(super) fn coalesce_latch_overwrite(
+    func: &MirFunc,
+    mut regs: Vec<u8>,
+    need_slot: &[bool],
+) -> Vec<u8> {
+    let _ = need_slot;
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let MirInst::Phi { dest, args, .. } = inst else {
+                continue;
+            };
+            let Some((pred, latch_val)) = args
+                .iter()
+                .find(|(pred, _)| pred.index() > block.id.index())
+            else {
+                continue;
+            };
+            if !latch_overwrite_ok(func, *pred, *dest, *latch_val) {
+                continue;
+            }
+            if dest.index() < regs.len() && latch_val.index() < regs.len() {
+                regs[dest.index()] = regs[latch_val.index()];
+            }
+        }
+    }
+    regs
+}
+
+fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: ValueId) -> bool {
+    let block = func.block(latch);
+    let mut seen_def = false;
+    for inst in &block.insts {
+        if inst.dest() == latch_val {
+            seen_def = true;
+            continue;
+        }
+        if seen_def && inst.operands().contains(&dest) {
+            return false;
+        }
+    }
+    if !seen_def {
+        return false;
+    }
+    match &block.term {
+        Some(Terminator::Br { cond, .. }) if *cond == dest => false,
+        _ => true,
+    }
 }
 
 fn assigned_mask(func: &MirFunc, need_slot: &[bool], n: usize) -> Vec<bool> {
@@ -431,44 +479,52 @@ fn groups_interfere(
 }
 
 struct SsaLive {
-    live_in: Vec<HashSet<ValueId>>,
-    after: Vec<Vec<HashSet<ValueId>>>,
+    nvals: usize,
+    live_in: Vec<Vec<u64>>,
+    after: Vec<Vec<Vec<u64>>>,
 }
 
 impl SsaLive {
     fn compute(func: &MirFunc) -> Self {
+        let nvals = func.types.len();
+        let nwords = nvals.div_ceil(64);
         let n = func.blocks.len();
-        let mut live_in: Vec<HashSet<ValueId>> = vec![HashSet::new(); n];
-        let mut after: Vec<Vec<HashSet<ValueId>>> = func
+        let empty = vec![0u64; nwords];
+        let mut live_in: Vec<Vec<u64>> = vec![empty.clone(); n];
+        let mut after: Vec<Vec<Vec<u64>>> = func
             .blocks
             .iter()
-            .map(|b| vec![HashSet::new(); b.insts.len()])
+            .map(|b| vec![empty.clone(); b.insts.len()])
             .collect();
         if n == 0 {
-            return Self { live_in, after };
+            return Self {
+                nvals,
+                live_in,
+                after,
+            };
         }
         let mut changed = true;
         while changed {
             changed = false;
             for bi in (0..n).rev() {
-                let mut live = live_out_of(func, BlockId(bi as u32), &live_in);
+                let mut live = live_out_bits(func, BlockId(bi as u32), &live_in, nwords);
                 if let Some(term) = &func.blocks[bi].term {
                     for u in term_uses(term) {
-                        live.insert(u);
+                        bit_set(&mut live, u.index());
                     }
                 }
                 let insts = &func.blocks[bi].insts;
                 for ii in (0..insts.len()).rev() {
                     if after[bi][ii] != live {
-                        after[bi][ii] = live.clone();
+                        after[bi][ii].clone_from(&live);
                         changed = true;
                     }
                     for dest in insts[ii].dests() {
-                        live.remove(&dest);
+                        bit_clear(&mut live, dest.index());
                     }
                     if !insts[ii].is_phi() {
                         for u in insts[ii].operands() {
-                            live.insert(u);
+                            bit_set(&mut live, u.index());
                         }
                     }
                 }
@@ -478,19 +534,28 @@ impl SsaLive {
                 }
             }
         }
-        Self { live_in, after }
+        Self {
+            nvals,
+            live_in,
+            after,
+        }
     }
 
     fn interfere(&self, a: ValueId, b: ValueId) -> bool {
         if a == b {
             return false;
         }
-        for (bi, lin) in self.live_in.iter().enumerate() {
-            if lin.contains(&a) && lin.contains(&b) {
+        let ai = a.index();
+        let bi = b.index();
+        if ai >= self.nvals || bi >= self.nvals {
+            return false;
+        }
+        for (block, lin) in self.live_in.iter().enumerate() {
+            if bit_get(lin, ai) && bit_get(lin, bi) {
                 return true;
             }
-            for set in &self.after[bi] {
-                if set.contains(&a) && set.contains(&b) {
+            for set in &self.after[block] {
+                if bit_get(set, ai) && bit_get(set, bi) {
                     return true;
                 }
             }
@@ -499,8 +564,13 @@ impl SsaLive {
     }
 }
 
-fn live_out_of(func: &MirFunc, b: BlockId, live_in: &[HashSet<ValueId>]) -> HashSet<ValueId> {
-    let mut live = HashSet::new();
+fn live_out_bits(
+    func: &MirFunc,
+    b: BlockId,
+    live_in: &[Vec<u64>],
+    nwords: usize,
+) -> Vec<u64> {
+    let mut live = vec![0u64; nwords];
     let Some(term) = &func.block(b).term else {
         return live;
     };
@@ -508,30 +578,50 @@ fn live_out_of(func: &MirFunc, b: BlockId, live_in: &[HashSet<ValueId>]) -> Hash
         if s.index() >= live_in.len() {
             continue;
         }
-        let phi_dests: HashSet<ValueId> = func
-            .block(s)
-            .insts
-            .iter()
-            .take_while(|i| i.is_phi())
-            .map(|i| i.dest())
-            .collect();
-        for v in &live_in[s.index()] {
-            if !phi_dests.contains(v) {
-                live.insert(*v);
-            }
-        }
-        for inst in &func.block(s).insts {
-            let MirInst::Phi { args, .. } = inst else {
+        let succ = func.block(s);
+        let mut phi_dests = Vec::new();
+        for inst in &succ.insts {
+            let MirInst::Phi { dest, args, .. } = inst else {
                 break;
             };
+            phi_dests.push(*dest);
             for (pred, v) in args {
                 if *pred == b {
-                    live.insert(*v);
+                    bit_set(&mut live, v.index());
                 }
             }
         }
+        for (wi, &word) in live_in[s.index()].iter().enumerate() {
+            let mut keep = word;
+            for dest in &phi_dests {
+                let i = dest.index();
+                if i / 64 == wi {
+                    keep &= !(1u64 << (i % 64));
+                }
+            }
+            live[wi] |= keep;
+        }
     }
     live
+}
+
+fn bit_set(bits: &mut [u64], i: usize) {
+    let w = i / 64;
+    if w < bits.len() {
+        bits[w] |= 1u64 << (i % 64);
+    }
+}
+
+fn bit_clear(bits: &mut [u64], i: usize) {
+    let w = i / 64;
+    if w < bits.len() {
+        bits[w] &= !(1u64 << (i % 64));
+    }
+}
+
+fn bit_get(bits: &[u64], i: usize) -> bool {
+    let w = i / 64;
+    w < bits.len() && bits[w] & (1u64 << (i % 64)) != 0
 }
 
 fn term_uses(term: &Terminator) -> Vec<ValueId> {
