@@ -2875,7 +2875,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::DenseBinJmpf as u8);
+            promise!(*bc as u8 <= Instruction::DenseIndexJmpf as u8);
 
             match bc {
                 Instruction::POP => {
@@ -4042,7 +4042,7 @@ impl<const S: usize> Machine<S> {
                     );
                     self.vregs[dest] = out;
                 }
-                Instruction::DenseIndex => {
+                Instruction::DenseIndex | Instruction::DenseIndexJmpf => {
                     if dispatch::dense_index(
                         &mut self.stack,
                         sp,
@@ -4057,6 +4057,22 @@ impl<const S: usize> Machine<S> {
                     .is_err()
                     {
                         return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
+                    }
+                    if unlikely(*bc as u8 == Instruction::DenseIndexJmpf as u8) {
+                        promise!(ip < code_len);
+                        let tail = unsafe { code.get_unchecked(ip) };
+                        ip += 1;
+                        prefetch_code(code, ip);
+                        if let Some(target) = dispatch::dense_bin_jmp_tail(
+                            &mut self.stack,
+                            sp,
+                            tail,
+                            constants,
+                            &self.heap,
+                            stack_cap,
+                        ) {
+                            set_jump_target(&mut ip, target, code);
+                        }
                     }
                 }
                 Instruction::DenseStoreIndex => {

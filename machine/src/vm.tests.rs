@@ -5105,3 +5105,43 @@
         assert_eq!(table_v, match_v);
         assert_eq!(hot_v, match_v);
     }
+
+    #[test]
+    fn coi_379_dense_index_jmpf_all_modes() {
+        let abc = |op: Instruction, flags: u8, dest: u8, arr: u8, idx: u8| {
+            Byte::new(op).with_operand_u32(
+                ((flags as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((arr as u32) << 8)
+                    | u32::from(idx),
+            )
+        };
+        let eq = Instruction::EQ as u8;
+        // JMPF when flags[idx] != 1 → PC 10 (const 0). Fall-through loads dest.
+        let pool = [(10u64 << 32) | 1];
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(4),
+            const_int(0),
+            const_int(1),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            const_int(1),
+            store_pop(1),
+            abc(
+                Instruction::DenseIndexJmpf,
+                common::dense::HEAP_UNCHECKED,
+                2,
+                0,
+                1,
+            ),
+            Byte::new(Instruction::BinSlotImmJmpf).with_bin_slot_imm_jmpf(eq, 2, 0),
+            load(2),
+            Byte::new(Instruction::HALT),
+            const_int(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        assert_eq!(match_v, 1, "index then EQ 1 must fall through");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
