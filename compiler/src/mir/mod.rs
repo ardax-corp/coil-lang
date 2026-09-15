@@ -172,7 +172,9 @@ mod tests {
     fn is_dense_bin_op(inst: Instruction) -> bool {
         matches!(
             inst,
-            Instruction::DenseBin | Instruction::DenseBin2 | Instruction::DenseBinJmpf
+            Instruction::DenseBin
+                | Instruction::DenseBin2
+                | Instruction::DenseBinJmpf
         )
     }
 
@@ -191,7 +193,7 @@ mod tests {
         &bc[start..end]
     }
 
-    /// Remainder `i += 1` is `DenseConst ; DenseBin ; JMP` (COI-386), not stack CONST+STORE.
+    /// Remainder `i += 1` is `DenseConst ; DenseBin` (COI-386 X1).
     fn assert_vectorize_tail_dense_const(ops: &[Byte], fn_name: &str) {
         let names: Vec<_> = ops.iter().map(|b| b.bytecode().mnemonic()).collect();
         let stack_iv = ops.windows(3).any(|w| {
@@ -203,14 +205,13 @@ mod tests {
             !stack_iv,
             "COI-386 {fn_name}: tail i+=1 must not be CONST; STORE; DenseBin; opcodes={names:?}"
         );
-        let dense_iv = ops.windows(3).any(|w| {
+        let dense_iv = ops.windows(2).any(|w| {
             *w[0].bytecode() == Instruction::DenseConst
                 && *w[1].bytecode() == Instruction::DenseBin
-                && *w[2].bytecode() == Instruction::JMP
         });
         assert!(
             dense_iv,
-            "COI-386 {fn_name}: expected DenseConst; DenseBin; JMP on remainder IV; opcodes={names:?}"
+            "COI-386 {fn_name}: expected DenseConst; DenseBin on remainder IV; opcodes={names:?}"
         );
     }
 
@@ -475,6 +476,19 @@ fn main() {
             packed_jmp >= 1,
             "COI-377 S1: nested mandelbrot inner escape should pack DenseBinJmpf"
         );
+        let mut latch = 0usize;
+        for w in bc.windows(3) {
+            if *w[0].bytecode() == Instruction::DenseBin2
+                && *w[1].bytecode() == Instruction::DenseBin
+                && *w[2].bytecode() == Instruction::JMP
+            {
+                latch += 1;
+            }
+        }
+        assert!(
+            latch >= 1,
+            "COI-387 X2: nested mandelbrot inner latch should be DenseBin2; DenseBin; JMP"
+        );
         let moves = bc
             .iter()
             .filter(|b| *b.bytecode() == Instruction::DenseMove)
@@ -557,6 +571,16 @@ fn main() {
         assert!(
             packed >= 1,
             "COI-379 S4: nsieve p-loop should pack DenseIndexJmpf"
+        );
+        let mut latch = 0usize;
+        for w in bc.windows(2) {
+            if *w[0].bytecode() == Instruction::DenseBin && *w[1].bytecode() == Instruction::JMP {
+                latch += 1;
+            }
+        }
+        assert!(
+            latch >= 1,
+            "COI-387 X2: nsieve k-loop should be DenseBin; JMP"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         p.wire_host_natives(&mut vm);

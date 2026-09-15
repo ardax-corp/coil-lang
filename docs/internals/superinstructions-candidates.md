@@ -58,8 +58,8 @@ kept dense / vectorize / fuse-IL. No `try_specialize_body` change.
 
 | Extra | Shape | Hit | Layer | Why it is independent |
 |-------|-------|-----|-------|------------------------|
-| **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` → `emit.rs` `emit_const` (`DenseConst`) | **Done (emit, no opcode).** Remainder IV bump is `DenseConst ; DenseBin ; JMP` (2 dispatches vs stack `CONST ; STORE ; DenseBin`). Existing `DenseConst` only; no specialize-keep; print `main` / FORMAT unchanged. |
-| **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | dense emit or VM peek | Not S1 (not a cmp) and not S2 (not two bins). Counted-loop latch. |
+| **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` → `emit.rs` `emit_const` (`DenseConst`) | **Done (emit, no opcode).** Remainder IV bump is `DenseConst ; DenseBin` (X2 peeks a trailing `JMP` on table/hotmatch). Existing `DenseConst` only; no specialize-keep; print `main` / FORMAT unchanged. |
+| **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | table/hotmatch VM peek | **Done (no new opcode).** A second `Instruction` discriminant (~1.12–1.17× fib execute/LTO tax on identical `.hyc`) was reverted. Bytecode stays `DenseBin ; JMP` / `DenseBin2 ; JMP`. Default table and hotmatch peek the trailing `JMP` after `DenseBin`/`DenseBin2` (one dispatch on the latch). Giant match is byte-identical to main (two dispatches). Not S1, not S2, not X4 (X4 would peek adjacent `DenseBin`). `fib` has no this shape; keep `unlikely(is_hot)` / `.rodata` `ALWAYS_HOT`. Print `main` / FORMAT unchanged. |
 | **X3** | `MakeEnum ; RETURN` fuse (one-word heap) | `bottom_up` (`MakeEnum ; RETURN` twice) | IL peep — `MakeEnum` is **typed** `IlOp`, `Return` is typed | **Done (fuse-select).** `MakeEnumReturn` (archive **minor 19**): same packing as `MakeEnum`. Two sites on `bottom_up` (Leaf arity-0, Node arity-2). Reuses `is_one_word_return` (no two-word RETURN). Not ALWAYS_HOT — alloc+return stays on the giant match like `MakeEnum`/`RETURN` (`unlikely(is_hot)`). Print `main` / FORMAT unchanged. |
 | **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/vm.rs` peek | **Not shipped** — S2 took the ISA pack (`DenseBin2`). Pick one; do not add peek on top. |
 
@@ -109,7 +109,8 @@ instead.
 `DenseBin` / `DenseBin2` / `DenseBinJmpf` / `DenseIndexJmpf` / `DenseCmp` / `DenseConst` / `DenseMove` / `DenseUnary` /
 `DenseCast` / dense heap / field / `V*` from `emit_dense` / `vectorize`.
 `DenseBin2` is a two-word ISA pack of adjacent `DenseBin` (COI-381); X4 VM peek
-is not shipped.
+of a second `DenseBin` is not shipped. COI-387 X2 peeks a trailing `JMP` after
+`DenseBin`/`DenseBin2` on table/hotmatch only (no extra discriminant).
 
 `DenseCmp` is emitted for SSA **values**. Branchy compares go through
 `emit_br_cond` (stack `LOAD`/`BinSlotImm`/`Bin` + `Jump`) so fuse-select
@@ -187,10 +188,12 @@ order-of-magnitude, not `vm_profile`).
 **mandelbrot** (`DenseBin` / `DenseBin2` / `DenseBinJmpf`, fewer `DenseMove` after S6, `DenseCast`×3):
 
 - y/x headers: `DenseCast ; DenseBin×3 ; DenseMove* ; BinSlotSlotJmpf`
-- inner: `BinSlotSlotJmpf GT ; DenseBin2 ; DenseBinJmpf (mag + GTF) ; JMP(break) ; DenseBin2×3 ; JMP(latch)` (`tr` sunk so `zr` dest-overwrites; no latch `DenseMove`)
+- inner: `BinSlotSlotJmpf GT ; DenseBin2 ; DenseBinJmpf (mag + GTF) ; JMP(break) ; DenseBin2×2 ; DenseBin2 ; JMP(latch)` (`tr` sunk so `zr` dest-overwrites; no latch `DenseMove`; table/hotmatch peeks the latch `JMP`)
 
 **nsieve:** p-loop `DenseIndexJmpf` (`DenseIndex` + `BinSlotImmJmpf EQ`); k-loop
 `DenseMove ; DenseStoreIndex ; DenseBin ; JMP`.
+
+**fib:** `BinSlotImmJmpt ; BinSlotImm ; CALL ; BinSlotImm ; CALL ; BinReturn ; ConstReturnImm`.
 
 **fib:** `BinSlotImmJmpt ; BinSlotImm ; CALL ; BinSlotImm ; CALL ; BinReturn ; ConstReturnImm`.
 
@@ -198,7 +201,7 @@ order-of-magnitude, not `vm_profile`).
 
 **bottom_up:** `MakeEnumReturn` twice (Leaf arity-0, Node arity-2; COI-388 X3).
 
-**sum/scan tail:** `DenseConst ; DenseBin ; JMP` (COI-386 X1; was `CONST ; STORE ; DenseBin`).
+**sum/scan tail:** `DenseConst ; DenseBin ; JMP` (COI-386 X1 remainder; COI-387 table peek).
 
 ---
 

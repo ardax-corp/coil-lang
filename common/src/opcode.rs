@@ -579,6 +579,7 @@ pub mod dense {
     /// Stream width of `op`: [`super::Instruction::DenseBin2`],
     /// [`super::Instruction::DenseBinJmpf`], and
     /// [`super::Instruction::DenseIndexJmpf`] consume the following payload word.
+    /// COI-387 X2 coalesces a trailing `JMP` in the VM (no extra discriminant).
     #[inline]
     #[must_use]
     pub fn stream_width(op: super::Instruction) -> usize {

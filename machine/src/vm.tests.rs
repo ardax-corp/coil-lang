@@ -5181,3 +5181,67 @@
         assert_eq!(table_v, match_v);
         assert_eq!(hot_v, match_v);
     }
+
+    #[test]
+    fn coi_387_dense_bin_jmp_all_modes() {
+        let ty = common::dense::TY_I64 as u32;
+        let c = |dest: u8, imm: u16| {
+            Byte::new(Instruction::DenseConst)
+                .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
+        };
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((a as u32) << 8)
+                    | u32::from(b),
+            )
+        };
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(5),
+            c(0, 2),
+            c(1, 3),
+            abc(Instruction::DenseBin, common::dense::IADD64, 3, 0, 1),
+            Byte::new(Instruction::JMP).with_operand_u32(6),
+            const_int(0),
+            load(3),
+            Byte::new(Instruction::HALT),
+        ];
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        assert_eq!(match_v, 5, "bin then JMP must skip the poison CONST");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_387_dense_bin2_jmp_all_modes() {
+        let ty = common::dense::TY_I64 as u32;
+        let c = |dest: u8, imm: u16| {
+            Byte::new(Instruction::DenseConst)
+                .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
+        };
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((a as u32) << 8)
+                    | u32::from(b),
+            )
+        };
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(5),
+            c(0, 2),
+            c(1, 3),
+            c(2, 4),
+            abc(Instruction::DenseBin2, common::dense::IADD64, 3, 0, 1),
+            abc(Instruction::DenseBin, common::dense::IMUL64, 4, 3, 2),
+            Byte::new(Instruction::JMP).with_operand_u32(8),
+            const_int(0),
+            load(4),
+            Byte::new(Instruction::HALT),
+        ];
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        assert_eq!(match_v, 20, "two bins then JMP, sequential (2+3)*4");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }

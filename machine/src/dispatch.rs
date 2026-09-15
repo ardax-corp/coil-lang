@@ -920,17 +920,50 @@ fn apply_jump(ctx: &mut HotCtx<'_, '_>, target: Option<usize>) {
     }
 }
 
+/// Consume a following `JMP` without a second dispatch (COI-387 X2).
+/// Table/hotmatch only — the giant match stays byte-identical to main.
+#[inline(always)]
+fn apply_trailing_jmp(ctx: &mut HotCtx<'_, '_>) {
+    if ctx.ip >= ctx.code.len() {
+        return;
+    }
+    promise!(ctx.ip < ctx.code.len());
+    let next = unsafe { ctx.code.get_unchecked(ctx.ip) };
+    if *next.bytecode() as u8 != Instruction::JMP as u8 {
+        return;
+    }
+    ctx.ip += 1;
+    set_jump_target(&mut ctx.ip, next.operand_u32() as usize, ctx.code);
+}
+
+/// Same as [`apply_trailing_jmp`] with `unlikely` so unpaired `DenseBin`
+/// (nsieve k-loop / SIMD tails) does not enlarge the fib-hot `DenseBin` arm.
+#[inline(always)]
+fn apply_trailing_jmp_cold(ctx: &mut HotCtx<'_, '_>) {
+    if ctx.ip >= ctx.code.len() {
+        return;
+    }
+    promise!(ctx.ip < ctx.code.len());
+    let next = unsafe { ctx.code.get_unchecked(ctx.ip) };
+    if unlikely(*next.bytecode() as u8 == Instruction::JMP as u8) {
+        ctx.ip += 1;
+        set_jump_target(&mut ctx.ip, next.operand_u32() as usize, ctx.code);
+    }
+}
+
 fn cold(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
 
 #[inline(never)]
 fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+    apply_trailing_jmp_cold(ctx);
 }
 
 #[inline(never)]
 fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let tail = take_code_word(ctx);
     dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+    apply_trailing_jmp(ctx);
 }
 
 #[inline(never)]
@@ -1302,10 +1335,14 @@ fn copy_byte(code: &[Byte], ip: usize) -> Byte {
 #[inline(always)]
 fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
     match bc {
-        Instruction::DenseBin => dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
+        Instruction::DenseBin => {
+            dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            apply_trailing_jmp_cold(ctx);
+        }
         Instruction::DenseBin2 => {
             let tail = take_code_word(ctx);
             dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+            apply_trailing_jmp(ctx);
         }
         Instruction::DenseBinJmpf => {
             dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
