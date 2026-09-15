@@ -650,14 +650,9 @@ fn emit_vectorized(
         }
         emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
     }
-    // IV step +1
+    // IV step +1 (DenseConst into scratch — not CONST; STORE; DenseBin)
     let one = {
-        let c = emit_const_i64(pool, 1, loc)?;
-        out.push(c);
-        out.push(IlOp::StorePop {
-            slot: u32::from(max_reg),
-            loc,
-        });
+        out.push(emit_const_i64(pool, max_reg, 1, loc)?);
         max_reg
     };
     out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
@@ -869,12 +864,7 @@ fn emit_reduced(
         ));
     }
     let one = {
-        let c = emit_const_i64(pool, 1, loc)?;
-        out.push(c);
-        out.push(IlOp::StorePop {
-            slot: u32::from(max_reg),
-            loc,
-        });
+        out.push(emit_const_i64(pool, max_reg, 1, loc)?);
         max_reg
     };
     out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
@@ -1062,21 +1052,8 @@ fn alloc_v(next: &mut u8) -> Option<u8> {
     Some(v)
 }
 
-fn emit_const_i64(pool: &mut Vec<u64>, n: i64, loc: DebugLoc) -> Option<IlOp> {
-    if let Ok(imm) = i32::try_from(n) {
-        return Some(IlOp::Const { imm, loc });
-    }
-    let idx = intern_pool(pool, n as u64)?;
-    Some(IlOp::ConstPool { idx, loc })
-}
-
-fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Option<u32> {
-    if let Some(i) = pool.iter().position(|&x| x == bits) {
-        return u32::try_from(i).ok();
-    }
-    let i = pool.len();
-    pool.push(bits);
-    u32::try_from(i).ok()
+fn emit_const_i64(pool: &mut Vec<u64>, dest: u8, n: i64, loc: DebugLoc) -> Option<IlOp> {
+    super::emit::emit_const(MirConst::I64(n), dest, pool, loc).ok()
 }
 
 fn def(func: &MirFunc, v: ValueId) -> Option<&MirInst> {
