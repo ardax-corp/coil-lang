@@ -58,7 +58,7 @@ kept dense / vectorize / fuse-IL. No `try_specialize_body` change.
 
 | Extra | Shape | Hit | Layer | Why it is independent |
 |-------|-------|-----|-------|------------------------|
-| **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` (today stack `IlOp::Const` + `StorePop`) vs `emit.rs` `emit_const` | Already vectorized. 3 dispatches → 2 with **existing** `DenseConst`. Smallest patch. |
+| **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` → `emit.rs` `emit_const` (`DenseConst`) | **Done (emit, no opcode).** Remainder IV bump is `DenseConst ; DenseBin ; JMP` (2 dispatches vs stack `CONST ; STORE ; DenseBin`). Existing `DenseConst` only; no specialize-keep; print `main` / FORMAT unchanged. |
 | **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | dense emit or VM peek | Not S1 (not a cmp) and not S2 (not two bins). Counted-loop latch. |
 | **X3** | `MakeEnum ; RETURN` fuse (one-word heap) | `bottom_up` (`MakeEnum ; RETURN` twice) | IL peep — `MakeEnum` is **typed** `IlOp`, `Return` is typed | Body is fuse-IL; fuse-select simply has no pattern. Reuse `is_one_word_return`. |
 | **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/vm.rs` peek | **Not shipped** — S2 took the ISA pack (`DenseBin2`). Pick one; do not add peek on top. |
@@ -196,7 +196,7 @@ order-of-magnitude, not `vm_profile`).
 
 **item_check:** `JumpIfMatch ; Unpack ; packed STORE ; LOAD ; CALL ; … ; CONST ; LOAD ; ADD ; LOAD ; BinReturn`.
 
-**sum/scan tail:** `CONST ; STORE ; DenseBin ; JMP`.
+**sum/scan tail:** `DenseConst ; DenseBin ; JMP` (COI-386 X1; was `CONST ; STORE ; DenseBin`).
 
 ---
 
