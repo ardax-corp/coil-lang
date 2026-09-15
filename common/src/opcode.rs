@@ -361,6 +361,7 @@ pub enum Instruction {
     /// Dense unary (`neg` / `not`). `[31:24]` kind, `[15:8]` dest, `[7:0]` src.
     DenseUnary,
     /// Dense cast. `[31:24]` kind, `[15:8]` dest, `[7:0]` src.
+    /// Table/hotmatch peeks a trailing `DenseBin`/`DenseBin2` (COI-380).
     DenseCast,
 
     /// Compiler-only 8-lane load (COI-310). Numeric heap words only.
@@ -580,6 +581,7 @@ pub mod dense {
     /// [`super::Instruction::DenseBinJmpf`], and
     /// [`super::Instruction::DenseIndexJmpf`] consume the following payload word.
     /// COI-387 X2 coalesces a trailing `JMP` in the VM (no extra discriminant).
+    /// COI-380 S3 coalesces a trailing `DenseBin`/`DenseBin2` after `DenseCast`.
     #[inline]
     #[must_use]
     pub fn stream_width(op: super::Instruction) -> usize {

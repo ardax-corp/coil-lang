@@ -5104,6 +5104,99 @@
         assert_eq!(table_v, match_v);
         assert_eq!(hot_v, match_v);
     }
+
+    fn dense_cast_bin_code() -> [Byte; 6] {
+        let ty = common::dense::TY_I64 as u32;
+        let c = |dest: u8, imm: u16| {
+            Byte::new(Instruction::DenseConst)
+                .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
+        };
+        [
+            Byte::new(Instruction::Seek).with_operand_u32(3),
+            c(0, 7),
+            Byte::new(Instruction::DenseCast).with_dense_unary(common::dense::CAST_I2F, 1, 0),
+            Byte::new(Instruction::DenseBin).with_dense_abc(common::dense::FADD64, 2, 1, 1),
+            load(2),
+            Byte::new(Instruction::HALT),
+        ]
+    }
+
+    #[test]
+    fn coi_380_dense_cast_bin_peek_all_modes() {
+        let code = dense_cast_bin_code();
+        let run = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(&code, &[], &[], 0);
+            super::dispatch::override_mode(None);
+            vm.pop().as_float()
+        };
+        let match_v = run(super::dispatch::Mode::Match);
+        let table_v = run(super::dispatch::Mode::Table);
+        let hot_v = run(super::dispatch::Mode::HotMatch);
+        assert_eq!(match_v, 14.0, "i2f(7)+i2f(7)");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_380_dense_cast_bin2_peek_all_modes() {
+        let ty = common::dense::TY_I64 as u32;
+        let c = |dest: u8, imm: u16| {
+            Byte::new(Instruction::DenseConst)
+                .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
+        };
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_dense_abc(kind, dest, a, b)
+        };
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(4),
+            c(0, 7),
+            Byte::new(Instruction::DenseCast).with_dense_unary(common::dense::CAST_I2F, 1, 0),
+            abc(Instruction::DenseBin2, common::dense::FADD64, 2, 1, 1),
+            abc(Instruction::DenseBin, common::dense::FADD64, 3, 2, 1),
+            load(3),
+            Byte::new(Instruction::HALT),
+        ];
+        let run = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(&code, &[], &[], 0);
+            super::dispatch::override_mode(None);
+            vm.pop().as_float()
+        };
+        let match_v = run(super::dispatch::Mode::Match);
+        let table_v = run(super::dispatch::Mode::Table);
+        let hot_v = run(super::dispatch::Mode::HotMatch);
+        assert_eq!(match_v, 21.0, "7+7 then +7");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_380_table_peek_saves_a_dispatch() {
+        let code = dense_cast_bin_code();
+        let count = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            reset_dispatch_count();
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(&code, &[], &[], 0);
+            super::dispatch::override_mode(None);
+            dispatch_count()
+        };
+        let match_n = count(super::dispatch::Mode::Match);
+        let table_n = count(super::dispatch::Mode::Table);
+        let hot_n = count(super::dispatch::Mode::HotMatch);
+        assert!(
+            table_n < match_n,
+            "table should peek DenseBin (table={table_n}, match={match_n})"
+        );
+        assert!(
+            hot_n < match_n,
+            "hotmatch should peek DenseBin (hot={hot_n}, match={match_n})"
+        );
+    }
+
     #[test]
     fn coi_377_dense_bin_jmpf_all_modes() {
         let ty = common::dense::TY_I64 as u32;
