@@ -567,6 +567,8 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
                 | Instruction::DenseBin
                 | Instruction::DenseBin2
                 | Instruction::DenseBinJmpf
+                | Instruction::DenseBinJmp
+                | Instruction::DenseBin2Jmp
         )
     });
     assert!(

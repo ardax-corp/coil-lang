@@ -311,14 +311,14 @@ fn format_operands(
             format!("has_send={}", (byte.operand_u32() & 1) != 0)
         }
         Instruction::DynCmp => format!("kind={}", byte.operand_u32() & 0xFF),
-        Instruction::DenseBin | Instruction::DenseBin2 => {
+        Instruction::DenseBin | Instruction::DenseBin2 | Instruction::DenseBin2Jmp => {
             let (kind, dest, a, b) = byte.dense_abc_parts();
             format!(
                 "kind={} dest={dest} a={a} b={b}",
                 common::dense::bin_kind_name(kind)
             )
         }
-        Instruction::DenseBinJmpf => {
+        Instruction::DenseBinJmpf | Instruction::DenseBinJmp => {
             let (kind, dest, a, b) = byte.dense_abc_parts();
             format!(
                 "kind={} dest={dest} a={a} b={b}",
@@ -364,6 +364,45 @@ pub fn format_bytecode_section(
                 "{pc:05}  DenseBin2        {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1}",
                 common::dense::bin_kind_name(k0),
                 common::dense::bin_kind_name(k1)
+            );
+            pc += 2;
+            continue;
+        }
+        if *byte.bytecode() == Instruction::DenseBin2Jmp && pc + 2 < end {
+            let mid = &bytecode[pc + 1];
+            let jmp = &bytecode[pc + 2];
+            let (k0, d0, a0, b0) = byte.dense_abc_parts();
+            let (k1, d1, a1, b1) = mid.dense_abc_parts();
+            let jmp_ops = format_operands(*jmp.bytecode(), jmp, constants, pc_names);
+            let extra = if jmp_ops.is_empty() {
+                String::new()
+            } else {
+                format!(" {jmp_ops}")
+            };
+            let _ = writeln!(
+                out,
+                "{pc:05}  DenseBin2Jmp     {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1} ; {}{extra}",
+                common::dense::bin_kind_name(k0),
+                common::dense::bin_kind_name(k1),
+                jmp.bytecode().mnemonic()
+            );
+            pc += 3;
+            continue;
+        }
+        if *byte.bytecode() == Instruction::DenseBinJmp && pc + 1 < end {
+            let tail = &bytecode[pc + 1];
+            let (k0, d0, a0, b0) = byte.dense_abc_parts();
+            let jmp = format_operands(*tail.bytecode(), tail, constants, pc_names);
+            let extra = if jmp.is_empty() {
+                String::new()
+            } else {
+                format!(" {jmp}")
+            };
+            let _ = writeln!(
+                out,
+                "{pc:05}  DenseBinJmp      {} r{d0}=r{a0},r{b0} ; {}{extra}",
+                common::dense::bin_kind_name(k0),
+                tail.bytecode().mnemonic()
             );
             pc += 2;
             continue;
@@ -740,6 +779,46 @@ mod tests {
         assert!(
             !out.contains("\n00001  BinSlotImmJmpf"),
             "payload jmp should not be a second dispatch line:\n{out}"
+        );
+        assert!(out.contains("HALT"));
+    }
+
+    #[test]
+    fn format_dense_bin_jmp_skips_payload_word() {
+        let empty = HashMap::new();
+        let bc = [
+            Byte::new(Instruction::DenseBinJmp).with_dense_abc(common::dense::IADD64, 2, 2, 1),
+            Byte::new(Instruction::JMP).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let out = format_bytecode_section("latch", 0, 3, &bc, &[], &empty);
+        assert!(out.contains("DenseBinJmp"));
+        assert!(out.contains("IADD64"));
+        assert!(out.contains("JMP"));
+        assert!(
+            !out.contains("\n00001  JMP"),
+            "payload JMP should not be a second dispatch line:\n{out}"
+        );
+        assert!(out.contains("HALT"));
+    }
+
+    #[test]
+    fn format_dense_bin2_jmp_skips_payload_words() {
+        let empty = HashMap::new();
+        let bc = [
+            Byte::new(Instruction::DenseBin2Jmp).with_dense_abc(common::dense::FADD64, 3, 1, 2),
+            Byte::new(Instruction::DenseBin).with_dense_abc(common::dense::FMUL64, 4, 3, 5),
+            Byte::new(Instruction::JMP).with_operand_u32(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let out = format_bytecode_section("mandel", 0, 4, &bc, &[], &empty);
+        assert!(out.contains("DenseBin2Jmp"));
+        assert!(out.contains("FADD64"));
+        assert!(out.contains("FMUL64"));
+        assert!(out.contains("JMP"));
+        assert!(
+            !out.contains("\n00001  DenseBin") && !out.contains("\n00002  JMP"),
+            "payload words should not be extra dispatch lines:\n{out}"
         );
         assert!(out.contains("HALT"));
     }

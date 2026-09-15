@@ -1305,6 +1305,8 @@ use string::{format, to_bytes};
                 | Instruction::DenseBin
                 | Instruction::DenseBin2
                 | Instruction::DenseBinJmpf
+                | Instruction::DenseBinJmp
+                | Instruction::DenseBin2Jmp
         )
     });
     assert!(has_arith, "expected fib arithmetic with PolyFn present");

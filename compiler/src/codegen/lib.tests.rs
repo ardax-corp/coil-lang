@@ -6965,6 +6965,8 @@ fn main() { \
                         | Instruction::JMPF
                         | Instruction::DenseBin
                     | Instruction::DenseBin2
+                    | Instruction::DenseBinJmp
+                    | Instruction::DenseBin2Jmp
                 )),
             "expected fused superinstructions or fib arithmetic alongside PolyFn; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
