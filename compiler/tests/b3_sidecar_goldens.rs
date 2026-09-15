@@ -32,12 +32,13 @@ const CORPUS: &[&str] = &[
 /// A3 (COI-336) drops the named-reason checklist; `functions.hy` keeps LIR
 /// when cost ≤ fuse (fingerprint 400). B2 convoys recursive `fib` (same
 /// length; opcode mix changes).
+/// COI-388 X3 fuses `MakeEnum; RETURN` → `MakeEnumReturn` (shorter corpus).
 const EXPECTED: &[(&str, &str)] = &[
-    ("arithmetic.hy", "259c7f7110e2abd1_622"),
-    ("functions.hy", "806483c70f0a6d83_400"),
-    ("loops.hy", "ecae1dcfae84aaed_274"),
-    ("option_pair.hy", "1abbc7207ee1bcc6_397"),
-    ("user_trait_dispatch.hy", "cf1c593995cb3879_162"),
+    ("arithmetic.hy", "53c04a3bd949039e_572"),
+    ("functions.hy", "7d51114f1381cfe6_378"),
+    ("loops.hy", "b8e88a433a519860_257"),
+    ("option_pair.hy", "e9662ae6a46cd854_378"),
+    ("user_trait_dispatch.hy", "8efebd98b030b900_153"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
