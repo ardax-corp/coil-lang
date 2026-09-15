@@ -616,7 +616,7 @@ fn pack_dense_index_jmpf(ops: &mut [IlOp]) {
 /// The jump stays a typed `IlOp` so label resolution still runs; the VM
 /// consumes it as the last payload word. `DenseBin2Jmp` is packed first so
 /// the payload `DenseBin` of a pair is not stolen as `DenseBinJmp`.
-fn pack_dense_bin_latch_jmp(ops: &mut [IlOp]) {
+pub(super) fn pack_dense_bin_latch_jmp(ops: &mut [IlOp]) {
     let mut i = 0;
     while i + 2 < ops.len() {
         let is_bin2 = matches!(
