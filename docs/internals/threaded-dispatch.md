@@ -188,6 +188,24 @@ must not share instruction-cache lines with mandelbrot/fib dense kernels.
 
 `hotmatch` is unchanged (G1 compact match, including opt-in CALL/RETURN).
 
+### G3 measured (release, fat LTO, `COIL_AUTO_PAR=0`, same `.hyc` vs G2 `main`)
+
+Same host as G2. `perf_event` still unavailable (`poop` / `perf`); wall A/B is
+`hyperfine --shell=none`. ELF: `.text.hot` ~57 KiB, `.text.unlikely` ~324 KiB,
+kept as distinct sections.
+
+Checksums identical: mandelbrot `625885`, fib `2178309`, nsieve `1900`.
+
+| Bench | main match | G3 match | main table (G2) | G3 table | notes |
+|---|---|---|---|---|---|
+| mandelbrot | 19.0 ± 0.9 ms | 18.1 ± 1.0 ms | 20.5 ± 1.3 ms | **19.1 ± 0.7 ms** | table ~1.07× vs G2 table; wash vs G3 match |
+| fib | 55.4 ± 0.4 ms | 54.8 ± 3.2 ms | 62.2 ± 8.6 ms | 61.2 ± 9.7 ms | **flat vs main** (same ~1.12× table vs match as G2) |
+| nsieve | 2.5 ± 0.1 ms | 2.4 ± 0.2 ms | 2.7 ± 0.2 ms | 2.7 ± 0.1 ms | short; wash |
+
+**Go:** land the layout split. Mandelbrot default-table improved vs G2; fib
+default-table is flat vs G2 (CALL still on the match). Fib table-vs-match gap
+is G2, not a G3 regression. No archive bump.
+
 ## I-cache / inlining
 
 - Hot loop is a separate `#[inline(never)]` function from `execute`.
