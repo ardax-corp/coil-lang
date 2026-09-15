@@ -1,4 +1,4 @@
-# Threaded execute dispatch (COI-373 G0, COI-374 G1)
+# Threaded execute dispatch (COI-373 G0, COI-374 G1, COI-375 G2)
 
 Can a portable **fn-pointer** interpreter beat the outlined giant `match` in
 `Machine::execute` on flagship `.hyc`?
@@ -45,6 +45,23 @@ implemented as shared helpers and used by the giant match.
 match (alloc / GC). Tombstones stay on the match.
 
 Debugger-attached runs never enter the hot loop (per-op stops).
+
+## Remaining ops (G2)
+
+G2 fills the 256-entry table for every non-kernel opcode. Stack arith, consts,
+casts, and `BinSlotSlot` have outlined handlers on the trampoline. Heap / FFI /
+host / coro / SIMD / alloc ops share a `rest` slot that bounces to
+`Machine::exec_rest` (the old giant-match arms). Archive tombstones
+(`HostInvokeNiche`, `OptionNicheToHeap`, …) use that rest path too.
+
+**Not** on the default table (still the inlined `execute` match):
+
+- `CALL` / `TailCall` / `RETURN` / fused returns / `MakeEnumReturn`
+- packed `LOAD` / `STORE` / `StorePop` / `Seek`
+- imm-slot fuses (`BinSlotImm*`)
+
+`hotmatch` still only consumes the G1 hot subset. Table mode diverts on
+`is_hot || !is_kernel` so fib’s CALL kernel never enters the trampoline.
 
 ## CALL / RETURN (A/B, default off)
 
@@ -131,18 +148,11 @@ Threading packed `LOAD`/`STORE`/`Seek` **without** `DenseIndex` made nsieve
 `COIL_THREADED_CALL=1` vs `=0` on the table path: CALL-on is ~1.39× faster than
 CALL-off for fib, but still slower than the giant match.
 
-## Go / no-go for G2 (COI-375)
+## Go / no-go for G3 (COI-376)
 
-**Go, with constraints.** Default table is a mandelbrot wash-to-slight-win
-and does not regress fib when CALL/RETURN stay on the match. G2 full
-`Instruction` coverage must not blindly park CALL/RETURN or packed
-LOAD/STORE on outlined fn-pointer handlers: CALL/RETURN lose on fib/tak;
-LOAD/STORE without a complete kernel bounce nsieve.
-
-G2 should try one of: fewer/colder outlines so CALL can inline into the
-trampoline, a dedicated call/return mini-loop, or nightly `become` behind a
-non-default feature. Do not treat inner `fused.rs` eval tables as the same
-result; that path was ~2% slower.
+G2 landed remaining coverage without parking CALL/RETURN or packed LOAD/STORE
+on the default table. Next is hot/cold I-cache split of handler code, not a
+retry of “CALL on the table.”
 
 ## I-cache / inlining
 
