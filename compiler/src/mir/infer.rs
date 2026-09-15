@@ -1053,6 +1053,7 @@ pub(crate) fn has_heap_index(ops: &[IlOp]) -> bool {
                 | Instruction::StoreIndexUnchecked
                 | Instruction::ArrayLen
                 | Instruction::DenseIndex
+                | Instruction::DenseIndexJmpf
                 | Instruction::DenseStoreIndex
                 | Instruction::DenseArrayLen
         ),

@@ -174,6 +174,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::DenseBin
         | Instruction::DenseBin2
         | Instruction::DenseBinJmpf
+        | Instruction::DenseIndexJmpf
         | Instruction::DenseCmp
         | Instruction::DenseConst
         | Instruction::DenseMove

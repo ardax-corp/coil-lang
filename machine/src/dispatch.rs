@@ -188,6 +188,7 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::DenseBin);
     b = or_hot(b, Instruction::DenseBin2);
     b = or_hot(b, Instruction::DenseBinJmpf);
+    b = or_hot(b, Instruction::DenseIndexJmpf);
     b = or_hot(b, Instruction::DenseCmp);
     b = or_hot(b, Instruction::DenseConst);
     b = or_hot(b, Instruction::DenseMove);
@@ -948,6 +949,36 @@ fn op_dense_bin_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
+fn op_dense_index_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    if dense_index(
+        ctx.stack,
+        ctx.sp,
+        &opcode,
+        ctx.heap,
+        ctx.extra.frames_len,
+        ctx.extra.frame_pins,
+        ctx.extra.dense_obj_addr,
+        ctx.extra.dense_obj,
+        ctx.stack_cap,
+    )
+    .is_err()
+    {
+        ctx.panic_msg = Some("index out of bounds");
+        return;
+    }
+    let tail = take_code_word(ctx);
+    let target = dense_bin_jmp_tail(
+        ctx.stack,
+        ctx.sp,
+        &tail,
+        ctx.constants,
+        ctx.heap,
+        ctx.stack_cap,
+    );
+    apply_jump(ctx, target);
+}
+
+#[inline(never)]
 fn op_dense_cmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
@@ -1218,6 +1249,7 @@ fn build_table() -> [Handler; 256] {
     t[Instruction::DenseBin as usize] = op_dense_bin;
     t[Instruction::DenseBin2 as usize] = op_dense_bin2;
     t[Instruction::DenseBinJmpf as usize] = op_dense_bin_jmpf;
+    t[Instruction::DenseIndexJmpf as usize] = op_dense_index_jmpf;
     t[Instruction::DenseCmp as usize] = op_dense_cmp;
     t[Instruction::DenseConst as usize] = op_dense_const;
     t[Instruction::DenseMove as usize] = op_dense_move;
@@ -1277,6 +1309,34 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
         }
         Instruction::DenseBinJmpf => {
             dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            let tail = take_code_word(ctx);
+            let target = dense_bin_jmp_tail(
+                ctx.stack,
+                ctx.sp,
+                &tail,
+                ctx.constants,
+                ctx.heap,
+                ctx.stack_cap,
+            );
+            apply_jump(ctx, target);
+        }
+        Instruction::DenseIndexJmpf => {
+            if dense_index(
+                ctx.stack,
+                ctx.sp,
+                &opcode,
+                ctx.heap,
+                ctx.extra.frames_len,
+                ctx.extra.frame_pins,
+                ctx.extra.dense_obj_addr,
+                ctx.extra.dense_obj,
+                ctx.stack_cap,
+            )
+            .is_err()
+            {
+                ctx.panic_msg = Some("index out of bounds");
+                return;
+            }
             let tail = take_code_word(ctx);
             let target = dense_bin_jmp_tail(
                 ctx.stack,
@@ -1595,6 +1655,7 @@ mod tests {
         assert!(is_hot(Instruction::DenseBin));
         assert!(is_hot(Instruction::DenseBin2));
         assert!(is_hot(Instruction::DenseBinJmpf));
+        assert!(is_hot(Instruction::DenseIndexJmpf));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
         assert!(is_hot(Instruction::DenseIndex));
         assert!(!is_hot(Instruction::LOAD));

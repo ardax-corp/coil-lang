@@ -1189,6 +1189,7 @@ fn main() {
                 Instruction::DenseBin
                     | Instruction::DenseBin2
                     | Instruction::DenseBinJmpf
+                    | Instruction::DenseIndexJmpf
                     | Instruction::DenseCmp
                     | Instruction::DenseConst
                     | Instruction::DenseMove

@@ -423,6 +423,12 @@ pub enum Instruction {
     /// IEEE then the compare-branch. Not `DenseCmp`+jmp (dense bodies emit
     /// zero `DenseCmp` on branches).
     DenseBinJmpf,
+    /// [`Self::DenseIndex`] then a fused `*Jmpf`/`*Jmpt` (COI-379 S4).
+    /// Operand is the index `dense_abc` (same as [`Self::DenseIndex`]).
+    /// The following code word is the jump (`BinSlotImmJmpf` / twins, or
+    /// `BinSlotSlotJmpf` / twins). One dispatch; heap load then compare-branch.
+    /// Stacks with last-addr `Object` cache (COI-372). Not IndexPin.
+    DenseIndexJmpf,
 }
 
 impl From<u8> for Instruction {
@@ -566,13 +572,16 @@ pub mod dense {
         }
     }
 
-    /// Stream width of `op`: [`super::Instruction::DenseBin2`] and
-    /// [`super::Instruction::DenseBinJmpf`] consume the following payload word.
+    /// Stream width of `op`: [`super::Instruction::DenseBin2`],
+    /// [`super::Instruction::DenseBinJmpf`], and
+    /// [`super::Instruction::DenseIndexJmpf`] consume the following payload word.
     #[inline]
     #[must_use]
     pub fn stream_width(op: super::Instruction) -> usize {
         match op {
-            super::Instruction::DenseBin2 | super::Instruction::DenseBinJmpf => 2,
+            super::Instruction::DenseBin2
+            | super::Instruction::DenseBinJmpf
+            | super::Instruction::DenseIndexJmpf => 2,
             _ => 1,
         }
     }
@@ -844,6 +853,7 @@ impl Instruction {
             Self::DenseMakeObject => "DenseMakeObject",
             Self::DenseBin2 => "DenseBin2",
             Self::DenseBinJmpf => "DenseBinJmpf",
+            Self::DenseIndexJmpf => "DenseIndexJmpf",
         }
     }
 }
@@ -1865,6 +1875,9 @@ mod tests {
         let br = Byte::new(Instruction::DenseBinJmpf).with_dense_abc(dense::FADD64, 5, 3, 4);
         assert_eq!(br.dense_abc_parts(), (dense::FADD64, 5, 3, 4));
         assert_eq!(dense::stream_width(Instruction::DenseBinJmpf), 2);
+        let ix = Byte::new(Instruction::DenseIndexJmpf).with_dense_abc(dense::HEAP_UNCHECKED, 5, 1, 2);
+        assert_eq!(ix.dense_abc_parts(), (dense::HEAP_UNCHECKED, 5, 1, 2));
+        assert_eq!(dense::stream_width(Instruction::DenseIndexJmpf), 2);
         assert_eq!(dense::bin_kind_name(dense::FMUL64), "FMUL64");
     }
 
@@ -1872,7 +1885,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DenseBinJmpf as u8;
+        let last = Instruction::DenseIndexJmpf as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

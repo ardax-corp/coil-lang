@@ -2201,6 +2201,7 @@ fn main() { add(1, 2); }
                         | Instruction::StoreIndex
                         | Instruction::StoreIndexUnchecked
                         | Instruction::DenseIndex
+                        | Instruction::DenseIndexJmpf
                         | Instruction::DenseStoreIndex
                 )
             });
@@ -2389,6 +2390,7 @@ fn main() -> int {
                         Instruction::IndexUnchecked
                             | Instruction::IndexPinUnchecked
                             | Instruction::DenseIndex
+                            | Instruction::DenseIndexJmpf
                     )
                 })
             })
@@ -2399,6 +2401,7 @@ fn main() -> int {
                 Instruction::IndexUnchecked
                     | Instruction::IndexPinUnchecked
                     | Instruction::DenseIndex
+                    | Instruction::DenseIndexJmpf
             )
         });
         assert!(
@@ -2608,7 +2611,10 @@ fn main() -> int {
     fn is_dense_heap_index(op: common::Instruction) -> bool {
         matches!(
             op,
-            Instruction::DenseIndex | Instruction::DenseStoreIndex | Instruction::DenseArrayPush
+            Instruction::DenseIndex
+                | Instruction::DenseIndexJmpf
+                | Instruction::DenseStoreIndex
+                | Instruction::DenseArrayPush
         )
     }
 
@@ -2643,7 +2649,8 @@ fn main() -> int {
         );
         assert!(
             main.iter().any(|b| is_unchecked_index(*b.bytecode())
-                || *b.bytecode() == Instruction::DenseIndex),
+                || *b.bytecode() == Instruction::DenseIndex
+                || *b.bytecode() == Instruction::DenseIndexJmpf),
             "stable for-in should uncheck or keep DenseIndex; body={:?}",
             main.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
