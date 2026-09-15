@@ -5068,3 +5068,40 @@
         assert_eq!(table_v, match_v);
         assert_eq!(hot_v, match_v);
     }
+    #[test]
+    fn coi_377_dense_bin_jmpf_all_modes() {
+        let ty = common::dense::TY_I64 as u32;
+        let c = |dest: u8, imm: u16| {
+            Byte::new(Instruction::DenseConst)
+                .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
+        };
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((a as u32) << 8)
+                    | u32::from(b),
+            )
+        };
+        let pool = [(8u64 << 32) | 2];
+        let code = [
+            Byte::new(Instruction::Seek).with_operand_u32(5),
+            c(0, 2),
+            c(1, 3),
+            c(2, 4),
+            abc(Instruction::DenseBinJmpf, common::dense::IADD64, 3, 0, 1),
+            Byte::new(Instruction::BinSlotSlotJmpf).with_bin_slot_slot_jmpf(
+                Instruction::GT as u8,
+                3,
+                0,
+            ),
+            load(3),
+            Byte::new(Instruction::HALT),
+            const_int(0),
+            Byte::new(Instruction::HALT),
+        ];
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        assert_eq!(match_v, 5, "bin must run (2+3) before GT vs 4");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }

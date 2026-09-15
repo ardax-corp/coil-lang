@@ -187,6 +187,7 @@ const ALWAYS_HOT: [u64; 4] = {
     let mut b = [0u64; 4];
     b = or_hot(b, Instruction::DenseBin);
     b = or_hot(b, Instruction::DenseBin2);
+    b = or_hot(b, Instruction::DenseBinJmpf);
     b = or_hot(b, Instruction::DenseCmp);
     b = or_hot(b, Instruction::DenseConst);
     b = or_hot(b, Instruction::DenseMove);
@@ -267,6 +268,33 @@ fn take_code_word(ctx: &mut HotCtx<'_, '_>) -> Byte {
 pub(super) fn dense_bin2(stack: &mut Stack<Value>, sp: usize, first: &Byte, second: &Byte, stack_cap: usize) {
     dense_bin(stack, sp, first, stack_cap);
     dense_bin(stack, sp, second, stack_cap);
+}
+
+/// Payload of [`Instruction::DenseBinJmpf`]: fused slot compare-jump (or twin).
+#[inline(always)]
+pub(super) fn dense_bin_jmp_tail(
+    stack: &mut Stack<Value>,
+    sp: usize,
+    tail: &Byte,
+    constants: &[u64],
+    heap: &Heap,
+    stack_cap: usize,
+) -> Option<usize> {
+    match *tail.bytecode() {
+        Instruction::BinSlotSlotJmpf => {
+            bin_slot_slot_jmp(stack, sp, tail, constants, heap, stack_cap, false)
+        }
+        Instruction::BinSlotSlotJmpt => {
+            bin_slot_slot_jmp(stack, sp, tail, constants, heap, stack_cap, true)
+        }
+        Instruction::BinSlotImmJmpf => {
+            bin_slot_imm_jmp(stack, sp, tail, constants, heap, stack_cap, false)
+        }
+        Instruction::BinSlotImmJmpt => {
+            bin_slot_imm_jmp(stack, sp, tail, constants, heap, stack_cap, true)
+        }
+        _ => None,
+    }
 }
 
 #[inline(always)]
@@ -905,6 +933,21 @@ fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
+fn op_dense_bin_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+    let tail = take_code_word(ctx);
+    let target = dense_bin_jmp_tail(
+        ctx.stack,
+        ctx.sp,
+        &tail,
+        ctx.constants,
+        ctx.heap,
+        ctx.stack_cap,
+    );
+    apply_jump(ctx, target);
+}
+
+#[inline(never)]
 fn op_dense_cmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
@@ -1174,6 +1217,7 @@ fn build_table() -> [Handler; 256] {
     let mut t = [cold as Handler; 256];
     t[Instruction::DenseBin as usize] = op_dense_bin;
     t[Instruction::DenseBin2 as usize] = op_dense_bin2;
+    t[Instruction::DenseBinJmpf as usize] = op_dense_bin_jmpf;
     t[Instruction::DenseCmp as usize] = op_dense_cmp;
     t[Instruction::DenseConst as usize] = op_dense_const;
     t[Instruction::DenseMove as usize] = op_dense_move;
@@ -1230,6 +1274,19 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
         Instruction::DenseBin2 => {
             let tail = take_code_word(ctx);
             dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+        }
+        Instruction::DenseBinJmpf => {
+            dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            let tail = take_code_word(ctx);
+            let target = dense_bin_jmp_tail(
+                ctx.stack,
+                ctx.sp,
+                &tail,
+                ctx.constants,
+                ctx.heap,
+                ctx.stack_cap,
+            );
+            apply_jump(ctx, target);
         }
         Instruction::DenseCmp => dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
         Instruction::DenseConst => {
@@ -1537,6 +1594,7 @@ mod tests {
         let _ = table();
         assert!(is_hot(Instruction::DenseBin));
         assert!(is_hot(Instruction::DenseBin2));
+        assert!(is_hot(Instruction::DenseBinJmpf));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
         assert!(is_hot(Instruction::DenseIndex));
         assert!(!is_hot(Instruction::LOAD));
