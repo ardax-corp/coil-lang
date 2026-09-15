@@ -246,7 +246,12 @@ const KERNEL: [u64; 4] = {
 
 #[inline(always)]
 pub(super) fn is_kernel(bc: Instruction) -> bool {
-    let i = bc as u8 as usize;
+    is_kernel_disc(bc as u8)
+}
+
+#[inline(always)]
+fn is_kernel_disc(disc: u8) -> bool {
+    let i = disc as usize;
     (KERNEL[i >> 6] >> (i & 63)) & 1 != 0
 }
 
@@ -1377,7 +1382,7 @@ fn fill_g2_coverage(t: &mut [Handler; 256]) {
         }
     }
     for disc in 0..256u16 {
-        if is_kernel(Instruction::from(disc as u8)) {
+        if is_kernel_disc(disc as u8) {
             t[disc as usize] = cold;
         }
     }
