@@ -29,12 +29,17 @@ Layer key: **dense emit** = pack in `mir/emit.rs` / `vectorize.rs` before
 ops become residual `IlOp::Byte`. **IL peep** = `fuse_select` / convoy /
 instcombine on typed `IlOp`. **Gate lift** = typed-IL / SP / refuse table.
 
-**S8 fact that binds every dense ticket:** `IlOp::from_plain_byte` does
-**not** lift `Dense*` / `V*` (`compiler/src/il/op.rs` falls through to
+**S8 fact that binds every dense ticket ([COI-385](https://linear.app/ardax/issue/COI-385), landed):**
+fusion is **not** blocked on specialize keep. Cost / `lir_eligible` do not
+refuse because a packed op appeared. `IlOp::from_plain_byte` does **not**
+lift `Dense*` / `V*` (`compiler/src/il/op.rs` falls through to
 `IlOp::Byte`). `fuse_select` marks `IlOp::Byte` as `Slot::Cold` and
-refuses any window that includes it. Dense packing **cannot** be a
-post-concat fuse-select peep unless S8 lifts those ops to typed `IlOp`.
-Until then S1–S5 are dense-emit (or VM peek) only.
+refuses any window that includes it. Dense packing is **not** a
+post-concat fuse-select peep. S1–S5 pack in dense emit (or VM peek) only.
+Typed `IlOp` lift of `DenseBin` / `DenseCast` / `DenseIndex` /
+`DenseStoreIndex` / `DenseMove` is a **no-go** (S8): fuse-select is stack
+IL; print `main` stays fuse-IL. Note also
+[specialize-refuse.md](specialize-refuse.md) (S8).
 
 | ID | Linear | Ticket shape | Dissect (this PR) | Layer | Refine |
 |----|--------|--------------|-------------------|-------|--------|
@@ -45,9 +50,9 @@ Until then S1–S5 are dense-emit (or VM peek) only.
 | **S5** | [COI-382](https://linear.app/ardax/issue/COI-382) | Index/StoreIndex stride pair | Inner k-loop is **`DenseMove ; DenseStoreIndex ; DenseBin ; JMP`** — store of 0 with `k = k + p`. **No** `DenseIndex` in that loop. | table/hotmatch VM peek | **Done (peek, no opcode).** Table/hotmatch consume trailing `DenseBin`/`DenseBin2` then `JMP` in the `DenseStoreIndex` handler (one dispatch for store + IV bump + latch). Bytecode unchanged (`DenseMove` stays its own op). No archive bump; not ALWAYS_HOT growth. Giant match stays three-dispatch on store/bin/jmp. `fib` has no this shape; keep `unlikely(is_hot)`. Not consecutive Index+Store of the same cell. |
 | **S6** | [COI-383](https://linear.app/ardax/issue/COI-383) | `DenseMove` coalesce | `mandelbrot` **9** `DenseMove` (φ / latch copies). Pairs: `DenseMove ; DenseMove ; BinSlotSlotJmpf`. | MIR destprop / dense emit | **Done (peep, no opcode).** Sink φ incomings past last use of the dest, then the existing latch overwrite aliases `i = i+1` / mandelbrot `tr`→`zr`. Identity `DenseMove` drop. No new opcode; LOAD/STORE cost 2 vs `DenseMove` 1 unchanged. Nested-accumulator interference coalesce was unsound (SROA pack checksum) and is not shipped. |
 | **S7** | [COI-384](https://linear.app/ardax/issue/COI-384) | Fuse-IL peep parity for S1–S5 shapes | `fib`/`tak`/`item_check`/`bottom_up` stay fuse-IL. Stack `*Jmpf` / `BinSlotImm` / `BinReturn` **already fire** (`fib` is 7 ops). Dense S1–S5 shapes do not appear on these bodies. | IL peep | **Done (peep, no opcode).** `item_check` `CONST; LOAD; ADD` → `BinSlotImm`: fuse-select matches const-left commute bins (shape appears after slot-promote, past canon); canon also swaps `Const; Load; op` without Known SP. `bottom_up` MakeEnum+RETURN is X3. Do not densify `main`/FORMAT. Dense S1–S5 “parity” remains N/A on fuse-IL flagships. |
-| **S8** | [COI-385](https://linear.app/ardax/issue/COI-385) | Fusion not blocked on specialize keep | Cost gate / `lir_eligible` do **not** currently refuse because a packed op appeared (none exist yet). The live block is **`Dense*` as residual `Byte` → fuse-select Cold**. `emit_cost` weights `Seek` and LOAD/STORE, not opcode novelty. | typed `IlOp` for `Dense*` **or** keep packing in dense emit | One-line lift if S1–S5 should share fuse-select: lift `DenseBin`/`DenseCast`/`DenseIndex`/`DenseStoreIndex`/`DenseMove` in `from_plain_byte`. Do **not** make specialize keep a prerequisite. Print `main` stays fuse-IL by design. |
+| **S8** | [COI-385](https://linear.app/ardax/issue/COI-385) | Fusion not blocked on specialize keep | Cost gate / `lir_eligible` do **not** refuse because a packed op appeared. Live fuse-select block is **`Dense*` / `V*` as residual `Byte` → Cold**. `emit_cost` weights `Seek` and LOAD/STORE, not opcode novelty. | keep packing in dense emit / VM peek | **Done (docs + tests, no typed lift).** Do **not** add packed ops to specialize refuse; do **not** make specialize keep a prerequisite. Print `main` stays fuse-IL. Optional `from_plain_byte` lift refused: fuse-select should not see dense ABC ops. |
 
-Kick order (project ladder, still valid): **S8 note first** (this doc) → **S2** (landed, two-word `DenseBin2`) → **S1** (landed, two-word `DenseBinJmpf`) → **S4** (landed, two-word `DenseIndexJmpf`) → **S6** → **S3** (landed, table/hotmatch peek) → **S5** (landed, table/hotmatch peek) → **S7** (landed, `item_check` const-left `BinSlotImm`).
+Kick order (project ladder): **S8** (landed, docs+tests; no typed `Dense*` lift) → **S2** (landed, two-word `DenseBin2`) → **S1** (landed, two-word `DenseBinJmpf`) → **S4** (landed, two-word `DenseIndexJmpf`) → **S6** → **S3** (landed, table/hotmatch peek) → **S5** (landed, table/hotmatch peek) → **S7** (landed, `item_check` const-left `BinSlotImm`).
 
 ---
 

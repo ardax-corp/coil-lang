@@ -2058,6 +2058,49 @@ mod tests {
         );
     }
 
+    /// COI-385: Dense* is residual Byte / Cold — same refuse as FORMAT.
+    #[test]
+    fn fuse_select_refuses_dense_byte_in_window() {
+        let loc = DebugLoc::unknown();
+        let ops = vec![
+            IlOp::Load { slot: 0, loc },
+            IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(0, 2, 0, 1)),
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return {
+                loc,
+                ret_words: 1,
+            },
+        ];
+        let mut pool = Vec::new();
+        let lowered = lower(&ops, &mut pool);
+        assert!(
+            lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::DenseBin),
+            "DenseBin Byte must survive encode"
+        );
+        assert!(
+            lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::LOAD),
+            "Load before DenseBin must not be swallowed"
+        );
+        assert!(
+            !lowered
+                .bytecode
+                .iter()
+                .any(|b| *b.bytecode() == Instruction::BinSlotImm
+                    || *b.bytecode() == Instruction::BinSlotSlot),
+            "fuse must refuse a window that contains Dense* Byte"
+        );
+    }
+
     /// Typed hot-set ops must encode through lower's `as_encode_byte` path and still fuse.
     #[test]
     fn lower_fuses_typed_load_const_bin_ops() {
