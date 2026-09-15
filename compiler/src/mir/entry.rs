@@ -112,6 +112,7 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 ..
             } => {}
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => {}
+            // Packed Dense*/fused ops are not a LIR entry tax (COI-385 S8).
             _ => {}
         }
     }
@@ -438,5 +439,21 @@ mod tests {
             hint: Default::default(),
         }];
         assert_eq!(lir_refuse(&jim2, &[]), None);
+    }
+
+    /// COI-385: packed dense ops are not a `hard_refuse` / `lir_eligible` tax.
+    #[test]
+    fn dense_packed_ops_are_lir_eligible() {
+        let loc = loc();
+        let ops = [
+            IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(0, 2, 0, 1)),
+            IlOp::byte(Byte::new(Instruction::DenseCast).with_dense_abc(0, 3, 2, 0)),
+            IlOp::byte(Byte::new(Instruction::DenseIndex).with_dense_abc(0, 4, 0, 1)),
+            IlOp::byte(Byte::new(Instruction::DenseStoreIndex).with_dense_abc(0, 0, 1, 2)),
+            IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_abc(0, 1, 0, 0)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        assert_eq!(lir_refuse(&ops, &[]), None);
+        assert!(lir_eligible(&ops, &[]));
     }
 }

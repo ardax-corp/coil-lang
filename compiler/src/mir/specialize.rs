@@ -369,6 +369,8 @@ fn residual_heap_box(ops: &[IlOp]) -> bool {
     })
 }
 
+/// Reconstruct size vs fuse-IL. Weights `Seek` and LOAD/STORE, not opcode
+/// novelty — packed `Dense*` must not grow this (COI-385 S8).
 fn emit_cost(ops: &[IlOp]) -> usize {
     ops.iter()
         .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
@@ -622,5 +624,15 @@ mod cost_gate_tests {
             Byte::new(Instruction::Seek).with_operand_u32(80),
         )];
         assert!(emit_cost(&large) > emit_cost(&small));
+    }
+
+    /// COI-385: packed dense ops cost 1 — same as any non-Seek/LOAD Byte.
+    #[test]
+    fn emit_cost_does_not_tax_packed_dense_ops() {
+        let dense = [
+            IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(0, 2, 0, 1)),
+            IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_abc(0, 1, 0, 0)),
+        ];
+        assert_eq!(emit_cost(&dense), 2);
     }
 }

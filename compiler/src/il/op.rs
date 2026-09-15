@@ -98,10 +98,12 @@ pub enum EntryKind {
 #[derive(Clone, PartialEq, Eq)]
 pub enum IlOp {
     /// Residual cold set / escape hatch (`FORMAT`, FFI, packed multi-slot
-    /// LOAD/STORE, and anything [`IlOp::from_plain_byte`] still leaves unmatched).
-    /// Fuse-select refuses any window that includes this. Jump/call ops that
-    /// still embed absolute PCs are accepted for transitional emit paths;
-    /// prefer [`IlOp::Jump`] / [`IlOp::Entry`].
+    /// LOAD/STORE, `Dense*` / `V*`, and anything [`IlOp::from_plain_byte`]
+    /// still leaves unmatched). Fuse-select refuses any window that includes
+    /// this (`Slot::Cold`). Jump/call ops that still embed absolute PCs are
+    /// accepted for transitional emit paths; prefer [`IlOp::Jump`] /
+    /// [`IlOp::Entry`]. Dense packing is dense emit / VM peek, not a
+    /// fuse-select peep ([COI-385](https://linear.app/ardax/issue/COI-385) S8).
     Byte {
         byte: Byte,
         loc: DebugLoc,
@@ -461,6 +463,7 @@ impl IlOp {
                 loc,
             },
             other if is_plain_bin_instruction(other) => Self::Bin { op: other, loc },
+            // Dense*/V* stay Byte so fuse-select marks them Cold (COI-385).
             _ => Self::Byte { byte, loc },
         }
     }
@@ -911,6 +914,30 @@ mod tests {
             IlOp::from_plain_byte(imm_store, DebugLoc::unknown()),
             IlOp::Byte { .. }
         ));
+    }
+
+    /// COI-385: Dense*/V* stay residual Byte so fuse-select marks them Cold.
+    #[test]
+    fn from_plain_byte_keeps_dense_and_simd_as_byte() {
+        let loc = DebugLoc::unknown();
+        for inst in [
+            Instruction::DenseBin,
+            Instruction::DenseCast,
+            Instruction::DenseIndex,
+            Instruction::DenseStoreIndex,
+            Instruction::DenseMove,
+            Instruction::DenseBin2,
+            Instruction::DenseBinJmpf,
+            Instruction::DenseIndexJmpf,
+            Instruction::VLoad,
+            Instruction::VBin,
+        ] {
+            let b = Byte::new(inst).with_dense_abc(0, 1, 2, 3);
+            assert!(
+                matches!(IlOp::from_plain_byte(b, loc), IlOp::Byte { .. }),
+                "{inst:?} must stay residual Byte (not a typed fuse-IL lift)"
+            );
+        }
     }
 
     #[test]
