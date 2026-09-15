@@ -162,3 +162,24 @@ cost gate can keep field loops. LIR still `HeapField`.
 **D3** ([COI-357](https://linear.app/ardax/issue/COI-357)) reconstructs
 boxed multi-payload `JumpIfMatch` / `Unpack(n)` with per-index maps.
 Keep/refuse is the cost gate. No trees opcode.
+
+## Superinstructions (COI-385 S8)
+
+Fusion is **not** gated on `try_specialize_body` keep. Cost
+[`emit_cost`](../../compiler/src/mir/specialize.rs) weights `Seek` and
+LOAD/STORE, not opcode novelty. [`lir_eligible`](../../compiler/src/mir/entry.rs)
+is the leftover MIR→LIR reconstruct wall — packed `Dense*` / fused `*Jmpf`
+must not be added to `hard_refuse` as a keep tax.
+
+The live fuse-select refuse is residual [`IlOp::Byte`](../../compiler/src/il/op.rs):
+`from_plain_byte` does not lift `Dense*` / `V*` (or FORMAT / FFI / `Seek`).
+`fuse_select` marks `Byte` `Slot::Cold` and refuses any window that includes
+it. S1–S5 therefore pack in **dense emit** or **VM peek**, not post-concat
+fuse-IL.
+
+Typed `IlOp` lift of `DenseBin` / `DenseCast` / `DenseIndex` /
+`DenseStoreIndex` / `DenseMove` is **out**: fuse-select is the stack
+LOAD/CONST/bin/jmp peep (print `main` / FORMAT stay fuse-IL). Sharing that
+pass with dense ABC ops would need new fuse windows, not a one-line
+`from_plain_byte` arm. Binding inventory:
+[superinstructions-candidates.md](superinstructions-candidates.md).
