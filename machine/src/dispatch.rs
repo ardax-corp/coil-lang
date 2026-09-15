@@ -920,10 +920,35 @@ fn apply_jump(ctx: &mut HotCtx<'_, '_>, target: Option<usize>) {
     }
 }
 
+/// Consume a following `JMP` without a second dispatch (COI-387 X2).
+/// Table/hotmatch only — the giant match stays byte-identical to main.
 #[inline(always)]
-fn apply_payload_jmp(ctx: &mut HotCtx<'_, '_>) {
-    let jmp = take_code_word(ctx);
-    set_jump_target(&mut ctx.ip, jmp.operand_u32() as usize, ctx.code);
+fn apply_trailing_jmp(ctx: &mut HotCtx<'_, '_>) {
+    if ctx.ip >= ctx.code.len() {
+        return;
+    }
+    promise!(ctx.ip < ctx.code.len());
+    let next = unsafe { ctx.code.get_unchecked(ctx.ip) };
+    if *next.bytecode() as u8 != Instruction::JMP as u8 {
+        return;
+    }
+    ctx.ip += 1;
+    set_jump_target(&mut ctx.ip, next.operand_u32() as usize, ctx.code);
+}
+
+/// Same as [`apply_trailing_jmp`] with `unlikely` so unpaired `DenseBin`
+/// (nsieve k-loop / SIMD tails) does not enlarge the fib-hot `DenseBin` arm.
+#[inline(always)]
+fn apply_trailing_jmp_cold(ctx: &mut HotCtx<'_, '_>) {
+    if ctx.ip >= ctx.code.len() {
+        return;
+    }
+    promise!(ctx.ip < ctx.code.len());
+    let next = unsafe { ctx.code.get_unchecked(ctx.ip) };
+    if unlikely(*next.bytecode() as u8 == Instruction::JMP as u8) {
+        ctx.ip += 1;
+        set_jump_target(&mut ctx.ip, next.operand_u32() as usize, ctx.code);
+    }
 }
 
 fn cold(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
@@ -931,25 +956,14 @@ fn cold(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
 #[inline(never)]
 fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+    apply_trailing_jmp_cold(ctx);
 }
 
 #[inline(never)]
 fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let tail = take_code_word(ctx);
     dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
-}
-
-#[inline(never)]
-fn op_dense_bin_jmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-    apply_payload_jmp(ctx);
-}
-
-#[inline(never)]
-fn op_dense_bin2_jmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    let tail = take_code_word(ctx);
-    dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
-    apply_payload_jmp(ctx);
+    apply_trailing_jmp(ctx);
 }
 
 #[inline(never)]
@@ -1269,8 +1283,6 @@ fn build_table() -> [Handler; 256] {
     t[Instruction::DenseBin2 as usize] = op_dense_bin2;
     t[Instruction::DenseBinJmpf as usize] = op_dense_bin_jmpf;
     t[Instruction::DenseIndexJmpf as usize] = op_dense_index_jmpf;
-    t[Instruction::DenseBinJmp as usize] = op_dense_bin_jmp;
-    t[Instruction::DenseBin2Jmp as usize] = op_dense_bin2_jmp;
     t[Instruction::DenseCmp as usize] = op_dense_cmp;
     t[Instruction::DenseConst as usize] = op_dense_const;
     t[Instruction::DenseMove as usize] = op_dense_move;
@@ -1323,10 +1335,14 @@ fn copy_byte(code: &[Byte], ip: usize) -> Byte {
 #[inline(always)]
 fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
     match bc {
-        Instruction::DenseBin => dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
+        Instruction::DenseBin => {
+            dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            apply_trailing_jmp_cold(ctx);
+        }
         Instruction::DenseBin2 => {
             let tail = take_code_word(ctx);
             dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+            apply_trailing_jmp(ctx);
         }
         Instruction::DenseBinJmpf => {
             dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
@@ -1677,9 +1693,6 @@ mod tests {
         assert!(is_hot(Instruction::DenseBin2));
         assert!(is_hot(Instruction::DenseBinJmpf));
         assert!(is_hot(Instruction::DenseIndexJmpf));
-        // COI-387: latch packs stay off ALWAYS_HOT (fib `unlikely(is_hot)`).
-        assert!(!is_hot(Instruction::DenseBinJmp));
-        assert!(!is_hot(Instruction::DenseBin2Jmp));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
         assert!(is_hot(Instruction::DenseIndex));
         assert!(!is_hot(Instruction::LOAD));

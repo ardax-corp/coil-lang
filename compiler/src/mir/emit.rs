@@ -201,7 +201,6 @@ pub fn emit_dense(
     pack_chained_dense_bin(&mut out);
     pack_dense_bin_jmpf(&mut out);
     pack_dense_index_jmpf(&mut out);
-    pack_dense_bin_latch_jmp(&mut out);
     Ok(out)
 }
 
@@ -610,73 +609,6 @@ fn pack_dense_index_jmpf(ops: &mut [IlOp]) {
         ops[i] = IlOp::from_plain_byte(packed, loc);
         i += 1;
     }
-}
-
-/// Pack counted-loop `DenseBin ; JMP` / `DenseBin2 ; JMP` (COI-387 X2).
-/// The jump stays a typed `IlOp` so label resolution still runs; the VM
-/// consumes it as the last payload word. `DenseBin2Jmp` is packed first so
-/// the payload `DenseBin` of a pair is not stolen as `DenseBinJmp`.
-pub(super) fn pack_dense_bin_latch_jmp(ops: &mut [IlOp]) {
-    let mut i = 0;
-    while i + 2 < ops.len() {
-        let is_bin2 = matches!(
-            &ops[i],
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin2
-        );
-        let payload_bin = matches!(
-            &ops[i + 1],
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin
-        );
-        if is_bin2 && payload_bin && uncond_jump(&ops[i + 2]) {
-            let loc = ops[i].loc();
-            let first = match &ops[i] {
-                IlOp::Byte { byte, .. } => *byte,
-                _ => unreachable!("DenseBin2"),
-            };
-            let packed = Byte::new(Instruction::DenseBin2Jmp).with_operand_u32(first.operand_u32());
-            ops[i] = IlOp::from_plain_byte(packed, loc);
-            i += 3;
-            continue;
-        }
-        i += 1;
-    }
-    i = 0;
-    while i + 1 < ops.len() {
-        let first = match &ops[i] {
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin => Some(*byte),
-            _ => None,
-        };
-        if first.is_none() || !uncond_jump(&ops[i + 1]) || dense_bin_is_pack_payload(ops, i) {
-            i += 1;
-            continue;
-        }
-        let loc = ops[i].loc();
-        let packed = Byte::new(Instruction::DenseBinJmp)
-            .with_operand_u32(first.expect("DenseBin").operand_u32());
-        ops[i] = IlOp::from_plain_byte(packed, loc);
-        i += 1;
-    }
-}
-
-fn dense_bin_is_pack_payload(ops: &[IlOp], i: usize) -> bool {
-    i > 0
-        && matches!(
-            &ops[i - 1],
-            IlOp::Byte { byte, .. } if matches!(
-                *byte.bytecode(),
-                Instruction::DenseBin2 | Instruction::DenseBin2Jmp
-            )
-        )
-}
-
-fn uncond_jump(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Jump {
-            kind: IlJumpKind::Unconditional,
-            ..
-        }
-    )
 }
 
 fn dense_bin_followed_by_cond_jmp(ops: &[IlOp], i: usize) -> bool {

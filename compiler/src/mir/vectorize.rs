@@ -52,16 +52,10 @@ pub fn try_vectorize(
         return None;
     }
     if let Some(spec) = match_store_loop(func) {
-        return pack_latch_jmp(emit_vectorized(func, &spec, entry_label, pool, label_hi));
+        return emit_vectorized(func, &spec, entry_label, pool, label_hi);
     }
     let spec = match_reduce_loop(func)?;
-    pack_latch_jmp(emit_reduced(func, &spec, entry_label, pool, label_hi))
-}
-
-fn pack_latch_jmp(ops: Option<Vec<IlOp>>) -> Option<Vec<IlOp>> {
-    let mut ops = ops?;
-    super::emit::pack_dense_bin_latch_jmp(&mut ops);
-    Some(ops)
+    emit_reduced(func, &spec, entry_label, pool, label_hi)
 }
 
 struct StoreLoop {

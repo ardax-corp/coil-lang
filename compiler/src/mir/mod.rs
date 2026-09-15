@@ -175,8 +175,6 @@ mod tests {
             Instruction::DenseBin
                 | Instruction::DenseBin2
                 | Instruction::DenseBinJmpf
-                | Instruction::DenseBinJmp
-                | Instruction::DenseBin2Jmp
         )
     }
 
@@ -195,7 +193,7 @@ mod tests {
         &bc[start..end]
     }
 
-    /// Remainder `i += 1` is `DenseConst ; DenseBinJmp` (COI-386 + COI-387).
+    /// Remainder `i += 1` is `DenseConst ; DenseBin` (COI-386 X1).
     fn assert_vectorize_tail_dense_const(ops: &[Byte], fn_name: &str) {
         let names: Vec<_> = ops.iter().map(|b| b.bytecode().mnemonic()).collect();
         let stack_iv = ops.windows(3).any(|w| {
@@ -209,11 +207,11 @@ mod tests {
         );
         let dense_iv = ops.windows(2).any(|w| {
             *w[0].bytecode() == Instruction::DenseConst
-                && *w[1].bytecode() == Instruction::DenseBinJmp
+                && *w[1].bytecode() == Instruction::DenseBin
         });
         assert!(
             dense_iv,
-            "COI-387 {fn_name}: expected DenseConst; DenseBinJmp on remainder IV; opcodes={names:?}"
+            "COI-386 {fn_name}: expected DenseConst; DenseBin on remainder IV; opcodes={names:?}"
         );
     }
 
@@ -479,29 +477,17 @@ fn main() {
             "COI-377 S1: nested mandelbrot inner escape should pack DenseBinJmpf"
         );
         let mut latch = 0usize;
-        for (i, b) in bc.iter().enumerate() {
-            if *b.bytecode() != Instruction::DenseBin2Jmp {
-                continue;
+        for w in bc.windows(3) {
+            if *w[0].bytecode() == Instruction::DenseBin2
+                && *w[1].bytecode() == Instruction::DenseBin
+                && *w[2].bytecode() == Instruction::JMP
+            {
+                latch += 1;
             }
-            latch += 1;
-            let mid = bc.get(i + 1).expect("DenseBin2Jmp payload bin");
-            let jmp = bc.get(i + 2).expect("DenseBin2Jmp payload JMP");
-            assert_eq!(
-                *mid.bytecode(),
-                Instruction::DenseBin,
-                "COI-387 X2: DenseBin2Jmp mid word must be DenseBin, got {}",
-                mid.bytecode().mnemonic()
-            );
-            assert_eq!(
-                *jmp.bytecode(),
-                Instruction::JMP,
-                "COI-387 X2: DenseBin2Jmp tail must be JMP, got {}",
-                jmp.bytecode().mnemonic()
-            );
         }
         assert!(
             latch >= 1,
-            "COI-387 X2: nested mandelbrot inner latch should pack DenseBin2Jmp"
+            "COI-387 X2: nested mandelbrot inner latch should be DenseBin2; DenseBin; JMP"
         );
         let moves = bc
             .iter()
@@ -587,22 +573,14 @@ fn main() {
             "COI-379 S4: nsieve p-loop should pack DenseIndexJmpf"
         );
         let mut latch = 0usize;
-        for (i, b) in bc.iter().enumerate() {
-            if *b.bytecode() != Instruction::DenseBinJmp {
-                continue;
+        for w in bc.windows(2) {
+            if *w[0].bytecode() == Instruction::DenseBin && *w[1].bytecode() == Instruction::JMP {
+                latch += 1;
             }
-            latch += 1;
-            let tail = bc.get(i + 1).expect("DenseBinJmp payload word").bytecode();
-            assert_eq!(
-                *tail,
-                Instruction::JMP,
-                "COI-387 X2: DenseBinJmp payload must be JMP, got {}",
-                tail.mnemonic()
-            );
         }
         assert!(
             latch >= 1,
-            "COI-387 X2: nsieve k-loop should pack DenseBinJmp"
+            "COI-387 X2: nsieve k-loop should be DenseBin; JMP"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         p.wire_host_natives(&mut vm);
@@ -1545,8 +1523,6 @@ fn main() {
                 Instruction::DenseBin
                     | Instruction::DenseBin2
                     | Instruction::DenseBinJmpf
-                    | Instruction::DenseBinJmp
-                    | Instruction::DenseBin2Jmp
                     | Instruction::DenseConst
                     | Instruction::DensePush
             )
