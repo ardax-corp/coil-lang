@@ -1,7 +1,8 @@
 # Auto-par vs branch misses (investigation)
 
-Report-only (main `f35b3ea4` G3 + this note). No ISA / codegen change.
-Symptom: `poop` shows many **branch misses** when `COIL_AUTO_PAR` is on.
+Report-only investigation on main `f35b3ea4` G3 (no ISA / codegen change), plus
+**COI-390** join wait (drop 1 ms poll). Symptom: `poop` shows many **branch
+misses** when `COIL_AUTO_PAR` is on.
 
 ## How to read `poop` here
 
@@ -23,7 +24,7 @@ Optional reactor dump (off by default):
 ```bash
 COIL_PAR_STATS=1 COIL_MAX_WORKER_THREADS=4 ./target/release/coil run fib.par.hyc
 # coil par-stats workers=… submitted=… steal_ok=… steal_empty=… steal_retry=…
-# idle_waits=… join_helps=… join_timeouts=…
+# idle_waits=… join_helps=… join_timeouts=… join_parks=…
 ```
 
 Fair sequential `.hyc`: `COIL_AUTO_PAR=0` at **compile**. Runtime
@@ -92,16 +93,33 @@ move.
 F1 hop means fib(32) is **three** AlwaysPar spawns, not a job per tree node.
 Empty steals dominate successful steals (~100:1 at w=4). `Steal::Retry` (CAS
 contention on the deque) is **zero** on this load. Idle workers
-`wait_timeout(2 ms)` and the joiner `wait_timeout(1 ms)` then steal-empty again.
+`wait_timeout(2 ms)` and (before COI-390) the joiner `wait_timeout(1 ms)` then
+steal-empty again.
+
+### COI-390 join wait (after)
+
+Join parks on `sleep_cvar` until a result or stealable job (`notify` holds the
+sleep mutex and `notify_all`). No 1 ms poll. Idle 2 ms park is unchanged.
+
+| Config | steal_empty | idle_waits | join_timeouts | join_parks | notes |
+|---|---|---|---|---|---|
+| fib IPA w=4 **before** | ~300 | ~23 | **~27** | — | 1 ms join poll |
+| fib IPA w=4 **after** | ~200 | ~30 | **0** | **4** | 3 jobs; parks not timeouts |
+| loop IPA w=4 **before** | ~41 | 8 | 1 | — | |
+| loop IPA w=4 **after** | 33 | 7 | **0** | 0 | result ready without park |
+
+Fib IPA wall on this host (release, `hyperfine`): seq **66.9 ± 4.7 ms**, IPA
+w=4 **28.1 ± 15.5 ms** (min 24.2 ms; noisy outliers). Checksums hold:
+mandelbrot `625885`, fib `2178309`, nsieve `1900`. Sequential mandelbrot /
+nsieve archives remain byte-identical with auto-par on.
 
 ## Attribution
 
 ### 1. Reactor idle / join poll (primary under auto-par)
 
-`machine/src/reactor.rs`: `worker_loop` parks with a **2 ms** condvar timeout;
-`wait_join*` uses **1 ms**. Each wake: `injector.steal()` + walk every peer
-stealer, almost always `Steal::Empty` (`match` + `% n` cursor). That is a
-predictable source of extra user branches and of kernel ctx-switches.
+`machine/src/reactor.rs`: `worker_loop` still parks with a **2 ms** condvar
+timeout. **Join** (COI-390) waits until result or job — `join_timeouts` is 0.
+Idle empty-steal walks remain the main leftover poll.
 
 G0–G3 execute peeks are **not** on this path.
 
@@ -143,7 +161,7 @@ source.
 
 | Rank | Change | Cost | Why |
 |---|---|---|---|
-| 1 | **Join wait without 1 ms poll** — sleep until `JoinState` result **or** a stealable job (`notify` already exists on complete/submit) | small reactor | Cuts `join_timeouts` + empty-steal scans that dominate `COIL_PAR_STATS` |
+| 1 | ~~Join wait without 1 ms poll~~ **landed (COI-390)** — `join_timeouts=0`, `join_parks≈4` on fib IPA | small reactor | Remaining empty-steals are mostly idle 2 ms |
 | 2 | **Idle workers: park until `notify`, drop 2 ms poll** (or exponential backoff) | small reactor | Cuts `idle_waits` × peer-empty walks; 4 workers vs 3 fib jobs is mostly idle |
 | 3 | **Read `poop` as miss rate + pin `COIL_MAX_WORKER_THREADS`** when comparing seq vs par | docs / script | Absolute misses scale with threads; `poop_baseline.sh` fib is already sequential |
 | 4 | **Do not revert G3 peeks / DenseBin2 for this symptom** | — | Fib IPA never takes them; mandelbrot auto-par is a no-op |
@@ -151,13 +169,13 @@ source.
 | 6 | PMU laptop: `perf record -e branch-misses` on fib IPA vs seq; expect hits in `steal_from_*` / pthread condwait, not `exec_dense` | measurement | Confirms (1) if this cloud’s missing PMU worried anyone |
 | 7 | Shared-heap CAS / F3 | skip for this | No evidence on flagships |
 
-Free/near-free: (1)–(3). Large design: changing hop/grain so fib spawns more
+Rank 1 landed (COI-390). Free/near-free leftover: (2)–(3). Large design: changing hop/grain so fib spawns more
 jobs (would **increase** steal traffic). ISA peeks are the wrong knob.
 
 ## Hypotheses (verdict)
 
 | Hypothesis | Verdict |
 |---|---|
-| Auto-par steal / chunk / reactor poll dominate misses more than opcode peeks | **Hold** (empty-steal + timed waits; 3 jobs; retry=0) |
+| Auto-par steal / chunk / reactor poll dominate misses more than opcode peeks | **Hold** (idle 2 ms empty-steal leftover; join poll gone; 3 jobs; retry=0) |
 | G3 `execute_dense` ALWAYS_HOT peek + table raises per-worker mispredict when mix differs | **Discard for fib IPA**; sequential mandelbrot only |
 | Shared-heap contention shows as misses around CAS/spin | **Discard on these benches** (`steal_retry=0`, shared-off wash) |

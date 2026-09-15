@@ -70,7 +70,10 @@ pub struct Reactor {
     steal_retry: AtomicUsize,
     idle_waits: AtomicUsize,
     join_helps: AtomicUsize,
+    /// Timed 1 ms join polls (always 0 after COI-390; kept for `COIL_PAR_STATS` diffs).
     join_timeouts: AtomicUsize,
+    /// Join parks on `sleep_cvar` until a result or stealable job (no poll).
+    join_parks: AtomicUsize,
     shutdown: AtomicBool,
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
@@ -92,6 +95,7 @@ impl Reactor {
             idle_waits: AtomicUsize::new(0),
             join_helps: AtomicUsize::new(0),
             join_timeouts: AtomicUsize::new(0),
+            join_parks: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             worker_handles: Mutex::new(Vec::new()),
         })
@@ -115,7 +119,7 @@ impl Reactor {
             return;
         }
         eprintln!(
-            "coil par-stats workers={} submitted={} steal_ok={} steal_empty={} steal_retry={} idle_waits={} join_helps={} join_timeouts={}",
+            "coil par-stats workers={} submitted={} steal_ok={} steal_empty={} steal_retry={} idle_waits={} join_helps={} join_timeouts={} join_parks={}",
             self.n_workers.load(Ordering::Relaxed),
             self.submitted.load(Ordering::Relaxed),
             self.steal_success.load(Ordering::Relaxed),
@@ -124,6 +128,7 @@ impl Reactor {
             self.idle_waits.load(Ordering::Relaxed),
             self.join_helps.load(Ordering::Relaxed),
             self.join_timeouts.load(Ordering::Relaxed),
+            self.join_parks.load(Ordering::Relaxed),
         );
     }
 
@@ -153,8 +158,11 @@ impl Reactor {
         });
     }
 
+    /// Wake idle workers and joiners. Holds `sleep` so a waiter cannot miss the
+    /// signal between a failed steal and `wait` (join parks with no timeout).
     fn notify(&self) {
-        self.sleep_cvar.notify_one();
+        let _g = self.sleep.lock().unwrap_or_else(|e| e.into_inner());
+        self.sleep_cvar.notify_all();
     }
 
     /// Stop worker threads and join them. Call once the owning root VM's run
@@ -209,9 +217,7 @@ impl Reactor {
     /// Run at most one stolen job on this thread's TLS helper VM.
     pub fn help_once(self: &Arc<Self>) {
         if let Some(job) = self.steal_job() {
-            bump(&self.join_helps);
-            let program = Arc::clone(&job.program);
-            with_help_vm(&program, |vm| run_job_on_vm(vm, job));
+            run_help_job(self, job);
         }
     }
 
@@ -227,34 +233,7 @@ impl Reactor {
         self: &Arc<Self>,
         state: &JoinState,
     ) -> Result<PortableValue, ThreadErrorTag> {
-        loop {
-            if let Some(r) = state.try_take_result() {
-                return r;
-            }
-            if let Some(job) = self.steal_job() {
-                bump(&self.join_helps);
-                let program = Arc::clone(&job.program);
-                with_help_vm(&program, |vm| run_job_on_vm(vm, job));
-                continue;
-            }
-            {
-                let mut g = state.inner_lock();
-                if g.result.is_some() {
-                    return g
-                        .result
-                        .take()
-                        .unwrap_or(Err(ThreadErrorTag::JoinFailed));
-                }
-                let wait = state
-                    .finished_cvar()
-                    .wait_timeout(g, Duration::from_millis(1));
-                bump(&self.join_timeouts);
-                match wait {
-                    Ok((guard, _)) => drop(guard),
-                    Err(poisoned) => drop(poisoned.into_inner().0),
-                }
-            }
-        }
+        wait_join_loop(self, state, || self.steal_job())
     }
 }
 
@@ -442,50 +421,68 @@ fn worker_loop(reactor: Arc<Reactor>) {
     IS_POOL_WORKER.with(|c| c.set(false));
 }
 
-fn wait_join_on_worker(
+fn run_help_job(reactor: &Reactor, job: Job) {
+    bump(&reactor.join_helps);
+    let program = Arc::clone(&job.program);
+    with_help_vm(&program, |vm| run_job_on_vm(vm, job));
+}
+
+/// Help-steal until `state` completes. Parks on `sleep_cvar` until a result
+/// is stored or `notify` (submit / job done) — no 1 ms poll.
+fn wait_join_loop(
     reactor: &Arc<Reactor>,
     state: &JoinState,
+    steal: impl Fn() -> Option<Job>,
 ) -> Result<PortableValue, ThreadErrorTag> {
     loop {
         if let Some(r) = state.try_take_result() {
             return r;
         }
-        // Only help from this reactor's local deque — a foreign TLS binding
-        // (nested / concurrent Machines) must not be drained here.
-        let job =
-            with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref)).flatten();
-        if let Some(job) = job {
-            bump(&reactor.join_helps);
-            let program = Arc::clone(&job.program);
-            with_help_vm(&program, |help| run_job_on_vm(help, job));
+        if let Some(job) = steal() {
+            run_help_job(reactor, job);
             continue;
         }
-        // Also steal from this reactor's injector/peers when local is empty or
-        // foreign — same as non-worker join help.
-        if let Some(job) = reactor.steal_job() {
-            bump(&reactor.join_helps);
-            let program = Arc::clone(&job.program);
-            with_help_vm(&program, |help| run_job_on_vm(help, job));
-            continue;
-        }
-        {
-            let mut g = state.inner_lock();
-            if g.result.is_some() {
-                return g
-                    .result
-                    .take()
-                    .unwrap_or(Err(ThreadErrorTag::JoinFailed));
-            }
-            let wait = state
-                .finished_cvar()
-                .wait_timeout(g, Duration::from_millis(1));
-            bump(&reactor.join_timeouts);
-            match wait {
-                Ok((guard, _)) => drop(guard),
-                Err(poisoned) => drop(poisoned.into_inner().0),
-            }
+        if let Some(r) = park_join(reactor, state, &steal) {
+            return r;
         }
     }
+}
+
+/// Recheck result/steal under `sleep` then wait. Running a stolen job drops
+/// the lock first so `notify` is not held across `call_function`.
+fn park_join(
+    reactor: &Reactor,
+    state: &JoinState,
+    steal: &impl Fn() -> Option<Job>,
+) -> Option<Result<PortableValue, ThreadErrorTag>> {
+    let g = reactor.sleep.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(r) = state.try_take_result() {
+        return Some(r);
+    }
+    if let Some(job) = steal() {
+        drop(g);
+        run_help_job(reactor, job);
+        return None;
+    }
+    bump(&reactor.join_parks);
+    match reactor.sleep_cvar.wait(g) {
+        Ok(guard) => drop(guard),
+        Err(poisoned) => drop(poisoned.into_inner()),
+    }
+    None
+}
+
+fn wait_join_on_worker(
+    reactor: &Arc<Reactor>,
+    state: &JoinState,
+) -> Result<PortableValue, ThreadErrorTag> {
+    wait_join_loop(reactor, state, || {
+        // Only help from this reactor's local deque — a foreign TLS binding
+        // (nested / concurrent Machines) must not be drained here.
+        with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref))
+            .flatten()
+            .or_else(|| reactor.steal_job())
+    })
 }
 
 fn run_job_on_vm(vm: &mut Machine<WORKER_STACK_SLOTS>, job: Job) {
@@ -709,6 +706,33 @@ mod tests {
         let rb = reactor.wait_join(&b).expect("B");
         assert_eq!(ra, PortableValue::Immediate(1));
         assert_eq!(rb, PortableValue::Immediate(2));
+    }
+
+    #[test]
+    fn wait_join_parks_until_result_without_timeout() {
+        let reactor = Reactor::new(1);
+        let state = Arc::new(JoinState::new());
+        let state2 = Arc::clone(&state);
+        let r2 = Arc::clone(&reactor);
+        let started = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(25));
+            state2.store_result(Ok(PortableValue::Immediate(99)));
+            r2.notify();
+        });
+        let t0 = std::time::Instant::now();
+        let pv = reactor.wait_join(&state).expect("parked join");
+        let elapsed = t0.elapsed();
+        started.join().expect("completer");
+        assert_eq!(pv, PortableValue::Immediate(99));
+        assert!(
+            elapsed >= Duration::from_millis(10),
+            "join returned too fast ({elapsed:?}); completer should have parked us"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1000),
+            "join must not 1 ms-poll for long after result ({elapsed:?})"
+        );
+        reactor.shutdown();
     }
 
     /// A TLS local deque owned by reactor A must not swallow submits for B.
