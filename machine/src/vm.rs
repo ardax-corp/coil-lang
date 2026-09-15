@@ -1647,6 +1647,30 @@ impl<const S: usize> Machine<S> {
         }
     }
 
+    /// `MakeEnum` packing: tag in `[31:16]`, arity in `[15:0]`.
+    /// Payloads stay on the stack through alloc so GC can root them; the
+    /// fresh object is pushed before `maybe_gc_after_alloc`.
+    fn push_make_enum(&mut self, operands: u32, ip: usize) {
+        let tag = operands >> 16;
+        let arity = (operands & 0xFFFF) as usize;
+        if arity == 0 {
+            let object = self.heap.immortal_unit_enum(tag);
+            self.stack.push(Value::from(object.addr()));
+            return;
+        }
+        let sp = self.stack.tell();
+        promise!(sp >= arity);
+        if arity <= 3 {
+            note_make_fast();
+        }
+        let payload = Self::stack_copy_enum_payload(&self.heap, &self.stack, sp, arity);
+        let obj_enum = ObjEnum { tag, payload };
+        let (object, _) = self.heap.alloc(obj_enum, Object::Enum);
+        self.stack.seek(sp - arity);
+        self.stack.push(Value::from(object.addr()));
+        self.maybe_gc_after_alloc(ip);
+    }
+
     /// Copy `n` stack values in declaration order (`stack[base..base+n]`).
     /// Used by MakeTuple / MakeArray. Args stay on the stack for GC rooting
     /// until the caller seeks past them after allocation.
@@ -2875,7 +2899,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::DenseIndexJmpf as u8);
+            promise!(*bc as u8 <= Instruction::MakeEnumReturn as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3697,33 +3721,18 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::NOOP => continue,
                 Instruction::MakeEnum => {
-                    // operands: tag (high 16), arity (low 16). Codegen reverse-pushes
-                    // args; we read TOS-first into declaration-order payload.
-                    // Values stay on the stack until after alloc so GC can root them.
-                    let operands = opcode.operand_u32();
-                    let tag = operands >> 16;
-                    let arity = (operands & 0xFFFF) as usize;
-
-                    if arity == 0 {
-                        let object = self.heap.immortal_unit_enum(tag);
-                        self.stack.push(Value::from(object.addr()));
-                        // No alloc pressure, singleton is immortal.
-                        continue;
+                    self.push_make_enum(opcode.operand_u32(), ip);
+                }
+                Instruction::MakeEnumReturn => {
+                    self.push_make_enum(opcode.operand_u32(), ip);
+                    let ret_val = self.stack.pop();
+                    if self.capture_nested_return(ret_val) {
+                        return false;
                     }
-
-                    let sp = self.stack.tell();
-                    promise!(sp >= arity);
-                    let n = arity;
-                    if n <= 3 {
-                        note_make_fast();
-                    }
-                    let payload = Self::stack_copy_enum_payload(&self.heap, &self.stack, sp, n);
-                    let obj_enum = ObjEnum { tag, payload };
-                    let (object, _) = self.heap.alloc(obj_enum, Object::Enum);
-                    // Drop args, then root the fresh enum before maybe-GC.
-                    self.stack.seek(sp - n);
-                    self.stack.push(Value::from(object.addr()));
-                    self.maybe_gc_after_alloc(ip);
+                    let return_sp = self.pop_call_frame();
+                    self.stack.seek(return_sp);
+                    self.stack.push(ret_val);
+                    self.after_return(&mut ip, &mut sp);
                 }
                 Instruction::MakeTuple | Instruction::MakeArray => {
                     let operands = opcode.operand_u32();

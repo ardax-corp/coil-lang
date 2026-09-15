@@ -1674,6 +1674,8 @@ mod tests {
         assert!(!is_hot(Instruction::BinSlotImmJmpt) || (call_is_hot() && return_is_hot()));
         assert!(!is_hot(Instruction::BinReturn) || (call_is_hot() && return_is_hot()));
         assert!(!is_hot(Instruction::ConstReturnImm) || (call_is_hot() && return_is_hot()));
+        // COI-388: alloc+return stays on the giant match (not ALWAYS_HOT).
+        assert!(!is_hot(Instruction::MakeEnumReturn));
         let t = table();
         assert!(!core::ptr::fn_addr_eq(
             t[Instruction::DenseBin as usize],

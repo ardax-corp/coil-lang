@@ -1043,6 +1043,42 @@
         }
     }
 
+    /// `MakeEnumReturn` is `MakeEnum` then one-word `RETURN` (COI-388 X3).
+    #[test]
+    fn make_enum_return_arity0_and_arity2() {
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::HALT),
+            Byte::new(Instruction::MakeEnumReturn).with_operands_u16([0, 0]),
+        ]);
+        let leaf = vm.pop().raw() as u64;
+        match vm.heap().find_object_by_addr(leaf) {
+            Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 0),
+            _ => panic!("arity-0 MakeEnumReturn should return Leaf"),
+        }
+
+        let mut vm = Machine::<8>::default();
+        vm.run(&[
+            Byte::new(Instruction::CALL).with_call_packed(0, 2),
+            Byte::new(Instruction::HALT),
+            const_int(1),
+            make_enum(0, 1),
+            const_int(2),
+            make_enum(0, 1),
+            Byte::new(Instruction::MakeEnumReturn).with_operands_u16([1, 2]),
+        ]);
+        let node = vm.pop().raw() as u64;
+        match vm.heap().find_object_by_addr(node) {
+            Some(Object::Enum(gc)) => {
+                let e = gc.as_ref();
+                assert_eq!(e.tag, 1);
+                assert_eq!(e.payload.len(), 2);
+            }
+            _ => panic!("arity-2 MakeEnumReturn should return Node"),
+        }
+    }
+
     /// Arity above [`crate::ENUM_INLINE_ARITY`] uses a spill `Vec`.
     #[test]
     fn make_enum_arity3_spills_payload() {
