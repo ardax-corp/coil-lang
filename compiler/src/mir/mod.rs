@@ -489,6 +489,21 @@ fn main() {
             latch >= 1,
             "COI-387 X2: nested mandelbrot inner latch should be DenseBin2; DenseBin; JMP"
         );
+        let mut cast_bin = 0usize;
+        for w in bc.windows(2) {
+            if *w[0].bytecode() == Instruction::DenseCast
+                && matches!(
+                    *w[1].bytecode(),
+                    Instruction::DenseBin | Instruction::DenseBin2
+                )
+            {
+                cast_bin += 1;
+            }
+        }
+        assert!(
+            cast_bin >= 2,
+            "COI-380 S3: nested mandelbrot x/y headers should be DenseCast ; DenseBin*, got {cast_bin}"
+        );
         let moves = bc
             .iter()
             .filter(|b| *b.bytecode() == Instruction::DenseMove)

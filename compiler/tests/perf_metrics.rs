@@ -288,6 +288,34 @@ fn perf_match_sum_emits_jump_if_match() {
 }
 
 #[test]
+fn perf_dense_cast_bin_header_shape() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/dense_cast_bin.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "hot", bc.len());
+    let body = &bc[start..end];
+    let casts = count_opcodes_in(&bc, start, end, Instruction::DenseCast);
+    assert!(
+        casts >= 1,
+        "dense_cast_bin hot should emit DenseCast, got {casts}"
+    );
+    let mut fused = 0usize;
+    for w in body.windows(2) {
+        if *w[0].bytecode() == Instruction::DenseCast
+            && matches!(
+                *w[1].bytecode(),
+                Instruction::DenseBin | Instruction::DenseBin2
+            )
+        {
+            fused += 1;
+        }
+    }
+    assert!(
+        fused >= 1,
+        "COI-380 S3: hot should keep DenseCast ; DenseBin* (bytecode unchanged)"
+    );
+}
+
+#[test]
 fn perf_mandelbrot_dispatch_regression() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/mandelbrot.hy");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);

@@ -31,7 +31,7 @@ User code does not name these directly; the compiler emits them:
 | `MakeEnumReturn` | `MakeEnum; RETURN` for a one-word heap enum (COI-388 X3). Same operand as `MakeEnum` (`[31:16]` tag, `[15:0]` arity). Fuse-select only; two-word `RETURN` is not fused. Not ALWAYS_HOT. Archive **minor 19**. |
 | `DenseConst` | Typed slot const. Bit 31 = pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm or pool index. |
 | `DenseMove` | Copy slot to slot (`[15:8]` dest, `[7:0]` src). Used for residual φ edge copies; COI-383 S6 sinks + coalesces so many latch/header copies never emit. |
-| `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). |
+| `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). Table/hotmatch peek a trailing `DenseBin` / `DenseBin2` after `DenseCast` (COI-380 S3) without a new discriminant; giant match does not. |
 | `VLoad` / `VStore` | Compiler-only 8-lane numeric heap access (COI-310). `[31:24]` ty (`TY_I64` / `TY_F64`), `[23:16]` vreg, `[15:8]` array slot, `[7:0]` index slot. No heap refs in vregs. Archive **minor 8**. |
 | `VBin` / `VMove` | 8-lane zip / splat / iota / neg via `coil-simd` (`VBin` packing matches `DenseBin`; splat `a` is a frame slot). `VMove` copies vregs. HostInvoke packs (P12) stay. |
 | `VReduce` / `VFma` | S5b V1 (archive **minor 9**). `VReduce`: `[31:24]` ty, `[23:16]` dest slot, `[15:8]` vsrc — `dest = fold_left_add(dest, lanes)` (float sequential). `VFma`: dest/a/b vregs — `v[dest] = v[a]*v[b] + v[dest]` mul-then-add (no hardware contract). |
