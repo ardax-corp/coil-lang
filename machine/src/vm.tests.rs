@@ -5111,11 +5111,24 @@
             Byte::new(Instruction::DenseConst)
                 .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
         };
+        let unary = |op: Instruction, kind: u8, dest: u8, src: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24) | ((dest as u32) << 8) | u32::from(src),
+            )
+        };
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((a as u32) << 8)
+                    | u32::from(b),
+            )
+        };
         [
             Byte::new(Instruction::Seek).with_operand_u32(3),
             c(0, 7),
-            Byte::new(Instruction::DenseCast).with_dense_unary(common::dense::CAST_I2F, 1, 0),
-            Byte::new(Instruction::DenseBin).with_dense_abc(common::dense::FADD64, 2, 1, 1),
+            unary(Instruction::DenseCast, common::dense::CAST_I2F, 1, 0),
+            abc(Instruction::DenseBin, common::dense::FADD64, 2, 1, 1),
             load(2),
             Byte::new(Instruction::HALT),
         ]
@@ -5146,13 +5159,23 @@
             Byte::new(Instruction::DenseConst)
                 .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
         };
+        let unary = |op: Instruction, kind: u8, dest: u8, src: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24) | ((dest as u32) << 8) | u32::from(src),
+            )
+        };
         let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
-            Byte::new(op).with_dense_abc(kind, dest, a, b)
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((a as u32) << 8)
+                    | u32::from(b),
+            )
         };
         let code = [
             Byte::new(Instruction::Seek).with_operand_u32(4),
             c(0, 7),
-            Byte::new(Instruction::DenseCast).with_dense_unary(common::dense::CAST_I2F, 1, 0),
+            unary(Instruction::DenseCast, common::dense::CAST_I2F, 1, 0),
             abc(Instruction::DenseBin2, common::dense::FADD64, 2, 1, 1),
             abc(Instruction::DenseBin, common::dense::FADD64, 3, 2, 1),
             load(3),
