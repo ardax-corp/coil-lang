@@ -955,10 +955,10 @@ fn apply_trailing_jmp_cold(ctx: &mut HotCtx<'_, '_>) {
 /// S2 already packed `DenseBin; DenseBin` into `DenseBin2`; odd-length
 /// chains leave `DenseBin2 ; DenseBin`. Table/hotmatch only — no new
 /// discriminant; giant match stays split so debugger single-step /
-/// `debug_locs` still stop on the residue. `unlikely`: inner latch is
-/// `DenseBin2 ; JMP` (X2), so a taken residue must not enlarge that arm.
-/// Do not peek another `DenseBin2` (that would re-do S2) and do not put
-/// this on the `DenseBin` arm (fib layout / S2 already ate that pair).
+/// `debug_locs` still stop on the residue. `unlikely` keeps unpaired
+/// `DenseBin2 ; JMP` (X2, no leftover) from enlarging the taken latch;
+/// mandelbrot still has leftover+JMP on the inner iter. Do not peek
+/// another `DenseBin2` and do not put this on the `DenseBin` arm.
 #[inline(always)]
 fn apply_trailing_dense_bin_residue(ctx: &mut HotCtx<'_, '_>) -> bool {
     if ctx.ip >= ctx.code.len() {
