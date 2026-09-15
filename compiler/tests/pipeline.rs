@@ -1303,6 +1303,7 @@ use string::{format, to_bytes};
                 | Instruction::BinSlotSlot
                 | Instruction::BinReturn
                 | Instruction::DenseBin
+                | Instruction::DenseBin2
         )
     });
     assert!(has_arith, "expected fib arithmetic with PolyFn present");

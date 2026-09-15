@@ -6964,6 +6964,7 @@ fn main() { \
                         | Instruction::LEQ
                         | Instruction::JMPF
                         | Instruction::DenseBin
+                    | Instruction::DenseBin2
                 )),
             "expected fused superinstructions or fib arithmetic alongside PolyFn; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
@@ -7599,6 +7600,7 @@ fn main() {
                     | Instruction::BinSlotSlot
                     | Instruction::BinReturn
                     | Instruction::DenseBin
+                    | Instruction::DenseBin2
             )),
             "cross unroll should emit MUL or fused slot mul; opcodes: {:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()

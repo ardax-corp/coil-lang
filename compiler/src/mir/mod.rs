@@ -169,6 +169,10 @@ mod tests {
         DebugLoc::unknown()
     }
 
+    fn is_dense_bin_op(inst: Instruction) -> bool {
+        matches!(inst, Instruction::DenseBin | Instruction::DenseBin2)
+    }
+
     #[test]
     fn public_api_exports_compile() {
         let _ = std::any::type_name::<(
@@ -212,7 +216,7 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile dense kernel");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "expected DenseBin in specialized float kernel"
         );
         assert!(
@@ -250,32 +254,36 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile add/sub kernel");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "float +/− loops must emit DenseBin without * or /"
         );
         assert!(
             bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FADD64
             }),
             "expected DenseBin FADD64"
         );
         assert!(
             bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FSUB64
             }),
             "expected DenseBin FSUB64"
         );
         assert!(
             !bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && matches!(
                         b.dense_abc_parts().0,
                         common::dense::FMUL64 | common::dense::FDIV64
                     )
             }),
             "hit kernel must stay mul/div-free"
+        );
+        assert!(
+            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin2),
+            "consecutive float +/− should pack DenseBin2"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
@@ -304,7 +312,7 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile nested");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "nested float-mul loops emit dense"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -334,14 +342,14 @@ fn main() {
         let fdivs = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FDIV64
             })
             .count();
         assert_eq!(fdivs, 1, "one DenseBin FDIV64 after MIR LICM");
         assert!(
             bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FMUL64
             }),
             "dense mul of the hoisted quotient"
@@ -389,8 +397,16 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile mandelbrot");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "flagship-shaped nested mandelbrot must emit DenseBin"
+        );
+        let packed = bc
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::DenseBin2)
+            .count();
+        assert!(
+            packed >= 1,
+            "COI-381 S2: nested mandelbrot should pack DenseBin2, got {packed}"
         );
         let seek = bc
             .iter()
@@ -432,14 +448,14 @@ fn main() {
         let fdivs = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FDIV64
             })
             .count();
         assert_eq!(fdivs, 1, "MIR CSE must keep a single DenseBin FDIV64");
         assert!(
             bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FMUL64
             }),
             "dense mul of the CSE'd quotient"
@@ -475,7 +491,7 @@ fn main() {
         let fdivs = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FDIV64
             })
             .count();
@@ -507,14 +523,14 @@ fn main() {
         let fmuls = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FMUL64
             })
             .count();
         let fadds = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FADD64
             })
             .count();
@@ -548,21 +564,21 @@ fn main() {
         let fdivs = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FDIV64
             })
             .count();
         let fsubs = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FSUB64
             })
             .count();
         let fmuls = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FMUL64
             })
             .count();
@@ -601,7 +617,7 @@ fn main() {
         let fmuls = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FMUL64
             })
             .count();
@@ -640,14 +656,14 @@ fn main() {
         let fmuls = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FMUL64
             })
             .count();
         let fadds = bc
             .iter()
             .filter(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::FADD64
             })
             .count();
@@ -688,7 +704,7 @@ fn main() {
                 .collect::<Vec<_>>()
         );
         assert!(
-            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            !bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "packed axpy must not keep DenseBin"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -837,12 +853,12 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile i64 loop");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "counted i64 loops must emit DenseBin"
         );
         assert!(
             bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::IADD64
             }),
             "expected DenseBin IADD64"
@@ -870,26 +886,26 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile i64 add/sub");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "counted i64 +/− loops must emit DenseBin"
         );
         assert!(
             bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::IADD64
             }),
             "expected DenseBin IADD64"
         );
         assert!(
             bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && b.dense_abc_parts().0 == common::dense::ISUB64
             }),
             "expected DenseBin ISUB64"
         );
         assert!(
             !bc.iter().any(|b| {
-                *b.bytecode() == Instruction::DenseBin
+                is_dense_bin_op(*b.bytecode())
                     && matches!(
                         b.dense_abc_parts().0,
                         common::dense::IMUL64 | common::dense::IDIV64
@@ -914,7 +930,7 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile below-gate i64");
         assert!(
-            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            !bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "tiny straight-line helper loses the dense cost gate vs fuse-IL"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -937,7 +953,7 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile I8 pick");
         assert!(
-            !bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            !bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "compare diamond must not dense-specialize"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -962,7 +978,7 @@ fn main() {
         let (bc, constants) = p.compile_src(src).expect("compile above-gate kernel");
         assert_eq!(numeric_work_ops(&[]), 0);
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "straight-line kernel that beats fuse-IL cost must emit DenseBin"
         );
         assert!(
@@ -999,7 +1015,7 @@ fn main() {
         let mut p = crate::Pipeline::new();
         let (bc, constants) = p.compile_src(src).expect("compile W4 math host");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "allowlisted math HostInvoke must stay on dense; opcodes={:?}",
             bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -1044,7 +1060,7 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            hot_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "caller must stay dense; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -1084,7 +1100,7 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            hot_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S3 open one-word CALL keeps the caller dense; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -1124,7 +1140,7 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let hot_bc = if hot < main { &bc[hot..main] } else { &bc[hot..] };
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            hot_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S3 open CALL densifies the loop; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -1164,7 +1180,7 @@ fn main() {
         let main = p.function_offset("main").expect("main");
         let rec_bc = if rec < main { &bc[rec..main] } else { &bc[rec..] };
         assert!(
-            rec_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            rec_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "Q7 recursive+loop callee must densify; opcodes={:?}",
             rec_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -1337,7 +1353,10 @@ fn main() {
         let lifted = hot_bc.iter().any(|b| {
             matches!(
                 *b.bytecode(),
-                Instruction::DenseBin | Instruction::DenseConst | Instruction::DensePush
+                Instruction::DenseBin
+                    | Instruction::DenseBin2
+                    | Instruction::DenseConst
+                    | Instruction::DensePush
             )
         });
         let _ = lifted;
@@ -1555,7 +1574,7 @@ fn main() {
 "#;
         let mut p = crate::Pipeline::new();
         let (bc, _) = p.compile_src(src).expect("compile eval_a");
-        let dense = bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin);
+        let dense = bc.iter().any(|b| is_dense_bin_op(*b.bytecode()));
         assert!(
             dense,
             "nbody eval_a beats the dense cost gate and emits DenseBin"
@@ -1803,7 +1822,7 @@ fn main() {
         assert!(
             dense.iter().any(|op| matches!(
                 op,
-                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin
+                IlOp::Byte { byte, .. } if is_dense_bin_op(*byte.bytecode())
             )),
             "dense emit must use DenseBin"
         );
@@ -1867,7 +1886,7 @@ fn main() {
                 op,
                 IlOp::Byte { byte, .. } if matches!(
                     *byte.bytecode(),
-                    Instruction::DenseBin | Instruction::MakeEnum
+                    Instruction::DenseBin | Instruction::DenseBin2 | Instruction::MakeEnum
                 )
             )),
             "P3 must not emit dense or MakeEnum"
@@ -2139,7 +2158,7 @@ fn main() {
                 op,
                 IlOp::Byte { byte, .. } if matches!(
                     *byte.bytecode(),
-                    Instruction::DenseBin | Instruction::MakeEnum
+                    Instruction::DenseBin | Instruction::DenseBin2 | Instruction::MakeEnum
                 )
             )),
             "I2 must stay MIR→LIR"
@@ -2333,7 +2352,7 @@ fn main() {
         assert!(
             dense.iter().any(|op| matches!(
                 op,
-                IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin
+                IlOp::Byte { byte, .. } if is_dense_bin_op(*byte.bytecode())
             )),
             "Q8 two-slot+arith uses DenseBin"
         );
@@ -2381,7 +2400,10 @@ fn main() {
                 op,
                 IlOp::Byte { byte, .. } if matches!(
                     *byte.bytecode(),
-                    Instruction::DenseBin | Instruction::InitTyped | Instruction::GetField
+                    Instruction::DenseBin
+                        | Instruction::DenseBin2
+                        | Instruction::InitTyped
+                        | Instruction::GetField
                 )
             )),
             "I3 must stay MIR→LIR without heap fields"
@@ -2791,7 +2813,7 @@ fn main() {
         let has_dense_make = hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseMake);
         if has_make {
             assert!(
-                hot_bc.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
+                hot_bc.iter().all(|b| !is_dense_bin_op(*b.bytecode())),
                 "residual MakeArray stays fuse-IL; opcodes={names:?}"
             );
         }
@@ -2853,7 +2875,7 @@ fn main() {
             assert!(
                 pack_bc
                     .iter()
-                    .all(|b| *b.bytecode() != Instruction::DenseBin),
+                    .all(|b| !is_dense_bin_op(*b.bytecode())),
                 "S2l: boxed in-loop Make* stays fuse-IL; opcodes={names:?}"
             );
         }
@@ -2910,7 +2932,7 @@ fn main() {
         assert!(
             pair_bc
                 .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
+                .all(|b| !is_dense_bin_op(*b.bytecode())),
             "S3: pair stays LIR MakeArray (not dense+match)"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -2958,7 +2980,7 @@ fn main() {
             "S2f SROA drops in-loop MakeArray; opcodes={names:?}"
         );
         assert!(
-            pack_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            pack_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S2k: pack select load takes dense; opcodes={names:?}"
         );
         let seek = pack_bc
@@ -3011,7 +3033,7 @@ fn main() {
             .count();
         assert!(
             makes == 0
-                || body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+                || body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S2f SROA drops MakeArray, or S2d dense keeps it; opcodes={names:?}"
         );
         let seeks = body
@@ -3038,7 +3060,7 @@ fn main() {
             p.operand_stack_slots()
         );
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S2k: bump store-select takes dense; opcodes={names:?} seek={seek_hw}"
         );
         let slots = p.operand_stack_slots() as usize;
@@ -3086,7 +3108,7 @@ fn main() {
             "S2k pack_store stays slots; opcodes={names:?}"
         );
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S2k pack_store select takes dense; opcodes={names:?}"
         );
         let seek = body
@@ -3141,7 +3163,7 @@ fn main() {
             "S2f SROA: at most OOB MakeArray for xs[k]; opcodes={names:?}"
         );
         assert!(
-            body.iter().all(|b| *b.bytecode() != Instruction::DenseBin),
+            body.iter().all(|b| !is_dense_bin_op(*b.bytecode())),
             "compare-only looping alloc stays LIR; opcodes={names:?}"
         );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -3280,7 +3302,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S3b: reverse index takes dense; opcodes={names:?}"
         );
         assert!(
@@ -3358,7 +3380,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S3b: times_a index+CALL takes dense; opcodes={names:?}"
         );
         assert!(
@@ -3439,7 +3461,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "D0: nsieve keeps dense after lift; opcodes={names:?}"
         );
         assert!(
@@ -3548,7 +3570,7 @@ fn main() {
         let mut def = crate::Pipeline::new();
         let (bc_def, constants) = def.compile_src(src).expect("compile default");
         assert!(
-            bc_def.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc_def.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "default must dense hot; opcodes={:?}",
             bc_def.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -3563,7 +3585,7 @@ fn main() {
             "flag must stick"
         );
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "B8 debugger-attached may dense; opcodes={:?}",
             bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -3580,7 +3602,7 @@ fn main() {
         og.set_opt_level(crate::OptLevel::Debug);
         let (bc_og, constants_og) = og.compile_src(src).expect("compile -Og");
         assert!(
-            bc_og.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc_og.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "B8 -Og may dense; opcodes={:?}",
             bc_og.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -3608,7 +3630,7 @@ fn main() {
         p.set_debugger_attached(true);
         let (bc, constants) = p.compile_src(src).expect("compile");
         assert!(
-            bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "C3 board must dense; opcodes={:?}",
             bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -3742,7 +3764,7 @@ fn main() {
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            hot_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "S3 clock+arith loop is dense; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -3845,7 +3867,7 @@ fn main() {
         assert!(
             hot_bc
                 .iter()
-                .all(|b| *b.bytecode() != Instruction::DenseBin),
+                .all(|b| !is_dense_bin_op(*b.bytecode())),
             "R3 must not dense-specialize a FORMAT loop"
         );
         assert!(
@@ -4003,7 +4025,7 @@ fn main() {
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            hot_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "R2 to_bytes+arith loop is dense; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -4046,7 +4068,7 @@ fn main() {
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            hot_bc.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            hot_bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "R2 from_bytes+arith loop is dense; opcodes={:?}",
             hot_bc.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
@@ -4218,7 +4240,7 @@ fn main() {
             assert!(
                 slice
                     .iter()
-                    .any(|b| *b.bytecode() == Instruction::DenseBin),
+                    .any(|b| is_dense_bin_op(*b.bytecode())),
                 "{name} must keep DenseBin; opcodes={:?}",
                 slice.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
             );
@@ -4955,7 +4977,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "Q6 literal range for-in should DenseBin; opcodes={names:?}"
         );
         assert!(
@@ -5003,7 +5025,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "B5 first-class range for-in should DenseBin; opcodes={names:?}"
         );
         assert!(
@@ -5051,7 +5073,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "C2 param range for-in should DenseBin; opcodes={names:?}"
         );
         assert!(
@@ -5102,7 +5124,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "C2 returned range for-in should DenseBin; opcodes={names:?}"
         );
         assert!(
@@ -5152,7 +5174,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "C2b heap-field range for-in should DenseBin; opcodes={names:?}"
         );
         assert!(
@@ -5199,7 +5221,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "C2b array-held range for-in should DenseBin; opcodes={names:?}"
         );
         assert!(
@@ -5269,7 +5291,7 @@ fn main() {
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         let dense = body
             .iter()
-            .any(|b| *b.bytecode() == Instruction::DenseBin);
+            .any(|b| is_dense_bin_op(*b.bytecode()));
         let two_slot_tag = body.windows(2).any(|w| {
             matches!(w[0].bytecode(), Instruction::CALL)
                 && w[0].call_ret_words() == 2
@@ -5342,7 +5364,7 @@ fn main() {
         let body = &bc[start..end];
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         assert!(
-            body.iter().any(|b| *b.bytecode() == Instruction::DenseBin),
+            body.iter().any(|b| is_dense_bin_op(*b.bytecode())),
             "C2b into_iter Range for-in should DenseBin; opcodes={names:?}"
         );
         assert!(
@@ -5392,7 +5414,7 @@ fn main() {
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         let dense = body
             .iter()
-            .any(|b| *b.bytecode() == Instruction::DenseBin);
+            .any(|b| is_dense_bin_op(*b.bytecode()));
         let mapped = body
             .iter()
             .any(|b| *b.bytecode() == Instruction::DictEntries);
@@ -5447,7 +5469,7 @@ fn main() {
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         let dense = body
             .iter()
-            .any(|b| *b.bytecode() == Instruction::DenseBin);
+            .any(|b| is_dense_bin_op(*b.bytecode()));
         let mapped = body
             .iter()
             .any(|b| *b.bytecode() == Instruction::DictEntries);
@@ -5508,7 +5530,7 @@ fn main() {
         let names: Vec<_> = body.iter().map(|b| b.bytecode().mnemonic()).collect();
         let dense = body
             .iter()
-            .any(|b| *b.bytecode() == Instruction::DenseBin);
+            .any(|b| is_dense_bin_op(*b.bytecode()));
         let mapped = body
             .iter()
             .any(|b| *b.bytecode() == Instruction::ResumeCoro);
