@@ -21,6 +21,21 @@ use crate::thread::{
 };
 use crate::vm::Machine;
 
+fn par_stats_enabled() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| match std::env::var("COIL_PAR_STATS") {
+        Ok(v) if matches!(v.as_str(), "1" | "true" | "on" | "yes") => true,
+        _ => false,
+    })
+}
+
+#[inline(always)]
+fn bump(counter: &AtomicUsize) {
+    if par_stats_enabled() {
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 /// One unit of work for the reactor (isolated `call_function` on a worker VM).
 pub struct Job {
     pub entry: u32,
@@ -50,6 +65,12 @@ pub struct Reactor {
     inflight: AtomicUsize,
     /// Total `submit` calls this reactor has accepted (IPA spawn count).
     submitted: AtomicUsize,
+    steal_success: AtomicUsize,
+    steal_empty: AtomicUsize,
+    steal_retry: AtomicUsize,
+    idle_waits: AtomicUsize,
+    join_helps: AtomicUsize,
+    join_timeouts: AtomicUsize,
     shutdown: AtomicBool,
     worker_handles: Mutex<Vec<thread::JoinHandle<()>>>,
 }
@@ -65,6 +86,12 @@ impl Reactor {
             started: OnceLock::new(),
             inflight: AtomicUsize::new(0),
             submitted: AtomicUsize::new(0),
+            steal_success: AtomicUsize::new(0),
+            steal_empty: AtomicUsize::new(0),
+            steal_retry: AtomicUsize::new(0),
+            idle_waits: AtomicUsize::new(0),
+            join_helps: AtomicUsize::new(0),
+            join_timeouts: AtomicUsize::new(0),
             shutdown: AtomicBool::new(false),
             worker_handles: Mutex::new(Vec::new()),
         })
@@ -81,6 +108,23 @@ impl Reactor {
     /// Jobs pushed since this reactor was created (each AlwaysPar `thread_spawn`).
     pub fn jobs_submitted(&self) -> usize {
         self.submitted.load(Ordering::Relaxed)
+    }
+
+    fn dump_par_stats(&self) {
+        if !par_stats_enabled() {
+            return;
+        }
+        eprintln!(
+            "coil par-stats workers={} submitted={} steal_ok={} steal_empty={} steal_retry={} idle_waits={} join_helps={} join_timeouts={}",
+            self.n_workers.load(Ordering::Relaxed),
+            self.submitted.load(Ordering::Relaxed),
+            self.steal_success.load(Ordering::Relaxed),
+            self.steal_empty.load(Ordering::Relaxed),
+            self.steal_retry.load(Ordering::Relaxed),
+            self.idle_waits.load(Ordering::Relaxed),
+            self.join_helps.load(Ordering::Relaxed),
+            self.join_timeouts.load(Ordering::Relaxed),
+        );
     }
 
     fn ensure_started(self: &Arc<Self>) {
@@ -118,6 +162,7 @@ impl Reactor {
     /// hold their own `Arc<Reactor>` clone, so without an explicit stop they
     /// poll forever and the reactor is never dropped.
     pub fn shutdown(&self) {
+        self.dump_par_stats();
         self.shutdown.store(true, Ordering::Relaxed);
         self.sleep_cvar.notify_all();
         let handles = std::mem::take(
@@ -154,16 +199,17 @@ impl Reactor {
         if let Some(job) = local.pop() {
             return Some(job);
         }
-        steal_from_injector(&self.injector).or_else(|| steal_from_peers(&self.stealers))
+        steal_from_injector(self).or_else(|| steal_from_peers(self))
     }
 
     fn steal_job(&self) -> Option<Job> {
-        steal_from_injector(&self.injector).or_else(|| steal_from_peers(&self.stealers))
+        steal_from_injector(self).or_else(|| steal_from_peers(self))
     }
 
     /// Run at most one stolen job on this thread's TLS helper VM.
     pub fn help_once(self: &Arc<Self>) {
         if let Some(job) = self.steal_job() {
+            bump(&self.join_helps);
             let program = Arc::clone(&job.program);
             with_help_vm(&program, |vm| run_job_on_vm(vm, job));
         }
@@ -186,6 +232,7 @@ impl Reactor {
                 return r;
             }
             if let Some(job) = self.steal_job() {
+                bump(&self.join_helps);
                 let program = Arc::clone(&job.program);
                 with_help_vm(&program, |vm| run_job_on_vm(vm, job));
                 continue;
@@ -201,6 +248,7 @@ impl Reactor {
                 let wait = state
                     .finished_cvar()
                     .wait_timeout(g, Duration::from_millis(1));
+                bump(&self.join_timeouts);
                 match wait {
                     Ok((guard, _)) => drop(guard),
                     Err(poisoned) => drop(poisoned.into_inner().0),
@@ -210,18 +258,26 @@ impl Reactor {
     }
 }
 
-fn steal_from_injector(injector: &Injector<Job>) -> Option<Job> {
+fn steal_from_injector(reactor: &Reactor) -> Option<Job> {
     loop {
-        match injector.steal() {
-            Steal::Success(job) => return Some(job),
-            Steal::Empty => return None,
-            Steal::Retry => continue,
+        match reactor.injector.steal() {
+            Steal::Success(job) => {
+                bump(&reactor.steal_success);
+                return Some(job);
+            }
+            Steal::Empty => {
+                bump(&reactor.steal_empty);
+                return None;
+            }
+            Steal::Retry => {
+                bump(&reactor.steal_retry);
+            }
         }
     }
 }
 
-fn steal_from_peers(stealers: &RwLock<Vec<Stealer<Job>>>) -> Option<Job> {
-    let guard = stealers.read().unwrap_or_else(|e| e.into_inner());
+fn steal_from_peers(reactor: &Reactor) -> Option<Job> {
+    let guard = reactor.stealers.read().unwrap_or_else(|e| e.into_inner());
     let n = guard.len();
     if n == 0 {
         return None;
@@ -231,9 +287,17 @@ fn steal_from_peers(stealers: &RwLock<Vec<Stealer<Job>>>) -> Option<Job> {
         let s = &guard[(start + i) % n];
         loop {
             match s.steal() {
-                Steal::Success(job) => return Some(job),
-                Steal::Empty => break,
-                Steal::Retry => continue,
+                Steal::Success(job) => {
+                    bump(&reactor.steal_success);
+                    return Some(job);
+                }
+                Steal::Empty => {
+                    bump(&reactor.steal_empty);
+                    break;
+                }
+                Steal::Retry => {
+                    bump(&reactor.steal_retry);
+                }
             }
         }
     }
@@ -365,6 +429,7 @@ fn worker_loop(reactor: Arc<Reactor>) {
                 run_job_on_vm(&mut vm, job);
             }
             None => {
+                bump(&reactor.idle_waits);
                 let g = reactor.sleep.lock().unwrap_or_else(|e| e.into_inner());
                 let _ = reactor
                     .sleep_cvar
@@ -390,6 +455,7 @@ fn wait_join_on_worker(
         let job =
             with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref)).flatten();
         if let Some(job) = job {
+            bump(&reactor.join_helps);
             let program = Arc::clone(&job.program);
             with_help_vm(&program, |help| run_job_on_vm(help, job));
             continue;
@@ -397,6 +463,7 @@ fn wait_join_on_worker(
         // Also steal from this reactor's injector/peers when local is empty or
         // foreign — same as non-worker join help.
         if let Some(job) = reactor.steal_job() {
+            bump(&reactor.join_helps);
             let program = Arc::clone(&job.program);
             with_help_vm(&program, |help| run_job_on_vm(help, job));
             continue;
@@ -412,6 +479,7 @@ fn wait_join_on_worker(
             let wait = state
                 .finished_cvar()
                 .wait_timeout(g, Duration::from_millis(1));
+            bump(&reactor.join_timeouts);
             match wait {
                 Ok((guard, _)) => drop(guard),
                 Err(poisoned) => drop(poisoned.into_inner().0),
