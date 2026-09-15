@@ -2899,7 +2899,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::MakeEnumReturn as u8);
+            promise!(*bc as u8 <= Instruction::DenseBin2Jmp as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3935,6 +3935,24 @@ impl<const S: usize> Machine<S> {
                         prefetch_code(code, ip);
                         dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
                     }
+                }
+                Instruction::DenseBinJmp => {
+                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
+                    promise!(ip < code_len);
+                    let jmp = unsafe { code.get_unchecked(ip) };
+                    ip += 1;
+                    set_jump_target(&mut ip, jmp.operand_u32() as usize, code);
+                }
+                Instruction::DenseBin2Jmp => {
+                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
+                    promise!(ip < code_len);
+                    let tail = unsafe { code.get_unchecked(ip) };
+                    ip += 1;
+                    dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
+                    promise!(ip < code_len);
+                    let jmp = unsafe { code.get_unchecked(ip) };
+                    ip += 1;
+                    set_jump_target(&mut ip, jmp.operand_u32() as usize, code);
                 }
                 Instruction::DenseBinJmpf => {
                     dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);

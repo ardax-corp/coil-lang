@@ -189,6 +189,8 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::DenseBin2);
     b = or_hot(b, Instruction::DenseBinJmpf);
     b = or_hot(b, Instruction::DenseIndexJmpf);
+    b = or_hot(b, Instruction::DenseBinJmp);
+    b = or_hot(b, Instruction::DenseBin2Jmp);
     b = or_hot(b, Instruction::DenseCmp);
     b = or_hot(b, Instruction::DenseConst);
     b = or_hot(b, Instruction::DenseMove);
@@ -920,6 +922,12 @@ fn apply_jump(ctx: &mut HotCtx<'_, '_>, target: Option<usize>) {
     }
 }
 
+#[inline(always)]
+fn apply_payload_jmp(ctx: &mut HotCtx<'_, '_>) {
+    let jmp = take_code_word(ctx);
+    set_jump_target(&mut ctx.ip, jmp.operand_u32() as usize, ctx.code);
+}
+
 fn cold(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
 
 #[inline(never)]
@@ -931,6 +939,19 @@ fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let tail = take_code_word(ctx);
     dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+}
+
+#[inline(never)]
+fn op_dense_bin_jmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+    apply_payload_jmp(ctx);
+}
+
+#[inline(never)]
+fn op_dense_bin2_jmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let tail = take_code_word(ctx);
+    dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+    apply_payload_jmp(ctx);
 }
 
 #[inline(never)]
@@ -1250,6 +1271,8 @@ fn build_table() -> [Handler; 256] {
     t[Instruction::DenseBin2 as usize] = op_dense_bin2;
     t[Instruction::DenseBinJmpf as usize] = op_dense_bin_jmpf;
     t[Instruction::DenseIndexJmpf as usize] = op_dense_index_jmpf;
+    t[Instruction::DenseBinJmp as usize] = op_dense_bin_jmp;
+    t[Instruction::DenseBin2Jmp as usize] = op_dense_bin2_jmp;
     t[Instruction::DenseCmp as usize] = op_dense_cmp;
     t[Instruction::DenseConst as usize] = op_dense_const;
     t[Instruction::DenseMove as usize] = op_dense_move;
@@ -1306,6 +1329,15 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
         Instruction::DenseBin2 => {
             let tail = take_code_word(ctx);
             dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+        }
+        Instruction::DenseBinJmp => {
+            dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
+            apply_payload_jmp(ctx);
+        }
+        Instruction::DenseBin2Jmp => {
+            let tail = take_code_word(ctx);
+            dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+            apply_payload_jmp(ctx);
         }
         Instruction::DenseBinJmpf => {
             dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
@@ -1656,6 +1688,8 @@ mod tests {
         assert!(is_hot(Instruction::DenseBin2));
         assert!(is_hot(Instruction::DenseBinJmpf));
         assert!(is_hot(Instruction::DenseIndexJmpf));
+        assert!(is_hot(Instruction::DenseBinJmp));
+        assert!(is_hot(Instruction::DenseBin2Jmp));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
         assert!(is_hot(Instruction::DenseIndex));
         assert!(!is_hot(Instruction::LOAD));
