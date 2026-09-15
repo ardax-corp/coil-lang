@@ -437,6 +437,14 @@ fn main() {
             packed_jmp >= 1,
             "COI-377 S1: nested mandelbrot inner escape should pack DenseBinJmpf"
         );
+        let moves = bc
+            .iter()
+            .filter(|b| *b.bytecode() == Instruction::DenseMove)
+            .count();
+        assert!(
+            moves <= 8,
+            "COI-383 S6: nested mandelbrot should coalesce DenseMove copies, got {moves}"
+        );
         let seek = bc
             .iter()
             .filter(|b| *b.bytecode() == Instruction::Seek)

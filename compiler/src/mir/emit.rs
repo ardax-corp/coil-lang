@@ -7,6 +7,7 @@ use common::{dense, Byte, DebugLoc, Instruction};
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::call_convoy::{is_tail_call_inst, ConvoyPlan};
+use super::destprop::sink_phi_incomings;
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp,
@@ -42,9 +43,12 @@ pub fn emit_dense(
             "dense emit refuses untyped HostInvoke".into(),
         ));
     }
+    let mut func = func.clone();
+    sink_phi_incomings(&mut func);
+    let func = &func;
     let plan = ConvoyPlan::new(func, entry_label);
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
-    let regs = coalesce_safe_latch_phis(func, regs);
+    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -193,6 +197,7 @@ pub fn emit_dense(
             func.term_loc(block.id),
         )?;
     }
+    coalesce_dense_moves(&mut out);
     pack_chained_dense_bin(&mut out);
     pack_dense_bin_jmpf(&mut out);
     pack_dense_index_jmpf(&mut out);
@@ -204,12 +209,14 @@ pub(super) fn dense_sidecars(
     func: &MirFunc,
     entry_label: Option<Label>,
 ) -> (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap) {
-    let plan = ConvoyPlan::new(func, entry_label);
-    let (regs, _) = assign_regs(func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
-    let regs = coalesce_safe_latch_phis(func, regs);
+    let mut func = func.clone();
+    sink_phi_incomings(&mut func);
+    let plan = ConvoyPlan::new(&func, entry_label);
+    let (regs, _) = assign_regs(&func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
+    let regs = coalesce_latch_overwrite(&func, regs, &plan.need_slot);
     (
-        super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
-        super::deopt::encode_draft(func, &regs, &plan.need_slot),
+        super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot),
+        super::deopt::encode_draft(&func, &regs, &plan.need_slot),
     )
 }
 
@@ -312,7 +319,13 @@ pub(super) fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool
 
 /// Alias a header φ dest with its latch incoming when the dest is dead after
 /// that incoming is defined (so `i = i + 1` is a dest-overwrite, not a move).
-pub(super) fn coalesce_safe_latch_phis(func: &MirFunc, mut regs: Vec<u8>) -> Vec<u8> {
+/// COI-383 S6 sinks the incoming first so mandelbrot `tr`/`zr` can alias.
+pub(super) fn coalesce_latch_overwrite(
+    func: &MirFunc,
+    mut regs: Vec<u8>,
+    need_slot: &[bool],
+) -> Vec<u8> {
+    let _ = need_slot;
     for block in &func.blocks {
         for inst in &block.insts {
             let MirInst::Phi { dest, args, .. } = inst else {
@@ -327,7 +340,9 @@ pub(super) fn coalesce_safe_latch_phis(func: &MirFunc, mut regs: Vec<u8>) -> Vec
             if !latch_overwrite_ok(func, *pred, *dest, *latch_val) {
                 continue;
             }
-            regs[dest.index()] = regs[latch_val.index()];
+            if dest.index() < regs.len() && latch_val.index() < regs.len() {
+                regs[dest.index()] = regs[latch_val.index()];
+            }
         }
     }
     regs
@@ -356,6 +371,7 @@ fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: 
         _ => true,
     }
 }
+
 
 pub(super) fn term_cmp_dest(func: &MirFunc, block: &super::func::MirBlock) -> Option<ValueId> {
     let Terminator::Br { cond, .. } = block.term.as_ref()? else {
@@ -505,6 +521,21 @@ pub(super) fn emit_cond_jumps(
             hint: Default::default(),
         });
     }
+}
+
+/// Drop identity `DenseMove` (COI-383 S6). Runs before `DenseBin2` packing.
+fn coalesce_dense_moves(ops: &mut Vec<IlOp>) {
+    drop_identity_dense_moves(ops);
+}
+
+fn drop_identity_dense_moves(ops: &mut Vec<IlOp>) {
+    ops.retain(|op| match op {
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseMove => {
+            let (d, s) = byte.dense_move_parts();
+            d != s
+        }
+        _ => true,
+    });
 }
 
 /// Pack adjacent [`Instruction::DenseBin`] into [`Instruction::DenseBin2`].

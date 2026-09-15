@@ -11,7 +11,7 @@ use common::{Byte, DebugLoc, Instruction};
 use crate::il::{IlJumpKind, IlOp, Label};
 
 use super::emit::{
-    coalesce_safe_latch_phis, emit_cond_jumps, il_for_alloc, is_fallthrough, max_label_hint,
+    coalesce_latch_overwrite, emit_cond_jumps, il_for_alloc, is_fallthrough, max_label_hint,
     paired_alloc_dest, term_cmp_dest,
 };
 use super::func::MirFunc;
@@ -39,7 +39,7 @@ pub fn emit_lir(
     }
     let plan = EmitPlan::new(func);
     let (regs, scratch) = assign_needed(func, &plan)?;
-    let regs = coalesce_safe_latch_phis(func, regs);
+    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let max_reg = plan
         .need_slot
         .iter()
@@ -130,7 +130,7 @@ pub(super) fn lir_sidecars(
 ) -> (std::collections::HashMap<u32, u32>, super::deopt::DraftDeoptMap) {
     let plan = EmitPlan::new(func);
     let (regs, _) = assign_needed(func, &plan).unwrap_or_else(|_| (Vec::new(), 0));
-    let regs = coalesce_safe_latch_phis(func, regs);
+    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     (
         super::deopt::debug_slot_remap(func, &regs, &plan.need_slot),
         super::deopt::encode_draft(func, &regs, &plan.need_slot),

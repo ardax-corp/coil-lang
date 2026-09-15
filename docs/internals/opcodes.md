@@ -29,7 +29,7 @@ User code does not name these directly; the compiler emits them:
 | `DenseBinJmpf` | Two-word pack of `DenseBin` then a fused `*Jmpf`/`*Jmpt` (COI-377 S1). Operand is the bin `dense_abc`; the following word is the jump (`BinSlotSlotJmpf` / `BinSlotImmJmpf` / twins). One dispatch; sequential IEEE then the compare-branch. Not `DenseCmp`+jmp. Archive **minor 17**. |
 | `DenseIndexJmpf` | Two-word pack of `DenseIndex` then a fused `*Jmpf`/`*Jmpt` (COI-379 S4). Operand is the index `dense_abc`; the following word is the jump (`BinSlotImmJmpf` / twins, or `BinSlotSlotJmpf` / twins). One dispatch; heap load then compare-branch. Stacks with last-addr `Object` cache (COI-372). Archive **minor 18**. |
 | `DenseConst` | Typed slot const. Bit 31 = pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm or pool index. |
-| `DenseMove` | Copy slot to slot (`[15:8]` dest, `[7:0]` src). Used for φ edge copies. |
+| `DenseMove` | Copy slot to slot (`[15:8]` dest, `[7:0]` src). Used for residual φ edge copies; COI-383 S6 sinks + coalesces so many latch/header copies never emit. |
 | `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). |
 | `VLoad` / `VStore` | Compiler-only 8-lane numeric heap access (COI-310). `[31:24]` ty (`TY_I64` / `TY_F64`), `[23:16]` vreg, `[15:8]` array slot, `[7:0]` index slot. No heap refs in vregs. Archive **minor 8**. |
 | `VBin` / `VMove` | 8-lane zip / splat / iota / neg via `coil-simd` (`VBin` packing matches `DenseBin`; splat `a` is a frame slot). `VMove` copies vregs. HostInvoke packs (P12) stay. |
