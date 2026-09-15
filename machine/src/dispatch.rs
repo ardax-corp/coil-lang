@@ -189,8 +189,6 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::DenseBin2);
     b = or_hot(b, Instruction::DenseBinJmpf);
     b = or_hot(b, Instruction::DenseIndexJmpf);
-    b = or_hot(b, Instruction::DenseBinJmp);
-    b = or_hot(b, Instruction::DenseBin2Jmp);
     b = or_hot(b, Instruction::DenseCmp);
     b = or_hot(b, Instruction::DenseConst);
     b = or_hot(b, Instruction::DenseMove);
@@ -1688,8 +1686,9 @@ mod tests {
         assert!(is_hot(Instruction::DenseBin2));
         assert!(is_hot(Instruction::DenseBinJmpf));
         assert!(is_hot(Instruction::DenseIndexJmpf));
-        assert!(is_hot(Instruction::DenseBinJmp));
-        assert!(is_hot(Instruction::DenseBin2Jmp));
+        // COI-387: latch packs stay off ALWAYS_HOT (fib `unlikely(is_hot)`).
+        assert!(!is_hot(Instruction::DenseBinJmp));
+        assert!(!is_hot(Instruction::DenseBin2Jmp));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
         assert!(is_hot(Instruction::DenseIndex));
         assert!(!is_hot(Instruction::LOAD));
