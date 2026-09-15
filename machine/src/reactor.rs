@@ -68,6 +68,7 @@ pub struct Reactor {
     steal_success: AtomicUsize,
     steal_empty: AtomicUsize,
     steal_retry: AtomicUsize,
+    /// Idle parks on `sleep_cvar` until submit / job-complete / shutdown (no 2 ms poll).
     idle_waits: AtomicUsize,
     join_helps: AtomicUsize,
     /// Timed 1 ms join polls (always 0 after COI-390; kept for `COIL_PAR_STATS` diffs).
@@ -159,7 +160,7 @@ impl Reactor {
     }
 
     /// Wake idle workers and joiners. Holds `sleep` so a waiter cannot miss the
-    /// signal between a failed steal and `wait` (join parks with no timeout).
+    /// signal between a failed steal and `wait` (idle and join park with no timeout).
     fn notify(&self) {
         let _g = self.sleep.lock().unwrap_or_else(|e| e.into_inner());
         self.sleep_cvar.notify_all();
@@ -168,11 +169,13 @@ impl Reactor {
     /// Stop worker threads and join them. Call once the owning root VM's run
     /// has fully drained (its `live_threads` registry is empty) — workers
     /// hold their own `Arc<Reactor>` clone, so without an explicit stop they
-    /// poll forever and the reactor is never dropped.
+    /// park forever and the reactor is never dropped.
     pub fn shutdown(&self) {
         self.dump_par_stats();
-        self.shutdown.store(true, Ordering::Relaxed);
-        self.sleep_cvar.notify_all();
+        self.shutdown.store(true, Ordering::SeqCst);
+        // Hold `sleep` so a worker cannot miss shutdown between the empty-steal
+        // recheck and `wait` (same handshake as `notify`).
+        self.notify();
         let handles = std::mem::take(
             &mut *self
                 .worker_handles
@@ -234,6 +237,11 @@ impl Reactor {
         state: &JoinState,
     ) -> Result<PortableValue, ThreadErrorTag> {
         wait_join_loop(self, state, || self.steal_job())
+    }
+
+    #[cfg(test)]
+    fn idle_wait_count(&self) -> usize {
+        self.idle_waits.load(Ordering::Relaxed)
     }
 }
 
@@ -396,7 +404,7 @@ fn worker_loop(reactor: Arc<Reactor>) {
     });
 
     loop {
-        if reactor.shutdown.load(Ordering::Relaxed) {
+        if reactor.shutdown.load(Ordering::SeqCst) {
             break;
         }
         let job = with_owned_local_worker(&reactor, |local_ref| reactor.find_job(local_ref))
@@ -408,11 +416,11 @@ fn worker_loop(reactor: Arc<Reactor>) {
                 run_job_on_vm(&mut vm, job);
             }
             None => {
-                bump(&reactor.idle_waits);
-                let g = reactor.sleep.lock().unwrap_or_else(|e| e.into_inner());
-                let _ = reactor
-                    .sleep_cvar
-                    .wait_timeout(g, Duration::from_millis(2));
+                if let Some(job) = park_idle_worker(&reactor) {
+                    ensure_operand_capacity(&mut vm, job.program.operand_stack_slots);
+                    vm.set_reactor(Arc::clone(&reactor));
+                    run_job_on_vm(&mut vm, job);
+                }
             }
         }
     }
@@ -425,6 +433,26 @@ fn run_help_job(reactor: &Reactor, job: Job) {
     bump(&reactor.join_helps);
     let program = Arc::clone(&job.program);
     with_help_vm(&program, |vm| run_job_on_vm(vm, job));
+}
+
+/// Recheck shutdown/steal under `sleep` then wait until `notify` (submit /
+/// job done / shutdown). No 2 ms poll — same handshake as [`park_join`].
+fn park_idle_worker(reactor: &Reactor) -> Option<Job> {
+    let g = reactor.sleep.lock().unwrap_or_else(|e| e.into_inner());
+    if reactor.shutdown.load(Ordering::SeqCst) {
+        return None;
+    }
+    if let Some(job) = with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref))
+        .flatten()
+    {
+        return Some(job);
+    }
+    reactor.idle_waits.fetch_add(1, Ordering::Relaxed);
+    match reactor.sleep_cvar.wait(g) {
+        Ok(guard) => drop(guard),
+        Err(poisoned) => drop(poisoned.into_inner()),
+    }
+    None
 }
 
 /// Help-steal until `state` completes. Parks on `sleep_cvar` until a result
@@ -706,6 +734,41 @@ mod tests {
         let rb = reactor.wait_join(&b).expect("B");
         assert_eq!(ra, PortableValue::Immediate(1));
         assert_eq!(rb, PortableValue::Immediate(2));
+    }
+
+    #[test]
+    fn idle_workers_park_until_notify_without_timeout() {
+        let reactor = Reactor::new(2);
+        let first = submit_const_job(&reactor, 1);
+        reactor.wait_join(&first).expect("warmup");
+        for _ in 0..50 {
+            if reactor.inflight() == 0 {
+                break;
+            }
+            thread::sleep(Duration::from_millis(1));
+        }
+        thread::sleep(Duration::from_millis(15));
+        let parked = reactor.idle_wait_count();
+        assert!(
+            parked >= 1,
+            "workers should park after the injector drains ({parked})"
+        );
+        thread::sleep(Duration::from_millis(80));
+        assert_eq!(
+            reactor.idle_wait_count(),
+            parked,
+            "idle workers must not 2 ms-poll while waiting for notify"
+        );
+        let t0 = std::time::Instant::now();
+        let second = submit_const_job(&reactor, 8);
+        let pv = reactor.wait_join(&second).expect("delayed submit");
+        assert_eq!(pv, PortableValue::Immediate(8));
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "submit must wake parked workers ({:?})",
+            t0.elapsed()
+        );
+        reactor.shutdown();
     }
 
     #[test]
