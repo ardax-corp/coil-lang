@@ -183,6 +183,21 @@ pub(super) fn dense_bin(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stac
 }
 
 #[inline(always)]
+fn take_code_word(ctx: &mut HotCtx<'_, '_>) -> Byte {
+    promise!(ctx.ip < ctx.code.len());
+    let word = copy_byte(ctx.code, ctx.ip);
+    ctx.ip += 1;
+    super::prefetch_code(ctx.code, ctx.ip);
+    word
+}
+
+#[inline(always)]
+pub(super) fn dense_bin2(stack: &mut Stack<Value>, sp: usize, first: &Byte, second: &Byte, stack_cap: usize) {
+    dense_bin(stack, sp, first, stack_cap);
+    dense_bin(stack, sp, second, stack_cap);
+}
+
+#[inline(always)]
 pub(super) fn dense_cmp(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap: usize) {
     let (kind, dest, lhs, rhs) = opcode.dense_abc_parts();
     promise!(sp + dest < stack_cap);
@@ -812,6 +827,12 @@ fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
+fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let tail = take_code_word(ctx);
+    dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+}
+
+#[inline(never)]
 fn op_dense_cmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
@@ -1079,6 +1100,7 @@ fn op_bin_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 fn build_table() -> [Handler; 256] {
     let mut t = [cold as Handler; 256];
     t[Instruction::DenseBin as usize] = op_dense_bin;
+    t[Instruction::DenseBin2 as usize] = op_dense_bin2;
     t[Instruction::DenseCmp as usize] = op_dense_cmp;
     t[Instruction::DenseConst as usize] = op_dense_const;
     t[Instruction::DenseMove as usize] = op_dense_move;
@@ -1132,6 +1154,10 @@ fn copy_byte(code: &[Byte], ip: usize) -> Byte {
 fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
     match bc {
         Instruction::DenseBin => dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
+        Instruction::DenseBin2 => {
+            let tail = take_code_word(ctx);
+            dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+        }
         Instruction::DenseCmp => dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
         Instruction::DenseConst => {
             dense_const(ctx.stack, ctx.sp, &opcode, ctx.constants, ctx.stack_cap)
@@ -1436,6 +1462,7 @@ mod tests {
     #[test]
     fn hot_subset_and_table_slots() {
         assert!(is_hot(Instruction::DenseBin));
+        assert!(is_hot(Instruction::DenseBin2));
         assert!(is_hot(Instruction::BinSlotSlotJmpf));
         assert!(is_hot(Instruction::DenseIndex));
         assert!(!is_hot(Instruction::LOAD));
