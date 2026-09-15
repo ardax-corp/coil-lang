@@ -110,6 +110,11 @@ Isolated `hyperfine` (~50 min-runs mandelbrot, x86_64, `COIL_AUTO_PAR=0`):
 
 Checksums identical across match / table / hotmatch.
 
+Appending a hot opcode (`DenseBin2`, COI-381) made LLVM treat `execute`'s
+`is_hot` divert as the fall-through and cost ~14–19% on `fib` (identical
+bytecode, never hot). `is_hot` is a `.rodata` bitset (not the 2 KiB handler
+table); the divert is `unlikely` so the giant match stays the fall-through.
+
 Threading packed `LOAD`/`STORE`/`Seek` **without** `DenseIndex` made nsieve
 ~1.3× slower (bounce). Threading CALL/RETURN/imm is documented above.
 

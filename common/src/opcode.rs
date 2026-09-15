@@ -412,6 +412,11 @@ pub enum Instruction {
     /// Dense `InitTyped` (COI-356 D2). Stack-neutral Object make.
     /// Operand: `[31:24]` dest, `[23:16]` nfields, `[15:0]` type_id.
     DenseMakeObject,
+    /// Two consecutive [`Self::DenseBin`] ops, sequential IEEE (COI-381 S2).
+    /// Operand is the first `dense_abc` packing. The following code word is
+    /// a payload [`Self::DenseBin`] (second op); the VM consumes both in one
+    /// dispatch. Not FMA / reassoc; not tombstoned `FloatChainStore`.
+    DenseBin2,
 }
 
 impl From<u8> for Instruction {
@@ -520,6 +525,100 @@ pub mod dense {
     #[inline]
     pub const fn unpack_make_object(operand: u32) -> (u8, u8, u32) {
         ((operand >> 24) as u8, (operand >> 16) as u8, operand & 0xFFFF)
+    }
+
+    /// Mnemonic for a [`super::Instruction::DenseBin`] kind byte.
+    #[must_use]
+    pub fn bin_kind_name(kind: u8) -> &'static str {
+        match kind {
+            IADD64 => "IADD64",
+            ISUB64 => "ISUB64",
+            IMUL64 => "IMUL64",
+            IDIV64 => "IDIV64",
+            IREM64 => "IREM64",
+            IAND64 => "IAND64",
+            IOR64 => "IOR64",
+            IXOR64 => "IXOR64",
+            ISHL64 => "ISHL64",
+            ISHR64 => "ISHR64",
+            FADD64 => "FADD64",
+            FSUB64 => "FSUB64",
+            FMUL64 => "FMUL64",
+            FDIV64 => "FDIV64",
+            FREM64 => "FREM64",
+            IADD32 => "IADD32",
+            ISUB32 => "ISUB32",
+            IMUL32 => "IMUL32",
+            IDIV32 => "IDIV32",
+            IREM32 => "IREM32",
+            FADD32 => "FADD32",
+            FSUB32 => "FSUB32",
+            FMUL32 => "FMUL32",
+            FDIV32 => "FDIV32",
+            FREM32 => "FREM32",
+            _ => "DenseBin?",
+        }
+    }
+
+    /// Stream width of `op`: [`super::Instruction::DenseBin2`] consumes the
+    /// following payload word.
+    #[inline]
+    #[must_use]
+    pub fn stream_width(op: super::Instruction) -> usize {
+        match op {
+            super::Instruction::DenseBin2 => 2,
+            _ => 1,
+        }
+    }
+
+    /// Visit each numeric bin in program order (`DenseBin` and both halves of
+    /// [`super::Instruction::DenseBin2`]).
+    pub fn for_each_bin(code: &[super::Byte], mut visit: impl FnMut(u8, usize, usize, usize)) {
+        let mut i = 0;
+        while i < code.len() {
+            match *code[i].bytecode() {
+                super::Instruction::DenseBin => {
+                    let (k, d, a, b) = code[i].dense_abc_parts();
+                    visit(k, d, a, b);
+                    i += 1;
+                }
+                super::Instruction::DenseBin2 => {
+                    let (k, d, a, b) = code[i].dense_abc_parts();
+                    visit(k, d, a, b);
+                    i += 1;
+                    if i < code.len() {
+                        let (k2, d2, a2, b2) = code[i].dense_abc_parts();
+                        visit(k2, d2, a2, b2);
+                        i += 1;
+                    }
+                }
+                _ => i += 1,
+            }
+        }
+    }
+
+    /// True when `code` contains a dense bin of `kind` (packed or not).
+    #[must_use]
+    pub fn has_bin_kind(code: &[super::Byte], kind: u8) -> bool {
+        let mut found = false;
+        for_each_bin(code, |k, _, _, _| {
+            if k == kind {
+                found = true;
+            }
+        });
+        found
+    }
+
+    /// Count dense bins of `kind` (packed or not).
+    #[must_use]
+    pub fn count_bin_kind(code: &[super::Byte], kind: u8) -> usize {
+        let mut n = 0;
+        for_each_bin(code, |k, _, _, _| {
+            if k == kind {
+                n += 1;
+            }
+        });
+        n
     }
 
     #[inline]
@@ -731,6 +830,7 @@ impl Instruction {
             Self::DenseFieldLoad => "DenseFieldLoad",
             Self::DenseFieldStore => "DenseFieldStore",
             Self::DenseMakeObject => "DenseMakeObject",
+            Self::DenseBin2 => "DenseBin2",
         }
     }
 }
@@ -1746,13 +1846,17 @@ mod tests {
         let mk = Byte::new(Instruction::DenseMakeObject)
             .with_operand_u32(dense::pack_make_object(5, 2, 9));
         assert_eq!(dense::unpack_make_object(mk.operand_u32()), (5, 2, 9));
+        let pair = Byte::new(Instruction::DenseBin2).with_dense_abc(dense::FADD64, 3, 1, 2);
+        assert_eq!(pair.dense_abc_parts(), (dense::FADD64, 3, 1, 2));
+        assert_eq!(dense::stream_width(Instruction::DenseBin2), 2);
+        assert_eq!(dense::bin_kind_name(dense::FMUL64), "FMUL64");
     }
 
     #[test]
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DenseMakeObject as u8;
+        let last = Instruction::DenseBin2 as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

@@ -193,6 +193,7 @@ pub fn emit_dense(
             func.term_loc(block.id),
         )?;
     }
+    pack_chained_dense_bin(&mut out);
     Ok(out)
 }
 
@@ -501,6 +502,33 @@ pub(super) fn emit_cond_jumps(
             loc,
             hint: Default::default(),
         });
+    }
+}
+
+/// Pack adjacent [`Instruction::DenseBin`] into [`Instruction::DenseBin2`].
+/// Sequential IEEE eval of both ops; no FMA / reassoc. Labels and other ops
+/// are barriers. The payload word stays `DenseBin` so a jump cannot land in
+/// the middle of a pack (labels already split blocks).
+fn pack_chained_dense_bin(ops: &mut [IlOp]) {
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        let first = match &ops[i] {
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin => Some(*byte),
+            _ => None,
+        };
+        let second_is_bin = matches!(
+            &ops[i + 1],
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin
+        );
+        if first.is_none() || !second_is_bin {
+            i += 1;
+            continue;
+        }
+        let loc = ops[i].loc();
+        let packed = Byte::new(Instruction::DenseBin2)
+            .with_operand_u32(first.expect("DenseBin").operand_u32());
+        ops[i] = IlOp::from_plain_byte(packed, loc);
+        i += 2;
     }
 }
 

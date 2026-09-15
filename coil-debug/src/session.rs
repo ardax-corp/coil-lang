@@ -1187,6 +1187,7 @@ fn main() {
             matches!(
                 *b.bytecode(),
                 Instruction::DenseBin
+                    | Instruction::DenseBin2
                     | Instruction::DenseCmp
                     | Instruction::DenseConst
                     | Instruction::DenseMove

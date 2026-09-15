@@ -363,7 +363,7 @@ fn perf_field_hot_reuses_repeated_string_keys() {
     assert!(
         bc[start..end]
             .iter()
-            .any(|b| *b.bytecode() == Instruction::DenseBin),
+            .any(|b| matches!(*b.bytecode(), Instruction::DenseBin | Instruction::DenseBin2)),
         "field_hot hot keeps DenseBin (D2 field natives)"
     );
     assert!(

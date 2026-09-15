@@ -39,7 +39,7 @@ Until then S1–S5 are dense-emit (or VM peek) only.
 | ID | Linear | Ticket shape | Dissect (this PR) | Layer | Refine |
 |----|--------|--------------|-------------------|-------|--------|
 | **S1** | [COI-377](https://linear.app/ardax/issue/COI-377) | Dense cmp/bin → jmp | `mandelbrot` inner: `DenseBin×3 ; BinSlotSlotJmpf GTF`. Headers: `DenseMove* ; BinSlotSlotJmpf GT` (no `DenseCmp`). `emit_br_cond` reconstructs stack cmp so fuse-select already made `*Jmpf` (1 dispatch). | dense emit | The escape test is **`DenseBin` (mag) + fused `BinSlotSlotJmpf`**, not `DenseCmp`+jmp. A `DenseCmpJmpf` only wins if emit stops going through stack `Bin`+`Jump`. Packing `DenseBin; *Jmpf` is the real 2→1. Outer `y`/`x` headers are already 1-op jumps. |
-| **S2** | [COI-381](https://linear.app/ardax/issue/COI-381) | 2-wide `DenseBin` pack | `mandelbrot` has **18** `DenseBin`. Inner latch is `DenseBin×6 ; DenseMove ; JMP`. | dense emit (or VM peek, no ISA) | Independent of IEEE FMA. Pool descriptor vs two-word encoding is the packing choice. **Do not** revive `FloatChainStore`. VM peek of the next `DenseBin` is the no-minor-bump alternative (debug-step policy). |
+| **S2** | [COI-381](https://linear.app/ardax/issue/COI-381) | 2-wide `DenseBin` pack | `mandelbrot` has **18** `DenseBin`. Inner latch is `DenseBin×6 ; DenseMove ; JMP`. | dense emit | **Done (ISA pack).** Two-word `DenseBin2` (archive **minor 16**): first `dense_abc` on the opcode, payload word is the second `DenseBin` (chosen over a pool descriptor so the second packing stays in the instruction stream). Sequential IEEE; `mir/emit.rs` `pack_chained_dense_bin`. Inner latch `DenseBin×6` → three `DenseBin2`. **Not** X4 VM peek, **not** `FloatChainStore`. `fib` bytecode is unchanged; default table peek of `is_hot` must keep the giant match as fall-through (`unlikely(is_hot)`). |
 | **S3** | [COI-380](https://linear.app/ardax/issue/COI-380) | `DenseCast`+`DenseBin` | Three `DenseCast` sites, all **x/y headers** (`DenseCast ; DenseBin×3`), not the innermost `iter` loop. | dense emit | Flagship wall may be noise (cast is `160²` / `160`, not `160²×50`). Hit-bench the x-loop or a dedicated i2f kernel if mandelbrot A/B is wash. |
 | **S4** | [COI-379](https://linear.app/ardax/issue/COI-379) | `DenseIndex` + imm cmp + jmpf | `nsieve` p-loop: `DenseIndex ; BinSlotImmJmpf EQ` (`flags[p] == 1`). | dense emit | Shape matches. Stacks with [COI-372](https://linear.app/ardax/issue/COI-372). Index is dense-native (not `IndexPin`). |
 | **S5** | [COI-382](https://linear.app/ardax/issue/COI-382) | Index/StoreIndex stride pair | Inner k-loop is **`DenseMove ; DenseStoreIndex ; DenseBin ; JMP`** — store of 0 with `k = k + p`. **No** `DenseIndex` in that loop. | dense emit | Refine to **stride `DenseStoreIndex` + IV bump** (clear-flags), not consecutive index+store of the same cell. Optional pack `DenseStoreIndex ; DenseBin`. |
@@ -47,7 +47,7 @@ Until then S1–S5 are dense-emit (or VM peek) only.
 | **S7** | [COI-384](https://linear.app/ardax/issue/COI-384) | Fuse-IL peep parity for S1–S5 shapes | `fib`/`tak`/`item_check`/`bottom_up` stay fuse-IL. Stack `*Jmpf` / `BinSlotImm` / `BinReturn` **already fire** (`fib` is 7 ops). Dense S1–S5 shapes do not appear on these bodies. | IL peep | Real fuse-IL gaps are **not** S1–S5 copies: `item_check` `CONST ; LOAD ; ADD` (canon Unknown-SP after match); `bottom_up` `MakeEnum ; RETURN`. Do not densify `main`/FORMAT. Pick one of those as the S7 hit, or drop S7 if “parity” meant “already true for stack fuses.” |
 | **S8** | [COI-385](https://linear.app/ardax/issue/COI-385) | Fusion not blocked on specialize keep | Cost gate / `lir_eligible` do **not** currently refuse because a packed op appeared (none exist yet). The live block is **`Dense*` as residual `Byte` → fuse-select Cold**. `emit_cost` weights `Seek` and LOAD/STORE, not opcode novelty. | typed `IlOp` for `Dense*` **or** keep packing in dense emit | One-line lift if S1–S5 should share fuse-select: lift `DenseBin`/`DenseCast`/`DenseIndex`/`DenseStoreIndex`/`DenseMove` in `from_plain_byte`. Do **not** make specialize keep a prerequisite. Print `main` stays fuse-IL by design. |
 
-Kick order (project ladder, still valid): **S8 note first** (this doc) → **S2** (biggest mandelbrot dispatch) → **S1** (inner escape, after clarifying `DenseBin`+jmp not `DenseCmp`) → **S4** (nsieve, clear dump) → **S6** → **S3** (colder) → **S5** (after shape refine) → **S7** (after choosing a real fuse-IL hit).
+Kick order (project ladder, still valid): **S8 note first** (this doc) → **S2** (landed, two-word `DenseBin2`) → **S1** (inner escape, after clarifying `DenseBin`+jmp not `DenseCmp`) → **S4** (nsieve, clear dump) → **S6** → **S3** (colder) → **S5** (after shape refine) → **S7** (after choosing a real fuse-IL hit).
 
 ---
 
@@ -61,7 +61,7 @@ kept dense / vectorize / fuse-IL. No `try_specialize_body` change.
 | **X1** | Vectorize remainder `i += 1`: `DenseConst` into scratch instead of `CONST ; STORE ; DenseBin` | `sum` / `scan` / `fill` scalar tails (`artifacts/.../for_in_sum.fn.txt`, `vec_scan.*.fn.txt`) | `mir/vectorize.rs` `emit_const_i64` (today stack `IlOp::Const` + `StorePop`) vs `emit.rs` `emit_const` | Already vectorized. 3 dispatches → 2 with **existing** `DenseConst`. Smallest patch. |
 | **X2** | `DenseBin ; JMP` latch coalescing | mandelbrot / nsieve / SIMD tails | dense emit or VM peek | Not S1 (not a cmp) and not S2 (not two bins). Counted-loop latch. |
 | **X3** | `MakeEnum ; RETURN` fuse (one-word heap) | `bottom_up` (`MakeEnum ; RETURN` twice) | IL peep — `MakeEnum` is **typed** `IlOp`, `Return` is typed | Body is fuse-IL; fuse-select simply has no pattern. Reuse `is_one_word_return`. |
-| **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/vm.rs` peek | No archive bump; existing `.hyc` win. Debugger single-step / `debug_locs` policy. Alternative to S2 ISA pack — pick one, do not ship both. |
+| **X4** | VM coalescing of adjacent `DenseBin` **without** a new opcode | same as S2 | `machine/src/vm.rs` peek | **Not shipped** — S2 took the ISA pack (`DenseBin2`). Pick one; do not add peek on top. |
 
 Not ready without a gate (still not specialize-keep):
 
@@ -106,8 +106,10 @@ instead.
 
 ### MIR specialize / SIMD
 
-`DenseBin` / `DenseCmp` / `DenseConst` / `DenseMove` / `DenseUnary` /
+`DenseBin` / `DenseBin2` / `DenseCmp` / `DenseConst` / `DenseMove` / `DenseUnary` /
 `DenseCast` / dense heap / field / `V*` from `emit_dense` / `vectorize`.
+`DenseBin2` is a two-word ISA pack of adjacent `DenseBin` (COI-381); X4 VM peek
+is not shipped.
 
 `DenseCmp` is emitted for SSA **values**. Branchy compares go through
 `emit_br_cond` (stack `LOAD`/`BinSlotImm`/`Bin` + `Jump`) so fuse-select
@@ -203,7 +205,7 @@ order-of-magnitude, not `vm_profile`).
 [Threaded execute dispatch](https://linear.app/ardax/project/threaded-execute-dispatch-e632b8b7ca96)
 is cheaper dispatch, not new packed ops. `machine/src/fused.rs`: rustc
 1.98 has no stable `become`; a 256-entry fn-pointer table was ~2% slower
-on mandelbrot. 161 match arms including tombstones.
+on mandelbrot. 162 match arms including tombstones.
 
 Hot vs cold if that project splits the match: hot = `DenseBin` / fused
 jumps / `CALL` / `V*`; cold = `Dyn*`, FFI, coro, FORMAT, tombstones.

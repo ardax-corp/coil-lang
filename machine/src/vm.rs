@@ -2830,7 +2830,8 @@ impl<const S: usize> Machine<S> {
             if dispatch_mode != dispatch::Mode::Match && !debug_attached {
                 promise!(ip < code_len);
                 let peek = unsafe { code.get_unchecked(ip) };
-                if dispatch::is_hot(*peek.bytecode()) {
+                // Fib never takes this; keep the giant match as fall-through.
+                if unlikely(dispatch::is_hot(*peek.bytecode())) {
                     match dispatch::run_hot_streak(
                         &mut self.stack,
                         &mut sp,
@@ -2874,7 +2875,7 @@ impl<const S: usize> Machine<S> {
             // variant. A stale ceiling (e.g. YieldFromCoro) makes later opcodes
             // (`StoreIndex`, `DoneCoro`, `ArrayPush`, …) UB via assert_unchecked.
             #[cfg(not(debug_assertions))]
-            promise!(*bc as u8 <= Instruction::DenseMakeObject as u8);
+            promise!(*bc as u8 <= Instruction::DenseBin2 as u8);
 
             match bc {
                 Instruction::POP => {
@@ -3916,8 +3917,15 @@ impl<const S: usize> Machine<S> {
                     }
                     self.stack.push(value);
                 }
-                Instruction::DenseBin => {
+                Instruction::DenseBin | Instruction::DenseBin2 => {
                     dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
+                    if unlikely(*bc as u8 == Instruction::DenseBin2 as u8) {
+                        promise!(ip < code_len);
+                        let tail = unsafe { code.get_unchecked(ip) };
+                        ip += 1;
+                        prefetch_code(code, ip);
+                        dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
+                    }
                 }
                 Instruction::DenseCmp => {
                     dispatch::dense_cmp(&mut self.stack, sp, opcode, stack_cap);

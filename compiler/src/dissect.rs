@@ -311,6 +311,13 @@ fn format_operands(
             format!("has_send={}", (byte.operand_u32() & 1) != 0)
         }
         Instruction::DynCmp => format!("kind={}", byte.operand_u32() & 0xFF),
+        Instruction::DenseBin | Instruction::DenseBin2 => {
+            let (kind, dest, a, b) = byte.dense_abc_parts();
+            format!(
+                "kind={} dest={dest} a={a} b={b}",
+                common::dense::bin_kind_name(kind)
+            )
+        }
         _ => {
             let o = byte.operand_u32();
             if o == 0 {
@@ -333,12 +340,29 @@ pub fn format_bytecode_section(
 ) -> String {
     let mut out = String::new();
     let _ = writeln!(out, ";; fn {name}  bc[{start}..{end})");
-    for pc in start..end.min(bytecode.len()) {
+    let mut pc = start;
+    let end = end.min(bytecode.len());
+    while pc < end {
+        let byte = &bytecode[pc];
+        if *byte.bytecode() == Instruction::DenseBin2 && pc + 1 < end {
+            let tail = &bytecode[pc + 1];
+            let (k0, d0, a0, b0) = byte.dense_abc_parts();
+            let (k1, d1, a1, b1) = tail.dense_abc_parts();
+            let _ = writeln!(
+                out,
+                "{pc:05}  DenseBin2        {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1}",
+                common::dense::bin_kind_name(k0),
+                common::dense::bin_kind_name(k1)
+            );
+            pc += 2;
+            continue;
+        }
         let _ = writeln!(
             out,
             "{}",
-            format_byte_line(pc, &bytecode[pc], constants, pc_names)
+            format_byte_line(pc, byte, constants, pc_names)
         );
+        pc += 1;
     }
     out
 }
@@ -607,5 +631,24 @@ mod tests {
         assert!(line.contains("BinSlotImm"));
         assert!(line.contains("slot=4"));
         assert!(line.contains("imm=-1"));
+    }
+
+    #[test]
+    fn format_dense_bin2_skips_payload_word() {
+        let empty = HashMap::new();
+        let bc = [
+            Byte::new(Instruction::DenseBin2).with_dense_abc(common::dense::FADD64, 3, 1, 2),
+            Byte::new(Instruction::DenseBin).with_dense_abc(common::dense::FMUL64, 4, 3, 5),
+            Byte::new(Instruction::HALT),
+        ];
+        let out = format_bytecode_section("hot", 0, 3, &bc, &[], &empty);
+        assert!(out.contains("DenseBin2"));
+        assert!(out.contains("FADD64"));
+        assert!(out.contains("FMUL64"));
+        assert!(
+            !out.contains("\n00001  DenseBin"),
+            "payload DenseBin should not be a second dispatch line:\n{out}"
+        );
+        assert!(out.contains("HALT"));
     }
 }
