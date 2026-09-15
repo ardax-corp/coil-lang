@@ -1349,9 +1349,7 @@ impl<const S: usize> Machine<S> {
                         let mut arg_i = 0usize;
                         for slot in 0..arity {
                             if filled_mask & (1u64 << slot) != 0 {
-                                *ip_out = ip;
-                    *sp_out = sp;
-                    return dispatch::RestFlow::Continue;
+                                continue;
                             }
                             if arg_i >= new_args.len() {
                                 break;
