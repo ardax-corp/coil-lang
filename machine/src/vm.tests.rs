@@ -5074,8 +5074,7 @@
         assert_eq!(hot_v, match_v);
     }
 
-    #[test]
-    fn coi_381_dense_bin2_sequential_ieee_all_modes() {
+    fn dense_bin2_code() -> [Byte; 8] {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5089,7 +5088,7 @@
                     | u32::from(b),
             )
         };
-        let code = [
+        [
             Byte::new(Instruction::Seek).with_operand_u32(5),
             c(0, 2),
             c(1, 3),
@@ -5098,11 +5097,78 @@
             abc(Instruction::DenseBin, common::dense::IMUL64, 4, 3, 2),
             load(4),
             Byte::new(Instruction::HALT),
-        ];
+        ]
+    }
+
+    /// Odd-length chain: two-word `DenseBin2` then a leftover `DenseBin`
+    /// (not the payload word).
+    fn dense_bin2_residue_code() -> [Byte; 9] {
+        let ty = common::dense::TY_I64 as u32;
+        let c = |dest: u8, imm: u16| {
+            Byte::new(Instruction::DenseConst)
+                .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
+        };
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((a as u32) << 8)
+                    | u32::from(b),
+            )
+        };
+        [
+            Byte::new(Instruction::Seek).with_operand_u32(5),
+            c(0, 2),
+            c(1, 3),
+            c(2, 4),
+            abc(Instruction::DenseBin2, common::dense::IADD64, 3, 0, 1),
+            abc(Instruction::DenseBin, common::dense::IMUL64, 4, 3, 2),
+            abc(Instruction::DenseBin, common::dense::IADD64, 4, 4, 0),
+            load(4),
+            Byte::new(Instruction::HALT),
+        ]
+    }
+
+    #[test]
+    fn coi_381_dense_bin2_sequential_ieee_all_modes() {
+        let code = dense_bin2_code();
         let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
         assert_eq!(match_v, 20, "sequential (2+3)*4, not a fused FMA");
         assert_eq!(table_v, match_v);
         assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_389_dense_bin2_residue_peek_all_modes() {
+        let code = dense_bin2_residue_code();
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        assert_eq!(match_v, 22, "sequential (2+3)*4+2 residue");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_389_table_peek_saves_a_dispatch() {
+        let code = dense_bin2_residue_code();
+        let count = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            reset_dispatch_count();
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(&code, &[], &[], 0);
+            super::dispatch::override_mode(None);
+            dispatch_count()
+        };
+        let match_n = count(super::dispatch::Mode::Match);
+        let table_n = count(super::dispatch::Mode::Table);
+        let hot_n = count(super::dispatch::Mode::HotMatch);
+        assert!(
+            table_n < match_n,
+            "table should peek residue DenseBin (table={table_n}, match={match_n})"
+        );
+        assert!(
+            hot_n < match_n,
+            "hotmatch should peek residue DenseBin (hot={hot_n}, match={match_n})"
+        );
     }
 
     fn dense_cast_bin_code() -> [Byte; 6] {

@@ -504,6 +504,35 @@ fn main() {
             cast_bin >= 2,
             "COI-380 S3: nested mandelbrot x/y headers should be DenseCast ; DenseBin*, got {cast_bin}"
         );
+        let mut residue = 0usize;
+        let mut unpacked_pair = 0usize;
+        let mut pc = 0usize;
+        while pc < bc.len() {
+            let op = *bc[pc].bytecode();
+            let width = common::dense::stream_width(op);
+            let next = pc + width;
+            if op == Instruction::DenseBin2
+                && next < bc.len()
+                && *bc[next].bytecode() == Instruction::DenseBin
+            {
+                residue += 1;
+            }
+            if op == Instruction::DenseBin
+                && next < bc.len()
+                && *bc[next].bytecode() == Instruction::DenseBin
+            {
+                unpacked_pair += 1;
+            }
+            pc += width;
+        }
+        assert_eq!(
+            unpacked_pair, 0,
+            "S2 should pack adjacent DenseBin; DenseBin; leftover pairs are X4 residue after DenseBin2"
+        );
+        assert!(
+            residue >= 1,
+            "COI-389 X4: nested mandelbrot should keep DenseBin2 ; leftover DenseBin, got {residue}"
+        );
         let moves = bc
             .iter()
             .filter(|b| *b.bytecode() == Instruction::DenseMove)
