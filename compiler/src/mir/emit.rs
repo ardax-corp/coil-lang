@@ -1244,7 +1244,7 @@ fn move_op(dest: u8, src: u8) -> IlOp {
     IlOp::byte(Byte::new(Instruction::DenseMove).with_dense_move(dest, src))
 }
 
-fn emit_const(
+pub(super) fn emit_const(
     c: MirConst,
     dest: u8,
     pool: &mut Vec<u64>,
