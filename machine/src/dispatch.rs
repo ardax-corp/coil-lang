@@ -1328,15 +1328,6 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             let tail = take_code_word(ctx);
             dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
         }
-        Instruction::DenseBinJmp => {
-            dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-            apply_payload_jmp(ctx);
-        }
-        Instruction::DenseBin2Jmp => {
-            let tail = take_code_word(ctx);
-            dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
-            apply_payload_jmp(ctx);
-        }
         Instruction::DenseBinJmpf => {
             dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
             let tail = take_code_word(ctx);

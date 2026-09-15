@@ -3926,33 +3926,30 @@ impl<const S: usize> Machine<S> {
                     }
                     self.stack.push(value);
                 }
-                Instruction::DenseBin | Instruction::DenseBin2 => {
+                Instruction::DenseBin
+                | Instruction::DenseBin2
+                | Instruction::DenseBinJmp
+                | Instruction::DenseBin2Jmp => {
                     dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
-                    if unlikely(*bc as u8 == Instruction::DenseBin2 as u8) {
+                    if unlikely(
+                        *bc as u8 == Instruction::DenseBin2 as u8
+                            || *bc as u8 == Instruction::DenseBin2Jmp as u8,
+                    ) {
                         promise!(ip < code_len);
                         let tail = unsafe { code.get_unchecked(ip) };
                         ip += 1;
                         prefetch_code(code, ip);
                         dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
                     }
-                }
-                Instruction::DenseBinJmp => {
-                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
-                    promise!(ip < code_len);
-                    let jmp = unsafe { code.get_unchecked(ip) };
-                    ip += 1;
-                    set_jump_target(&mut ip, jmp.operand_u32() as usize, code);
-                }
-                Instruction::DenseBin2Jmp => {
-                    dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
-                    promise!(ip < code_len);
-                    let tail = unsafe { code.get_unchecked(ip) };
-                    ip += 1;
-                    dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
-                    promise!(ip < code_len);
-                    let jmp = unsafe { code.get_unchecked(ip) };
-                    ip += 1;
-                    set_jump_target(&mut ip, jmp.operand_u32() as usize, code);
+                    if unlikely(
+                        *bc as u8 == Instruction::DenseBinJmp as u8
+                            || *bc as u8 == Instruction::DenseBin2Jmp as u8,
+                    ) {
+                        promise!(ip < code_len);
+                        let jmp = unsafe { code.get_unchecked(ip) };
+                        ip += 1;
+                        set_jump_target(&mut ip, jmp.operand_u32() as usize, code);
+                    }
                 }
                 Instruction::DenseBinJmpf => {
                     dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
