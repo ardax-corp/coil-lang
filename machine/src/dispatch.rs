@@ -1,3 +1,6 @@
+//! G2 (COI-375): remaining ops on the G0/G1 table; kernel CALL/RETURN/LOAD/STORE
+//! stay on the inlined match (G1: outlined CALL/RETURN lose on fib).
+//!
 //! G1 (COI-374): outlined hot-op dispatch vs the giant `Machine::execute` match.
 //!
 //! Stable Rust has no guaranteed tail calls (`become` is nightly), so this
@@ -154,6 +157,13 @@ struct HotExtra<'a> {
     resume_stack: &'a mut Vec<super::ResumeCtx>,
     io_reactor: &'a std::sync::Arc<crate::io_reactor::IoReactor>,
     execute_done: Option<bool>,
+    pending_rest: Option<Byte>,
+}
+
+/// Outcome of a remaining (non-kernel) op executed via [`super::Machine::exec_rest`].
+pub(super) enum RestFlow {
+    Continue,
+    Done(bool),
 }
 
 struct HotCtx<'a, 'e> {
@@ -211,6 +221,39 @@ const ALWAYS_HOT: [u64; 4] = {
     b = or_hot(b, Instruction::BinSlotSlotStore);
     b
 };
+
+/// Inlined in `execute` by default: CALL/RETURN (fib/tak) and packed
+/// LOAD/STORE/Seek / imm-slot fuses (nsieve bounce if forced onto the table).
+const KERNEL: [u64; 4] = {
+    let mut b = [0u64; 4];
+    b = or_hot(b, Instruction::CALL);
+    b = or_hot(b, Instruction::TailCall);
+    b = or_hot(b, Instruction::RETURN);
+    b = or_hot(b, Instruction::ConstReturnImm);
+    b = or_hot(b, Instruction::LoadReturnSlot);
+    b = or_hot(b, Instruction::BinReturn);
+    b = or_hot(b, Instruction::MakeEnumReturn);
+    b = or_hot(b, Instruction::LOAD);
+    b = or_hot(b, Instruction::STORE);
+    b = or_hot(b, Instruction::StorePop);
+    b = or_hot(b, Instruction::Seek);
+    b = or_hot(b, Instruction::BinSlotImm);
+    b = or_hot(b, Instruction::BinSlotImmStore);
+    b = or_hot(b, Instruction::BinSlotImmJmpf);
+    b = or_hot(b, Instruction::BinSlotImmJmpt);
+    b
+};
+
+#[inline(always)]
+pub(super) fn is_kernel(bc: Instruction) -> bool {
+    is_kernel_disc(bc as u8)
+}
+
+#[inline(always)]
+fn is_kernel_disc(disc: u8) -> bool {
+    let i = disc as usize;
+    (KERNEL[i >> 6] >> (i & 63)) & 1 != 0
+}
 
 const OPT_HOT: [u64; 4] = {
     let mut b = [0u64; 4];
@@ -1016,6 +1059,382 @@ fn apply_trailing_dense_bin_jmp(ctx: &mut HotCtx<'_, '_>) {
 
 fn cold(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
 
+/// Remaining Instruction coverage: bounce to `Machine::exec_rest` (COI-375).
+#[inline(never)]
+fn rest(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    ctx.extra.pending_rest = Some(opcode);
+}
+
+#[inline(never)]
+fn op_pop(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    ctx.stack.pop();
+}
+
+#[inline(never)]
+fn op_dup(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    ctx.stack.duplicate();
+}
+
+#[inline(never)]
+fn op_const(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let op = opcode.operand_u32();
+    let raw = if unlikely(op & Byte::POOL_FLAG != 0) {
+        let pool_idx = (op & !Byte::POOL_FLAG) as usize;
+        promise!(pool_idx < ctx.constants.len());
+        unsafe { *ctx.constants.get_unchecked(pool_idx) }
+    } else {
+        op as i32 as i64 as u64
+    };
+    ctx.stack.push(Value::from(raw));
+}
+
+#[inline(never)]
+fn op_code_ptr(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    ctx.stack.push(Value::from(opcode.operand_u32() as i64));
+}
+
+#[inline(never)]
+fn op_noop(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
+
+#[inline(always)]
+fn unary_int(stack: &mut Stack<Value>, op: fn(i64) -> i64) {
+    let sp = stack.tell();
+    promise!(sp >= 1);
+    let idx = sp - 1;
+    let rhs = stack[idx].as_int();
+    stack[idx].replace(op(rhs) as _);
+}
+
+#[inline(always)]
+fn binary_int(stack: &mut Stack<Value>, op: fn(i64, i64) -> i64) {
+    let sp = stack.tell();
+    promise!(sp >= 2);
+    let rhs = stack[sp - 1].as_int();
+    let lhs = stack[sp - 2].as_int();
+    stack[sp - 2].replace(op(lhs, rhs) as _);
+    stack.seek(sp - 1);
+}
+
+#[inline(always)]
+fn binary_float(stack: &mut Stack<Value>, op: fn(f64, f64) -> f64) {
+    let sp = stack.tell();
+    promise!(sp >= 2);
+    let rhs = stack[sp - 1].as_float();
+    let lhs = stack[sp - 2].as_float();
+    stack[sp - 2].replace(op(lhs, rhs).to_bits() as _);
+    stack.seek(sp - 1);
+}
+
+#[inline(always)]
+fn binary_float_cmp(stack: &mut Stack<Value>, op: fn(f64, f64) -> bool) {
+    let sp = stack.tell();
+    promise!(sp >= 2);
+    let rhs = stack[sp - 1].as_float();
+    let lhs = stack[sp - 2].as_float();
+    stack[sp - 2].replace(op(lhs, rhs) as _);
+    stack.seek(sp - 1);
+}
+
+#[inline(always)]
+fn binary_bool(stack: &mut Stack<Value>, op: fn(bool, bool) -> bool) {
+    let sp = stack.tell();
+    promise!(sp >= 2);
+    let rhs = stack[sp - 1].as_bool();
+    let lhs = stack[sp - 2].as_bool();
+    stack[sp - 2].replace(op(lhs, rhs) as _);
+    stack.seek(sp - 1);
+}
+
+#[inline(never)]
+fn op_not(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    unary_int(ctx.stack, |x| !x);
+}
+
+#[inline(never)]
+fn op_neg(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    unary_int(ctx.stack, |x| -x);
+}
+
+#[inline(never)]
+fn op_log_not(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let val = ctx.stack.pop();
+    ctx.stack.push(Value::from(!(val.as_int() != 0)));
+}
+
+#[inline(never)]
+fn op_negf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let sp = ctx.stack.tell();
+    promise!(sp >= 1);
+    let idx = sp - 1;
+    let bits = ctx.stack[idx].raw() as u64;
+    ctx.stack[idx].replace((bits ^ (1u64 << 63)) as _);
+}
+
+#[inline(never)]
+fn op_inc(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let (slot, prefix, is_float) = opcode.inc_dec_parts();
+    promise!(ctx.sp + slot < ctx.stack_cap);
+    let idx = ctx.sp + slot;
+    let old = ctx.stack[idx];
+    let new_val = if is_float {
+        Value::from(old.as_float() + 1.0)
+    } else {
+        Value::from(old.as_int() + 1)
+    };
+    ctx.stack[idx] = new_val;
+    ctx.stack.push(if prefix { new_val } else { old });
+}
+
+#[inline(never)]
+fn op_dec(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let (slot, prefix, is_float) = opcode.inc_dec_parts();
+    promise!(ctx.sp + slot < ctx.stack_cap);
+    let idx = ctx.sp + slot;
+    let old = ctx.stack[idx];
+    let new_val = if is_float {
+        Value::from(old.as_float() - 1.0)
+    } else {
+        Value::from(old.as_int() - 1)
+    };
+    ctx.stack[idx] = new_val;
+    ctx.stack.push(if prefix { new_val } else { old });
+}
+
+#[inline(never)]
+fn op_and(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_bool(ctx.stack, |a, b| a && b);
+}
+#[inline(never)]
+fn op_or(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_bool(ctx.stack, |a, b| a || b);
+}
+#[inline(never)]
+fn op_add(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a + b);
+}
+#[inline(never)]
+fn op_sub(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a - b);
+}
+#[inline(never)]
+fn op_mul(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a * b);
+}
+#[inline(never)]
+fn op_div(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a / b);
+}
+#[inline(never)]
+fn op_mod(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a % b);
+}
+#[inline(never)]
+fn op_le(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| (a < b) as i64);
+}
+#[inline(never)]
+fn op_leq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| (a <= b) as i64);
+}
+#[inline(never)]
+fn op_gt(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| (a > b) as i64);
+}
+#[inline(never)]
+fn op_geq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| (a >= b) as i64);
+}
+#[inline(never)]
+fn op_eq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let sp = ctx.stack.tell();
+    promise!(sp >= 2);
+    let rhs = ctx.stack[sp - 1];
+    let lhs = ctx.stack[sp - 2];
+    let eq = crate::value_eq::values_eq(ctx.heap, lhs, rhs);
+    ctx.stack[sp - 2].replace(eq as _);
+    ctx.stack.seek(sp - 1);
+}
+#[inline(never)]
+fn op_neq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let sp = ctx.stack.tell();
+    promise!(sp >= 2);
+    let rhs = ctx.stack[sp - 1];
+    let lhs = ctx.stack[sp - 2];
+    let eq = crate::value_eq::values_eq(ctx.heap, lhs, rhs);
+    ctx.stack[sp - 2].replace((!eq) as _);
+    ctx.stack.seek(sp - 1);
+}
+#[inline(never)]
+fn op_addf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float(ctx.stack, |a, b| a + b);
+}
+#[inline(never)]
+fn op_subf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float(ctx.stack, |a, b| a - b);
+}
+#[inline(never)]
+fn op_mulf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float(ctx.stack, |a, b| a * b);
+}
+#[inline(never)]
+fn op_divf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float(ctx.stack, |a, b| a / b);
+}
+#[inline(never)]
+fn op_modf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float(ctx.stack, |a, b| a % b);
+}
+#[inline(never)]
+fn op_shl(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a << b);
+}
+#[inline(never)]
+fn op_shr(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a >> b);
+}
+#[inline(never)]
+fn op_xor(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a ^ b);
+}
+#[inline(never)]
+fn op_bitand(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a & b);
+}
+#[inline(never)]
+fn op_bitor(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_int(ctx.stack, |a, b| a | b);
+}
+#[inline(never)]
+fn op_pow(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let sp = ctx.stack.tell();
+    promise!(sp >= 2);
+    let rhs = ctx.stack[sp - 1].as_int();
+    let lhs = ctx.stack[sp - 2].as_int();
+    ctx.stack[sp - 2].replace(lhs.pow(rhs as u32) as _);
+    ctx.stack.seek(sp - 1);
+}
+#[inline(never)]
+fn op_powf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float(ctx.stack, |a, b| a.powf(b));
+}
+#[inline(never)]
+fn op_lef(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float_cmp(ctx.stack, |a, b| a < b);
+}
+#[inline(never)]
+fn op_leqf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float_cmp(ctx.stack, |a, b| a <= b);
+}
+#[inline(never)]
+fn op_gtf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float_cmp(ctx.stack, |a, b| a > b);
+}
+#[inline(never)]
+fn op_geqf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    binary_float_cmp(ctx.stack, |a, b| a >= b);
+}
+#[inline(never)]
+fn op_cast_i2f(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let v = ctx.stack.pop().as_int() as f64;
+    ctx.stack.push(Value::from(v));
+}
+#[inline(never)]
+fn op_cast_f2i(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let v = ctx.stack.pop().as_float() as i64;
+    ctx.stack.push(Value::from(v));
+}
+#[inline(never)]
+fn op_cast_i2b(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let v = ctx.stack.pop().as_int();
+    ctx.stack.push(Value::from((v as u8) as i64));
+}
+#[inline(never)]
+fn op_cast_b2i(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let v = ctx.stack.pop().as_int();
+    ctx.stack.push(Value::from(v & 0xff));
+}
+#[inline(never)]
+fn op_cast_i2bool(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let v = ctx.stack.pop().as_int();
+    ctx.stack.push(Value::from((v != 0) as i64));
+}
+#[inline(never)]
+fn op_cast_bool2i(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
+    let v = ctx.stack.pop().as_int();
+    ctx.stack.push(Value::from(if v != 0 { 1 } else { 0 }));
+}
+
+#[inline(never)]
+fn op_bin_slot_slot(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
+    let (op, a, b) = opcode.bin_slot_slot_parts();
+    promise!(ctx.sp + a < ctx.stack_cap);
+    promise!(ctx.sp + b < ctx.stack_cap);
+    let va = ctx.stack[ctx.sp + a];
+    let vb = ctx.stack[ctx.sp + b];
+    let result = crate::fused::eval_bin(op, va, vb, ctx.heap);
+    ctx.stack.push(result);
+}
+
+fn fill_g2_coverage(t: &mut [Handler; 256]) {
+    for h in t.iter_mut() {
+        if core::ptr::fn_addr_eq(*h, cold as Handler) {
+            *h = rest;
+        }
+    }
+    for disc in 0..256u16 {
+        if is_kernel_disc(disc as u8) {
+            t[disc as usize] = cold;
+        }
+    }
+    t[Instruction::POP as usize] = op_pop;
+    t[Instruction::DUPLICATE as usize] = op_dup;
+    t[Instruction::CONST as usize] = op_const;
+    t[Instruction::CodePtr as usize] = op_code_ptr;
+    t[Instruction::NOOP as usize] = op_noop;
+    t[Instruction::INC as usize] = op_inc;
+    t[Instruction::DEC as usize] = op_dec;
+    t[Instruction::NOT as usize] = op_not;
+    t[Instruction::NEG as usize] = op_neg;
+    t[Instruction::LogNot as usize] = op_log_not;
+    t[Instruction::NEGF as usize] = op_negf;
+    t[Instruction::AND as usize] = op_and;
+    t[Instruction::OR as usize] = op_or;
+    t[Instruction::ADD as usize] = op_add;
+    t[Instruction::SUB as usize] = op_sub;
+    t[Instruction::MUL as usize] = op_mul;
+    t[Instruction::DIV as usize] = op_div;
+    t[Instruction::MOD as usize] = op_mod;
+    t[Instruction::LE as usize] = op_le;
+    t[Instruction::LEQ as usize] = op_leq;
+    t[Instruction::GT as usize] = op_gt;
+    t[Instruction::GEQ as usize] = op_geq;
+    t[Instruction::EQ as usize] = op_eq;
+    t[Instruction::NEQ as usize] = op_neq;
+    t[Instruction::ADDF as usize] = op_addf;
+    t[Instruction::SUBF as usize] = op_subf;
+    t[Instruction::MULF as usize] = op_mulf;
+    t[Instruction::DIVF as usize] = op_divf;
+    t[Instruction::MODF as usize] = op_modf;
+    t[Instruction::SHL as usize] = op_shl;
+    t[Instruction::SHR as usize] = op_shr;
+    t[Instruction::XOR as usize] = op_xor;
+    t[Instruction::BITAND as usize] = op_bitand;
+    t[Instruction::BITOR as usize] = op_bitor;
+    t[Instruction::Pow as usize] = op_pow;
+    t[Instruction::PowF as usize] = op_powf;
+    t[Instruction::LEF as usize] = op_lef;
+    t[Instruction::LEQF as usize] = op_leqf;
+    t[Instruction::GTF as usize] = op_gtf;
+    t[Instruction::GEQF as usize] = op_geqf;
+    t[Instruction::CastIntToFloat as usize] = op_cast_i2f;
+    t[Instruction::CastFloatToInt as usize] = op_cast_f2i;
+    t[Instruction::CastIntToByte as usize] = op_cast_i2b;
+    t[Instruction::CastByteToInt as usize] = op_cast_b2i;
+    t[Instruction::CastIntToBool as usize] = op_cast_i2bool;
+    t[Instruction::CastBoolToInt as usize] = op_cast_bool2i;
+    t[Instruction::BinSlotSlot as usize] = op_bin_slot_slot;
+}
+
 #[inline(never)]
 fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
@@ -1101,16 +1520,19 @@ fn op_dense_unary(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
+#[allow(dead_code)] // optional LOAD/STORE/Seek table slots (G1 bounce; stay kernel)
 #[inline(never)]
 fn op_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     load(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
+#[allow(dead_code)]
 #[inline(never)]
 fn op_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     store(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
+#[allow(dead_code)]
 #[inline(never)]
 fn op_seek(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     seek(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
@@ -1368,6 +1790,7 @@ fn build_table() -> [Handler; 256] {
     t[Instruction::LogNotJmpf as usize] = op_log_not_jmpf;
     t[Instruction::LogNotJmpt as usize] = op_log_not_jmpt;
     t[Instruction::BinSlotSlotStore as usize] = op_bin_slot_slot_store;
+    fill_g2_coverage(&mut t);
     // Imm-slot fuses share the fib/tak kernel with CALL/RETURN. Threading
     // them without both call and return bounces out of the trampoline.
     if call_is_hot() && return_is_hot() {
@@ -1644,7 +2067,11 @@ fn table_loop(ctx: &mut HotCtx<'_, '_>) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         h(ctx, opcode);
-        if unlikely(ctx.panic_msg.is_some() || ctx.extra.execute_done.is_some()) {
+        if unlikely(
+            ctx.panic_msg.is_some()
+                || ctx.extra.execute_done.is_some()
+                || ctx.extra.pending_rest.is_some(),
+        ) {
             return;
         }
     }
@@ -1676,6 +2103,8 @@ fn hotmatch_loop(ctx: &mut HotCtx<'_, '_>) {
 pub(super) enum HotStop {
     Panic(&'static str),
     Done(bool),
+    /// Table slot for a remaining op; execute via [`super::Machine::exec_rest`].
+    Rest(Byte),
 }
 
 /// Consume a streak of hot ops at `*ip`. Leaves `*ip` on the first cold op
@@ -1715,6 +2144,7 @@ pub(super) fn run_hot_streak<const S: usize>(
         resume_stack,
         io_reactor,
         execute_done: None,
+        pending_rest: None,
     };
     let mut ctx = HotCtx {
         stack,
@@ -1736,8 +2166,10 @@ pub(super) fn run_hot_streak<const S: usize>(
     *sp = ctx.sp;
     if let Some(msg) = ctx.panic_msg {
         Some(HotStop::Panic(msg))
+    } else if let Some(paused) = ctx.extra.execute_done {
+        Some(HotStop::Done(paused))
     } else {
-        ctx.extra.execute_done.map(HotStop::Done)
+        ctx.extra.pending_rest.take().map(HotStop::Rest)
     }
 }
 
@@ -1768,6 +2200,11 @@ mod tests {
         assert!(!is_hot(Instruction::LOAD));
         assert!(!is_hot(Instruction::Seek));
         assert!(!is_hot(Instruction::HALT));
+        assert!(is_kernel(Instruction::CALL));
+        assert!(is_kernel(Instruction::LOAD));
+        assert!(is_kernel(Instruction::MakeEnumReturn));
+        assert!(!is_kernel(Instruction::CONST));
+        assert!(!is_kernel(Instruction::HALT));
         assert_eq!(
             is_hot(Instruction::CALL),
             call_is_hot() && return_is_hot()
@@ -1796,5 +2233,25 @@ mod tests {
             !core::ptr::fn_addr_eq(t[Instruction::CALL as usize], cold as Handler),
             call_is_hot()
         );
+        assert!(!core::ptr::fn_addr_eq(
+            t[Instruction::CONST as usize],
+            cold as Handler
+        ));
+        assert!(!core::ptr::fn_addr_eq(
+            t[Instruction::HALT as usize],
+            cold as Handler
+        ));
+        assert!(!core::ptr::fn_addr_eq(
+            t[Instruction::ADD as usize],
+            cold as Handler
+        ));
+        assert!(!core::ptr::fn_addr_eq(
+            t[Instruction::HostInvoke as usize],
+            cold as Handler
+        ));
+        assert!(!core::ptr::fn_addr_eq(
+            t[Instruction::DenseMake as usize],
+            cold as Handler
+        ));
     }
 }

@@ -5492,3 +5492,31 @@
         assert_eq!(table_v, match_v);
         assert_eq!(hot_v, match_v);
     }
+
+    #[test]
+    fn coi_375_table_covers_stack_arith_and_halt() {
+        let code = [
+            const_int(40),
+            const_int(2),
+            Byte::new(Instruction::ADD),
+            Byte::new(Instruction::HALT),
+        ];
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        assert_eq!(match_v, 42);
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_375_table_tombstone_panics_like_match() {
+        let code = [Byte::new(Instruction::HostInvokeNiche)];
+        let run = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(&code, &[], &[], 0);
+            super::dispatch::override_mode(None);
+            vm.panicked()
+        };
+        assert!(run(super::dispatch::Mode::Match));
+        assert!(run(super::dispatch::Mode::Table));
+    }
