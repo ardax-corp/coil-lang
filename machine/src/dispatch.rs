@@ -954,10 +954,11 @@ fn apply_trailing_jmp_cold(ctx: &mut HotCtx<'_, '_>) {
 /// Consume a following `DenseBin` / `DenseBin2` without a second dispatch
 /// (COI-380 S3). Table/hotmatch only — giant match stays two-dispatch; no
 /// new discriminant. After S2 the header shape is `DenseCast ; DenseBin2`.
+/// Returns whether a bin was consumed so S5 can also peek a latch `JMP`.
 #[inline(always)]
-fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) {
+fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) -> bool {
     if ctx.ip >= ctx.code.len() {
-        return;
+        return false;
     }
     promise!(ctx.ip < ctx.code.len());
     let next = unsafe { ctx.code.get_unchecked(ctx.ip) };
@@ -966,13 +967,24 @@ fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         dense_bin(ctx.stack, ctx.sp, next, ctx.stack_cap);
-        return;
+        return true;
     }
     if bc == Instruction::DenseBin2 as u8 {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         let tail = take_code_word(ctx);
         dense_bin2(ctx.stack, ctx.sp, next, &tail, ctx.stack_cap);
+        return true;
+    }
+    false
+}
+
+/// nsieve k-loop: `DenseStoreIndex ; DenseBin ; JMP` (COI-382 S5). Peek the
+/// IV bump and latch without a new discriminant. Giant match stays split.
+#[inline(always)]
+fn apply_trailing_dense_bin_jmp(ctx: &mut HotCtx<'_, '_>) {
+    if apply_trailing_dense_bin(ctx) {
+        apply_trailing_jmp(ctx);
     }
 }
 
@@ -1054,7 +1066,7 @@ fn op_dense_move(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[inline(never)]
 fn op_dense_cast(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cast(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-    apply_trailing_dense_bin(ctx);
+    let _ = apply_trailing_dense_bin(ctx);
 }
 
 #[inline(never)]
@@ -1238,7 +1250,7 @@ fn op_dense_store_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
         ctx.extra.dense_obj,
         ctx.stack_cap,
     ) {
-        Ok(()) => {}
+        Ok(()) => apply_trailing_dense_bin_jmp(ctx),
         Err(DenseFail::IndexOob) => ctx.panic_msg = Some("index out of bounds"),
         Err(_) => ctx.panic_msg = Some("StoreIndex on non-array"),
     }
@@ -1418,7 +1430,7 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
         Instruction::DenseMove => dense_move(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
         Instruction::DenseCast => {
             dense_cast(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-            apply_trailing_dense_bin(ctx);
+            let _ = apply_trailing_dense_bin(ctx);
         }
         Instruction::DenseUnary => dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
         Instruction::LOAD => load(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
@@ -1543,7 +1555,7 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             ctx.extra.dense_obj,
             ctx.stack_cap,
         ) {
-            Ok(()) => {}
+            Ok(()) => apply_trailing_dense_bin_jmp(ctx),
             Err(DenseFail::IndexOob) => ctx.panic_msg = Some("index out of bounds"),
             Err(_) => ctx.panic_msg = Some("StoreIndex on non-array"),
         },
