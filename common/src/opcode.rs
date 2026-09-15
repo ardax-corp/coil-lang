@@ -419,6 +419,9 @@ pub enum Instruction {
     /// Operand is the first `dense_abc` packing. The following code word is
     /// a payload [`Self::DenseBin`] (second op); the VM consumes both in one
     /// dispatch. Not FMA / reassoc; not tombstoned `FloatChainStore`.
+    /// Table/hotmatch peek a trailing leftover `DenseBin` (COI-389 X4) then
+    /// a trailing `JMP` (COI-387 X2) without a new discriminant; giant match
+    /// does not.
     DenseBin2,
     /// [`Self::DenseBin`] then a fused `*Jmpf`/`*Jmpt` (COI-377 S1).
     /// Operand is the bin `dense_abc`. The following code word is the jump
@@ -583,6 +586,8 @@ pub mod dense {
     /// [`super::Instruction::DenseBinJmpf`], and
     /// [`super::Instruction::DenseIndexJmpf`] consume the following payload word.
     /// COI-387 X2 coalesces a trailing `JMP` in the VM (no extra discriminant).
+    /// COI-389 X4 coalesces a leftover `DenseBin` after `DenseBin2` (odd-length
+    /// chains; S2 already packed `DenseBin; DenseBin`).
     /// COI-380 S3 coalesces a trailing `DenseBin`/`DenseBin2` after `DenseCast`.
     /// COI-382 S5 coalesces `DenseStoreIndex` then `DenseBin`/`DenseBin2` then `JMP`.
     #[inline]

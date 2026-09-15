@@ -951,10 +951,35 @@ fn apply_trailing_jmp_cold(ctx: &mut HotCtx<'_, '_>) {
     }
 }
 
+/// Consume a leftover `DenseBin` after `DenseBin2` (COI-389 X4).
+/// S2 already packed `DenseBin; DenseBin` into `DenseBin2`; odd-length
+/// chains leave `DenseBin2 ; DenseBin`. Table/hotmatch only — no new
+/// discriminant; giant match stays split so debugger single-step /
+/// `debug_locs` still stop on the residue. `unlikely`: inner latch is
+/// `DenseBin2 ; JMP` (X2), so a taken residue must not enlarge that arm.
+/// Do not peek another `DenseBin2` (that would re-do S2) and do not put
+/// this on the `DenseBin` arm (fib layout / S2 already ate that pair).
+#[inline(always)]
+fn apply_trailing_dense_bin_residue(ctx: &mut HotCtx<'_, '_>) -> bool {
+    if ctx.ip >= ctx.code.len() {
+        return false;
+    }
+    promise!(ctx.ip < ctx.code.len());
+    let next = unsafe { ctx.code.get_unchecked(ctx.ip) };
+    if unlikely(*next.bytecode() as u8 == Instruction::DenseBin as u8) {
+        ctx.ip += 1;
+        prefetch_code(ctx.code, ctx.ip);
+        dense_bin(ctx.stack, ctx.sp, next, ctx.stack_cap);
+        return true;
+    }
+    false
+}
+
 /// Consume a following `DenseBin` / `DenseBin2` without a second dispatch
 /// (COI-380 S3). Table/hotmatch only — giant match stays two-dispatch; no
 /// new discriminant. After S2 the header shape is `DenseCast ; DenseBin2`.
 /// Returns whether a bin was consumed so S5 can also peek a latch `JMP`.
+/// After a peeked `DenseBin2`, also take X4 residue `DenseBin`.
 #[inline(always)]
 fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) -> bool {
     if ctx.ip >= ctx.code.len() {
@@ -974,6 +999,7 @@ fn apply_trailing_dense_bin(ctx: &mut HotCtx<'_, '_>) -> bool {
         prefetch_code(ctx.code, ctx.ip);
         let tail = take_code_word(ctx);
         dense_bin2(ctx.stack, ctx.sp, next, &tail, ctx.stack_cap);
+        let _ = apply_trailing_dense_bin_residue(ctx);
         return true;
     }
     false
@@ -1000,6 +1026,7 @@ fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let tail = take_code_word(ctx);
     dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+    let _ = apply_trailing_dense_bin_residue(ctx);
     apply_trailing_jmp(ctx);
 }
 
@@ -1380,6 +1407,7 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
         Instruction::DenseBin2 => {
             let tail = take_code_word(ctx);
             dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
+            let _ = apply_trailing_dense_bin_residue(ctx);
             apply_trailing_jmp(ctx);
         }
         Instruction::DenseBinJmpf => {
