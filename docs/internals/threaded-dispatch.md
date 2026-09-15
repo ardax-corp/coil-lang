@@ -1,4 +1,4 @@
-# Threaded execute dispatch (COI-373 G0, COI-374 G1, COI-375 G2)
+# Threaded execute dispatch (COI-373 G0, COI-374 G1, COI-375 G2, COI-376 G3)
 
 Can a portable **fn-pointer** interpreter beat the outlined giant `match` in
 `Machine::execute` on flagship `.hyc`?
@@ -166,12 +166,51 @@ Checksums identical: mandelbrot `625885`, fib `2178309`, nsieve `1900`.
 Divert stays `unlikely(is_hot)` (G1). Diverting all `!is_kernel` ops made fib ~1.12× slower (stack `ADD` bouncing out of the CALL kernel).
 
 G2 landed remaining coverage without parking CALL/RETURN or packed LOAD/STORE
-on the default table. Next is hot/cold I-cache split of handler code, not a
-retry of “CALL on the table.”
+on the default table. G3 splits handler **layout** (I-cache), not coverage.
+
+## G3 hot/cold I-cache split
+
+Rare ops (`FORMAT`, `STRINGIFY`, `HostInvoke`, `rest` / exec_rest, debug/deopt)
+must not share instruction-cache lines with mandelbrot/fib dense kernels.
+
+- Hot outlined handlers (`op_dense_*`, jmp fuses, `execute_dense`, `table_loop`)
+  use `.text.hot` on Linux. Cold handlers (`rest`, G2 stack arith,
+  optional CALL/RETURN) use `#[cold]` + `.text.unlikely`.
+  `.cargo/config.toml` passes `-z keep-text-section-prefix` so rust-lld does
+  not fold those prefixes into `.text`.
+- Table mode **peeks** `ALWAYS_HOT` (no new discriminant) and enters
+  `execute_dense`: a compact match over the G1 dense/jmp set with **no**
+  256-entry table. Kernel ops still bounce to the giant `execute` match.
+  G2 remaining ops still run on the trampoline only after the dense streak
+  ends (and only then is the handler table touched).
+- CALL/RETURN stay off the default table. Packed LOAD/STORE / imm-slot fuses
+  stay off the trampoline.
+
+`hotmatch` is unchanged (G1 compact match, including opt-in CALL/RETURN).
+
+### G3 measured (release, fat LTO, `COIL_AUTO_PAR=0`, same `.hyc` vs G2 `main`)
+
+Same host as G2. `perf_event` still unavailable (`poop` / `perf`); wall A/B is
+`hyperfine --shell=none`. ELF: `.text.hot` ~57 KiB, `.text.unlikely` ~324 KiB,
+kept as distinct sections.
+
+Checksums identical: mandelbrot `625885`, fib `2178309`, nsieve `1900`.
+
+| Bench | main match | G3 match | main table (G2) | G3 table | notes |
+|---|---|---|---|---|---|
+| mandelbrot | 19.0 ± 0.9 ms | 18.1 ± 1.0 ms | 20.5 ± 1.3 ms | **19.1 ± 0.7 ms** | table ~1.07× vs G2 table; wash vs G3 match |
+| fib | 55.4 ± 0.4 ms | 54.8 ± 3.2 ms | 62.2 ± 8.6 ms | 61.2 ± 9.7 ms | **flat vs main** (same ~1.12× table vs match as G2) |
+| nsieve | 2.5 ± 0.1 ms | 2.4 ± 0.2 ms | 2.7 ± 0.2 ms | 2.7 ± 0.1 ms | short; wash |
+
+**Go:** land the layout split. Mandelbrot default-table improved vs G2; fib
+default-table is flat vs G2 (CALL still on the match). Fib table-vs-match gap
+is G2, not a G3 regression. No archive bump.
 
 ## I-cache / inlining
 
 - Hot loop is a separate `#[inline(never)]` function from `execute`.
+- G3: `execute_dense` is a further outlined compact match in `.text.hot`;
+  `rest` / FORMAT / HostInvoke handlers are `#[cold]` in `.text.unlikely`.
 - Table handlers are `#[inline(never)]` so LTO does not paste them into one
   mega-function (and so objdump can show `callq *handler`).
 - Shared `#[inline(always)]` helpers keep match-path and table semantics
