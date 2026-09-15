@@ -437,6 +437,9 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
         if let Some(fused) = try_fuse_bin_slot_imm_local(&w) {
             return Some((Slot::Byte(fused, window[0].loc()), 3));
         }
+        if let Some(fused) = try_fuse_const_load_bin_slot_imm_local(&w) {
+            return Some((Slot::Byte(fused, window[0].loc()), 3));
+        }
         if let Some(fused) = try_fuse_bin_slot_slot_local(&w) {
             return Some((Slot::Byte(fused, window[0].loc()), 3));
         }
@@ -990,6 +993,21 @@ fn try_fuse_bin_slot_imm_local(window: &[Byte; 3]) -> Option<Byte> {
         return None;
     }
     Some(Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(op as u8, slot, imm))
+}
+
+/// `CONST imm; LOAD slot; commute-bin` → `BinSlotImm` (COI-384 S7).
+///
+/// Same encoding as `LOAD; CONST; op` after operand-order canon. Needed because
+/// `item_check` materializes `1 + call` as `CONST; LOAD; ADD` after slot
+/// promotion, past the canon pass. Non-commutative ops stay unfused.
+fn try_fuse_const_load_bin_slot_imm_local(window: &[Byte; 3]) -> Option<Byte> {
+    let imm = i16::try_from(const_inline_value(&window[0])?).ok()?;
+    let slot = load_slot(&window[1])?;
+    let op2 = super::canon::swap_binop(*window[2].bytecode())?;
+    if !is_int_bin_op(op2) {
+        return None;
+    }
+    Some(Byte::new(Instruction::BinSlotImm).with_bin_slot_imm(op2 as u8, slot, imm))
 }
 
 fn try_fuse_bin_slot_slot_local(window: &[Byte; 3]) -> Option<Byte> {
@@ -2171,6 +2189,61 @@ mod tests {
                         | Instruction::LoadReturnSlot
                 )),
             "join of slot 3 must still return; ops={:?}",
+            lowered
+                .bytecode
+                .iter()
+                .map(|b| *b.bytecode())
+                .collect::<Vec<_>>()
+        );
+    }
+
+    /// Fuse-select encodes `CONST; LOAD; ADD` as `BinSlotImm` without canon
+    /// (COI-384: post-slot-promote `item_check` shape).
+    #[test]
+    fn fuse_select_const_load_add_to_bin_slot_imm() {
+        let loc = DebugLoc::unknown();
+        let ops = vec![
+            IlOp::Const { imm: 1, loc },
+            IlOp::Load { slot: 3, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(&ops, &mut pool);
+        let bin = lowered
+            .bytecode
+            .iter()
+            .find(|b| matches!(*b.bytecode(), Instruction::BinSlotImm))
+            .expect("expected BinSlotImm from CONST;LOAD;ADD");
+        let (op, slot, imm) = bin.bin_slot_imm_parts();
+        assert_eq!(op, Instruction::ADD as u8);
+        assert_eq!(slot, 3);
+        assert_eq!(imm, 1);
+    }
+
+    #[test]
+    fn fuse_select_const_load_sub_stays_unfused() {
+        let loc = DebugLoc::unknown();
+        let ops = vec![
+            IlOp::Const { imm: 1, loc },
+            IlOp::Load { slot: 0, loc },
+            IlOp::Bin {
+                op: Instruction::SUB,
+                loc,
+            },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(&ops, &mut pool);
+        assert!(
+            lowered
+                .bytecode
+                .iter()
+                .all(|b| !matches!(*b.bytecode(), Instruction::BinSlotImm)),
+            "non-commutative CONST;LOAD;SUB must not become BinSlotImm; got {:?}",
             lowered
                 .bytecode
                 .iter()
