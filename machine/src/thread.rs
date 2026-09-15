@@ -6,7 +6,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, RwLock};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread;
 
 use parking_lot::RawMutex;
@@ -276,7 +276,7 @@ pub struct JoinState {
     shared_epoch: Option<Arc<crate::shared_heap::SharedHeapEpoch>>,
 }
 
-/// Join-state payload (reactor timed waits).
+/// Join-state payload (result slot).
 pub(crate) struct JoinStateInner {
     pub result: Option<Result<PortableValue, ThreadErrorTag>>,
 }
@@ -321,14 +321,6 @@ impl JoinState {
     pub(crate) fn try_take_result(&self) -> Option<Result<PortableValue, ThreadErrorTag>> {
         let mut g = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         g.result.take()
-    }
-
-    pub(crate) fn inner_lock(&self) -> MutexGuard<'_, JoinStateInner> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
-    }
-
-    pub(crate) fn finished_cvar(&self) -> &Condvar {
-        &self.finished
     }
 }
 

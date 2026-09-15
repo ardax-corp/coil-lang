@@ -227,7 +227,9 @@ Still refuses (and why):
 threads (size = [`WorkerCap`](../../machine/src/thread.rs), default
 `available_parallelism`). Jobs land on a crossbeam injector / local deques;
 idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
-`std::thread::spawn`.
+`std::thread::spawn`. Join help-steals, then parks on the reactor condvar until
+the `JoinState` result is ready **or** `submit` / job-complete `notify` (COI-390);
+there is no 1 ms poll. Idle workers still `wait_timeout(2 ms)` (follow-up).
 
 | Env | Effect |
 |-----|--------|
