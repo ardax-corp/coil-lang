@@ -1,7 +1,8 @@
 # Auto-par vs branch misses (investigation)
 
-Report-only (main `f35b3ea4` G3 + this note). No ISA / codegen change.
-Symptom: `poop` shows many **branch misses** when `COIL_AUTO_PAR` is on.
+Report-only investigation on main `f35b3ea4` G3 (no ISA / codegen change), plus
+**COI-390** join wait (drop 1 ms poll). Symptom: `poop` shows many **branch
+misses** when `COIL_AUTO_PAR` is on.
 
 ## How to read `poop` here
 
