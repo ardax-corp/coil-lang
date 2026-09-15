@@ -429,6 +429,10 @@ pub enum Instruction {
     /// `BinSlotSlotJmpf` / twins). One dispatch; heap load then compare-branch.
     /// Stacks with last-addr `Object` cache (COI-372). Not IndexPin.
     DenseIndexJmpf,
+    /// `MakeEnum; RETURN` (one-word heap) — same operand as [`Self::MakeEnum`]
+    /// (`[31:16]` tag, `[15:0]` arity). Fuse-select only; two-word `RETURN`
+    /// must not fuse (would drop the hi word). Archive **minor 19** (COI-388 X3).
+    MakeEnumReturn,
 }
 
 impl From<u8> for Instruction {
@@ -854,6 +858,7 @@ impl Instruction {
             Self::DenseBin2 => "DenseBin2",
             Self::DenseBinJmpf => "DenseBinJmpf",
             Self::DenseIndexJmpf => "DenseIndexJmpf",
+            Self::MakeEnumReturn => "MakeEnumReturn",
         }
     }
 }
@@ -1885,7 +1890,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DenseIndexJmpf as u8;
+        let last = Instruction::MakeEnumReturn as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }

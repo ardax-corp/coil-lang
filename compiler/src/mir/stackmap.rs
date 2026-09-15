@@ -159,6 +159,7 @@ pub fn is_alloc_opcode(inst: Instruction) -> bool {
         Instruction::MakeArray
             | Instruction::MakeTuple
             | Instruction::MakeEnum
+            | Instruction::MakeEnumReturn
             | Instruction::InitTyped
             | Instruction::INIT
             | Instruction::ArrayPush
