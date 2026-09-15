@@ -209,6 +209,7 @@ pub(super) fn byte_stack_delta(insn: Instruction, byte: &common::Byte) -> Option
         Instruction::LoadReturnSlot | Instruction::ConstReturnImm => Some(-1),
         Instruction::ReturnPair => Some(-2),
         Instruction::BinReturn => Some(-2),
+        Instruction::MakeEnumReturn => Some(-(byte.operand_u16(1) as i32)),
         Instruction::HALT | Instruction::NOOP => Some(0),
         Instruction::JMP => Some(0),
         Instruction::JMPF | Instruction::JMPT => Some(-1),
@@ -302,6 +303,7 @@ fn is_terminator(op: &IlOp) -> bool {
                 | Instruction::LoadReturnSlot
                 | Instruction::ConstReturnImm
                 | Instruction::BinReturn
+                | Instruction::MakeEnumReturn
                 | Instruction::TailCall
         )
     )

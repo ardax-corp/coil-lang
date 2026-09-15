@@ -240,7 +240,7 @@ fn format_operands(
                 format!("target={}", annotate_pc(t & 0xFFFF, pc_names))
             }
         }
-        Instruction::MakeEnum => {
+        Instruction::MakeEnum | Instruction::MakeEnumReturn => {
             format!("tag={} arity={}", byte.operand_u16(0), byte.operand_u16(1))
         }
         Instruction::JumpIfMatch => {

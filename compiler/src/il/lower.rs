@@ -508,6 +508,9 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
         if let Some(fused) = try_fuse_bin_return_local(&w) {
             return Some((Slot::Byte(fused, window[0].loc()), 2));
         }
+        if let Some(fused) = try_fuse_make_enum_return_local(&w) {
+            return Some((Slot::Byte(fused, window[0].loc()), 2));
+        }
     }
     // After patterns that consume individual LOAD/STORE: pack adjacent runs.
     if let Some((fused, n)) = try_fuse_packed_loads(window) {
@@ -629,7 +632,10 @@ fn slot_is_return_fusion(s: &Slot) -> bool {
     match s {
         Slot::Byte(b, _) => matches!(
             *b.bytecode(),
-            Instruction::LoadReturnSlot | Instruction::ConstReturnImm | Instruction::BinReturn
+            Instruction::LoadReturnSlot
+                | Instruction::ConstReturnImm
+                | Instruction::BinReturn
+                | Instruction::MakeEnumReturn
         ),
         _ => false,
     }
@@ -1082,6 +1088,16 @@ fn try_fuse_bin_return_local(window: &[Byte; 2]) -> Option<Byte> {
     Some(Byte::new(Instruction::BinReturn).with_bin_return(op as u8))
 }
 
+fn try_fuse_make_enum_return_local(window: &[Byte; 2]) -> Option<Byte> {
+    if *window[0].bytecode() != Instruction::MakeEnum {
+        return None;
+    }
+    if !is_one_word_return(&window[1]) {
+        return None;
+    }
+    Some(Byte::new(Instruction::MakeEnumReturn).with_operand_u32(window[0].operand_u32()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1208,6 +1224,55 @@ mod tests {
             Instruction::BinReturn
         ));
         assert_eq!(lowered.bytecode[0].bin_return_op(), Instruction::ADD as u8);
+    }
+
+    #[test]
+    fn lower_fuses_make_enum_return() {
+        let mut il = IlBuilder::new();
+        il.push_op(IlOp::MakeEnum {
+            tag: 1,
+            arity: 2,
+            loc: DebugLoc::unknown(),
+        });
+        il.push_op(IlOp::Return {
+            loc: DebugLoc::unknown(),
+            ret_words: 1,
+        });
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(il.ops(), &mut pool);
+        assert_eq!(lowered.bytecode.len(), 1);
+        assert!(matches!(
+            *lowered.bytecode[0].bytecode(),
+            Instruction::MakeEnumReturn
+        ));
+        assert_eq!(lowered.bytecode[0].operand_u16(0), 1);
+        assert_eq!(lowered.bytecode[0].operand_u16(1), 2);
+    }
+
+    #[test]
+    fn lower_refuses_make_enum_two_word_return() {
+        let mut il = IlBuilder::new();
+        il.push_op(IlOp::MakeEnum {
+            tag: 0,
+            arity: 0,
+            loc: DebugLoc::unknown(),
+        });
+        il.push_op(IlOp::Return {
+            loc: DebugLoc::unknown(),
+            ret_words: 2,
+        });
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(il.ops(), &mut pool);
+        assert_eq!(lowered.bytecode.len(), 2);
+        assert!(matches!(
+            *lowered.bytecode[0].bytecode(),
+            Instruction::MakeEnum
+        ));
+        assert!(matches!(
+            *lowered.bytecode[1].bytecode(),
+            Instruction::RETURN
+        ));
+        assert_eq!(lowered.bytecode[1].return_words(), 2);
     }
 
     #[test]
