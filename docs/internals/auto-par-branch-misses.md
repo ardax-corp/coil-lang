@@ -117,11 +117,24 @@ nsieve archives remain byte-identical with auto-par on.
 ### COI-391 idle park (after)
 
 Idle workers recheck steal/shutdown under `sleep` then `wait` until `notify`
-(submit / job-complete / shutdown). No 2 ms poll. Join path unchanged.
+(submit / job-complete / shutdown). No 2 ms poll. When `inflight == 0` they
+skip the empty-deque walk. Join path unchanged (`join_timeouts=0`).
 
-Fill in measured `COIL_PAR_STATS` after the local fib IPA / loop IPA runs
-on this change (see verification). Expected: `idle_waits` / `steal_empty`
-drop vs the COI-390 row; `join_timeouts` stays 0.
+| Config | steal_empty | idle_waits | join_timeouts | join_parks | notes |
+|---|---|---|---|---|---|
+| fib IPA w=4 **COI-390** | ~200 | ~30 | **0** | **4** | 2 ms idle poll |
+| fib IPA w=4 **COI-391** | **~140** | **~12** | **0** | **4–5** | parks, not 2 ms timeouts |
+| loop IPA w=4 **COI-390** | 33 | 7 | 0 | 0 | |
+| loop IPA w=4 **COI-391** | **~20–36** | **6–7** | **0** | 0–1 | |
+
+Leftover `steal_empty` is `notify_all` waking idle peers who then walk injector
++ stealers once (counted per deque). It no longer grows with wall / 2 ms.
+
+Fib IPA wall on this host (release, `hyperfine` ≥30 runs): seq **57.2 ± 0.4 ms**,
+IPA w=4 **25.2 ± 1.3 ms** (min 23.9 ms). Sequential mandelbrot **18.5 ± 0.4 ms**,
+nsieve **2.6 ± 0.2 ms**. Checksums hold: mandelbrot `625885`, fib `2178309`,
+nsieve `1900`, loop_ipa_sum `2666646666700000`. Sequential mandelbrot / nsieve
+archives remain byte-identical with auto-par on.
 
 ## Attribution
 
@@ -171,7 +184,7 @@ source.
 | Rank | Change | Cost | Why |
 |---|---|---|---|
 | 1 | ~~Join wait without 1 ms poll~~ **landed (COI-390)** — `join_timeouts=0`, `join_parks≈4` on fib IPA | small reactor | Remaining empty-steals were idle 2 ms |
-| 2 | ~~Idle workers park until `notify`~~ **landed (COI-391)** — drop 2 ms empty-steal poll | small reactor | Cuts `idle_waits` × peer-empty walks; 4 workers vs 3 fib jobs is mostly idle |
+| 2 | ~~Idle workers park until `notify`~~ **landed (COI-391)** — `idle_waits≈12`, `steal_empty≈140` on fib IPA (was ~30 / ~200) | small reactor | Cuts timed empty-steal; leftover empties are one walk per notify |
 | 3 | **Read `poop` as miss rate + pin `COIL_MAX_WORKER_THREADS`** when comparing seq vs par | docs / script | Absolute misses scale with threads; `poop_baseline.sh` fib is already sequential |
 | 4 | **Do not revert G3 peeks / DenseBin2 for this symptom** | — | Fib IPA never takes them; mandelbrot auto-par is a no-op |
 | 5 | Optional: start `n = min(cap, inflight)` workers, or keep a 1-worker pool until the second submit | medium | Avoids 3 idle pollers for a 3-job fib |
