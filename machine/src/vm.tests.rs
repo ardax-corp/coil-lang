@@ -5298,6 +5298,71 @@
         assert_eq!(hot_v, match_v);
     }
 
+    fn dense_store_bin_jmp_code() -> [Byte; 14] {
+        let ty = common::dense::TY_I64 as u32;
+        let c = |dest: u8, imm: u16| {
+            Byte::new(Instruction::DenseConst)
+                .with_operand_u32(((ty & 0x7F) << 24) | ((dest as u32) << 16) | u32::from(imm))
+        };
+        let abc = |op: Instruction, kind: u8, dest: u8, a: u8, b: u8| {
+            Byte::new(op).with_operand_u32(
+                ((kind as u32) << 24)
+                    | ((dest as u32) << 16)
+                    | ((a as u32) << 8)
+                    | u32::from(b),
+            )
+        };
+        [
+            Byte::new(Instruction::Seek).with_operand_u32(5),
+            const_int(5),
+            const_int(6),
+            Byte::new(Instruction::MakeArray).with_operand_u32(2),
+            store_pop(0),
+            c(1, 0),
+            c(2, 1),
+            c(3, 9),
+            dense_store_index(common::dense::HEAP_UNCHECKED, 3, 0, 1),
+            abc(Instruction::DenseBin, common::dense::IADD64, 1, 1, 2),
+            Byte::new(Instruction::JMP).with_operand_u32(12),
+            const_int(0),
+            load(1),
+            Byte::new(Instruction::HALT),
+        ]
+    }
+
+    #[test]
+    fn coi_382_dense_store_bin_jmp_all_modes() {
+        let code = dense_store_bin_jmp_code();
+        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        assert_eq!(match_v, 1, "store then k = k + p then JMP skips poison");
+        assert_eq!(table_v, match_v);
+        assert_eq!(hot_v, match_v);
+    }
+
+    #[test]
+    fn coi_382_table_peek_saves_dispatches() {
+        let code = dense_store_bin_jmp_code();
+        let count = |mode: super::dispatch::Mode| {
+            super::dispatch::override_mode(Some(mode));
+            reset_dispatch_count();
+            let mut vm = Machine::<8>::default();
+            vm.run_with_pool(&code, &[], &[], 0);
+            super::dispatch::override_mode(None);
+            dispatch_count()
+        };
+        let match_n = count(super::dispatch::Mode::Match);
+        let table_n = count(super::dispatch::Mode::Table);
+        let hot_n = count(super::dispatch::Mode::HotMatch);
+        assert!(
+            table_n < match_n,
+            "table should peek DenseBin+JMP (table={table_n}, match={match_n})"
+        );
+        assert!(
+            hot_n < match_n,
+            "hotmatch should peek DenseBin+JMP (hot={hot_n}, match={match_n})"
+        );
+    }
+
     #[test]
     fn coi_387_dense_bin_jmp_all_modes() {
         let ty = common::dense::TY_I64 as u32;
