@@ -2824,8 +2824,10 @@ impl<const S: usize> Machine<S> {
     /// the non-LTO `machine` codegen (already identical to `main`'s).
     /// Prefetch + fused jump tables live *inside* this outlined copy.
     /// Hot dense/jmp ops may divert into `dispatch` (COI-374 G1). Remaining
-    /// non-kernel ops divert on the table path (COI-375 G2). CALL/RETURN and
-    /// packed LOAD/STORE stay on this match unless `COIL_THREADED_CALL`+`RETURN`.
+    /// non-kernel ops divert on the table path (COI-375 G2). ALWAYS_HOT
+    /// streaks use `execute_dense` (COI-376 G3) so FORMAT/HostInvoke text
+    /// is not in that I-cache working set. CALL/RETURN and packed LOAD/STORE
+    /// stay on this match unless `COIL_THREADED_CALL`+`RETURN`.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
