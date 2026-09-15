@@ -313,6 +313,24 @@ fn perf_dense_cast_bin_header_shape() {
         fused >= 1,
         "COI-380 S3: hot should keep DenseCast ; DenseBin* (bytecode unchanged)"
     );
+    let mut residue = 0usize;
+    let mut pc = start;
+    while pc < end {
+        let op = *bc[pc].bytecode();
+        let width = common::dense::stream_width(op);
+        let next = pc + width;
+        if op == Instruction::DenseBin2
+            && next < end
+            && *bc[next].bytecode() == Instruction::DenseBin
+        {
+            residue += 1;
+        }
+        pc += width;
+    }
+    assert!(
+        residue >= 1,
+        "COI-389 X4: dense_cast_bin should keep DenseBin2 ; leftover DenseBin, got {residue}"
+    );
 }
 
 #[test]

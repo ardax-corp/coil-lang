@@ -359,20 +359,47 @@ pub fn format_bytecode_section(
             let tail = &bytecode[pc + 1];
             let (k0, d0, a0, b0) = byte.dense_abc_parts();
             let (k1, d1, a1, b1) = tail.dense_abc_parts();
-            if pc + 2 < end && *bytecode[pc + 2].bytecode() == Instruction::JMP {
-                let jmp = &bytecode[pc + 2];
+            let residue = pc + 2 < end && *bytecode[pc + 2].bytecode() == Instruction::DenseBin;
+            let jmp_at = if residue { pc + 3 } else { pc + 2 };
+            if jmp_at < end && *bytecode[jmp_at].bytecode() == Instruction::JMP {
+                let jmp = &bytecode[jmp_at];
                 let jmp_ops = format_operands(*jmp.bytecode(), jmp, constants, pc_names);
                 let extra = if jmp_ops.is_empty() {
                     String::new()
                 } else {
                     format!(" {jmp_ops}")
                 };
+                if residue {
+                    let (k2, d2, a2, b2) = bytecode[pc + 2].dense_abc_parts();
+                    let _ = writeln!(
+                        out,
+                        "{pc:05}  DenseBin2        {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1} ; {} r{d2}=r{a2},r{b2} ; {}{extra}",
+                        common::dense::bin_kind_name(k0),
+                        common::dense::bin_kind_name(k1),
+                        common::dense::bin_kind_name(k2),
+                        jmp.bytecode().mnemonic()
+                    );
+                    pc += 4;
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "{pc:05}  DenseBin2        {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1} ; {}{extra}",
+                        common::dense::bin_kind_name(k0),
+                        common::dense::bin_kind_name(k1),
+                        jmp.bytecode().mnemonic()
+                    );
+                    pc += 3;
+                }
+                continue;
+            }
+            if residue {
+                let (k2, d2, a2, b2) = bytecode[pc + 2].dense_abc_parts();
                 let _ = writeln!(
                     out,
-                    "{pc:05}  DenseBin2        {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1} ; {}{extra}",
+                    "{pc:05}  DenseBin2        {} r{d0}=r{a0},r{b0} ; {} r{d1}=r{a1},r{b1} ; {} r{d2}=r{a2},r{b2}",
                     common::dense::bin_kind_name(k0),
                     common::dense::bin_kind_name(k1),
-                    jmp.bytecode().mnemonic()
+                    common::dense::bin_kind_name(k2)
                 );
                 pc += 3;
                 continue;
@@ -733,6 +760,25 @@ mod tests {
         assert!(
             !out.contains("\n00001  DenseBin"),
             "payload DenseBin should not be a second dispatch line:\n{out}"
+        );
+        assert!(out.contains("HALT"));
+    }
+
+    #[test]
+    fn format_dense_bin2_residue_skips_leftover_bin() {
+        let empty = HashMap::new();
+        let bc = [
+            Byte::new(Instruction::DenseBin2).with_dense_abc(common::dense::FADD64, 3, 1, 2),
+            Byte::new(Instruction::DenseBin).with_dense_abc(common::dense::FMUL64, 4, 3, 5),
+            Byte::new(Instruction::DenseBin).with_dense_abc(common::dense::FSUB64, 3, 3, 4),
+            Byte::new(Instruction::HALT),
+        ];
+        let out = format_bytecode_section("hot", 0, 4, &bc, &[], &empty);
+        assert!(out.contains("DenseBin2"));
+        assert!(out.contains("FSUB64"));
+        assert!(
+            !out.contains("\n00002  DenseBin"),
+            "X4 residue DenseBin should not be a second dispatch line:\n{out}"
         );
         assert!(out.contains("HALT"));
     }
