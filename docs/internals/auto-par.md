@@ -229,7 +229,8 @@ threads (size = [`WorkerCap`](../../machine/src/thread.rs), default
 idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
 `std::thread::spawn`. Join help-steals, then parks on the reactor condvar until
 the `JoinState` result is ready **or** `submit` / job-complete `notify` (COI-390);
-there is no 1 ms poll. Idle workers still `wait_timeout(2 ms)` (follow-up).
+there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
+(submit / job-complete / shutdown) — no 2 ms empty-steal poll (COI-391).
 
 | Env | Effect |
 |-----|--------|
