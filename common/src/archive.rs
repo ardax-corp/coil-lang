@@ -76,10 +76,13 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      fused `*Jmpf`/`*Jmpt` payload (mandelbrot inner mag + GTF).
 /// 18 — `DenseIndexJmpf` (COI-379 S4): two-word pack of `DenseIndex` then a
 ///      fused `*Jmpf`/`*Jmpt` payload (nsieve p-loop `flags[p] == 1`).
+/// 19 — `MakeEnumReturn` (COI-388 X3): fuse-select `MakeEnum; RETURN` for a
+///      one-word heap enum (`binary_trees` `bottom_up`). Same packing as
+///      `MakeEnum`. Not two-word `RETURN`.
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 18;
+pub const ARCHIVE_MINOR: u16 = 19;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -547,9 +550,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 18);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 18));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.18");
+        assert_eq!(ARCHIVE_MINOR, 19);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 19));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.19");
     }
 
     #[test]
