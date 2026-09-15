@@ -454,6 +454,71 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_nsieve_packs_dense_index_jmpf() {
+        let src = r#"
+fn nsieve(int n) -> int {
+    let flags: Vec<int> = Vec::with_capacity(n);
+    let i = 0;
+    while i < n {
+        flags.push(1);
+        i = i + 1;
+    }
+    let count = 0;
+    let p = 2;
+    while p < n {
+        if flags[p] == 1 {
+            count = count + 1;
+            let k = p + p;
+            while k < n {
+                flags[k] = 0;
+                k = k + p;
+            }
+        }
+        p = p + 1;
+    }
+    return count;
+}
+fn main() {
+    if nsieve(16) != 6 {
+        panic "nsieve";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile nsieve");
+        let mut packed = 0usize;
+        for (i, b) in bc.iter().enumerate() {
+            if *b.bytecode() != Instruction::DenseIndexJmpf {
+                continue;
+            }
+            packed += 1;
+            let tail = bc
+                .get(i + 1)
+                .expect("DenseIndexJmpf payload word")
+                .bytecode();
+            assert!(
+                matches!(
+                    *tail,
+                    Instruction::BinSlotImmJmpf
+                        | Instruction::BinSlotImmJmpt
+                        | Instruction::BinSlotSlotJmpf
+                        | Instruction::BinSlotSlotJmpt
+                ),
+                "COI-379 S4: DenseIndexJmpf payload must be fused *Jmpf, got {}",
+                tail.mnemonic()
+            );
+        }
+        assert!(
+            packed >= 1,
+            "COI-379 S4: nsieve p-loop should pack DenseIndexJmpf"
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "nsieve checksum after DenseIndexJmpf");
+    }
+
+    #[test]
     fn pipeline_cse_collapses_repeated_divf() {
         let src = r#"
 fn hot(float scale, int n) -> float {
@@ -3500,6 +3565,7 @@ fn main() {
                 Instruction::Index
                     | Instruction::IndexUnchecked
                     | Instruction::DenseIndex
+                    | Instruction::DenseIndexJmpf
             )),
             "nsieve keeps Index; opcodes={names:?}"
         );

@@ -328,6 +328,7 @@ fn count_index(ops: &[IlOp]) -> usize {
             IlOp::Byte { byte, .. } => matches!(
                 *byte.bytecode(),
                 Instruction::Index | Instruction::IndexUnchecked | Instruction::DenseIndex
+                    | Instruction::DenseIndexJmpf
             ),
             _ => false,
         })

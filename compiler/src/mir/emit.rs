@@ -195,6 +195,7 @@ pub fn emit_dense(
     }
     pack_chained_dense_bin(&mut out);
     pack_dense_bin_jmpf(&mut out);
+    pack_dense_index_jmpf(&mut out);
     Ok(out)
 }
 
@@ -551,6 +552,29 @@ fn pack_dense_bin_jmpf(ops: &mut [IlOp]) {
         let loc = ops[i].loc();
         let packed = Byte::new(Instruction::DenseBinJmpf)
             .with_operand_u32(first.expect("DenseBin").operand_u32());
+        ops[i] = IlOp::from_plain_byte(packed, loc);
+        i += 1;
+    }
+}
+
+/// Pack [`Instruction::DenseIndex`] immediately followed by a reconstruct that
+/// fuse-select turns into `*Jmpf` (COI-379 S4). Same stream-width lesson as
+/// [`Instruction::DenseBinJmpf`]: the jump stays a typed `IlOp`; the VM
+/// consumes it as the payload word.
+fn pack_dense_index_jmpf(ops: &mut [IlOp]) {
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        let first = match &ops[i] {
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseIndex => Some(*byte),
+            _ => None,
+        };
+        if first.is_none() || !dense_bin_followed_by_cond_jmp(ops, i) {
+            i += 1;
+            continue;
+        }
+        let loc = ops[i].loc();
+        let packed = Byte::new(Instruction::DenseIndexJmpf)
+            .with_operand_u32(first.expect("DenseIndex").operand_u32());
         ops[i] = IlOp::from_plain_byte(packed, loc);
         i += 1;
     }
