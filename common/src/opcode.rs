@@ -417,6 +417,12 @@ pub enum Instruction {
     /// a payload [`Self::DenseBin`] (second op); the VM consumes both in one
     /// dispatch. Not FMA / reassoc; not tombstoned `FloatChainStore`.
     DenseBin2,
+    /// [`Self::DenseBin`] then a fused `*Jmpf`/`*Jmpt` (COI-377 S1).
+    /// Operand is the bin `dense_abc`. The following code word is the jump
+    /// (`BinSlotSlotJmpf` / `BinSlotImmJmpf` / twins). One dispatch; sequential
+    /// IEEE then the compare-branch. Not `DenseCmp`+jmp (dense bodies emit
+    /// zero `DenseCmp` on branches).
+    DenseBinJmpf,
 }
 
 impl From<u8> for Instruction {
@@ -560,19 +566,20 @@ pub mod dense {
         }
     }
 
-    /// Stream width of `op`: [`super::Instruction::DenseBin2`] consumes the
-    /// following payload word.
+    /// Stream width of `op`: [`super::Instruction::DenseBin2`] and
+    /// [`super::Instruction::DenseBinJmpf`] consume the following payload word.
     #[inline]
     #[must_use]
     pub fn stream_width(op: super::Instruction) -> usize {
         match op {
-            super::Instruction::DenseBin2 => 2,
+            super::Instruction::DenseBin2 | super::Instruction::DenseBinJmpf => 2,
             _ => 1,
         }
     }
 
-    /// Visit each numeric bin in program order (`DenseBin` and both halves of
-    /// [`super::Instruction::DenseBin2`]).
+    /// Visit each numeric bin in program order (`DenseBin`, both halves of
+    /// [`super::Instruction::DenseBin2`], and the bin half of
+    /// [`super::Instruction::DenseBinJmpf`]).
     pub fn for_each_bin(code: &[super::Byte], mut visit: impl FnMut(u8, usize, usize, usize)) {
         let mut i = 0;
         while i < code.len() {
@@ -591,6 +598,11 @@ pub mod dense {
                         visit(k2, d2, a2, b2);
                         i += 1;
                     }
+                }
+                super::Instruction::DenseBinJmpf => {
+                    let (k, d, a, b) = code[i].dense_abc_parts();
+                    visit(k, d, a, b);
+                    i += 2;
                 }
                 _ => i += 1,
             }
@@ -831,6 +843,7 @@ impl Instruction {
             Self::DenseFieldStore => "DenseFieldStore",
             Self::DenseMakeObject => "DenseMakeObject",
             Self::DenseBin2 => "DenseBin2",
+            Self::DenseBinJmpf => "DenseBinJmpf",
         }
     }
 }
@@ -1849,6 +1862,9 @@ mod tests {
         let pair = Byte::new(Instruction::DenseBin2).with_dense_abc(dense::FADD64, 3, 1, 2);
         assert_eq!(pair.dense_abc_parts(), (dense::FADD64, 3, 1, 2));
         assert_eq!(dense::stream_width(Instruction::DenseBin2), 2);
+        let br = Byte::new(Instruction::DenseBinJmpf).with_dense_abc(dense::FADD64, 5, 3, 4);
+        assert_eq!(br.dense_abc_parts(), (dense::FADD64, 5, 3, 4));
+        assert_eq!(dense::stream_width(Instruction::DenseBinJmpf), 2);
         assert_eq!(dense::bin_kind_name(dense::FMUL64), "FMUL64");
     }
 
@@ -1856,7 +1872,7 @@ mod tests {
     fn instruction_from_u8_covers_last_appended_variant() {
         // ARCHIVE stability: last variant must remain decodable (keep in sync
         // with machine release `promise!` ceiling).
-        let last = Instruction::DenseBin2 as u8;
+        let last = Instruction::DenseBinJmpf as u8;
         let decoded: Instruction = last.into();
         assert_eq!(decoded as u8, last);
     }
