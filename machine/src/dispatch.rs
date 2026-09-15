@@ -1376,25 +1376,10 @@ fn fill_g2_coverage(t: &mut [Handler; 256]) {
             *h = rest;
         }
     }
-    // Kernel stays on the inlined match (sentinel `cold`).
-    for op in [
-        Instruction::CALL,
-        Instruction::TailCall,
-        Instruction::RETURN,
-        Instruction::ConstReturnImm,
-        Instruction::LoadReturnSlot,
-        Instruction::BinReturn,
-        Instruction::MakeEnumReturn,
-        Instruction::LOAD,
-        Instruction::STORE,
-        Instruction::StorePop,
-        Instruction::Seek,
-        Instruction::BinSlotImm,
-        Instruction::BinSlotImmStore,
-        Instruction::BinSlotImmJmpf,
-        Instruction::BinSlotImmJmpt,
-    ] {
-        t[op as usize] = cold;
+    for disc in 0..256u16 {
+        if is_kernel(Instruction::from(disc as u8)) {
+            t[disc as usize] = cold;
+        }
     }
     t[Instruction::POP as usize] = op_pop;
     t[Instruction::DUPLICATE as usize] = op_dup;

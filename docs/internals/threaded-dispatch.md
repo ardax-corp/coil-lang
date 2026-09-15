@@ -151,7 +151,19 @@ Threading packed `LOAD`/`STORE`/`Seek` **without** `DenseIndex` made nsieve
 `COIL_THREADED_CALL=1` vs `=0` on the table path: CALL-on is ~1.39× faster than
 CALL-off for fib, but still slower than the giant match.
 
-## Go / no-go for G3 (COI-376)
+### G2 remaining coverage (COI-375)
+
+Same host, `COIL_AUTO_PAR=0`, identical `.hyc`:
+
+| Bench | match | table | notes |
+|---|---|---|---|
+| mandelbrot | 19.1 ± 0.3 ms | 20.4 ± 0.9 ms (~1.06× match) | wash / slight table loss vs G1’s wash-to-win; extra outlined rest/arith handlers |
+| fib | 58.5 ± 10.4 ms | 59.3 ± 0.3 ms | **flat** (CALL/RETURN/imm on match; no ADD bounce) |
+| nsieve | 2.6 ± 0.2 ms | 2.8 ± 0.2 ms | short; startup-dominated |
+
+Checksums identical: mandelbrot `625885`, fib `2178309`, nsieve `1900`.
+
+Divert stays `unlikely(is_hot)` (G1). Diverting all `!is_kernel` ops made fib ~1.12× slower (stack `ADD` bouncing out of the CALL kernel).
 
 G2 landed remaining coverage without parking CALL/RETURN or packed LOAD/STORE
 on the default table. Next is hot/cold I-cache split of handler code, not a
