@@ -17,3 +17,8 @@ RUST_MIN_STACK = "8388608"
 # limits and surface as cargo "io error when listing tests" EAGAIN. Override
 # with COIL_MAX_WORKER_THREADS=N when profiling auto-par / spawn throughput.
 COIL_MAX_WORKER_THREADS = { value = "1", force = false }
+
+# Keep LLVM/GCC `.text.hot` / `.text.unlikely` as distinct executable
+# sections (COI-376 G3). rust-lld otherwise folds `.text.*` into `.text`.
+[target.x86_64-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-Wl,-z,keep-text-section-prefix"]

@@ -1075,34 +1075,34 @@ fn apply_trailing_dense_bin_jmp(ctx: &mut HotCtx<'_, '_>) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn cold(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
 
 /// Remaining Instruction coverage: bounce to `Machine::exec_rest` (COI-375).
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn rest(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     ctx.extra.pending_rest = Some(opcode);
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_pop(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     ctx.stack.pop();
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_dup(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     ctx.stack.duplicate();
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_const(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let op = opcode.operand_u32();
     let raw = if unlikely(op & Byte::POOL_FLAG != 0) {
@@ -1117,14 +1117,14 @@ fn op_const(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_code_ptr(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     ctx.stack.push(Value::from(opcode.operand_u32() as i64));
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_noop(_ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {}
 
 #[inline(always)]
@@ -1178,21 +1178,21 @@ fn binary_bool(stack: &mut Stack<Value>, op: fn(bool, bool) -> bool) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_not(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     unary_int(ctx.stack, |x| !x);
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_neg(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     unary_int(ctx.stack, |x| -x);
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_log_not(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let val = ctx.stack.pop();
     ctx.stack.push(Value::from(!(val.as_int() != 0)));
@@ -1200,7 +1200,7 @@ fn op_log_not(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_negf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let sp = ctx.stack.tell();
     promise!(sp >= 1);
@@ -1211,7 +1211,7 @@ fn op_negf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_inc(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let (slot, prefix, is_float) = opcode.inc_dec_parts();
     promise!(ctx.sp + slot < ctx.stack_cap);
@@ -1228,7 +1228,7 @@ fn op_inc(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_dec(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let (slot, prefix, is_float) = opcode.inc_dec_parts();
     promise!(ctx.sp + slot < ctx.stack_cap);
@@ -1245,73 +1245,73 @@ fn op_dec(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_and(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_bool(ctx.stack, |a, b| a && b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_or(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_bool(ctx.stack, |a, b| a || b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_add(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a + b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_sub(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a - b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_mul(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a * b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_div(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a / b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_mod(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a % b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_le(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| (a < b) as i64);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_leq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| (a <= b) as i64);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_gt(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| (a > b) as i64);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_geq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| (a >= b) as i64);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_eq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let sp = ctx.stack.tell();
     promise!(sp >= 2);
@@ -1323,7 +1323,7 @@ fn op_eq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_neq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let sp = ctx.stack.tell();
     promise!(sp >= 2);
@@ -1335,67 +1335,67 @@ fn op_neq(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_addf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float(ctx.stack, |a, b| a + b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_subf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float(ctx.stack, |a, b| a - b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_mulf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float(ctx.stack, |a, b| a * b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_divf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float(ctx.stack, |a, b| a / b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_modf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float(ctx.stack, |a, b| a % b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_shl(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a << b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_shr(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a >> b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_xor(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a ^ b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bitand(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a & b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bitor(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_int(ctx.stack, |a, b| a | b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_pow(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let sp = ctx.stack.tell();
     promise!(sp >= 2);
@@ -1406,72 +1406,72 @@ fn op_pow(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_powf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float(ctx.stack, |a, b| a.powf(b));
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_lef(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float_cmp(ctx.stack, |a, b| a < b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_leqf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float_cmp(ctx.stack, |a, b| a <= b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_gtf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float_cmp(ctx.stack, |a, b| a > b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_geqf(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     binary_float_cmp(ctx.stack, |a, b| a >= b);
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_cast_i2f(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let v = ctx.stack.pop().as_int() as f64;
     ctx.stack.push(Value::from(v));
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_cast_f2i(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let v = ctx.stack.pop().as_float() as i64;
     ctx.stack.push(Value::from(v));
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_cast_i2b(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let v = ctx.stack.pop().as_int();
     ctx.stack.push(Value::from((v as u8) as i64));
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_cast_b2i(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let v = ctx.stack.pop().as_int();
     ctx.stack.push(Value::from(v & 0xff));
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_cast_i2bool(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let v = ctx.stack.pop().as_int();
     ctx.stack.push(Value::from((v != 0) as i64));
 }
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_cast_bool2i(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
     let v = ctx.stack.pop().as_int();
     ctx.stack.push(Value::from(if v != 0 { 1 } else { 0 }));
@@ -1479,7 +1479,7 @@ fn op_cast_bool2i(ctx: &mut HotCtx<'_, '_>, _opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bin_slot_slot(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let (op, a, b) = opcode.bin_slot_slot_parts();
     promise!(ctx.sp + a < ctx.stack_cap);
@@ -1551,14 +1551,14 @@ fn fill_g2_coverage(t: &mut [Handler; 256]) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_bin(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
     apply_trailing_jmp_cold(ctx);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let tail = take_code_word(ctx);
     dense_bin2(ctx.stack, ctx.sp, &opcode, &tail, ctx.stack_cap);
@@ -1567,7 +1567,7 @@ fn op_dense_bin2(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_bin_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_bin(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
     let tail = take_code_word(ctx);
@@ -1583,7 +1583,7 @@ fn op_dense_bin_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_index_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if dense_index(
         ctx.stack,
@@ -1614,32 +1614,32 @@ fn op_dense_index_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_cmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cmp(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_const(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_const(ctx.stack, ctx.sp, &opcode, ctx.constants, ctx.stack_cap);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_move(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_move(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_cast(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_cast(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
     let _ = apply_trailing_dense_bin(ctx);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_unary(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
@@ -1647,7 +1647,7 @@ fn op_dense_unary(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[allow(dead_code)] // optional LOAD/STORE/Seek table slots (G1 bounce; stay kernel)
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     load(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
@@ -1655,7 +1655,7 @@ fn op_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[allow(dead_code)]
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     store(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
@@ -1663,19 +1663,19 @@ fn op_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[allow(dead_code)]
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_seek(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     seek(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_jmp(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if !ctx.stack.pop().as_bool() {
         set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
@@ -1683,7 +1683,7 @@ fn op_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if ctx.stack.pop().as_bool() {
         set_jump_target(&mut ctx.ip, opcode.operand_u32() as usize, ctx.code);
@@ -1691,7 +1691,7 @@ fn op_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_bin_slot_slot_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
@@ -1708,7 +1708,7 @@ fn op_bin_slot_slot_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_bin_slot_slot_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
@@ -1726,7 +1726,7 @@ fn op_bin_slot_slot_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bin_slot_imm_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
@@ -1744,7 +1744,7 @@ fn op_bin_slot_imm_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bin_slot_imm_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     apply_jump(
         ctx,
@@ -1761,28 +1761,28 @@ fn op_bin_slot_imm_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_cmp_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = cmp_jmp(ctx.stack, &opcode, ctx.constants, ctx.heap, false);
     apply_jump(ctx, target);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_cmp_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = cmp_jmp(ctx.stack, &opcode, ctx.constants, ctx.heap, true);
     apply_jump(ctx, target);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_log_not_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = log_not_jmp(ctx.stack, &opcode, ctx.constants, false);
     apply_jump(ctx, target);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_log_not_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = log_not_jmp(ctx.stack, &opcode, ctx.constants, true);
     apply_jump(ctx, target);
@@ -1790,14 +1790,14 @@ fn op_log_not_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bin_slot_imm(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     bin_slot_imm(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap);
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bin_slot_imm_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     bin_slot_imm_store(
         ctx.stack,
@@ -1810,13 +1810,13 @@ fn op_bin_slot_imm_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_bin_slot_slot_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     bin_slot_slot_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if dense_index(
         ctx.stack,
@@ -1836,7 +1836,7 @@ fn op_dense_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_store_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     match dense_store_index(
         ctx.stack,
@@ -1856,13 +1856,13 @@ fn op_dense_store_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_array_len(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_array_len(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap);
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_field_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if dense_field_load(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() {
         ctx.panic_msg = Some("no such field");
@@ -1870,7 +1870,7 @@ fn op_dense_field_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_field_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     if dense_field_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() {
         ctx.panic_msg = Some("SetField on non-instance");
@@ -1879,28 +1879,28 @@ fn op_dense_field_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     do_call(ctx, opcode);
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_tail_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     do_tail_call(ctx, opcode);
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     do_return(ctx, opcode);
 }
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_const_return_imm(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let ret_val = Value::from(opcode.operand_u32() as i32 as i64 as u64);
     finish_return(ctx, ret_val);
@@ -1908,7 +1908,7 @@ fn op_const_return_imm(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_load_return_slot(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let slot = opcode.operand_u32() as usize;
     promise!(ctx.sp + slot < ctx.stack_cap);
@@ -1918,7 +1918,7 @@ fn op_load_return_slot(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 
 #[cold]
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
 fn op_bin_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let tos = ctx.stack.tell();
     promise!(tos >= 2);
@@ -2227,7 +2227,7 @@ fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
 /// Dedicated dense-kernel entry: compact match, no handler table (COI-376).
 /// Stops on the first non-`ALWAYS_HOT` op (peek, no new discriminant).
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
     let code_len = ctx.code.len();
     loop {
@@ -2251,7 +2251,7 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn table_loop(ctx: &mut HotCtx<'_, '_>) {
     let handlers = table();
     let code_len = ctx.code.len();
@@ -2281,7 +2281,7 @@ fn table_loop(ctx: &mut HotCtx<'_, '_>) {
 }
 
 #[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot.coil_vm"))]
+#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn hotmatch_loop(ctx: &mut HotCtx<'_, '_>) {
     let code_len = ctx.code.len();
     loop {
