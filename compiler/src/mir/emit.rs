@@ -48,7 +48,7 @@ pub fn emit_dense(
     let func = &func;
     let plan = ConvoyPlan::new(func, entry_label);
     let (regs, scratch) = assign_regs(func, &plan.need_slot)?;
-    let regs = coalesce_safe_latch_phis(func, regs, &plan.need_slot);
+    let regs = coalesce_latch_overwrite(func, regs, &plan.need_slot);
     let gather = gather_window(func, entry_label);
     let mut max_slot = plan
         .need_slot
@@ -213,7 +213,7 @@ pub(super) fn dense_sidecars(
     sink_phi_incomings(&mut func);
     let plan = ConvoyPlan::new(&func, entry_label);
     let (regs, _) = assign_regs(&func, &plan.need_slot).unwrap_or_else(|_| (Vec::new(), 0));
-    let regs = coalesce_safe_latch_phis(&func, regs, &plan.need_slot);
+    let regs = coalesce_latch_overwrite(&func, regs, &plan.need_slot);
     (
         super::deopt::debug_slot_remap(&func, &regs, &plan.need_slot),
         super::deopt::encode_draft(&func, &regs, &plan.need_slot),
@@ -317,45 +317,9 @@ pub(super) fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool
     next_emitted(func, from) == Some(to)
 }
 
-/// Alias a header φ dest with an incoming when the live ranges do not overlap
-/// (COI-383 S6). Latch edges first so `i = i + 1` dest-overwrites. Nested
-/// accumulators (`sum` across x/y) coalesce without a local latch def.
-pub(super) fn coalesce_safe_latch_phis(
-    func: &MirFunc,
-    mut regs: Vec<u8>,
-    need_slot: &[bool],
-) -> Vec<u8> {
-    if regs.is_empty() {
-        return regs;
-    }
-    let assigned = assigned_mask(func, need_slot, regs.len());
-    let live = SsaLive::compute(func);
-    let mut edges: Vec<(ValueId, ValueId, bool)> = Vec::new();
-    for block in &func.blocks {
-        for inst in &block.insts {
-            let MirInst::Phi { dest, args, .. } = inst else {
-                continue;
-            };
-            if dest.index() >= assigned.len() || !assigned[dest.index()] {
-                continue;
-            }
-            for (pred, src) in args {
-                if src.index() >= assigned.len() || !assigned[src.index()] {
-                    continue;
-                }
-                let latch = pred.index() > block.id.index();
-                edges.push((*dest, *src, latch));
-            }
-        }
-    }
-    edges.sort_by_key(|(_, _, latch)| !latch);
-    for (dest, src, _) in edges {
-        try_alias(&mut regs, dest, src, &assigned, &live);
-    }
-    regs
-}
-
-/// Conservative in-place latch overwrite for MIR→LIR (no interference scan).
+/// Alias a header φ dest with its latch incoming when the dest is dead after
+/// that incoming is defined (so `i = i + 1` is a dest-overwrite, not a move).
+/// COI-383 S6 sinks the incoming first so mandelbrot `tr`/`zr` can alias.
 pub(super) fn coalesce_latch_overwrite(
     func: &MirFunc,
     mut regs: Vec<u8>,
@@ -397,6 +361,9 @@ fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: 
         }
     }
     if !seen_def {
+        // CSE can merge `i+1` with an earlier body use (SROA last-arm
+        // `xs[1]`). Aliasing the header φ with that value then clobbers
+        // `i` before later arms / `i % n`.
         return false;
     }
     match &block.term {
@@ -405,233 +372,6 @@ fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: 
     }
 }
 
-fn assigned_mask(func: &MirFunc, need_slot: &[bool], n: usize) -> Vec<bool> {
-    let mut assigned = vec![false; n];
-    for p in &func.params {
-        if p.index() < n {
-            assigned[p.index()] = true;
-        }
-    }
-    for (i, slot) in assigned.iter_mut().enumerate() {
-        if need_slot.get(i).copied().unwrap_or(false) {
-            *slot = true;
-        }
-    }
-    assigned
-}
-
-fn try_alias(
-    regs: &mut [u8],
-    dest: ValueId,
-    src: ValueId,
-    assigned: &[bool],
-    live: &SsaLive,
-) {
-    let da = dest.index();
-    let sa = src.index();
-    if da >= regs.len() || sa >= regs.len() {
-        return;
-    }
-    let ra = regs[da];
-    let rb = regs[sa];
-    if ra == rb {
-        return;
-    }
-    if groups_interfere(regs, assigned, live, ra, rb) {
-        return;
-    }
-    let keep = ra.min(rb);
-    let drop = ra.max(rb);
-    for (i, r) in regs.iter_mut().enumerate() {
-        if assigned.get(i).copied().unwrap_or(false) && *r == drop {
-            *r = keep;
-        }
-    }
-}
-
-fn groups_interfere(
-    regs: &[u8],
-    assigned: &[bool],
-    live: &SsaLive,
-    ra: u8,
-    rb: u8,
-) -> bool {
-    let mut ga = Vec::new();
-    let mut gb = Vec::new();
-    for (i, &r) in regs.iter().enumerate() {
-        if !assigned.get(i).copied().unwrap_or(false) {
-            continue;
-        }
-        if r == ra {
-            ga.push(ValueId(i as u32));
-        } else if r == rb {
-            gb.push(ValueId(i as u32));
-        }
-    }
-    for a in &ga {
-        for b in &gb {
-            if live.interfere(*a, *b) {
-                return true;
-            }
-        }
-    }
-    false
-}
-
-struct SsaLive {
-    nvals: usize,
-    live_in: Vec<Vec<u64>>,
-    after: Vec<Vec<Vec<u64>>>,
-}
-
-impl SsaLive {
-    fn compute(func: &MirFunc) -> Self {
-        let nvals = func.types.len();
-        let nwords = nvals.div_ceil(64);
-        let n = func.blocks.len();
-        let empty = vec![0u64; nwords];
-        let mut live_in: Vec<Vec<u64>> = vec![empty.clone(); n];
-        let mut after: Vec<Vec<Vec<u64>>> = func
-            .blocks
-            .iter()
-            .map(|b| vec![empty.clone(); b.insts.len()])
-            .collect();
-        if n == 0 {
-            return Self {
-                nvals,
-                live_in,
-                after,
-            };
-        }
-        let mut changed = true;
-        while changed {
-            changed = false;
-            for bi in (0..n).rev() {
-                let mut live = live_out_bits(func, BlockId(bi as u32), &live_in, nwords);
-                if let Some(term) = &func.blocks[bi].term {
-                    for u in term_uses(term) {
-                        bit_set(&mut live, u.index());
-                    }
-                }
-                let insts = &func.blocks[bi].insts;
-                for ii in (0..insts.len()).rev() {
-                    if after[bi][ii] != live {
-                        after[bi][ii].clone_from(&live);
-                        changed = true;
-                    }
-                    for dest in insts[ii].dests() {
-                        bit_clear(&mut live, dest.index());
-                    }
-                    if !insts[ii].is_phi() {
-                        for u in insts[ii].operands() {
-                            bit_set(&mut live, u.index());
-                        }
-                    }
-                }
-                if live_in[bi] != live {
-                    live_in[bi] = live;
-                    changed = true;
-                }
-            }
-        }
-        Self {
-            nvals,
-            live_in,
-            after,
-        }
-    }
-
-    fn interfere(&self, a: ValueId, b: ValueId) -> bool {
-        if a == b {
-            return false;
-        }
-        let ai = a.index();
-        let bi = b.index();
-        if ai >= self.nvals || bi >= self.nvals {
-            return false;
-        }
-        for (block, lin) in self.live_in.iter().enumerate() {
-            if bit_get(lin, ai) && bit_get(lin, bi) {
-                return true;
-            }
-            for set in &self.after[block] {
-                if bit_get(set, ai) && bit_get(set, bi) {
-                    return true;
-                }
-            }
-        }
-        false
-    }
-}
-
-fn live_out_bits(
-    func: &MirFunc,
-    b: BlockId,
-    live_in: &[Vec<u64>],
-    nwords: usize,
-) -> Vec<u64> {
-    let mut live = vec![0u64; nwords];
-    let Some(term) = &func.block(b).term else {
-        return live;
-    };
-    for s in term.succs() {
-        if s.index() >= live_in.len() {
-            continue;
-        }
-        let succ = func.block(s);
-        let mut phi_dests = Vec::new();
-        for inst in &succ.insts {
-            let MirInst::Phi { dest, args, .. } = inst else {
-                break;
-            };
-            phi_dests.push(*dest);
-            for (pred, v) in args {
-                if *pred == b {
-                    bit_set(&mut live, v.index());
-                }
-            }
-        }
-        for (wi, &word) in live_in[s.index()].iter().enumerate() {
-            let mut keep = word;
-            for dest in &phi_dests {
-                let i = dest.index();
-                if i / 64 == wi {
-                    keep &= !(1u64 << (i % 64));
-                }
-            }
-            live[wi] |= keep;
-        }
-    }
-    live
-}
-
-fn bit_set(bits: &mut [u64], i: usize) {
-    let w = i / 64;
-    if w < bits.len() {
-        bits[w] |= 1u64 << (i % 64);
-    }
-}
-
-fn bit_clear(bits: &mut [u64], i: usize) {
-    let w = i / 64;
-    if w < bits.len() {
-        bits[w] &= !(1u64 << (i % 64));
-    }
-}
-
-fn bit_get(bits: &[u64], i: usize) -> bool {
-    let w = i / 64;
-    w < bits.len() && bits[w] & (1u64 << (i % 64)) != 0
-}
-
-fn term_uses(term: &Terminator) -> Vec<ValueId> {
-    match term {
-        Terminator::Br { cond, .. } => vec![*cond],
-        Terminator::JumpIfMatch { scrutinee, .. } => vec![*scrutinee],
-        Terminator::Return { lo, hi } => lo.iter().copied().chain(hi.iter().copied()).collect(),
-        Terminator::Jump { .. } | Terminator::Unreachable => Vec::new(),
-    }
-}
 
 pub(super) fn term_cmp_dest(func: &MirFunc, block: &super::func::MirBlock) -> Option<ValueId> {
     let Terminator::Br { cond, .. } = block.term.as_ref()? else {
@@ -783,12 +523,9 @@ pub(super) fn emit_cond_jumps(
     }
 }
 
-/// Drop identity `DenseMove` and dest-rewrite a unique slot writer into the
-/// copy dest (COI-383 S6). Runs before `DenseBin2` packing. Labels / jumps
-/// are barriers.
+/// Drop identity `DenseMove` (COI-383 S6). Runs before `DenseBin2` packing.
 fn coalesce_dense_moves(ops: &mut Vec<IlOp>) {
     drop_identity_dense_moves(ops);
-    dest_rewrite_dense_moves(ops);
 }
 
 fn drop_identity_dense_moves(ops: &mut Vec<IlOp>) {
@@ -799,149 +536,6 @@ fn drop_identity_dense_moves(ops: &mut Vec<IlOp>) {
         }
         _ => true,
     });
-}
-
-fn dest_rewrite_dense_moves(ops: &mut Vec<IlOp>) {
-    let mut remove = vec![false; ops.len()];
-    for i in 0..ops.len() {
-        let Some((dest, src)) = dense_move_of(&ops[i]) else {
-            continue;
-        };
-        if dest == src {
-            remove[i] = true;
-            continue;
-        }
-        let Some(writer) = unique_slot_writer(ops, i, src) else {
-            continue;
-        };
-        if slot_used_between(ops, writer + 1, i, dest) {
-            continue;
-        }
-        if slot_used_between(ops, writer + 1, i, src) {
-            continue;
-        }
-        if let Some(rewritten) = rewrite_dense_dest(&ops[writer], dest as u8) {
-            ops[writer] = rewritten;
-            remove[i] = true;
-        }
-    }
-    let mut out = Vec::with_capacity(ops.len());
-    for (i, op) in ops.drain(..).enumerate() {
-        if !remove[i] {
-            out.push(op);
-        }
-    }
-    *ops = out;
-}
-
-fn dense_move_of(op: &IlOp) -> Option<(usize, usize)> {
-    match op {
-        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseMove => {
-            Some(byte.dense_move_parts())
-        }
-        _ => None,
-    }
-}
-
-fn unique_slot_writer(ops: &[IlOp], before: usize, slot: usize) -> Option<usize> {
-    let mut found = None;
-    for j in (0..before).rev() {
-        if is_region_barrier(&ops[j]) {
-            break;
-        }
-        if dense_write_slot(&ops[j]) == Some(slot) {
-            if found.is_some() {
-                return None;
-            }
-            found = Some(j);
-        }
-    }
-    found
-}
-
-fn slot_used_between(ops: &[IlOp], lo: usize, hi: usize, slot: usize) -> bool {
-    for op in ops.iter().take(hi).skip(lo) {
-        if is_region_barrier(op) {
-            return true;
-        }
-        if dense_read_slots(op).contains(&slot) || dense_write_slot(op) == Some(slot) {
-            return true;
-        }
-    }
-    false
-}
-
-fn is_region_barrier(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Label(_)
-            | IlOp::JoinLabel(_)
-            | IlOp::Jump { .. }
-            | IlOp::Entry { .. }
-            | IlOp::Return { .. }
-            | IlOp::Halt { .. }
-    )
-}
-
-fn dense_write_slot(op: &IlOp) -> Option<usize> {
-    let IlOp::Byte { byte, .. } = op else {
-        return None;
-    };
-    match *byte.bytecode() {
-        Instruction::DenseBin | Instruction::DenseIndex | Instruction::DenseArrayPush => {
-            Some(byte.dense_abc_parts().1)
-        }
-        Instruction::DenseCast | Instruction::DenseUnary => {
-            Some(byte.dense_unary_parts().1)
-        }
-        Instruction::DenseArrayLen | Instruction::DenseMove => Some(byte.dense_move_parts().0),
-        Instruction::DenseConst => Some(byte.dense_const_parts().1),
-        _ => None,
-    }
-}
-
-fn dense_read_slots(op: &IlOp) -> Vec<usize> {
-    let IlOp::Byte { byte, .. } = op else {
-        return Vec::new();
-    };
-    match *byte.bytecode() {
-        Instruction::DenseBin | Instruction::DenseIndex => {
-            let (_, _, a, b) = byte.dense_abc_parts();
-            vec![a, b]
-        }
-        Instruction::DenseCast | Instruction::DenseUnary => {
-            vec![byte.dense_unary_parts().2]
-        }
-        Instruction::DenseArrayLen | Instruction::DenseMove => vec![byte.dense_move_parts().1],
-        _ => Vec::new(),
-    }
-}
-
-fn rewrite_dense_dest(op: &IlOp, dest: u8) -> Option<IlOp> {
-    let IlOp::Byte { byte, loc } = op else {
-        return None;
-    };
-    let loc = *loc;
-    let rewritten = match *byte.bytecode() {
-        Instruction::DenseBin => {
-            let (k, _, a, b) = byte.dense_abc_parts();
-            Byte::new(Instruction::DenseBin).with_dense_abc(k, dest, a as u8, b as u8)
-        }
-        Instruction::DenseCast => {
-            let (k, _, src) = byte.dense_unary_parts();
-            Byte::new(Instruction::DenseCast).with_dense_unary(k, dest, src as u8)
-        }
-        Instruction::DenseUnary => {
-            let (k, _, src) = byte.dense_unary_parts();
-            Byte::new(Instruction::DenseUnary).with_dense_unary(k, dest, src as u8)
-        }
-        Instruction::DenseConst => {
-            let (ty, _, payload, pool) = byte.dense_const_parts();
-            Byte::new(Instruction::DenseConst).with_dense_const(ty, dest, payload, pool)
-        }
-        _ => return None,
-    };
-    Some(IlOp::from_plain_byte(rewritten, loc))
 }
 
 /// Pack adjacent [`Instruction::DenseBin`] into [`Instruction::DenseBin2`].

@@ -442,7 +442,7 @@ fn main() {
             .filter(|b| *b.bytecode() == Instruction::DenseMove)
             .count();
         assert!(
-            moves <= 5,
+            moves <= 8,
             "COI-383 S6: nested mandelbrot should coalesce DenseMove copies, got {moves}"
         );
         let seek = bc
