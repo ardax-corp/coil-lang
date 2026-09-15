@@ -26,6 +26,7 @@ User code does not name these directly; the compiler emits them:
 | `RETURN` (operand) | `0` (default; old archives) is one word. `2` pops/pushes two words (second on top) instead of one value. |
 | `DenseBin` / `DenseCmp` | MIR 3-address numeric op / compare. Operand `[31:24] kind`, `[23:16] dest`, `[15:8] lhs`, `[7:0] rhs`. Stack-neutral; writes a typed frame slot. Archive **minor 6**. |
 | `DenseBin2` | Two-word pack of consecutive `DenseBin` (COI-381 S2). First `dense_abc` is the opcode operand; the following word is a payload `DenseBin` (second op). One dispatch; sequential IEEE (no FMA / reassoc). Not `FloatChainStore`. Archive **minor 16**. |
+| `DenseBinJmpf` | Two-word pack of `DenseBin` then a fused `*Jmpf`/`*Jmpt` (COI-377 S1). Operand is the bin `dense_abc`; the following word is the jump (`BinSlotSlotJmpf` / `BinSlotImmJmpf` / twins). One dispatch; sequential IEEE then the compare-branch. Not `DenseCmp`+jmp. Archive **minor 17**. |
 | `DenseConst` | Typed slot const. Bit 31 = pool; `[30:24]` ty, `[23:16]` dest, `[15:0]` imm or pool index. |
 | `DenseMove` | Copy slot to slot (`[15:8]` dest, `[7:0]` src). Used for φ edge copies. |
 | `DenseUnary` / `DenseCast` | `[31:24]` kind, `[15:8]` dest, `[7:0]` src (`neg` / `fneg` / `not`; `i2f` / `sext`). |

@@ -170,7 +170,10 @@ mod tests {
     }
 
     fn is_dense_bin_op(inst: Instruction) -> bool {
-        matches!(inst, Instruction::DenseBin | Instruction::DenseBin2)
+        matches!(
+            inst,
+            Instruction::DenseBin | Instruction::DenseBin2 | Instruction::DenseBinJmpf
+        )
     }
 
     #[test]
@@ -407,6 +410,32 @@ fn main() {
         assert!(
             packed >= 1,
             "COI-381 S2: nested mandelbrot should pack DenseBin2, got {packed}"
+        );
+        let mut packed_jmp = 0usize;
+        for (i, b) in bc.iter().enumerate() {
+            if *b.bytecode() != Instruction::DenseBinJmpf {
+                continue;
+            }
+            packed_jmp += 1;
+            let tail = bc
+                .get(i + 1)
+                .expect("DenseBinJmpf payload word")
+                .bytecode();
+            assert!(
+                matches!(
+                    *tail,
+                    Instruction::BinSlotSlotJmpf
+                        | Instruction::BinSlotSlotJmpt
+                        | Instruction::BinSlotImmJmpf
+                        | Instruction::BinSlotImmJmpt
+                ),
+                "COI-377 S1: DenseBinJmpf payload must be fused *Jmpf, got {}",
+                tail.mnemonic()
+            );
+        }
+        assert!(
+            packed_jmp >= 1,
+            "COI-377 S1: nested mandelbrot inner escape should pack DenseBinJmpf"
         );
         let seek = bc
             .iter()
@@ -1355,6 +1384,7 @@ fn main() {
                 *b.bytecode(),
                 Instruction::DenseBin
                     | Instruction::DenseBin2
+                    | Instruction::DenseBinJmpf
                     | Instruction::DenseConst
                     | Instruction::DensePush
             )

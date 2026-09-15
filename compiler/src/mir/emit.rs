@@ -194,6 +194,7 @@ pub fn emit_dense(
         )?;
     }
     pack_chained_dense_bin(&mut out);
+    pack_dense_bin_jmpf(&mut out);
     Ok(out)
 }
 
@@ -530,6 +531,85 @@ fn pack_chained_dense_bin(ops: &mut [IlOp]) {
         ops[i] = IlOp::from_plain_byte(packed, loc);
         i += 2;
     }
+}
+
+/// Pack [`Instruction::DenseBin`] immediately followed by a reconstruct that
+/// fuse-select turns into `*Jmpf` (COI-377 S1). The jump stays a typed
+/// `IlOp` so label resolution / invert still run; the VM consumes the fused
+/// jump as the payload word (`stream_width` 2).
+fn pack_dense_bin_jmpf(ops: &mut [IlOp]) {
+    let mut i = 0;
+    while i + 1 < ops.len() {
+        let first = match &ops[i] {
+            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::DenseBin => Some(*byte),
+            _ => None,
+        };
+        if first.is_none() || !dense_bin_followed_by_cond_jmp(ops, i) {
+            i += 1;
+            continue;
+        }
+        let loc = ops[i].loc();
+        let packed = Byte::new(Instruction::DenseBinJmpf)
+            .with_operand_u32(first.expect("DenseBin").operand_u32());
+        ops[i] = IlOp::from_plain_byte(packed, loc);
+        i += 1;
+    }
+}
+
+fn dense_bin_followed_by_cond_jmp(ops: &[IlOp], i: usize) -> bool {
+    dense_bin_slot_slot_jmp(ops, i) || dense_bin_slot_imm_jmp(ops, i)
+}
+
+fn cond_jump_fusable(op: &IlOp) -> bool {
+    match op {
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse | IlJumpKind::JumpIfTrue,
+            hint,
+            ..
+        } => !hint.blocks_cmp_jmp_fuse(),
+        _ => false,
+    }
+}
+
+fn dense_bin_slot_slot_jmp(ops: &[IlOp], i: usize) -> bool {
+    if i + 4 >= ops.len() {
+        return false;
+    }
+    matches!(&ops[i + 1], IlOp::Load { .. })
+        && matches!(&ops[i + 2], IlOp::Load { .. } | IlOp::Dup { .. })
+        && matches!(&ops[i + 3], IlOp::Bin { op, .. } if is_jmpf_cond_op(*op))
+        && cond_jump_fusable(&ops[i + 4])
+}
+
+fn dense_bin_slot_imm_jmp(ops: &[IlOp], i: usize) -> bool {
+    if i + 2 >= ops.len() {
+        return false;
+    }
+    matches!(
+        &ops[i + 1],
+        IlOp::BinSlotImm { op, .. } if is_jmpf_cond_op(Instruction::from(*op))
+    ) && cond_jump_fusable(&ops[i + 2])
+}
+
+fn is_jmpf_cond_op(i: Instruction) -> bool {
+    matches!(
+        i,
+        Instruction::LE
+            | Instruction::LEQ
+            | Instruction::GT
+            | Instruction::GEQ
+            | Instruction::EQ
+            | Instruction::NEQ
+            | Instruction::LEF
+            | Instruction::LEQF
+            | Instruction::GTF
+            | Instruction::GEQF
+            | Instruction::AND
+            | Instruction::OR
+            | Instruction::BITAND
+            | Instruction::BITOR
+            | Instruction::XOR
+    )
 }
 
 pub(super) fn emit_inst(

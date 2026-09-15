@@ -1188,6 +1188,7 @@ fn main() {
                 *b.bytecode(),
                 Instruction::DenseBin
                     | Instruction::DenseBin2
+                    | Instruction::DenseBinJmpf
                     | Instruction::DenseCmp
                     | Instruction::DenseConst
                     | Instruction::DenseMove
