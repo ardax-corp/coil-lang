@@ -1,8 +1,9 @@
 # Auto-par vs branch misses (investigation)
 
 Report-only investigation on main `f35b3ea4` G3 (no ISA / codegen change), plus
-**COI-390** join wait (drop 1 ms poll). Symptom: `poop` shows many **branch
-misses** when `COIL_AUTO_PAR` is on.
+**COI-390** join wait (drop 1 ms poll) and **COI-391** idle park (drop 2 ms
+empty-steal). Symptom: `poop` shows many **branch misses** when `COIL_AUTO_PAR`
+is on.
 
 ## How to read `poop` here
 
@@ -91,10 +92,10 @@ move.
 | loop IPA w=4 | 4 | **1** | 1 | ~41 | 0 | 8 | 0 | 1 |
 
 F1 hop means fib(32) is **three** AlwaysPar spawns, not a job per tree node.
-Empty steals dominate successful steals (~100:1 at w=4). `Steal::Retry` (CAS
-contention on the deque) is **zero** on this load. Idle workers
-`wait_timeout(2 ms)` and (before COI-390) the joiner `wait_timeout(1 ms)` then
-steal-empty again.
+Empty steals dominate successful steals (~100:1 at w=4) **before** COI-391.
+`Steal::Retry` (CAS contention on the deque) is **zero** on this load. Before
+COI-391, idle workers `wait_timeout(2 ms)` and (before COI-390) the joiner
+`wait_timeout(1 ms)` then steal-empty again.
 
 ### COI-390 join wait (after)
 
@@ -113,13 +114,34 @@ w=4 **28.1 ± 15.5 ms** (min 24.2 ms; noisy outliers). Checksums hold:
 mandelbrot `625885`, fib `2178309`, nsieve `1900`. Sequential mandelbrot /
 nsieve archives remain byte-identical with auto-par on.
 
+### COI-391 idle park (after)
+
+Idle workers recheck steal/shutdown under `sleep` then `wait` until `notify`
+(submit / job-complete / shutdown). No 2 ms poll. When `inflight == 0` they
+skip the empty-deque walk. Join path unchanged (`join_timeouts=0`).
+
+| Config | steal_empty | idle_waits | join_timeouts | join_parks | notes |
+|---|---|---|---|---|---|
+| fib IPA w=4 **COI-390** | ~200 | ~30 | **0** | **4** | 2 ms idle poll |
+| fib IPA w=4 **COI-391** | **~140** | **~12** | **0** | **4–5** | parks, not 2 ms timeouts |
+| loop IPA w=4 **COI-390** | 33 | 7 | 0 | 0 | |
+| loop IPA w=4 **COI-391** | **~20–36** | **6–7** | **0** | 0–1 | |
+
+Leftover `steal_empty` is `notify_all` waking idle peers who then walk injector
++ stealers once (counted per deque). It no longer grows with wall / 2 ms.
+
+Fib IPA wall on this host (release, `hyperfine` ≥30 runs): seq **57.2 ± 0.4 ms**,
+IPA w=4 **25.2 ± 1.3 ms** (min 23.9 ms). Sequential mandelbrot **18.5 ± 0.4 ms**,
+nsieve **2.6 ± 0.2 ms**. Checksums hold: mandelbrot `625885`, fib `2178309`,
+nsieve `1900`, loop_ipa_sum `2666646666700000`. Sequential mandelbrot / nsieve
+archives remain byte-identical with auto-par on.
+
 ## Attribution
 
 ### 1. Reactor idle / join poll (primary under auto-par)
 
-`machine/src/reactor.rs`: `worker_loop` still parks with a **2 ms** condvar
-timeout. **Join** (COI-390) waits until result or job — `join_timeouts` is 0.
-Idle empty-steal walks remain the main leftover poll.
+`machine/src/reactor.rs`: **Join** (COI-390) waits until result or job —
+`join_timeouts` is 0. **Idle** (COI-391) parks until `notify` — no 2 ms poll.
 
 G0–G3 execute peeks are **not** on this path.
 
@@ -161,21 +183,21 @@ source.
 
 | Rank | Change | Cost | Why |
 |---|---|---|---|
-| 1 | ~~Join wait without 1 ms poll~~ **landed (COI-390)** — `join_timeouts=0`, `join_parks≈4` on fib IPA | small reactor | Remaining empty-steals are mostly idle 2 ms |
-| 2 | **Idle workers: park until `notify`, drop 2 ms poll** (or exponential backoff) | small reactor | Cuts `idle_waits` × peer-empty walks; 4 workers vs 3 fib jobs is mostly idle |
+| 1 | ~~Join wait without 1 ms poll~~ **landed (COI-390)** — `join_timeouts=0`, `join_parks≈4` on fib IPA | small reactor | Remaining empty-steals were idle 2 ms |
+| 2 | ~~Idle workers park until `notify`~~ **landed (COI-391)** — `idle_waits≈12`, `steal_empty≈140` on fib IPA (was ~30 / ~200) | small reactor | Cuts timed empty-steal; leftover empties are one walk per notify |
 | 3 | **Read `poop` as miss rate + pin `COIL_MAX_WORKER_THREADS`** when comparing seq vs par | docs / script | Absolute misses scale with threads; `poop_baseline.sh` fib is already sequential |
 | 4 | **Do not revert G3 peeks / DenseBin2 for this symptom** | — | Fib IPA never takes them; mandelbrot auto-par is a no-op |
 | 5 | Optional: start `n = min(cap, inflight)` workers, or keep a 1-worker pool until the second submit | medium | Avoids 3 idle pollers for a 3-job fib |
 | 6 | PMU laptop: `perf record -e branch-misses` on fib IPA vs seq; expect hits in `steal_from_*` / pthread condwait, not `exec_dense` | measurement | Confirms (1) if this cloud’s missing PMU worried anyone |
 | 7 | Shared-heap CAS / F3 | skip for this | No evidence on flagships |
 
-Rank 1 landed (COI-390). Free/near-free leftover: (2)–(3). Large design: changing hop/grain so fib spawns more
+Rank 1–2 landed (COI-390, COI-391). Free leftover: (3). Large design: changing hop/grain so fib spawns more
 jobs (would **increase** steal traffic). ISA peeks are the wrong knob.
 
 ## Hypotheses (verdict)
 
 | Hypothesis | Verdict |
 |---|---|
-| Auto-par steal / chunk / reactor poll dominate misses more than opcode peeks | **Hold** (idle 2 ms empty-steal leftover; join poll gone; 3 jobs; retry=0) |
+| Auto-par steal / chunk / reactor poll dominate misses more than opcode peeks | **Hold** (idle + join polls gone; leftover is real steal + condwait; 3 jobs; retry=0) |
 | G3 `execute_dense` ALWAYS_HOT peek + table raises per-worker mispredict when mix differs | **Discard for fib IPA**; sequential mandelbrot only |
 | Shared-heap contention shows as misses around CAS/spin | **Discard on these benches** (`steal_retry=0`, shared-off wash) |
