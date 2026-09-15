@@ -236,6 +236,7 @@ idle workers steal. `thread::spawn` / auto-par share this pool — no per-call
 | `COIL_PAR_THRESHOLD` | Expression IPA grain floor (fork-tree nodes `W`). Default **10945**. |
 | `COIL_LOOP_GRAIN` | Counted-loop IPA trip-count floor. Default **20**. |
 | `COIL_SHARED_HEAP` | `0` / `false` / `off` / `no` forces isolate `PortableValue` spawn for loop chunks and expression IPA (C1/C2 off). Default on. |
+| `COIL_PAR_STATS` | `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). |
 
 `.hyc` / embed execute sizes each isolate operand stack from the persisted
 compiler bound (archive minor 13). Pre-13 archives still use the Seek+CALL

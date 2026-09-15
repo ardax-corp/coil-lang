@@ -108,7 +108,9 @@ COIL_THREADED_DISPATCH=1 COIL_AUTO_PAR=0 ./target/release/coil run /tmp/m.hyc
 
 Checksums: mandelbrot `625885`, fib `2178309`, nsieve `1900`, tak `7`.
 
-`poop` panics on this host (`perf_event` / stripped binary); wall A/B used `hyperfine`.
+`poop` panics on this host (`perf_event` / stripped binary / no CPU PMU);
+wall A/B used `hyperfine`. Auto-par vs sequential branch-miss notes:
+[auto-par-branch-misses.md](auto-par-branch-misses.md).
 
 ## Measured (release, fat LTO, `COIL_AUTO_PAR=0`, same `.hyc`)
 
