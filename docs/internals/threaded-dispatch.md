@@ -174,8 +174,10 @@ Rare ops (`FORMAT`, `STRINGIFY`, `HostInvoke`, `rest` / exec_rest, debug/deopt)
 must not share instruction-cache lines with mandelbrot/fib dense kernels.
 
 - Hot outlined handlers (`op_dense_*`, jmp fuses, `execute_dense`, `table_loop`)
-  use `.text.hot.coil_vm` on Linux. Cold handlers (`rest`, G2 stack arith,
-  optional CALL/RETURN) use `#[cold]` + `.text.unlikely.coil_vm`.
+  use `.text.hot` on Linux. Cold handlers (`rest`, G2 stack arith,
+  optional CALL/RETURN) use `#[cold]` + `.text.unlikely`.
+  `.cargo/config.toml` passes `-z keep-text-section-prefix` so rust-lld does
+  not fold those prefixes into `.text`.
 - Table mode **peeks** `ALWAYS_HOT` (no new discriminant) and enters
   `execute_dense`: a compact match over the G1 dense/jmp set with **no**
   256-entry table. Kernel ops still bounce to the giant `execute` match.
