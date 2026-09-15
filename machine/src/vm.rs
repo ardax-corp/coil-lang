@@ -2830,7 +2830,8 @@ impl<const S: usize> Machine<S> {
             if dispatch_mode != dispatch::Mode::Match && !debug_attached {
                 promise!(ip < code_len);
                 let peek = unsafe { code.get_unchecked(ip) };
-                if dispatch::is_hot(*peek.bytecode()) {
+                // Fib never takes this; keep the giant match as fall-through.
+                if unlikely(dispatch::is_hot(*peek.bytecode())) {
                     match dispatch::run_hot_streak(
                         &mut self.stack,
                         &mut sp,
