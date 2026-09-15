@@ -597,6 +597,19 @@ fn main() {
             latch >= 1,
             "COI-387 X2: nsieve k-loop should be DenseBin; JMP"
         );
+        let mut stride = 0usize;
+        for w in bc.windows(3) {
+            if *w[0].bytecode() == Instruction::DenseStoreIndex
+                && *w[1].bytecode() == Instruction::DenseBin
+                && *w[2].bytecode() == Instruction::JMP
+            {
+                stride += 1;
+            }
+        }
+        assert!(
+            stride >= 1,
+            "COI-382 S5: nsieve k-loop should be DenseStoreIndex; DenseBin; JMP"
+        );
         let mut vm = machine::Machine::<64>::with_operand_capacity(64);
         p.wire_host_natives(&mut vm);
         vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());

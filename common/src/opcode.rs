@@ -388,6 +388,8 @@ pub enum Instruction {
     DenseIndex,
     /// Dense heap store. Same packing as [`Self::DenseIndex`].
     /// Dest slot holds the stored value (and is the SSA dest).
+    /// Table/hotmatch peek a trailing `DenseBin`/`DenseBin2` + `JMP`
+    /// (COI-382 S5 stride IV bump); giant match does not.
     DenseStoreIndex,
     /// Dense `ArrayLen`. `[15:8]` dest, `[7:0]` array slot.
     DenseArrayLen,
@@ -582,6 +584,7 @@ pub mod dense {
     /// [`super::Instruction::DenseIndexJmpf`] consume the following payload word.
     /// COI-387 X2 coalesces a trailing `JMP` in the VM (no extra discriminant).
     /// COI-380 S3 coalesces a trailing `DenseBin`/`DenseBin2` after `DenseCast`.
+    /// COI-382 S5 coalesces `DenseStoreIndex` then `DenseBin`/`DenseBin2` then `JMP`.
     #[inline]
     #[must_use]
     pub fn stream_width(op: super::Instruction) -> usize {

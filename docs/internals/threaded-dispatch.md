@@ -31,7 +31,7 @@ much smaller I-cache footprint than `execute`.
 G0: `DenseBin`, `DenseCmp`, `DenseConst`, `DenseMove`, `DenseCast`, `JMP` /
 `JMPF` / `JMPT`, `BinSlotSlotJmpf` / `BinSlotSlotJmpt`. `DenseBin2` /
 `DenseBinJmpf` / `DenseIndexJmpf` are always-hot like `DenseBin` (`.rodata` mask; `unlikely(is_hot)`).
-Table/hotmatch peek a trailing `JMP` after `DenseBin` / `DenseBin2` (COI-387 X2) so the latch is one dispatch without a new `Instruction` variant. The giant match does not peek. Table/hotmatch also peek a trailing `DenseBin` / `DenseBin2` after `DenseCast` (COI-380 S3); bytecode stays split; giant match does not peek.
+Table/hotmatch peek a trailing `JMP` after `DenseBin` / `DenseBin2` (COI-387 X2) so the latch is one dispatch without a new `Instruction` variant. The giant match does not peek. Table/hotmatch also peek a trailing `DenseBin` / `DenseBin2` after `DenseCast` (COI-380 S3); bytecode stays split; giant match does not peek. Table/hotmatch peek `DenseBin`/`DenseBin2` then `JMP` after `DenseStoreIndex` (COI-382 S5); giant match does not.
 
 G1 adds: `DenseUnary`, `DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` /
 `DenseFieldLoad` / `DenseFieldStore`, `CmpJmpf` / `CmpJmpt`, `LogNotJmpf` /

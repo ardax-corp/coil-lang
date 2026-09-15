@@ -3977,6 +3977,12 @@ fn example_perf_dense_cast_bin_prints_checksum() {
 }
 
 #[test]
+fn example_perf_stride_store_iv_prints_checksum() {
+    let output = run_example("examples/perf/stride_store_iv.hy");
+    assert_eq!(output, "1");
+}
+
+#[test]
 fn example_perf_dest_prop_field_alias_prints_checksum() {
     let output = run_example("examples/perf/dest_prop_field_alias.hy");
     assert_eq!(output, "40000000");
