@@ -4,6 +4,9 @@
 # Not a hard CI gate: prints poop stats for the fair cross-lang perf subset so
 # regressions are easy to spot before/after compiler changes. Requires `poop`.
 # Times `coil run` on a precompiled archive (not in-memory compile+run).
+# Flagship mandelbrot/nsieve/tak/binary_trees do not emit IPA; fib is compiled
+# with COIL_AUTO_PAR=0 so this row stays sequential. For IPA vs seq counters
+# see docs/internals/auto-par-branch-misses.md (COIL_PAR_STATS=1).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
