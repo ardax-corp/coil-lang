@@ -30,7 +30,7 @@ much smaller I-cache footprint than `execute`.
 
 G0: `DenseBin`, `DenseCmp`, `DenseConst`, `DenseMove`, `DenseCast`, `JMP` /
 `JMPF` / `JMPT`, `BinSlotSlotJmpf` / `BinSlotSlotJmpt`. `DenseBin2` /
-`DenseBinJmpf` are always-hot like `DenseBin` (`.rodata` mask; `unlikely(is_hot)`).
+`DenseBinJmpf` / `DenseIndexJmpf` are always-hot like `DenseBin` (`.rodata` mask; `unlikely(is_hot)`).
 
 G1 adds: `DenseUnary`, `DenseIndex` / `DenseStoreIndex` / `DenseArrayLen` /
 `DenseFieldLoad` / `DenseFieldStore`, `CmpJmpf` / `CmpJmpt`, `LogNotJmpf` /
