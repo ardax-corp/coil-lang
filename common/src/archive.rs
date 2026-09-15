@@ -74,10 +74,12 @@ pub const ARCHIVE_MAJOR: u16 = 4;
 ///      `DenseBin`). Sequential IEEE; not FMA / `FloatChainStore`.
 /// 17 — `DenseBinJmpf` (COI-377 S1): two-word pack of `DenseBin` then a
 ///      fused `*Jmpf`/`*Jmpt` payload (mandelbrot inner mag + GTF).
+/// 18 — `DenseIndexJmpf` (COI-379 S4): two-word pack of `DenseIndex` then a
+///      fused `*Jmpf`/`*Jmpt` payload (nsieve p-loop `flags[p] == 1`).
 ///
 /// Major 3: persist [`CStructLayout`] (C align/pad) so packaged / `.hyc`
 /// execute can restore `extern struct` layouts. rkyv schema change.
-pub const ARCHIVE_MINOR: u16 = 17;
+pub const ARCHIVE_MINOR: u16 = 18;
 
 /// Packed `ARCHIVE_MAJOR.ARCHIVE_MINOR` stamped into new archives.
 pub const ARCHIVE_VERSION: u32 = pack_archive_version(ARCHIVE_MAJOR, ARCHIVE_MINOR);
@@ -545,9 +547,9 @@ mod tests {
     #[test]
     fn archive_version_matches_current_abi() {
         assert_eq!(ARCHIVE_MAJOR, 4);
-        assert_eq!(ARCHIVE_MINOR, 17);
-        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 17));
-        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.17");
+        assert_eq!(ARCHIVE_MINOR, 18);
+        assert_eq!(ARCHIVE_VERSION, pack_archive_version(4, 18));
+        assert_eq!(format_archive_version(ARCHIVE_VERSION), "4.18");
     }
 
     #[test]
