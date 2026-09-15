@@ -316,6 +316,27 @@ fn perf_dense_cast_bin_header_shape() {
 }
 
 #[test]
+fn perf_stride_store_iv_k_loop_shape() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/stride_store_iv.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "hot", bc.len());
+    let body = &bc[start..end];
+    let mut stride = 0usize;
+    for w in body.windows(3) {
+        if *w[0].bytecode() == Instruction::DenseStoreIndex
+            && *w[1].bytecode() == Instruction::DenseBin
+            && *w[2].bytecode() == Instruction::JMP
+        {
+            stride += 1;
+        }
+    }
+    assert!(
+        stride >= 1,
+        "COI-382 S5: hot should keep DenseStoreIndex ; DenseBin ; JMP"
+    );
+}
+
+#[test]
 fn perf_mandelbrot_dispatch_regression() {
     let (bc, pool, strings, statics, pipeline) = compile("examples/perf/mandelbrot.hy");
     let dispatches = run_dispatch(bc, pool, strings, statics, &pipeline);
