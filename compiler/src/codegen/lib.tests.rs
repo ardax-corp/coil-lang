@@ -8997,8 +8997,10 @@ fn main() {
 "#,
         );
         assert!(
-            bc.iter()
-                .any(|b| matches!(b.bytecode(), Instruction::MakeEnum)),
+            bc.iter().any(|b| matches!(
+                b.bytecode(),
+                Instruction::MakeEnum | Instruction::MakeEnumReturn
+            )),
             "Result with an immediate payload must stay boxed; opcodes={:?}",
             bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>(),
         );
