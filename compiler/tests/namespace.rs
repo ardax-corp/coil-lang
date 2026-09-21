@@ -1430,6 +1430,173 @@ fn main() {
     });
 }
 
+/// Cross-module `Result<Path, IoError>` match must take Ok when the
+/// caller never imports `IoError` (coil-stdlib `tests/path.hy`).
+#[test]
+fn cross_module_result_path_ioerror_match_is_ok() {
+    let files = [
+        (
+            "src/pathmod.hy",
+            r#"
+use io::{IoError};
+
+class Path {
+    pub raw: string,
+}
+
+impl Path {
+    pub static fn from(string s) -> Path {
+        return new Path(s);
+    }
+
+    pub fn as_str() -> string {
+        return self.raw;
+    }
+
+    pub fn clone_ok() -> Result<Path, IoError> {
+        return new Path(self.raw);
+    }
+}
+"#,
+        ),
+        (
+            "src/main.hy",
+            r#"
+use pathmod::{Path};
+use io::{stdout, write};
+use string::{format, to_bytes};
+
+fn main() {
+    let a = Path::from("a");
+    let j = match a.clone_ok() {
+        Result::Ok(p) => p,
+        Result::Err(_) => panic "clone",
+    };
+    write(stdout(), to_bytes(j.as_str()));
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project(
+        "cross_module_path_ioerror",
+        &manifest_src_and_stdlib(),
+        &files,
+        "src/main.hy",
+    );
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+            Ok(pair) => pair,
+            Err(()) => {
+                for msg in pipeline.messages() {
+                    eprintln!("PIPELINE ERROR: {}", msg.message());
+                }
+                panic!("compile failed");
+            }
+        };
+        let output = run_bytecode(bytecode, constants, &pipeline);
+        assert_eq!(output, "a");
+    });
+}
+
+/// `Result<string, string>` return layout must follow `text::to_lower`,
+/// not a sibling `ascii::to_lower` that shares the short name.
+#[test]
+fn module_result_string_keeps_ok_across_short_name_collision() {
+    let files = [
+        (
+            "src/ascii.hy",
+            r#"
+fn to_lower(byte c) -> byte {
+    if c >= "A" {
+        if c <= "Z" {
+            let n = (c as int) + 32;
+            return n as byte;
+        }
+    }
+    return c;
+}
+"#,
+        ),
+        (
+            "src/textmod.hy",
+            r#"
+use string::{to_bytes, from_bytes};
+use ascii::{to_lower as ascii_lower};
+
+fn utf8_ok(Vec<byte> b) -> Result<string, string> {
+    return match from_bytes(b) {
+        Result::Ok(s) => s,
+        Result::Err(_) => raise "utf8",
+    };
+}
+
+fn to_lower(string s) -> Result<string, string> {
+    let b = to_bytes(s);
+    let out: Vec<byte> = Vec::new();
+    let i = 0;
+    let a_up: byte = "A";
+    let z_up: byte = "Z";
+    while i < len(b) {
+        let c = b[i];
+        if c >= a_up {
+            if c <= z_up {
+                out.push(ascii_lower(c));
+            }
+            if c > z_up {
+                out.push(c);
+            }
+        }
+        if c < a_up {
+            out.push(c);
+        }
+        i = i + 1;
+    }
+    return utf8_ok(out)?;
+}
+"#,
+        ),
+        (
+            "src/main.hy",
+            r#"
+use textmod::{to_lower};
+use io::{stdout, write};
+use string::{to_bytes};
+
+fn main() {
+    let low = match to_lower("AbC") {
+        Result::Ok(s) => s,
+        Result::Err(_) => panic "lower",
+    };
+    write(stdout(), to_bytes(low));
+}
+"#,
+        ),
+    ];
+    let (root, entry) = build_project(
+        "module_result_name_collision",
+        &manifest_src_and_stdlib(),
+        &files,
+        "src/main.hy",
+    );
+    with_project_cwd(&root, || {
+        let mut pipeline = Pipeline::new();
+        bind_ns_pipeline(&mut pipeline, &[]);
+        let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+            Ok(pair) => pair,
+            Err(()) => {
+                for msg in pipeline.messages() {
+                    eprintln!("PIPELINE ERROR: {}", msg.message());
+                }
+                panic!("compile failed");
+            }
+        };
+        let output = run_bytecode(bytecode, constants, &pipeline);
+        assert_eq!(output, "abc");
+    });
+}
+
 static CWD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 struct CwdLockGuard(std::sync::MutexGuard<'static, ()>);
