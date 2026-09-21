@@ -212,11 +212,16 @@ impl Checker {
     }
 
     /// Pre-register compiler-built-in enums (`FFIType`, `Option`, `Result`).
+    ///
+    /// Virtual error enums keep their *tags* here so Result layout survives
+    /// per-file `check_program` reset. Names stay out of prelude scope;
+    /// `use io::{IoError}` still binds the identifier.
     fn register_builtin_enums(&mut self) {
         self.register_builtin_ffi_type();
         self.register_builtin_option_result();
-        // `IoError` is NOT registered here, it is not auto-imported.
-        // Tags are installed on first `use io::…` that binds `IoError` or an IO fn.
+        self.register_builtin_io_error();
+        self.register_builtin_thread_error();
+        self.register_builtin_env_error();
     }
 
     /// Synthetic `Vec<T>` class + inherent methods (host natives / method sugar).
@@ -574,6 +579,13 @@ impl Checker {
     /// Look up a short name in the virtual-module scope.
     pub fn scope_binding(&self, name: &str) -> Option<&BuiltinExport> {
         self.scope_bindings.get(name)
+    }
+
+    /// True when `enum_name` itself was imported (`use io::{IoError}`).
+    fn virtual_error_enum_imported(&self, enum_name: &str) -> bool {
+        self.scope_bindings.values().any(|export| {
+            matches!(export, BuiltinExport::Enum { name } if *name == enum_name)
+        })
     }
 
     /// True when `name` is an in-scope FFI tag constructor (`Int`, …).
@@ -4038,6 +4050,14 @@ impl Checker {
                 Some(s) if s == def_scheme => return Some(def_scheme.clone()),
                 Some(_) => return env_scheme,
             }
+        }
+        // Namespaced compile looks up `module::fn`. Prefer the recorded
+        // DefId scheme over a stale env dummy / colliding short name.
+        if let Some((module, name)) = ident.rsplit_once("::")
+            && let Some(id) = self.interned_def(module, name)
+            && let Some(def_scheme) = self.schemes_by_def.get(&id)
+        {
+            return Some(def_scheme.clone());
         }
         env_scheme
     }
@@ -9938,9 +9958,17 @@ impl Checker {
 
     fn note_result_mode_fn(&mut self, name: &str, ok: &Ty) {
         self.result_mode_fns.insert(name.to_string());
+        if !self.current_module.is_empty() {
+            self.result_mode_fns
+                .insert(format!("{}::{}", self.current_module, name));
+        }
         let ok = apply_ty_prune(&self.subst, ok);
         if result_ok_err(&ok).is_some() {
             self.result_mode_ok_is_result.insert(name.to_string());
+            if !self.current_module.is_empty() {
+                self.result_mode_ok_is_result
+                    .insert(format!("{}::{}", self.current_module, name));
+            }
         }
     }
 
@@ -13483,6 +13511,14 @@ impl Checker {
                 }
                 if common::is_builtin_ffi_enum(enum_name) {
                     return self.ffi_tag_in_scope(variant);
+                }
+                // Tags stay registered for Result layout; constructors
+                // stay out of prelude until the enum is imported.
+                if common::is_builtin_io_error_enum(enum_name)
+                    || common::is_builtin_thread_error_enum(enum_name)
+                    || common::is_builtin_env_error_enum(enum_name)
+                {
+                    return self.virtual_error_enum_imported(enum_name);
                 }
                 true
             })

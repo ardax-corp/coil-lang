@@ -9633,13 +9633,37 @@ impl Compiler {
 
     /// Return type of the function whose body is being compiled.
     fn compiling_fn_return_ty(&self) -> Option<crate::typechecking::Ty> {
-        let name = self
-            .current_function_qualified
-            .as_deref()
-            .or(self.current_function_table_key.as_deref())?;
-        self.checker
-            .fn_return_ty(name)
-            .or_else(|| self.fn_return_ty(name))
+        let qualified = self.current_function_qualified.as_deref();
+        let table_key = self.current_function_table_key.as_deref();
+        if let Some(name) = qualified {
+            if let Some(ty) = self
+                .checker
+                .fn_return_ty(name)
+                .or_else(|| self.fn_return_ty(name))
+            {
+                return Some(ty);
+            }
+        }
+        if let Some(name) = table_key {
+            if let Some(ty) = self
+                .checker
+                .fn_return_ty(name)
+                .or_else(|| self.fn_return_ty(name))
+            {
+                return Some(ty);
+            }
+        }
+        // Own-module DefId — not `local_defs` of the last typechecked file.
+        let name = qualified.or(table_key)?;
+        if let Some((module, bare)) = name.rsplit_once("::") {
+            self.checker.interned_def(module, bare).and_then(|id| {
+                self.checker.fn_return_ty(&self.fqn_of_def(id))
+            })
+        } else {
+            self.checker.def_id_of(name).and_then(|id| {
+                self.checker.fn_return_ty(&self.fqn_of_def(id))
+            })
+        }
     }
 
     /// Host-edge Option/Result layout from this invoke's HM type only.
@@ -12360,6 +12384,13 @@ impl Compiler {
             Ty::Constructor { owner, .. } => Self::niche_heap_only_ty(owner, checker),
             Ty::Con(name) => {
                 if name == "string" || checker.is_class(name) {
+                    true
+                } else if common::is_builtin_io_error_enum(name)
+                    || common::is_builtin_thread_error_enum(name)
+                    || common::is_builtin_env_error_enum(name)
+                {
+                    // Virtual unit-error enums stay heap even if this file
+                    // never imported the tags (per-file `check_program` reset).
                     true
                 } else if common::is_builtin_option_enum(name)
                     || common::is_builtin_result_enum(name)

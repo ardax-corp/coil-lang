@@ -519,6 +519,12 @@ impl Checker {
             } else {
                 let scheme = Scheme::mono(resolved);
                 self.env.insert_top(name.to_string(), scheme.clone());
+                // Same FQN insert as the generic branch: namespaced compile
+                // looks up `module::fn` for Result/Option return layout.
+                if !self.current_module.is_empty() {
+                    let fqn = format!("{}::{}", self.current_module, name);
+                    self.env.insert_top(fqn, scheme.clone());
+                }
                 self.record_free_fn_scheme(name, scheme);
             }
         }
