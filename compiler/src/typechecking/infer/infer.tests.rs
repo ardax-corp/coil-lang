@@ -6853,13 +6853,21 @@ fn main() {
 
     #[test]
     fn io_error_other_does_not_collide_until_imported() {
-        // IoError::Other must not reserve the constructor name globally , 
+        // IoError::Other must not reserve the constructor name globally;
         // user enums may use `Other` without `use io`.
         let (mut c, _) = check("enum Foo { Bar, Other } let x = Foo::Other;");
         let msgs = c.take_messages();
         assert!(
             msgs.is_empty(),
             "unexpected without io import: {:?}",
+            msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
+        );
+
+        let (mut c, _) = check("enum Foo { Bar, Other } let x = Other;");
+        let msgs = c.take_messages();
+        assert!(
+            msgs.is_empty(),
+            "bare Other must stay Foo when IoError is not imported: {:?}",
             msgs.iter().map(|m| m.message()).collect::<Vec<_>>()
         );
 
