@@ -399,6 +399,37 @@
     }
 
     #[test]
+    fn return_convoy_refuses_bitand_err_bit_as_payload() {
+        // Niche Result `?`: DUP; CONST 1; BITAND; JMPF success; RETURN.
+        // CONST 1 is the discriminant mask, not the Ok payload.
+        let loc = common::DebugLoc::unknown();
+        let mut ops = vec![
+            IlOp::Load { slot: 0, loc },
+            IlOp::Dup { loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::BITAND,
+                loc,
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(0),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(0)),
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let before = ops.clone();
+        return_convoy(&mut ops);
+        assert!(
+            ops == before,
+            "must not fuse CONST 1 under BITAND;JMPF as the return"
+        );
+    }
+
+    #[test]
     fn return_convoy_skips_conditional_jump_into_cluster() {
         // CONST immediately before JMPF is the condition, not a value-under-cond.
         let mut ops = vec![
@@ -2033,6 +2064,48 @@
             .count();
         assert_eq!(jmpf_count, 2, "JMPF ops kept; only S stripped");
         assert!(ops.iter().any(|op| matches!(op, IlOp::Return { .. })));
+    }
+
+    #[test]
+    fn multi_op_join_convoy_refuses_two_word_call_as_jmpf_cond() {
+        // Same diamond as `sinks_identical_suffix_via_jmpt`, but JMPF's
+        // "condition" is a two-slot CALL (delta +1 is the Result tag).
+        let suf = load_const_add_suffix();
+        let loc = common::DebugLoc::unknown();
+        let call = IlOp::Entry {
+            kind: crate::il::op::EntryKind::Call,
+            arity: 1,
+            target: Label(2),
+            loc,
+            ret_words: 2,
+        };
+        let mut ops = Vec::new();
+        ops.extend(suf.clone());
+        ops.push(call.clone());
+        ops.push(IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(0),
+            loc,
+            hint: Default::default(),
+        });
+        ops.push(IlOp::Pop { loc });
+        ops.extend(suf);
+        ops.push(call);
+        ops.push(IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(0),
+            loc,
+            hint: Default::default(),
+        });
+        ops.push(IlOp::Label(Label(0)));
+        ops.push(IlOp::StorePop { slot: 2, loc });
+
+        let before = ops.clone();
+        multi_op_join_convoy(&mut ops);
+        assert!(
+            ops == before,
+            "must not treat two-slot CALL as JMPF condition"
+        );
     }
 
     /// `STORE; LOAD; CONST; EQ; JMPF` must not sink — EQ consumes the compare

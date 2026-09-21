@@ -194,6 +194,14 @@ fn convoy_pred_tail_before(
             if jump_idx < 2 {
                 return None;
             }
+            // `DUP; CONST 1; BITAND; JMPF` (niche Result `?`) — CONST 1 is
+            // the mask, not the return payload. Refuse two-input conds.
+            if ops[jump_idx - 1]
+                .as_encode_byte()
+                .is_some_and(|c| is_plain_binop(&c))
+            {
+                return None;
+            }
             let cond = ops[jump_idx - 1].as_encode_byte()?;
             let _ = cond;
             let b = ops[jump_idx - 2].as_encode_byte()?;
@@ -540,8 +548,26 @@ fn multi_op_pred_suffix_end(jump_idx: usize, kind: IlJumpKind) -> Option<usize> 
 /// `JMPF`/`JMPT` condition must be a pure push (delta +1) so it does not
 /// consume values produced by the sunk suffix (e.g. `LOAD;CONST;EQ;JMPF`
 /// must not treat `EQ` as movable with its operands).
+///
+/// A two-slot `CALL` also has delta `+1` (`ret_words=2`, arity 1). That
+/// word is the Result tag, not a boolean. Treating it as the condition
+/// lets this pass sink the previous statement into the `?` success join.
 fn multi_op_cond_is_independent_push(ops: &[IlOp], cond_idx: usize) -> bool {
+    if is_call_like_cond(&ops[cond_idx]) {
+        return false;
+    }
     matches!(crate::il::sp::stack_delta(&ops[cond_idx]), Some(1))
+}
+
+fn is_call_like_cond(op: &IlOp) -> bool {
+    match op {
+        IlOp::Entry { .. } | IlOp::HostInvoke { .. } => true,
+        IlOp::Byte { byte, .. } => matches!(
+            *byte.bytecode(),
+            Instruction::CALL | Instruction::CallIndirect | Instruction::HostInvoke
+        ),
+        _ => false,
+    }
 }
 
 /// Sink identical multi-op compute suffixes into a return or non-return join.
