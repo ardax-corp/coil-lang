@@ -4,7 +4,7 @@ use io::fs::{exists, remove_file};
 use string::{to_bytes, from_bytes};
 
 test("exists matches Ok true after write") {
-    let path = "/tmp/coil_lang_exists_roundtrip.txt";
+    let path = "coil_lang_exists_roundtrip.txt";
     let s = match open(path, "w") {
         Result::Ok(v) => v,
         Result::Err(_) => panic "open w",
@@ -36,7 +36,7 @@ test("exists of cwd matches Ok") {
 }
 
 test("write_from mid offset matches Ok") {
-    let path = "/tmp/coil_lang_write_from.txt";
+    let path = "coil_lang_write_from.txt";
     let s = match open(path, "w") {
         Result::Ok(v) => v,
         Result::Err(_) => panic "open w",
@@ -57,7 +57,7 @@ test("write_from mid offset matches Ok") {
 }
 
 test("write_from at len is Ok zero") {
-    let path = "/tmp/coil_lang_write_from_len.txt";
+    let path = "coil_lang_write_from_len.txt";
     let s = match open(path, "w") {
         Result::Ok(v) => v,
         Result::Err(_) => panic "open w",
