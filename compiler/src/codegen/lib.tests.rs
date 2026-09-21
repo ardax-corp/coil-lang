@@ -8272,6 +8272,50 @@ fn main() {
     }
 
     #[test]
+    fn match_exists_uses_boxed_jump_if_match_not_two_word() {
+        let mut ast = Pratt::default()
+            .parse(
+                r#"
+use io::fs::{exists};
+fn main() {
+    let _ = match exists(".") {
+        Result::Ok(_) => 1,
+        Result::Err(_) => 0,
+    };
+}
+"#,
+            )
+            .expect("parse");
+        let mut compiler = Compiler::default();
+        compiler.register_native_id("fs_exists", 1);
+        let bc = compiler.compile("", &mut ast);
+        let host = bc
+            .iter()
+            .position(|b| matches!(b.bytecode(), Instruction::HostInvoke))
+            .expect("exists HostInvoke");
+        assert!(
+            bc[host..]
+                .iter()
+                .any(|b| matches!(b.bytecode(), Instruction::JumpIfMatch)),
+            "host Result<bool, IoError> must match boxed, not two-word EQ; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !bc[host..].windows(3).any(|w| {
+                matches!(w[0].bytecode(), Instruction::DUPLICATE)
+                    && matches!(w[1].bytecode(), Instruction::CONST)
+                    && matches!(w[2].bytecode(), Instruction::EQ)
+            }),
+            "exists must not take two-word tag EQ; opcodes={:?}",
+            bc.iter()
+                .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+                .collect::<Vec<_>>(),
+        );
+    }
+
+    #[test]
     fn write_result_int_stays_boxed_host_layout() {
         let mut ast = Pratt::default()
             .parse(
