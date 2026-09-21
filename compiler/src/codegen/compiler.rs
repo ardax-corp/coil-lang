@@ -9027,6 +9027,10 @@ impl Compiler {
             return None;
         }
         let lookup = strip_overload_key(name);
+        // Host natives never use two-slot CALL/RETURN (one packed HostInvoke word).
+        if self.ident_is_host_native(name) || self.ident_is_host_native(lookup) {
+            return None;
+        }
         // `fn_return_ty` is not by-name lookup; must not feed this classifier (steals caller return ty).
         let ty = self
             .checker
@@ -9076,6 +9080,18 @@ impl Compiler {
         self.bytecode.push_return_two_word();
     }
 
+    /// Host natives pack one word at `HostInvoke` (boxed / niche bits).
+    /// Their HM type may still be two-slot (`Result<int, E>`, `Result<bool, E>`),
+    /// but they never leave `[payload, tag]` the way a user `CALL` does.
+    fn ident_is_host_native(&self, name: &str) -> bool {
+        self.checker.io_fn_in_scope(name).is_some()
+            || self.checker.host_fn_in_scope(name).is_some()
+            || self.checker.thread_fn_in_scope(name).is_some()
+            || self.checker.gc_fn_in_scope(name).is_some()
+            || self.string_builtin_for_call(name).is_some()
+            || self.checker.ffi_fn_in_scope(name).is_some()
+    }
+
     /// `true` when `callee` is a statically resolvable direct call (free
     /// function, qualified name, or a method whose receiver type is known)
     /// whose own two-word classification is `enum_name`, i.e. calling it
@@ -9087,12 +9103,19 @@ impl Compiler {
                 if self.lookup_slot(name).is_some() {
                     return None;
                 }
+                if self.ident_is_host_native(name) {
+                    return None;
+                }
                 let resolved = self.resolve_free_fn(name);
                 self.two_word_return_kind(&resolved)
                     .or_else(|| self.two_word_return_kind(name))
             }
             Expression::QualifiedAccess { owner, member } => {
-                self.two_word_return_kind(&format!("{owner}::{member}"))
+                let fqn = format!("{owner}::{member}");
+                if self.ident_is_host_native(member) || self.ident_is_host_native(&fqn) {
+                    return None;
+                }
+                self.two_word_return_kind(&fqn)
             }
             Expression::Access(recv, method) => {
                 let owner = self
@@ -15532,6 +15555,7 @@ impl Compiler {
                 let prev_fn_vars = std::mem::take(&mut self.context.variables);
                 let prev_stack_arrays = std::mem::take(&mut self.context.stack_array_locals);
                 let prev_stack_boxes = std::mem::take(&mut self.context.stack_array_box);
+                let prev_unboxed_enum = std::mem::take(&mut self.context.unboxed_enum_locals);
                 let prev_unboxed_class = std::mem::take(&mut self.context.unboxed_class_locals);
                 let prev_unboxed_class_box = std::mem::take(&mut self.context.unboxed_class_box);
                 let prev_fn_polyfn_vars = std::mem::take(&mut self.polyfn_vars);
@@ -15539,6 +15563,7 @@ impl Compiler {
                 self.context.variables = Interner::default();
                 self.context.stack_array_locals.clear();
                 self.context.stack_array_box.clear();
+                self.context.unboxed_enum_locals.clear();
                 self.context.unboxed_class_locals.clear();
                 self.context.unboxed_class_box.clear();
 
@@ -15585,6 +15610,7 @@ impl Compiler {
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
                 self.context.stack_array_box = prev_stack_boxes;
+                self.context.unboxed_enum_locals = prev_unboxed_enum;
                 self.context.unboxed_class_locals = prev_unboxed_class;
                 self.context.unboxed_class_box = prev_unboxed_class_box;
                 self.polyfn_vars = prev_fn_polyfn_vars;
