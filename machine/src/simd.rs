@@ -65,6 +65,15 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
             lanes::mul_i64(&a, &b, &mut o);
             from_i64(&o)
         }
+        simd::IDIV64 => {
+            let a = as_i64(lhs);
+            let b = as_i64(rhs);
+            let mut o = [0i64; LANES];
+            for i in 0..LANES {
+                o[i] = a[i] / b[i];
+            }
+            from_i64(&o)
+        }
         simd::FADD64 => {
             let a = as_f64(lhs);
             let b = as_f64(rhs);
@@ -127,13 +136,21 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
 
 /// `acc ⊕ left-fold(lanes)` — float add is sequential (P11).
 #[inline]
-pub fn eval_vreduce(ty: u8, acc: Value, src: &[u64; LANES]) -> Value {
-    match ty {
-        dense::TY_I64 => {
+pub fn eval_vreduce(ty: u8, acc: Value, src: &[u64; LANES], fold: u8) -> Value {
+    match (ty, fold) {
+        (dense::TY_I64, simd::REDUCE_MUL) => {
+            let lanes = as_i64(src);
+            Value::from(lanes::fold_mul_i64(acc.as_int(), &lanes))
+        }
+        (dense::TY_F64, simd::REDUCE_MUL) => {
+            let lanes = as_f64(src);
+            Value::from(lanes::fold_mul_f64(acc.as_float(), &lanes))
+        }
+        (dense::TY_I64, _) => {
             let lanes = as_i64(src);
             Value::from(lanes::fold_add_i64(acc.as_int(), &lanes))
         }
-        dense::TY_F64 => {
+        (dense::TY_F64, _) => {
             let lanes = as_f64(src);
             Value::from(lanes::fold_add_f64(acc.as_float(), &lanes))
         }

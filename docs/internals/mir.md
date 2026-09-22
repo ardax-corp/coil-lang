@@ -323,9 +323,20 @@ P11 still holds: float `VReduce` left-folds lanes into the running
 scalar (`s = (…((s+x0)+x1)…)`); `VFma` is mul-then-add (two
 roundings). No fast-math / contract flag. Hardware `fmadd` is not used.
 
-Same refuse map as V0 (alloc/GC, match, impure CALL/HostInvoke,
-explicit `Deopt`, heap words in vregs). Reductions without a heap load
-stay dense (`s = s + i`). P12 HostInvoke packs stay first.
+Refuse is the loop region, not the whole function: a call or
+allocation before or after the loop is left scalar. The index may
+start at a loop-invariant value other than 0, and loads/stores may be
+`a[i + k]` for a constant `k`. An add-reduction does not need a heap
+load (`s = s + i`). Integer division of two lanes is `VBin` `IDIV64`.
+A multiply reduction (`s = s * a[i]`) uses the same `VReduce` with
+the low byte set to mul; add stays `0`, so older bytecode is unchanged.
+Min and max are not MIR operators, so they have no fold.
+
+Several counted loops in one function are vectorized when each exits
+straight into the next, or into `return`. A branch between the loops
+is still refused: the lowering has no φ. A step other than `+ 1`, a
+call inside a body, `match`, and `Deopt` are still refused.
+P12 HostInvoke packs stay first.
 
 Prove: `scan` in `examples/perf/vec_scan.hy`; saxpy store in
 `examples/perf/vec_axpy.hy`.

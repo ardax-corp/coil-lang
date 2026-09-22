@@ -69,8 +69,12 @@ beat Rust/`memcmp` slice equality.
   stores (`compiler/src/mir/vectorize.rs`). VM glue in `machine/src/simd.rs`
   calls `coil_simd::lanes` only.
 - MIR S5b V1 — `VReduce` (left-fold add into a scalar slot) and `VFma`
-  (mul-then-add, two IEEE roundings). Same refuse map as V0. Prove:
-  `scan` in `vec_scan.hy`, saxpy store in `vec_axpy.hy`.
+  (mul-then-add, two IEEE roundings). The counted loop may sit beside
+  other code, start at a non-zero invariant index, and use `a[i + k]`
+  or `s = s + i`. `VReduce`'s low byte selects add (`0`) or mul (`1`).
+  A straight chain of counted loops in one function is lowered in
+  order. Prove: `scan` in `vec_scan.hy`, saxpy store in `vec_axpy.hy`,
+  `examples/perf/vec_widen.hy`.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
 

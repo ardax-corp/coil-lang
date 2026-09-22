@@ -925,11 +925,12 @@ impl<const S: usize> Machine<S> {
                     self.vregs[dest] = self.vregs[src];
                 }
                 Instruction::VReduce => {
-                    let (ty, dest, vsrc, _) = opcode.dense_abc_parts();
+                    let (ty, dest, vsrc, fold) = opcode.dense_abc_parts();
                     promise!(vsrc < common::simd::NREGS);
                     promise!(sp + dest < stack_cap);
                     let acc = self.stack[sp + dest];
-                    self.stack[sp + dest] = crate::simd::eval_vreduce(ty, acc, &self.vregs[vsrc]);
+                    self.stack[sp + dest] =
+                        crate::simd::eval_vreduce(ty, acc, &self.vregs[vsrc], fold as u8);
                 }
                 Instruction::VFma => {
                     let (ty, dest, a, b) = opcode.dense_abc_parts();

@@ -85,6 +85,26 @@ pub fn fold_add_i64(init: i64, lanes: &[i64; LANES]) -> i64 {
     s
 }
 
+/// Left-fold `init * lanes[0] * …`. Float order matches scalar `s = s * a[i]`.
+#[inline]
+pub fn fold_mul_f64(init: f64, lanes: &[f64; LANES]) -> f64 {
+    let mut s = init;
+    for x in lanes {
+        s = s * *x;
+    }
+    s
+}
+
+/// Wrapping left-fold multiply.
+#[inline]
+pub fn fold_mul_i64(init: i64, lanes: &[i64; LANES]) -> i64 {
+    let mut s = init;
+    for x in lanes {
+        s = s.wrapping_mul(*x);
+    }
+    s
+}
+
 /// Conservative FMA: `out[i] = (a[i] * b[i]) + c[i]` (two IEEE roundings).
 #[inline]
 pub fn fmadd_f64(

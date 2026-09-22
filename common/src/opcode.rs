@@ -678,6 +678,7 @@ pub mod simd {
     pub const IADD64: u8 = dense::IADD64;
     pub const ISUB64: u8 = dense::ISUB64;
     pub const IMUL64: u8 = dense::IMUL64;
+    pub const IDIV64: u8 = dense::IDIV64;
     pub const FADD64: u8 = dense::FADD64;
     pub const FSUB64: u8 = dense::FSUB64;
     pub const FMUL64: u8 = dense::FMUL64;
@@ -688,6 +689,11 @@ pub mod simd {
     pub const IOTA_F64: u8 = 35;
     pub const INEG: u8 = 36;
     pub const FNEG: u8 = 37;
+
+    /// Low byte of `VReduce`: fold the lanes into the scalar. `0` is add,
+    /// which is what every existing archive emits.
+    pub const REDUCE_ADD: u8 = 0;
+    pub const REDUCE_MUL: u8 = 1;
 }
 
 /// Slot index when `operand` is an indexed [`Instruction::SetField`].

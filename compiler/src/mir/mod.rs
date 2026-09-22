@@ -1024,6 +1024,154 @@ fn main() {
     }
 
     #[test]
+    fn pipeline_vectorizes_reduce_without_load_and_nonzero_start() {
+        let src = r#"
+fn sum_i(int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + i;
+        i = i + 1;
+    }
+    return s;
+}
+fn sum_from(Vec<int> v, int start) -> int {
+    let s = 0;
+    let i = start;
+    while i < len(v) {
+        s = s + v[i];
+        i = i + 1;
+    }
+    return s;
+}
+fn sum_next(Vec<int> v) -> int {
+    let s = 0;
+    let i = 0;
+    while i < len(v) - 1 {
+        s = s + v[i + 1];
+        i = i + 1;
+    }
+    return s;
+}
+fn id(int n) -> int {
+    return n;
+}
+fn sum_after_call(Vec<int> v) -> int {
+    let n = id(len(v));
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + v[i];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let a: Vec<int> = Vec::from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    let b: Vec<int> = Vec::from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    let c: Vec<int> = Vec::from([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    if sum_i(16) != 120 {
+        panic "sum i";
+    }
+    if sum_from(a, 2) != 119 {
+        panic "sum from 2";
+    }
+    if sum_next(b) != 120 {
+        panic "sum v[i+1]";
+    }
+    if sum_after_call(c) != 120 {
+        panic "sum after call";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile widened vector loops");
+        let symbols = p.program_debug().fn_symbols.clone();
+        for name in ["sum_i", "sum_from", "sum_next", "sum_after_call"] {
+            let body = fn_ops(&bc, &symbols, name);
+            assert!(
+                body.iter().any(|b| *b.bytecode() == Instruction::VReduce),
+                "{name} must emit VReduce; opcodes={:?}",
+                body.iter()
+                    .map(|b| b.bytecode().mnemonic())
+                    .collect::<Vec<_>>()
+            );
+        }
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "widened vector checksums");
+    }
+
+    #[test]
+    fn pipeline_vectorizes_mul_reduce_and_loop_chain() {
+        let src = r#"
+fn product(Vec<int> v) -> int {
+    let s = 1;
+    let i = 0;
+    while i < len(v) {
+        s = s * v[i];
+        i = i + 1;
+    }
+    return s;
+}
+fn fill_then_sum(Vec<int> v) -> int {
+    let i = 0;
+    while i < len(v) {
+        v[i] = i + 1;
+        i = i + 1;
+    }
+    let s = 0;
+    let j = 0;
+    while j < len(v) {
+        s = s + v[j];
+        j = j + 1;
+    }
+    return s;
+}
+fn main() {
+    let a: Vec<int> = Vec::from([1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+    let b: Vec<int> = Vec::from([0, 0, 0, 0, 0, 0, 0, 0]);
+    if product(a) != 3628800 {
+        panic "product";
+    }
+    if fill_then_sum(b) != 36 {
+        panic "fill then sum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile mul and chain");
+        let symbols = p.program_debug().fn_symbols.clone();
+        let prod = fn_ops(&bc, &symbols, "product");
+        assert!(
+            prod.iter().any(|b| {
+                *b.bytecode() == Instruction::VReduce && (b.operand_u32() & 0xFF) == 1
+            }),
+            "product must VReduce with MUL; opcodes={:?}",
+            prod.iter()
+                .map(|b| format!("{}:{:08x}", b.bytecode().mnemonic(), b.operand_u32()))
+                .collect::<Vec<_>>()
+        );
+        let both = fn_ops(&bc, &symbols, "fill_then_sum");
+        assert!(
+            both.iter().any(|b| *b.bytecode() == Instruction::VStore),
+            "fill loop must VStore"
+        );
+        assert!(
+            both.iter().any(|b| *b.bytecode() == Instruction::VReduce),
+            "sum loop must VReduce; opcodes={:?}",
+            both.iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "mul reduce and loop chain checksums");
+    }
+
+    #[test]
     fn pipeline_vectorizes_conservative_fma_store() {
         let src = r#"
 fn axpy(float a, Vec<float> x, Vec<float> y) -> float {
