@@ -1610,8 +1610,9 @@ fn table() -> &'static [Handler; 256] {
 #[inline(always)]
 fn copy_byte(code: &[Byte], ip: usize) -> Byte {
     promise!(ip < code.len());
-    let src = unsafe { code.get_unchecked(ip) };
-    Byte::new(*src.bytecode()).with_operand_u32(src.operand_u32())
+    // `ArchivedByte` is plain data but not `Copy`. One word load; rebuilding
+    // the opcode and operand reloads the same instruction on every dense dispatch.
+    unsafe { core::ptr::read(code.as_ptr().add(ip)) }
 }
 
 /// ALWAYS_HOT kernel only — no CALL/LOAD/imm, so `execute_dense` does not
@@ -1810,7 +1811,8 @@ fn execute_dense(ctx: &mut HotCtx<'_, '_>) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         exec_dense(ctx, bc, opcode);
-        if unlikely(ctx.panic_msg.is_some() || ctx.extra.execute_done.is_some()) {
+        // `execute_done` is never set from this loop. Panic is the only stop.
+        if unlikely(ctx.panic_msg.is_some()) {
             return;
         }
     }
@@ -1836,11 +1838,7 @@ fn table_loop(ctx: &mut HotCtx<'_, '_>) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         h(ctx, opcode);
-        if unlikely(
-            ctx.panic_msg.is_some()
-                || ctx.extra.execute_done.is_some()
-                || ctx.extra.pending_rest.is_some(),
-        ) {
+        if unlikely(ctx.panic_msg.is_some() || ctx.extra.pending_rest.is_some()) {
             return;
         }
     }
@@ -1864,7 +1862,7 @@ fn hotmatch_loop(ctx: &mut HotCtx<'_, '_>) {
         ctx.ip += 1;
         prefetch_code(ctx.code, ctx.ip);
         exec_hot(ctx, bc, opcode);
-        if unlikely(ctx.panic_msg.is_some() || ctx.extra.execute_done.is_some()) {
+        if unlikely(ctx.panic_msg.is_some()) {
             return;
         }
     }
