@@ -980,37 +980,8 @@ impl<const S: usize> Machine<S> {
     }
 
     #[inline]
-    fn remember_dense_obj(&mut self, addr: u64, obj: Object) {
-        self.dense_obj_addr = addr;
-        self.dense_obj = Some(obj);
-    }
-
-    #[inline]
     fn pinned_object(&self, slot: u32) -> Option<Object> {
         pinned_object_in(&self.frame_pins, self.frames.len(), slot)
-    }
-
-    /// Cached `Object` for `slot` when it still names `addr` (same identity).
-    #[inline]
-    fn pinned_object_matching(&self, slot: u32, addr: u64) -> Option<Object> {
-        pinned_object_matching_in(&self.frame_pins, self.frames.len(), slot, addr)
-    }
-
-    /// Reuse a cached `Object` while the array address is unchanged (COI-372).
-    ///
-    /// Predicted last-addr hit first; then `frame_pins[arr]` (ArrayPin / prior
-    /// dense index); then the slab. Pins and the last-addr cell are GC roots.
-    #[inline(always)]
-    fn resolve_dense_index_object(&mut self, slot: u32, addr: u64) -> Option<Object> {
-        resolve_dense_index_object_in(
-            &self.heap,
-            self.frames.len(),
-            &mut self.frame_pins,
-            &mut self.dense_obj_addr,
-            &mut self.dense_obj,
-            slot,
-            addr,
-        )
     }
 
     /// Allocate a pin table only when this frame first pins an array.

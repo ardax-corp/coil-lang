@@ -249,6 +249,7 @@ const KERNEL: [u64; 4] = {
     b
 };
 
+#[cfg(test)]
 #[inline(always)]
 pub(super) fn is_kernel(bc: Instruction) -> bool {
     is_kernel_disc(bc as u8)
@@ -1699,30 +1700,6 @@ fn op_dense_cast(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_unary(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     dense_unary(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-}
-
-#[allow(dead_code)] // optional LOAD/STORE/Seek table slots (G1 bounce; stay kernel)
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_load(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    load(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-}
-
-#[allow(dead_code)]
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    store(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
-}
-
-#[allow(dead_code)]
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_seek(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    seek(ctx.stack, ctx.sp, &opcode, ctx.stack_cap);
 }
 
 #[inline(never)]
