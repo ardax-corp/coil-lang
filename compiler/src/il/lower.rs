@@ -218,9 +218,8 @@ fn try_lower_optimized(ops: &[IlOp], pool: &mut Vec<u64>) -> Result<Lowered, IlE
         debug_locs.push(slot.loc());
     }
 
-    // Symbolic jumps are label-resolved at encode. Residual abs JMP Bytes
-    // are forbidden ([`assert_no_residual_abs_jumps`]); this hook is a no-op.
-    remap_absolute_targets(&mut bytecode, pool, &pre_to_post, slots.len());
+    // Symbolic jumps are label-resolved in [`encode_slot`]. Residual absolute
+    // JMP/JMPF/JMPT bytes never reach here ([`assert_no_residual_abs_jumps`]).
 
     let code_len = bytecode.len();
     Ok(Lowered {
@@ -331,14 +330,14 @@ fn fuse_slots_with_origins(
     pool: &mut Vec<u64>,
     binds_at: &HashMap<usize, Vec<u32>>,
 ) -> (Vec<Slot>, HashMap<usize, usize>) {
-    let abs_jump_targets = absolute_jump_targets(&slots);
     let mut out = Vec::with_capacity(slots.len());
     let mut origins: HashMap<usize, usize> = HashMap::new();
     let mut i = 0;
     while i < slots.len() {
         // Do not fuse a window that would pull an op with an incoming
-        // label / absolute jump into a fused superinstruction with a
-        // preceding op (match joins, attr-inlined absolute JMP→RETURN).
+        // label into a fused superinstruction with a preceding op
+        // (match joins). Residual absolute JMP bytes are `Slot::Cold`
+        // and refused below; they are not a second target set.
         // *Return fusions refuse an *unconditional* join on window[0]:
         // `JMP` there can carry a stacked arm value that `RETURN` must
         // pop, while `ConstReturnImm` would ignore it. Compare-jumps
@@ -347,11 +346,10 @@ fn fuse_slots_with_origins(
         let mut fused = None;
         if let Some((f, window)) = try_fuse_slots(&slots[i..], pool) {
             let crosses_label = (1..window).any(|k| binds_at.contains_key(&(i + k)));
-            let crosses_abs = (1..window).any(|k| abs_jump_targets.contains(&(i + k)));
             let has_cold = (0..window).any(|k| matches!(slots[i + k], Slot::Cold(..)));
             let return_at_uncond_join =
                 slot_is_return_fusion(&f) && join_has_unconditional_pred(&slots, i, binds_at);
-            if !crosses_label && !crosses_abs && !has_cold && !return_at_uncond_join {
+            if !crosses_label && !has_cold && !return_at_uncond_join {
                 fused = Some((f, window));
             }
         }
@@ -369,26 +367,6 @@ fn fuse_slots_with_origins(
         }
     }
     (out, origins)
-}
-
-/// Pre-fusion indices targeted by absolute `JMP`/`JMPF`/`JMPT` bytes.
-fn absolute_jump_targets(slots: &[Slot]) -> std::collections::HashSet<usize> {
-    let mut set = std::collections::HashSet::new();
-    for s in slots {
-        let Slot::Byte(b, _) = s else {
-            continue;
-        };
-        match *b.bytecode() {
-            Instruction::JMP | Instruction::JMPF | Instruction::JMPT => {
-                let t = b.operand_u32();
-                if t != u32::MAX {
-                    set.insert(t as usize);
-                }
-            }
-            _ => {}
-        }
-    }
-    set
 }
 
 fn cond_jump(slot: &Slot) -> Option<(bool, Label, FuseHint)> {
@@ -644,25 +622,22 @@ fn slot_is_return_fusion(s: &Slot) -> bool {
     }
 }
 
-/// True when an unconditional `JMP` (symbolic or residual absolute) targets `i`.
+/// True when a symbolic unconditional `JMP` targets a label bound at `i`.
+///
+/// Residual absolute `JMP` bytes are `Slot::Cold` (and rejected before
+/// fuse). They are not `Slot::Byte`, so they cannot name this index.
 fn join_has_unconditional_pred(
     slots: &[Slot],
     i: usize,
     binds_at: &HashMap<usize, Vec<u32>>,
 ) -> bool {
     let labels = binds_at.get(&i).map(Vec::as_slice).unwrap_or(&[]);
-    for slot in slots {
-        match slot {
-            Slot::Jump(IlJumpKind::Unconditional, t, _, _) if labels.contains(&t.0) => return true,
-            Slot::Byte(b, _)
-                if *b.bytecode() == Instruction::JMP && b.operand_u32() as usize == i =>
-            {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
+    slots.iter().any(|slot| {
+        matches!(
+            slot,
+            Slot::Jump(IlJumpKind::Unconditional, t, _, _) if labels.contains(&t.0)
+        )
+    })
 }
 
 fn encode_slot(
@@ -777,22 +752,6 @@ fn resolve(labels: &HashMap<u32, usize>, target: Label) -> Result<u32, IlError> 
         .copied()
         .map(|pc| pc as u32)
         .ok_or(IlError::UnboundLabel(target))
-}
-
-/// Remap residual absolute jump targets that still use pre-fusion indices.
-/// Symbolic [`IlOp::Jump`] / fused jmp forms are already label-resolved at
-/// encode — do not touch them (double-remap breaks loop exits under fusion).
-/// Leftover CALL/CodePtr Bytes (missing fn CodePtr 0) are not fusion-sensitive
-/// and are left as-is.
-fn remap_absolute_targets(
-    bytecode: &mut [Byte],
-    pool: &mut [u64],
-    pre_to_post: &HashMap<usize, usize>,
-    len: usize,
-) {
-    let _ = (bytecode, pool, pre_to_post, len);
-    // Production emit has no residual abs JMP/JMPF/JMPT as `IlOp::Byte`
-    // (see [`assert_no_residual_abs_jumps`]). Prologue uses `u32::MAX`.
 }
 
 fn is_int_bin_op(i: Instruction) -> bool {
@@ -1137,6 +1096,67 @@ mod tests {
         assert_eq!(lowered.bytecode.len(), 3);
         assert_eq!(lowered.bytecode[0].operand_u32(), 1);
         assert!(matches!(*lowered.bytecode[2].bytecode(), Instruction::HALT));
+    }
+
+    /// Fusion moves a label's PC. Encode must point the back-edge at that
+    /// post-fusion PC. There is no second absolute-index remap: a pre-fusion
+    /// operand, or a remap applied on top of an already-resolved PC, misses
+    /// the header.
+    #[test]
+    fn lower_optimized_backedge_targets_post_fusion_label() {
+        let loc = DebugLoc::unknown();
+        let header = Label(7);
+        let ops = vec![
+            IlOp::Load { slot: 0, loc },
+            IlOp::Load { slot: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Label(header),
+            IlOp::Load { slot: 2, loc },
+            IlOp::Const { imm: 1, loc },
+            IlOp::Bin {
+                op: Instruction::ADD,
+                loc,
+            },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: header,
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Halt { loc },
+        ];
+        let mut pool = Vec::new();
+        let lowered = lower_optimized(&ops, &mut pool);
+        assert!(
+            matches!(*lowered.bytecode[0].bytecode(), Instruction::BinSlotSlot),
+            "prefix LOAD; LOAD; ADD must fuse, got {:?}",
+            lowered.bytecode[0].bytecode()
+        );
+        let header_pc = lowered
+            .label_pcs
+            .get(&header.0)
+            .copied()
+            .expect("header label");
+        // Pre-fusion slot of the labeled LOAD is 3. The three-op prefix
+        // collapses, so the post PC is strictly smaller.
+        assert_eq!(lowered.pre_to_post.get(&3).copied(), Some(header_pc));
+        assert!(
+            header_pc < 3,
+            "fusion must move the header off its pre-fusion index, pc={header_pc}"
+        );
+        let jmp = lowered
+            .bytecode
+            .iter()
+            .find(|b| *b.bytecode() == Instruction::JMP)
+            .expect("back-edge");
+        assert_eq!(
+            jmp.operand_u32() as usize,
+            header_pc,
+            "JMP must use the encoded post-fusion label PC"
+        );
     }
 
     #[test]
