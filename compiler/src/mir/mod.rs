@@ -988,6 +988,42 @@ fn main() {
     }
 
     #[test]
+    fn loop_carried_pair_does_not_share_a_slot() {
+        let src = r#"
+fn fib_iter(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    let prev = 1;
+    let curr = 1;
+    let sum = 0;
+    let i = 2;
+    while i < n {
+        sum = prev + curr;
+        prev = curr;
+        curr = sum;
+        i = i + 1;
+    }
+    return curr;
+}
+fn main() {
+    if fib_iter(5) != 5 {
+        panic "fib 5";
+    }
+    if fib_iter(10) != 55 {
+        panic "fib 10";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile pair fib");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "prev/curr must stay distinct across the add");
+    }
+
+    #[test]
     fn pipeline_vectorizes_stride1_reduce() {
         let src = r#"
 fn scan(Vec<int> v) -> int {

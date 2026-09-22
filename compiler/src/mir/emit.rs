@@ -320,6 +320,8 @@ pub(super) fn is_fallthrough(func: &MirFunc, from: BlockId, to: BlockId) -> bool
 /// Alias a header φ dest with its latch incoming when the dest is dead after
 /// that incoming is defined (so `i = i + 1` is a dest-overwrite, not a move).
 /// COI-383 S6 sinks the incoming first so mandelbrot `tr`/`zr` can alias.
+/// Refuses when another φ in the header reads this dest from the same edge
+/// (`prev' = curr` beside `curr' = prev + curr`).
 pub(super) fn coalesce_latch_overwrite(
     func: &MirFunc,
     mut regs: Vec<u8>,
@@ -337,7 +339,7 @@ pub(super) fn coalesce_latch_overwrite(
             else {
                 continue;
             };
-            if !latch_overwrite_ok(func, *pred, *dest, *latch_val) {
+            if !latch_overwrite_ok(func, block.id, *pred, *dest, *latch_val) {
                 continue;
             }
             if dest.index() < regs.len() && latch_val.index() < regs.len() {
@@ -348,7 +350,31 @@ pub(super) fn coalesce_latch_overwrite(
     regs
 }
 
-fn latch_overwrite_ok(func: &MirFunc, latch: BlockId, dest: ValueId, latch_val: ValueId) -> bool {
+fn latch_overwrite_ok(
+    func: &MirFunc,
+    header: BlockId,
+    latch: BlockId,
+    dest: ValueId,
+    latch_val: ValueId,
+) -> bool {
+    // Another φ in this header takes `dest` from the same predecessor
+    // (`prev' = curr` while `curr' = prev + curr`). The copy is emitted at
+    // the back edge, after the add. Aliasing `curr` with the sum clobbers
+    // `curr` first, so `prev` sees the new value and the pair doubles.
+    for inst in &func.block(header).insts {
+        let MirInst::Phi {
+            dest: other, args, ..
+        } = inst
+        else {
+            break;
+        };
+        if *other == dest {
+            continue;
+        }
+        if args.iter().any(|(pred, src)| *pred == latch && *src == dest) {
+            return false;
+        }
+    }
     let block = func.block(latch);
     let mut seen_def = false;
     for inst in &block.insts {
