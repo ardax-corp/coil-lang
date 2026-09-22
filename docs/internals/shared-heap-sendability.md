@@ -13,7 +13,7 @@ stays isolate + `PortableValue`.
 `thread_spawn_shared`. Eligible arms (C0 whitelist args — fib/tak immediates)
 allocate and publish pointers on the shared Heap; join reconstructs
 `Value` bits without a `PortableValue` graph walk. Refuse (maps missing for
-non-immediates, `COIL_SHARED_HEAP=0`, debugger attached, non-whitelist args)
+non-immediates, debugger attached, non-whitelist args)
 keeps isolate + copy. No region bump (Q5 conservative). Do **not** merge
 [#403](https://github.com/ardax-corp/coil-lang/pull/403).
 

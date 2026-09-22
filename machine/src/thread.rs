@@ -1129,7 +1129,7 @@ pub fn host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 fn try_host_spawn_shared(heap: &mut Heap, args: &[Value]) -> Result<Value, ThreadErrorTag> {
-    if !crate::shared_heap::runtime_enabled() || host_debugger_attached() {
+    if host_debugger_attached() {
         return try_host_spawn(heap, args);
     }
     let ctx = match host_spawn_context() {

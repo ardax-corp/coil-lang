@@ -2,7 +2,9 @@
 //!
 //! Counted-loop chunks and expression IPA arms run as stolen jobs on one
 //! [`Heap`] and several stacks. No collect during the epoch; a job that would
-//! GC aborts to isolate / sequential fallback. See
+//! GC aborts to isolate / sequential fallback. Shared-heap spawn is always
+//! on; debugger-attached runs and programs without stack maps still use
+//! isolate `PortableValue` spawn. See
 //! `docs/internals/shared-heap-sendability.md`.
 
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -12,14 +14,6 @@ use common::Value;
 
 use crate::memory::{Heap, Object};
 use crate::thread::{is_immediate_value, ThreadProgram};
-
-/// `COIL_SHARED_HEAP=0` / `false` / `off` / `no` forces the isolate spawn path.
-pub fn runtime_enabled() -> bool {
-    match std::env::var("COIL_SHARED_HEAP") {
-        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no") => false,
-        _ => true,
-    }
-}
 
 /// S2b maps are mandatory for shared-heap steal (pre-14 / empty → isolate).
 pub fn program_has_real_maps(program: &ThreadProgram) -> bool {

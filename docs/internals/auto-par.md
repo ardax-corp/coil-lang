@@ -76,8 +76,8 @@ site's path guards, codegen emits **one** parameterized worker
 2. `MakeFn` the first arm: self-arms with `hop > 1` re-enter this worker with
    `hop - 1` and live `ArgForm` args; otherwise the sequential callee.
 3. `thread_spawn_shared` that arm (HostInvoke **137**; isolate
-   `thread_spawn` when maps are missing for non-immediates, `COIL_SHARED_HEAP=0`,
-   debugger attached, or an arg misses the C0 whitelist). No `GT` grain gate.
+   `thread_spawn` when maps are missing for non-immediates, the debugger is
+   attached, or an arg misses the C0 whitelist). No `GT` grain gate.
 4. On `Ok(handle)`: evaluate remaining arms locally (same hop policy), `join`
    (help-steals), apply the site's combine. Shared join publishes raw `Value` bits
    (no graph copy).
@@ -180,7 +180,7 @@ At the loop site:
 
 1. `MakeFn` the worker, then `thread_spawn_shared(worker, mid, end, identity)`
    (HostInvoke **137**; falls back to isolate `thread_spawn` when maps are
-   missing, `COIL_SHARED_HEAP=0`, or an arg misses the C1 whitelist) — the
+   missing, the debugger is attached, or an arg misses the C1 whitelist) — the
    upper chunk starts from the operator's identity (`0` for `+`/`^`, `1` for `*`) so
    the accumulator's initial value is counted exactly once.
 2. Call the worker inline for `[begin, mid)` seeded with the live `acc`.
@@ -238,7 +238,7 @@ there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 | `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
 | `COIL_PAR_THRESHOLD` | Expression IPA grain floor (fork-tree nodes `W`). Default **10945**. |
 | `COIL_LOOP_GRAIN` | Counted-loop IPA trip-count floor. Default **20**. |
-| `COIL_SHARED_HEAP` | `0` / `false` / `off` / `no` forces isolate `PortableValue` spawn for loop chunks and expression IPA (C1/C2 off). Default on. |
+| `COIL_SHARED_HEAP` | Removed. Shared-heap spawn stays on. Debugger-attached runs and programs without stack maps still fall back to isolate `PortableValue` spawn. |
 | `COIL_PAR_STATS` | `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). |
 
 `.hyc` / embed execute sizes each isolate operand stack from the persisted
