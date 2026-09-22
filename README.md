@@ -14,7 +14,7 @@ cd coil-lang
 # Optional: userland stdlib for `io::sync` and showcase projects
 git clone git@github.com:ardax-corp/coil-stdlib.git ../coil-stdlib
 cargo build
-cargo run -- examples/fib.hy    # prints 55
+cargo run -- examples/fib.hy    # prints 2178309
 ```
 
 ## Documentation

@@ -144,8 +144,8 @@ fn package_fib_embedded_run_prints_55() {
     );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        stdout.contains("55"),
-        "expected fib(10)=55, stdout={stdout}"
+        stdout.contains("2178309"),
+        "expected fib(32)=2178309, stdout={stdout}"
     );
 
     let coil_size = std::fs::metadata(&bin).map(|m| m.len()).unwrap_or(0);

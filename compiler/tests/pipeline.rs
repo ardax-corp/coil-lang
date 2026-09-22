@@ -657,7 +657,7 @@ fn example_tree_prints_6() {
 #[test]
 fn example_fib_still_works() {
     let output = run_example("examples/fib.hy");
-    assert_eq!(output, "55");
+    assert_eq!(output, "2178309");
 }
 
 #[test]

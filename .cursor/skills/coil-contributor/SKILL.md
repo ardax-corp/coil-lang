@@ -71,7 +71,7 @@ cargo test --workspace --lib --tests --bins   # required; includes */tests/* (sk
 cargo build --bin coil && (ulimit -v 65536; ./target/debug/coil test)  # leak smoke (64MB)
 cargo build --release --workspace
 ./scripts/poop_baseline.sh       # soft CPU check before/after perf work
-rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 55 (default run needs no out.hyc)
+rm -f out.hyc && cargo run --release -- examples/fib.hy   # expect 2178309 (default run needs no out.hyc)
 ```
 
 | Work type | Extra check |

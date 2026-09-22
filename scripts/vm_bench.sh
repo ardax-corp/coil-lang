@@ -10,7 +10,7 @@ BIN="${BIN:-$CARGO_TARGET_DIR/release/coil}"
 MEM_LIMIT_KB="${MEM_LIMIT_KB:-65536}"
 
 declare -A EXPECTED=(
-    ["examples/fib.hy"]="55"
+    ["examples/fib.hy"]="2178309"
     ["examples/option.hy"]="42"
     ["examples/result.hy"]="420-1"
     ["examples/tree.hy"]="6"

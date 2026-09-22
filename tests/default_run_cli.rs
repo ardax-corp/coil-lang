@@ -68,8 +68,8 @@ fn default_run_fib_prints_55_and_no_out_hyc() {
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("55"),
-        "expected fib(10)=55, stdout={stdout}"
+        stdout.contains("2178309"),
+        "expected fib(32)=2178309, stdout={stdout}"
     );
     assert!(
         !cwd.join("out.hyc").exists(),
@@ -136,8 +136,8 @@ fn compile_writes_out_hyc_and_run_prints_55() {
     );
     let stdout = String::from_utf8_lossy(&run.stdout);
     assert!(
-        stdout.contains("55"),
-        "expected fib(10)=55 from coil run, stdout={stdout}"
+        stdout.contains("2178309"),
+        "expected fib(32)=2178309 from coil run, stdout={stdout}"
     );
     cleanup(&cwd);
 }
