@@ -434,6 +434,10 @@ pub struct Machine<const S: usize> {
     program_string_cache: Vec<Value>,
     /// When > 0, `RETURN` captures into `nested_return` instead of unwinding to caller.
     nested_depth: u32,
+    /// Set when a `RETURN` must update pins, a nested host call, or a
+    /// coroutine. Fib, tak, and binary trees leave it clear, so those
+    /// returns skip the three empty checks.
+    return_bookkeeping: bool,
     /// Stack of frame-stack lengths at each active [`call_function`] entry.
     /// Only a `RETURN` that pops back to `last()` should capture `nested_return`
     /// (inner `CALL`s must still unwind normally). A stack (not a scalar) is
@@ -527,6 +531,7 @@ impl<const S: usize> Machine<S> {
             program_strings: Arc::new(Vec::new()),
             program_string_cache: Vec::new(),
             nested_depth: 0,
+            return_bookkeeping: false,
             nested_frame_depths: Vec::new(),
             nested_return: None,
             pending_ffi: None,
@@ -733,6 +738,7 @@ impl<const S: usize> Machine<S> {
         self.nested_frame_depths.clear();
         self.nested_return = None;
         self.resume_stack.clear();
+        self.return_bookkeeping = !self.frame_pins.is_empty();
         self.statics.clear();
         if let Some(dbg) = self.debug.as_mut() {
             dbg.clear_step();
@@ -942,7 +948,9 @@ impl<const S: usize> Machine<S> {
     }
 
     fn pop_call_frame(&mut self) -> usize {
-        self.pop_pin_map_for_current_frame();
+        if unlikely(self.return_bookkeeping) {
+            self.pop_pin_map_for_current_frame();
+        }
         self.frames.pop().get()
     }
 
@@ -970,6 +978,7 @@ impl<const S: usize> Machine<S> {
     #[inline]
     fn pin_current_array(&mut self, slot: u32, obj: Object) {
         pin_current_array_in(&mut self.frame_pins, self.frames.len(), slot, obj);
+        self.return_bookkeeping = true;
     }
 
     fn read_indexed(elements: &[Value], index: i64, unchecked: bool) -> Option<Value> {
@@ -2071,7 +2080,8 @@ impl<const S: usize> Machine<S> {
         *ip = caller.tell();
         *sp = caller.get();
         // Coroutine resume bookkeeping is cold for ordinary calls (fib).
-        if unlikely(!self.resume_stack.is_empty())
+        if unlikely(self.return_bookkeeping)
+            && !self.resume_stack.is_empty()
             && let Some(ctx) = self.resume_stack.last()
             && self.frames.len() <= ctx.frame_depth
         {
@@ -2097,6 +2107,11 @@ impl<const S: usize> Machine<S> {
                 self.io_reactor.cancel_wait(tok);
             }
             self.resume_stack.pop();
+        }
+        if unlikely(self.return_bookkeeping) {
+            self.return_bookkeeping = self.nested_depth > 0
+                || !self.resume_stack.is_empty()
+                || !self.frame_pins.is_empty();
         }
     }
 
@@ -2161,6 +2176,7 @@ impl<const S: usize> Machine<S> {
             self.io_reactor.cancel_wait(tok);
         }
 
+        self.return_bookkeeping = true;
         self.resume_stack.push(ResumeCtx {
             coro: gc,
             base_sp,
@@ -2372,6 +2388,7 @@ impl<const S: usize> Machine<S> {
         self.statics.fill(Value::default());
         self.program_string_cache.fill(Value::default());
         self.nested_depth = 0;
+        self.return_bookkeeping = false;
         self.nested_frame_depths.clear();
         self.nested_return = None;
         self.pending_ffi = None;
@@ -2409,6 +2426,7 @@ impl<const S: usize> Machine<S> {
         self.stack.seek(0);
         self.resume_stack.clear();
         self.nested_depth = 0;
+        self.return_bookkeeping = false;
         self.nested_frame_depths.clear();
         self.nested_return = None;
         self.pending_ffi = None;
@@ -2684,6 +2702,7 @@ impl<const S: usize> Machine<S> {
         }
         self.nested_return = None;
         self.nested_depth += 1;
+        self.return_bookkeeping = true;
         let callee_sp = self.stack.tell().saturating_sub(args.len());
         self.frames.setup_current_and_advance(|f| {
             f.seek(0);
@@ -2725,6 +2744,9 @@ impl<const S: usize> Machine<S> {
         self.stack.seek(saved_sp);
         self.nested_depth -= 1;
         let _ = self.nested_frame_depths.pop();
+        self.return_bookkeeping = self.nested_depth > 0
+            || !self.resume_stack.is_empty()
+            || !self.frame_pins.is_empty();
         self.nested_return.take().unwrap_or_default()
     }
 
@@ -2732,7 +2754,7 @@ impl<const S: usize> Machine<S> {
     #[inline]
     fn capture_nested_return(&mut self, ret_val: Value) -> bool {
         // Nested FFI/host calls are rare; keep the hot RETURN path branch-free.
-        if unlikely(self.nested_depth > 0) {
+        if unlikely(self.return_bookkeeping) && self.nested_depth > 0 {
             let nested_target = self.nested_frame_depths.last().copied().unwrap_or(0);
             if self.frames.len() == nested_target {
                 self.nested_return = Some(ret_val);
@@ -2836,6 +2858,9 @@ impl<const S: usize> Machine<S> {
                         dispatch::HotStop::Done(paused) => return paused,
                         dispatch::HotStop::Rest(_) => {}
                     }
+                }
+                if unlikely(!self.frame_pins.is_empty()) {
+                    self.return_bookkeeping = true;
                 }
             };
         }
