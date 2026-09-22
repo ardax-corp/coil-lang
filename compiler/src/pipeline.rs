@@ -2262,6 +2262,43 @@ fn main() { add(1, 2); }
         assert!(!vm.panicked(), "vec_scan panicked");
     }
 
+    /// Naive `fib`: `n <= 2` returns the constant 1, otherwise two recursive
+    /// calls. The VM may skip the constant-base call; the value must still
+    /// match the recurrence (`fib(10) = 55`).
+    #[test]
+    fn recursive_fib_matches_recurrence() {
+        let src = r#"
+fn fib(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    if fib(1) != 1 {
+        panic "fib1";
+    }
+    if fib(3) != 2 {
+        panic "fib3";
+    }
+    if fib(10) != 55 {
+        panic "fib10";
+    }
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, constants) = pipeline.compile_src(src).expect("compile fib");
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(
+            &bytecode,
+            &constants,
+            pipeline.strings(),
+            pipeline.static_slot_count(),
+        );
+        assert!(!vm.panicked(), "recursive fib panicked");
+    }
+
     #[test]
     fn nsieve_retained_il_and_bytecode_emit_store_index_pin() {
         use common::Instruction;

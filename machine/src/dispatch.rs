@@ -830,6 +830,49 @@ fn claim_finalizer(heap: &Heap, v: Value) -> bool {
     }
 }
 
+/// Direct unary call whose callee starts with `slot0 ? imm; jump ConstReturnImm`.
+///
+/// Same compare the callee would run. When the branch is taken, the call
+/// returns that constant and does not push a frame. Any other shape returns
+/// `None` and the caller performs a normal `CALL`.
+#[inline(always)]
+pub(super) fn unary_const_base_return(
+    code: &[Byte],
+    constants: &[u64],
+    target: usize,
+    arg: Value,
+    heap: &Heap,
+) -> Option<Value> {
+    if target >= code.len() {
+        return None;
+    }
+    let entry = unsafe { code.get_unchecked(target) };
+    let want_true = match *entry.bytecode() {
+        Instruction::BinSlotImmJmpt => true,
+        Instruction::BinSlotImmJmpf => false,
+        _ => return None,
+    };
+    let (cmp_op, slot, pool_idx) = entry.bin_slot_imm_jmpf_parts();
+    if slot != 0 || pool_idx >= constants.len() {
+        return None;
+    }
+    let packed = unsafe { *constants.get_unchecked(pool_idx) };
+    let imm = packed as u32 as i32 as i64;
+    let dest = (packed >> 32) as usize;
+    if dest >= code.len() {
+        return None;
+    }
+    let ret_op = unsafe { code.get_unchecked(dest) };
+    if !matches!(*ret_op.bytecode(), Instruction::ConstReturnImm) {
+        return None;
+    }
+    let taken = crate::fused::eval_cmp(cmp_op, arg, Value::from(imm), heap);
+    if taken != want_true {
+        return None;
+    }
+    Some(Value::from(ret_op.operand_u32() as i32 as i64 as u64))
+}
+
 #[inline(always)]
 fn do_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let (arity, target) = opcode.call_parts();
@@ -845,6 +888,20 @@ fn do_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
             ctx.stack.push(Value::from(0i64));
             return;
         }
+    }
+    if arity == 1
+        && target != 0
+        && let Some(ret) = unary_const_base_return(
+            ctx.code,
+            ctx.constants,
+            target,
+            ctx.stack[ctx.stack.tell() - 1],
+            ctx.heap,
+        )
+    {
+        ctx.stack.pop();
+        ctx.stack.push(ret);
+        return;
     }
     let callee_sp = ctx.stack.tell() - arity;
     if likely(target != 0) {

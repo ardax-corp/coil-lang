@@ -2967,6 +2967,24 @@ impl<const S: usize> Machine<S> {
                     let callee_sp = self.stack.tell() - arity;
                     // Direct calls dominate; avoid the indirect `target == 0`
                     // return-ip adjustment on that path.
+                    // Unary callee that is `if arg ? imm { return k }` does not
+                    // need a frame. Debugger stays on the real call so a stop
+                    // on the base `ConstReturnImm` still fires.
+                    if !debug_attached
+                        && arity == 1
+                        && target != 0
+                        && let Some(ret) = dispatch::unary_const_base_return(
+                            code,
+                            constants,
+                            target,
+                            self.stack[self.stack.tell() - 1],
+                            &self.heap,
+                        )
+                    {
+                        self.stack.pop();
+                        self.stack.push(ret);
+                        continue;
+                    }
                     if likely(target != 0) {
                         self.frames.rewrite_top_and_push(
                             |caller| caller.seek(ip),
