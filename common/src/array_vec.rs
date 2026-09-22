@@ -86,8 +86,33 @@ impl<T: Default, const N: usize> ArrayVec<T, N> {
     }
 
     /// Hot CALL helper: rewrite the active frame, then push a fresh one.
+    ///
+    /// One `current < N` check covers both slots. `get_mut` tests `current < N + 1`
+    /// and `current_mut` tests `current < N`, so calling both compares twice on
+    /// every call while the frame is still inline.
     #[inline]
     pub fn rewrite_top_and_push<F, G>(&mut self, rewrite_top: F, setup_new: G)
+    where
+        F: FnOnce(&mut T),
+        G: FnOnce(&mut T),
+    {
+        let current = self.current;
+        if likely(current < N) {
+            // Root frame keeps `current >= 1` on the CALL path. The crossing
+            // call (`current == N`: top inline, new frame on the heap) is cold.
+            promise!(current > 0);
+            promise!(current < N);
+            rewrite_top(&mut self.storage[current - 1]);
+            setup_new(&mut self.storage[current]);
+            self.current = current + 1;
+        } else {
+            self.rewrite_top_and_push_cold(rewrite_top, setup_new);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn rewrite_top_and_push_cold<F, G>(&mut self, rewrite_top: F, setup_new: G)
     where
         F: FnOnce(&mut T),
         G: FnOnce(&mut T),
@@ -326,6 +351,21 @@ mod tests {
         v.setup_current_and_advance(|slot| *slot = 42);
         assert_eq!(v.len(), 1);
         assert_eq!(v[0], 42);
+    }
+
+    #[test]
+    fn rewrite_top_and_push_inline_then_spill() {
+        let mut v = ArrayVec::<i32, 2>::default();
+        v.push(1);
+        v.rewrite_top_and_push(|top| *top = 7, |frame| *frame = 8);
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0], 7);
+        assert_eq!(v[1], 8);
+        // `current == N`: top stays inline, the new slot spills.
+        v.rewrite_top_and_push(|top| *top = 9, |frame| *frame = 3);
+        assert_eq!(v.len(), 3);
+        assert_eq!(v[1], 9);
+        assert_eq!(v[2], 3);
     }
 
     #[test]
