@@ -8,10 +8,37 @@
 
 use common::{Instruction, Value};
 
-use crate::Heap;
+use crate::{Heap, HeapSlot};
+
+/// Heap pointer for fused ops. `HeapSlot::get` branches on the steal borrow;
+/// integer arms must not call it. Equality goes through [`eq_values`], which
+/// is outlined so that branch stays off the arithmetic jump table.
+pub(crate) trait HeapView {
+    fn as_heap(&self) -> &Heap;
+}
+
+impl HeapView for Heap {
+    #[inline(always)]
+    fn as_heap(&self) -> &Heap {
+        self
+    }
+}
+
+impl HeapView for HeapSlot {
+    #[inline(always)]
+    fn as_heap(&self) -> &Heap {
+        self.get()
+    }
+}
+
+/// Outlined so `HeapSlot::get` is not hoisted above the integer arms.
+#[inline(never)]
+fn eq_values<H: HeapView>(heap: &H, lhs: Value, rhs: Value) -> bool {
+    crate::value_eq::values_eq(heap.as_heap(), lhs, rhs)
+}
 
 #[inline(always)]
-pub(crate) fn eval_bin(op: u8, lhs: Value, rhs: Value, heap: &Heap) -> Value {
+pub(crate) fn eval_bin<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) -> Value {
     match Instruction::from(op) {
         Instruction::ADD => Value::from(lhs.as_int() + rhs.as_int()),
         Instruction::SUB => Value::from(lhs.as_int() - rhs.as_int()),
@@ -33,8 +60,8 @@ pub(crate) fn eval_bin(op: u8, lhs: Value, rhs: Value, heap: &Heap) -> Value {
         Instruction::LEQ => Value::from((lhs.as_int() <= rhs.as_int()) as i64),
         Instruction::GT => Value::from((lhs.as_int() > rhs.as_int()) as i64),
         Instruction::GEQ => Value::from((lhs.as_int() >= rhs.as_int()) as i64),
-        Instruction::EQ => Value::from(crate::value_eq::values_eq(heap, lhs, rhs) as i64),
-        Instruction::NEQ => Value::from((!crate::value_eq::values_eq(heap, lhs, rhs)) as i64),
+        Instruction::EQ => Value::from(eq_values(heap, lhs, rhs) as i64),
+        Instruction::NEQ => Value::from((!eq_values(heap, lhs, rhs)) as i64),
         Instruction::ADDF => Value::from(lhs.as_float() + rhs.as_float()),
         Instruction::SUBF => Value::from(lhs.as_float() - rhs.as_float()),
         Instruction::MULF => Value::from(lhs.as_float() * rhs.as_float()),
@@ -50,14 +77,14 @@ pub(crate) fn eval_bin(op: u8, lhs: Value, rhs: Value, heap: &Heap) -> Value {
 }
 
 #[inline(always)]
-pub(crate) fn eval_cmp(op: u8, lhs: Value, rhs: Value, heap: &Heap) -> bool {
+pub(crate) fn eval_cmp<H: HeapView>(op: u8, lhs: Value, rhs: Value, heap: &H) -> bool {
     match Instruction::from(op) {
         Instruction::LE => lhs.as_int() < rhs.as_int(),
         Instruction::LEQ => lhs.as_int() <= rhs.as_int(),
         Instruction::GT => lhs.as_int() > rhs.as_int(),
         Instruction::GEQ => lhs.as_int() >= rhs.as_int(),
-        Instruction::EQ => crate::value_eq::values_eq(heap, lhs, rhs),
-        Instruction::NEQ => !crate::value_eq::values_eq(heap, lhs, rhs),
+        Instruction::EQ => eq_values(heap, lhs, rhs),
+        Instruction::NEQ => !eq_values(heap, lhs, rhs),
         Instruction::LEF => lhs.as_float() < rhs.as_float(),
         Instruction::LEQF => lhs.as_float() <= rhs.as_float(),
         Instruction::GTF => lhs.as_float() > rhs.as_float(),
