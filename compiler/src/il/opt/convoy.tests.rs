@@ -5,7 +5,7 @@
     use common::{Byte, Instruction};
 
     fn is_insn(op: &IlOp, i: Instruction) -> bool {
-        op.instruction() == Some(i)
+        op.as_encode_byte().is_some_and(|b| *b.bytecode() == i)
     }
 
     #[test]
@@ -594,7 +594,7 @@
         return_convoy(&mut ops);
         assert!(ops.iter().any(|op| {
             matches!(op, IlOp::ConstReturnImm { imm: 0, .. })
-                || matches!(op.instruction(), Some(Instruction::ConstReturnImm))
+                || is_insn(op, Instruction::ConstReturnImm)
         }));
         assert_eq!(
             ops.iter()
@@ -709,7 +709,7 @@
         ];
         return_convoy(&mut ops);
         assert!(ops.iter().any(|op| {
-            matches!(op.instruction(), Some(Instruction::ConstReturnImm))
+            is_insn(op, Instruction::ConstReturnImm)
                 || matches!(op, IlOp::ConstReturnImm { .. })
         }));
         assert!(ops.iter().any(|op| matches!(op, IlOp::Label(Label(54)))));
@@ -3629,10 +3629,12 @@
     }
 
     /// Opcode names for assertion messages (`IlOp` has no `Debug`).
+    /// Symbolic control stays unlabeled: [`IlOp::as_encode_byte`] refuses it.
     fn insn_names(ops: &[IlOp]) -> Vec<String> {
         ops.iter()
-            .map(|op| match op.instruction() {
-                Some(i) => format!("{i:?}"),
+            .map(|op| match op.as_encode_byte() {
+                Some(b) => format!("{:?}", b.bytecode()),
+                None if op.is_control() => "<control>".to_string(),
                 None => "<label/meta>".to_string(),
             })
             .collect()
