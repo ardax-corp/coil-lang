@@ -13,21 +13,23 @@
 //! stand-in; `hotmatch` is a compact-match control in the same outlined function.
 //!
 //! Select at process start with `COIL_THREADED_DISPATCH`:
-//! - `0` / `match` — existing giant match (A/B baseline)
-//! - `1` / `table` / unset — fn-pointer trampoline (default)
+//! - `0` / `match` / unset — giant match (default). Dense and jump ops then
+//!   stay in `execute_dense` for the rest of the streak, so fib does not pay
+//!   a failed hot peek and mandelbrot does not return to the giant match
+//!   on every dense opcode.
+//! - `1` / `table` — 256-entry fn-pointer trampoline
 //! - `2` / `hotmatch` — compact match over the same hot subset
 //!
-//! `COIL_THREADED_CALL=1` and `COIL_THREADED_RETURN=1` together thread
-//! `CALL`/`TailCall`/`RETURN`/imm-slot fuses (A/B; default off — fib/tak lose).
+//! `CALL` / `RETURN` stay on the giant match. A handler array for those
+//! loses on fib, and threading them did not beat the match.
 //!
 //! Debugger-attached runs stay on the giant match so per-op stops still fire.
 
 use std::cell::Cell;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use common::{
-    ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Value, likely, promise,
+    ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Value, promise,
     unlikely,
 };
 
@@ -61,106 +63,22 @@ pub(super) fn mode() -> Mode {
         return over;
     }
     static CACHED: OnceLock<Mode> = OnceLock::new();
-    *CACHED.get_or_init(|| {
-        refresh_opt_call_return_hot();
-        match std::env::var("COIL_THREADED_DISPATCH") {
-            Ok(v) => parse_mode(&v),
-            Err(_) => Mode::Table,
-        }
+    *CACHED.get_or_init(|| match std::env::var("COIL_THREADED_DISPATCH") {
+        Ok(v) => parse_mode(&v),
+        Err(_) => Mode::Match,
     })
 }
 
 #[cfg(test)]
 pub(super) fn override_mode(mode: Option<Mode>) {
     MODE_OVERRIDE.with(|c| c.set(mode));
-    refresh_opt_call_return_hot();
-}
-
-fn env_flag_enabled(name: &str, default: bool) -> bool {
-    match std::env::var(name) {
-        Ok(v) => {
-            let v = v.trim();
-            !(v == "0"
-                || v.eq_ignore_ascii_case("off")
-                || v.eq_ignore_ascii_case("match")
-                || v.eq_ignore_ascii_case("no"))
-        }
-        Err(_) => default,
-    }
-}
-
-/// `CALL` / `TailCall` on the trampoline. Default off: fib/tak lose to match.
-pub(super) fn call_is_hot() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| env_flag_enabled("COIL_THREADED_CALL", false))
-}
-
-/// `RETURN` and fused returns. Default off (same A/B as CALL).
-pub(super) fn return_is_hot() -> bool {
-    static CACHED: OnceLock<bool> = OnceLock::new();
-    *CACHED.get_or_init(|| env_flag_enabled("COIL_THREADED_RETURN", false))
-}
-
-trait CallFrames {
-    fn rewrite_call(&mut self, caller_ip: usize, callee_sp: usize);
-    fn rewrite_indirect_call(&mut self, return_ip: usize, callee_sp: usize);
-    fn top_sp(&self) -> usize;
-    fn caller_ip_sp(&self) -> (usize, usize);
-    fn pop_sp(&mut self) -> usize;
-    fn len(&self) -> usize;
-}
-
-impl<const S: usize> CallFrames for ArrayVec<Frame, S> {
-    #[inline(always)]
-    fn rewrite_call(&mut self, caller_ip: usize, callee_sp: usize) {
-        self.rewrite_top_and_push(
-            |caller| caller.seek(caller_ip),
-            |frame| frame.set(callee_sp),
-        );
-    }
-
-    #[inline(always)]
-    fn rewrite_indirect_call(&mut self, return_ip: usize, callee_sp: usize) {
-        self.rewrite_top_and_push(
-            |caller| caller.seek(return_ip),
-            |frame| frame.set(callee_sp),
-        );
-    }
-
-    #[inline(always)]
-    fn top_sp(&self) -> usize {
-        self.get().get()
-    }
-
-    #[inline(always)]
-    fn caller_ip_sp(&self) -> (usize, usize) {
-        let f = self.get();
-        (f.tell(), f.get())
-    }
-
-    #[inline(always)]
-    fn pop_sp(&mut self) -> usize {
-        self.pop().get()
-    }
-
-    #[inline(always)]
-    fn len(&self) -> usize {
-        ArrayVec::len(self)
-    }
 }
 
 struct HotExtra<'a> {
-    frames: &'a mut dyn CallFrames,
     frames_len: usize,
     frame_pins: &'a mut Vec<FramePins>,
     dense_obj_addr: &'a mut u64,
     dense_obj: &'a mut Option<Object>,
-    finalizer_pcs: &'a std::collections::HashSet<u32, crate::AddrHashBuilder>,
-    nested_depth: &'a mut u32,
-    nested_frame_depths: &'a mut Vec<usize>,
-    nested_return: &'a mut Option<Value>,
-    resume_stack: &'a mut Vec<super::ResumeCtx>,
-    io_reactor: &'a std::sync::Arc<crate::io_reactor::IoReactor>,
     execute_done: Option<bool>,
     pending_rest: Option<Byte>,
 }
@@ -261,27 +179,6 @@ fn is_kernel_disc(disc: u8) -> bool {
     (KERNEL[i >> 6] >> (i & 63)) & 1 != 0
 }
 
-const OPT_HOT: [u64; 4] = {
-    let mut b = [0u64; 4];
-    b = or_hot(b, Instruction::BinSlotImm);
-    b = or_hot(b, Instruction::BinSlotImmStore);
-    b = or_hot(b, Instruction::BinSlotImmJmpf);
-    b = or_hot(b, Instruction::BinSlotImmJmpt);
-    b = or_hot(b, Instruction::CALL);
-    b = or_hot(b, Instruction::TailCall);
-    b = or_hot(b, Instruction::RETURN);
-    b = or_hot(b, Instruction::ConstReturnImm);
-    b = or_hot(b, Instruction::LoadReturnSlot);
-    b = or_hot(b, Instruction::BinReturn);
-    b
-};
-
-static OPT_CALL_RETURN_HOT: AtomicBool = AtomicBool::new(false);
-
-fn refresh_opt_call_return_hot() {
-    OPT_CALL_RETURN_HOT.store(call_is_hot() && return_is_hot(), Ordering::Relaxed);
-}
-
 #[inline(always)]
 fn is_always_hot_disc(disc: u8) -> bool {
     let i = disc as usize;
@@ -295,14 +192,7 @@ fn is_always_hot(bc: Instruction) -> bool {
 
 #[inline(always)]
 pub(super) fn is_hot(bc: Instruction) -> bool {
-    if is_always_hot(bc) {
-        return true;
-    }
-    if !OPT_CALL_RETURN_HOT.load(Ordering::Relaxed) {
-        return false;
-    }
-    let i = bc as u8 as usize;
-    (OPT_HOT[i >> 6] >> (i & 63)) & 1 != 0
+    is_always_hot(bc)
 }
 
 #[inline(always)]
@@ -333,12 +223,12 @@ pub(super) fn dense_bin2(stack: &mut Stack<Value>, sp: usize, first: &Byte, seco
 
 /// Payload of [`Instruction::DenseBinJmpf`]: fused slot compare-jump (or twin).
 #[inline(always)]
-pub(super) fn dense_bin_jmp_tail(
+pub(super) fn dense_bin_jmp_tail<H: crate::fused::HeapView>(
     stack: &mut Stack<Value>,
     sp: usize,
     tail: &Byte,
     constants: &[u64],
-    heap: &Heap,
+    heap: &H,
     stack_cap: usize,
 ) -> Option<usize> {
     match *tail.bytecode() {
@@ -449,11 +339,11 @@ pub(super) fn seek(stack: &mut Stack<Value>, sp: usize, opcode: &Byte, stack_cap
 }
 
 #[inline(always)]
-pub(super) fn bin_slot_imm(
+pub(super) fn bin_slot_imm<H: crate::fused::HeapView>(
     stack: &mut Stack<Value>,
     sp: usize,
     opcode: &Byte,
-    heap: &Heap,
+    heap: &H,
     stack_cap: usize,
 ) {
     let (op, slot, imm) = opcode.bin_slot_imm_parts();
@@ -464,12 +354,12 @@ pub(super) fn bin_slot_imm(
 }
 
 #[inline(always)]
-pub(super) fn bin_slot_imm_store(
+pub(super) fn bin_slot_imm_store<H: crate::fused::HeapView>(
     stack: &mut Stack<Value>,
     sp: usize,
     opcode: &Byte,
     constants: &[u64],
-    heap: &Heap,
+    heap: &H,
     stack_cap: usize,
 ) {
     let (op, slot, pool_idx) = opcode.bin_slot_imm_store_parts();
@@ -491,11 +381,11 @@ pub(super) fn bin_slot_imm_store(
 }
 
 #[inline(always)]
-pub(super) fn bin_slot_slot_store(
+pub(super) fn bin_slot_slot_store<H: crate::fused::HeapView>(
     stack: &mut Stack<Value>,
     sp: usize,
     opcode: &Byte,
-    heap: &Heap,
+    heap: &H,
     stack_cap: usize,
 ) {
     let (op, a, b, dest) = opcode.bin_slot_slot_store_parts();
@@ -514,12 +404,12 @@ pub(super) fn bin_slot_slot_store(
 }
 
 #[inline(always)]
-pub(super) fn bin_slot_slot_jmp(
+pub(super) fn bin_slot_slot_jmp<H: crate::fused::HeapView>(
     stack: &Stack<Value>,
     sp: usize,
     opcode: &Byte,
     constants: &[u64],
-    heap: &Heap,
+    heap: &H,
     stack_cap: usize,
     want_true: bool,
 ) -> Option<usize> {
@@ -541,12 +431,12 @@ pub(super) fn bin_slot_slot_jmp(
 }
 
 #[inline(always)]
-pub(super) fn bin_slot_imm_jmp(
+pub(super) fn bin_slot_imm_jmp<H: crate::fused::HeapView>(
     stack: &Stack<Value>,
     sp: usize,
     opcode: &Byte,
     constants: &[u64],
-    heap: &Heap,
+    heap: &H,
     stack_cap: usize,
     want_true: bool,
 ) -> Option<usize> {
@@ -567,11 +457,11 @@ pub(super) fn bin_slot_imm_jmp(
 }
 
 #[inline(always)]
-pub(super) fn cmp_jmp(
+pub(super) fn cmp_jmp<H: crate::fused::HeapView>(
     stack: &mut Stack<Value>,
     opcode: &Byte,
     constants: &[u64],
-    heap: &Heap,
+    heap: &H,
     want_true: bool,
 ) -> Option<usize> {
     let (op, t) = opcode.cmp_jmpf_parts();
@@ -816,33 +706,18 @@ pub(super) fn dense_field_store(
     Ok(())
 }
 
-fn claim_finalizer(heap: &Heap, v: Value) -> bool {
-    match heap.find_object_by_addr(v.raw() as u64) {
-        Some(Object::Instance(gc)) => {
-            let inst = gc.payload_mut();
-            if inst.finalized {
-                false
-            } else {
-                inst.finalized = true;
-                true
-            }
-        }
-        _ => false,
-    }
-}
-
 /// Direct unary call whose callee starts with `slot0 ? imm; jump ConstReturnImm`.
 ///
 /// Same compare the callee would run. When the branch is taken, the call
 /// returns that constant and does not push a frame. Any other shape returns
 /// `None` and the caller performs a normal `CALL`.
 #[inline(always)]
-pub(super) fn unary_const_base_return(
+pub(super) fn unary_const_base_return<H: crate::fused::HeapView>(
     code: &[Byte],
     constants: &[u64],
     target: usize,
     arg: Value,
-    heap: &Heap,
+    heap: &H,
 ) -> Option<Value> {
     if target >= code.len() {
         return None;
@@ -872,163 +747,6 @@ pub(super) fn unary_const_base_return(
         return None;
     }
     Some(Value::from(ret_op.operand_u32() as i32 as i64 as u64))
-}
-
-#[inline(always)]
-fn do_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    let (arity, target) = opcode.call_parts();
-    promise!(ctx.stack.tell() >= arity);
-    if arity == 1
-        && unlikely(!ctx.extra.finalizer_pcs.is_empty())
-        && ctx.extra.finalizer_pcs.contains(&(target as u32))
-    {
-        promise!(ctx.stack.tell() >= 1);
-        let self_val = ctx.stack[ctx.stack.tell() - 1];
-        if !claim_finalizer(ctx.heap, self_val) {
-            ctx.stack.pop();
-            ctx.stack.push(Value::from(0i64));
-            return;
-        }
-    }
-    if arity == 1
-        && target != 0
-        && let Some(ret) = unary_const_base_return(
-            ctx.code,
-            ctx.constants,
-            target,
-            ctx.stack[ctx.stack.tell() - 1],
-            ctx.heap,
-        )
-    {
-        ctx.stack.pop();
-        ctx.stack.push(ret);
-        return;
-    }
-    let callee_sp = ctx.stack.tell() - arity;
-    if likely(target != 0) {
-        ctx.extra.frames.rewrite_call(ctx.ip, callee_sp);
-        ctx.sp = callee_sp;
-        ctx.extra.frames_len = ctx.extra.frames.len();
-        set_jump_target(&mut ctx.ip, target, ctx.code);
-    } else {
-        ctx.extra
-            .frames
-            .rewrite_indirect_call(ctx.ip + 1, callee_sp);
-        ctx.sp = callee_sp;
-        ctx.extra.frames_len = ctx.extra.frames.len();
-    }
-}
-
-#[inline(always)]
-fn do_tail_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    let (arity, target) = opcode.call_parts();
-    promise!(ctx.stack.tell() >= arity);
-    let callee_sp = ctx.extra.frames.top_sp();
-    let src = ctx.stack.tell() - arity;
-    ctx.stack.copy_slots(callee_sp, src, arity);
-    ctx.stack.seek(callee_sp + arity);
-    ctx.sp = callee_sp;
-    set_jump_target(&mut ctx.ip, target, ctx.code);
-}
-
-fn with_coro_mut(heap: &Heap, addr: u64, f: impl FnOnce(&mut crate::ObjCoroutine)) {
-    let mut current = heap.head_for_lookup();
-    while let Some(reference) = current {
-        if reference.addr() == addr {
-            if let Object::Coroutine(gc) = reference {
-                f(gc.payload_mut());
-            }
-            return;
-        }
-        current = reference.get_next();
-    }
-}
-
-#[inline(always)]
-fn pop_frame_pins(frame_pins: &mut Vec<FramePins>, frames_len: usize) {
-    if frame_pins.last().is_some_and(|p| p.depth == frames_len) {
-        frame_pins.pop();
-    }
-}
-
-#[inline(always)]
-fn capture_nested(ctx: &mut HotCtx<'_, '_>, ret_val: Value) -> bool {
-    if unlikely(*ctx.extra.nested_depth > 0) {
-        let nested_target = ctx.extra.nested_frame_depths.last().copied().unwrap_or(0);
-        if ctx.extra.frames_len == nested_target {
-            *ctx.extra.nested_return = Some(ret_val);
-            return true;
-        }
-    }
-    false
-}
-
-#[inline(always)]
-fn after_return_hot(ctx: &mut HotCtx<'_, '_>) {
-    let (ip, sp) = ctx.extra.frames.caller_ip_sp();
-    ctx.ip = ip;
-    ctx.sp = sp;
-    if unlikely(!ctx.extra.resume_stack.is_empty())
-        && let Some(rctx) = ctx.extra.resume_stack.last()
-        && ctx.extra.frames_len <= rctx.frame_depth
-    {
-        let coro_ptr = rctx.coro.as_ptr() as u64;
-        let old_wait = {
-            let mut taken = None;
-            with_coro_mut(ctx.heap, coro_ptr, |coro| {
-                if coro.yield_from.is_some() {
-                    return;
-                }
-                taken = coro.io_wait.take();
-                coro.state = crate::CoroState::Done;
-                coro.saved_stack.clear();
-                coro.saved_frames.clear();
-                coro.yield_from = None;
-            });
-            taken
-        };
-        if let Some(tok) = old_wait {
-            ctx.extra.io_reactor.cancel_wait(tok);
-        }
-        ctx.extra.resume_stack.pop();
-    }
-}
-
-#[inline(always)]
-fn finish_return(ctx: &mut HotCtx<'_, '_>, ret_val: Value) {
-    if capture_nested(ctx, ret_val) {
-        ctx.extra.execute_done = Some(false);
-        return;
-    }
-    pop_frame_pins(ctx.extra.frame_pins, ctx.extra.frames_len);
-    let return_sp = ctx.extra.frames.pop_sp();
-    ctx.extra.frames_len -= 1;
-    ctx.stack.seek(return_sp);
-    ctx.stack.push(ret_val);
-    after_return_hot(ctx);
-}
-
-#[inline(always)]
-fn do_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    if unlikely(opcode.return_words() >= 2) {
-        promise!(ctx.stack.tell() >= 2);
-        let tag = ctx.stack.pop();
-        let payload = ctx.stack.pop();
-        if capture_nested(ctx, payload) {
-            ctx.extra.execute_done = Some(false);
-            return;
-        }
-        pop_frame_pins(ctx.extra.frame_pins, ctx.extra.frames_len);
-        let return_sp = ctx.extra.frames.pop_sp();
-        ctx.extra.frames_len -= 1;
-        ctx.stack.seek(return_sp);
-        ctx.stack.push(payload);
-        ctx.stack.push(tag);
-        after_return_hot(ctx);
-    } else {
-        let ret_val = ctx.stack.pop();
-        finish_return(ctx, ret_val);
-    }
 }
 
 fn apply_jump(ctx: &mut HotCtx<'_, '_>, target: Option<usize>) {
@@ -1758,42 +1476,6 @@ fn op_bin_slot_slot_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     );
 }
 
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_bin_slot_imm_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    apply_jump(
-        ctx,
-        bin_slot_imm_jmp(
-            ctx.stack,
-            ctx.sp,
-            &opcode,
-            ctx.constants,
-            ctx.heap,
-            ctx.stack_cap,
-            false,
-        ),
-    );
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_bin_slot_imm_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    apply_jump(
-        ctx,
-        bin_slot_imm_jmp(
-            ctx.stack,
-            ctx.sp,
-            &opcode,
-            ctx.constants,
-            ctx.heap,
-            ctx.stack_cap,
-            true,
-        ),
-    );
-}
-
 #[inline(never)]
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_cmp_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
@@ -1820,27 +1502,6 @@ fn op_log_not_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 fn op_log_not_jmpt(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     let target = log_not_jmp(ctx.stack, &opcode, ctx.constants, true);
     apply_jump(ctx, target);
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_bin_slot_imm(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    bin_slot_imm(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap);
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_bin_slot_imm_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    bin_slot_imm_store(
-        ctx.stack,
-        ctx.sp,
-        &opcode,
-        ctx.constants,
-        ctx.heap,
-        ctx.stack_cap,
-    );
 }
 
 #[inline(never)]
@@ -1911,59 +1572,7 @@ fn op_dense_field_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
     }
 }
 
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    do_call(ctx, opcode);
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_tail_call(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    do_tail_call(ctx, opcode);
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    do_return(ctx, opcode);
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_const_return_imm(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    let ret_val = Value::from(opcode.operand_u32() as i32 as i64 as u64);
-    finish_return(ctx, ret_val);
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_load_return_slot(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    let slot = opcode.operand_u32() as usize;
-    promise!(ctx.sp + slot < ctx.stack_cap);
-    let ret_val = ctx.stack[ctx.sp + slot];
-    finish_return(ctx, ret_val);
-}
-
-#[cold]
-#[inline(never)]
-#[cfg_attr(target_os = "linux", unsafe(link_section = ".text.unlikely"))]
-fn op_bin_return(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    let tos = ctx.stack.tell();
-    promise!(tos >= 2);
-    let rhs = ctx.stack[tos - 1];
-    let lhs = ctx.stack[tos - 2];
-    let ret_val = crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, ctx.heap);
-    finish_return(ctx, ret_val);
-}
-
 fn build_table() -> [Handler; 256] {
-    refresh_opt_call_return_hot();
     let mut t = [cold as Handler; 256];
     t[Instruction::DenseBin as usize] = op_dense_bin;
     t[Instruction::DenseBin2 as usize] = op_dense_bin2;
@@ -1990,20 +1599,6 @@ fn build_table() -> [Handler; 256] {
     t[Instruction::LogNotJmpt as usize] = op_log_not_jmpt;
     t[Instruction::BinSlotSlotStore as usize] = op_bin_slot_slot_store;
     fill_g2_coverage(&mut t);
-    // Imm-slot fuses share the fib/tak kernel with CALL/RETURN. Threading
-    // them without both call and return bounces out of the trampoline.
-    if call_is_hot() && return_is_hot() {
-        t[Instruction::BinSlotImm as usize] = op_bin_slot_imm;
-        t[Instruction::BinSlotImmStore as usize] = op_bin_slot_imm_store;
-        t[Instruction::BinSlotImmJmpf as usize] = op_bin_slot_imm_jmpf;
-        t[Instruction::BinSlotImmJmpt as usize] = op_bin_slot_imm_jmpt;
-        t[Instruction::CALL as usize] = op_call;
-        t[Instruction::TailCall as usize] = op_tail_call;
-        t[Instruction::RETURN as usize] = op_return;
-        t[Instruction::ConstReturnImm as usize] = op_const_return_imm;
-        t[Instruction::LoadReturnSlot as usize] = op_load_return_slot;
-        t[Instruction::BinReturn as usize] = op_bin_return;
-    }
     t
 }
 
@@ -2190,72 +1785,9 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
     }
 }
 
-/// Opt-in CALL/RETURN/imm + packed LOAD/STORE (hotmatch A/B). Not inlined
-/// into `execute_dense`.
 #[inline(always)]
 fn exec_hot(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
-    match bc {
-        Instruction::LOAD => load(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
-        Instruction::STORE => store(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
-        Instruction::Seek => seek(ctx.stack, ctx.sp, &opcode, ctx.stack_cap),
-        Instruction::BinSlotImmJmpf => apply_jump(
-            ctx,
-            bin_slot_imm_jmp(
-                ctx.stack,
-                ctx.sp,
-                &opcode,
-                ctx.constants,
-                ctx.heap,
-                ctx.stack_cap,
-                false,
-            ),
-        ),
-        Instruction::BinSlotImmJmpt => apply_jump(
-            ctx,
-            bin_slot_imm_jmp(
-                ctx.stack,
-                ctx.sp,
-                &opcode,
-                ctx.constants,
-                ctx.heap,
-                ctx.stack_cap,
-                true,
-            ),
-        ),
-        Instruction::BinSlotImm => {
-            bin_slot_imm(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap)
-        }
-        Instruction::BinSlotImmStore => bin_slot_imm_store(
-            ctx.stack,
-            ctx.sp,
-            &opcode,
-            ctx.constants,
-            ctx.heap,
-            ctx.stack_cap,
-        ),
-        Instruction::CALL if call_is_hot() => do_call(ctx, opcode),
-        Instruction::TailCall if call_is_hot() => do_tail_call(ctx, opcode),
-        Instruction::RETURN if return_is_hot() => do_return(ctx, opcode),
-        Instruction::ConstReturnImm if return_is_hot() => {
-            let ret_val = Value::from(opcode.operand_u32() as i32 as i64 as u64);
-            finish_return(ctx, ret_val);
-        }
-        Instruction::LoadReturnSlot if return_is_hot() => {
-            let slot = opcode.operand_u32() as usize;
-            promise!(ctx.sp + slot < ctx.stack_cap);
-            let ret_val = ctx.stack[ctx.sp + slot];
-            finish_return(ctx, ret_val);
-        }
-        Instruction::BinReturn if return_is_hot() => {
-            let tos = ctx.stack.tell();
-            promise!(tos >= 2);
-            let rhs = ctx.stack[tos - 1];
-            let lhs = ctx.stack[tos - 2];
-            let ret_val = crate::fused::eval_bin(opcode.bin_return_op(), lhs, rhs, ctx.heap);
-            finish_return(ctx, ret_val);
-        }
-        _ => exec_dense(ctx, bc, opcode),
-    }
+    exec_dense(ctx, bc, opcode);
 }
 
 /// Dedicated dense-kernel entry: compact match, no handler table (COI-376).
@@ -2359,28 +1891,15 @@ pub(super) fn run_hot_streak<const S: usize>(
     frame_pins: &mut Vec<FramePins>,
     dense_obj_addr: &mut u64,
     dense_obj: &mut Option<Object>,
-    finalizer_pcs: &std::collections::HashSet<u32, crate::AddrHashBuilder>,
-    nested_depth: &mut u32,
-    nested_frame_depths: &mut Vec<usize>,
-    nested_return: &mut Option<Value>,
-    resume_stack: &mut Vec<super::ResumeCtx>,
-    io_reactor: &std::sync::Arc<crate::io_reactor::IoReactor>,
     stack_cap: usize,
     mode: Mode,
 ) -> Option<HotStop> {
     let frames_len = frames.len();
     let mut extra = HotExtra {
-        frames: frames as &mut dyn CallFrames,
         frames_len,
         frame_pins,
         dense_obj_addr,
         dense_obj,
-        finalizer_pcs,
-        nested_depth,
-        nested_frame_depths,
-        nested_return,
-        resume_stack,
-        io_reactor,
         execute_done: None,
         pending_rest: None,
     };
@@ -2404,6 +1923,8 @@ pub(super) fn run_hot_streak<const S: usize>(
                     execute_dense(&mut ctx);
                 }
             }
+            // Re-read: `execute_dense` may have stopped on a later word.
+            // Kernel ops (CALL, LOAD, BinSlotImm) stay on the giant match.
             if ctx.panic_msg.is_none()
                 && ctx.extra.execute_done.is_none()
                 && ctx.extra.pending_rest.is_none()
@@ -2427,6 +1948,62 @@ pub(super) fn run_hot_streak<const S: usize>(
         Some(HotStop::Done(paused))
     } else {
         ctx.extra.pending_rest.take().map(HotStop::Rest)
+    }
+}
+
+/// After the giant match handles one always-hot opcode, keep going through
+/// `execute_dense` while the following words are still always-hot.
+///
+/// `*ip` already points at the next instruction. Fib never calls this.
+/// Mandelbrot enters once and stays in the dense loop across the back edge.
+#[inline(never)]
+pub(super) fn consume_always_hot_streak<const S: usize>(
+    stack: &mut Stack<Value>,
+    sp: &mut usize,
+    ip: &mut usize,
+    code: &[Byte],
+    constants: &[u64],
+    heap: &mut Heap,
+    frames: &mut ArrayVec<Frame, S>,
+    frame_pins: &mut Vec<FramePins>,
+    dense_obj_addr: &mut u64,
+    dense_obj: &mut Option<Object>,
+    stack_cap: usize,
+) -> Option<HotStop> {
+    if *ip >= code.len() {
+        return None;
+    }
+    let disc = unsafe { *code.get_unchecked(*ip).bytecode() } as u8;
+    if !is_always_hot_disc(disc) {
+        return None;
+    }
+    let frames_len = frames.len();
+    let mut extra = HotExtra {
+        frames_len,
+        frame_pins,
+        dense_obj_addr,
+        dense_obj,
+        execute_done: None,
+        pending_rest: None,
+    };
+    let mut ctx = HotCtx {
+        stack,
+        sp: *sp,
+        ip: *ip,
+        code,
+        constants,
+        heap,
+        stack_cap,
+        panic_msg: None,
+        extra: &mut extra,
+    };
+    execute_dense(&mut ctx);
+    *ip = ctx.ip;
+    *sp = ctx.sp;
+    if let Some(msg) = ctx.panic_msg {
+        Some(HotStop::Panic(msg))
+    } else {
+        ctx.extra.execute_done.map(HotStop::Done)
     }
 }
 
@@ -2469,19 +2046,12 @@ mod tests {
         assert!(is_kernel(Instruction::MakeEnumReturn));
         assert!(!is_kernel(Instruction::CONST));
         assert!(!is_kernel(Instruction::HALT));
-        assert_eq!(
-            is_hot(Instruction::CALL),
-            call_is_hot() && return_is_hot()
-        );
-        assert_eq!(
-            is_hot(Instruction::RETURN),
-            call_is_hot() && return_is_hot()
-        );
-        assert!(!is_hot(Instruction::BinSlotImmJmpf) || (call_is_hot() && return_is_hot()));
-        assert!(!is_hot(Instruction::BinSlotImm) || (call_is_hot() && return_is_hot()));
-        assert!(!is_hot(Instruction::BinSlotImmJmpt) || (call_is_hot() && return_is_hot()));
-        assert!(!is_hot(Instruction::BinReturn) || (call_is_hot() && return_is_hot()));
-        assert!(!is_hot(Instruction::ConstReturnImm) || (call_is_hot() && return_is_hot()));
+        assert!(!is_hot(Instruction::CALL));
+        assert!(!is_hot(Instruction::RETURN));
+        assert!(!is_hot(Instruction::BinSlotImm));
+        assert!(!is_hot(Instruction::BinSlotImmJmpt));
+        assert!(!is_hot(Instruction::BinReturn));
+        assert!(!is_hot(Instruction::ConstReturnImm));
         // COI-388: alloc+return stays on the giant match (not ALWAYS_HOT).
         assert!(!is_hot(Instruction::MakeEnumReturn));
         let t = table();
@@ -2489,14 +2059,14 @@ mod tests {
             t[Instruction::DenseBin as usize],
             cold as Handler
         ));
-        assert_eq!(
-            !core::ptr::fn_addr_eq(t[Instruction::RETURN as usize], cold as Handler),
-            return_is_hot()
-        );
-        assert_eq!(
-            !core::ptr::fn_addr_eq(t[Instruction::CALL as usize], cold as Handler),
-            call_is_hot()
-        );
+        assert!(core::ptr::fn_addr_eq(
+            t[Instruction::RETURN as usize],
+            cold as Handler
+        ));
+        assert!(core::ptr::fn_addr_eq(
+            t[Instruction::CALL as usize],
+            cold as Handler
+        ));
         assert!(!core::ptr::fn_addr_eq(
             t[Instruction::CONST as usize],
             cold as Handler

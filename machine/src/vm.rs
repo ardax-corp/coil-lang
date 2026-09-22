@@ -249,30 +249,12 @@ macro_rules! unary {
     };
 }
 
-/// Software-prefetch the bytecode word at `ip` (no-op if past the end).
-/// `core::hint::prefetch_read` is still unstable (`hint_prefetch`).
-/// `_mm_prefetch` is stable on x86_64; `core::arch::aarch64::_prefetch` is
-/// not (`stdarch_aarch64_prefetch`). Use `prfm` via stable `asm!` instead.
+/// Previously prefetched `code[ip]` (`prefetcht1` / `prfm`) after a
+/// `ip >= len` check. On the flagship loops the next word is already in L1,
+/// and the check plus the prefetch retired on every dispatch. Call sites stay
+/// so a later measurement can turn it back on in one place.
 #[inline(always)]
-fn prefetch_code(code: &[Byte], ip: usize) {
-    if ip >= code.len() {
-        return;
-    }
-    let ptr = unsafe { code.as_ptr().add(ip) };
-    #[cfg(target_arch = "x86_64")]
-    unsafe {
-        core::arch::x86_64::_mm_prefetch::<{ core::arch::x86_64::_MM_HINT_T1 }>(ptr.cast::<i8>());
-    }
-    // pldl2keep ≈ x86 T1: L2, do not shove the operand stack out of L1.
-    #[cfg(target_arch = "aarch64")]
-    unsafe {
-        core::arch::asm!(
-            "prfm pldl2keep, [{ptr}]",
-            ptr = in(reg) ptr,
-            options(readonly, nostack, preserves_flags),
-        );
-    }
-}
+fn prefetch_code(_code: &[Byte], _ip: usize) {}
 
 #[inline(always)]
 fn set_jump_target(ip: &mut usize, target: usize, code: &[Byte]) {
@@ -2793,12 +2775,14 @@ impl<const S: usize> Machine<S> {
     /// enough to blow branch-mispredict rates on some CPUs while keeping
     /// dynamic instruction counts identical. A single outlined copy matches
     /// the non-LTO `machine` codegen (already identical to `main`'s).
-    /// Prefetch + fused jump tables live *inside* this outlined copy.
-    /// Hot dense/jmp ops may divert into `dispatch` (COI-374 G1). Remaining
-    /// non-kernel ops divert on the table path (COI-375 G2). ALWAYS_HOT
-    /// streaks use `execute_dense` (COI-376 G3) so FORMAT/HostInvoke text
-    /// is not in that I-cache working set. CALL/RETURN and packed LOAD/STORE
-    /// stay on this match unless `COIL_THREADED_CALL`+`RETURN`.
+    /// Fused jump tables live *inside* this outlined copy. Bytecode prefetch
+    /// was removed: the next word is already in L1 on the flagship loops, and
+    /// the guard compare retired on every dispatch.
+    /// Hot dense/jmp ops may divert into `dispatch` when
+    /// `COIL_THREADED_DISPATCH` selects table or hotmatch. The default is
+    /// this match. An always-hot arm then continues the streak in
+    /// `execute_dense`, so a dense loop does not return here per opcode.
+    /// CALL/RETURN stay on this match.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
@@ -2808,6 +2792,32 @@ impl<const S: usize> Machine<S> {
         let stack_cap = self.stack.capacity();
         let code_len = code.len();
         let dispatch_mode = dispatch::mode();
+
+        macro_rules! then_hot_streak {
+            () => {
+                if let Some(stop) = dispatch::consume_always_hot_streak(
+                    &mut self.stack,
+                    &mut sp,
+                    &mut ip,
+                    code,
+                    constants,
+                    &mut self.heap,
+                    &mut self.frames,
+                    &mut self.frame_pins,
+                    &mut self.dense_obj_addr,
+                    &mut self.dense_obj,
+                    stack_cap,
+                ) {
+                    match stop {
+                        dispatch::HotStop::Panic(msg) => {
+                            return self.runtime_panic(msg, ip.saturating_sub(1));
+                        }
+                        dispatch::HotStop::Done(paused) => return paused,
+                        dispatch::HotStop::Rest(_) => {}
+                    }
+                }
+            };
+        }
 
         while ip < code_len {
             #[cfg(any(test, feature = "debugger"))]
@@ -2833,6 +2843,11 @@ impl<const S: usize> Machine<S> {
                 // Remaining (non-hot) ops use `_ => exec_rest` in this match —
                 // do not divert `!is_kernel` or fib bounces on stack ADD.
                 if unlikely(dispatch::is_hot(peek_bc)) {
+                    // If the streak does not consume this word, fall through
+                    // into the match. `continue` here used to spin: table
+                    // mode can report `CALL` as hot while leaving `ip` and
+                    // the operand stack untouched.
+                    let ip_at_peek = ip;
                     match dispatch::run_hot_streak(
                         &mut self.stack,
                         &mut sp,
@@ -2844,12 +2859,6 @@ impl<const S: usize> Machine<S> {
                         &mut self.frame_pins,
                         &mut self.dense_obj_addr,
                         &mut self.dense_obj,
-                        &self.finalizer_pcs,
-                        &mut self.nested_depth,
-                        &mut self.nested_frame_depths,
-                        &mut self.nested_return,
-                        &mut self.resume_stack,
-                        &self.io_reactor,
                         stack_cap,
                         dispatch_mode,
                     ) {
@@ -2866,13 +2875,13 @@ impl<const S: usize> Machine<S> {
                                 constants,
                                 stack_cap,
                             ) {
-                                dispatch::RestFlow::Continue => {}
+                                dispatch::RestFlow::Continue => continue,
                                 dispatch::RestFlow::Done(paused) => return paused,
                             }
                         }
+                        None if ip != ip_at_peek => continue,
                         None => {}
                     }
-                    continue;
                 }
             }
 
@@ -2908,16 +2917,19 @@ impl<const S: usize> Machine<S> {
                 }
                 Instruction::JMP => {
                     set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
+                    then_hot_streak!();
                 }
                 Instruction::JMPF => {
                     if !self.stack.pop().as_bool() {
                         set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
                     }
+                    then_hot_streak!();
                 }
                 Instruction::JMPT => {
                     if self.stack.pop().as_bool() {
                         set_jump_target(&mut ip, opcode.operand_u32() as usize, code);
                     }
+                    then_hot_streak!();
                 }
                 Instruction::CALL => {
                     let (arity, target) = opcode.call_parts();
@@ -3029,6 +3041,7 @@ impl<const S: usize> Machine<S> {
                     ) {
                         set_jump_target(&mut ip, target, code);
                     }
+                    then_hot_streak!();
                 }
                 // Fused `LOAD slot; CONST imm; <cond>; JMPF/JMPT` without stack traffic.
                 Instruction::BinSlotImmJmpf | Instruction::BinSlotImmJmpt => {
@@ -3053,6 +3066,7 @@ impl<const S: usize> Machine<S> {
                     ) {
                         set_jump_target(&mut ip, target, code);
                     }
+                    then_hot_streak!();
                 }
                 // Fused `BinSlotSlot; JMPF/JMPT`, pool packs (target<<32)|b.
                 Instruction::BinSlotSlotJmpf | Instruction::BinSlotSlotJmpt => {
@@ -3067,6 +3081,7 @@ impl<const S: usize> Machine<S> {
                     ) {
                         set_jump_target(&mut ip, target, code);
                     }
+                    then_hot_streak!();
                 }
                 // Fused `LOAD src; CONST imm; <op>; STORE dest`, pool packs (dest<<32)|imm.
                 Instruction::BinSlotImmStore => {
@@ -3087,6 +3102,7 @@ impl<const S: usize> Machine<S> {
                         &self.heap,
                         stack_cap,
                     );
+                    then_hot_streak!();
                 }
                 Instruction::LoadReturnSlot => {
                     let slot = opcode.operand_u32() as usize;
@@ -3147,6 +3163,7 @@ impl<const S: usize> Machine<S> {
                         prefetch_code(code, ip);
                         dispatch::dense_bin(&mut self.stack, sp, tail, stack_cap);
                     }
+                    then_hot_streak!();
                 }
                 Instruction::DenseBinJmpf => {
                     dispatch::dense_bin(&mut self.stack, sp, opcode, stack_cap);
@@ -3164,21 +3181,27 @@ impl<const S: usize> Machine<S> {
                     ) {
                         set_jump_target(&mut ip, target, code);
                     }
+                    then_hot_streak!();
                 }
                 Instruction::DenseCmp => {
                     dispatch::dense_cmp(&mut self.stack, sp, opcode, stack_cap);
+                    then_hot_streak!();
                 }
                 Instruction::DenseConst => {
                     dispatch::dense_const(&mut self.stack, sp, opcode, constants, stack_cap);
+                    then_hot_streak!();
                 }
                 Instruction::DenseMove => {
                     dispatch::dense_move(&mut self.stack, sp, opcode, stack_cap);
+                    then_hot_streak!();
                 }
                 Instruction::DenseUnary => {
                     dispatch::dense_unary(&mut self.stack, sp, opcode, stack_cap);
+                    then_hot_streak!();
                 }
                 Instruction::DenseCast => {
                     dispatch::dense_cast(&mut self.stack, sp, opcode, stack_cap);
+                    then_hot_streak!();
                 }
                 Instruction::DenseIndex | Instruction::DenseIndexJmpf => {
                     if dispatch::dense_index(
@@ -3212,6 +3235,7 @@ impl<const S: usize> Machine<S> {
                             set_jump_target(&mut ip, target, code);
                         }
                     }
+                    then_hot_streak!();
                 }
                 Instruction::DenseStoreIndex => {
                     match dispatch::dense_store_index(
@@ -3234,9 +3258,11 @@ impl<const S: usize> Machine<S> {
                                 .runtime_panic("StoreIndex on non-array", ip.saturating_sub(1));
                         }
                     }
+                    then_hot_streak!();
                 }
                 Instruction::DenseArrayLen => {
                     dispatch::dense_array_len(&mut self.stack, sp, opcode, &self.heap, stack_cap);
+                    then_hot_streak!();
                 }
                 Instruction::DenseFieldLoad => {
                     if dispatch::dense_field_load(
@@ -3250,6 +3276,7 @@ impl<const S: usize> Machine<S> {
                     {
                         return self.runtime_panic("no such field", ip.saturating_sub(1));
                     }
+                    then_hot_streak!();
                 }
                 Instruction::DenseFieldStore => {
                     match dispatch::dense_field_store(
@@ -3265,6 +3292,7 @@ impl<const S: usize> Machine<S> {
                                 .runtime_panic("SetField on non-instance", ip.saturating_sub(1));
                         }
                     }
+                    then_hot_streak!();
                 }
                 Instruction::StorePop => {
                     let count = opcode.load_store_count();

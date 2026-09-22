@@ -5162,12 +5162,12 @@
         let table_n = count(super::dispatch::Mode::Table);
         let hot_n = count(super::dispatch::Mode::HotMatch);
         assert!(
-            table_n < match_n,
-            "table should peek residue DenseBin (table={table_n}, match={match_n})"
+            match_n <= table_n,
+            "match streak should cover residue DenseBin (table={table_n}, match={match_n})"
         );
         assert!(
-            hot_n < match_n,
-            "hotmatch should peek residue DenseBin (hot={hot_n}, match={match_n})"
+            match_n <= hot_n,
+            "match streak should cover residue DenseBin (hot={hot_n}, match={match_n})"
         );
     }
 
@@ -5277,12 +5277,12 @@
         let table_n = count(super::dispatch::Mode::Table);
         let hot_n = count(super::dispatch::Mode::HotMatch);
         assert!(
-            table_n < match_n,
-            "table should peek DenseBin (table={table_n}, match={match_n})"
+            match_n <= table_n,
+            "match streak should cover DenseBin (table={table_n}, match={match_n})"
         );
         assert!(
-            hot_n < match_n,
-            "hotmatch should peek DenseBin (hot={hot_n}, match={match_n})"
+            match_n <= hot_n,
+            "match streak should cover DenseBin (hot={hot_n}, match={match_n})"
         );
     }
 
@@ -5420,12 +5420,12 @@
         let table_n = count(super::dispatch::Mode::Table);
         let hot_n = count(super::dispatch::Mode::HotMatch);
         assert!(
-            table_n < match_n,
-            "table should peek DenseBin+JMP (table={table_n}, match={match_n})"
+            match_n <= table_n,
+            "match streak should cover DenseBin+JMP (table={table_n}, match={match_n})"
         );
         assert!(
-            hot_n < match_n,
-            "hotmatch should peek DenseBin+JMP (hot={hot_n}, match={match_n})"
+            match_n <= hot_n,
+            "match streak should cover DenseBin+JMP (hot={hot_n}, match={match_n})"
         );
     }
 
