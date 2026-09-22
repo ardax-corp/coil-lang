@@ -2783,15 +2783,36 @@ impl<const S: usize> Machine<S> {
     /// this match. An always-hot arm then continues the streak in
     /// `execute_dense`, so a dense loop does not return here per opcode.
     /// CALL/RETURN stay on this match.
+    ///
+    /// `PEEK` is false for the default match. The table/hotmatch test is
+    /// then absent from the loop; fib, tak, and other non-dense code do
+    /// not compare the dispatch mode on every opcode.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
+        #[cfg(any(test, feature = "debugger"))]
+        let debug_attached = self.debug.is_some();
+        #[cfg(not(any(test, feature = "debugger")))]
+        let debug_attached = false;
+        if !debug_attached && dispatch::mode() != dispatch::Mode::Match {
+            self.execute_loop::<true>(code, constants, start_ip)
+        } else {
+            self.execute_loop::<false>(code, constants, start_ip)
+        }
+    }
+
+    #[inline(never)]
+    fn execute_loop<const PEEK: bool>(
+        &mut self,
+        code: &[Byte],
+        constants: &[u64],
+        start_ip: usize,
+    ) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
 
         let mut ip: usize = start_ip;
         let mut sp = self.frames.get_mut().get();
         let stack_cap = self.stack.capacity();
         let code_len = code.len();
-        let dispatch_mode = dispatch::mode();
 
         macro_rules! then_hot_streak {
             () => {
@@ -2835,7 +2856,7 @@ impl<const S: usize> Machine<S> {
             #[cfg(not(any(test, feature = "debugger")))]
             let debug_attached = false;
 
-            if dispatch_mode != dispatch::Mode::Match && !debug_attached {
+            if PEEK {
                 promise!(ip < code_len);
                 let peek = unsafe { code.get_unchecked(ip) };
                 let peek_bc = *peek.bytecode();
@@ -2843,6 +2864,7 @@ impl<const S: usize> Machine<S> {
                 // Remaining (non-hot) ops use `_ => exec_rest` in this match —
                 // do not divert `!is_kernel` or fib bounces on stack ADD.
                 if unlikely(dispatch::is_hot(peek_bc)) {
+                    let dispatch_mode = dispatch::mode();
                     // If the streak does not consume this word, fall through
                     // into the match. `continue` here used to spin: table
                     // mode can report `CALL` as hot while leaving `ip` and

@@ -5,8 +5,9 @@ Can a portable **fn-pointer** interpreter beat the outlined giant `match` in
 
 `COIL_THREADED_CALL` and `COIL_THREADED_RETURN` are removed. `CALL` / `RETURN`
 stay on the giant match. Unset `COIL_THREADED_DISPATCH` is `match`: that match,
-then an always-hot streak in `execute_dense`. `1` / `table` and `2` / `hotmatch`
-remain optional A/B switches. The 256-entry handler array is that table path;
+then an always-hot streak in `execute_dense`. The mode test sits outside
+the loop, so the default path does not re-read it per opcode. `1` / `table`
+and `2` / `hotmatch` remain optional A/B switches. The 256-entry handler array is that table path;
 using it for every opcode, including `CALL`, was slower on fib.
 
 ## Mechanism
