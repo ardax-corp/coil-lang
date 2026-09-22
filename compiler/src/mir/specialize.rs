@@ -117,7 +117,6 @@ pub fn try_specialize_body_side(
     hints.allow_index = true;
     hints.allow_effects = true;
     hints.allow_heap_fields = true;
-    let _heap_index = super::infer::has_heap_index(ops);
     let live_params = super::abi::live_in_params(ops, &hints.slot_ty);
     hints.param_count = live_params
         .as_ref()
