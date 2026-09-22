@@ -707,60 +707,6 @@ impl IlOp {
     pub fn as_plain_byte(&self) -> Option<Byte> {
         self.as_encode_byte()
     }
-
-    #[allow(dead_code)]
-    pub fn instruction(&self) -> Option<Instruction> {
-        match self {
-            IlOp::Byte { byte, .. } => Some(*byte.bytecode()),
-            IlOp::Load { .. } => Some(Instruction::LOAD),
-            IlOp::StorePop { .. } => Some(Instruction::STORE),
-            IlOp::Const { .. } | IlOp::ConstPool { .. } => Some(Instruction::CONST),
-            IlOp::String { .. } => Some(Instruction::STRING),
-            IlOp::Dup { .. } => Some(Instruction::DUPLICATE),
-            IlOp::Pop { .. } => Some(Instruction::POP),
-            IlOp::LogNot { .. } => Some(Instruction::LogNot),
-            IlOp::Index { .. } => Some(Instruction::Index),
-            IlOp::IndexUnchecked { .. } => Some(Instruction::IndexUnchecked),
-            IlOp::ArrayPin { .. } => Some(Instruction::ArrayPin),
-            IlOp::IndexPin { .. } => Some(Instruction::IndexPin),
-            IlOp::IndexPinUnchecked { .. } => Some(Instruction::IndexPinUnchecked),
-            IlOp::StoreIndexPin { .. } => Some(Instruction::StoreIndexPin),
-            IlOp::StoreIndexPinUnchecked { .. } => Some(Instruction::StoreIndexPinUnchecked),
-            IlOp::MakeTuple { .. } => Some(Instruction::MakeTuple),
-            IlOp::MakeArray { .. } => Some(Instruction::MakeArray),
-            IlOp::MakeEnum { .. } => Some(Instruction::MakeEnum),
-            IlOp::BoxValue { .. } => Some(Instruction::BoxValue),
-            IlOp::UnboxValue { .. } => Some(Instruction::UnboxValue),
-            IlOp::LoadField { .. } => Some(Instruction::LoadField),
-            IlOp::GetField { .. } => Some(Instruction::GetField),
-            IlOp::SetField { .. } => Some(Instruction::SetField),
-            IlOp::HostInvoke { .. } => Some(Instruction::HostInvoke),
-            IlOp::Print { .. } => Some(Instruction::PRINT),
-            IlOp::Return { .. } => Some(Instruction::RETURN),
-            IlOp::Halt { .. } => Some(Instruction::HALT),
-            IlOp::Bin { op, .. } => Some(*op),
-            IlOp::BinSlotImm { .. } => Some(Instruction::BinSlotImm),
-            IlOp::BinSlotSlot { .. } => Some(Instruction::BinSlotSlot),
-            IlOp::LoadReturnSlot { .. } => Some(Instruction::LoadReturnSlot),
-            IlOp::ConstReturnImm { .. } => Some(Instruction::ConstReturnImm),
-            IlOp::BinReturn { .. } => Some(Instruction::BinReturn),
-            IlOp::Jump { kind, .. } => Some(match kind {
-                IlJumpKind::Unconditional => Instruction::JMP,
-                IlJumpKind::JumpIfFalse => Instruction::JMPF,
-                IlJumpKind::JumpIfTrue => Instruction::JMPT,
-                IlJumpKind::JumpIfMatch { .. } => Instruction::JumpIfMatch,
-            }),
-            IlOp::Entry { kind, .. } => Some(match kind {
-                EntryKind::Call => Instruction::CALL,
-                EntryKind::TailCall => Instruction::TailCall,
-                EntryKind::MakeCoro => Instruction::MakeCoro,
-                EntryKind::CodePtr => Instruction::CodePtr,
-                EntryKind::MakePolyFn => Instruction::MakePolyFn,
-            }),
-            IlOp::PrologueJmp { .. } => Some(Instruction::JMP),
-            IlOp::Label(_) | IlOp::JoinLabel(_) => None,
-        }
-    }
 }
 
 #[cfg(test)]
@@ -1006,6 +952,22 @@ mod tests {
         assert!(entry.is_control());
         assert!(IlOp::Label(Label(0)).as_encode_byte().is_none());
         assert!(!IlOp::Label(Label(0)).emits_code());
+        // Prologue is a symbolic jump, not a data byte. Fuse-select turns it
+        // into `Slot::PrologueJmp`; encoding it as `JMP` would double-emit.
+        assert!(
+            IlOp::PrologueJmp {
+                loc: DebugLoc::unknown(),
+            }
+            .as_encode_byte()
+            .is_none()
+        );
+        let load = IlOp::Load {
+            slot: 4,
+            loc: DebugLoc::unknown(),
+        };
+        let byte = load.as_encode_byte().expect("load encodes");
+        assert_eq!(*byte.bytecode(), Instruction::LOAD);
+        assert_eq!(byte.load_store_single_slot(), Some(4));
     }
 
     #[test]
