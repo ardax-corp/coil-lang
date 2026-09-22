@@ -181,6 +181,93 @@ fn stats_aggregate_across_iterative_rounds() {
     );
 }
 
+/// `n * fact(n - 1)` must not become `n * n` when MIR parks the call result.
+#[test]
+fn fact_mul_keeps_call_result_across_opts() {
+    use crate::il::{EntryKind, IlFunc, IlModule};
+
+    let ops = vec![
+        label(1),
+        IlOp::Load { slot: 0, loc: loc() },
+        c(1),
+        IlOp::Bin {
+            op: common::Instruction::LEQ,
+            loc: loc(),
+        },
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(2),
+            loc: loc(),
+            hint: Default::default(),
+        },
+        IlOp::Load { slot: 0, loc: loc() },
+        ret(),
+        label(2),
+        IlOp::Load { slot: 0, loc: loc() },
+        IlOp::StorePop { slot: 1, loc: loc() },
+        IlOp::Load { slot: 0, loc: loc() },
+        c(1),
+        IlOp::Bin {
+            op: common::Instruction::SUB,
+            loc: loc(),
+        },
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            arity: 1,
+            target: Label(1),
+            loc: loc(),
+            ret_words: 1,
+        },
+        IlOp::StorePop { slot: 2, loc: loc() },
+        IlOp::Load { slot: 1, loc: loc() },
+        IlOp::Load { slot: 2, loc: loc() },
+        IlOp::Bin {
+            op: common::Instruction::MUL,
+            loc: loc(),
+        },
+        ret(),
+    ];
+    let emitting = ops.iter().filter(|op| op.emits_code()).count();
+    let funcs = vec![IlFunc::with_entry_sp(
+        "fact",
+        Some(Label(1)),
+        0,
+        emitting,
+        1,
+    )];
+    let mut module = IlModule::from_flat(&ops, &funcs);
+    let (optimized, _, _) =
+        module.optimize_and_flatten(&OptimizeOptions::default(), &mut Vec::new());
+    let rendered = optimized
+        .iter()
+        .map(crate::dissect::format_il_op)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let squared = optimized.windows(3).any(|w| {
+        matches!(
+            (&w[0], &w[1], &w[2]),
+            (
+                IlOp::Load { slot: 0, .. },
+                IlOp::Load { slot: 0, .. },
+                IlOp::Bin {
+                    op: common::Instruction::MUL,
+                    ..
+                }
+            )
+        )
+    }) || optimized.iter().any(|op| {
+        matches!(
+            op,
+            IlOp::BinSlotSlot { op, a: 0, b: 0, .. } if *op == common::Instruction::MUL as u8
+        )
+    });
+    assert!(!squared, "fact multiply collapsed into slot0 * slot0\n{rendered}");
+    assert!(
+        rendered.contains("MUL"),
+        "fact multiply disappeared\n{rendered}"
+    );
+}
+
 #[test]
 fn stats_off_does_not_record() {
     begin_opt_stats();

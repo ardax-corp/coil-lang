@@ -2262,9 +2262,95 @@ fn main() { add(1, 2); }
         assert!(!vm.panicked(), "vec_scan panicked");
     }
 
-    /// Naive `fib`: `n <= 2` returns the constant 1, otherwise two recursive
-    /// calls. The VM may skip the constant-base call; the value must still
-    /// match the recurrence (`fib(10) = 55`).
+    /// Naive `fib` and `fact` through the real compiler and VM.
+    ///
+    /// `fib(n <= 2)` returns the constant 1; the VM may skip that call.
+    /// `fact` returns `n` on the base, so the call must still run. Both
+    /// results have to match the closed forms (`fib(10) = 55`, `fact(6) = 720`).
+    #[test]
+    fn recursive_fib_and_fact_match_closed_values() {
+        let src = r#"
+fn fib(int n) -> int {
+    if n <= 2 {
+        return 1;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn fact(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return n * fact(n - 1);
+}
+fn fact_rev(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fact_rev(n - 1) * n;
+}
+fn sum_rec(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return 1 + sum_rec(n - 1);
+}
+fn main() {
+    if fib(1) != 1 {
+        panic "fib1";
+    }
+    if fib(3) != 2 {
+        panic "fib3";
+    }
+    if fib(10) != 55 {
+        panic "fib10";
+    }
+    if fact(1) != 1 {
+        panic "fact1";
+    }
+    if fact(6) != 720 {
+        panic "fact";
+    }
+    if fact_rev(6) != 720 {
+        panic "fact_rev";
+    }
+    if sum_rec(6) != 6 {
+        panic "sum_rec";
+    }
+}
+"#;
+        let mut pipeline = Pipeline::new();
+        let (bytecode, constants) = pipeline
+            .compile_src_retaining_il(src)
+            .expect("compile fib and fact");
+        let il = pipeline
+            .cursor_il
+            .as_ref()
+            .map(|snap| {
+                snap.ops
+                    .iter()
+                    .map(crate::dissect::format_il_op)
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+            .unwrap_or_default();
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        pipeline.wire_host_natives(&mut vm);
+        vm.run_raw(
+            &bytecode,
+            &constants,
+            pipeline.strings(),
+            pipeline.static_slot_count(),
+        );
+        assert!(
+            !vm.panicked(),
+            "recursive fib/fact panicked\n{il}\nbytecode={:?}",
+            bytecode
+                .iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn recursive_fib_matches_recurrence() {
         let src = r#"

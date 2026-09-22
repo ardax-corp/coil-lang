@@ -81,6 +81,11 @@ impl ConvoyPlan {
                 changed = true;
             }
         }
+        // `n * fact(n - 1)`: the param is reloaded beside the call result.
+        // There is no SWAP, and a slotless call has no reg (reload reads
+        // slot 0, the param). Park that dest. `fib(n-1)+fib(n-2)` stays
+        // on the stack — the other operand is itself a self-call.
+        park_self_call_beside_slot(func, &def, &mut convoy, self_entry);
 
         let mut need_slot = vec![false; n];
         for p in &func.params {
@@ -256,6 +261,53 @@ fn term_uses(term: &Terminator) -> Vec<ValueId> {
 
 fn is_self_call_inst(inst: &MirInst, entry: Option<Label>) -> bool {
     matches!(inst, MirInst::Call { target, .. } if Some(*target) == entry)
+}
+
+/// Self-call results used next to a slot/const operand must take a frame
+/// slot. Only a sibling self-call operand can stay on the operand stack.
+fn park_self_call_beside_slot(
+    func: &MirFunc,
+    def: &[Option<(BlockId, usize)>],
+    convoy: &mut [bool],
+    entry: Option<Label>,
+) {
+    let mut park = Vec::new();
+    for block in &func.blocks {
+        for inst in &block.insts {
+            let MirInst::Bin { lhs, rhs, .. } = inst else {
+                continue;
+            };
+            for (call_v, other) in [(*lhs, *rhs), (*rhs, *lhs)] {
+                if !convoy.get(call_v.index()).copied().unwrap_or(false) {
+                    continue;
+                }
+                if is_self_call_value(func, def, other, entry) {
+                    continue;
+                }
+                if is_self_call_value(func, def, call_v, entry) {
+                    park.push(call_v.index());
+                }
+            }
+        }
+    }
+    for i in park {
+        convoy[i] = false;
+    }
+}
+
+fn is_self_call_value(
+    func: &MirFunc,
+    def: &[Option<(BlockId, usize)>],
+    v: ValueId,
+    entry: Option<Label>,
+) -> bool {
+    let Some((b, i)) = def.get(v.index()).copied().flatten() else {
+        return false;
+    };
+    func.block(b)
+        .insts
+        .get(i)
+        .is_some_and(|inst| is_self_call_inst(inst, entry))
 }
 
 pub(super) fn is_tail_call_inst(block: &super::func::MirBlock, inst: &MirInst) -> bool {

@@ -1856,13 +1856,14 @@ fn emit_stack_value(
         } => {
             emit_stack_bin(out, stacked, *op, *ty, *lhs, *rhs, *dest, func, plan, regs, pool, loc)
         }
+        // A slotless call result is only valid while it is still TOS
+        // (`stacked.last()` above). Reloading `regs[v]` reads an
+        // unassigned slot — 0, the first parameter — so `n * fact(n-1)`
+        // becomes `n * n`. Refuse; the planner parks these dests.
         MirInst::Call { dest, dest_hi, .. } if *dest == v || *dest_hi == Some(v) => {
-            out.push(IlOp::Load {
-                slot: u32::from(regs[v.index()]),
-                loc,
-            });
-            stacked.push(v);
-            Ok(())
+            Err(LowerError::Refused(
+                "stack-carried call result is not on TOS".into(),
+            ))
         }
         _ => Err(LowerError::Refused("dense convoy value".into())),
     }
