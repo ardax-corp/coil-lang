@@ -5,8 +5,8 @@
 //! HashSet. See `docs/internals/heap-identity.md`.
 
 use std::alloc::Layout;
-use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 const CHUNK: usize = 64 * 1024;
 
@@ -23,22 +23,34 @@ struct PageMeta {
 
 pub struct Slab {
     chunks: Vec<Chunk>,
-    free: HashMap<(u32, u32), Vec<NonNull<u8>>>,
+    /// Free lists keyed by `(slot_size, align)`. A handful of classes; a
+    /// linear scan is cheaper than hashing the pair on every alloc.
+    free: Vec<((u32, u32), Vec<NonNull<u8>>)>,
+    /// Last chunk that contained a lookup. Relaxed: a stale hint misses and
+    /// falls back to the scan. Not a synchronization point.
+    last_start: AtomicU64,
+    last_end: AtomicU64,
+    last_idx: AtomicU32,
 }
 
 impl Slab {
     pub fn new() -> Self {
         Self {
             chunks: Vec::new(),
-            free: HashMap::new(),
+            free: Vec::new(),
+            last_start: AtomicU64::new(0),
+            last_end: AtomicU64::new(0),
+            last_idx: AtomicU32::new(0),
         }
     }
 
     pub fn alloc(&mut self, layout: Layout) -> NonNull<u8> {
         let (slot_size, align) = slot_dims(layout);
         let key = (slot_size as u32, align as u32);
-        if let Some(p) = self.free.get_mut(&key).and_then(|v| v.pop()) {
-            return p;
+        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key) {
+            if let Some(p) = slots.pop() {
+                return p;
+            }
         }
         self.carve_page(slot_size, align)
     }
@@ -48,10 +60,12 @@ impl Slab {
             debug_assert!(false, "slab free of unmapped pointer");
             return;
         };
-        self.free
-            .entry((meta.slot_size, meta.slot_align))
-            .or_default()
-            .push(ptr);
+        let key = (meta.slot_size, meta.slot_align);
+        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key) {
+            slots.push(ptr);
+            return;
+        }
+        self.free.push((key, vec![ptr]));
     }
 
     /// Mapped anonymous bytes (chunks stay mapped after sweep).
@@ -84,14 +98,20 @@ impl Slab {
         let key = (slot_size as u32, align as u32);
         let mut p = first;
         let mut first_slot = None;
+        let mut rest = Vec::new();
         while p + slot_size <= end {
             let nn = unsafe { NonNull::new_unchecked(p as *mut u8) };
             if first_slot.is_none() {
                 first_slot = Some(nn);
             } else {
-                self.free.entry(key).or_default().push(nn);
+                rest.push(nn);
             }
             p += slot_size;
+        }
+        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key) {
+            slots.append(&mut rest);
+        } else if !rest.is_empty() {
+            self.free.push((key, rest));
         }
         self.chunks.push(Chunk {
             ptr,
@@ -105,10 +125,25 @@ impl Slab {
     }
 
     fn chunk_for(&self, addr: u64) -> Option<(u64, &PageMeta)> {
-        for c in &self.chunks {
-            let start = c.ptr as u64;
-            if addr >= start && addr < start + CHUNK as u64 {
-                return Some((start, &c.meta));
+        let start = self.last_start.load(Ordering::Relaxed);
+        let end = self.last_end.load(Ordering::Relaxed);
+        let idx = self.last_idx.load(Ordering::Relaxed) as usize;
+        if start != 0
+            && addr >= start
+            && addr < end
+            && let Some(c) = self.chunks.get(idx)
+            && c.ptr as u64 == start
+        {
+            return Some((start, &c.meta));
+        }
+        for (i, c) in self.chunks.iter().enumerate() {
+            let cstart = c.ptr as u64;
+            let cend = cstart + CHUNK as u64;
+            if addr >= cstart && addr < cend {
+                self.last_start.store(cstart, Ordering::Relaxed);
+                self.last_end.store(cend, Ordering::Relaxed);
+                self.last_idx.store(i as u32, Ordering::Relaxed);
+                return Some((cstart, &c.meta));
             }
         }
         None

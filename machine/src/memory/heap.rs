@@ -42,6 +42,9 @@ pub struct Heap {
     live_count: usize,
     /// Immortal arity-0 enum singletons keyed by tag (never swept).
     immortal_enums: HashMap<u32, Object, AddrHashBuilder>,
+    /// Last tag returned by [`Self::immortal_unit_enum`]. Unit constructors
+    /// (binary-tree leaves) hit this instead of the map.
+    unit_enum: Option<(u32, Object)>,
     /// Reused gray worklist / root buffers across collections.
     gc_gray: Vec<Object>,
     gc_root_objects: Vec<Object>,
@@ -78,6 +81,7 @@ impl Default for Heap {
             slab: Slab::new(),
             live_count: 0,
             immortal_enums: HashMap::default(),
+            unit_enum: None,
             gc_gray: Vec::new(),
             gc_root_objects: Vec::new(),
             gc_roots: Vec::new(),
@@ -699,7 +703,13 @@ impl Heap {
 
     /// Return a shared arity-0 enum for `tag`, allocating once per tag.
     pub fn immortal_unit_enum(&mut self, tag: u32) -> Object {
+        if let Some((cached, obj)) = self.unit_enum
+            && cached == tag
+        {
+            return obj;
+        }
         if let Some(obj) = self.immortal_enums.get(&tag) {
+            self.unit_enum = Some((tag, *obj));
             return *obj;
         }
         let obj_enum = crate::memory::ObjEnum {
@@ -708,6 +718,7 @@ impl Heap {
         };
         let (object, _) = self.alloc(obj_enum, Object::Enum);
         self.immortal_enums.insert(tag, object);
+        self.unit_enum = Some((tag, object));
         object
     }
 
