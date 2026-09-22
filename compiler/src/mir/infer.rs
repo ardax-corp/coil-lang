@@ -1035,32 +1035,6 @@ fn is_heap_field_op(op: &IlOp) -> bool {
     }
 }
 
-/// Heap-index / store / pin / ArrayLen — S3 may specialize these with maps.
-pub(crate) fn has_heap_index(ops: &[IlOp]) -> bool {
-    ops.iter().any(|op| match op {
-        IlOp::Index { .. }
-        | IlOp::IndexUnchecked { .. }
-        | IlOp::IndexPin { .. }
-        | IlOp::IndexPinUnchecked { .. }
-        | IlOp::StoreIndexPin { .. }
-        | IlOp::StoreIndexPinUnchecked { .. }
-        | IlOp::ArrayPin { .. } => true,
-        IlOp::Byte { byte, .. } => matches!(
-            *byte.bytecode(),
-            Instruction::Index
-                | Instruction::IndexUnchecked
-                | Instruction::StoreIndex
-                | Instruction::StoreIndexUnchecked
-                | Instruction::ArrayLen
-                | Instruction::DenseIndex
-                | Instruction::DenseIndexJmpf
-                | Instruction::DenseStoreIndex
-                | Instruction::DenseArrayLen
-        ),
-        _ => false,
-    })
-}
-
 fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
     let mut label_at = HashMap::new();
     for (i, op) in ops.iter().enumerate() {

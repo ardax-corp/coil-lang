@@ -3551,6 +3551,53 @@ fn main() {
         assert!(!vm.panicked(), "indexed_sum checksum");
     }
 
+    /// Counted index loops densify. A body-wide index walk is not an
+    /// eligibility gate: refusing every index op would leave stack `Index`
+    /// and drop `VReduce` / `DenseIndex`.
+    #[test]
+    fn index_loop_specializes_without_heap_prescan() {
+        let src = r#"
+fn sum(Vec<int> arr) -> int {
+    let i = 0;
+    let s = 0;
+    while i < len(arr) {
+        s = s + arr[i];
+        i = i + 1;
+    }
+    return s;
+}
+fn main() {
+    let v: Vec<int> = Vec::from([1, 2, 3, 4]);
+    if sum(v) != 10 {
+        panic "indexed_sum checksum";
+    }
+}
+"#;
+        let mut p = crate::Pipeline::new();
+        let (bc, constants) = p.compile_src(src).expect("compile index loop");
+        let sum = p.function_offset("sum").expect("sum");
+        let main = p.function_offset("main").expect("main");
+        let sum_bc = if sum < main { &bc[sum..main] } else { &bc[sum..] };
+        assert!(
+            sum_bc.iter().any(|b| matches!(
+                *b.bytecode(),
+                Instruction::VReduce
+                    | Instruction::DenseIndex
+                    | Instruction::DenseIndexJmpf
+                    | Instruction::DenseStoreIndex
+            )),
+            "index loop must densify, not stay on a heap-index refuse; opcodes={:?}",
+            sum_bc
+                .iter()
+                .map(|b| b.bytecode().mnemonic())
+                .collect::<Vec<_>>()
+        );
+        let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+        p.wire_host_natives(&mut vm);
+        vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
+        assert!(!vm.panicked(), "indexed_sum checksum");
+    }
+
     #[test]
     fn s3b_reverse_index_takes_dense_and_checksums() {
         let src = r#"
