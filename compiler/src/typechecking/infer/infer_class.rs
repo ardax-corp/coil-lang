@@ -32,10 +32,7 @@ impl Checker {
                     if assoc_types.iter().any(|a| a.name == *aname) {
                         self.messages.push(Message::error(
                             ErrorCode::GenericTypeError,
-                            format!(
-                                "Duplicate associated type `{}` in trait `{}`",
-                                aname, name
-                            ),
+                            format!("Duplicate associated type `{}` in trait `{}`", aname, name),
                             m.0.into_range(),
                         ));
                     } else {
@@ -53,7 +50,9 @@ impl Checker {
                 }
                 Expression::Function {
                     docs: _,
-                    name: mname, body, ..
+                    name: mname,
+                    body,
+                    ..
                 } => {
                     let has_default = body.as_ref().is_some_and(
                         |b| !matches!(b.1.as_ref(), Expression::Block(v) if v.is_empty()),
@@ -66,8 +65,7 @@ impl Checker {
                 _ => None,
             })
             .collect();
-        let param_names: Vec<String> =
-            type_params.iter().map(|tp| tp.name.to_string()).collect();
+        let param_names: Vec<String> = type_params.iter().map(|tp| tp.name.to_string()).collect();
         let param_kinds: Vec<Kind> = type_params
             .iter()
             .map(|tp| Kind::from(tp.kind.clone()))
@@ -189,8 +187,7 @@ impl Checker {
                     .as_ref()
                     .map(|ret| self.parse_type_name(ret))
                     .unwrap_or_else(unit_ty);
-                let assoc_projections =
-                    self.current_assoc_projections.take().unwrap_or_default();
+                let assoc_projections = self.current_assoc_projections.take().unwrap_or_default();
                 self.current_assoc_projections = prev_assoc;
                 let fun_ty = arg_tys.iter().rev().fold(ret_ty, |ret, (_, arg)| {
                     Ty::Fun(Box::new(arg.clone()), Box::new(ret))
@@ -282,9 +279,7 @@ impl Checker {
             .find_overlapping_instance(class, &arg_tys)
             .cloned();
         let existing_idx = self.generics.instances.iter().position(|inst| {
-            inst.class == class
-                && inst.defined_module == self.current_module
-                && inst.range == range
+            inst.class == class && inst.defined_module == self.current_module && inst.range == range
         });
         let existing_idx = existing_idx.or_else(|| {
             overlapping.as_ref().and_then(|existing| {
@@ -310,30 +305,30 @@ impl Checker {
         });
         if let Some(existing) = overlapping.as_ref() {
             if !same_decl {
-            let mut msg = Message::error(
-                ErrorCode::GenericTypeError,
-                format!(
-                    "Overlapping instance `{}` conflicts with existing `{}`",
-                    self.instance_signature(class, &arg_tys),
-                    self.instance_signature(&existing.class, &existing.args)
-                ),
-                range.clone(),
-            );
-            msg.with_help(format!(
-                "existing instance was declared in module `{}`",
-                existing.defined_module
-            ));
-            msg.push(Label::new(
-                "new instance declared here".to_string(),
-                range.clone(),
-            ));
-            if existing.defined_module == self.current_module {
-                msg.push(Label::new(
-                    "existing overlapping instance declared here".to_string(),
-                    existing.range.clone(),
+                let mut msg = Message::error(
+                    ErrorCode::GenericTypeError,
+                    format!(
+                        "Overlapping instance `{}` conflicts with existing `{}`",
+                        self.instance_signature(class, &arg_tys),
+                        self.instance_signature(&existing.class, &existing.args)
+                    ),
+                    range.clone(),
+                );
+                msg.with_help(format!(
+                    "existing instance was declared in module `{}`",
+                    existing.defined_module
                 ));
-            }
-            self.messages.push(msg);
+                msg.push(Label::new(
+                    "new instance declared here".to_string(),
+                    range.clone(),
+                ));
+                if existing.defined_module == self.current_module {
+                    msg.push(Label::new(
+                        "existing overlapping instance declared here".to_string(),
+                        existing.range.clone(),
+                    ));
+                }
+                self.messages.push(msg);
             }
         }
         // Build method_fqns, assoc_tys, and register instance.
@@ -481,10 +476,7 @@ impl Checker {
                     } else {
                         assoc_names.push(aname.to_string());
                         let value = AssocTypeValue {
-                            params: assoc_params
-                                .iter()
-                                .map(|tp| tp.name.to_string())
-                                .collect(),
+                            params: assoc_params.iter().map(|tp| tp.name.to_string()).collect(),
                             param_vars: assoc_param_vars,
                             param_kinds: assoc_param_kinds,
                             ty: resolved,
@@ -621,10 +613,8 @@ impl Checker {
                     range.clone(),
                 ));
             }
-            let unknown_assoc = Generics::unknown_assoc_types(
-                class_def,
-                assoc_names.iter().map(|n| n.as_str()),
-            );
+            let unknown_assoc =
+                Generics::unknown_assoc_types(class_def, assoc_names.iter().map(|n| n.as_str()));
             for aname in &unknown_assoc {
                 self.messages.push(Message::error(
                     ErrorCode::GenericTypeError,
@@ -664,8 +654,7 @@ impl Checker {
                 ));
             }
             Generics::fill_default_method_fqns(class_def, &mut method_fqns);
-            let missing_methods =
-                Generics::missing_required_methods(class_def, &method_fqns);
+            let missing_methods = Generics::missing_required_methods(class_def, &method_fqns);
             if !missing_methods.is_empty() {
                 let methods = missing_methods
                     .iter()
@@ -790,9 +779,7 @@ impl Checker {
                     .map(|tp| {
                         (
                             tp.name.to_string(),
-                            *frame
-                                .get(tp.name)
-                                .expect("type param registered in frame"),
+                            *frame.get(tp.name).expect("type param registered in frame"),
                         )
                     })
                     .collect()
@@ -895,11 +882,7 @@ impl Checker {
                     let scheme = if param_vars.is_empty() {
                         Scheme::mono(fun_ty.clone())
                     } else {
-                        Scheme::poly(
-                            param_vars.clone(),
-                            impl_constraints.clone(),
-                            fun_ty.clone(),
-                        )
+                        Scheme::poly(param_vars.clone(), impl_constraints.clone(), fun_ty.clone())
                     };
                     // Env lookup feeds `emit_call_site_dicts` at method CALL.
                     self.env.insert_top(fqn.clone(), scheme.clone());
@@ -974,6 +957,4 @@ impl Checker {
         self.pop_type_params_for_type_parsing(pushed);
         let _ = range;
     }
-
-
 }

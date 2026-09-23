@@ -127,8 +127,11 @@ impl TypedSidecar {
 
     pub fn is_pin_param(&self, fn_name: &str, param: &str) -> bool {
         let short = fn_name.rsplit("::").next().unwrap_or(fn_name);
-        self.pin_params.contains(&(fn_name.to_string(), param.to_string()))
-            || self.pin_params.contains(&(short.to_string(), param.to_string()))
+        self.pin_params
+            .contains(&(fn_name.to_string(), param.to_string()))
+            || self
+                .pin_params
+                .contains(&(short.to_string(), param.to_string()))
     }
 
     /// True when `id` is a for-in loop whose synthetic index is in-bounds.

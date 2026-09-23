@@ -12,7 +12,7 @@ use parser::ast::{EnumConstructPayload, Expression, Output};
 
 use super::id::NodeId;
 use super::infer::Checker;
-use super::ty::{is_option_ty, is_result_ty, strip_readonly, Ty};
+use super::ty::{Ty, is_option_ty, is_result_ty, strip_readonly};
 
 struct Candidate {
     binder: NodeId,

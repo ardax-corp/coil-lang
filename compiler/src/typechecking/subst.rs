@@ -262,7 +262,6 @@ mod tests {
         Ty::Var(TyVarId(i))
     }
 
-
     #[test]
     fn apply_passes_through_constructor() {
         let s = Subst::empty();
@@ -350,7 +349,6 @@ mod tests {
         assert_eq!(apply_ty_prune(&s, &v(0)), int());
     }
 
-
     #[test]
     fn apply_scheme_preserves_bounds() {
         let s = Subst::singleton(TyVarId(0), int());
@@ -379,7 +377,6 @@ mod tests {
         let result = apply_scheme(&s, &scheme);
         assert_eq!(result.ty, Ty::Fun(Box::new(v(0)), Box::new(int())));
     }
-
 
     #[test]
     fn compose_of_two_empties_is_empty() {
@@ -445,7 +442,6 @@ mod tests {
         assert_eq!(apply_ty(&composed, &v(0)), string());
     }
 
-
     #[test]
     fn union_combines_domains() {
         let s1 = Subst::singleton(TyVarId(0), int());
@@ -463,7 +459,6 @@ mod tests {
         let u = union(&s1, &s2);
         assert_eq!(apply_ty(&u, &v(0)), string());
     }
-
 
     #[test]
     fn subst_singleton_len_and_get() {

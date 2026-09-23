@@ -30,9 +30,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 "`static fn` is only allowed inside an `impl` block".to_string(),
                 range,
-                Some(
-                    "declare static methods as `impl Class { static fn ... }`".to_string(),
-                ),
+                Some("declare static methods as `impl Class { static fn ... }`".to_string()),
             );
         }
         if name == "main" {
@@ -111,8 +109,7 @@ impl Checker {
 
         // File-level imports and module-visible named `fn`s are globals,
         // not closure captures. Rebind after isolating the env.
-        let import_rebinds =
-            self.snapshot_file_level_imports(&mut uncaptured, range.clone());
+        let import_rebinds = self.snapshot_file_level_imports(&mut uncaptured, range.clone());
 
         let saved_frames = self.env.take_and_isolate();
         let prev_uncaptured = self.lambda_uncaptured_outer.replace(uncaptured);
@@ -143,7 +140,6 @@ impl Checker {
         }
         Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), false)
     }
-
 
     pub(super) fn infer_function(
         &mut self,

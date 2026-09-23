@@ -12,8 +12,8 @@
 
 use super::infer::Checker;
 use super::ty::{
-    is_option_ty, is_result_ty, option_inner, range_app, result_ok_err, strip_readonly, Ty, BOOL,
-    BYTE, FLOAT, INT,
+    BOOL, BYTE, FLOAT, INT, Ty, is_option_ty, is_result_ty, option_inner, range_app, result_ok_err,
+    strip_readonly,
 };
 
 /// Kind string for a two-slot arity-2 immediate product. Not a user enum;
@@ -175,7 +175,7 @@ fn ty_is_closed(ty: &Ty) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::typechecking::ty::{option_ty, range_inclusive_ty, range_ty, result_ty, STRING};
+    use crate::typechecking::ty::{STRING, option_ty, range_inclusive_ty, range_ty, result_ty};
 
     fn checker() -> Checker {
         Checker::new()
@@ -358,10 +358,7 @@ fn shape() -> Shape {
             Some(TWO_WORD_RANGE_KIND.to_string())
         );
         assert_eq!(
-            two_word_return_enum(
-                &c,
-                &range_inclusive_ty(Ty::Con(FLOAT.into()))
-            ),
+            two_word_return_enum(&c, &range_inclusive_ty(Ty::Con(FLOAT.into()))),
             Some(TWO_WORD_RANGE_INCLUSIVE_KIND.to_string())
         );
     }

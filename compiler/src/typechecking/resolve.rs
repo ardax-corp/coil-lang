@@ -324,9 +324,7 @@ mod tests {
 
     #[test]
     fn resolve_interns_extern_fn_into_local_defs() {
-        let ast = parse(
-            "extern \"c\" {\n    fn strlen(string s) -> int;\n}\nfn run() {}\n",
-        );
+        let ast = parse("extern \"c\" {\n    fn strlen(string s) -> int;\n}\nfn run() {}\n");
         let mut intern = DefInterner::new();
         let m = intern.intern_module("ffi_mod::sys");
         let mut local = HashMap::new();

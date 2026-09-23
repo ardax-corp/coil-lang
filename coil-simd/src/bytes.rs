@@ -107,7 +107,10 @@ unsafe fn xor_sse2(a: &[u8], b: &[u8], out: &mut [u8], n: usize) {
     while i + 16 <= n {
         let va = _mm_loadu_si128(a.as_ptr().add(i) as *const __m128i);
         let vb = _mm_loadu_si128(b.as_ptr().add(i) as *const __m128i);
-        _mm_storeu_si128(out.as_mut_ptr().add(i) as *mut __m128i, _mm_xor_si128(va, vb));
+        _mm_storeu_si128(
+            out.as_mut_ptr().add(i) as *mut __m128i,
+            _mm_xor_si128(va, vb),
+        );
         i += 16;
     }
     while i < n {

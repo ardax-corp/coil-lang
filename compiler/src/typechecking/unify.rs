@@ -1,9 +1,9 @@
 //! Unification (Robinson's algorithm with occurs check).
 
 use super::env::substitute_vars;
-use super::subst::{apply_ty, compose, Subst};
+use super::subst::{Subst, apply_ty, compose};
 use super::ty::{
-    ftv_ty, option_inner, peel_constructor_refinement, result_ok_err, Constraint, Ty, TyVarId,
+    Constraint, Ty, TyVarId, ftv_ty, option_inner, peel_constructor_refinement, result_ok_err,
 };
 
 /// Failure modes for unification.
@@ -29,7 +29,6 @@ impl std::fmt::Display for UnifyError {
 }
 
 impl std::error::Error for UnifyError {}
-
 
 /// Structural equality of `forall` constraints after renaming `c2`'s bound
 /// vars. Display is not injective (`Existential("Show")` and `Con("Show")`
@@ -541,7 +540,7 @@ mod tests {
     use super::*;
     use crate::typechecking::subst::apply_ty_prune;
     use crate::typechecking::ty::{
-        array, array_fixed, boolean, float, int, list, string, EnumVariantPayloadTy,
+        EnumVariantPayloadTy, array, array_fixed, boolean, float, int, list, string,
     };
 
     fn v(i: u32) -> Ty {
@@ -551,7 +550,6 @@ mod tests {
     fn fun(a: Ty, b: Ty) -> Ty {
         Ty::Fun(Box::new(a), Box::new(b))
     }
-
 
     #[test]
     fn unify_same_constructor_succeeds() {
@@ -604,7 +602,6 @@ mod tests {
         assert_eq!(apply_ty(&s, &v(1)), v(1));
     }
 
-
     #[test]
     fn unify_different_constructors_is_mismatch() {
         let err = unify(&int(), &float()).unwrap_err();
@@ -646,7 +643,6 @@ mod tests {
         assert!(matches!(err, UnifyError::Mismatch { .. }));
     }
 
-
     #[test]
     fn occurs_check_rejects_alpha_equals_alpha_to_alpha() {
         // α = α -> α
@@ -681,7 +677,6 @@ mod tests {
         let s = unify(&v(0), &fun(v(1), v(2))).unwrap();
         assert_eq!(apply_ty(&s, &v(0)), fun(v(1), v(2)));
     }
-
 
     #[test]
     fn unify_fun_decomposes_into_args_and_return() {
@@ -720,7 +715,6 @@ mod tests {
         assert_eq!(apply_ty(&s, &v(2)), string());
     }
 
-
     #[test]
     fn unify_with_existing_subst_extends_it() {
         // Start with γ = string, unify v(0) with v(2). v(0) should
@@ -740,7 +734,6 @@ mod tests {
         assert_eq!(apply_ty(&s, &v(0)), boolean());
         assert_eq!(apply_ty(&s, &v(2)), string());
     }
-
 
     #[test]
     fn chained_unifications_propagate_through_subst() {
@@ -776,7 +769,6 @@ mod tests {
         assert_eq!(apply_ty_prune(&s2, &v(0)), int());
         assert_eq!(apply_ty_prune(&s2, &v(1)), int());
     }
-
 
     fn is_idempotent(s: &Subst) -> bool {
         for (var, ty) in s.iter() {
@@ -815,7 +807,6 @@ mod tests {
             "substitution should be idempotent: {s3:?}"
         );
     }
-
 
     fn sum(name: &str, variants: Vec<(&str, EnumVariantPayloadTy)>) -> Ty {
         Ty::Sum {
@@ -1095,7 +1086,6 @@ mod tests {
         assert!(unify(&s, &s).is_ok());
     }
 
-
     #[test]
     fn unify_app_var_with_option_sum_binds_constructor_head() {
         use crate::typechecking::ty::option_ty;
@@ -1138,7 +1128,6 @@ mod tests {
         assert_eq!(apply_ty_prune(&s, &v(1)), int());
         assert_eq!(apply_ty_prune(&s, &v(2)), string());
     }
-
 
     #[test]
     fn unify_static_array_lengths_equal_succeeds() {

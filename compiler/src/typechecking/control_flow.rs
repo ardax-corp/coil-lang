@@ -5,7 +5,7 @@ use std::ops::Range;
 use parser::ast::{Expression, Output};
 use reporting::{ErrorCode, Label, Message};
 
-use super::const_eval::{eval_bool_const, ConstVal};
+use super::const_eval::{ConstVal, eval_bool_const};
 
 /// Result of analyzing a function body for exits / warnings.
 #[derive(Debug, Default)]
@@ -298,8 +298,8 @@ fn warn_defer_never(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use parser::ast::Expression;
     use parser::SimpleSpan;
+    use parser::ast::Expression;
 
     fn out<'a>(expr: Expression<'a>) -> Output<'a> {
         (SimpleSpan::from(0..0), Box::new(expr))
@@ -366,10 +366,11 @@ mod tests {
         ]);
         let cf = analyze_fn_body(&body, &|_| None);
         assert!(cf.always_exits);
-        assert!(cf
-            .messages
-            .iter()
-            .any(|m| m.code() == Some(ErrorCode::UnreachableCode)));
+        assert!(
+            cf.messages
+                .iter()
+                .any(|m| m.code() == Some(ErrorCode::UnreachableCode))
+        );
     }
 
     #[test]
@@ -384,10 +385,11 @@ mod tests {
         ]);
         let cf = analyze_fn_body(&body, &|_| None);
         assert!(cf.always_exits);
-        assert!(cf
-            .messages
-            .iter()
-            .any(|m| m.code() == Some(ErrorCode::DeferNeverRuns)));
+        assert!(
+            cf.messages
+                .iter()
+                .any(|m| m.code() == Some(ErrorCode::DeferNeverRuns))
+        );
     }
 
     fn stmt(inner: Output<'_>) -> Output<'_> {

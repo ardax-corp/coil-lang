@@ -6,12 +6,11 @@ use parser::ast::{Expression, MatchArm, Output, Pattern};
 use reporting::ErrorCode;
 
 use crate::typechecking::subst::apply_ty_prune;
-use crate::typechecking::ty::{int, Ty};
+use crate::typechecking::ty::{Ty, int};
 
 use super::*;
 
 impl Checker {
-
     pub(super) fn infer_match(
         &mut self,
         scrutinee: &Output,
@@ -181,12 +180,8 @@ impl Checker {
     ) -> Ty {
         use parser::ast::PatternPayload;
         match pattern {
-            Pattern::Wildcard => {
-                expected_ty.clone()
-            }
-            Pattern::Default => {
-                expected_ty.clone()
-            }
+            Pattern::Wildcard => expected_ty.clone(),
+            Pattern::Default => expected_ty.clone(),
             Pattern::Binding { name } => {
                 // `name => body` binds `name` to the scrutinee in
                 // the arm's env. This makes the arm cover every
@@ -201,12 +196,7 @@ impl Checker {
                 pruned
             }
             Pattern::Integer(_) => {
-                self.unify(
-                    expected_ty,
-                    &int(),
-                    pattern_range,
-                    "match integer pattern",
-                );
+                self.unify(expected_ty, &int(), pattern_range, "match integer pattern");
                 int()
             }
             Pattern::Constructor {

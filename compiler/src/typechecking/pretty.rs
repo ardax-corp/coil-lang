@@ -80,17 +80,21 @@ fn format_ty_fqn_inner(ty: &Ty, nominal_modules: &HashMap<String, String>) -> Op
                 .join(", ");
             Some(format!("{}<{}>", head, inner))
         }
-        Ty::List(inner) => Some(format!("[{}]", format_ty_fqn_inner(inner, nominal_modules)?)),
+        Ty::List(inner) => Some(format!(
+            "[{}]",
+            format_ty_fqn_inner(inner, nominal_modules)?
+        )),
         Ty::Sum { name, variants } => {
             let head = qualify_nominal(name, nominal_modules);
             if name == common::BUILTIN_OPTION_ENUM {
-                let inner = variants
-                    .iter()
-                    .find(|(n, _)| n == "Some")
-                    .and_then(|(_, p)| match p {
-                        EnumVariantPayloadTy::Tuple(tys) => tys.first(),
-                        _ => None,
-                    })?;
+                let inner =
+                    variants
+                        .iter()
+                        .find(|(n, _)| n == "Some")
+                        .and_then(|(_, p)| match p {
+                            EnumVariantPayloadTy::Tuple(tys) => tys.first(),
+                            _ => None,
+                        })?;
                 return Some(format!(
                     "{}<{}>",
                     head,
@@ -143,8 +147,7 @@ fn format_ty_fqn_inner(ty: &Ty, nominal_modules: &HashMap<String, String>) -> Op
             let inner = fields
                 .iter()
                 .map(|(name, ty)| {
-                    format_ty_fqn_inner(ty, nominal_modules)
-                        .map(|t| format!("{}: {}", name, t))
+                    format_ty_fqn_inner(ty, nominal_modules).map(|t| format!("{}: {}", name, t))
                 })
                 .collect::<Option<Vec<_>>>()?
                 .join(", ");
@@ -648,7 +651,6 @@ mod tests {
             "diagnostics must not show raw tN ids: {s}"
         );
     }
-
 
     #[test]
     fn display_sum_with_no_payloads() {

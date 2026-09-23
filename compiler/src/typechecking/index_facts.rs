@@ -10,7 +10,7 @@ use parser::ast::{AssignOp, EnumConstructPayload, Expression, Output};
 
 use super::id::NodeId;
 use super::infer::{Checker, ForInKind};
-use super::ty::{strip_readonly, vec_element_ty, Ty};
+use super::ty::{Ty, strip_readonly, vec_element_ty};
 
 const MAX_FACT_ARRAY_ARITY: usize = 32;
 
@@ -285,10 +285,7 @@ fn positive_int_const(expr: &Output<'_>) -> Option<i64> {
 fn is_immediate(expr: &Output<'_>) -> bool {
     matches!(
         peel(expr).1.as_ref(),
-        Expression::Integer(_)
-            | Expression::Float(_)
-            | Expression::Bool(_)
-            | Expression::String(_)
+        Expression::Integer(_) | Expression::Float(_) | Expression::Bool(_) | Expression::String(_)
     )
 }
 
@@ -427,7 +424,16 @@ fn walk_tree(
             pattern: _,
             iterable,
             body,
-        } => walk_loop(checker, ast, identifier.as_ref(), iterable, body, pure, env, calls),
+        } => walk_loop(
+            checker,
+            ast,
+            identifier.as_ref(),
+            iterable,
+            body,
+            pure,
+            env,
+            calls,
+        ),
         Expression::Call { name, args } => {
             walk_tree(checker, name, pure, env, calls);
             if let Some(args) = args {
@@ -601,7 +607,11 @@ fn walk_if(
         }
         walk_tree(checker, body, pure, &mut branch_env, calls);
         env.finish_nested_region(&branch_env);
-        env.nonneg = env.nonneg.intersection(&branch_env.nonneg).cloned().collect();
+        env.nonneg = env
+            .nonneg
+            .intersection(&branch_env.nonneg)
+            .cloned()
+            .collect();
     }
 }
 
@@ -703,11 +713,7 @@ fn note_call(
     if callee == "len" {
         return;
     }
-    let arg_names: Vec<Option<String>> = args
-        .unwrap_or(&[])
-        .iter()
-        .map(ident_name)
-        .collect();
+    let arg_names: Vec<Option<String>> = args.unwrap_or(&[]).iter().map(ident_name).collect();
     let mut arr_ok = HashSet::new();
     for a in arg_names.iter().flatten() {
         if env.arr_ok(a) {
@@ -900,7 +906,8 @@ fn contains_yield(ast: &Output<'_>) -> bool {
 fn mark_callee_indices(checker: &mut Checker, body: &Output<'_>, arr: &str, idx: &str) {
     match body.1.as_ref() {
         Expression::Index(base, Some(i)) => {
-            if ident_name(base).as_deref() == Some(arr) && ident_name(i).as_deref() == Some(idx)
+            if ident_name(base).as_deref() == Some(arr)
+                && ident_name(i).as_deref() == Some(idx)
                 && let Some(id) = nid(checker, body)
             {
                 checker.in_bounds_index.insert(id);

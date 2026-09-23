@@ -45,9 +45,7 @@ pub fn rescale_operand_slots_for_dense_seek(current: u32, seek: u32) -> u32 {
     if seek <= DEFAULT_FRAME_SLOTS {
         return current;
     }
-    let frames = current
-        .saturating_sub(DEFAULT_FRAME_SLOTS)
-        / DEFAULT_FRAME_SLOTS;
+    let frames = current.saturating_sub(DEFAULT_FRAME_SLOTS) / DEFAULT_FRAME_SLOTS;
     operand_slots_for_frame_size(frames.max(1), seek).max(current)
 }
 
@@ -116,7 +114,13 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
     let mut measure_shapes: HashMap<String, RecMeasureShape> = HashMap::new();
     let mut tail_only: HashSet<String> = HashSet::new();
     let mut fn_meta: HashMap<String, FnMeta> = HashMap::new();
-    collect_fn_meta(ast, &recursive, &mut fn_meta, &mut measure_shapes, &mut tail_only);
+    collect_fn_meta(
+        ast,
+        &recursive,
+        &mut fn_meta,
+        &mut measure_shapes,
+        &mut tail_only,
+    );
 
     // Wrapper / entry const params (interprocedural), then entry sites.
     let wrapper_consts = propagate_const_args(ast, &recursive);
@@ -134,10 +138,7 @@ pub fn analyze_stack_bounds(ast: &Output<'_>) -> StackBoundReport {
     let mut max_frames_any: u32 = 1;
 
     for name in &recursive {
-        let span = fn_meta
-            .get(name)
-            .map(|m| m.span.clone())
-            .unwrap_or(0..0);
+        let span = fn_meta.get(name).map(|m| m.span.clone()).unwrap_or(0..0);
         let attr_depth = fn_meta.get(name).and_then(|m| m.max_depth);
         let attr_err = fn_meta.get(name).and_then(|m| m.attr_error.clone());
         if let Some(msg) = attr_err {
@@ -526,11 +527,7 @@ fn collect_self_calls<'a>(body: &'a Output<'a>, fn_name: &str) -> Vec<&'a [Outpu
     out
 }
 
-fn walk_self_calls<'a>(
-    ast: &'a Output<'a>,
-    fn_name: &str,
-    out: &mut Vec<&'a [Output<'a>]>,
-) {
+fn walk_self_calls<'a>(ast: &'a Output<'a>, fn_name: &str, out: &mut Vec<&'a [Output<'a>]>) {
     match ast.1.as_ref() {
         Expression::Program(items)
         | Expression::Block(items)
@@ -684,7 +681,9 @@ fn is_tail_only_recursive(body: &Output<'_>, name: &str, recursive: &HashSet<Str
 fn call_target_is_rec(callee: &Output<'_>, name: &str, recursive: &HashSet<String>) -> bool {
     match peel(callee).1.as_ref() {
         Expression::Identifier(n) => *n == name || recursive.contains(*n),
-        Expression::QualifiedAccess { member, .. } => *member == name || recursive.contains(*member),
+        Expression::QualifiedAccess { member, .. } => {
+            *member == name || recursive.contains(*member)
+        }
         _ => false,
     }
 }
@@ -734,10 +733,7 @@ fn walk_tail_rec(
                 walk_tail_rec(&arm.body, name, recursive, tail_ctx, rec_calls, non_tail);
             }
         }
-        Expression::Call {
-            name: callee,
-            args,
-        } => {
+        Expression::Call { name: callee, args } => {
             let is_rec = call_target_is_rec(callee, name, recursive);
             if is_rec {
                 *rec_calls += 1;
@@ -1001,11 +997,7 @@ fn walk_gather_calls(
     }
 }
 
-fn seed_formals(
-    args: &Output<'_>,
-    slots: &[Option<i64>],
-    env: &mut HashMap<String, ConstValue>,
-) {
+fn seed_formals(args: &Output<'_>, slots: &[Option<i64>], env: &mut HashMap<String, ConstValue>) {
     let items = match args.1.as_ref() {
         Expression::Fragment(items) | Expression::Block(items) => items.as_slice(),
         _ => return,
@@ -1427,7 +1419,9 @@ fn walk_entry_sites(
                 );
             }
         }
-        Expression::Method(_, inner) | Expression::Member(inner) | Expression::NamedArg(_, inner) => {
+        Expression::Method(_, inner)
+        | Expression::Member(inner)
+        | Expression::NamedArg(_, inner) => {
             walk_entry_sites(
                 inner,
                 inside,
@@ -2257,8 +2251,7 @@ fn main() {
         let report = analyze_stack_bounds(&ast);
         assert!(
             report.messages.iter().any(|m| {
-                m.code() == Some(ErrorCode::UnboundedRecursion)
-                    && m.message().contains("base case")
+                m.code() == Some(ErrorCode::UnboundedRecursion) && m.message().contains("base case")
             }),
             "{:?}",
             report.messages
@@ -2393,10 +2386,7 @@ fn main() {
         assert_eq!(operand_slots_for_frames(1), DEFAULT_OPERAND_STACK_SLOTS);
         assert_eq!(operand_slots_for_frames(9), DEFAULT_OPERAND_STACK_SLOTS);
         assert_eq!(operand_slots_for_frames(31), 512);
-        assert_eq!(
-            operand_slots_for_frames(u32::MAX),
-            MAX_OPERAND_STACK_SLOTS
-        );
+        assert_eq!(operand_slots_for_frames(u32::MAX), MAX_OPERAND_STACK_SLOTS);
     }
 
     #[test]

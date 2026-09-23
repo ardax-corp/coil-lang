@@ -92,8 +92,13 @@ pub enum ForInKind {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ForInCounted {
     Array,
-    Tuple { arity: usize },
-    Range { inclusive: bool, float: bool },
+    Tuple {
+        arity: usize,
+    },
+    Range {
+        inclusive: bool,
+        float: bool,
+    },
     /// `DictEntries` then the array latch (C2b rung 3).
     Dict,
 }
@@ -105,12 +110,8 @@ pub struct ForInInfo {
     /// Resolved item type used by representation-specialized `next` loops.
     pub item_ty: Ty,
 }
-use crate::typechecking::ty::{
-    EnumVariantPayloadTy, STRING, Ty, TyVarId,
-};
-use crate::typechecking::virtual_modules::{
-    BuiltinExport, VirtualModules,
-};
+use crate::typechecking::ty::{EnumVariantPayloadTy, STRING, Ty, TyVarId};
+use crate::typechecking::virtual_modules::{BuiltinExport, VirtualModules};
 
 /// One candidate in a compile-time overload set (arity and/or parameter types).
 ///
@@ -362,11 +363,13 @@ pub struct Checker {
 
     /// Aggregate (tuple/array) element-wise / broadcast arithmetic.
     aggregate_arith: HashMap<NodeId, crate::typechecking::aggregate_arith::AggregateArithInfo>,
-    aggregate_arith_by_span: HashMap<(usize, usize), crate::typechecking::aggregate_arith::AggregateArithInfo>,
+    aggregate_arith_by_span:
+        HashMap<(usize, usize), crate::typechecking::aggregate_arith::AggregateArithInfo>,
 
     /// Named linear-algebra helpers (`dot` / `matmul` / `cross`).
     linear_algebra: HashMap<NodeId, crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
-    linear_algebra_by_span: HashMap<(usize, usize), crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
+    linear_algebra_by_span:
+        HashMap<(usize, usize), crate::typechecking::aggregate_arith::LinearAlgebraInfo>,
 
     /// `%v` arguments resolved through an active `Show` constraint.
     bound_display_calls: HashMap<NodeId, BoundDisplayCall>,
@@ -657,11 +660,9 @@ impl Default for Checker {
     }
 }
 
-
 mod checker;
 mod sidecar;
 pub use sidecar::{SelectedOverload, TypedSidecar};
-
 
 /// Human-readable name of a payload shape, used in
 /// typecheck-error messages.

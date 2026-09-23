@@ -308,7 +308,6 @@ impl Scheme {
     }
 }
 
-
 /// Name of the `int` type constructor.
 pub const INT: &str = "int";
 /// Name of the `float` type constructor.
@@ -804,7 +803,6 @@ pub fn schemaize_payload(
     }
 }
 
-
 /// Free type variables of a `Ty`.
 pub fn ftv_ty(ty: &Ty) -> HashSet<TyVarId> {
     let mut acc = HashSet::new();
@@ -965,7 +963,6 @@ mod tests {
         assert_eq!(s.ty, int());
     }
 
-
     #[test]
     fn ftv_of_sum_walks_variant_payloads() {
         // enum E { A(int), B(string) }  — ftv is the union of the
@@ -1016,7 +1013,6 @@ mod tests {
         };
         assert!(ftv_ty(&sum).is_empty());
     }
-
 
     #[test]
     fn payload_field_count_unit() {
@@ -1082,7 +1078,10 @@ mod tests {
     #[test]
     fn range_app_distinguishes_half_open_and_inclusive() {
         let half = range_ty(int());
-        assert_eq!(range_app(&half).map(|(e, inc)| (e, inc)), Some((&int(), false)));
+        assert_eq!(
+            range_app(&half).map(|(e, inc)| (e, inc)),
+            Some((&int(), false))
+        );
         let closed = range_inclusive_ty(float());
         assert_eq!(
             range_app(&closed).map(|(e, inc)| (format!("{e}"), inc)),

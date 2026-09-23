@@ -69,8 +69,7 @@ impl Compiler {
             return false;
         }
 
-        self.bytecode
-            .push_seek(self.context.variables.len() as u32);
+        self.bytecode.push_seek(self.context.variables.len() as u32);
         let mut scrutinee_bc = self.do_compile(scrutinee);
         self.bytecode.append(&mut scrutinee_bc);
 
@@ -118,12 +117,12 @@ impl Compiler {
                     } else {
                         Some(bb.fresh_label(self.bytecode.il_mut()))
                     };
-                        if let Some(miss) = miss {
-                            self.bytecode.push(Byte::new(Instruction::DUPLICATE));
-                            let mut lit = CodeBuf::new();
-                            self.emit_scalar_backing(&backing, &mut lit);
-                            self.bytecode.append(&mut lit);
-                            self.bytecode.push(Byte::new(Instruction::EQ));
+                    if let Some(miss) = miss {
+                        self.bytecode.push(Byte::new(Instruction::DUPLICATE));
+                        let mut lit = CodeBuf::new();
+                        self.emit_scalar_backing(&backing, &mut lit);
+                        self.bytecode.append(&mut lit);
+                        self.bytecode.push(Byte::new(Instruction::EQ));
                         bb.emit_jump_to_hinted(
                             miss,
                             BbJumpKind::JumpIfFalse,
@@ -258,8 +257,7 @@ impl Compiler {
             return false;
         }
 
-        self.bytecode
-            .push_seek(self.context.variables.len() as u32);
+        self.bytecode.push_seek(self.context.variables.len() as u32);
         self.unbox_enum_context += 1;
         let mut scrutinee_bc = self.do_compile(scrutinee);
         self.unbox_enum_context -= 1;
@@ -320,11 +318,12 @@ impl Compiler {
         }
         bb.bind_label(end, self.bytecode.il_mut());
         if let Some((payload, tag_slot)) = from_ident {
-            let last = self.node_id_of(peeled).is_some_and(|id| {
-                self.typed_sidecar.is_frame_local_last_use(id)
-            }) || self.node_id_of(scrutinee).is_some_and(|id| {
-                self.typed_sidecar.is_frame_local_last_use(id)
-            });
+            let last = self
+                .node_id_of(peeled)
+                .is_some_and(|id| self.typed_sidecar.is_frame_local_last_use(id))
+                || self
+                    .node_id_of(scrutinee)
+                    .is_some_and(|id| self.typed_sidecar.is_frame_local_last_use(id));
             if last {
                 self.bytecode.push_const(0);
                 self.bytecode.push_store_pop(payload);
@@ -369,9 +368,7 @@ impl Compiler {
                     enum_name,
                     variant_name,
                     payload: PatternPayload::Unit,
-                } if common::is_builtin_option_enum(enum_name)
-                    && *variant_name == "None" =>
-                {
+                } if common::is_builtin_option_enum(enum_name) && *variant_name == "None" => {
                     fallback = Some((index, None));
                 }
                 Pattern::Wildcard | Pattern::Default => {
@@ -390,8 +387,7 @@ impl Compiler {
             return false;
         };
 
-        self.bytecode
-            .push_seek(self.context.variables.len() as u32);
+        self.bytecode.push_seek(self.context.variables.len() as u32);
         let previous_niche_context = self.force_niche_option;
         self.force_niche_option = true;
         let mut scrutinee_bc = self.do_compile(scrutinee);
@@ -500,8 +496,7 @@ impl Compiler {
             return false;
         };
 
-        self.bytecode
-            .push_seek(self.context.variables.len() as u32);
+        self.bytecode.push_seek(self.context.variables.len() as u32);
         let previous_niche_context = self.force_niche_result;
         self.force_niche_result = true;
         let mut scrutinee_bc = self.do_compile(scrutinee);
@@ -605,8 +600,7 @@ impl Compiler {
             return false;
         };
 
-        self.bytecode
-            .push_seek(self.context.variables.len() as u32);
+        self.bytecode.push_seek(self.context.variables.len() as u32);
         let previous_niche_context = self.force_niche_result;
         self.force_niche_result = true;
         let mut scrutinee_bc = self.do_compile(scrutinee);
@@ -698,14 +692,12 @@ impl Compiler {
             // (that missed the last group's first arm when Err
             // followed two Ok arms, panicking at emit time).
             let any_multi_arm_group = tag_groups.iter().any(|g| g.arm_indices.len() > 1);
-            let mut arm_labels: Vec<Option<crate::block_builder::Label>> =
-                vec![None; arms.len()];
+            let mut arm_labels: Vec<Option<crate::block_builder::Label>> = vec![None; arms.len()];
             for (g_idx, group) in tag_groups.iter().enumerate() {
                 let is_last_group = g_idx == tag_groups.len() - 1;
                 if !is_last_group || any_multi_arm_group {
                     let first_arm_idx = group.arm_indices[0];
-                    arm_labels[first_arm_idx] =
-                        Some(bb.fresh_label(self.bytecode.il_mut()));
+                    arm_labels[first_arm_idx] = Some(bb.fresh_label(self.bytecode.il_mut()));
                 }
             }
 
@@ -798,8 +790,7 @@ impl Compiler {
                                     "Match arm constructor: typechecker should have registered the arity",
                                 );
                             self.bytecode.push(
-                                Byte::new(Instruction::Unpack)
-                                    .with_operand_u32(arity as u32),
+                                Byte::new(Instruction::Unpack).with_operand_u32(arity as u32),
                             );
                         }
                         Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
@@ -830,8 +821,7 @@ impl Compiler {
             let mut test_chain_arms: std::collections::HashSet<usize> =
                 std::collections::HashSet::new();
             // arm_idx → name → slot from `emit_inner_test` (avoid double-bind in reverse).
-            let mut match_bindings_per_arm: HashMap<usize, HashMap<String, u32>> =
-                HashMap::new();
+            let mut match_bindings_per_arm: HashMap<usize, HashMap<String, u32>> = HashMap::new();
 
             for group in &tag_groups {
                 if group.arm_indices.len() <= 1 {
@@ -935,8 +925,7 @@ impl Compiler {
                             variant_name,
                             ..
                         } => {
-                            let decl_order =
-                                self.checker.payload_tys_for(enum_name, variant_name);
+                            let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
                             emit_pattern_binding(
                                 &self.checker,
                                 &mut arm_bindings,
@@ -961,8 +950,7 @@ impl Compiler {
                             variant_name,
                             ..
                         } => {
-                            let decl_order =
-                                self.checker.payload_tys_for(enum_name, variant_name);
+                            let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
                             emit_pattern_binding(
                                 &self.checker,
                                 &mut arm_bindings,
@@ -1000,11 +988,7 @@ impl Compiler {
 
                 // Per-arm types so Access on a reused binding name sees this arm's payload.
                 let mut arm_binding_tys = HashMap::new();
-                collect_pattern_binding_types(
-                    &self.checker,
-                    &arm.pattern.1,
-                    &mut arm_binding_tys,
-                );
+                collect_pattern_binding_types(&self.checker, &arm.pattern.1, &mut arm_binding_tys);
                 if let Pattern::Binding { name } = &arm.pattern.1 {
                     if let Some(ty) = self.checker.codegen_var_type(name) {
                         arm_binding_tys.insert(name.to_string(), ty.clone());
@@ -1035,11 +1019,7 @@ impl Compiler {
                 // `end_label`. This is patched when we
                 // bind `end_label` below.
                 if !is_first {
-                    bb.emit_jump_to(
-                        end_label,
-                        BbJumpKind::Unconditional,
-                        self.bytecode.il_mut(),
-                    );
+                    bb.emit_jump_to(end_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
                 }
             }
 

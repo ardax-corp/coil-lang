@@ -10,7 +10,11 @@ use crate::typechecking::infer::unwrap_expr_wrappers;
 
 impl Checker {
     /// Apply CLI / Pipeline grants for this typecheck (deny-all by default).
-    pub(crate) fn set_host_grants(&mut self, grants: crate::HostGrants, extra_dload_stems: Vec<String>) {
+    pub(crate) fn set_host_grants(
+        &mut self,
+        grants: crate::HostGrants,
+        extra_dload_stems: Vec<String>,
+    ) {
         self.host_grants = grants;
         self.dload_host_stems = extra_dload_stems;
     }
@@ -51,7 +55,12 @@ impl Checker {
         );
     }
 
-    pub(super) fn gate_ffi_exec_symbol(&mut self, symbol: &str, bind_name: &str, range: Range<usize>) {
+    pub(super) fn gate_ffi_exec_symbol(
+        &mut self,
+        symbol: &str,
+        bind_name: &str,
+        range: Range<usize>,
+    ) {
         if !common::is_ffi_exec_symbol(symbol) {
             return;
         }
@@ -119,9 +128,9 @@ impl Checker {
         if self.host_grants.allows_dload_stem(stem) {
             return true;
         }
-        self.dload_host_stems.iter().any(|s| {
-            !common::is_libc_alias(s) && common::dload_request_stem(s) == stem
-        })
+        self.dload_host_stems
+            .iter()
+            .any(|s| !common::is_libc_alias(s) && common::dload_request_stem(s) == stem)
     }
 }
 
@@ -141,10 +150,7 @@ mod tests {
     fn check_codes(src: &str, grants: crate::HostGrants, extra: &[&str]) -> Vec<ErrorCode> {
         let ast = Pratt::default().parse(src).expect("parse");
         let mut c = Checker::new();
-        c.set_host_grants(
-            grants,
-            extra.iter().map(|s| (*s).to_string()).collect(),
-        );
+        c.set_host_grants(grants, extra.iter().map(|s| (*s).to_string()).collect());
         let _ = c.check_program(&ast);
         c.take_messages()
             .into_iter()
@@ -331,4 +337,3 @@ fn main() { let _ = dload("plugin"); }
         assert!(!codes.contains(&ErrorCode::HostDloadDenied), "{codes:?}");
     }
 }
-

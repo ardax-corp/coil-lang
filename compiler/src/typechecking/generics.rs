@@ -1,5 +1,5 @@
 //! Typeclass and instance registry for userland generics.
-    //!
+//!
 //! Stores the shapes of typeclasses (`Num<T>`, `Eq<T>`, …) and
 //! registered implementations (`impl Num<int>`, `impl Num<float>`, …).
 //! The [`Checker`](super::infer::Checker) owns one `Generics` value and
@@ -29,19 +29,19 @@ pub struct TypeClassMethodDef {
 }
 
 /// The shape of a typeclass: its name, type parameters, and methods.
-    ///
+///
 /// E.g. `trait Num<T> { fn add(T a, T b) -> T; fn sub(…) -> T; }`
 /// is stored as:
 /// ```text
 /// TypeClassDef { name: "Num", type_params: ["T"],
 ///     methods: [TypeClassMethodDef { name: "add", has_default: false }, …] }
 /// ```
-    ///
+///
 /// Superclasses (Phase 5): `trait Ordered<T: Equal>` stores
 /// `superclasses: ["Equal"]`. Dictionary layout is flattened — subclass
 /// methods first, then each superclass’s methods in declaration order
 /// (transitively).
-    ///
+///
 /// Associated types: `trait Collect<C> { type Elem<A>; … }`
 /// stores structured declarations so generic associated types retain
 /// their own binders and kind.
@@ -178,13 +178,13 @@ impl TypeClassDef {
 }
 
 /// One registered typeclass instance (concrete type → implementation mapping).
-    ///
+///
 /// E.g. `impl Num<int> { fn add(…) { … } }` is stored as:
 /// ```text
 /// InstanceDef { class: "Num", args: [int()],
 ///     method_fqns: { "add" → "Num__int__add" } }
 /// ```
-    ///
+///
 /// Associated types: `impl Collect<Option<int>> { type Elem<A> = A; … }`
 /// stores `assoc_tys: { "Elem" → AssocTypeValue { … } }`.
 #[derive(Debug, Clone)]

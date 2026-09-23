@@ -107,12 +107,7 @@ pub fn fold_mul_i64(init: i64, lanes: &[i64; LANES]) -> i64 {
 
 /// Conservative FMA: `out[i] = (a[i] * b[i]) + c[i]` (two IEEE roundings).
 #[inline]
-pub fn fmadd_f64(
-    a: &[f64; LANES],
-    b: &[f64; LANES],
-    c: &[f64; LANES],
-    out: &mut [f64; LANES],
-) {
+pub fn fmadd_f64(a: &[f64; LANES], b: &[f64; LANES], c: &[f64; LANES], out: &mut [f64; LANES]) {
     let mut prod = [0.0f64; LANES];
     kernels::zip_mul_f64(a, b, &mut prod);
     kernels::zip_add_f64(&prod, c, out);
@@ -120,12 +115,7 @@ pub fn fmadd_f64(
 
 /// Wrapping `out[i] = a[i] * b[i] + c[i]`.
 #[inline]
-pub fn fmadd_i64(
-    a: &[i64; LANES],
-    b: &[i64; LANES],
-    c: &[i64; LANES],
-    out: &mut [i64; LANES],
-) {
+pub fn fmadd_i64(a: &[i64; LANES], b: &[i64; LANES], c: &[i64; LANES], out: &mut [i64; LANES]) {
     let mut prod = [0i64; LANES];
     kernels::zip_mul_i64(a, b, &mut prod);
     kernels::zip_add_i64(&prod, c, out);
