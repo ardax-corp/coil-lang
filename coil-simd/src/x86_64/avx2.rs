@@ -297,3 +297,85 @@ pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> 
     }
     s
 }
+
+#[target_feature(enable = "avx2")]
+pub unsafe fn zip_i64_op(kind: u8, a: &[i64], b: &[i64], out: &mut [i64], byte_width: bool) {
+    // Arithmetic `>>` has no AVX2 variable form (`srav_epi64` is AVX-512).
+    if kind == 12 || !matches!(kind, 2..=11 | 13 | 14) {
+        return crate::scalar::zip_i64_op(kind, a, b, out, byte_width);
+    }
+    let n = a.len().min(b.len()).min(out.len());
+    let one = _mm256_set1_epi64x(1);
+    let all_ones = _mm256_set1_epi64x(-1);
+    let zero = _mm256_setzero_si256();
+    let shift_mask = _mm256_set1_epi64x(63);
+    let byte_mask = _mm256_set1_epi64x(0xFF);
+    let mut i = 0;
+    while i + 4 <= n {
+        let va = _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i);
+        let vb = _mm256_loadu_si256(b.as_ptr().add(i) as *const __m256i);
+        let eq = _mm256_cmpeq_epi64(va, vb);
+        let gt = _mm256_cmpgt_epi64(va, vb);
+        let lt = _mm256_cmpgt_epi64(vb, va);
+        let mut r = match kind {
+            2 => _mm256_and_si256(eq, one),
+            3 => _mm256_and_si256(_mm256_xor_si256(eq, all_ones), one),
+            4 => _mm256_and_si256(lt, one),
+            5 => _mm256_and_si256(_mm256_or_si256(eq, lt), one),
+            6 => _mm256_and_si256(gt, one),
+            7 => _mm256_and_si256(_mm256_or_si256(eq, gt), one),
+            8 => _mm256_and_si256(va, vb),
+            9 => _mm256_or_si256(va, vb),
+            10 => _mm256_xor_si256(va, vb),
+            11 => _mm256_sllv_epi64(va, _mm256_and_si256(vb, shift_mask)),
+            13 => {
+                let nz_a = _mm256_and_si256(
+                    _mm256_xor_si256(_mm256_cmpeq_epi64(va, zero), all_ones),
+                    one,
+                );
+                let nz_b = _mm256_and_si256(
+                    _mm256_xor_si256(_mm256_cmpeq_epi64(vb, zero), all_ones),
+                    one,
+                );
+                _mm256_and_si256(nz_a, nz_b)
+            }
+            14 => {
+                let nz_a = _mm256_and_si256(
+                    _mm256_xor_si256(_mm256_cmpeq_epi64(va, zero), all_ones),
+                    one,
+                );
+                let z_b = _mm256_and_si256(_mm256_cmpeq_epi64(vb, zero), one);
+                _mm256_and_si256(nz_a, z_b)
+            }
+            _ => zero,
+        };
+        if byte_width && matches!(kind, 8 | 9 | 10 | 11) {
+            r = _mm256_and_si256(r, byte_mask);
+        }
+        _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, r);
+        i += 4;
+    }
+    if i < n {
+        crate::scalar::zip_i64_op(kind, &a[i..n], &b[i..n], &mut out[i..n], byte_width);
+    }
+}
+
+#[target_feature(enable = "avx2")]
+pub unsafe fn zip_i64_not(a: &[i64], out: &mut [i64], byte_width: bool) {
+    let n = a.len().min(out.len());
+    let all_ones = _mm256_set1_epi64x(-1);
+    let byte_mask = _mm256_set1_epi64x(0xFF);
+    let mut i = 0;
+    while i + 4 <= n {
+        let va = _mm256_loadu_si256(a.as_ptr().add(i) as *const __m256i);
+        let mut r = _mm256_xor_si256(va, all_ones);
+        if byte_width {
+            r = _mm256_and_si256(r, byte_mask);
+        }
+        _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, r);
+        i += 4;
+    }
+    if i < n {
+        crate::scalar::zip_i64_not(&a[i..n], &mut out[i..n], byte_width);
+    }
+}

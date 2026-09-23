@@ -1,6 +1,6 @@
 //! Portable numeric kernels with runtime SIMD dispatch.
 
-use crate::level::{detect, SimdLevel};
+use crate::level::{SimdLevel, detect};
 use crate::scalar;
 
 /// Dot product of equal-prefix slices (`min(len)`).
@@ -101,6 +101,43 @@ pub fn zip_mul_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
 #[inline]
 pub fn zip_div_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     dispatch_zip_f64(a, b, out, scalar::zip_div_f64, zip_div_f64_simd)
+}
+
+/// Integer compares, bitwise ops, intersect, and diff. See [`crate::scalar::zip_i64_op`].
+/// AVX2 (and AVX-512 hosts, 4-wide) cover every kind except arithmetic `>>`.
+#[inline]
+pub fn zip_i64_op(kind: u8, a: &[i64], b: &[i64], out: &mut [i64], byte_width: bool) {
+    if a.len().min(b.len()).min(out.len()) < 8 {
+        return scalar::zip_i64_op(kind, a, b, out, byte_width);
+    }
+    match detect() {
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx512 | SimdLevel::Avx2 => unsafe {
+            crate::x86_64::avx2::zip_i64_op(kind, a, b, out, byte_width)
+        },
+        _ => scalar::zip_i64_op(kind, a, b, out, byte_width),
+    }
+}
+
+/// Bitwise `~` on `i64` cells. AVX2 / AVX-512 hosts use a 4-wide XOR.
+#[inline]
+pub fn zip_i64_not(a: &[i64], out: &mut [i64], byte_width: bool) {
+    if a.len().min(out.len()) < 8 {
+        return scalar::zip_i64_not(a, out, byte_width);
+    }
+    match detect() {
+        #[cfg(target_arch = "x86_64")]
+        SimdLevel::Avx512 | SimdLevel::Avx2 => unsafe {
+            crate::x86_64::avx2::zip_i64_not(a, out, byte_width)
+        },
+        _ => scalar::zip_i64_not(a, out, byte_width),
+    }
+}
+
+/// Float compare / presence mask into `0`/`1` integers.
+#[inline]
+pub fn zip_f64_mask(kind: u8, a: &[f64], b: &[f64], out: &mut [i64]) {
+    scalar::zip_f64_mask(kind, a, b, out)
 }
 
 /// Wrapping element-wise multiply. SIMD on AVX-512DQ; scalar elsewhere (no `i64` mullo).

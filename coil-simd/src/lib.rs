@@ -25,8 +25,8 @@ mod aarch64;
 
 pub use kernels::{
     axpy_reduce_f64, dot_f64, dot_i64, matmul_f64, matmul_i64, scale_f64, scale_i64, zip_add_f64,
-    zip_add_i64, zip_div_f64, zip_mul_f64, zip_mul_i64, zip_neg_f64, zip_neg_i64, zip_sub_f64,
-    zip_sub_i64,
+    zip_add_i64, zip_div_f64, zip_f64_mask, zip_i64_not, zip_i64_op, zip_mul_f64, zip_mul_i64,
+    zip_neg_f64, zip_neg_i64, zip_sub_f64, zip_sub_i64,
 };
 pub use lanes::LANES;
-pub use level::{detect, SimdLevel};
+pub use level::{SimdLevel, detect};
