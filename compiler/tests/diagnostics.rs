@@ -5,7 +5,7 @@ use parser::Pratt;
 
 /// Parse `src`, run the HM checker, and return both the root type and
 /// the accumulated messages.
-    ///
+///
 /// Bare expression statements (`42;`) check as `unit`. Single-line bare
 /// expressions are wrapped in a probe function so golden tests observe the
 /// expression value type (matching the checker unit-test harness).
@@ -635,7 +635,6 @@ fn class_declaration_typechecks() {
     );
 }
 
-
 #[test]
 fn enum_decl_no_messages() {
     // A bare `enum` declaration produces no diagnostic.
@@ -845,7 +844,6 @@ fn multiparam_typeclass_cannot_be_bare_existential_type() {
     );
 }
 
-
 #[test]
 fn record_construct_missing_field_diagnostic() {
     // Variant declared with two fields; constructor supplies
@@ -954,7 +952,6 @@ fn mixed_shape_enum_with_match_uses_correct_shape() {
         msgs
     );
 }
-
 
 #[test]
 fn access_field_on_non_record_produces_helpful_message() {
@@ -1361,28 +1358,28 @@ fn compile_messages(src: &str) -> Vec<String> {
 }
 
 #[test]
-    fn derive_unknown_trait_reports_diagnostic() {
-        let msgs = compile_messages("#[derive(Clone)] enum Color { Red } fn main() {}");
-        assert!(
-            msgs.iter()
-                .any(|m| m.contains("Cannot derive unknown or non-derivable trait `Clone`")),
-            "expected unknown-trait derive diagnostic, got: {:?}",
-            msgs
-        );
-    }
+fn derive_unknown_trait_reports_diagnostic() {
+    let msgs = compile_messages("#[derive(Clone)] enum Color { Red } fn main() {}");
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("Cannot derive unknown or non-derivable trait `Clone`")),
+        "expected unknown-trait derive diagnostic, got: {:?}",
+        msgs
+    );
+}
 
-    #[test]
-    fn derive_clone_on_scalar_enum_reports_same_diagnostic() {
-        let msgs = compile_messages(
-            "#[repr(int)] #[derive(Clone)] enum Status { Ok = 200, NotFound = 404 } fn main() {}",
-        );
-        assert!(
-            msgs.iter()
-                .any(|m| m.contains("Cannot derive unknown or non-derivable trait `Clone`")),
-            "expected Clone-on-scalar-enum diagnostic, got: {:?}",
-            msgs
-        );
-    }
+#[test]
+fn derive_clone_on_scalar_enum_reports_same_diagnostic() {
+    let msgs = compile_messages(
+        "#[repr(int)] #[derive(Clone)] enum Status { Ok = 200, NotFound = 404 } fn main() {}",
+    );
+    assert!(
+        msgs.iter()
+            .any(|m| m.contains("Cannot derive unknown or non-derivable trait `Clone`")),
+        "expected Clone-on-scalar-enum diagnostic, got: {:?}",
+        msgs
+    );
+}
 
 #[test]
 fn derive_non_derivable_trait_reports_diagnostic() {
@@ -1437,8 +1434,7 @@ fn ffi_attr_with_body_reports_diagnostic() {
         "#[ffi(lib = \"c\")] fn strlen(string s) -> int { return 0; } fn main() {}",
     );
     assert!(
-        msgs.iter()
-            .any(|m| m.contains("`#[ffi]` is not supported")),
+        msgs.iter().any(|m| m.contains("`#[ffi]` is not supported")),
         "expected #[ffi] rejected diagnostic, got: {:?}",
         msgs
     );
@@ -1447,7 +1443,9 @@ fn ffi_attr_with_body_reports_diagnostic() {
 #[test]
 fn signature_only_without_extern_is_parse_error() {
     assert!(
-        Pratt::default().parse("fn foo() -> int; fn main() {}").is_err(),
+        Pratt::default()
+            .parse("fn foo() -> int; fn main() {}")
+            .is_err(),
         "orphan signature-only fn must be a parse error"
     );
 }
@@ -1618,7 +1616,8 @@ fn main() {}
         .collect();
     assert!(
         msgs.iter()
-            .any(|m| m.contains("`#[ffi]` is not supported") || m.contains("`#[test]` is not supported")),
+            .any(|m| m.contains("`#[ffi]` is not supported")
+                || m.contains("`#[test]` is not supported")),
         "expected #[ffi]/#[test] rejected diagnostic, got: {:?}",
         msgs
     );
@@ -2211,6 +2210,23 @@ fn main() {
     assert!(
         msgs.iter().any(|m| m.contains("inner dimensions mismatch")),
         "expected Matrix * dimension mismatch, got: {:?}",
+        msgs
+    );
+}
+
+#[test]
+fn matrix_float_bitwise_is_rejected() {
+    let (_ty, msgs) = check(
+        r#"
+fn main() {
+    let a = matrix([[1.0, 2.0], [3.0, 4.0]]);
+    let _ = a & a;
+}
+"#,
+    );
+    assert!(
+        msgs.iter().any(|m| m.contains("bitwise")),
+        "expected float bitwise rejection, got: {:?}",
         msgs
     );
 }
@@ -2811,10 +2827,13 @@ fn free_generic_option_of_ground_payload_is_ok() {
         "fn none_of<T>(T x) -> Option<int> { return Option::None; }\nfn main() { let _ = none_of(1); }",
     );
     assert!(
-        !msgs.iter()
+        !msgs
+            .iter()
             .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
         "Option<int> payload does not depend on T; got: {:?}",
-        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+        msgs.iter()
+            .map(|m| (m.code(), m.message()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -2835,10 +2854,13 @@ fn main() {
 "#,
     );
     assert!(
-        !msgs.iter()
+        !msgs
+            .iter()
             .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn)),
         "inherent method Option return must typecheck; got: {:?}",
-        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+        msgs.iter()
+            .map(|m| (m.code(), m.message()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -2899,10 +2921,13 @@ fn main() {
 "#,
     );
     assert!(
-        !msgs.iter()
+        !msgs
+            .iter()
             .any(|m| m.code() == Some(ErrorCode::PrivateMember)),
         "impl should see private members; got: {:?}",
-        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+        msgs.iter()
+            .map(|m| (m.code(), m.message()))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -2945,9 +2970,12 @@ fn main() {
 "#,
     );
     assert!(
-        !msgs.iter()
+        !msgs
+            .iter()
             .any(|m| m.code() == Some(ErrorCode::PrivateMember)),
         "pub members should be visible; got: {:?}",
-        msgs.iter().map(|m| (m.code(), m.message())).collect::<Vec<_>>()
+        msgs.iter()
+            .map(|m| (m.code(), m.message()))
+            .collect::<Vec<_>>()
     );
 }

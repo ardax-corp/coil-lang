@@ -24,6 +24,7 @@ safe API:
 | `axpy_reduce_f64` | Counted `s = (s + a*x) + y; x += dx` (P12 HostInvoke) |
 | `lanes::fold_add_*` / `fmadd_*` | V1 horizontal left-fold add; conservative mul-then-add FMA |
 | `bytes::eq` / `bytes::xor` | Byte equality and XOR |
+| `zip_i64_op` / `zip_i64_not` / `zip_f64_mask` | Matrix cell compares, bitwise ops, intersect, and diff |
 
 ## Dispatch
 
@@ -77,6 +78,12 @@ beat Rust/`memcmp` slice equality.
   `examples/perf/vec_widen.hy`.
 - String intern table lookup (`Heap` hash map) uses `bytes::eq` for key
   compares.
+- `packed_matrix_zip` / `packed_matrix_neg` also lower matrix compares
+  (`==` `!=` `<` `<=` `>` `>=`), bitwise `&` `|` `^` `<<` `>>` `~`, and
+  `intersect` / `diff`. Compare, intersect, and diff return a `byte` mask of
+  `0`/`1`. Integer kinds other than arithmetic `>>` use AVX2 (4-wide) on
+  AVX2 and AVX-512 hosts; `>>` and float masks stay scalar and match IEEE
+  / arithmetic shift. Shift counts use the low 6 bits.
 
 Matrix `*` remains matmul; Hadamard `*` on bare tuples/arrays uses
 `packed_vec_arith`.

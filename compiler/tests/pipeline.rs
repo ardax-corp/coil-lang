@@ -251,7 +251,8 @@ fn main() {
         pipeline
             .messages()
             .iter()
-            .any(|m| m.message().contains("cannot grow") && m.help().as_deref() == Some("use `Vec<T>` for growable storage")),
+            .any(|m| m.message().contains("cannot grow")
+                && m.help().as_deref() == Some("use `Vec<T>` for growable storage")),
         "Q3 front-end diagnostic, got {:?}",
         pipeline
             .messages()
@@ -268,7 +269,10 @@ fn assert_compile_fails_pipeline(pipeline: &mut Pipeline, src: &str, code: compi
         .iter()
         .map(|m| (m.code(), m.message().to_string()))
         .collect();
-    assert!(result.is_err(), "expected compile failure, got Ok; {msgs:?}");
+    assert!(
+        result.is_err(),
+        "expected compile failure, got Ok; {msgs:?}"
+    );
     assert!(
         pipeline.messages().iter().any(|m| m.code() == Some(code)),
         "expected {code:?}, got {msgs:?}"
@@ -551,7 +555,9 @@ fn main() {
 }
 "#;
     let mut pipeline = test_pipeline();
-    let (bytecode, _) = pipeline.compile_src(src).expect("scalar enum should compile");
+    let (bytecode, _) = pipeline
+        .compile_src(src)
+        .expect("scalar enum should compile");
     assert!(
         !bytecode
             .iter()
@@ -2091,7 +2097,8 @@ time = { git = "https://example.com/coil-time.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("time")),
-        &["time"]);
+        &["time"],
+    );
     assert_eq!(
         output, "missing",
         "allow+trusted `time` must not be denied; got {output:?}"
@@ -2391,7 +2398,10 @@ fn assert_dload_project_compile_fails(
         .map(|m| (m.code(), m.message().to_string()))
         .collect();
     let _ = std::fs::remove_dir_all(&dir);
-    assert!(result.is_err(), "expected compile failure, got Ok; {msgs:?}");
+    assert!(
+        result.is_err(),
+        "expected compile failure, got Ok; {msgs:?}"
+    );
     assert!(
         pipeline.messages().iter().any(|m| m.code() == Some(code)),
         "expected {code:?}, got {msgs:?}"
@@ -2409,7 +2419,8 @@ plugin = { git = "https://example.com/plugin.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-        &["plugin"]);
+        &["plugin"],
+    );
     assert_eq!(output, "missing");
 }
 
@@ -2429,7 +2440,8 @@ sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         extra,
         Some(lock),
         &dload_kind_program(&missing_abs_dload("plugin")),
-        &["plugin"]);
+        &["plugin"],
+    );
     assert_eq!(output, "missing");
 }
 
@@ -2444,7 +2456,8 @@ plugin = { git = "https://example.com/plugin.git", trusted = false }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-        &["plugin"]);
+        &["plugin"],
+    );
     assert_eq!(output, "denied");
 }
 
@@ -2526,7 +2539,8 @@ coil-plugin = { git = "https://example.com/plugin.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-        &["plugin"]);
+        &["plugin"],
+    );
     assert_eq!(output, "missing");
 }
 
@@ -2541,7 +2555,8 @@ plugin = { git = "https://example.com/plugin.git" }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("plugin")),
-        &["plugin"]);
+        &["plugin"],
+    );
     assert_eq!(output, "denied");
 }
 
@@ -2588,7 +2603,8 @@ crypto = { git = "https://example.com/coil-crypto.git" }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-        &["crypto"]);
+        &["crypto"],
+    );
     assert_eq!(output, "denied");
 }
 
@@ -2608,7 +2624,8 @@ stem = 'plugin'
         extra,
         Some(lock),
         &dload_kind_program(&missing_abs_dload("plugin")),
-        &["plugin"]);
+        &["plugin"],
+    );
     assert_eq!(output, "missing");
 }
 
@@ -2623,7 +2640,8 @@ crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-        &["crypto"]);
+        &["crypto"],
+    );
     assert_eq!(output, "missing");
 }
 
@@ -2643,7 +2661,8 @@ sha256 = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         extra,
         Some(lock),
         &dload_kind_program(&missing_abs_dload("crypto")),
-        &["crypto"]);
+        &["crypto"],
+    );
     assert_eq!(output, "missing");
 }
 
@@ -2764,16 +2783,14 @@ fn userland_dload_first_party_trusted_without_allow_is_denied() {
 #[test]
 fn userland_dload_first_party_allow_plus_trusted_is_missing() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
-        let extra = format!(
-            "[dependencies]\n{}",
-            first_party_dep_line(stem, Some(true))
-        );
+        let extra = format!("[dependencies]\n{}", first_party_dep_line(stem, Some(true)));
         let output = run_userland_dload_project(
             &format!("{stem}_allow_trusted"),
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-            &[stem]);
+            &[stem],
+        );
         assert_eq!(
             output, "missing",
             "{stem} allow+trusted must skip hash; missing file is LibraryNotFound"
@@ -2784,16 +2801,14 @@ fn userland_dload_first_party_allow_plus_trusted_is_missing() {
 #[test]
 fn userland_dload_first_party_allow_without_hash_or_trusted_is_denied() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
-        let extra = format!(
-            "[dependencies]\n{}",
-            first_party_dep_line(stem, None)
-        );
+        let extra = format!("[dependencies]\n{}", first_party_dep_line(stem, None));
         let output = run_userland_dload_project(
             &format!("{stem}_allow_omitted_trusted"),
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-            &[stem]);
+            &[stem],
+        );
         assert_eq!(
             output, "denied",
             "{stem} allow without trusted and without pin must be denied"
@@ -2813,7 +2828,8 @@ fn userland_dload_first_party_allow_trusted_false_without_pin_is_denied() {
             &extra,
             None,
             &dload_kind_program(&missing_abs_dload(stem)),
-            &[stem]);
+            &[stem],
+        );
         assert_eq!(
             output, "denied",
             "{stem} trusted = false must not skip native sha256"
@@ -2832,7 +2848,8 @@ coil-crypto = { git = "https://example.com/coil-crypto.git", trusted = true }
         extra,
         None,
         &dload_kind_program(&missing_abs_dload("crypto")),
-        &["crypto"]);
+        &["crypto"],
+    );
     assert_eq!(output, "missing");
 }
 
@@ -2855,10 +2872,7 @@ libc = { git = "https://example.com/libc.git", trusted = true }
 #[test]
 fn pipeline_gate_first_party_allow_without_hash_or_trusted_is_denied() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
-        let extra = format!(
-            "[dependencies]\n{}",
-            first_party_dep_line(stem, None)
-        );
+        let extra = format!("[dependencies]\n{}", first_party_dep_line(stem, None));
         let gate = dload_gate_for_project(&format!("{stem}_gate_no_hash"), &extra, None, &[stem]);
         assert_library_denied(&gate, stem, stem);
         assert!(gate.hash_required(stem), "{stem} must require a lock hash");
@@ -2868,10 +2882,7 @@ fn pipeline_gate_first_party_allow_without_hash_or_trusted_is_denied() {
 #[test]
 fn pipeline_gate_first_party_allow_plus_trusted_skips_hash() {
     for stem in machine::DLOAD_PRODUCTION_STEMS {
-        let extra = format!(
-            "[dependencies]\n{}",
-            first_party_dep_line(stem, Some(true))
-        );
+        let extra = format!("[dependencies]\n{}", first_party_dep_line(stem, Some(true)));
         let gate = dload_gate_for_project(&format!("{stem}_gate_trusted"), &extra, None, &[stem]);
         gate.check_request(stem)
             .unwrap_or_else(|e| panic!("{stem} allow+trusted must pass, got {e:?}"));
@@ -3907,9 +3918,7 @@ fn tail_sibling_hy_harness_cases_pass() {
             .join("tests/positive/tail_sibling.hy"),
     )
     .expect("read tail_sibling.hy");
-    let (bytecode, constants) = pipeline
-        .compile_src(&src)
-        .expect("compile tail_sibling.hy");
+    let (bytecode, constants) = pipeline.compile_src(&src).expect("compile tail_sibling.hy");
     let cases = pipeline.test_cases().to_vec();
     assert_eq!(
         cases.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
@@ -5029,7 +5038,6 @@ fn main() {
     );
     assert_eq!(output, "1035");
 }
-
 
 #[test]
 fn production_compile_strips_harness_declarations() {
@@ -7965,10 +7973,7 @@ fn main() {
     let bytes = rkyv::to_bytes::<Error>(&program).expect("serialize");
     let decoded = decode_archived_program(bytes.as_slice()).expect("decode");
     assert!(decoded.stack_maps_persisted);
-    assert_eq!(
-        decoded.program.stack_maps.as_slice(),
-        pipeline.stack_maps()
-    );
+    assert_eq!(decoded.program.stack_maps.as_slice(), pipeline.stack_maps());
     assert!(
         !decoded.program.stack_maps.is_empty(),
         "mapped keep() must persist S2b maps"
@@ -9308,6 +9313,15 @@ fn example_matrix_mul_prints_product_and_hadamard_add() {
 }
 
 #[test]
+fn example_matrix_mask_prints_compares_bits_and_presence() {
+    let output = run_example("examples/matrix_mask.hy");
+    assert_eq!(
+        output,
+        "10101001,10305008,10111101,01000010,00000001,2,221,1001"
+    );
+}
+
+#[test]
 fn matrix_compound_add_assign_updates_cells() {
     let output = run_example_src(
         r#"
@@ -9686,7 +9700,8 @@ fn main() {
 "#;
     let mut grants = compiler::HostGrants::deny_all();
     grants.allow_attach = true;
-    let output = run_userland_dload_project_grants("allow_attach_null", extra, None, src, &[], grants);
+    let output =
+        run_userland_dload_project_grants("allow_attach_null", extra, None, src, &[], grants);
     assert_eq!(
         output, "invalid",
         "attach must reach pointer checks, got {output:?}"
@@ -11262,7 +11277,11 @@ fn extern_in_imported_module_libc_is_compile_error() {
         .expect("workspace root");
     let full = workspace_root.join("examples/ffi_mod_entry.hy");
     let result = pipeline.compile_src_from_file(full.to_str().unwrap());
-    assert!(result.is_err(), "extern c must not compile: {:?}", pipeline.messages());
+    assert!(
+        result.is_err(),
+        "extern c must not compile: {:?}",
+        pipeline.messages()
+    );
     assert!(
         pipeline
             .messages()
