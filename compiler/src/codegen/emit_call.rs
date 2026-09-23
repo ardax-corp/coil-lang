@@ -16,8 +16,7 @@ impl Compiler {
         // lengths become CONST instead of Length thunk + ArrayLen.
         if let Expression::Identifier(raw) = name.1.as_ref()
             && *raw == "len"
-            && let Some(ConstValue::Int(n)) =
-                crate::const_fold::eval_expr(ast, self.const_env())
+            && let Some(ConstValue::Int(n)) = crate::const_fold::eval_expr(ast, self.const_env())
         {
             if let Some(items) = args.as_ref() {
                 for arg in items {
@@ -101,7 +100,9 @@ impl Compiler {
                 }
                 crate::typechecking::PreludeFn::Dot
                 | crate::typechecking::PreludeFn::MatMul
-                | crate::typechecking::PreludeFn::Cross => {
+                | crate::typechecking::PreludeFn::Cross
+                | crate::typechecking::PreludeFn::Intersect
+                | crate::typechecking::PreludeFn::Diff => {
                     self.emit_linear_algebra(
                         &mut bytecode,
                         self_id,
@@ -110,8 +111,7 @@ impl Compiler {
                         arg_slice,
                     );
                 }
-                crate::typechecking::PreludeFn::Ord
-                | crate::typechecking::PreludeFn::Char => {
+                crate::typechecking::PreludeFn::Ord | crate::typechecking::PreludeFn::Char => {
                     self.emit_prelude_host_call(arg_slice, kind.as_str(), Some(ast));
                 }
                 crate::typechecking::PreludeFn::Sin
@@ -195,16 +195,13 @@ impl Compiler {
             return bytecode;
         }
 
-        if let Some(hint) = self.existential_method_hint(self_id, span.start, span.end)
-        {
-            if self.emit_existential_method_call(&mut bytecode, name, args.as_ref(), &hint)
-            {
+        if let Some(hint) = self.existential_method_hint(self_id, span.start, span.end) {
+            if self.emit_existential_method_call(&mut bytecode, name, args.as_ref(), &hint) {
                 return bytecode;
             }
         }
 
-        if let Some(hint) = self.bound_method_hint(self_id, span.start, span.end)
-        {
+        if let Some(hint) = self.bound_method_hint(self_id, span.start, span.end) {
             let dict_name = format!("__dict{}", hint.dict_index);
             if let Some(dict_slot) = self.lookup_slot(&dict_name) {
                 if hint.has_receiver
@@ -224,18 +221,12 @@ impl Compiler {
                 bytecode.push_const(hint.method_slot as i32);
                 bytecode.push_index();
                 bytecode.push(
-                    Byte::new(Instruction::CallIndirect)
-                        .with_operand_u32(hint.arity as u32 + 1),
+                    Byte::new(Instruction::CallIndirect).with_operand_u32(hint.arity as u32 + 1),
                 );
                 return bytecode;
             }
             if self.compiling_mono_clone
-                && self.try_emit_ground_bound_method(
-                    &mut bytecode,
-                    name,
-                    args.as_ref(),
-                    &hint,
-                )
+                && self.try_emit_ground_bound_method(&mut bytecode, name, args.as_ref(), &hint)
             {
                 return bytecode;
             }
@@ -265,8 +256,7 @@ impl Compiler {
                 .and_then(|dicts| dicts.first())
                 .and_then(|instance| {
                     let fqn = instance.method_fqns.get(*method)?.clone();
-                    if self.functions.contains_key(&fqn)
-                        || self.fn_entry_labels.contains_key(&fqn)
+                    if self.functions.contains_key(&fqn) || self.fn_entry_labels.contains_key(&fqn)
                     {
                         Some((instance.class.clone(), instance.args.clone(), fqn))
                     } else {
@@ -369,12 +359,7 @@ impl Compiler {
                     };
                     match self.checker.select_overload_for_args(&fqn_base, nargs, tys) {
                         crate::typechecking::infer::OverloadSelect::Selected(c) => {
-                            let keyed = overload_fn_key(
-                                &fqn_base,
-                                c.fixed_arity,
-                                c.is_rest,
-                                c.id,
-                            );
+                            let keyed = overload_fn_key(&fqn_base, c.fixed_arity, c.is_rest, c.id);
                             if self.functions.contains_key(&keyed) {
                                 keyed
                             } else {
@@ -446,8 +431,8 @@ impl Compiler {
                     // params, append trait dictionaries, unbox returns.
                     let lookup_name = strip_overload_key(&fqn).to_string();
                     let is_generic = self.checker.is_generic_fn(&lookup_name);
-                    let box_generic_args = is_generic
-                        && self.generic_has_toplevel_type_param_args(&lookup_name);
+                    let box_generic_args =
+                        is_generic && self.generic_has_toplevel_type_param_args(&lookup_name);
                     // Stage the receiver into a temp *before* user args.
                     // Leaving it on the operand stack while arg staging
                     // `STORE`s into temps clobbers it (locals and the
@@ -519,7 +504,8 @@ impl Compiler {
                             call_arg_tys.push(self.synthesize_rest_array_ty(&rest));
                         }
                         let mut forwarded = 0;
-                        if let Some(indices) = self.forwarded_dicts_hint(self_id, span.start, span.end)
+                        if let Some(indices) =
+                            self.forwarded_dicts_hint(self_id, span.start, span.end)
                         {
                             for dict_index in indices {
                                 if let Some(slot) =
@@ -543,8 +529,7 @@ impl Compiler {
                     };
                     let call_arity = 1 + nargs + dict_count as u32;
                     let niche_vec = Self::vec_option_host_native(&lookup_name).filter(|_| {
-                        self.host_enum_layout_for_expr(ast)
-                            == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                        self.host_enum_layout_for_expr(ast) == common::HOST_ENUM_LAYOUT_OPTION_NICHE
                     });
                     if let Some(native) = niche_vec {
                         if !self.emit_host_invoke_from_call_args(
@@ -598,8 +583,7 @@ impl Compiler {
                 }
                 bytecode.append(&mut self.do_compile(name));
                 bytecode.push(
-                    Byte::new(Instruction::CallIndirect)
-                        .with_operand_u32(flat_args.len() as u32),
+                    Byte::new(Instruction::CallIndirect).with_operand_u32(flat_args.len() as u32),
                 );
                 return bytecode;
             }
@@ -615,28 +599,19 @@ impl Compiler {
                             crate::const_fold::eval_expr(ast, self.const_env())
                         {
                             self.discard_compile(&items[0]);
-                            self.emit_const_value(
-                                &ConstValue::Int(n),
-                                &mut bytecode,
-                            );
+                            self.emit_const_value(&ConstValue::Int(n), &mut bytecode);
                             return bytecode;
                         }
                         if let Some(n) = self.static_len_of(&items[0]) {
                             bytecode.append(&mut self.do_compile(&items[0]));
                             bytecode.push_pop();
-                            self.emit_const_value(
-                                &ConstValue::Int(n as i64),
-                                &mut bytecode,
-                            );
+                            self.emit_const_value(&ConstValue::Int(n as i64), &mut bytecode);
                             return bytecode;
                         }
                         // Structural aggregates → ArrayLen. Custom types
                         // with `Length` use the instance method below.
                         let arg_ty = self.codegen_expr_ty(&items[0]).map(|ty| {
-                            crate::typechecking::subst::apply_ty_prune(
-                                self.checker.subst(),
-                                &ty,
-                            )
+                            crate::typechecking::subst::apply_ty_prune(self.checker.subst(), &ty)
                         });
                         let structural = arg_ty
                             .as_ref()
@@ -764,11 +739,7 @@ impl Compiler {
                         .as_ref()
                         .map(|items| items.iter().collect())
                         .unwrap_or_default();
-                    if let Some(tags) = self.resolve_call_ffi_tags(
-                        Some(&n),
-                        call_span,
-                        &arg_refs,
-                    ) {
+                    if let Some(tags) = self.resolve_call_ffi_tags(Some(&n), call_span, &arg_refs) {
                         for &(tag, aux) in &tags {
                             emit_ffi_type_const(&mut self.bytecode, tag, aux);
                         }
@@ -852,12 +823,7 @@ impl Compiler {
                     && !self.callee_has_unboxed_range_params(&lookup_name)
                     && !self.coroutine_fns.contains(&n)
                     && !self.coroutine_fns.contains(&lookup_name)
-                    && self.try_emit_remat_peel_call(
-                        &n,
-                        Some(arg_slice),
-                        &mut bytecode,
-                        off as u32,
-                    )
+                    && self.try_emit_remat_peel_call(&n, Some(arg_slice), &mut bytecode, off as u32)
                 {
                     return bytecode;
                 }
@@ -902,22 +868,21 @@ impl Compiler {
                             .map(|(a, r)| (*a as usize, *r, 0))
                     })
                     .unwrap_or((0, false, 0));
-                let fill_mask =
-                    self.checker
-                        .partial_fill_at(span.start, span.end)
-                        .or_else(|| {
-                            // Spread args count as their expanded arity, not one slot.
-                            let argc = flat_arg_slice.len();
-                            if !is_rest && fa > 0 && argc < fa {
-                                Some((1u32 << argc).wrapping_sub(1))
-                            } else {
-                                None
-                            }
-                        });
+                let fill_mask = self
+                    .checker
+                    .partial_fill_at(span.start, span.end)
+                    .or_else(|| {
+                        // Spread args count as their expanded arity, not one slot.
+                        let argc = flat_arg_slice.len();
+                        if !is_rest && fa > 0 && argc < fa {
+                            Some((1u32 << argc).wrapping_sub(1))
+                        } else {
+                            None
+                        }
+                    });
                 if let Some(off) = target_offset
                     && let Some(mask) = fill_mask.filter(|_| {
-                        pair_kind.is_none()
-                            && !self.callee_has_unboxed_range_params(&lookup_name)
+                        pair_kind.is_none() && !self.callee_has_unboxed_range_params(&lookup_name)
                     })
                 {
                     // Emit filled values in declaration order (already
@@ -932,9 +897,10 @@ impl Compiler {
                     let n_filled = mask.count_ones();
                     bytecode.push_const(mask as i32);
                     bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(off as u32));
-                    bytecode.push(Byte::new(Instruction::MakeFn).with_operand_u32(
-                        make_fn_operand(0, n_filled, fa as u32, is_rest),
-                    ));
+                    bytecode.push(
+                        Byte::new(Instruction::MakeFn)
+                            .with_operand_u32(make_fn_operand(0, n_filled, fa as u32, is_rest)),
+                    );
                     return bytecode;
                 }
 
@@ -969,13 +935,10 @@ impl Compiler {
                         call_arg_tys.push(self.synthesize_rest_array_ty(&rest));
                     }
                     let mut forwarded = 0;
-                    if let Some(indices) =
-                        self.forwarded_dicts_hint(self_id, span.start, span.end)
+                    if let Some(indices) = self.forwarded_dicts_hint(self_id, span.start, span.end)
                     {
                         for dict_index in indices {
-                            if let Some(slot) =
-                                self.lookup_slot(&format!("__dict{}", dict_index))
-                            {
+                            if let Some(slot) = self.lookup_slot(&format!("__dict{}", dict_index)) {
                                 bytecode.push_load(slot);
                                 forwarded += 1;
                             }
@@ -1008,8 +971,7 @@ impl Compiler {
                 let niche_vec = Self::vec_option_host_native(&lookup_name)
                     .or_else(|| Self::vec_option_host_native(&n))
                     .filter(|_| {
-                        self.host_enum_layout_for_expr(ast)
-                            == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+                        self.host_enum_layout_for_expr(ast) == common::HOST_ENUM_LAYOUT_OPTION_NICHE
                     });
                 if let Some(native) = niche_vec {
                     if !self.emit_host_invoke_from_call_args(
@@ -1020,10 +982,7 @@ impl Compiler {
                     ) {
                         if let Some(off) = mono_offset {
                             bytecode.push(Self::packed_entry_byte_ret(
-                                entry_kind,
-                                arity,
-                                off as u32,
-                                ret_words,
+                                entry_kind, arity, off as u32, ret_words,
                             ));
                         } else if !self.emit_named_entry_ret(
                             &mut bytecode,
@@ -1037,13 +996,15 @@ impl Compiler {
                     }
                 } else if let Some(off) = mono_offset {
                     bytecode.push(Self::packed_entry_byte_ret(
-                        entry_kind,
-                        arity,
-                        off as u32,
-                        ret_words,
+                        entry_kind, arity, off as u32, ret_words,
                     ));
-                } else if !self.emit_named_entry_ret(&mut bytecode, &n, arity, entry_kind, ret_words)
-                {
+                } else if !self.emit_named_entry_ret(
+                    &mut bytecode,
+                    &n,
+                    arity,
+                    entry_kind,
+                    ret_words,
+                ) {
                     self.missing_call_target(&n, span.into_range());
                 }
                 if let Some(enum_name) = two_word {
@@ -1056,24 +1017,20 @@ impl Compiler {
                 // (`id<T>(T) -> T`). Nested params (`F<A> -> A`) are
                 // not boxed at construction, so unboxing would zero
                 // a valid immediate (Phase 5 HKT / Container::first).
-                    if is_generic && self.generic_return_is_boxed(&lookup_name) {
+                if is_generic && self.generic_return_is_boxed(&lookup_name) {
                     if let Some(call_ty) = self.codegen_expr_ty(ast) {
                         Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                     }
-                    } else if is_generic && self.expr_is_niche_option(ast) {
-                        Self::emit_boxed_option_to_niche(&mut bytecode);
-                    }
+                } else if is_generic && self.expr_is_niche_option(ast) {
+                    Self::emit_boxed_option_to_niche(&mut bytecode);
+                }
             } else if self.fn_entry_labels.contains_key(&n) {
                 // Reserved by phased emit (COI-109) but body not yet bound.
                 let lookup_name = strip_overload_key(&n).to_string();
                 let arg_slice = args.as_deref().unwrap_or(&[]);
                 self.consume_spread_emit_ids(arg_slice);
-                let value_arity = self.emit_call_args_with_rest(
-                    &lookup_name,
-                    arg_slice,
-                    &mut bytecode,
-                    false,
-                );
+                let value_arity =
+                    self.emit_call_args_with_rest(&lookup_name, arg_slice, &mut bytecode, false);
                 if !self.emit_direct_fn_call(&mut bytecode, &n, value_arity) {
                     let mut message = Message::error(
                         ErrorCode::UnknownFunction,
@@ -1112,8 +1069,7 @@ impl Compiler {
                 }
                 let mut dict_count = 0u32;
                 if let Some(source) = polyfn_source.as_ref() {
-                    if let Some(indices) =
-                        self.forwarded_dicts_hint(self_id, span.start, span.end)
+                    if let Some(indices) = self.forwarded_dicts_hint(self_id, span.start, span.end)
                     {
                         for dict_index in indices {
                             if let Some(dict_slot) =
@@ -1140,10 +1096,7 @@ impl Compiler {
                         .with_operand_u32(value_arity | (dict_count << 16)),
                 );
                 // Generic→concrete unbox for polyfn call site.
-                if self.local_polyfn_call_needs_unbox(
-                    &identifier,
-                    Some((span.start, span.end)),
-                ) {
+                if self.local_polyfn_call_needs_unbox(&identifier, Some((span.start, span.end))) {
                     let call_ty = self.codegen_expr_ty(ast);
                     let unbox_ty = match call_ty {
                         Some(t) if Self::ty_to_value_tag(&t).is_some() => Some(t),
@@ -1158,22 +1111,17 @@ impl Compiler {
                                 let mut found = None;
                                 for frame in self.mono_codegen_var_types.iter().rev() {
                                     if let Some(ty) = frame.get(&identifier) {
-                                        found = Some(apply_ty_prune(
-                                            self.checker.subst(),
-                                            ty,
-                                        ));
+                                        found = Some(apply_ty_prune(self.checker.subst(), ty));
                                         break;
                                     }
                                 }
                                 found.or_else(|| {
-                                    self.checker.codegen_var_type(&identifier).map(|ty| {
-                                        apply_ty_prune(self.checker.subst(), ty)
-                                    })
+                                    self.checker
+                                        .codegen_var_type(&identifier)
+                                        .map(|ty| apply_ty_prune(self.checker.subst(), ty))
                                 })
                             };
-                            binder.and_then(|vt| {
-                                Self::instantiate_polyfn_app_result(&vt, &arg_tys)
-                            })
+                            binder.and_then(|vt| Self::instantiate_polyfn_app_result(&vt, &arg_tys))
                         }
                     };
                     if let Some(ty) = unbox_ty {
@@ -1201,7 +1149,12 @@ impl Compiler {
     /// `dest` must be a fragment that will be appended onto [`Self::bytecode`]
     /// (not `self.bytecode` itself). Forward refs flush `dest` first so the
     /// reserved module label is not remapped as fragment-local.
-    pub(super) fn emit_direct_fn_call(&mut self, dest: &mut CodeBuf, name: &str, arity: u32) -> bool {
+    pub(super) fn emit_direct_fn_call(
+        &mut self,
+        dest: &mut CodeBuf,
+        name: &str,
+        arity: u32,
+    ) -> bool {
         self.emit_named_entry(dest, name, arity, crate::il::EntryKind::Call)
     }
 
@@ -1290,9 +1243,13 @@ impl Compiler {
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
             self.bytecode.append(dest);
-            self.bytecode
-                .il_mut()
-                .emit_entry_ret_at(kind, arity, label, DebugLoc::unknown(), ret_words);
+            self.bytecode.il_mut().emit_entry_ret_at(
+                kind,
+                arity,
+                label,
+                DebugLoc::unknown(),
+                ret_words,
+            );
             true
         } else {
             false
@@ -1341,13 +1298,21 @@ impl Compiler {
         ret_words: u32,
     ) -> bool {
         if let Some(&offset) = self.functions.get(name) {
-            self.bytecode
-                .push(Self::packed_entry_byte_ret(kind, arity, offset as u32, ret_words));
+            self.bytecode.push(Self::packed_entry_byte_ret(
+                kind,
+                arity,
+                offset as u32,
+                ret_words,
+            ));
             true
         } else if let Some(label) = self.fn_entry_labels.get(name).copied() {
-            self.bytecode
-                .il_mut()
-                .emit_entry_ret_at(kind, arity, label, DebugLoc::unknown(), ret_words);
+            self.bytecode.il_mut().emit_entry_ret_at(
+                kind,
+                arity,
+                label,
+                DebugLoc::unknown(),
+                ret_words,
+            );
             true
         } else {
             false
@@ -1395,5 +1360,4 @@ impl Compiler {
         bytecode.push(Byte::new(Instruction::CodePtr).with_operand_u32(target_offset));
         bytecode.push(Byte::new(Instruction::CallIndirect).with_operand_u32(arity));
     }
-
 }

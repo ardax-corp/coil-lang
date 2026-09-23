@@ -232,6 +232,16 @@ pub fn packed_matmul(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// `packed_matrix_zip(a, b, meta)` — former `PackedMatrixZip` operand layout.
+///
+/// Meta:
+/// - bits 0..7 `m`, 8..15 `n`, 16..23 `zip_kind`
+/// - bit 24 input cells are `f64` (mask ops still return `0`/`1` integers)
+/// - bit 25 outer tuple, bit 26 row tuple
+/// - bit 27 scalar broadcast, bit 28 scalar is the left argument
+/// - bit 29 `byte` cells (bitwise results masked to `0..=255`)
+///
+/// `zip_kind`: 0 add, 1 sub, 2 eq, 3 ne, 4 lt, 5 le, 6 gt, 7 ge,
+/// 8 and, 9 or, 10 xor, 11 shl, 12 shr, 13 intersect, 14 diff.
 pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
     if args.len() < 3 {
         return Value::default();
@@ -245,18 +255,13 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
     let is_float = (ops & (1 << 24)) != 0;
     let outer_is_tuple = (ops & (1 << 25)) != 0;
     let row_is_tuple = (ops & (1 << 26)) != 0;
+    let broadcast = (ops & (1 << 27)) != 0;
+    let scalar_left = (ops & (1 << 28)) != 0;
+    let byte_width = (ops & (1 << 29)) != 0;
     let len = m.saturating_mul(n);
-    let c = if is_float {
-        let mut a_cells = Vec::new();
-        let mut b_cells = Vec::new();
-        if !pack_f64_matrix(heap, a, m, n, &mut a_cells) {
-            a_cells.clear();
-            a_cells.resize(len, 0.0);
-        }
-        if !pack_f64_matrix(heap, b, m, n, &mut b_cells) {
-            b_cells.clear();
-            b_cells.resize(len, 0.0);
-        }
+    let mask = matches!(zip_kind, 2..=7 | 13 | 14);
+    let c = if is_float && matches!(zip_kind, 0 | 1) {
+        let (a_cells, b_cells) = pack_f64_pair(heap, a, b, m, n, len, broadcast, scalar_left);
         let nlen = a_cells.len().min(b_cells.len());
         let mut out = vec![0.0; nlen];
         if zip_kind == 1 {
@@ -268,30 +273,121 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
             out.push(0.0);
         }
         f64_to_values(&out[..len])
-    } else {
-        let mut a_cells = Vec::new();
-        let mut b_cells = Vec::new();
-        if !pack_i64_matrix(heap, a, m, n, &mut a_cells) {
-            a_cells.clear();
-            a_cells.resize(len, 0);
-        }
-        if !pack_i64_matrix(heap, b, m, n, &mut b_cells) {
-            b_cells.clear();
-            b_cells.resize(len, 0);
-        }
+    } else if is_float && mask {
+        let (a_cells, b_cells) = pack_f64_pair(heap, a, b, m, n, len, broadcast, scalar_left);
         let nlen = a_cells.len().min(b_cells.len());
-        let mut out = vec![0_i64; nlen];
-        if zip_kind == 1 {
-            coil_simd::zip_sub_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out);
+        let mut out = vec![0_i64; len];
+        coil_simd::zip_f64_mask(
+            zip_kind,
+            &a_cells[..nlen],
+            &b_cells[..nlen],
+            &mut out[..nlen],
+        );
+        i64_to_values(&out)
+    } else {
+        let (a_cells, b_cells) = pack_i64_pair(heap, a, b, m, n, len, broadcast, scalar_left);
+        let nlen = a_cells.len().min(b_cells.len());
+        let mut out = vec![0_i64; len];
+        if matches!(zip_kind, 0 | 1) {
+            if zip_kind == 1 {
+                coil_simd::zip_sub_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen]);
+            } else {
+                coil_simd::zip_add_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out[..nlen]);
+            }
         } else {
-            coil_simd::zip_add_i64(&a_cells[..nlen], &b_cells[..nlen], &mut out);
+            coil_simd::zip_i64_op(
+                zip_kind,
+                &a_cells[..nlen],
+                &b_cells[..nlen],
+                &mut out[..nlen],
+                byte_width,
+            );
         }
-        while out.len() < len {
-            out.push(0);
-        }
-        i64_to_values(&out[..len])
+        i64_to_values(&out)
     };
     alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
+}
+
+fn pack_f64_pair(
+    heap: &Heap,
+    a: Value,
+    b: Value,
+    m: usize,
+    n: usize,
+    len: usize,
+    broadcast: bool,
+    scalar_left: bool,
+) -> (Vec<f64>, Vec<f64>) {
+    if broadcast {
+        let (matrix, scalar) = if scalar_left {
+            (b, a.as_float())
+        } else {
+            (a, b.as_float())
+        };
+        let mut cells = Vec::new();
+        if !pack_f64_matrix(heap, matrix, m, n, &mut cells) {
+            cells.clear();
+            cells.resize(len, 0.0);
+        }
+        let filled = vec![scalar; cells.len()];
+        return if scalar_left {
+            (filled, cells)
+        } else {
+            (cells, filled)
+        };
+    }
+    let mut a_cells = Vec::new();
+    let mut b_cells = Vec::new();
+    if !pack_f64_matrix(heap, a, m, n, &mut a_cells) {
+        a_cells.clear();
+        a_cells.resize(len, 0.0);
+    }
+    if !pack_f64_matrix(heap, b, m, n, &mut b_cells) {
+        b_cells.clear();
+        b_cells.resize(len, 0.0);
+    }
+    (a_cells, b_cells)
+}
+
+fn pack_i64_pair(
+    heap: &Heap,
+    a: Value,
+    b: Value,
+    m: usize,
+    n: usize,
+    len: usize,
+    broadcast: bool,
+    scalar_left: bool,
+) -> (Vec<i64>, Vec<i64>) {
+    if broadcast {
+        let (matrix, scalar) = if scalar_left {
+            (b, a.as_int())
+        } else {
+            (a, b.as_int())
+        };
+        let mut cells = Vec::new();
+        if !pack_i64_matrix(heap, matrix, m, n, &mut cells) {
+            cells.clear();
+            cells.resize(len, 0);
+        }
+        let filled = vec![scalar; cells.len()];
+        return if scalar_left {
+            (filled, cells)
+        } else {
+            (cells, filled)
+        };
+    }
+    let mut a_cells = Vec::new();
+    let mut b_cells = Vec::new();
+    if !pack_i64_matrix(heap, a, m, n, &mut a_cells) {
+        a_cells.clear();
+        a_cells.resize(len, 0);
+    }
+    if !pack_i64_matrix(heap, b, m, n, &mut b_cells) {
+        b_cells.clear();
+        b_cells.resize(len, 0);
+    }
+    (a_cells, b_cells)
 }
 
 /// `packed_matrix_neg(a, meta)` — former `PackedMatrixNeg` operand layout.
@@ -306,6 +402,8 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Value {
     let is_float = (ops & (1 << 16)) != 0;
     let outer_is_tuple = (ops & (1 << 17)) != 0;
     let row_is_tuple = (ops & (1 << 18)) != 0;
+    let bit_not = (ops & (1 << 19)) != 0;
+    let byte_width = (ops & (1 << 20)) != 0;
     let len = m.saturating_mul(n);
     let c = if is_float {
         let mut a_cells = Vec::new();
@@ -323,7 +421,11 @@ pub fn packed_matrix_neg(heap: &mut Heap, args: &[Value]) -> Value {
             a_cells.resize(len, 0);
         }
         let mut out = vec![0_i64; a_cells.len()];
-        coil_simd::zip_neg_i64(&a_cells, &mut out);
+        if bit_not {
+            coil_simd::zip_i64_not(&a_cells, &mut out, byte_width);
+        } else {
+            coil_simd::zip_neg_i64(&a_cells, &mut out);
+        }
         i64_to_values(&out)
     };
     alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
@@ -389,11 +491,7 @@ pub fn packed_vec_arith(heap: &mut Heap, args: &[Value]) -> Value {
     let rhs = args[1];
 
     if broadcast {
-        let (vec_v, sc_v) = if scalar_left {
-            (rhs, lhs)
-        } else {
-            (lhs, rhs)
-        };
+        let (vec_v, sc_v) = if scalar_left { (rhs, lhs) } else { (lhs, rhs) };
         let out = if is_float {
             let mut a = Vec::new();
             if !pack_f64_1d(heap, vec_v, len, &mut a) {
@@ -661,10 +759,7 @@ mod tests {
         assert_eq!(ne[0].as_int(), -1);
         assert_eq!(ne[7].as_int(), 8);
 
-        let fa = alloc_array_f(
-            &mut heap,
-            vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0],
-        );
+        let fa = alloc_array_f(&mut heap, vec![2.0, 4.0, 6.0, 8.0, 10.0, 12.0, 14.0, 16.0]);
         let fb = alloc_array_f(&mut heap, vec![2.0; 8]);
         let div_meta = Value::from((8 | (3 << 16) | (1 << 24)) as i64); // div + float
         let quot = packed_vec_arith(&mut heap, &[fa, fb, div_meta]);
@@ -695,10 +790,7 @@ mod tests {
             0
         );
         let meta = Value::from((8 | (2 << 16)) as i64); // zip mul
-        let missing = packed_vec_arith(
-            &mut heap,
-            &[Value::from(0_i64), Value::from(0_i64), meta],
-        );
+        let missing = packed_vec_arith(&mut heap, &[Value::from(0_i64), Value::from(0_i64), meta]);
         let elems = aggregate_elements(&heap, missing).expect("zero-filled");
         assert_eq!(elems.len(), 8);
         assert!(elems.iter().all(|v| v.as_int() == 0));

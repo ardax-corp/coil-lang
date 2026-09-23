@@ -89,11 +89,7 @@ impl Compiler {
     }
 
     /// Record `#[derive]` constructor aliases from attribute expansion.
-    pub(crate) fn apply_expand_result(
-        &mut self,
-        module: &str,
-        expand: crate::attrs::ExpandResult,
-    ) {
+    pub(crate) fn apply_expand_result(&mut self, module: &str, expand: crate::attrs::ExpandResult) {
         self.messages.extend(expand.messages);
         for (k, v) in expand.decorated_class_ctors {
             let key = if module.is_empty() {
@@ -469,16 +465,11 @@ impl Compiler {
                         }
                         // Record form is a type error for static
                         // methods; still emit a CALL for recovery.
-                        let _ = self.emit_direct_fn_call(
-                            &mut bytecode,
-                            &fqn,
-                            parts.len() as u32,
-                        );
+                        let _ = self.emit_direct_fn_call(&mut bytecode, &fqn, parts.len() as u32);
                         return bytecode;
                     }
                 };
-                let arity =
-                    self.emit_call_args_with_rest(&fqn, arg_slice, &mut bytecode, false);
+                let arity = self.emit_call_args_with_rest(&fqn, arg_slice, &mut bytecode, false);
                 let _ = self.emit_direct_fn_call(&mut bytecode, &fqn, arity);
                 return bytecode;
             }
@@ -653,7 +644,6 @@ impl Compiler {
         bytecode
     }
 
-
     /// If `ast` folds to a scalar, emit it and return true.
     ///
     /// When `allow_mul_shl` is false, skip `x * 2^n` → `SHL` so trait/`Mul`
@@ -672,9 +662,7 @@ impl Compiler {
             let mut inner_bc = self.do_compile(inner);
             bytecode.append(&mut inner_bc);
             true
-        } else if let Some(bit) =
-            crate::const_fold::strength_reduce_bitops(ast, self.const_env())
-        {
+        } else if let Some(bit) = crate::const_fold::strength_reduce_bitops(ast, self.const_env()) {
             match bit {
                 crate::const_fold::StrengthBitop::Identity(inner) => {
                     let mut inner_bc = self.do_compile(inner);
@@ -687,7 +675,8 @@ impl Compiler {
                 }
             }
         } else if allow_mul_shl
-            && let Some((inner, shift)) = crate::const_fold::strength_mul_to_shl(ast, self.const_env())
+            && let Some((inner, shift)) =
+                crate::const_fold::strength_mul_to_shl(ast, self.const_env())
         {
             // Int SHL only for known int/byte operands; unknown types fall through to MUL / dict dispatch.
             use crate::typechecking::subst::apply_ty_prune;
@@ -714,9 +703,9 @@ impl Compiler {
             // Equivalent only for non-negative dividends (including `byte`).
             use crate::typechecking::subst::apply_ty_prune;
             use crate::typechecking::ty::{BYTE, INT};
-            let inner_ty = self.codegen_expr_ty(inner).map(|ty| {
-                apply_ty_prune(self.checker.subst(), &ty)
-            });
+            let inner_ty = self
+                .codegen_expr_ty(inner)
+                .map(|ty| apply_ty_prune(self.checker.subst(), &ty));
             let is_byte = matches!(inner_ty, Some(Ty::Con(ref n)) if n == BYTE);
             let is_int = matches!(inner_ty, Some(Ty::Con(ref n)) if n == INT);
             let safe = is_byte
@@ -730,7 +719,9 @@ impl Compiler {
             bytecode.push_const(shift as i32);
             bytecode.push(Byte::new(Instruction::SHR));
             true
-        } else if let Some((base, kind)) = crate::const_fold::strength_pow_int(ast, self.const_env()) {
+        } else if let Some((base, kind)) =
+            crate::const_fold::strength_pow_int(ast, self.const_env())
+        {
             use crate::typechecking::subst::apply_ty_prune;
             use crate::typechecking::ty::{BYTE, INT};
             let base_is_int_like = self.codegen_expr_ty(base).is_some_and(|ty| {
@@ -904,7 +895,8 @@ impl Compiler {
             Expression::QualifiedAccess { owner, member } => format!("{owner}::{member}"),
             _ => return None,
         };
-        if let Some((fa, is_rest, id)) = self.sidecar_overload(None, call_expr.0.start, call_expr.0.end)
+        if let Some((fa, is_rest, id)) =
+            self.sidecar_overload(None, call_expr.0.start, call_expr.0.end)
         {
             let keyed = overload_fn_key(&call_key, fa, is_rest, id);
             if self.functions.contains_key(&keyed) || self.fn_entry_labels.contains_key(&keyed) {
@@ -931,7 +923,8 @@ impl Compiler {
                 }
             }
         }
-        if !self.functions.contains_key(&call_key) && !self.fn_entry_labels.contains_key(&call_key) {
+        if !self.functions.contains_key(&call_key) && !self.fn_entry_labels.contains_key(&call_key)
+        {
             return None;
         }
         let qualified = self.current_function_qualified.as_deref().unwrap_or("");
@@ -1009,7 +1002,10 @@ impl Compiler {
         let Expression::Match { arms, .. } = match_expr.1.as_ref() else {
             return false;
         };
-        !arms.is_empty() && arms.iter().all(|arm| self.expr_is_tail_self_call(&arm.body))
+        !arms.is_empty()
+            && arms
+                .iter()
+                .all(|arm| self.expr_is_tail_self_call(&arm.body))
     }
 
     /// Whether an explicit `return Result::Ok/Err(…)` should skip the
@@ -1270,7 +1266,8 @@ impl Compiler {
             match op {
                 IlOp::Entry {
                     kind: EntryKind::TailCall,
-                    .. } => {
+                    ..
+                } => {
                     // Tail-call bodies leave dead fallthrough and rely on
                     // post-emit opts for arg order, unsafe to peel pre-opt.
                     return false;
@@ -1278,7 +1275,8 @@ impl Compiler {
                 IlOp::Entry {
                     kind: EntryKind::Call,
                     target,
-                    .. } => {
+                    ..
+                } => {
                     if *target == self_entry {
                         self_calls += 1;
                     }
@@ -1306,7 +1304,8 @@ impl Compiler {
                 }
             }
         }
-        self_calls >= 1 && self_calls <= 2
+        self_calls >= 1
+            && self_calls <= 2
             && !ops.iter().any(|op| {
                 matches!(
                     op,
@@ -1701,10 +1700,7 @@ impl Compiler {
                     return false;
                 };
                 bytecode.push_load(tmp);
-            } else if matches!(
-                byte.bytecode(),
-                Instruction::STORE | Instruction::StorePop
-            ) {
+            } else if matches!(byte.bytecode(), Instruction::STORE | Instruction::StorePop) {
                 // Must be remapped like LOAD: a verbatim copy writes the
                 // *callee's* slot number into the caller's frame. Only
                 // parameter slots have a caller temp; locals refuse the inline.
@@ -2074,9 +2070,7 @@ impl Compiler {
                 self.bytecode.append(&mut bytes);
                 let tmp = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(tmp);
-                argv.push(vec![
-                    Byte::new(Instruction::LOAD).with_load_store_slot(tmp),
-                ]);
+                argv.push(vec![Byte::new(Instruction::LOAD).with_load_store_slot(tmp)]);
             } else {
                 argv.push(plain.unwrap());
             }
@@ -2106,9 +2100,8 @@ impl Compiler {
                 self.bytecode.push(*byte);
             }
         }
-        self.bytecode.push(
-            Byte::new(Instruction::CALL).with_call_packed(argv.len() as u32, target_offset),
-        );
+        self.bytecode
+            .push(Byte::new(Instruction::CALL).with_call_packed(argv.len() as u32, target_offset));
         self.bytecode.bind_label(join);
         let result = self.alloc_temp_slot();
         self.bytecode.push_store_pop(result);
@@ -2156,9 +2149,10 @@ impl Compiler {
                 a: note(*a as usize, argc, args)?,
                 b: note(*b as usize, argc, args)?,
             }),
-            IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } | IlOp::Dup { .. } => {
-                Some(PeelRematOp::Copy(op.clone()))
-            }
+            IlOp::Const { .. }
+            | IlOp::ConstPool { .. }
+            | IlOp::String { .. }
+            | IlOp::Dup { .. } => Some(PeelRematOp::Copy(op.clone())),
             IlOp::Bin { op: bin, .. } if Self::peel_remat_bin_ok(*bin) => {
                 Some(PeelRematOp::Copy(op.clone()))
             }
@@ -2704,7 +2698,12 @@ impl Compiler {
                     let mapped = ensure_label(l.0, &mut self.bytecode);
                     self.bytecode.bind_join_label(mapped);
                 }
-                IlOp::Jump { kind, target, loc, hint } => {
+                IlOp::Jump {
+                    kind,
+                    target,
+                    loc,
+                    hint,
+                } => {
                     let mapped = ensure_label(target.0, &mut self.bytecode);
                     self.bytecode.push_op(IlOp::Jump {
                         kind: *kind,
@@ -3061,7 +3060,6 @@ impl Compiler {
         }
     }
 
-
     /// Bytecode offset WHERE the prologue (CALL+JMP+HALT)
     /// ENDS and user-program code BEGINS. Used by the runtime
     /// pipeline to patch the prologue's JMP operand so that
@@ -3134,10 +3132,7 @@ impl Compiler {
 
     /// Install `inner` on top of any enclosing arm's bindings (inner names
     /// shadow). Returns the previous map so the caller can restore it.
-    fn push_match_bindings(
-        &mut self,
-        inner: HashMap<String, u32>,
-    ) -> Option<HashMap<String, u32>> {
+    fn push_match_bindings(&mut self, inner: HashMap<String, u32>) -> Option<HashMap<String, u32>> {
         let saved = self.context.match_bindings.take();
         let mut merged = saved.clone().unwrap_or_default();
         merged.extend(inner);
@@ -3227,9 +3222,9 @@ impl Compiler {
             Expression::Identifier(name) => self.stack_array_info(name).is_some(),
             Expression::Call { name, args } => {
                 self.expr_mentions_stack_array(name)
-                    || args
-                        .as_ref()
-                        .is_some_and(|items| items.iter().any(|a| self.expr_mentions_stack_array(a)))
+                    || args.as_ref().is_some_and(|items| {
+                        items.iter().any(|a| self.expr_mentions_stack_array(a))
+                    })
             }
             Expression::Index(arr, idx) => {
                 self.expr_mentions_stack_array(arr)
@@ -3314,7 +3309,11 @@ impl Compiler {
         for i in 1..n {
             let pad = format!("__arrpad_{name}_{i}");
             let slot = self.context.variables.intern(pad) as u32;
-            debug_assert_eq!(slot, base + i as u32, "stack array slots must be consecutive");
+            debug_assert_eq!(
+                slot,
+                base + i as u32,
+                "stack array slots must be consecutive"
+            );
         }
         self.context
             .stack_array_locals
@@ -3331,13 +3330,7 @@ impl Compiler {
     }
 
     /// Q1: first whole-object escape boxes once; later edges reuse that identity.
-    fn emit_escape_stack_array(
-        &mut self,
-        bytecode: &mut CodeBuf,
-        name: &str,
-        base: u32,
-        n: usize,
-    ) {
+    fn emit_escape_stack_array(&mut self, bytecode: &mut CodeBuf, name: &str, base: u32, n: usize) {
         if let Some(&slot) = self.context.stack_array_box.get(name) {
             bytecode.push_load(slot);
             return;
@@ -3563,7 +3556,9 @@ impl Compiler {
             bytecode.push_const(n as i32);
             bytecode.push(Byte::new(Instruction::GEQ));
             bb.emit_jump_to(oob, BbJumpKind::JumpIfTrue, bytecode.il_mut());
-            self.emit_stack_array_in_range_store(bytecode, &mut bb, join, base, n, idx_slot, val_slot);
+            self.emit_stack_array_in_range_store(
+                bytecode, &mut bb, join, base, n, idx_slot, val_slot,
+            );
             bb.emit_jump_to(join, BbJumpKind::Unconditional, bytecode.il_mut());
             bb.bind_label(oob, bytecode.il_mut());
             self.emit_box_stack_array(bytecode, base, n);
@@ -3572,7 +3567,9 @@ impl Compiler {
             bytecode.push(Byte::new(Instruction::StoreIndex));
             bytecode.push_pop();
         } else {
-            self.emit_stack_array_in_range_store(bytecode, &mut bb, join, base, n, idx_slot, val_slot);
+            self.emit_stack_array_in_range_store(
+                bytecode, &mut bb, join, base, n, idx_slot, val_slot,
+            );
         }
         bb.bind_label(join, bytecode.il_mut());
         if leave_value {
@@ -3873,11 +3870,7 @@ impl Compiler {
         // Binary staging (`at + len(n)`) STORE-seeks past live prior args and
         // buries them under the high-water mark. Stage every arg when any may
         // clobber so CALL pops a clean [a0, a1, …] reload.
-        if !pack_rest
-            && fixed
-                .iter()
-                .any(|a| self.expr_may_clobber_operand_stack(a))
-        {
+        if !pack_rest && fixed.iter().any(|a| self.expr_may_clobber_operand_stack(a)) {
             let n = self.emit_call_args_stage_all(&fixed, bytecode, box_generic);
             self.park_args_above_stack_array_boxes(bytecode, n);
             return n;
@@ -4101,9 +4094,9 @@ impl Compiler {
                 use parser::ast::EnumConstructPayload;
                 match fields {
                     EnumConstructPayload::Unit => false,
-                    EnumConstructPayload::Tuple(args) => args
-                        .iter()
-                        .any(|a| self.expr_may_clobber_operand_stack(a)),
+                    EnumConstructPayload::Tuple(args) => {
+                        args.iter().any(|a| self.expr_may_clobber_operand_stack(a))
+                    }
                     EnumConstructPayload::Record(parts) => parts
                         .iter()
                         .any(|p| self.expr_may_clobber_operand_stack(&p.value)),
@@ -4240,7 +4233,8 @@ impl Compiler {
         let Some(fqn) = self.direct_call_fqn(name) else {
             return false;
         };
-        if !self.functions.contains_key(&fqn) && !self.functions.contains_key(strip_overload_key(&fqn))
+        if !self.functions.contains_key(&fqn)
+            && !self.functions.contains_key(strip_overload_key(&fqn))
         {
             // Method / unresolved, keep staging.
             return false;
@@ -4494,8 +4488,7 @@ impl Compiler {
         index: &Output<'_>,
         n: usize,
     ) -> bool {
-        self.node_in_bounds_index(index_node)
-            || Self::stack_array_mod_index_proven(index, n)
+        self.node_in_bounds_index(index_node) || Self::stack_array_mod_index_proven(index, n)
     }
 
     fn stack_array_computed_info(&self, arr: &Output<'_>) -> Option<(u32, usize)> {
@@ -4656,8 +4649,7 @@ impl Compiler {
         let type_id = self.checker.class_type_id(class_name);
         let n = nfields as u32;
         bytecode.push(
-            Byte::new(Instruction::InitTyped)
-                .with_operand_u32(common::pack_init_typed(type_id, n)),
+            Byte::new(Instruction::InitTyped).with_operand_u32(common::pack_init_typed(type_id, n)),
         );
         let tmp_inst = self.alloc_temp_slot();
         bytecode.push_store_pop(tmp_inst);
@@ -4687,14 +4679,12 @@ impl Compiler {
         let slot = self.alloc_temp_slot();
         bytecode.push(Byte::new(Instruction::DUPLICATE));
         bytecode.push_store_pop(slot);
-        self.context.unboxed_class_box.insert(name.to_string(), slot);
+        self.context
+            .unboxed_class_box
+            .insert(name.to_string(), slot);
     }
 
-    fn unboxed_class_field_slot(
-        &self,
-        receiver: &Output<'_>,
-        field: &str,
-    ) -> Option<u32> {
+    fn unboxed_class_field_slot(&self, receiver: &Output<'_>, field: &str) -> Option<u32> {
         let Expression::Identifier(name) = unwrap_expr_output(receiver).1.as_ref() else {
             return None;
         };
@@ -4729,10 +4719,9 @@ impl Compiler {
         let payload = self.alloc_binding_slot(name);
         let tag_name = format!("__unbox_tag_{name}");
         let tag = self.context.variables.intern(tag_name) as u32;
-        self.context.unboxed_enum_locals.insert(
-            name.to_string(),
-            (payload, tag, enum_name.to_string()),
-        );
+        self.context
+            .unboxed_enum_locals
+            .insert(name.to_string(), (payload, tag, enum_name.to_string()));
         (payload, tag)
     }
 
@@ -4743,10 +4732,9 @@ impl Compiler {
             let slot = self.context.variables.intern(pad) as u32;
             debug_assert_eq!(slot, base + i as u32);
         }
-        self.context.unboxed_class_locals.insert(
-            name.to_string(),
-            (base, n, class_name.to_string()),
-        );
+        self.context
+            .unboxed_class_locals
+            .insert(name.to_string(), (base, n, class_name.to_string()));
         base
     }
 
@@ -4985,9 +4973,8 @@ impl Compiler {
                             | Expression::Identifier("int" | "byte" | "float")
                     )
                 });
-                numeric.then(|| {
-                    crate::typechecking::return_layout::range_kind(inclusive).to_string()
-                })
+                numeric
+                    .then(|| crate::typechecking::return_layout::range_kind(inclusive).to_string())
             }
             _ => None,
         }
@@ -5002,8 +4989,7 @@ impl Compiler {
     ) {
         let type_id = crate::typechecking::return_layout::range_heap_type_id(inclusive);
         bytecode.push(
-            Byte::new(Instruction::InitTyped)
-                .with_operand_u32(common::pack_init_typed(type_id, 2)),
+            Byte::new(Instruction::InitTyped).with_operand_u32(common::pack_init_typed(type_id, 2)),
         );
         let tmp_inst = self.alloc_temp_slot();
         bytecode.push_store_pop(tmp_inst);
@@ -5083,11 +5069,8 @@ impl Compiler {
                 .class_fields(name)
                 .map(|f| f.len())
                 .unwrap_or(0);
-            return crate::escape::ClassEscape::for_named_new(
-                self.checker.class_has_drop(name),
-                n,
-            )
-            .stack_allocatable();
+            return crate::escape::ClassEscape::for_named_new(self.checker.class_has_drop(name), n)
+                .stack_allocatable();
         }
         crate::typechecking::ty::is_option_ty(ty)
             || crate::typechecking::ty::is_result_ty(ty)
@@ -5389,7 +5372,6 @@ impl Compiler {
         }
     }
 
-
     /// Lower an operator selected by HM inference to the uniform dictionary
     /// calling convention: two boxed values, the hidden trailing dictionary,
     /// then its method entry loaded from the dictionary tuple.
@@ -5516,7 +5498,11 @@ impl Compiler {
         let info = self_id
             .and_then(|id| self.checker.aggregate_arith_at(id))
             .cloned()
-            .or_else(|| self.checker.aggregate_arith_span(span_start, span_end).cloned())
+            .or_else(|| {
+                self.checker
+                    .aggregate_arith_span(span_start, span_end)
+                    .cloned()
+            })
             .or_else(|| self.recover_aggregate_arith(lhs, rhs, fallback_op));
         let Some(info) = info else {
             return false;
@@ -6599,11 +6585,7 @@ impl Compiler {
         let mut operand = arity & 0xFFFF;
         if variadic {
             let args: Vec<_> = tuple_elements.iter().collect();
-            if let Some(tags) = self.resolve_call_ffi_tags(
-                None,
-                (span.start, span.end),
-                &args,
-            ) {
+            if let Some(tags) = self.resolve_call_ffi_tags(None, (span.start, span.end), &args) {
                 for &(tag, aux) in &tags {
                     emit_ffi_type_const(&mut self.bytecode, tag, aux);
                 }
@@ -6676,10 +6658,7 @@ impl Compiler {
 
     /// Walk call sites in `node`. `pred(callee_name, is_value_method)`,     /// `is_value_method` is true for `recv.method(...)` on an identifier/
     /// variable receiver.
-    fn walk_expr_calls(
-        node: &Output<'_>,
-        pred: &mut dyn FnMut(&str, bool) -> bool,
-    ) -> bool {
+    fn walk_expr_calls(node: &Output<'_>, pred: &mut dyn FnMut(&str, bool) -> bool) -> bool {
         if let Expression::Call { name, args } = node.1.as_ref() {
             match name.1.as_ref() {
                 Expression::Access(recv, method)
@@ -6711,9 +6690,7 @@ impl Compiler {
         match node.1.as_ref() {
             Expression::Block(children)
             | Expression::Fragment(children)
-            | Expression::If(children) => {
-                children.iter().any(|c| Self::walk_expr_calls(c, pred))
-            }
+            | Expression::If(children) => children.iter().any(|c| Self::walk_expr_calls(c, pred)),
             Expression::Branch(cond, body) => {
                 cond.as_ref()
                     .is_some_and(|c| Self::walk_expr_calls(c, pred))
@@ -6755,18 +6732,16 @@ impl Compiler {
                     parser::ast::EnumConstructPayload::Tuple(args) => {
                         args.iter().any(|a| Self::walk_expr_calls(a, pred))
                     }
-                    parser::ast::EnumConstructPayload::Record(parts) => parts
-                        .iter()
-                        .any(|p| Self::walk_expr_calls(&p.value, pred)),
+                    parser::ast::EnumConstructPayload::Record(parts) => {
+                        parts.iter().any(|p| Self::walk_expr_calls(&p.value, pred))
+                    }
                 }
-            },
+            }
             Expression::List(items)
             | Expression::Tuple(items)
             | Expression::Array(items)
             | Expression::Declare(items)
-            | Expression::Invoke(items) => {
-                items.iter().any(|i| Self::walk_expr_calls(i, pred))
-            }
+            | Expression::Invoke(items) => items.iter().any(|i| Self::walk_expr_calls(i, pred)),
             Expression::Match { scrutinee, arms } => {
                 Self::walk_expr_calls(scrutinee, pred)
                     || arms
@@ -6796,9 +6771,9 @@ impl Compiler {
             }
             Expression::Instantiate(class, args) => {
                 Self::walk_expr_calls(class, pred)
-                    || args.as_ref().is_some_and(|a| {
-                        a.iter().any(|arg| Self::walk_expr_calls(arg, pred))
-                    })
+                    || args
+                        .as_ref()
+                        .is_some_and(|a| a.iter().any(|arg| Self::walk_expr_calls(arg, pred)))
             }
             _ => false,
         }
@@ -6832,9 +6807,10 @@ impl Compiler {
                     if *name == "main" || deferred.contains(*name) {
                         continue;
                     }
-                    if body.as_ref().is_some_and(|b| {
-                        Self::function_body_calls_free_fn(b, &deferred)
-                    }) {
+                    if body
+                        .as_ref()
+                        .is_some_and(|b| Self::function_body_calls_free_fn(b, &deferred))
+                    {
                         deferred.insert(name.to_string());
                         grew = true;
                     }
@@ -6847,7 +6823,9 @@ impl Compiler {
         deferred
     }
 
-    fn collect_user_impl_method_names(children: &[Output<'_>]) -> std::collections::HashSet<String> {
+    fn collect_user_impl_method_names(
+        children: &[Output<'_>],
+    ) -> std::collections::HashSet<String> {
         use std::collections::HashSet;
         let mut names = HashSet::new();
         for child in children {
@@ -6868,7 +6846,9 @@ impl Compiler {
         names
     }
 
-    fn top_level_free_fn_positions(children: &[Output<'_>]) -> std::collections::HashMap<String, usize> {
+    fn top_level_free_fn_positions(
+        children: &[Output<'_>],
+    ) -> std::collections::HashMap<String, usize> {
         use std::collections::HashMap;
         let mut pos = HashMap::new();
         for (idx, child) in children.iter().enumerate() {
@@ -6923,12 +6903,12 @@ impl Compiler {
                     iterable,
                     body,
                     identifier,
-            pattern: _,
+                    pattern: _,
                 } => {
                     body_calls_later_fn(iterable, impl_idx, free_fn_pos)
-                        || identifier.as_ref().is_some_and(|id| {
-                            body_calls_later_fn(id, impl_idx, free_fn_pos)
-                        })
+                        || identifier
+                            .as_ref()
+                            .is_some_and(|id| body_calls_later_fn(id, impl_idx, free_fn_pos))
                         || body_calls_later_fn(body, impl_idx, free_fn_pos)
                 }
                 Expression::Expr(inner)
@@ -6938,14 +6918,12 @@ impl Compiler {
                 | Expression::Return(inner)
                 | Expression::Raise(inner)
                 | Expression::Yield(inner)
-                | Expression::Try(inner) => {
-                    body_calls_later_fn(inner, impl_idx, free_fn_pos)
-                }
+                | Expression::Try(inner) => body_calls_later_fn(inner, impl_idx, free_fn_pos),
                 Expression::Match { scrutinee, arms } => {
                     body_calls_later_fn(scrutinee, impl_idx, free_fn_pos)
-                        || arms.iter().any(|arm| {
-                            body_calls_later_fn(&arm.body, impl_idx, free_fn_pos)
-                        })
+                        || arms
+                            .iter()
+                            .any(|arm| body_calls_later_fn(&arm.body, impl_idx, free_fn_pos))
                 }
                 Expression::IfLet {
                     scrutinee,
@@ -7317,7 +7295,8 @@ impl Compiler {
         lookup: &[crate::typechecking::Ty],
     ) -> bool {
         let (fqns, diag_range) = {
-            let Some(instance) = self.checker.generics().find_instance_relaxed(class, lookup) else {
+            let Some(instance) = self.checker.generics().find_instance_relaxed(class, lookup)
+            else {
                 return false;
             };
             let Some(class_def) = self.checker.generics().typeclass(&instance.class) else {
@@ -7332,7 +7311,9 @@ impl Compiler {
                     self.checker
                         .generics()
                         .find_instance_relaxed(owner_class, lookup)
-                        .and_then(|super_inst| super_inst.method_fqns.get(&method_def.name).cloned())
+                        .and_then(|super_inst| {
+                            super_inst.method_fqns.get(&method_def.name).cloned()
+                        })
                 };
                 let Some(name) = fqn else {
                     return false;
@@ -8036,10 +8017,7 @@ impl Compiler {
                 if matches!(op, ParBinOp::Sub) && arms != 2 {
                     return None;
                 }
-                Some((
-                    ParCombinePlan::Bin { ins, n: arms },
-                    (0..arms).collect(),
-                ))
+                Some((ParCombinePlan::Bin { ins, n: arms }, (0..arms).collect()))
             }
             ParCombine::SelfCall => {
                 if arms != site.param_count {
@@ -8163,18 +8141,16 @@ impl Compiler {
             // so a shadowing `for x in` does not store into an outer `x`.
             self.alloc_binding_slot(&site.index);
         }
-        let (Some(index_slot), Some(acc_slot)) = (
-            self.lookup_slot(&site.index),
-            self.lookup_slot(&site.acc),
-        ) else {
+        let (Some(index_slot), Some(acc_slot)) =
+            (self.lookup_slot(&site.index), self.lookup_slot(&site.acc))
+        else {
             return false;
         };
         let (Some(spawn_id), Some(join_id)) = (
             self.native_id("thread_spawn_shared")
                 .or_else(|| self.native_id("thread_spawn")),
             self.native_id("thread_join"),
-        )
-        else {
+        ) else {
             return false;
         };
         let (Ok(begin), Ok(mid), Ok(end)) = (
@@ -8201,7 +8177,11 @@ impl Compiler {
 
         let mut bb = BlockBuilder::new();
         let after_worker = bb.fresh_label(self.bytecode.il_mut());
-        bb.emit_jump_to(after_worker, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        bb.emit_jump_to(
+            after_worker,
+            BbJumpKind::Unconditional,
+            self.bytecode.il_mut(),
+        );
         let worker = self.emit_par_loop_worker(&site, body);
         bb.bind_label(after_worker, self.bytecode.il_mut());
 
@@ -8209,9 +8189,8 @@ impl Compiler {
         self.bytecode.push_const(0);
         self.bytecode
             .push(Byte::new(Instruction::CodePtr).with_operand_u32(worker));
-        self.bytecode.push(
-            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, 3, false)),
-        );
+        self.bytecode
+            .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, 3, false)));
         let fn_tmp = self.alloc_temp_slot();
         self.bytecode.push_store_pop(fn_tmp);
 
@@ -8713,9 +8692,7 @@ impl Compiler {
             // Shared thunk: T is unknown, so HostInvoke stays Boxed.
             // Heap-niche pop/remove HostInvoke at the call site; int /
             // boxed Vec keep this CALL + layout-0 body.
-            compiler
-                .bytecode
-                .push_host_invoke(slots.len() as u32);
+            compiler.bytecode.push_host_invoke(slots.len() as u32);
             compiler.bytecode.push_return();
         };
 
@@ -8730,7 +8707,12 @@ impl Compiler {
         }
 
         // static fn with_capacity(n) -> Vec<T>
-        emit_host(self, format!("{owner}::with_capacity"), "vec_with_capacity", &[0]);
+        emit_host(
+            self,
+            format!("{owner}::with_capacity"),
+            "vec_with_capacity",
+            &[0],
+        );
 
         // static fn from(arr) -> Vec<T>
         emit_host(self, format!("{owner}::from"), "vec_from_array", &[0]);
@@ -8742,8 +8724,7 @@ impl Compiler {
                 self.bind_function_entry(fqn);
                 self.bytecode.push_load(0);
                 self.bytecode.push_load(1);
-                self.bytecode
-                    .push(Byte::new(Instruction::ArrayPush));
+                self.bytecode.push(Byte::new(Instruction::ArrayPush));
                 self.bytecode.push_pop();
                 self.bytecode.push_const(0);
                 self.bytecode.push_return();
@@ -8756,8 +8737,7 @@ impl Compiler {
             if !self.functions.contains_key(&fqn) {
                 self.bind_function_entry(fqn);
                 self.bytecode.push_load(0);
-                self.bytecode
-                    .push(Byte::new(Instruction::ArrayLen));
+                self.bytecode.push(Byte::new(Instruction::ArrayLen));
                 self.bytecode.push_return();
             }
         }
@@ -9042,13 +9022,7 @@ impl Compiler {
     /// Trait methods live under `Class__Type__method` FQNs that `env` lookup
     /// misses. Pin two-slot `RETURN` from the instance assoc types so for-in
     /// `into_iter` / `next` keep Range / `Option<int>` pairs (C2b rung 2).
-    fn pin_trait_method_pair_return(
-        &self,
-        class: &str,
-        method: &str,
-        arg_tys: &[Ty],
-        fqn: &str,
-    ) {
+    fn pin_trait_method_pair_return(&self, class: &str, method: &str, arg_tys: &[Ty], fqn: &str) {
         let Some(instance) = self
             .checker
             .generics()
@@ -9172,13 +9146,13 @@ impl Compiler {
             }
         }
         match cur.1.as_ref() {
-            Expression::Identifier(n) => self
-                .unboxed_enum_kind(n)
-                .map(str::to_string)
-                .or_else(|| {
+            Expression::Identifier(n) => {
+                self.unboxed_enum_kind(n).map(str::to_string).or_else(|| {
                     self.unboxed_enum_info(*n)?;
-                    self.sidecar_ty_of(cur).and_then(|ty| extract_enum_name(&ty))
-                }),
+                    self.sidecar_ty_of(cur)
+                        .and_then(|ty| extract_enum_name(&ty))
+                })
+            }
             _ => None,
         }
     }
@@ -9249,7 +9223,9 @@ impl Compiler {
         }
     }
 
-    fn expr_arity2_tuple_items<'a>(expr: &'a Output<'a>) -> Option<(&'a Output<'a>, &'a Output<'a>)> {
+    fn expr_arity2_tuple_items<'a>(
+        expr: &'a Output<'a>,
+    ) -> Option<(&'a Output<'a>, &'a Output<'a>)> {
         let mut cur = expr;
         loop {
             match cur.1.as_ref() {
@@ -9284,7 +9260,12 @@ impl Compiler {
     /// tuple literal, or a pass-through direct `CALL` of another two-word
     /// function returning the same kind, and falls back to ordinary
     /// (boxed) compilation plus an unbox for anything else.
-    fn emit_two_word_return_value(&mut self, bytecode: &mut CodeBuf, expr: &Output, enum_name: &str) {
+    fn emit_two_word_return_value(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        expr: &Output,
+        enum_name: &str,
+    ) {
         if crate::typechecking::return_layout::is_range_kind(enum_name) {
             self.emit_range_pair_from_expr(bytecode, expr);
             return;
@@ -9476,9 +9457,7 @@ impl Compiler {
         let tag_slot = self.alloc_temp_slot();
         let payload_slot = self.alloc_temp_slot();
         self.expr_depth -= 2;
-        if let Some(inc) =
-            crate::typechecking::return_layout::range_kind_inclusive(enum_name)
-        {
+        if let Some(inc) = crate::typechecking::return_layout::range_kind_inclusive(enum_name) {
             bytecode.push_store_pop(tag_slot);
             bytecode.push_store_pop(payload_slot);
             self.emit_box_range_slots(bytecode, payload_slot, tag_slot, inc);
@@ -9573,7 +9552,8 @@ impl Compiler {
                 fields,
             } => {
                 let wrap_ok = common::is_builtin_result_enum(enum_name) && *variant_name == "Ok";
-                let wrap_some = common::is_builtin_option_enum(enum_name) && *variant_name == "Some";
+                let wrap_some =
+                    common::is_builtin_option_enum(enum_name) && *variant_name == "Some";
                 if !wrap_ok && !wrap_some {
                     return None;
                 }
@@ -9656,13 +9636,13 @@ impl Compiler {
         // Own-module DefId — not `local_defs` of the last typechecked file.
         let name = qualified.or(table_key)?;
         if let Some((module, bare)) = name.rsplit_once("::") {
-            self.checker.interned_def(module, bare).and_then(|id| {
-                self.checker.fn_return_ty(&self.fqn_of_def(id))
-            })
+            self.checker
+                .interned_def(module, bare)
+                .and_then(|id| self.checker.fn_return_ty(&self.fqn_of_def(id)))
         } else {
-            self.checker.def_id_of(name).and_then(|id| {
-                self.checker.fn_return_ty(&self.fqn_of_def(id))
-            })
+            self.checker
+                .def_id_of(name)
+                .and_then(|id| self.checker.fn_return_ty(&self.fqn_of_def(id)))
         }
     }
 
@@ -10090,10 +10070,7 @@ impl Compiler {
         Some(Self::apply_ty_var_map(current, &map))
     }
 
-    fn apply_ty_var_map(
-        ty: &Ty,
-        map: &HashMap<crate::typechecking::ty::TyVarId, Ty>,
-    ) -> Ty {
+    fn apply_ty_var_map(ty: &Ty, map: &HashMap<crate::typechecking::ty::TyVarId, Ty>) -> Ty {
         match ty {
             Ty::Var(v) => map.get(v).cloned().unwrap_or_else(|| ty.clone()),
             Ty::Fun(a, r) => Ty::Fun(
@@ -10102,11 +10079,16 @@ impl Compiler {
             ),
             Ty::App(h, args) => Ty::App(
                 Box::new(Self::apply_ty_var_map(h, map)),
-                args.iter().map(|a| Self::apply_ty_var_map(a, map)).collect(),
+                args.iter()
+                    .map(|a| Self::apply_ty_var_map(a, map))
+                    .collect(),
             ),
-            Ty::Tuple(items) => {
-                Ty::Tuple(items.iter().map(|t| Self::apply_ty_var_map(t, map)).collect())
-            }
+            Ty::Tuple(items) => Ty::Tuple(
+                items
+                    .iter()
+                    .map(|t| Self::apply_ty_var_map(t, map))
+                    .collect(),
+            ),
             Ty::Array { element, length } => Ty::Array {
                 element: Box::new(Self::apply_ty_var_map(element, map)),
                 length: length.clone(),
@@ -10190,8 +10172,7 @@ impl Compiler {
             let prev_fn_table_key = self.current_function_table_key.take();
             self.context.variables = Interner::default();
             self.compiling_result_mode = self.checker.fn_is_result_mode(source_name);
-            self.compiling_result_ok_is_result =
-                self.checker.fn_result_ok_is_result(source_name);
+            self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(source_name);
             self.compiling_mono_clone = true;
             self.current_function_qualified = Some(qualified.to_string());
             self.current_function_table_key = Some(qualified.to_string());
@@ -10245,10 +10226,7 @@ impl Compiler {
         if let Expression::Fragment(children) = args.1.as_ref() {
             for child in children {
                 if let Expression::Argument {
-                    ty,
-                    name,
-                    is_rest,
-                    ..
+                    ty, name, is_rest, ..
                 } = child.1.as_ref()
                     && let Some(ty) = ty
                     && let Expression::Type(tp_name) | Expression::Identifier(tp_name) =
@@ -10477,10 +10455,7 @@ impl Compiler {
     /// past a live operand). Safe to leave the array under the index on the
     /// shared locals/operand buffer; call/inline index exprs are not.
     fn index_keeps_array_on_stack_safe(idx: &Expression<'_>) -> bool {
-        matches!(
-            idx,
-            Expression::Identifier(_) | Expression::Integer(_)
-        )
+        matches!(idx, Expression::Identifier(_) | Expression::Integer(_))
     }
 
     /// Synthesize the packed rest-array type for a call's trailing args
@@ -10673,7 +10648,8 @@ impl Compiler {
         let arr_slot = self.alloc_temp_slot();
         let idx_slot = self.alloc_temp_slot();
         if !array_already_on_stack {
-            let mut iter_bc = self.do_compile(iterable.expect("iterable required when not on stack"));
+            let mut iter_bc =
+                self.do_compile(iterable.expect("iterable required when not on stack"));
             self.bytecode.append(&mut iter_bc);
         }
         self.bytecode.push_store_pop(arr_slot);
@@ -10830,7 +10806,8 @@ impl Compiler {
                     }
                     let binding_slot = self.alloc_binding_slot(bind.name);
                     let _ = self.next_emit_id();
-                    if let Some(ConstValue::Int(s)) = crate::const_fold::eval_expr(start, self.const_env())
+                    if let Some(ConstValue::Int(s)) =
+                        crate::const_fold::eval_expr(start, self.const_env())
                     {
                         for k in 0..trips {
                             let val = s + k as i64;
@@ -10903,8 +10880,8 @@ impl Compiler {
         if bind.consume_id {
             let _ = self.next_emit_id();
         }
-        let alias_iv = bind.pattern.is_none()
-            && !crate::const_fold::body_assigns_ident(body, bind.name);
+        let alias_iv =
+            bind.pattern.is_none() && !crate::const_fold::body_assigns_ident(body, bind.name);
         let binding_slot = self.alloc_binding_slot(bind.name);
         if alias_iv {
             // `x` is the IV (while-shaped). A copy DestProp-kills the increment.
@@ -11058,22 +11035,12 @@ impl Compiler {
                 self.emit_for_in_tuple_on_stack(body, bind, *arity);
                 return;
             }
-            Some(ForInCounted::Range {
-                inclusive,
-                float,
-            }) => {
+            Some(ForInCounted::Range { inclusive, float }) => {
                 let cur_slot = self.alloc_temp_slot();
                 let end_slot = self.alloc_temp_slot();
                 self.bytecode.push_store_pop(end_slot);
                 self.bytecode.push_store_pop(cur_slot);
-                self.emit_for_in_range_latch(
-                    body,
-                    bind,
-                    cur_slot,
-                    end_slot,
-                    *inclusive,
-                    *float,
-                );
+                self.emit_for_in_range_latch(body, bind, cur_slot, end_slot, *inclusive, *float);
                 return;
             }
             Some(ForInCounted::Dict) => {
@@ -11098,7 +11065,8 @@ impl Compiler {
         // even if a prior one-word cache landed first.
         if let Some(item) = item_ty {
             let opt = crate::typechecking::ty::option_ty(item.clone());
-            let kind = crate::typechecking::return_layout::two_word_return_enum(&self.checker, &opt);
+            let kind =
+                crate::typechecking::return_layout::two_word_return_enum(&self.checker, &opt);
             self.pin_two_word_return_kind(next_fqn, kind);
         }
         let two_slot_next = self.two_word_return_kind(next_fqn).is_some();
@@ -11125,11 +11093,7 @@ impl Compiler {
 
         if niche_next {
             Self::push_niche_eq_zero(&mut self.bytecode);
-            bb.emit_jump_to(
-                exit_label,
-                BbJumpKind::JumpIfTrue,
-                self.bytecode.il_mut(),
-            );
+            bb.emit_jump_to(exit_label, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
         } else if two_slot_next {
             // Q8/B3: CALL leaves `[payload, tag]`. JMPF on the tag (None = 0)
             // — do not emit `EQ 0; JMPT` (instcombine inverts that to
@@ -11835,6 +11799,15 @@ impl Compiler {
             return;
         }
 
+        {
+            let mut tmp = CodeBuf::new();
+            if self.try_emit_matrix_op(&mut tmp, self_id, span_start, span_end, target, Some(rhs)) {
+                bytecode.append(&mut tmp);
+                self.emit_write_lvalue(bytecode, target, false);
+                return;
+            }
+        }
+
         let agg_op = match op {
             parser::ast::AssignOp::Add => Some(crate::typechecking::AggregateOp::Add),
             parser::ast::AssignOp::Sub => Some(crate::typechecking::AggregateOp::Sub),
@@ -12216,11 +12189,9 @@ impl Compiler {
                 .find(|(n, _)| n == field)
                 .map(|(_, idx)| *idx as u32);
         }
-        self.checker.class_fields(name).and_then(|fs| {
-            fs.iter()
-                .position(|(n, _)| n == field)
-                .map(|i| i as u32)
-        })
+        self.checker
+            .class_fields(name)
+            .and_then(|fs| fs.iter().position(|(n, _)| n == field).map(|i| i as u32))
     }
 
     fn class_field_slot(&self, receiver: &Output<'_>, field: &str) -> Option<u32> {
@@ -12270,9 +12241,7 @@ impl Compiler {
 
     fn is_option_construct(expr: &Output) -> bool {
         match expr.1.as_ref() {
-            Expression::Construct { enum_name, .. } => {
-                common::is_builtin_option_enum(enum_name)
-            }
+            Expression::Construct { enum_name, .. } => common::is_builtin_option_enum(enum_name),
             Expression::Group(inner) | Expression::Expr(inner) => Self::is_option_construct(inner),
             _ => false,
         }
@@ -12280,9 +12249,7 @@ impl Compiler {
 
     fn is_result_construct(expr: &Output) -> bool {
         match expr.1.as_ref() {
-            Expression::Construct { enum_name, .. } => {
-                common::is_builtin_result_enum(enum_name)
-            }
+            Expression::Construct { enum_name, .. } => common::is_builtin_result_enum(enum_name),
             Expression::Group(inner) | Expression::Expr(inner) => Self::is_result_construct(inner),
             _ => false,
         }
@@ -12293,7 +12260,7 @@ impl Compiler {
     /// `Ok` is the aligned pointer; `Err` is `pointer | 1`. Mixed immediates
     /// (`Result<int, _>`, `Result<_, int>`, `Result<int, int>`) stay `ObjEnum`.
     fn ty_is_unit(ty: &Ty) -> bool {
-        use crate::typechecking::ty::{strip_readonly, UNIT};
+        use crate::typechecking::ty::{UNIT, strip_readonly};
         matches!(strip_readonly(ty), Ty::Con(name) if name == UNIT)
     }
 
@@ -12360,11 +12327,7 @@ impl Compiler {
             .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
     }
 
-    fn should_niche_result_construct(
-        &self,
-        enum_name: &str,
-        ast: &Output<'_>,
-    ) -> bool {
+    fn should_niche_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
         common::is_builtin_result_enum(enum_name)
             && !self.force_heap_result
             && !self
@@ -12424,12 +12387,9 @@ impl Compiler {
             Ty::List(inner) => Self::ty_is_closed(inner),
             Ty::Tuple(items) => items.iter().all(Self::ty_is_closed),
             Ty::Record { fields } => fields.iter().all(|(_, field)| Self::ty_is_closed(field)),
-            Ty::Sum { variants, .. } => variants.iter().all(|(_, payload)| {
-                payload
-                    .field_types()
-                    .into_iter()
-                    .all(Self::ty_is_closed)
-            }),
+            Ty::Sum { variants, .. } => variants
+                .iter()
+                .all(|(_, payload)| payload.field_types().into_iter().all(Self::ty_is_closed)),
             _ => false,
         }
     }
@@ -12443,12 +12403,9 @@ impl Compiler {
             Ty::Tuple(items) => items.iter().all(Self::ty_is_closed),
             Ty::Record { fields } => fields.iter().all(|(_, field)| Self::ty_is_closed(field)),
             Ty::Array { element, .. } => Self::ty_is_closed(element),
-            Ty::Sum { variants, .. } => variants.iter().all(|(_, payload)| {
-                payload
-                    .field_types()
-                    .into_iter()
-                    .all(Self::ty_is_closed)
-            }),
+            Ty::Sum { variants, .. } => variants
+                .iter()
+                .all(|(_, payload)| payload.field_types().into_iter().all(Self::ty_is_closed)),
             Ty::Con(_) | Ty::Never => true,
             Ty::Readonly(_) => unreachable!("stripped"),
         }
@@ -12588,7 +12545,11 @@ impl Compiler {
         let Some(info) = self_id
             .and_then(|id| self.checker.linear_algebra_at(id))
             .cloned()
-            .or_else(|| self.checker.linear_algebra_span(span_start, span_end).cloned())
+            .or_else(|| {
+                self.checker
+                    .linear_algebra_span(span_start, span_end)
+                    .cloned()
+            })
         else {
             return false;
         };
@@ -12611,6 +12572,146 @@ impl Compiler {
         }
     }
 
+    fn push_matrix_slot(bytecode: &mut CodeBuf, slot: u32, row: usize, col: usize, scalar: bool) {
+        bytecode.push_load(slot);
+        if !scalar {
+            bytecode.push_const(row as i32);
+            bytecode.push_index();
+            bytecode.push_const(col as i32);
+            bytecode.push_index();
+        }
+    }
+
+    /// Cell op. `a` then `b` are already on the stack. `ta`/`tb` are scratch slots.
+    fn emit_matrix_cell_op(
+        &mut self,
+        bytecode: &mut CodeBuf,
+        op: crate::typechecking::MatrixCellOp,
+        elem_is_float: bool,
+        elem_is_byte: bool,
+        ta: u32,
+        tb: u32,
+    ) {
+        use crate::typechecking::MatrixCellOp;
+        let mask_byte = |bytecode: &mut CodeBuf| {
+            if elem_is_byte {
+                bytecode.push_const(255);
+                bytecode.push(Byte::new(Instruction::BITAND));
+            }
+        };
+        match op {
+            MatrixCellOp::Add => bytecode.push(Byte::new(if elem_is_float {
+                Instruction::ADDF
+            } else {
+                Instruction::ADD
+            })),
+            MatrixCellOp::Sub => bytecode.push(Byte::new(if elem_is_float {
+                Instruction::SUBF
+            } else {
+                Instruction::SUB
+            })),
+            MatrixCellOp::Eq | MatrixCellOp::Ne if !elem_is_float => {
+                bytecode.push(Byte::new(if op == MatrixCellOp::Eq {
+                    Instruction::EQ
+                } else {
+                    Instruction::NEQ
+                }));
+            }
+            MatrixCellOp::Lt if !elem_is_float => bytecode.push(Byte::new(Instruction::LE)),
+            MatrixCellOp::Le if !elem_is_float => bytecode.push(Byte::new(Instruction::LEQ)),
+            MatrixCellOp::Gt if !elem_is_float => bytecode.push(Byte::new(Instruction::GT)),
+            MatrixCellOp::Ge if !elem_is_float => bytecode.push(Byte::new(Instruction::GEQ)),
+            MatrixCellOp::Eq | MatrixCellOp::Ne => {
+                bytecode.push_store_pop(tb);
+                bytecode.push_store_pop(ta);
+                bytecode.push_load(ta);
+                bytecode.push_load(tb);
+                bytecode.push(Byte::new(Instruction::LEQF));
+                bytecode.push_load(ta);
+                bytecode.push_load(tb);
+                bytecode.push(Byte::new(Instruction::GEQF));
+                bytecode.push(Byte::new(Instruction::BITAND));
+                if op == MatrixCellOp::Ne {
+                    bytecode.push_const(1);
+                    bytecode.push(Byte::new(Instruction::XOR));
+                }
+            }
+            MatrixCellOp::Lt => bytecode.push(Byte::new(Instruction::LEF)),
+            MatrixCellOp::Le => bytecode.push(Byte::new(Instruction::LEQF)),
+            MatrixCellOp::Gt => bytecode.push(Byte::new(Instruction::GTF)),
+            MatrixCellOp::Ge => bytecode.push(Byte::new(Instruction::GEQF)),
+            MatrixCellOp::BitAnd => {
+                bytecode.push(Byte::new(Instruction::BITAND));
+                mask_byte(bytecode);
+            }
+            MatrixCellOp::BitOr => {
+                bytecode.push(Byte::new(Instruction::BITOR));
+                mask_byte(bytecode);
+            }
+            MatrixCellOp::BitXor => {
+                bytecode.push(Byte::new(Instruction::XOR));
+                mask_byte(bytecode);
+            }
+            MatrixCellOp::Shl | MatrixCellOp::Shr => {
+                bytecode.push_store_pop(tb);
+                bytecode.push_store_pop(ta);
+                bytecode.push_load(ta);
+                bytecode.push_load(tb);
+                bytecode.push_const(63);
+                bytecode.push(Byte::new(Instruction::BITAND));
+                bytecode.push(Byte::new(if op == MatrixCellOp::Shl {
+                    Instruction::SHL
+                } else {
+                    Instruction::SHR
+                }));
+                mask_byte(bytecode);
+            }
+            MatrixCellOp::Intersect | MatrixCellOp::Diff => {
+                bytecode.push_store_pop(tb);
+                bytecode.push_store_pop(ta);
+                Self::push_matrix_nonzero(self, bytecode, ta, elem_is_float);
+                if op == MatrixCellOp::Intersect {
+                    Self::push_matrix_nonzero(self, bytecode, tb, elem_is_float);
+                } else if elem_is_float {
+                    let bits = Value::from(0.0_f64).raw() as u64;
+                    let idx = self.intern_constant(bits);
+                    bytecode.push_load(tb);
+                    bytecode.push_const_pool(idx);
+                    bytecode.push(Byte::new(Instruction::LEQF));
+                    bytecode.push_load(tb);
+                    bytecode.push_const_pool(idx);
+                    bytecode.push(Byte::new(Instruction::GEQF));
+                    bytecode.push(Byte::new(Instruction::BITAND));
+                } else {
+                    bytecode.push_load(tb);
+                    bytecode.push_const(0);
+                    bytecode.push(Byte::new(Instruction::EQ));
+                }
+                bytecode.push(Byte::new(Instruction::BITAND));
+            }
+        }
+    }
+
+    fn push_matrix_nonzero(&mut self, bytecode: &mut CodeBuf, slot: u32, elem_is_float: bool) {
+        if elem_is_float {
+            let bits = Value::from(0.0_f64).raw() as u64;
+            let idx = self.intern_constant(bits);
+            bytecode.push_load(slot);
+            bytecode.push_const_pool(idx);
+            bytecode.push(Byte::new(Instruction::LEQF));
+            bytecode.push_load(slot);
+            bytecode.push_const_pool(idx);
+            bytecode.push(Byte::new(Instruction::GEQF));
+            bytecode.push(Byte::new(Instruction::BITAND));
+            bytecode.push_const(1);
+            bytecode.push(Byte::new(Instruction::XOR));
+        } else {
+            bytecode.push_load(slot);
+            bytecode.push_const(0);
+            bytecode.push(Byte::new(Instruction::NEQ));
+        }
+    }
+
     /// Emit `dot` / `matmul` / `cross` / Matrix ops from the linear-algebra side table.
     ///
     /// Approach A: Dot / MatMul / MatrixZip / MatrixNeg lower to packed fat
@@ -12624,12 +12725,16 @@ impl Compiler {
         span_end: usize,
         args: &[Output],
     ) {
-        use crate::typechecking::{AggregateOp, LinearAlgebraKind};
+        use crate::typechecking::LinearAlgebraKind;
 
         let Some(info) = self_id
             .and_then(|id| self.checker.linear_algebra_at(id))
             .cloned()
-            .or_else(|| self.checker.linear_algebra_span(span_start, span_end).cloned())
+            .or_else(|| {
+                self.checker
+                    .linear_algebra_span(span_start, span_end)
+                    .cloned()
+            })
         else {
             return;
         };
@@ -12813,28 +12918,27 @@ impl Compiler {
                 outer_is_tuple,
                 row_is_tuple,
                 elem_is_float,
+                elem_is_byte,
+                scalar_on,
             } => {
                 let t1 = t1.expect("matrix zip needs two args");
-                let cell_op = match (op, elem_is_float) {
-                    (AggregateOp::Add, false) => Instruction::ADD,
-                    (AggregateOp::Add, true) => Instruction::ADDF,
-                    (AggregateOp::Sub, false) => Instruction::SUB,
-                    (AggregateOp::Sub, true) => Instruction::SUBF,
-                    _ => Instruction::ADD,
-                };
+                let left_scalar = matches!(scalar_on, Some(crate::typechecking::ScalarSide::Left));
+                let right_scalar =
+                    matches!(scalar_on, Some(crate::typechecking::ScalarSide::Right));
+                let cell_a = self.alloc_temp_slot();
+                let cell_b = self.alloc_temp_slot();
                 for i in 0..m {
                     for j in 0..n {
-                        bytecode.push_load(t0);
-                        bytecode.push_const(i as i32);
-                        bytecode.push_index();
-                        bytecode.push_const(j as i32);
-                        bytecode.push_index();
-                        bytecode.push_load(t1);
-                        bytecode.push_const(i as i32);
-                        bytecode.push_index();
-                        bytecode.push_const(j as i32);
-                        bytecode.push_index();
-                        bytecode.push(Byte::new(cell_op));
+                        Self::push_matrix_slot(bytecode, t0, i, j, left_scalar);
+                        Self::push_matrix_slot(bytecode, t1, i, j, right_scalar);
+                        self.emit_matrix_cell_op(
+                            bytecode,
+                            op,
+                            elem_is_float,
+                            elem_is_byte,
+                            cell_a,
+                            cell_b,
+                        );
                     }
                     if row_is_tuple {
                         bytecode.push_make_tuple(n as u32);
@@ -12854,6 +12958,8 @@ impl Compiler {
                 outer_is_tuple,
                 row_is_tuple,
                 elem_is_float,
+                elem_is_byte,
+                bit_not,
             } => {
                 for i in 0..m {
                     for j in 0..n {
@@ -12862,7 +12968,15 @@ impl Compiler {
                         bytecode.push_index();
                         bytecode.push_const(j as i32);
                         bytecode.push_index();
-                        self.emit_neg_tos(bytecode, elem_is_float);
+                        if bit_not {
+                            bytecode.push(Byte::new(Instruction::NOT));
+                            if elem_is_byte {
+                                bytecode.push_const(255);
+                                bytecode.push(Byte::new(Instruction::BITAND));
+                            }
+                        } else {
+                            self.emit_neg_tos(bytecode, elem_is_float);
+                        }
                     }
                     if row_is_tuple {
                         bytecode.push_make_tuple(n as u32);
@@ -12887,7 +13001,7 @@ impl Compiler {
         kind: &crate::typechecking::LinearAlgebraKind,
         args: &[Output],
     ) -> bool {
-        use crate::typechecking::{AggregateOp, LinearAlgebraKind};
+        use crate::typechecking::LinearAlgebraKind;
 
         let (native_name, meta, value_args): (&str, u32, &[Output]) = match kind {
             LinearAlgebraKind::Dot {
@@ -12941,6 +13055,8 @@ impl Compiler {
                 outer_is_tuple,
                 row_is_tuple,
                 elem_is_float,
+                elem_is_byte,
+                scalar_on,
             } => {
                 if args.len() != 2
                     || *m == 0
@@ -12950,12 +13066,7 @@ impl Compiler {
                 {
                     return false;
                 }
-                let zip_kind: u32 = match op {
-                    AggregateOp::Add => 0,
-                    AggregateOp::Sub => 1,
-                    _ => return false,
-                };
-                let mut ops = (*m as u32) | ((*n as u32) << 8) | (zip_kind << 16);
+                let mut ops = (*m as u32) | ((*n as u32) << 8) | (u32::from(op.zip_kind()) << 16);
                 if *elem_is_float {
                     ops |= 1 << 24;
                 }
@@ -12965,6 +13076,15 @@ impl Compiler {
                 if *row_is_tuple {
                     ops |= 1 << 26;
                 }
+                if scalar_on.is_some() {
+                    ops |= 1 << 27;
+                }
+                if matches!(scalar_on, Some(crate::typechecking::ScalarSide::Left)) {
+                    ops |= 1 << 28;
+                }
+                if *elem_is_byte {
+                    ops |= 1 << 29;
+                }
                 (common::PACKED_MATRIX_ZIP, ops, args)
             }
             LinearAlgebraKind::MatrixNeg {
@@ -12973,6 +13093,8 @@ impl Compiler {
                 outer_is_tuple,
                 row_is_tuple,
                 elem_is_float,
+                elem_is_byte,
+                bit_not,
             } => {
                 if args.is_empty()
                     || *m == 0
@@ -12991,6 +13113,12 @@ impl Compiler {
                 }
                 if *row_is_tuple {
                     ops |= 1 << 18;
+                }
+                if *bit_not {
+                    ops |= 1 << 19;
+                }
+                if *elem_is_byte {
+                    ops |= 1 << 20;
                 }
                 (common::PACKED_MATRIX_NEG, ops, args)
             }
@@ -13178,10 +13306,7 @@ impl Compiler {
         self.context.variables = prev_vars;
     }
 
-    fn do_compile<'compiler>(
-        &mut self,
-        ast: &(SimpleSpan, Box<Expression<'compiler>>),
-    ) -> CodeBuf {
+    fn do_compile<'compiler>(&mut self, ast: &(SimpleSpan, Box<Expression<'compiler>>)) -> CodeBuf {
         self.codegen_depth += 1;
         if self.codegen_depth > super::CODEGEN_RECURSION_LIMIT {
             self.messages.push(Message::error(
@@ -13341,7 +13466,8 @@ impl Compiler {
                             } else {
                                 self.append_binding_rhs(&mut bytecode, &children[1]);
                             }
-                            if let Some(val) = crate::const_fold::eval_expr(&children[1], self.const_env())
+                            if let Some(val) =
+                                crate::const_fold::eval_expr(&children[1], self.const_env())
                             {
                                 self.const_env_mut().insert(name.clone(), val);
                             } else {
@@ -13376,9 +13502,9 @@ impl Compiler {
                             if let Some(n) = stack_n {
                                 let can_stack = match rhs_node.1.as_ref() {
                                     Expression::Array(items) if items.len() == n => true,
-                                    Expression::Identifier(src) => self
-                                        .stack_array_info(src)
-                                        .is_some_and(|(_, sn)| sn == n),
+                                    Expression::Identifier(src) => {
+                                        self.stack_array_info(src).is_some_and(|(_, sn)| sn == n)
+                                    }
                                     _ => false,
                                 };
                                 if can_stack {
@@ -13478,19 +13604,18 @@ impl Compiler {
                     .or_default()
                     .push(name.to_string());
                 let (fixed_arity, has_rest) = fn_arity_from_args(args);
-                let table_key = if self.checker.is_overloaded(name)
-                    || self.checker.is_overloaded(&qualified)
-                {
-                    if let Some((decl_id, fa, rest)) =
-                        self.checker.overload_decl_at(span.start, span.end)
-                    {
-                        overload_fn_key(&qualified, fa, rest, decl_id)
+                let table_key =
+                    if self.checker.is_overloaded(name) || self.checker.is_overloaded(&qualified) {
+                        if let Some((decl_id, fa, rest)) =
+                            self.checker.overload_decl_at(span.start, span.end)
+                        {
+                            overload_fn_key(&qualified, fa, rest, decl_id)
+                        } else {
+                            overload_fn_key(&qualified, fixed_arity, has_rest, 0)
+                        }
                     } else {
-                        overload_fn_key(&qualified, fixed_arity, has_rest, 0)
-                    }
-                } else {
-                    qualified.clone()
-                };
+                        qualified.clone()
+                    };
                 let _ = self.bind_function_entry(table_key.clone());
                 self.fn_arities
                     .insert(table_key.clone(), (fixed_arity as u32, has_rest));
@@ -13518,8 +13643,7 @@ impl Compiler {
                 // Sync checker so `is_ffi_declare_variadic_for_fn_id` can see
                 // param call-site `declare` metadata for bare fn-id params.
                 let prev_checker_fn = if !self.compiling_method {
-                    self.checker
-                        .set_current_function(Some(name.to_string()))
+                    self.checker.set_current_function(Some(name.to_string()))
                 } else {
                     None
                 };
@@ -13605,8 +13729,13 @@ impl Compiler {
                 let body_end = self.bytecode.len();
                 self.record_fn_span(table_key.clone(), body_start, body_end);
                 let entry = self.fn_entry_labels.get(&table_key).copied();
-                self.bytecode
-                    .record_func_with_sp(table_key.clone(), entry, body_start, body_end, entry_sp);
+                self.bytecode.record_func_with_sp(
+                    table_key.clone(),
+                    entry,
+                    body_start,
+                    body_end,
+                    entry_sp,
+                );
                 self.record_unboxed_class_fields();
                 self.context.variables = prev_fn_vars;
                 self.context.stack_array_locals = prev_stack_arrays;
@@ -13797,9 +13926,7 @@ impl Compiler {
                     self.compile_array_index_expr(&mut bytecode, index);
                     let idx_slot = self.alloc_temp_slot();
                     bytecode.push_store_pop(idx_slot);
-                    self.emit_stack_array_select_load(
-                        &mut bytecode, base, n, idx_slot, proven,
-                    );
+                    self.emit_stack_array_select_load(&mut bytecode, base, n, idx_slot, proven);
                 } else if let Expression::Identifier(name) = target.1.as_ref()
                     && let Some((a, b)) = self.unboxed_enum_info(name)
                     && self
@@ -13854,8 +13981,7 @@ impl Compiler {
                     // enum, do not Ok-wrap again (COI-113). Nested Result Ok
                     // payloads still wrap.
                     if !self.skip_result_ok_wrap_for_return(expr) {
-                        if !self.return_is_niche_result() && !self.return_is_unit_result_niche()
-                        {
+                        if !self.return_is_niche_result() && !self.return_is_unit_result_niche() {
                             Self::emit_ok_or_some_wrap(&mut bytecode, false);
                         }
                     }
@@ -13950,7 +14076,9 @@ impl Compiler {
                         Expression::Method(_, body) => {
                             if let Expression::Function {
                                 docs: _,
-                                name, is_static, ..
+                                name,
+                                is_static,
+                                ..
                             } = body.1.borrow()
                             {
                                 let fqn = format!("{}::{}", owner_key, name);
@@ -14095,13 +14223,7 @@ impl Compiler {
                             let pin = self_id
                                 .is_some_and(|id| self.typed_sidecar.is_for_in_pin(id))
                                 || self.typed_sidecar.is_for_in_pin_span(span.start, span.end);
-                            self.emit_for_in_array_loop(
-                                body,
-                                &bind,
-                                false,
-                                Some(iterable),
-                                pin,
-                            );
+                            self.emit_for_in_array_loop(body, &bind, false, Some(iterable), pin);
                         }
                         ForInKind::Tuple { arity } => {
                             self.emit_for_in_tuple(iterable, body, &bind, arity);
@@ -14166,7 +14288,6 @@ impl Compiler {
 
                     bb.emit_jump_to(top_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
                     bb.bind_label(exit_label, self.bytecode.il_mut());
-
                 }
             }
             Expression::Break => {
@@ -14208,7 +14329,9 @@ impl Compiler {
 
                 bb.bind_label(after, self.bytecode.il_mut());
             }
-            Expression::Call { name, args } => bytecode.append(&mut self.compile_call_expr(name, args, ast, self_id, span)),
+            Expression::Call { name, args } => {
+                bytecode.append(&mut self.compile_call_expr(name, args, ast, self_id, span))
+            }
             Expression::Argument { ty, name: n, .. } => {
                 if let Some(kind) = self.argument_unboxed_range_kind(ast) {
                     let (start, _) = self.alloc_unboxed_enum_slots(n, &kind);
@@ -14290,7 +14413,8 @@ impl Compiler {
                         }
                         Expression::Function {
                             docs: _,
-                            name: method_name, ..
+                            name: method_name,
+                            ..
                         } => {
                             let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                             let unbox_tys =
@@ -14303,13 +14427,19 @@ impl Compiler {
                             self.emit_idx += 1;
                             if let Expression::Function {
                                 docs: _,
-                                name: method_name, ..
+                                name: method_name,
+                                ..
                             } = body.1.as_ref()
                             {
                                 let fqn = format!("{}__{}__{}", class, ty_part, method_name);
                                 let unbox_tys =
                                     self.instance_method_unbox_tys(class, method_name, &arg_tys);
-                                self.pin_trait_method_pair_return(class, method_name, &arg_tys, &fqn);
+                                self.pin_trait_method_pair_return(
+                                    class,
+                                    method_name,
+                                    &arg_tys,
+                                    &fqn,
+                                );
                                 self.compile_function_output_with_name(body, fqn, &unbox_tys, 1);
                             } else {
                                 self.consume_function_signature_output(body);
@@ -14382,10 +14512,7 @@ impl Compiler {
                         bytecode.push_load(tag_slot);
                     }
                 } else if let Some((base, nfields)) = self.unboxed_class_info(n) {
-                    let cname = self
-                        .unboxed_class_type_name(n)
-                        .unwrap_or(n)
-                        .to_string();
+                    let cname = self.unboxed_class_type_name(n).unwrap_or(n).to_string();
                     self.emit_escape_unboxed_class(&mut bytecode, n, &cname, base, nfields);
                 } else if let Some(slot) = self.lookup_slot(n) {
                     if let Some((base, len)) = self.stack_array_info(n) {
@@ -14394,8 +14521,7 @@ impl Compiler {
                     } else {
                         bytecode.push_load(slot);
                     }
-                } else if let Some((en, vn)) =
-                    self.checker.bare_construct_at(span.start, span.end)
+                } else if let Some((en, vn)) = self.checker.bare_construct_at(span.start, span.end)
                 {
                     let en = en.clone();
                     let vn = vn.clone();
@@ -14592,127 +14718,187 @@ impl Compiler {
                 // be bound. (Allocated-but-unused labels are allowed.)
             }
             Expression::Le(lhs, rhs) => {
-                let hint = self.bound_operator_hint(self_id, span.start, span.end);
-                if let Some(hint) = hint
-                    && self.emit_bound_operator_call(
-                        &mut bytecode,
-                        lhs,
-                        rhs,
-                        hint.dict_index,
-                        hint.method_slot,
-                    )
-                {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
-                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Lt", "lt") {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
+                if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
-                    let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
-                    bytecode.push(Byte::new(if is_float {
-                        Instruction::LEF
+                    let hint = self.bound_operator_hint(self_id, span.start, span.end);
+                    if let Some(hint) = hint
+                        && self.emit_bound_operator_call(
+                            &mut bytecode,
+                            lhs,
+                            rhs,
+                            hint.dict_index,
+                            hint.method_slot,
+                        )
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Lt", "lt")
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
                     } else {
-                        Instruction::LE
-                    }));
+                        let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
+                        bytecode.push(Byte::new(if is_float {
+                            Instruction::LEF
+                        } else {
+                            Instruction::LE
+                        }));
+                    }
                 }
             }
             Expression::Gt(lhs, rhs) => {
-                let hint = self.bound_operator_hint(self_id, span.start, span.end);
-                if let Some(hint) = hint
-                    && self.emit_bound_operator_call(
-                        &mut bytecode,
-                        lhs,
-                        rhs,
-                        hint.dict_index,
-                        hint.method_slot,
-                    )
-                {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
-                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Gt", "gt") {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
+                if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
-                    let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
-                    bytecode.push(Byte::new(if is_float {
-                        Instruction::GTF
+                    let hint = self.bound_operator_hint(self_id, span.start, span.end);
+                    if let Some(hint) = hint
+                        && self.emit_bound_operator_call(
+                            &mut bytecode,
+                            lhs,
+                            rhs,
+                            hint.dict_index,
+                            hint.method_slot,
+                        )
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Gt", "gt")
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
                     } else {
-                        Instruction::GT
-                    }));
+                        let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
+                        bytecode.push(Byte::new(if is_float {
+                            Instruction::GTF
+                        } else {
+                            Instruction::GT
+                        }));
+                    }
                 }
             }
             Expression::Leq(lhs, rhs) => {
-                let hint = self.bound_operator_hint(self_id, span.start, span.end);
-                if let Some(hint) = hint
-                    && self.emit_bound_operator_call(
-                        &mut bytecode,
-                        lhs,
-                        rhs,
-                        hint.dict_index,
-                        hint.method_slot,
-                    )
-                {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
-                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Le", "le") {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
+                if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
-                    let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
-                    bytecode.push(Byte::new(if is_float {
-                        Instruction::LEQF
+                    let hint = self.bound_operator_hint(self_id, span.start, span.end);
+                    if let Some(hint) = hint
+                        && self.emit_bound_operator_call(
+                            &mut bytecode,
+                            lhs,
+                            rhs,
+                            hint.dict_index,
+                            hint.method_slot,
+                        )
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Le", "le")
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
                     } else {
-                        Instruction::LEQ
-                    }));
+                        let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
+                        bytecode.push(Byte::new(if is_float {
+                            Instruction::LEQF
+                        } else {
+                            Instruction::LEQ
+                        }));
+                    }
                 }
             }
             Expression::Geq(lhs, rhs) => {
-                let hint = self.bound_operator_hint(self_id, span.start, span.end);
-                if let Some(hint) = hint
-                    && self.emit_bound_operator_call(
-                        &mut bytecode,
-                        lhs,
-                        rhs,
-                        hint.dict_index,
-                        hint.method_slot,
-                    )
-                {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
-                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Ge", "ge") {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
+                if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
-                    let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
-                    bytecode.push(Byte::new(if is_float {
-                        Instruction::GEQF
+                    let hint = self.bound_operator_hint(self_id, span.start, span.end);
+                    if let Some(hint) = hint
+                        && self.emit_bound_operator_call(
+                            &mut bytecode,
+                            lhs,
+                            rhs,
+                            hint.dict_index,
+                            hint.method_slot,
+                        )
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Ge", "ge")
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
                     } else {
-                        Instruction::GEQ
-                    }));
+                        let is_float = self.compile_binary_operands(&mut bytecode, lhs, rhs);
+                        bytecode.push(Byte::new(if is_float {
+                            Instruction::GEQF
+                        } else {
+                            Instruction::GEQ
+                        }));
+                    }
                 }
             }
             Expression::Eq(lhs, rhs) => {
-                let hint = self.bound_operator_hint(self_id, span.start, span.end);
-                if let Some(hint) = hint
-                    && self.emit_bound_operator_call(
-                        &mut bytecode,
-                        lhs,
-                        rhs,
-                        hint.dict_index,
-                        hint.method_slot,
-                    )
-                {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
-                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Eq", "eq") {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
+                if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
+                    // Element-wise mask.
                 } else {
-                    binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::EQ));
+                    let hint = self.bound_operator_hint(self_id, span.start, span.end);
+                    if let Some(hint) = hint
+                        && self.emit_bound_operator_call(
+                            &mut bytecode,
+                            lhs,
+                            rhs,
+                            hint.dict_index,
+                            hint.method_slot,
+                        )
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Eq", "eq")
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else {
+                        binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::EQ));
+                    }
                 }
             }
             Expression::Not(lhs) => {
-                unary!(bytecode, self, lhs, Byte::new(Instruction::NOT));
+                if self.try_emit_matrix_op(&mut bytecode, self_id, span.start, span.end, lhs, None)
+                {
+                } else {
+                    unary!(bytecode, self, lhs, Byte::new(Instruction::NOT));
+                }
             }
             Expression::LogicalNot(lhs) => {
                 unary!(bytecode, self, lhs, Byte::new(Instruction::LogNot));
@@ -14721,8 +14907,14 @@ impl Compiler {
                 if self.try_emit_folded_expr(ast, &mut bytecode, true) {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
-                } else if self.try_emit_matrix_op(&mut bytecode, self_id, span.start, span.end, lhs, None)
-                {
+                } else if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    None,
+                ) {
                     // Intentional empty body: the emit/try_emit call in the
                     // condition already wrote bytecode as a side effect.
                 } else if self.try_emit_aggregate_arith(
@@ -15003,30 +15195,70 @@ impl Compiler {
             }
             Expression::Shl(lhs, rhs) => {
                 if self.try_emit_folded_expr(ast, &mut bytecode, true) {
+                } else if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
                     binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::SHL));
                 }
             }
             Expression::Shr(lhs, rhs) => {
                 if self.try_emit_folded_expr(ast, &mut bytecode, true) {
+                } else if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
                     binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::SHR));
                 }
             }
             Expression::Xor(lhs, rhs) => {
                 if self.try_emit_folded_expr(ast, &mut bytecode, true) {
+                } else if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
                     binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::XOR));
                 }
             }
             Expression::BitAnd(lhs, rhs) => {
                 if self.try_emit_folded_expr(ast, &mut bytecode, true) {
+                } else if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
                     binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::BITAND));
                 }
             }
             Expression::BitOr(lhs, rhs) => {
                 if self.try_emit_folded_expr(ast, &mut bytecode, true) {
+                } else if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
                     binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::BITOR));
                 }
@@ -15035,23 +15267,34 @@ impl Compiler {
                 binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::OR));
             }
             Expression::Neq(lhs, rhs) => {
-                let hint = self.bound_operator_hint(self_id, span.start, span.end);
-                if let Some(hint) = hint
-                    && self.emit_bound_operator_call(
-                        &mut bytecode,
-                        lhs,
-                        rhs,
-                        hint.dict_index,
-                        hint.method_slot,
-                    )
-                {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
-                } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Eq", "ne") {
-                    // Intentional empty body: the emit/try_emit call in the
-                    // condition already wrote bytecode as a side effect.
+                if self.try_emit_matrix_op(
+                    &mut bytecode,
+                    self_id,
+                    span.start,
+                    span.end,
+                    lhs,
+                    Some(rhs),
+                ) {
                 } else {
-                    binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::NEQ));
+                    let hint = self.bound_operator_hint(self_id, span.start, span.end);
+                    if let Some(hint) = hint
+                        && self.emit_bound_operator_call(
+                            &mut bytecode,
+                            lhs,
+                            rhs,
+                            hint.dict_index,
+                            hint.method_slot,
+                        )
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else if self.emit_concrete_operator_call(&mut bytecode, lhs, rhs, "Eq", "ne")
+                    {
+                        // Intentional empty body: the emit/try_emit call in the
+                        // condition already wrote bytecode as a side effect.
+                    } else {
+                        binary!(bytecode, self, lhs, rhs, Byte::new(Instruction::NEQ));
+                    }
                 }
             }
             Expression::Integer(num) => bytecode.push(Byte::new_with_value(
@@ -15073,9 +15316,7 @@ impl Compiler {
                 let escaped_len = escaped.as_bytes().len();
                 let is_byte_or_bytes = |ty: &Ty| match ty {
                     Ty::Con(n) if n == "byte" => true,
-                    Ty::Array { element, length }
-                        if matches!(element.as_ref(), Ty::Con(n) if n == "byte") =>
-                    {
+                    Ty::Array { element, length } if matches!(element.as_ref(), Ty::Con(n) if n == "byte") => {
                         match length {
                             crate::typechecking::ty::ArrayLength::Static(n) => *n == escaped_len,
                             crate::typechecking::ty::ArrayLength::Dynamic => true,
@@ -15370,12 +15611,8 @@ impl Compiler {
                                 // Assignment: `name` Identifier is pre-walked
                                 // before `value`; consume it when we skip emit.
                                 let _ = self.next_emit_id();
-                                let ok = self.try_emit_stack_array_init(
-                                    &mut bytecode,
-                                    value,
-                                    base,
-                                    n,
-                                );
+                                let ok =
+                                    self.try_emit_stack_array_init(&mut bytecode, value, base, n);
                                 if !ok {
                                     // Heap `[T; N]` (e.g. call return): box into slots.
                                     self.append_binding_rhs(&mut bytecode, value);
@@ -15428,10 +15665,9 @@ impl Compiler {
                         existing
                     } else {
                         let fqn = format!("__ext_lib_{}", library);
-                        let slot = self.checker.alloc_synthetic_static_slot(
-                            fqn,
-                            crate::typechecking::ty::int(),
-                        );
+                        let slot = self
+                            .checker
+                            .alloc_synthetic_static_slot(fqn, crate::typechecking::ty::int());
                         self.extern_runtime_libs.insert(library.clone(), slot);
                         slot
                     };
@@ -15474,10 +15710,9 @@ impl Compiler {
                         continue;
                     }
                     let fn_id_fqn = format!("__ext_fn_{}", table_name);
-                    let fn_id_slot = self.checker.alloc_synthetic_static_slot(
-                        fn_id_fqn,
-                        crate::typechecking::ty::int(),
-                    );
+                    let fn_id_slot = self
+                        .checker
+                        .alloc_synthetic_static_slot(fn_id_fqn, crate::typechecking::ty::int());
                     self.bytecode
                         .push(Byte::new(Instruction::LoadStatic).with_operand_u32(lib_slot));
                     let span: SimpleSpan = (0..0).into();
@@ -15489,10 +15724,7 @@ impl Compiler {
                     let mut arg_type_tags: Vec<u32> = Vec::new();
                     if let Expression::Fragment(items) = decl.args.1.as_ref() {
                         for arg in items {
-                            if let Expression::Argument {
-                                ty: type_expr,
-                                ..
-                            } = arg.1.as_ref()
+                            if let Expression::Argument { ty: type_expr, .. } = arg.1.as_ref()
                                 && let Some(type_expr) = type_expr
                             {
                                 if let Some((tag, aux)) =
@@ -15556,7 +15788,9 @@ impl Compiler {
             }
             Expression::EnumDecl {
                 docs: _,
-                name: _, variants, ..
+                name: _,
+                variants,
+                ..
             } => {
                 // Metadata only; IDs consumed by descending into variants.
                 for v in variants {
@@ -15601,8 +15835,7 @@ impl Compiler {
                 let prev_result_mode = self.compiling_result_mode;
                 let prev_result_ok_is_result = self.compiling_result_ok_is_result;
                 self.compiling_result_mode = self.checker.fn_is_result_mode(&fn_name);
-                self.compiling_result_ok_is_result =
-                    self.checker.fn_result_ok_is_result(&fn_name);
+                self.compiling_result_ok_is_result = self.checker.fn_result_ok_is_result(&fn_name);
                 let prev_two_word_enum = self.compiling_two_word_enum.clone();
                 let prev_try_fail = self.compiling_try_fail.take();
                 self.compiling_two_word_enum = self.two_word_return_kind(&fn_name);
@@ -15768,9 +16001,10 @@ impl Compiler {
                     let class_ty = self.receiver_type(receiver);
                     let class_name = class_ty.as_ref().and_then(Checker::class_name_of_ty);
                     let idx = class_name.and_then(|cn| {
-                        self.context.classes.get(cn).and_then(|fields| {
-                            fields.iter().position(|(fname, _)| fname == field)
-                        })
+                        self.context
+                            .classes
+                            .get(cn)
+                            .and_then(|fields| fields.iter().position(|(fname, _)| fname == field))
                     });
                     if let Some(idx) = idx {
                         if idx < nfields {
@@ -15989,7 +16223,11 @@ impl Compiler {
                     );
                     // Miss: failure value (boxed `ObjEnum`) still on stack.
                     if let Some(enum_name) = self.compiling_two_word_enum.clone() {
-                        Self::emit_unbox_enum_to_pair(&self.checker, &mut self.bytecode, &enum_name);
+                        Self::emit_unbox_enum_to_pair(
+                            &self.checker,
+                            &mut self.bytecode,
+                            &enum_name,
+                        );
                         self.push_return_two_word();
                     } else {
                         self.bytecode.push_return();
@@ -16127,11 +16365,7 @@ impl Compiler {
                     let mut bb = BlockBuilder::new();
                     let end = bb.fresh_label(self.bytecode.il_mut());
                     Self::push_niche_eq_zero(&mut self.bytecode);
-                    bb.emit_jump_to(
-                        end,
-                        BbJumpKind::JumpIfTrue,
-                        self.bytecode.il_mut(),
-                    );
+                    bb.emit_jump_to(end, BbJumpKind::JumpIfTrue, self.bytecode.il_mut());
                     // Some(payload) is represented by the payload itself.
                     let inner_ty = self
                         .codegen_expr_ty(receiver)
@@ -16369,15 +16603,11 @@ impl Compiler {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
-            self.par_workers =
-                crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
+            self.par_workers = crate::typechecking::collect_par_worker_fns(ast, &self.par_shapes);
             self.loop_par_sites = crate::typechecking::analyze_loop_par_sites(ast, &self.pure_fns);
             for hint in crate::typechecking::analyze_par_escape_hints(ast) {
-                let mut msg = Message::info(
-                    ErrorCode::ParLockHint,
-                    hint.message(),
-                    hint.span.clone(),
-                );
+                let mut msg =
+                    Message::info(ErrorCode::ParLockHint, hint.message(), hint.span.clone());
                 msg.with_help(hint.help());
                 self.messages.push(msg);
             }
@@ -16398,11 +16628,7 @@ impl Compiler {
         self.bytecode.bind_fresh_entry();
         self.mono_plan = crate::monomorphize::run_monomorphize_pass(module, ast, &self.checker);
         for hit in &self.mono_plan.cap_hits {
-            let kind = if hit.per_fn {
-                "per-function"
-            } else {
-                "total"
-            };
+            let kind = if hit.per_fn { "per-function" } else { "total" };
             self.messages.push(Message::warn(
                 ErrorCode::MonomorphizeCap,
                 format!(
@@ -16667,9 +16893,8 @@ impl Compiler {
                 .iter()
                 .position(|f| pre >= f.code_start && pre < f.code_end)
         };
-        let func_idx_for_name = |name: &str| -> Option<usize> {
-            funcs.iter().position(|f| f.name == name)
-        };
+        let func_idx_for_name =
+            |name: &str| -> Option<usize> { funcs.iter().position(|f| f.name == name) };
         let resolve_fn_label_pc = |name: &str, emit_id: u32| -> Option<usize> {
             let idx = func_idx_for_name(name)?;
             let flat_id = flat_label(idx, emit_id);
@@ -16740,11 +16965,10 @@ impl Compiler {
             .max()
             .unwrap_or(0);
         if !self.recursive_fns.is_empty() && dense_seek > 16 {
-            self.operand_stack_slots =
-                crate::typechecking::rescale_operand_slots_for_dense_seek(
-                    self.operand_stack_slots,
-                    dense_seek,
-                );
+            self.operand_stack_slots = crate::typechecking::rescale_operand_slots_for_dense_seek(
+                self.operand_stack_slots,
+                dense_seek,
+            );
         }
         self.operand_stack_slots = self
             .operand_stack_slots
