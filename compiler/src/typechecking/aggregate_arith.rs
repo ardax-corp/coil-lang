@@ -196,23 +196,123 @@ pub enum LinearAlgebraKind {
         row_is_tuple: bool,
         elem_is_float: bool,
     },
-    /// Element-wise `+` / `-` on equal-shaped `Matrix` values (Hadamard).
+    /// Element-wise op on equal-shaped `Matrix` values.
+    ///
+    /// `scalar_on` broadcasts one immediate across every cell (`m == 1`,
+    /// `m << 2`). `Add` / `Sub` / `Intersect` / `Diff` stay matrix-matrix.
     MatrixZip {
         m: usize,
         n: usize,
-        op: AggregateOp,
+        op: MatrixCellOp,
         outer_is_tuple: bool,
         row_is_tuple: bool,
         elem_is_float: bool,
+        /// Cells are `byte`. Bitwise results are masked to `0..=255`.
+        elem_is_byte: bool,
+        scalar_on: Option<ScalarSide>,
     },
-    /// Element-wise unary `-` on a `Matrix`.
+    /// Element-wise unary `-` or bitwise `~` on a `Matrix`.
     MatrixNeg {
         m: usize,
         n: usize,
         outer_is_tuple: bool,
         row_is_tuple: bool,
         elem_is_float: bool,
+        elem_is_byte: bool,
+        /// `true` is bitwise `~`; `false` is arithmetic negation.
+        bit_not: bool,
     },
+}
+
+/// Cell op lowered by `packed_matrix_zip`. Kind numbers are the packed meta
+/// `zip_kind` byte (`Add` = 0 and `Sub` = 1 stay stable).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MatrixCellOp {
+    Add,
+    Sub,
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
+    Intersect,
+    Diff,
+}
+
+impl MatrixCellOp {
+    pub fn from_str(op: &str) -> Option<Self> {
+        match op {
+            "+" => Some(Self::Add),
+            "-" => Some(Self::Sub),
+            "==" => Some(Self::Eq),
+            "!=" => Some(Self::Ne),
+            "<" => Some(Self::Lt),
+            "<=" => Some(Self::Le),
+            ">" => Some(Self::Gt),
+            ">=" => Some(Self::Ge),
+            "&" => Some(Self::BitAnd),
+            "|" => Some(Self::BitOr),
+            "^" => Some(Self::BitXor),
+            "<<" => Some(Self::Shl),
+            ">>" => Some(Self::Shr),
+            "intersect" => Some(Self::Intersect),
+            "diff" => Some(Self::Diff),
+            _ => None,
+        }
+    }
+
+    pub fn zip_kind(self) -> u8 {
+        match self {
+            Self::Add => 0,
+            Self::Sub => 1,
+            Self::Eq => 2,
+            Self::Ne => 3,
+            Self::Lt => 4,
+            Self::Le => 5,
+            Self::Gt => 6,
+            Self::Ge => 7,
+            Self::BitAnd => 8,
+            Self::BitOr => 9,
+            Self::BitXor => 10,
+            Self::Shl => 11,
+            Self::Shr => 12,
+            Self::Intersect => 13,
+            Self::Diff => 14,
+        }
+    }
+
+    /// Compare, intersect, and diff write a `byte` mask of `0` / `1`.
+    pub fn is_mask(self) -> bool {
+        matches!(
+            self,
+            Self::Eq
+                | Self::Ne
+                | Self::Lt
+                | Self::Le
+                | Self::Gt
+                | Self::Ge
+                | Self::Intersect
+                | Self::Diff
+        )
+    }
+
+    pub fn is_bitwise(self) -> bool {
+        matches!(
+            self,
+            Self::BitAnd | Self::BitOr | Self::BitXor | Self::Shl | Self::Shr
+        )
+    }
+
+    /// Scalar broadcast (`matrix OP scalar` and the reverse).
+    pub fn allows_broadcast(self) -> bool {
+        !matches!(self, Self::Add | Self::Sub | Self::Intersect | Self::Diff)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -318,6 +418,33 @@ pub fn wrap_matrix_ty(data: Ty) -> Ty {
         Box::new(Ty::Con(common::BUILTIN_MATRIX_TYPE.into())),
         vec![data],
     )
+}
+
+/// `Matrix` of `elem` with the same row/column containers as `shape`.
+pub fn matrix_of_elem(
+    elem: Ty,
+    m: usize,
+    n: usize,
+    outer_is_tuple: bool,
+    row_is_tuple: bool,
+) -> Ty {
+    let row_ty = if row_is_tuple {
+        Ty::Tuple(vec![elem.clone(); n])
+    } else {
+        Ty::Array {
+            element: Box::new(elem.clone()),
+            length: ArrayLength::Static(n),
+        }
+    };
+    let data = if outer_is_tuple {
+        Ty::Tuple(vec![row_ty; m])
+    } else {
+        Ty::Array {
+            element: Box::new(row_ty),
+            length: ArrayLength::Static(m),
+        }
+    };
+    wrap_matrix_ty(data)
 }
 
 #[cfg(test)]

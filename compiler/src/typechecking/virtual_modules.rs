@@ -90,6 +90,10 @@ pub enum PreludeFn {
     Cross,
     /// Construct a nominal `Matrix` from nested static rows.
     Matrix,
+    /// Cell-wise presence intersection of two matrices → `byte` mask.
+    Intersect,
+    /// Cells present in the left matrix and absent from the right → `byte` mask.
+    Diff,
     /// Construct a single UTF-8 code unit as `Result<string, string>`.
     Char,
     /// First code unit of a `string` as `Result<byte, string>`.
@@ -127,6 +131,8 @@ impl PreludeFn {
             Self::MatMul => "matmul",
             Self::Cross => "cross",
             Self::Matrix => "matrix",
+            Self::Intersect => "intersect",
+            Self::Diff => "diff",
             Self::Char => "char",
             Self::Ord => "ord",
             Self::BlockOn => "block_on",
@@ -160,6 +166,8 @@ impl PreludeFn {
             "matmul" => Some(Self::MatMul),
             "cross" => Some(Self::Cross),
             "matrix" => Some(Self::Matrix),
+            "intersect" => Some(Self::Intersect),
+            "diff" => Some(Self::Diff),
             "char" => Some(Self::Char),
             "ord" => Some(Self::Ord),
             "block_on" => Some(Self::BlockOn),
@@ -795,6 +803,12 @@ impl VirtualModules {
                     kind: PreludeFn::Matrix,
                 },
                 BuiltinExport::Fn {
+                    kind: PreludeFn::Intersect,
+                },
+                BuiltinExport::Fn {
+                    kind: PreludeFn::Diff,
+                },
+                BuiltinExport::Fn {
                     kind: PreludeFn::Sin,
                 },
                 BuiltinExport::Fn {
@@ -1098,15 +1112,21 @@ mod tests {
     fn prelude_exports_option_result_and_ops() {
         let vm = VirtualModules::new();
         let exports = vm.prelude_exports();
-        assert!(exports
-            .iter()
-            .any(|e| matches!(e, BuiltinExport::Enum { name: "Option" })));
-        assert!(exports
-            .iter()
-            .any(|e| matches!(e, BuiltinExport::TypeClass { name: "Eq" })));
-        assert!(exports
-            .iter()
-            .any(|e| matches!(e, BuiltinExport::TypeClass { name: "Into" })));
+        assert!(
+            exports
+                .iter()
+                .any(|e| matches!(e, BuiltinExport::Enum { name: "Option" }))
+        );
+        assert!(
+            exports
+                .iter()
+                .any(|e| matches!(e, BuiltinExport::TypeClass { name: "Eq" }))
+        );
+        assert!(
+            exports
+                .iter()
+                .any(|e| matches!(e, BuiltinExport::TypeClass { name: "Into" }))
+        );
         assert!(exports.iter().any(|e| matches!(
             e,
             BuiltinExport::Fn {
@@ -1163,9 +1183,11 @@ mod tests {
                 .is_some(),
             "pow remains importable from prelude::math"
         );
-        assert!(!exports
-            .iter()
-            .any(|e| matches!(e, BuiltinExport::FfiFn { .. })));
+        assert!(
+            !exports
+                .iter()
+                .any(|e| matches!(e, BuiltinExport::FfiFn { .. }))
+        );
     }
 
     #[test]
@@ -1189,12 +1211,14 @@ mod tests {
         let tags = vm
             .resolve_glob(&["ffi".into(), "types".into()])
             .expect("ffi::types");
-        assert!(tags
-            .iter()
-            .any(|e| matches!(e, BuiltinExport::FfiTag { variant: "Int" })));
-        assert!(tags
-            .iter()
-            .any(|e| matches!(e, BuiltinExport::FfiTag { variant: "Ptr" })));
+        assert!(
+            tags.iter()
+                .any(|e| matches!(e, BuiltinExport::FfiTag { variant: "Int" }))
+        );
+        assert!(
+            tags.iter()
+                .any(|e| matches!(e, BuiltinExport::FfiTag { variant: "Ptr" }))
+        );
     }
 
     #[test]
@@ -1246,15 +1270,18 @@ mod tests {
     #[test]
     fn io_net_tls_is_not_a_virtual_module() {
         let vm = VirtualModules::new();
-        assert!(vm
-            .resolve_glob(&["io".into(), "net".into(), "tls".into()])
-            .is_none());
-        assert!(vm
-            .resolve_glob(&["io".into(), "net".into(), "tls".into(), "client".into()])
-            .is_none());
-        assert!(vm
-            .resolve_glob(&["io".into(), "net".into(), "tls".into(), "server".into()])
-            .is_none());
+        assert!(
+            vm.resolve_glob(&["io".into(), "net".into(), "tls".into()])
+                .is_none()
+        );
+        assert!(
+            vm.resolve_glob(&["io".into(), "net".into(), "tls".into(), "client".into()])
+                .is_none()
+        );
+        assert!(
+            vm.resolve_glob(&["io".into(), "net".into(), "tls".into(), "server".into()])
+                .is_none()
+        );
         assert!(!vm.resolves_use(&["io".into(), "net".into(), "tls".into()], "alpn_protocol"));
         assert!(!vm.resolves_use(
             &["io".into(), "net".into(), "tls".into(), "client".into()],
@@ -1268,17 +1295,20 @@ mod tests {
     fn io_tls_leftover_is_not_a_virtual_module() {
         let vm = VirtualModules::new();
         assert!(vm.resolve_glob(&["io".into(), "__tls".into()]).is_none());
-        assert!(vm
-            .resolve_glob(&["io".into(), "__tls".into(), "client".into()])
-            .is_none());
-        assert!(vm
-            .resolve_glob(&["io".into(), "__tls".into(), "server".into()])
-            .is_none());
+        assert!(
+            vm.resolve_glob(&["io".into(), "__tls".into(), "client".into()])
+                .is_none()
+        );
+        assert!(
+            vm.resolve_glob(&["io".into(), "__tls".into(), "server".into()])
+                .is_none()
+        );
         assert!(!vm.resolves_use(&["io".into(), "__tls".into()], "alpn_protocol"));
         assert!(!vm.resolves_use(&["io".into(), "__tls".into(), "client".into()], "enable"));
-        assert!(vm
-            .resolve_item(&["io".into(), "__tls".into(), "client".into()], "enable")
-            .is_none());
+        assert!(
+            vm.resolve_item(&["io".into(), "__tls".into(), "client".into()], "enable")
+                .is_none()
+        );
     }
 
     #[test]
@@ -1294,9 +1324,11 @@ mod tests {
         assert!(exports.iter().any(|e| e.short_name() == "park"));
         assert!(!exports.iter().any(|e| e.short_name() == "write_all"));
         assert!(!exports.iter().any(|e| e.short_name() == "set_read_timeout"));
-        assert!(!exports
-            .iter()
-            .any(|e| e.short_name() == "set_write_timeout"));
+        assert!(
+            !exports
+                .iter()
+                .any(|e| e.short_name() == "set_write_timeout")
+        );
         assert!(!exports.iter().any(|e| e.short_name() == "bind"));
         assert!(!exports.iter().any(|e| e.short_name() == "listen"));
         assert!(!exports.iter().any(|e| e.short_name() == "enable"));
@@ -1395,12 +1427,13 @@ mod tests {
             &["io".into(), "net".into(), "tls".into(), "client".into()],
             "enable"
         ));
-        assert!(vm
-            .resolve_item(
+        assert!(
+            vm.resolve_item(
                 &["io".into(), "net".into(), "tls".into(), "client".into()],
                 "enable"
             )
-            .is_none());
+            .is_none()
+        );
         assert!(!vm.resolves_use(&["tls".into()], "*"));
         assert!(vm.resolves_use(&["gc".into()], "*"));
         assert!(matches!(
@@ -1409,15 +1442,17 @@ mod tests {
                 kind: GcBuiltin::Root
             })
         ));
-        assert!(vm
-            .resolve_glob(&["gc".into()])
-            .expect("gc")
-            .iter()
-            .any(|e| e.short_name() == "Root"));
-        assert!(vm
-            .resolve_glob(&["gc".into()])
-            .expect("gc")
-            .iter()
-            .any(|e| e.short_name() == "Weak"));
+        assert!(
+            vm.resolve_glob(&["gc".into()])
+                .expect("gc")
+                .iter()
+                .any(|e| e.short_name() == "Root")
+        );
+        assert!(
+            vm.resolve_glob(&["gc".into()])
+                .expect("gc")
+                .iter()
+                .any(|e| e.short_name() == "Weak")
+        );
     }
 }

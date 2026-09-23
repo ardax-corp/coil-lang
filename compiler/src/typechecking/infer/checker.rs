@@ -1,9 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
-use parser::ast::{
-    Expression, ExternFunction, FieldModifier, Output, Pattern, Visibility,
-};
+use parser::ast::{Expression, ExternFunction, FieldModifier, Output, Pattern, Visibility};
 use reporting::{ErrorCode, Label, Message};
 
 use crate::typechecking::def_id::{DefId, DefKind};
@@ -14,14 +12,14 @@ use crate::typechecking::generics::{
 use crate::typechecking::id::{self, IdTable, NodeId};
 use crate::typechecking::kind::Kind;
 use crate::typechecking::subst::{Subst, apply_ty, apply_ty_prune, compose};
-use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{ArrayLength, array, array_fixed, tuple as tuple_ty};
+use crate::typechecking::ty::{AssocProjection, Constraint, Scheme};
 use crate::typechecking::ty::{
-    EnumVariantPayloadTy, Ty, TyVarId, boolean, float, ftv_ty, int, is_option_ty, is_result_ty,
-    list, never, option_app_ty, option_inner, option_ty, range_app, range_inclusive_ty, range_ty,
-    readonly_ty, result_app_ty, result_ok_err, result_ty, schemaize_payload, schemaize_ty, string,
-    strip_readonly, subst_payload_params, subst_ty_params, unit as unit_ty, vec_app_ty,
-    vec_element_ty, RANGE, RANGE_INCLUSIVE,
+    EnumVariantPayloadTy, RANGE, RANGE_INCLUSIVE, Ty, TyVarId, boolean, float, ftv_ty, int,
+    is_option_ty, is_result_ty, list, never, option_app_ty, option_inner, option_ty, range_app,
+    range_inclusive_ty, range_ty, readonly_ty, result_app_ty, result_ok_err, result_ty,
+    schemaize_payload, schemaize_ty, string, strip_readonly, subst_payload_params, subst_ty_params,
+    unit as unit_ty, vec_app_ty, vec_element_ty,
 };
 use crate::typechecking::unify::{UnifyError, unify_with};
 use crate::typechecking::virtual_modules::{
@@ -31,14 +29,14 @@ use crate::typechecking::virtual_modules::{
 
 use super::*;
 
+#[path = "host_caps.rs"]
+mod host_caps;
 #[path = "infer_class.rs"]
 mod infer_class;
 #[path = "infer_fn.rs"]
 mod infer_fn;
 #[path = "infer_match.rs"]
 mod infer_match;
-#[path = "host_caps.rs"]
-mod host_caps;
 
 /// Max native recursion depth for [`Checker::infer`]. Chosen well under what
 /// a debug-build stack of a few MiB can hold even with `infer_inner`'s
@@ -483,8 +481,10 @@ impl Checker {
             .insert("block_on".into(), vec!["handle".into()]);
         self.fn_param_names
             .insert("dload".into(), vec!["path".into()]);
-        self.fn_param_names
-            .insert("declare".into(), vec!["lib".into(), "name".into(), "sig".into()]);
+        self.fn_param_names.insert(
+            "declare".into(),
+            vec!["lib".into(), "name".into(), "sig".into()],
+        );
         self.fn_param_names.insert(
             "invoke".into(),
             vec!["lib".into(), "name".into(), "args".into()],
@@ -542,7 +542,6 @@ impl Checker {
             self.register_builtin_env_error();
         }
 
-
         // Lazily register `Error` / `ErrorKind` when the virtual `ffi`
         // module is brought into scope (enum or any FFI builtin).
         let needs_ffi_error = matches!(
@@ -583,9 +582,9 @@ impl Checker {
 
     /// True when `enum_name` itself was imported (`use io::{IoError}`).
     fn virtual_error_enum_imported(&self, enum_name: &str) -> bool {
-        self.scope_bindings.values().any(|export| {
-            matches!(export, BuiltinExport::Enum { name } if *name == enum_name)
-        })
+        self.scope_bindings
+            .values()
+            .any(|export| matches!(export, BuiltinExport::Enum { name } if *name == enum_name))
     }
 
     /// True when `name` is an in-scope FFI tag constructor (`Int`, …).
@@ -798,7 +797,6 @@ impl Checker {
         );
     }
 
-
     /// Pre-register `ThreadError` unit variants for the virtual `thread` module.
     fn register_builtin_thread_error(&mut self) {
         use common::{BUILTIN_THREAD_ERROR_ENUM, BUILTIN_THREAD_ERROR_VARIANTS};
@@ -908,9 +906,7 @@ impl Checker {
             IoBuiltin::TcpShutdown => fun(&[stream, int()], res_unit),
             IoBuiltin::UdpBind | IoBuiltin::UdpConnect => fun(&[string(), int()], res_stream),
             IoBuiltin::UdpSendTo => fun(&[stream, bytes, string(), int()], res_int),
-            IoBuiltin::UdpRecvFrom => {
-                fun(&[stream, bytes], res_recv_from)
-            }
+            IoBuiltin::UdpRecvFrom => fun(&[stream, bytes], res_recv_from),
             IoBuiltin::UdpLocalPort => fun(&[stream], res_int),
             IoBuiltin::StreamAttach => {
                 fun(&[stream, int(), int(), int(), int(), int()], res_stream)
@@ -1292,8 +1288,14 @@ impl Checker {
                 let n = name.to_ascii_lowercase();
                 if matches!(
                     n.as_str(),
-                    "stream" | "thread" | "coroutine" | "library" | "fn" | "polyfn"
-                        | "root" | "weak"
+                    "stream"
+                        | "thread"
+                        | "coroutine"
+                        | "library"
+                        | "fn"
+                        | "polyfn"
+                        | "root"
+                        | "weak"
                 ) {
                     return false;
                 }
@@ -1480,7 +1482,9 @@ impl Checker {
         self.methods.retain(|k, _| k.contains("::"));
         self.static_methods.retain(|k, _| k.contains("::"));
         self.const_class_fields.retain(|k, _| k.contains("::"));
-        self.generics.generic_type_ctors.retain(|k, _| k.contains("::"));
+        self.generics
+            .generic_type_ctors
+            .retain(|k, _| k.contains("::"));
         self.generics.register_builtin_type_ctors();
         // Keep module-qualified generic names so importers still see
         // `num::min` as generic after `num` was checked (dict-passing ABI).
@@ -1623,7 +1627,10 @@ impl Checker {
         self.def_interner.get(mid, name)
     }
 
-    fn split_overload_intern_key<'a>(&self, key: &'a str) -> (crate::typechecking::ModuleId, &'a str) {
+    fn split_overload_intern_key<'a>(
+        &self,
+        key: &'a str,
+    ) -> (crate::typechecking::ModuleId, &'a str) {
         if let Some((path, name)) = key.rsplit_once("::")
             && let Some(mid) = self.def_interner.module_id(path)
         {
@@ -1634,12 +1641,8 @@ impl Checker {
 
     fn intern_overload_def(&mut self, key: &str, candidate: u32) -> DefId {
         let (module, name) = self.split_overload_intern_key(key);
-        self.def_interner.intern_overload(
-            module,
-            crate::typechecking::DefKind::Fn,
-            name,
-            candidate,
-        )
+        self.def_interner
+            .intern_overload(module, crate::typechecking::DefKind::Fn, name, candidate)
     }
 
     /// [`DefId`] for one overload candidate (`0` is the set representative).
@@ -2075,8 +2078,7 @@ impl Checker {
         let id = self.ids.ids()[self.next_id_idx];
         self.next_id_idx += 1;
         self.maybe_attach_def_id(id, expr);
-        self.node_ids_by_span
-            .insert((expr.0.start, expr.0.end), id);
+        self.node_ids_by_span.insert((expr.0.start, expr.0.end), id);
 
         let ty = self.infer_inner(expr, Some(id));
         self.cache.insert(id, ty.clone());
@@ -2434,7 +2436,9 @@ impl Checker {
                 unit_ty()
             }
 
-            Expression::CompoundAssign(target, op, value) => self.infer_compound_assign(target, op, value, id, range),
+            Expression::CompoundAssign(target, op, value) => {
+                self.infer_compound_assign(target, op, value, id, range)
+            }
 
             Expression::Assignment(name, value) => {
                 if let Expression::Index(arr, None) = name.1.as_ref() {
@@ -2514,6 +2518,10 @@ impl Checker {
             Expression::Positive(e) => self.infer(e),
             Expression::Not(e) => {
                 let t = self.infer(e);
+                let pruned = apply_ty_prune(&self.subst, &t);
+                if crate::typechecking::aggregate_arith::is_matrix_ty(&pruned) {
+                    return self.infer_matrix_bitnot(pruned, id, range);
+                }
                 self.unify(&t, &int(), &e.0.into_range(), "operand of `~`");
                 int()
             }
@@ -2658,10 +2666,7 @@ impl Checker {
                 // `raise err?` parses as `raise (err?)` (postfix `?` binds
                 // tighter than the `raise` keyword). Point users at the
                 // bare-`raise` early-return idiom instead of a bare InvalidTry.
-                if matches!(
-                    unwrap_expr_wrappers(e).1.as_ref(),
-                    Expression::Try(_)
-                ) {
+                if matches!(unwrap_expr_wrappers(e).1.as_ref(), Expression::Try(_)) {
                     return self.error_with_help(
                         ErrorCode::InvalidTry,
                         "`?` after `raise` applies to the error expression, not to `raise`"
@@ -2692,10 +2697,7 @@ impl Checker {
                         ErrorCode::InvalidTry,
                         "`?` cannot follow `raise`".to_string(),
                         range,
-                        Some(
-                            "use `raise err;` — `raise` already early-returns `Err`"
-                                .to_string(),
-                        ),
+                        Some("use `raise err;` — `raise` already early-returns `Err`".to_string()),
                     );
                 }
                 let inner_ty = self.infer(inner);
@@ -2839,7 +2841,9 @@ impl Checker {
             // Array literal (static length from item count)
             Expression::Array(items) => self.infer_array_literal(items, range),
             // Index: static-length OOB check for literal indices
-            Expression::Index(target, index_expr) => self.infer_index_expr(target, index_expr, range),
+            Expression::Index(target, index_expr) => {
+                self.infer_index_expr(target, index_expr, range)
+            }
             Expression::Dict(fields) => {
                 // Check for duplicate field names, diagnostic
                 // is raised BEFORE we proceed (recovery: keep
@@ -3047,7 +3051,9 @@ impl Checker {
             Expression::Method(_vis, body) => self.infer(body),
             Expression::Member(_) => unit_ty(),
             Expression::Access(receiver, field) => self.infer_access_expr(receiver, field, range),
-            Expression::Instantiate(class_expr, args) => self.infer_instantiate(class_expr, args, range),
+            Expression::Instantiate(class_expr, args) => {
+                self.infer_instantiate(class_expr, args, range)
+            }
             Expression::Field { .. } => unit_ty(),
 
             Expression::EnumDecl {
@@ -3226,6 +3232,20 @@ impl Checker {
         let target_ty = self.infer_mutable_lvalue(target, range.clone());
         let val_ty = self.infer(value);
         let op_name = Self::compound_op_name(*op);
+        let tp = apply_ty_prune(&self.subst, &target_ty);
+        let vp = apply_ty_prune(&self.subst, &val_ty);
+        if crate::typechecking::aggregate_arith::is_matrix_ty(&tp)
+            || crate::typechecking::aggregate_arith::is_matrix_ty(&vp)
+        {
+            let result = self.infer_matrix_arith(tp, vp, id, range.clone(), op_name);
+            let _ = self.unify(
+                &target_ty,
+                &result,
+                &range,
+                &format!("operands of `{op_name}=`"),
+            );
+            return apply_ty_prune(&self.subst, &target_ty);
+        }
         if matches!(
             op,
             parser::ast::AssignOp::Shl
@@ -3239,23 +3259,11 @@ impl Checker {
         } else {
             let tp = apply_ty_prune(&self.subst, &target_ty);
             let vp = apply_ty_prune(&self.subst, &val_ty);
-            if crate::typechecking::aggregate_arith::is_matrix_ty(&tp)
-                || crate::typechecking::aggregate_arith::is_matrix_ty(&vp)
-            {
-                let result =
-                    self.infer_matrix_arith(tp.clone(), vp, id, range.clone(), op_name);
-                let _ = self.unify(
-                    &target_ty,
-                    &result,
-                    &range,
-                    &format!("operands of `{}=`", op_name),
-                );
-            } else if matches!(&tp, Ty::Tuple(_) | Ty::Array { .. })
+            if matches!(&tp, Ty::Tuple(_) | Ty::Array { .. })
                 || matches!(&vp, Ty::Tuple(_) | Ty::Array { .. })
             {
                 // Resolve as aggregate arith; result must match LHS shape.
-                let result =
-                    self.infer_aggregate_arith(tp.clone(), vp, id, range.clone(), op_name);
+                let result = self.infer_aggregate_arith(tp.clone(), vp, id, range.clone(), op_name);
                 let _ = self.unify(
                     &target_ty,
                     &result,
@@ -3285,8 +3293,7 @@ impl Checker {
         for decl in declarations {
             let sym = decl.symbol.unwrap_or(decl.name);
             self.gate_ffi_exec_symbol(sym, decl.name, decl.args.0.into_range());
-            let arg_tys: Vec<Ty> = if let Expression::Fragment(items) = decl.args.1.as_ref()
-            {
+            let arg_tys: Vec<Ty> = if let Expression::Fragment(items) = decl.args.1.as_ref() {
                 items
                     .iter()
                     .filter_map(|item| {
@@ -3338,7 +3345,7 @@ impl Checker {
                 self.register_overload_candidate(
                     decl.name,
                     OverloadCandidate {
-            id: 0,
+                        id: 0,
                         fixed_arity: nfixed,
                         is_rest: false,
                         scheme: Scheme::mono(fn_ty),
@@ -3497,10 +3504,7 @@ impl Checker {
                         provided.len()
                     ),
                     range,
-                    Some(
-                        "pass one argument per class field, in declaration order"
-                            .to_string(),
-                    ),
+                    Some("pass one argument per class field, in declaration order".to_string()),
                 );
             } else {
                 for (arg, fty) in provided.iter().zip(field_tys.iter()) {
@@ -3514,12 +3518,7 @@ impl Checker {
     }
 
     #[inline(never)]
-    fn infer_access_expr(
-        &mut self,
-        receiver: &Output,
-        field: &str,
-        range: Range<usize>,
-    ) -> Ty {
+    fn infer_access_expr(&mut self, receiver: &Output, field: &str, range: Range<usize>) -> Ty {
         let receiver_ty = self.infer(receiver);
         let resolved = apply_ty_prune(&self.subst, &receiver_ty);
         match strip_readonly(&resolved) {
@@ -3536,10 +3535,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!("Cannot access field `{}` on non-record type", field),
                         range,
-                        Some(
-                            "only values of record-shaped enum types expose fields"
-                                .to_string(),
-                        ),
+                        Some("only values of record-shaped enum types expose fields".to_string()),
                     ),
                 }
             }
@@ -3748,10 +3744,7 @@ impl Checker {
                     if i < 0 || (i as usize) >= *n {
                         let _ = self.error_with_help(
                             ErrorCode::IndexOutOfBounds,
-                            format!(
-                                "array index {} out of bounds for array of length {}",
-                                i, n
-                            ),
+                            format!("array index {} out of bounds for array of length {}", i, n),
                             range.clone(),
                             Some(format!(
                                 "indices are valid in [0..{}); the array has length {}",
@@ -3822,10 +3815,10 @@ impl Checker {
             self.current_expected = prev_expected;
             // Peel constructor tags so `[Rank::Low, Rank::Mid]` is
             // `[Rank; 2]`, not a stuck `::v0` element type.
-            let t_pruned =
-                crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(
-                    &self.subst, &t,
-                ));
+            let t_pruned = crate::typechecking::ty::peel_constructor_refinement(apply_ty_prune(
+                &self.subst,
+                &t,
+            ));
             match &elem_ty {
                 None => elem_ty = Some(t_pruned),
                 Some(prev) => {
@@ -3835,9 +3828,7 @@ impl Checker {
                             self.subst = compose(&s, &self.subst);
                             elem_ty = Some(apply_ty_prune(
                                 &self.subst,
-                                &crate::typechecking::ty::peel_constructor_refinement(
-                                    prev_pruned,
-                                ),
+                                &crate::typechecking::ty::peel_constructor_refinement(prev_pruned),
                             ));
                         }
                         Err(_) => {
@@ -3875,18 +3866,12 @@ impl Checker {
                     match length {
                         ArrayLength::Static(0) => {
                             let _ = unify_with(&self.subst, arr_elem.as_ref(), &element);
-                            return array_fixed(
-                                apply_ty_prune(&self.subst, arr_elem.as_ref()),
-                                0,
-                            );
+                            return array_fixed(apply_ty_prune(&self.subst, arr_elem.as_ref()), 0);
                         }
                         ArrayLength::Static(n) => {
                             return self.error_with_help(
                                 ErrorCode::TypeMismatch,
-                                format!(
-                                    "empty array literal `[]` cannot satisfy `[_; {}]`",
-                                    n
-                                ),
+                                format!("empty array literal `[]` cannot satisfy `[_; {}]`", n),
                                 range,
                                 Some(format!(
                                     "expected {} element{}, or annotate as `Vec<T>` / `[T; 0]`",
@@ -3903,10 +3888,7 @@ impl Checker {
                 ErrorCode::GenericTypeError,
                 "empty array literal `[]` requires a type annotation".to_string(),
                 range,
-                Some(
-                    "annotate as `Vec<T>` (growable) or `[T; 0]` (fixed empty array)"
-                        .to_string(),
-                ),
+                Some("annotate as `Vec<T>` (growable) or `[T; 0]` (fixed empty array)".to_string()),
             );
         }
         array_fixed(element, len)
@@ -3932,8 +3914,7 @@ impl Checker {
                     .iter()
                     .filter(|c| {
                         let (fun_ty, _, _) = self.instantiate_scheme_mapped(&c.scheme);
-                        crate::typechecking::unify::unify_with(&self.subst, &fun_ty, &exp)
-                            .is_ok()
+                        crate::typechecking::unify::unify_with(&self.subst, &fun_ty, &exp).is_ok()
                     })
                     .collect()
             } else {
@@ -4195,8 +4176,7 @@ impl Checker {
                             .map(|(_, s)| s.clone())
                             .expect("method present")
                     };
-                    let (fun_ty, constraints, _mapping) =
-                        self.instantiate_scheme_mapped(&scheme);
+                    let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
                     let mut arg_tys = vec![recv_ty];
                     let (tys, ordered_exprs) =
                         self.infer_and_reorder_call_args(&fqn, method_args, &range);
@@ -4268,12 +4248,8 @@ impl Checker {
                 if let Some((dict_index, dict_class, class, method_slot, scheme)) =
                     self.select_bound_method(candidates, method, &range)
                 {
-                    self.bind_matching_abstract_constraints(
-                        Some(receiver_var),
-                        &dict_class,
-                    );
-                    let (fun_ty, constraints, mapping) =
-                        self.instantiate_scheme_mapped(&scheme);
+                    self.bind_matching_abstract_constraints(Some(receiver_var), &dict_class);
+                    let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
                     let mut arg_tys = vec![recv_ty];
                     if let Some(a) = args {
                         for arg in a {
@@ -4340,10 +4316,7 @@ impl Checker {
                     let fqn = format!("{}::{}", owner, method);
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
-                        format!(
-                            "`{}` is a static method; call it as `{}(...)`",
-                            method, fqn
-                        ),
+                        format!("`{}` is a static method; call it as `{}(...)`", method, fqn),
                         range,
                         Some("static methods have no `self` receiver".to_string()),
                     );
@@ -4408,10 +4381,7 @@ impl Checker {
                                     if user_argc == 1 { "" } else { "s" }
                                 ),
                                 range,
-                                Some(format!(
-                                    "available arities: {}",
-                                    available.join(", ")
-                                )),
+                                Some(format!("available arities: {}", available.join(", "))),
                             );
                         }
                     }
@@ -4425,8 +4395,7 @@ impl Checker {
                     (scheme, false)
                 };
                 let _ = selected;
-                let (fun_ty, constraints, _mapping) =
-                    self.instantiate_scheme_mapped(&scheme);
+                let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(&scheme);
                 let mut arg_tys = vec![recv_ty];
                 let mut arg_exprs = Vec::with_capacity(1 + method_args.len());
                 arg_exprs.push(recv.clone());
@@ -4457,11 +4426,8 @@ impl Checker {
 
             // Ground trait method via concrete instance; pin return from
             // `current_expected` when present (`let y: T = x.into()`).
-            if let Some((class, scheme)) =
-                self.ground_trait_method_for_receiver(method, &recv_ty)
-            {
-                let (fun_ty, constraints, mapping) =
-                    self.instantiate_scheme_mapped(&scheme);
+            if let Some((class, scheme)) = self.ground_trait_method_for_receiver(method, &recv_ty) {
+                let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
                 let mut arg_tys = vec![recv_ty];
                 if let Some(a) = args {
                     for arg in a {
@@ -4520,14 +4486,7 @@ impl Checker {
                 .iter()
                 .map(|arg| self.infer_call_arg(arg))
                 .collect();
-            return self.apply_function(
-                None,
-                &callee_ty,
-                &arg_tys,
-                args.as_deref(),
-                id,
-                range,
-            );
+            return self.apply_function(None, &callee_ty, &arg_tys, args.as_deref(), id, range);
         }
 
         let ident = match name.1.as_ref() {
@@ -4539,10 +4498,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!("`{}` is a static field, not a function", fqn),
                         range,
-                        Some(
-                            "read it as a value or assign with `Class::field = expr`"
-                                .to_string(),
-                        ),
+                        Some("read it as a value or assign with `Class::field = expr`".to_string()),
                     );
                 }
                 // Parser may emit Call(QualifiedAccess) for module paths;
@@ -4600,16 +4556,14 @@ impl Checker {
 
         if ident == "len" {
             if has_named {
-                let (tys, reordered) =
-                    self.infer_and_reorder_call_args("len", raw_args, &range);
+                let (tys, reordered) = self.infer_and_reorder_call_args("len", raw_args, &range);
                 return self.infer_len_call_from_tys(&tys, &reordered, id, range);
             }
             return self.infer_len_call(args.as_deref(), id, range);
         }
         if let Some(kind) = self.string_fn_for_call(&ident) {
             let arg_slice = if has_named {
-                let (_, reordered) =
-                    self.infer_and_reorder_call_args(&ident, raw_args, &range);
+                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
                 return match kind {
                     StringBuiltin::Format => {
                         self.infer_string_format_call(reordered.as_slice(), range)
@@ -4675,8 +4629,7 @@ impl Checker {
         // `assert` from `prelude::test` (auto-imported or via `use`).
         if let Some(kind) = self.prelude_fn_in_scope(&ident) {
             if has_named {
-                let (_, reordered) =
-                    self.infer_and_reorder_call_args(&ident, raw_args, &range);
+                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
                 return match kind {
                     PreludeFn::Assert => self.infer_assert(&reordered, range),
                     PreludeFn::BlockOn => self.infer_block_on(&reordered, range),
@@ -4684,6 +4637,10 @@ impl Checker {
                     PreludeFn::MatMul => self.infer_matmul(&reordered, id, range),
                     PreludeFn::Cross => self.infer_cross(&reordered, id, range),
                     PreludeFn::Matrix => self.infer_matrix_ctor(&reordered, id, range),
+                    PreludeFn::Intersect => {
+                        self.infer_matrix_cells_call(&reordered, id, range, "intersect")
+                    }
+                    PreludeFn::Diff => self.infer_matrix_cells_call(&reordered, id, range, "diff"),
                     PreludeFn::Ord => self.infer_ord(&reordered, range),
                     PreludeFn::Char => self.infer_char(&reordered, range),
                     PreludeFn::Sin
@@ -4716,6 +4673,10 @@ impl Checker {
                 PreludeFn::MatMul => self.infer_matmul(arg_slice, id, range),
                 PreludeFn::Cross => self.infer_cross(arg_slice, id, range),
                 PreludeFn::Matrix => self.infer_matrix_ctor(arg_slice, id, range),
+                PreludeFn::Intersect => {
+                    self.infer_matrix_cells_call(arg_slice, id, range, "intersect")
+                }
+                PreludeFn::Diff => self.infer_matrix_cells_call(arg_slice, id, range, "diff"),
                 PreludeFn::Ord => self.infer_ord(arg_slice, range),
                 PreludeFn::Char => self.infer_char(arg_slice, range),
                 PreludeFn::Sin
@@ -4743,8 +4704,7 @@ impl Checker {
         // `dload` / `declare` / `invoke` after `use ffi::{…}`.
         if let Some(kind) = self.ffi_fn_in_scope(&ident) {
             if has_named {
-                let (_, reordered) =
-                    self.infer_and_reorder_call_args(&ident, raw_args, &range);
+                let (_, reordered) = self.infer_and_reorder_call_args(&ident, raw_args, &range);
                 return match kind {
                     FfiBuiltin::Dload => self.infer_ffi_dload(&reordered, range),
                     FfiBuiltin::Declare => self.infer_ffi_declare(&reordered, range),
@@ -4763,16 +4723,11 @@ impl Checker {
                 ErrorCode::UnknownValue,
                 format!("Cannot find value `{}` in this scope", ident),
                 range,
-                Some(
-                    "import it with `use ffi::{dload, declare, invoke}`".to_string(),
-                ),
+                Some("import it with `use ffi::{dload, declare, invoke}`".to_string()),
             );
         }
 
-        if !has_named
-            && self.lookup_fn_scheme(&ident).is_none()
-            && !self.is_overloaded(&ident)
-        {
+        if !has_named && self.lookup_fn_scheme(&ident).is_none() && !self.is_overloaded(&ident) {
             if let Some(ty) = self.try_infer_bare_constructor_call(&ident, args, range.clone(), id)
             {
                 return ty;
@@ -4797,17 +4752,14 @@ impl Checker {
                     apply_ty_prune(&self.subst, &ty)
                 })
                 .collect();
-            let candidate_opt = self
-                .select_overload_for_args(&ident, argc, &prelim_tys);
+            let candidate_opt = self.select_overload_for_args(&ident, argc, &prelim_tys);
             match candidate_opt {
                 OverloadSelect::NoMatch => {
                     // No candidate accepts this arity/types, emit a
                     // "no overload" error listing the available arities.
                     let available: Vec<String> = self
                         .overload_candidates(&ident)
-                        .map(|cs| {
-                            cs.iter().map(|c| Self::overload_sig_label(c)).collect()
-                        })
+                        .map(|cs| cs.iter().map(|c| Self::overload_sig_label(c)).collect())
                         .unwrap_or_default();
                     return self.error_with_help(
                         ErrorCode::WrongArity,
@@ -4845,10 +4797,9 @@ impl Checker {
                             self.instantiate_scheme_mapped(&candidate.scheme);
                         (fun_ty, constraints, mapping, Some(candidate.scheme.clone()))
                     };
-                    let (arg_tys, ordered_args) = self
-                        .infer_and_reorder_call_args_with_candidate(
-                            &ident, &candidate, raw_args, &range,
-                        );
+                    let (arg_tys, ordered_args) = self.infer_and_reorder_call_args_with_candidate(
+                        &ident, &candidate, raw_args, &range,
+                    );
                     let result = self.apply_function(
                         Some(&ident),
                         &fun_ty,
@@ -5037,9 +4988,9 @@ impl Checker {
         }
         let candidates = self.bound_method_candidates(&ident, None);
         if !candidates.is_empty() {
-            let receiver_var = arg_tys.first().and_then(|ty| {
-                Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty))
-            });
+            let receiver_var = arg_tys
+                .first()
+                .and_then(|ty| Self::constraint_var_of_ty(&apply_ty_prune(&self.subst, ty)));
             let candidates = receiver_var
                 .map(|v| self.bound_method_candidates(&ident, Some(v)))
                 .unwrap_or_else(|| self.bound_method_candidates(&ident, None));
@@ -5047,8 +4998,7 @@ impl Checker {
                 self.select_bound_method(candidates, &ident, &range)
             {
                 self.bind_matching_abstract_constraints(receiver_var, &dict_class);
-                let (fun_ty, constraints, mapping) =
-                    self.instantiate_scheme_mapped(&scheme);
+                let (fun_ty, constraints, mapping) = self.instantiate_scheme_mapped(&scheme);
                 if let Some(call_id) = id {
                     self.bound_method_calls.insert(
                         call_id,
@@ -5494,9 +5444,11 @@ impl Checker {
                                 let pruned = apply_ty_prune(&self.subst, &var_ty);
                                 self.record_codegen_var_type(n.to_string(), pruned.clone());
                                 self.warn_shallow_const_binding(n, &pruned, child.0.into_range());
-                                if let Some(cv) = crate::typechecking::const_eval::eval_const(next, &|name| {
-                                    self.const_fold_env.get(name).copied()
-                                }) {
+                                if let Some(cv) =
+                                    crate::typechecking::const_eval::eval_const(next, &|name| {
+                                        self.const_fold_env.get(name).copied()
+                                    })
+                                {
                                     self.const_fold_env.insert(n.to_string(), cv);
                                 }
                                 self.maybe_record_polyfn_binding(
@@ -5596,6 +5548,19 @@ impl Checker {
         let rt = Self::peel_comparison_ty(&self.infer(rhs));
         let lt = apply_ty_prune(&self.subst, &lt);
         let rt = apply_ty_prune(&self.subst, &rt);
+        if crate::typechecking::aggregate_arith::is_matrix_ty(&lt)
+            || crate::typechecking::aggregate_arith::is_matrix_ty(&rt)
+        {
+            let op = match method {
+                "ne" => "!=",
+                "lt" => "<",
+                "gt" => ">",
+                "le" => "<=",
+                "ge" => ">=",
+                _ => "==",
+            };
+            return self.infer_matrix_cells(lt, rt, id, range, op);
+        }
         if self.cmp_scalar_enum_with_backing(&lt, &rt) {
             return boolean();
         }
@@ -5757,7 +5722,9 @@ impl Checker {
         // Nominal `Matrix`, `*` is matmul (Mul), `+`/`-` are element-wise.
         // Must run before aggregate zip so nested-array data inside Matrix
         // is not treated as Hadamard product.
-        if crate::typechecking::aggregate_arith::is_matrix_ty(&lp) || crate::typechecking::aggregate_arith::is_matrix_ty(&rp) {
+        if crate::typechecking::aggregate_arith::is_matrix_ty(&lp)
+            || crate::typechecking::aggregate_arith::is_matrix_ty(&rp)
+        {
             return self.infer_matrix_arith(lp, rp, id, range, op);
         }
         if matches!(&lp, Ty::Tuple(_) | Ty::Array { .. })
@@ -7034,6 +7001,34 @@ impl Checker {
         }
     }
 
+    /// `intersect(a, b)` / `diff(a, b)` on two matrices.
+    fn infer_matrix_cells_call(
+        &mut self,
+        args: &[Output],
+        id: Option<NodeId>,
+        range: Range<usize>,
+        op: &str,
+    ) -> Ty {
+        if args.len() != 2 {
+            for arg in args {
+                let _ = self.infer(arg);
+            }
+            return self.error_with_help(
+                ErrorCode::ConstructorArity,
+                format!("`{op}` expects 2 arguments, got {}", args.len()),
+                range,
+                Some(format!(
+                    "use `{op}(a, b)` with two matrices of the same shape"
+                )),
+            );
+        }
+        let lt = self.infer(&args[0]);
+        let rt = self.infer(&args[1]);
+        let lp = apply_ty_prune(&self.subst, &lt);
+        let rp = apply_ty_prune(&self.subst, &rt);
+        self.infer_matrix_cells(lp, rp, id, range, op)
+    }
+
     /// `matmul(A, B)`, nested static matrices `(m×k) × (k×n) → (m×n)`.
     fn infer_matmul(&mut self, args: &[Output], id: Option<NodeId>, range: Range<usize>) -> Ty {
         use crate::typechecking::aggregate_arith::{
@@ -7156,7 +7151,9 @@ impl Checker {
         _id: Option<NodeId>,
         range: Range<usize>,
     ) -> Ty {
-        use crate::typechecking::aggregate_arith::{classify_matrix, is_numeric_elem, wrap_matrix_ty};
+        use crate::typechecking::aggregate_arith::{
+            classify_matrix, is_numeric_elem, wrap_matrix_ty,
+        };
 
         if args.len() != 1 {
             for arg in args {
@@ -7214,6 +7211,24 @@ impl Checker {
             LinearAlgebraInfo, LinearAlgebraKind, classify_matrix, elem_is_float, is_numeric_elem,
             unwrap_matrix_ty, wrap_matrix_ty,
         };
+
+        if matches!(
+            op,
+            "==" | "!="
+                | "<"
+                | "<="
+                | ">"
+                | ">="
+                | "&"
+                | "|"
+                | "^"
+                | "<<"
+                | ">>"
+                | "intersect"
+                | "diff"
+        ) {
+            return self.infer_matrix_cells(lp, rp, id, range, op);
+        }
 
         let Some(ld) = unwrap_matrix_ty(&lp) else {
             return self.error_with_help(
@@ -7315,7 +7330,6 @@ impl Checker {
                 wrap_matrix_ty(data)
             }
             "+" | "-" => {
-                use crate::typechecking::aggregate_arith::AggregateOp;
                 let Some((le, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(ld) else {
                     return self.error_with_help(
                         ErrorCode::GenericTypeError,
@@ -7357,11 +7371,6 @@ impl Checker {
                         None,
                     );
                 }
-                let agg_op = if op == "+" {
-                    AggregateOp::Add
-                } else {
-                    AggregateOp::Sub
-                };
                 self.record_linear_algebra(
                     id,
                     &range,
@@ -7369,10 +7378,16 @@ impl Checker {
                         kind: LinearAlgebraKind::MatrixZip {
                             m,
                             n,
-                            op: agg_op,
+                            op: if op == "+" {
+                                crate::typechecking::MatrixCellOp::Add
+                            } else {
+                                crate::typechecking::MatrixCellOp::Sub
+                            },
                             outer_is_tuple,
                             row_is_tuple,
                             elem_is_float: elem_is_float(&elem),
+                            elem_is_byte: Self::is_byte_ty(&elem),
+                            scalar_on: None,
                         },
                     },
                 );
@@ -7381,16 +7396,190 @@ impl Checker {
             _ => self.error_with_help(
                 ErrorCode::GenericTypeError,
                 format!(
-                    "operator `{}` is not supported on `Matrix` (use `*` for matmul, `+`/`-` for element-wise)",
+                    "operator `{}` is not supported on `Matrix` (use `*` for matmul, `+`/`-` for element-wise, compares and `&` `|` `^` `<<` `>>` for cell masks)",
                     op
                 ),
                 range,
                 Some(
-                    "`Matrix` implements Mul/Add/Sub only — not Num (no `/`, `%`, or `**`)"
+                    "`Matrix` is not `Num` (no `/`, `%`, or `**`). Compares return a `byte` mask of 0 and 1."
                         .to_string(),
                 ),
             ),
         }
+    }
+
+    /// Element-wise compare, bitwise, intersect, or diff.
+    ///
+    /// Compares and bitwise ops accept a scalar of the cell type on either
+    /// side. `intersect` / `diff` take two matrices. Mask ops (`==`, `!=`,
+    /// `<`, `<=`, `>`, `>=`, `intersect`, `diff`) return `Matrix` of `byte`
+    /// (`1` where the test holds, `0` otherwise). A cell counts as present
+    /// for intersect/diff when it is not zero (`NaN` counts as present).
+    fn infer_matrix_cells(
+        &mut self,
+        lp: Ty,
+        rp: Ty,
+        id: Option<NodeId>,
+        range: Range<usize>,
+        op: &str,
+    ) -> Ty {
+        use crate::typechecking::aggregate_arith::{
+            LinearAlgebraInfo, LinearAlgebraKind, MatrixCellOp, ScalarSide, classify_matrix,
+            elem_is_float, is_numeric_elem, matrix_of_elem,
+        };
+
+        let Some(cell_op) = MatrixCellOp::from_str(op) else {
+            return self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("operator `{op}` is not supported on `Matrix`"),
+                range,
+                None,
+            );
+        };
+
+        let left_m = crate::typechecking::aggregate_arith::is_matrix_ty(&lp);
+        let right_m = crate::typechecking::aggregate_arith::is_matrix_ty(&rp);
+
+        let resolved = if left_m && right_m {
+            self.unify_matrix_pair(&lp, &rp, &range, op).map(
+                |(elem, m, n, outer_is_tuple, row_is_tuple)| {
+                    (elem, m, n, outer_is_tuple, row_is_tuple, None)
+                },
+            )
+        } else if cell_op.allows_broadcast() && (left_m || right_m) {
+            let (matrix_ty, scalar_ty, side) = if left_m {
+                (&lp, &rp, ScalarSide::Right)
+            } else {
+                (&rp, &lp, ScalarSide::Left)
+            };
+            let Some(data) = crate::typechecking::aggregate_arith::unwrap_matrix_ty(matrix_ty)
+            else {
+                return self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("invalid matrix layout `{matrix_ty}`"),
+                    range,
+                    None,
+                );
+            };
+            let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
+                return self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("invalid matrix layout `{data}`"),
+                    range,
+                    None,
+                );
+            };
+            // An `int` scalar against `byte` cells stays `byte` (`m == 34`).
+            let scalar_pruned = apply_ty_prune(&self.subst, scalar_ty);
+            if !(Self::is_byte_ty(&elem) && Self::is_int_ty(&scalar_pruned)) {
+                let _ = self.unify(
+                    &elem,
+                    scalar_ty,
+                    &range,
+                    &format!("scalar operand of matrix `{op}`"),
+                );
+            }
+            let elem = apply_ty_prune(&self.subst, &elem);
+            if !is_numeric_elem(&elem) {
+                return self.error_with_help(
+                    ErrorCode::GenericTypeError,
+                    format!("element type `{elem}` does not support matrix `{op}`"),
+                    range,
+                    None,
+                );
+            }
+            Some((elem, m, n, outer_is_tuple, row_is_tuple, Some(side)))
+        } else if cell_op.allows_broadcast() {
+            None
+        } else {
+            return self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("`{op}` expects two `Matrix` values of the same shape"),
+                range,
+                Some("`intersect` and `diff` do not broadcast a scalar".to_string()),
+            );
+        };
+
+        let Some((elem, m, n, outer_is_tuple, row_is_tuple, scalar_on)) = resolved else {
+            return self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("cannot apply `{op}` to `{lp}` and `{rp}`"),
+                range,
+                Some(
+                    "both sides must be `Matrix`, or one side a scalar of the cell type"
+                        .to_string(),
+                ),
+            );
+        };
+
+        if cell_op.is_bitwise() && elem_is_float(&elem) {
+            return self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("bitwise `{op}` is not supported on `float` matrix cells"),
+                range,
+                Some("bitwise matrix ops require `int` or `byte` cells".to_string()),
+            );
+        }
+
+        let result_elem = if cell_op.is_mask() {
+            crate::typechecking::ty::byte()
+        } else {
+            elem.clone()
+        };
+        self.record_linear_algebra(
+            id,
+            &range,
+            LinearAlgebraInfo {
+                kind: LinearAlgebraKind::MatrixZip {
+                    m,
+                    n,
+                    op: cell_op,
+                    outer_is_tuple,
+                    row_is_tuple,
+                    elem_is_float: elem_is_float(&elem),
+                    elem_is_byte: Self::is_byte_ty(&elem),
+                    scalar_on,
+                },
+            },
+        );
+        matrix_of_elem(result_elem, m, n, outer_is_tuple, row_is_tuple)
+    }
+
+    fn unify_matrix_pair(
+        &mut self,
+        lp: &Ty,
+        rp: &Ty,
+        range: &Range<usize>,
+        op: &str,
+    ) -> Option<(Ty, usize, usize, bool, bool)> {
+        use crate::typechecking::aggregate_arith::{
+            classify_matrix, is_numeric_elem, unwrap_matrix_ty,
+        };
+        let ld = unwrap_matrix_ty(lp)?;
+        let rd = unwrap_matrix_ty(rp)?;
+        let (le, m, n, outer_is_tuple, row_is_tuple) = classify_matrix(ld)?;
+        let (re, m2, n2, right_outer, right_row) = classify_matrix(rd)?;
+        if m != m2 || n != n2 || outer_is_tuple != right_outer || row_is_tuple != right_row {
+            let _ = self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("cannot apply `{op}` to matrices of different shapes"),
+                range.clone(),
+                Some("cell-wise matrix ops require equal dimensions".to_string()),
+            );
+            return None;
+        }
+        let _ = self.unify(&le, &re, range, &format!("element types of matrix `{op}`"));
+        let elem = apply_ty_prune(&self.subst, &le);
+        if !is_numeric_elem(&elem) {
+            let _ = self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("element type `{elem}` does not support matrix `{op}`"),
+                range.clone(),
+                None,
+            );
+            return None;
+        }
+        Some((elem, m, n, outer_is_tuple, row_is_tuple))
     }
 
     /// Unary `-` on a `Matrix`, element-wise negate of every cell.
@@ -7429,6 +7618,56 @@ impl Checker {
                     outer_is_tuple,
                     row_is_tuple,
                     elem_is_float: elem_is_float(&elem),
+                    elem_is_byte: Self::is_byte_ty(&elem),
+                    bit_not: false,
+                },
+            },
+        );
+        wrap_matrix_ty(data.clone())
+    }
+
+    /// Element-wise bitwise `~`. `byte` cells stay in `0..=255`.
+    fn infer_matrix_bitnot(
+        &mut self,
+        matrix_ty: Ty,
+        id: Option<NodeId>,
+        range: Range<usize>,
+    ) -> Ty {
+        use crate::typechecking::aggregate_arith::{
+            LinearAlgebraInfo, LinearAlgebraKind, classify_matrix, elem_is_float, is_numeric_elem,
+            unwrap_matrix_ty, wrap_matrix_ty,
+        };
+        let Some(data) = unwrap_matrix_ty(&matrix_ty) else {
+            return matrix_ty;
+        };
+        let Some((elem, m, n, outer_is_tuple, row_is_tuple)) = classify_matrix(data) else {
+            return self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("invalid matrix layout `{data}`"),
+                range,
+                None,
+            );
+        };
+        if !is_numeric_elem(&elem) || elem_is_float(&elem) {
+            return self.error_with_help(
+                ErrorCode::GenericTypeError,
+                format!("bitwise `~` is not supported on `{elem}` matrix cells"),
+                range,
+                Some("bitwise `~` requires `int` or `byte` cells".to_string()),
+            );
+        }
+        self.record_linear_algebra(
+            id,
+            &range,
+            LinearAlgebraInfo {
+                kind: LinearAlgebraKind::MatrixNeg {
+                    m,
+                    n,
+                    outer_is_tuple,
+                    row_is_tuple,
+                    elem_is_float: false,
+                    elem_is_byte: Self::is_byte_ty(&elem),
+                    bit_not: true,
                 },
             },
         );
@@ -7984,8 +8223,8 @@ impl Checker {
                 variant_name,
                 ..
             } => {
-                let is_result = *enum_name == common::BUILTIN_RESULT_ENUM
-                    || enum_name.ends_with("::Result");
+                let is_result =
+                    *enum_name == common::BUILTIN_RESULT_ENUM || enum_name.ends_with("::Result");
                 is_result && (*variant_name == "Ok" || *variant_name == "Err")
             }
             Expression::Fragment(items) if items.len() == 1 => {
@@ -8061,7 +8300,10 @@ impl Checker {
                     n
                 ),
                 range.clone(),
-                Some("fixed-length `[byte; N]` requires a string literal with exactly N UTF-8 bytes".to_string()),
+                Some(
+                    "fixed-length `[byte; N]` requires a string literal with exactly N UTF-8 bytes"
+                        .to_string(),
+                ),
             ),
             ArrayLength::Static(_) => expected.clone(),
             ArrayLength::Dynamic => {
@@ -8081,11 +8323,7 @@ impl Checker {
         if crate::codegen::string_literal_as_single_byte(s).is_err() {
             return false;
         }
-        self.retarget_node_ty(
-            node.0.start,
-            node.0.end,
-            crate::typechecking::ty::byte(),
-        );
+        self.retarget_node_ty(node.0.start, node.0.end, crate::typechecking::ty::byte());
         true
     }
 
@@ -8178,9 +8416,7 @@ impl Checker {
     fn peel_literal_expr<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
         let expr = unwrap_expr_wrappers(expr);
         match expr.1.as_ref() {
-            Expression::Fragment(items) if items.len() == 1 => {
-                Self::peel_literal_expr(&items[0])
-            }
+            Expression::Fragment(items) if items.len() == 1 => Self::peel_literal_expr(&items[0]),
             _ => expr,
         }
     }
@@ -8634,7 +8870,9 @@ impl Checker {
         wanted: &[Ty],
         range: &Range<usize>,
     ) -> bool {
-        use crate::typechecking::aggregate_arith::{homogeneous_aggregate_elem, is_liftable_arith_trait};
+        use crate::typechecking::aggregate_arith::{
+            homogeneous_aggregate_elem, is_liftable_arith_trait,
+        };
         if !is_liftable_arith_trait(class) || wanted.len() != 1 {
             return false;
         }
@@ -10154,12 +10392,7 @@ impl Checker {
         }
     }
 
-    fn record_ffi_declare_metadata(
-        &mut self,
-        key: String,
-        dargs: &[Output],
-        store_field: bool,
-    ) {
+    fn record_ffi_declare_metadata(&mut self, key: String, dargs: &[Output], store_field: bool) {
         if dargs.len() != 4 && dargs.len() != 5 {
             return;
         }
@@ -10218,7 +10451,8 @@ impl Checker {
                 }
                 if let Some(fn_name) = &self.current_function {
                     let key = Self::ffi_param_invoke_key(fn_name, name);
-                    if let Some(&(ref ty, variadic, nfixed)) = self.ffi_fn_param_invoke_ret.get(&key)
+                    if let Some(&(ref ty, variadic, nfixed)) =
+                        self.ffi_fn_param_invoke_ret.get(&key)
                     {
                         return Some((ty.clone(), variadic, nfixed));
                     }
@@ -10349,11 +10583,7 @@ impl Checker {
         }
     }
 
-    fn maybe_record_ffi_param_invoke_flow_for_call(
-        &mut self,
-        fn_name: &str,
-        arg_exprs: &[Output],
-    ) {
+    fn maybe_record_ffi_param_invoke_flow_for_call(&mut self, fn_name: &str, arg_exprs: &[Output]) {
         let Some(param_names) = self.fn_param_names.get(fn_name).cloned() else {
             return;
         };
@@ -10361,10 +10591,7 @@ impl Checker {
     }
 
     #[cfg(test)]
-    pub(crate) fn test_ffi_param_invoke_ret(
-        &self,
-        key: &str,
-    ) -> Option<&(Ty, bool, usize)> {
+    pub(crate) fn test_ffi_param_invoke_ret(&self, key: &str) -> Option<&(Ty, bool, usize)> {
         self.ffi_fn_param_invoke_ret.get(key)
     }
 
@@ -10714,7 +10941,6 @@ impl Checker {
             _ => int(),
         }
     }
-
 
     /// Register a class: store its name and the (visibility, name,
     /// type) of each field. The class itself becomes a `Ty::Con(key)`
@@ -11069,15 +11295,16 @@ impl Checker {
 
     fn tuple_pack_ty_for_args(args: &Output, counter: &mut TyVarCounter) -> Option<Ty> {
         if let Expression::Fragment(children) = args.1.as_ref() {
-            if children
-                .last()
-                .is_some_and(|c| {
-                    matches!(
-                        c.1.as_ref(),
-                        Expression::Argument { ty: None, is_rest: true, .. }
-                    )
-                })
-            {
+            if children.last().is_some_and(|c| {
+                matches!(
+                    c.1.as_ref(),
+                    Expression::Argument {
+                        ty: None,
+                        is_rest: true,
+                        ..
+                    }
+                )
+            }) {
                 return Some(Ty::Var(counter.fresh()));
             }
         }
@@ -11202,10 +11429,7 @@ impl Checker {
             let n = children.len();
             for (i, child) in children.iter().enumerate() {
                 if let Expression::Argument {
-                    ty,
-                    name,
-                    is_rest,
-                    ..
+                    ty, name, is_rest, ..
                 } = child.1.as_ref()
                 {
                     if *is_rest {
@@ -11319,11 +11543,7 @@ impl Checker {
         }
         let fixed: Vec<&OverloadCandidate> =
             arity_ok.iter().copied().filter(|c| !c.is_rest).collect();
-        let pool: Vec<&OverloadCandidate> = if !fixed.is_empty() {
-            fixed
-        } else {
-            arity_ok
-        };
+        let pool: Vec<&OverloadCandidate> = if !fixed.is_empty() { fixed } else { arity_ok };
         if pool.len() == 1 {
             return OverloadSelect::Selected(pool[0]);
         }
@@ -12002,12 +12222,7 @@ impl Checker {
                 if !what.is_empty() {
                     continue;
                 }
-                self.stub_inherent_impl_methods(
-                    owner,
-                    type_params,
-                    methods,
-                    &stmt.0.into_range(),
-                );
+                self.stub_inherent_impl_methods(owner, type_params, methods, &stmt.0.into_range());
             }
         }
     }
@@ -12197,9 +12412,9 @@ impl Checker {
             // `use path::{join}` and other free-function imports.
             self.fn_param_names.insert(fqn.clone(), param_names);
             let has_rest = matches!(args.1.as_ref(), Expression::Fragment(children)
-                if children.last().is_some_and(|c| {
-                    matches!(c.1.as_ref(), Expression::Argument { is_rest: true, .. })
-                }));
+            if children.last().is_some_and(|c| {
+                matches!(c.1.as_ref(), Expression::Argument { is_rest: true, .. })
+            }));
             self.fn_has_rest.insert(fqn.clone(), has_rest);
 
             let mut fun_ty = match returns {
@@ -12410,7 +12625,7 @@ impl Checker {
                 iterable,
                 body,
                 identifier,
-            pattern: _,
+                pattern: _,
             } => {
                 self.pre_pass_ffi_invoke_param_flow_walk(iterable, local_class_scopes);
                 if let Some(identifier) = identifier {
@@ -12445,8 +12660,7 @@ impl Checker {
             Expression::Method(_, body) => {
                 self.pre_pass_ffi_invoke_param_flow_walk(body, local_class_scopes);
             }
-            Expression::Access(receiver, _)
-            | Expression::OptionalAccess(receiver, _) => {
+            Expression::Access(receiver, _) | Expression::OptionalAccess(receiver, _) => {
                 self.pre_pass_ffi_invoke_param_flow_walk(receiver, local_class_scopes);
             }
             Expression::Instantiate(class, args) => {
@@ -12528,7 +12742,11 @@ impl Checker {
                                 _ => unwrapped,
                             };
                             if let Some(dargs) = Self::declare_args_from_expr(unwrapped) {
-                                self.record_ffi_declare_metadata(var_name.to_string(), dargs, false);
+                                self.record_ffi_declare_metadata(
+                                    var_name.to_string(),
+                                    dargs,
+                                    false,
+                                );
                             }
                             if let Expression::Instantiate(class, _) = unwrapped.1.as_ref() {
                                 if let Expression::Identifier(class_name) = class.1.as_ref() {
@@ -12654,12 +12872,8 @@ impl Checker {
 
         if is_generic {
             self.type_params_in_scope.pop();
-            let scheme = Scheme::poly_with_kinds(
-                param_vars,
-                param_kinds,
-                param_constraints,
-                fun_ty,
-            );
+            let scheme =
+                Scheme::poly_with_kinds(param_vars, param_kinds, param_constraints, fun_ty);
             self.forward_free_fn_schemes
                 .insert(name.to_string(), scheme.clone());
             if key != name {
@@ -12672,7 +12886,6 @@ impl Checker {
         self.messages.truncate(msg_len);
         let _ = range;
     }
-
 
     /// Forward-declare module-level `fn` signatures after `push_scope` so
     /// `impl` methods can call helpers defined later in the file.
@@ -12806,9 +13019,7 @@ impl Checker {
             if !type_params.is_empty() {
                 errors.push(Message::error(
                     ErrorCode::InvalidEnumRepr,
-                    format!(
-                        "scalar-backed enum `{name_str}` cannot have type parameters"
-                    ),
+                    format!("scalar-backed enum `{name_str}` cannot have type parameters"),
                     range.clone(),
                 ));
                 return;
@@ -12816,9 +13027,7 @@ impl Checker {
             if any_payload {
                 errors.push(Message::error(
                     ErrorCode::InvalidEnumRepr,
-                    format!(
-                        "enum `{name_str}` cannot mix payload variants with `=` scalar cases"
-                    ),
+                    format!("enum `{name_str}` cannot mix payload variants with `=` scalar cases"),
                     range.clone(),
                 ));
                 return;
@@ -13039,10 +13248,7 @@ impl Checker {
                         if !seen.insert(vn) {
                             let mut msg = Message::error(
                                 ErrorCode::DuplicateConstructor,
-                                format!(
-                                    "Duplicate constructor `{}` on enum `{}`",
-                                    vn, name_str
-                                ),
+                                format!("Duplicate constructor `{}` on enum `{}`", vn, name_str),
                                 node.0.into_range(),
                             );
                             msg.with_help(format!(
@@ -13128,7 +13334,7 @@ impl Checker {
             | Expression::ExprStatement(e)
             | Expression::Return(e)
             | Expression::ImplicitReturn(e)
-            |             Expression::Raise(e)
+            | Expression::Raise(e)
             | Expression::Panic(e)
             | Expression::TypeOf(e)
             | Expression::Try(e)
@@ -13300,7 +13506,7 @@ impl Checker {
                 iterable,
                 body,
                 identifier,
-            pattern: _,
+                pattern: _,
             } => {
                 self.pre_register_enums_walk(iterable, errors);
                 if let Some(i) = identifier {
@@ -13395,7 +13601,6 @@ impl Checker {
             }
         }
     }
-
 
     fn infer_enum_decl(&mut self, name: &str, variants: &[Output], _range: &Range<usize>) {
         use parser::ast::EnumVariantPayload;
@@ -13715,9 +13920,7 @@ impl Checker {
                 let want = expected_payload.field_count();
                 (args.len() == want, args.len() != want)
             }
-            (EnumVariantPayloadTy::Record(_), EnumConstructPayload::Record(_)) => {
-                (true, false)
-            }
+            (EnumVariantPayloadTy::Record(_), EnumConstructPayload::Record(_)) => (true, false),
             _ => (false, false),
         };
 
@@ -13745,14 +13948,11 @@ impl Checker {
                 EnumConstructPayload::Record(_) => "record",
             };
             let help = match (&expected_payload, fields) {
-                (
-                    EnumVariantPayloadTy::Tuple(tys),
-                    EnumConstructPayload::Record(_),
-                ) if tys.len() == 1 => {
-                    let wrapped = crate::typechecking::pretty::format_ty_for_diag(
-                        &self.subst,
-                        &tys[0],
-                    );
+                (EnumVariantPayloadTy::Tuple(tys), EnumConstructPayload::Record(_))
+                    if tys.len() == 1 =>
+                {
+                    let wrapped =
+                        crate::typechecking::pretty::format_ty_for_diag(&self.subst, &tys[0]);
                     format!(
                         "`{enum_str}::{variant_str}` is a tuple variant wrapping `{wrapped}`; \
                          construct with `{enum_str}::{variant_str}(value)`, or declare a record \
@@ -14491,8 +14691,7 @@ impl Checker {
                     pending.match_range.clone(),
                 );
                 msg.with_help(
-                    "add a `default => ...` arm to cover the remaining cases"
-                        .to_string(),
+                    "add a `default => ...` arm to cover the remaining cases".to_string(),
                 );
                 self.messages.push(msg);
             }
@@ -15324,11 +15523,7 @@ impl Checker {
             .filter(|k| k.ends_with(&suffix))
             .cloned()
             .collect();
-        if hits.len() == 1 {
-            hits.pop()
-        } else {
-            None
-        }
+        if hits.len() == 1 { hits.pop() } else { None }
     }
 
     fn qualify_module_name(&self, name: &str) -> String {
@@ -15341,12 +15536,16 @@ impl Checker {
 
     /// Compile-time type id for `InitTyped` (`0` if the name is not a class).
     pub fn class_type_id(&self, name: &str) -> u32 {
-        let key = self.resolve_class_key(name).unwrap_or_else(|| name.to_string());
+        let key = self
+            .resolve_class_key(name)
+            .unwrap_or_else(|| name.to_string());
         self.class_type_ids.get(&key).copied().unwrap_or(0)
     }
 
     pub fn class_has_drop(&self, name: &str) -> bool {
-        let key = self.resolve_class_key(name).unwrap_or_else(|| name.to_string());
+        let key = self
+            .resolve_class_key(name)
+            .unwrap_or_else(|| name.to_string());
         self.classes_with_drop.contains(&key)
     }
 
@@ -15710,11 +15909,7 @@ impl Checker {
         inclusive: bool,
         range: &Range<usize>,
     ) -> Option<(Ty, ForInKind)> {
-        let type_name = if inclusive {
-            RANGE_INCLUSIVE
-        } else {
-            RANGE
-        };
+        let type_name = if inclusive { RANGE_INCLUSIVE } else { RANGE };
         let float = self.require_range_numeric_step(elem, type_name, range);
         let elem = apply_ty_prune(&self.subst, elem);
         Some((elem, ForInKind::Range { inclusive, float }))
@@ -15937,8 +16132,10 @@ impl Checker {
         if let Some(scheme) = self.env.lookup(fqn).cloned() {
             self.env.insert_top(local.to_string(), scheme);
         } else if self.env.lookup(local).is_none() {
-            self.env
-                .insert_top(local.to_string(), Scheme::mono(Ty::Var(self.counter.fresh())));
+            self.env.insert_top(
+                local.to_string(),
+                Scheme::mono(Ty::Var(self.counter.fresh())),
+            );
         }
         // Only the exact defining FQN, never a `::{local}` suffix heuristic
         // (another module's generic with the same short name would mis-tag).
@@ -15980,13 +16177,7 @@ impl Checker {
         Self::can_access_member(vis, owner_key, self.impl_owner.as_deref())
     }
 
-    fn report_private_member(
-        &mut self,
-        kind: &str,
-        owner: &str,
-        name: &str,
-        range: Range<usize>,
-    ) {
+    fn report_private_member(&mut self, kind: &str, owner: &str, name: &str, range: Range<usize>) {
         let mut msg = Message::error(
             ErrorCode::PrivateMember,
             format!("cannot access private {kind} `{name}` of `{owner}`"),

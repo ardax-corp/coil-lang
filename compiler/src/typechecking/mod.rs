@@ -11,16 +11,16 @@ pub mod env;
 pub mod fn_value_escape;
 pub mod generics;
 pub mod id;
-pub mod infer;
-pub mod resolve;
-pub mod kind;
-pub mod loop_par;
-pub mod local_escape;
 pub mod index_facts;
-pub mod pretty;
+pub mod infer;
+pub mod kind;
+pub mod local_escape;
+pub mod loop_par;
 pub mod par_hint;
 pub mod par_profit;
+pub mod pretty;
 pub mod purity;
+pub mod resolve;
 pub mod return_layout;
 pub mod stack_bound;
 pub mod subst;
@@ -29,7 +29,8 @@ pub mod unify;
 pub mod virtual_modules;
 
 pub use aggregate_arith::{
-    AggregateArithInfo, AggregateArithKind, AggregateOp, LinearAlgebraKind, ScalarSide,
+    AggregateArithInfo, AggregateArithKind, AggregateOp, LinearAlgebraKind, MatrixCellOp,
+    ScalarSide,
 };
 #[allow(unused_imports)] // public API for Matrix helpers
 pub use aggregate_arith::{is_matrix_ty, unwrap_matrix_ty, wrap_matrix_ty};
@@ -44,14 +45,14 @@ pub use kind::Kind;
 #[allow(unused_imports)] // public API re-export
 pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sites};
 #[allow(unused_imports)] // public API re-export
-pub use par_hint::{analyze_par_escape_hints, EscapeKind, NamedEscape, ParEscapeHint};
-pub use par_profit::{
-    ArgForm, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites, args_worth_parallel,
-    arm_callee, collect_par_worker_fns, eval_arm_args, guards_hold, par_expr_grain, par_loop_grain,
-    par_worker_name, PAR_SPEC_HOPS,
-};
+pub use par_hint::{EscapeKind, NamedEscape, ParEscapeHint, analyze_par_escape_hints};
 #[cfg(test)]
 pub use par_profit::par_work_grain;
+pub use par_profit::{
+    ArgForm, PAR_SPEC_HOPS, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites,
+    args_worth_parallel, arm_callee, collect_par_worker_fns, eval_arm_args, guards_hold,
+    par_expr_grain, par_loop_grain, par_worker_name,
+};
 #[allow(unused_imports)] // public API re-export
 pub use purity::{
     EffectFlags, RecursivePureSet, analyze_fn_effects, analyze_pure_fns, analyze_recursive_fns,
@@ -59,8 +60,9 @@ pub use purity::{
 };
 #[allow(unused_imports)] // public API re-export
 pub use stack_bound::{
-    BoundSource, DEFAULT_OPERAND_STACK_SLOTS, FnStackBound, MAX_OPERAND_STACK_SLOTS, StackBoundReport,
-    analyze_stack_bounds, operand_slots_for_frames, rescale_operand_slots_for_dense_seek,
+    BoundSource, DEFAULT_OPERAND_STACK_SLOTS, FnStackBound, MAX_OPERAND_STACK_SLOTS,
+    StackBoundReport, analyze_stack_bounds, operand_slots_for_frames,
+    rescale_operand_slots_for_dense_seek,
 };
 #[allow(unused_imports)] // public API re-export
 pub use ty::{ScalarBacking, Ty};
