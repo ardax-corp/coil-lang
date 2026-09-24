@@ -424,10 +424,12 @@ fn lir_cost_slack(ops: &[IlOp]) -> usize {
     slack
 }
 
-/// Trailing `if { raise }` end-labels sit in epilogue (`emitting_range_to_raw`
-/// stops at the last code op). Attach only those binds that the last function
-/// jumps to and does not already define, so remap stays local and does not
-/// steal another function's entry (finalizer / static-init prologue).
+/// Trailing `if { raise }` end-labels sit in glue / epilogue
+/// (`emitting_range_to_raw` stops at the last code op and does not steal
+/// them into the next function). Attach only those binds that the last
+/// function jumps to and does not already define, so remap stays local
+/// and does not steal another function's entry (finalizer / static-init
+/// prologue).
 fn absorb_trailing_labels(module: &mut IlModule) {
     let Some(last) = module.funcs.last_mut() else {
         return;
@@ -973,6 +975,81 @@ mod tests {
         assert_ne!(
             main_jmp, sum_mid,
             "main must not jump into sum's remapped Label(8)"
+        );
+    }
+
+    /// Trailing if-end labels must stay with the jumper, not the next body's
+    /// leading labels. MIR replace of the next body would otherwise drop them
+    /// (COI-407 release `label was never bound`).
+    #[test]
+    fn from_flat_keeps_trailing_if_end_on_previous_func() {
+        let loc = loc();
+        let ops = vec![
+            IlOp::Label(Label(1)),
+            IlOp::Jump {
+                kind: IlJumpKind::JumpIfFalse,
+                target: Label(8),
+                loc,
+                hint: Default::default(),
+            },
+            IlOp::Return { loc, ret_words: 1 },
+            IlOp::Label(Label(8)),
+            IlOp::Label(Label(2)),
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        // emitting: JMPF, RET | CONST, RET
+        let funcs = vec![
+            IlFunc::new("pred", Some(Label(1)), 0, 2),
+            IlFunc::new("hot", Some(Label(2)), 2, 4),
+        ];
+        let mut m = IlModule::from_flat(&ops, &funcs);
+        assert!(
+            m.funcs[0]
+                .ops
+                .iter()
+                .any(|op| matches!(op, IlOp::Label(Label(8))))
+                || m.glue
+                    .first()
+                    .is_some_and(|g| g.iter().any(|op| matches!(op, IlOp::Label(Label(8))))),
+            "pred or its trailing glue must keep end-label 8"
+        );
+        assert!(
+            !m.funcs[1]
+                .ops
+                .iter()
+                .any(|op| matches!(op, IlOp::Label(Label(8)))),
+            "hot must not steal pred's trailing end-label"
+        );
+        m.funcs[1].ops = vec![
+            IlOp::Label(Label(2)),
+            IlOp::Const { imm: 0, loc },
+            IlOp::Return { loc, ret_words: 1 },
+        ];
+        let (flat, _, _) = m.to_flat();
+        let mut pool = Vec::new();
+        crate::il::try_lower(&flat, &mut pool).unwrap_or_else(|e| {
+            panic!("trailing if-end must stay bound after next-body replace: {e}")
+        });
+        let jmp = flat.iter().find_map(|op| match op {
+            IlOp::Jump {
+                target,
+                kind: IlJumpKind::JumpIfFalse,
+                ..
+            } => Some(target.0),
+            _ => None,
+        });
+        let bound: Vec<u32> = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .collect();
+        let jmp = jmp.expect("pred JMPF");
+        assert!(
+            bound.contains(&jmp),
+            "JMPF target {jmp} must be bound, bound={bound:?}"
         );
     }
 

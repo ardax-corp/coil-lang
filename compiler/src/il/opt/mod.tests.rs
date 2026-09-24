@@ -284,3 +284,38 @@ fn stats_off_does_not_record() {
     let stats = last_opt_stats();
     assert_eq!(stats, OptStats::default());
 }
+
+#[test]
+fn emitting_range_does_not_steal_prefix_jump_end_label() {
+    let loc = loc();
+    let ops = vec![
+        label(1),
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(8),
+            loc,
+            hint: Default::default(),
+        },
+        ret(),
+        label(8),
+        label(2),
+        c(0),
+        ret(),
+    ];
+    // emitting: JMPF, RET | CONST, RET
+    let (s0, e0) = emitting_range_to_raw(&ops, 0, 2);
+    let (s1, e1) = emitting_range_to_raw(&ops, 2, 4);
+    assert!(
+        ops[s0..e0]
+            .iter()
+            .any(|op| matches!(op, IlOp::Label(Label(8))))
+            || s1 > s0 && ops[e0..s1].iter().any(|op| matches!(op, IlOp::Label(Label(8)))),
+        "label 8 must stay with pred or the gap, not hot"
+    );
+    assert!(
+        !ops[s1..e1]
+            .iter()
+            .any(|op| matches!(op, IlOp::Label(Label(8)))),
+        "hot span must not include pred's trailing if-end"
+    );
+}
