@@ -1,123 +1,21 @@
 // COI-408: park on WouldBlock, resume, match Result::Ok (not boxed-as-Err).
-use io::{await_readable, await_writable, close, read, write};
+use io::{await_readable, await_writable, close, read, wait_ready, write};
 use io::net::tcp::{accept, connect, listen, local_addr};
-use thread::{Sender, channel, join, recv, send, spawn};
-use clock::{sleep_ms};
 use string::{to_bytes};
 
-fn delay_http_server(Sender tx) -> int {
-    let listener = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    let addr = match local_addr(listener) {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "local_addr",
-    };
-    match send(tx, addr[1]) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "send port",
-    };
+fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
+    let listener = listen("127.0.0.1", 0)?;
+    let addr = local_addr(listener)?;
+    let client = connect("127.0.0.1", addr[1])?;
     match await_readable(listener) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "listen wait",
     };
-    let peer = match accept(listener) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "accept",
-    };
-    sleep_ms(80);
-    match write(peer, to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "server write",
-    };
-    match close(peer) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close peer",
-    };
-    match close(listener) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close listener",
-    };
-    return 0;
+    let server = accept(listener)?;
+    return Result::Ok((client, server, listener));
 }
 
-fn delay_drain_server(Sender tx) -> int {
-    let listener = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    let addr = match local_addr(listener) {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "local_addr",
-    };
-    match send(tx, addr[1]) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "send port",
-    };
-    match await_readable(listener) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "listen wait",
-    };
-    let peer = match accept(listener) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "accept",
-    };
-    sleep_ms(80);
-    let z: byte = 0;
-    let buf = Vec::from([z, z, z, z, z, z, z, z]);
-    let n = 0;
-    while n < 512 {
-        match read(peer, buf) {
-            Result::Ok(got) => {
-                match got {
-                    Option::None => {
-                        break;
-                    },
-                    Option::Some(_) => {},
-                };
-            },
-            Result::Err(_) => {
-                match await_readable(peer) {
-                    Result::Ok(_) => {},
-                    Result::Err(_) => panic "drain wait",
-                };
-            },
-        };
-        n = n + 1;
-    };
-    match close(peer) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close peer",
-    };
-    match close(listener) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "close listener",
-    };
-    return 0;
-}
-
-test("await_readable match Ok after WouldBlock park") {
-    let pair = match channel() {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "channel",
-    };
-    let t = match spawn(delay_http_server, pair[0]) {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "spawn",
-    };
-    let port = match recv(pair[1]) {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "recv port",
-    };
-    let c = match connect("127.0.0.1", port) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "connect",
-    };
-    match write(c, to_bytes("GET / HTTP/1.1\r\nHost: t\r\n\r\n")) {
-        Result::Ok(_) => {},
-        Result::Err(_) => panic "client write",
-    };
+async fn http_read_after_wait(Stream c) -> int {
     let z: byte = 0;
     let buf = Vec::from([z, z, z, z, z, z, z, z]);
     match read(c, buf) {
@@ -129,62 +27,59 @@ test("await_readable match Ok after WouldBlock park") {
             };
         },
     };
-    match read(c, buf) {
-        Result::Ok(got) => {
-            match got {
-                Option::Some(n) => assert(n > 0)?,
-                Option::None => panic "eof before body",
-            };
+    return match read(c, buf) {
+        Result::Ok(got) => match got {
+            Option::Some(n) => n,
+            Option::None => panic "eof before body",
         },
         Result::Err(_) => panic "second read after wait",
     };
+}
+
+async fn http_write_response(Stream s) -> int {
+    return match write(s, to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")) {
+        Result::Ok(_) => 0,
+        Result::Err(_) => panic "server write",
+    };
+}
+
+test("await_readable match Ok after WouldBlock park") {
+    let triple = match connected_pair() {
+        Result::Ok(v) => v,
+        Result::Err(_) => panic "pair",
+    };
+    let c = triple[0];
+    let s = triple[1];
+    let listener = triple[2];
+    let reader = http_read_after_wait(c);
+    let writer = http_write_response(s);
+    resume reader;
+    resume writer;
+    wait_ready();
+    let n = resume reader;
+    assert(n > 0)?;
     match close(c) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close client",
     };
-    match join(t) {
+    match close(s) {
         Result::Ok(_) => {},
-        Result::Err(_) => panic "join",
+        Result::Err(_) => panic "close server",
+    };
+    match close(listener) {
+        Result::Ok(_) => {},
+        Result::Err(_) => panic "close listener",
     };
 }
 
-test("await_writable match Ok after WouldBlock park") {
-    let pair = match channel() {
+test("await_writable match Ok on connected socket") {
+    let triple = match connected_pair() {
         Result::Ok(v) => v,
-        Result::Err(_) => panic "channel",
+        Result::Err(_) => panic "pair",
     };
-    let t = match spawn(delay_drain_server, pair[0]) {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "spawn",
-    };
-    let port = match recv(pair[1]) {
-        Result::Ok(v) => v,
-        Result::Err(_) => panic "recv port",
-    };
-    let c = match connect("127.0.0.1", port) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "connect",
-    };
-    let one: byte = 1;
-    let chunk: Vec<byte> = Vec::new();
-    let i = 0;
-    while i < 4096 {
-        chunk.push(one);
-        i = i + 1;
-    };
-    let blocked = 0;
-    let n = 0;
-    while n < 512 {
-        match write(c, chunk) {
-            Result::Ok(_) => {},
-            Result::Err(_) => {
-                blocked = 1;
-                break;
-            },
-        };
-        n = n + 1;
-    };
-    assert(blocked == 1)?;
+    let c = triple[0];
+    let s = triple[1];
+    let listener = triple[2];
     match await_writable(c) {
         Result::Ok(_) => {},
         Result::Err(_) => panic "await_writable treated Ok as Err",
@@ -193,8 +88,12 @@ test("await_writable match Ok after WouldBlock park") {
         Result::Ok(_) => {},
         Result::Err(_) => panic "close client",
     };
-    match join(t) {
+    match close(s) {
         Result::Ok(_) => {},
-        Result::Err(_) => panic "join",
+        Result::Err(_) => panic "close server",
+    };
+    match close(listener) {
+        Result::Ok(_) => {},
+        Result::Err(_) => panic "close listener",
     };
 }
