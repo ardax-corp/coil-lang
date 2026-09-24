@@ -2672,8 +2672,9 @@ impl Compiler {
     /// `temps`. Strips `RETURN` / fused `*Return` so the value stays on stack.
     /// When `allow_calls` is set, `Entry`/`CALL` are preserved (self-unroll).
     fn emit_cfg_inline_body(&mut self, ops: &[IlOp], temps: &[u32], allow_calls: bool) -> bool {
-        use std::collections::HashMap;
+        use std::collections::{HashMap, HashSet};
         let mut label_map: HashMap<u32, IlLabel> = HashMap::new();
+        let mut bound_mapped: HashSet<u32> = HashSet::new();
         let mut ensure_label = |id: u32, bc: &mut CodeBuf| -> IlLabel {
             *label_map.entry(id).or_insert_with(|| bc.fresh_label())
         };
@@ -2693,10 +2694,12 @@ impl Compiler {
                 IlOp::Label(l) => {
                     let mapped = ensure_label(l.0, &mut self.bytecode);
                     self.bytecode.bind_label(mapped);
+                    bound_mapped.insert(mapped.0);
                 }
                 IlOp::JoinLabel(l) => {
                     let mapped = ensure_label(l.0, &mut self.bytecode);
                     self.bytecode.bind_join_label(mapped);
+                    bound_mapped.insert(mapped.0);
                 }
                 IlOp::Jump {
                     kind,
@@ -2963,6 +2966,13 @@ impl Compiler {
             }
         }
         self.bytecode.bind_label(end_label);
+        // Trailing if-end sits at the exclusive span end and is omitted from
+        // `code_slice_raw_ops`. Bind leftover jump targets at the join.
+        for mapped in label_map.values() {
+            if !bound_mapped.contains(&mapped.0) {
+                self.bytecode.bind_label(*mapped);
+            }
+        }
         saw_value
     }
 }
