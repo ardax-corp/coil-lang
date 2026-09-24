@@ -37,6 +37,12 @@ pub use manifest::{
 };
 pub use pipeline::*;
 pub use project_index::ProjectIndex;
+
+/// COI-407: trailing `if` end-label stays bound after the next body is replaced.
+#[doc(hidden)]
+pub fn prove_coi407_trailing_if_end() {
+    crate::il::module::prove_trailing_if_end_after_next_body_replace();
+}
 pub use reporting::{ErrorCode, Label, Message, MessageKind};
 pub use typechecking::env::{Env, Frame};
 pub use typechecking::pretty::format_ty_for_diag;

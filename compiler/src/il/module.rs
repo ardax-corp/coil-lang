@@ -386,6 +386,84 @@ impl IlModule {
     }
 }
 
+/// Split + simulated MIR replace of the next body, then lower.
+///
+/// Used by the crate unit test and by `compiler/tests/coi407_trailing_label.rs`
+/// so CI can run this under `--release` without compiling `lib.tests.rs`
+/// (`Instruction: Debug` is debug_assertions-only).
+pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
+    let loc = common::DebugLoc::unknown();
+    let ops = vec![
+        IlOp::Label(Label(1)),
+        IlOp::Jump {
+            kind: IlJumpKind::JumpIfFalse,
+            target: Label(8),
+            loc,
+            hint: Default::default(),
+        },
+        IlOp::Return { loc, ret_words: 1 },
+        IlOp::Label(Label(8)),
+        IlOp::Label(Label(2)),
+        IlOp::Const { imm: 0, loc },
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let funcs = vec![
+        super::IlFunc::with_entry_sp("pred", Some(Label(1)), 0, 2, 0),
+        super::IlFunc::with_entry_sp("hot", Some(Label(2)), 2, 4, 0),
+    ];
+    let mut m = IlModule::from_flat(&ops, &funcs);
+    assert!(
+        m.funcs[0]
+            .ops
+            .iter()
+            .any(|op| matches!(op, IlOp::Label(Label(8))))
+            || m.glue
+                .first()
+                .is_some_and(|g| g.iter().any(|op| matches!(op, IlOp::Label(Label(8))))),
+        "pred or its trailing glue must keep end-label 8"
+    );
+    assert!(
+        !m.funcs[1]
+            .ops
+            .iter()
+            .any(|op| matches!(op, IlOp::Label(Label(8)))),
+        "hot must not steal pred's trailing end-label"
+    );
+    m.funcs[1].ops = vec![
+        IlOp::Label(Label(2)),
+        IlOp::Const { imm: 0, loc },
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let (flat, _, _) = m.to_flat();
+    let jmp = flat
+        .iter()
+        .find_map(|op| match op {
+            IlOp::Jump {
+                target,
+                kind: IlJumpKind::JumpIfFalse,
+                ..
+            } => Some(target.0),
+            _ => None,
+        })
+        .expect("pred JMPF");
+    let bound: Vec<u32> = flat
+        .iter()
+        .filter_map(|op| match op {
+            IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        bound.contains(&jmp),
+        "JMPF target {jmp} must be bound, bound={bound:?}"
+    );
+    let mut buf = super::CodeBuf::new();
+    for op in &flat {
+        buf.push_op(op.clone());
+    }
+    buf.lower_in_place(&mut Vec::new());
+}
+
 /// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
 /// the body (naive slot spill). Labels are free. `Seek` / `StorePop` are
 /// expensive so leftover lets keep fuse-IL (ConstReturnImm).
@@ -983,74 +1061,7 @@ mod tests {
     /// (COI-407 release `label was never bound`).
     #[test]
     fn from_flat_keeps_trailing_if_end_on_previous_func() {
-        let loc = loc();
-        let ops = vec![
-            IlOp::Label(Label(1)),
-            IlOp::Jump {
-                kind: IlJumpKind::JumpIfFalse,
-                target: Label(8),
-                loc,
-                hint: Default::default(),
-            },
-            IlOp::Return { loc, ret_words: 1 },
-            IlOp::Label(Label(8)),
-            IlOp::Label(Label(2)),
-            IlOp::Const { imm: 0, loc },
-            IlOp::Return { loc, ret_words: 1 },
-        ];
-        // emitting: JMPF, RET | CONST, RET
-        let funcs = vec![
-            IlFunc::new("pred", Some(Label(1)), 0, 2),
-            IlFunc::new("hot", Some(Label(2)), 2, 4),
-        ];
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        assert!(
-            m.funcs[0]
-                .ops
-                .iter()
-                .any(|op| matches!(op, IlOp::Label(Label(8))))
-                || m.glue
-                    .first()
-                    .is_some_and(|g| g.iter().any(|op| matches!(op, IlOp::Label(Label(8))))),
-            "pred or its trailing glue must keep end-label 8"
-        );
-        assert!(
-            !m.funcs[1]
-                .ops
-                .iter()
-                .any(|op| matches!(op, IlOp::Label(Label(8)))),
-            "hot must not steal pred's trailing end-label"
-        );
-        m.funcs[1].ops = vec![
-            IlOp::Label(Label(2)),
-            IlOp::Const { imm: 0, loc },
-            IlOp::Return { loc, ret_words: 1 },
-        ];
-        let (flat, _, _) = m.to_flat();
-        let mut pool = Vec::new();
-        crate::il::try_lower(&flat, &mut pool).unwrap_or_else(|e| {
-            panic!("trailing if-end must stay bound after next-body replace: {e}")
-        });
-        let jmp = flat.iter().find_map(|op| match op {
-            IlOp::Jump {
-                target,
-                kind: IlJumpKind::JumpIfFalse,
-                ..
-            } => Some(target.0),
-            _ => None,
-        });
-        let bound: Vec<u32> = flat
-            .iter()
-            .filter_map(|op| match op {
-                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
-                _ => None,
-            })
-            .collect();
-        let jmp = jmp.expect("pred JMPF");
-        assert!(
-            bound.contains(&jmp),
-            "JMPF target {jmp} must be bound, bound={bound:?}"
-        );
+        super::prove_trailing_if_end_after_next_body_replace();
     }
 
     #[test]
