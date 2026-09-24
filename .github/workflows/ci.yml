@@ -100,6 +100,16 @@ jobs:
             sleep 5
           done
 
+      - name: Release label lower (COI-407)
+        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        run: |
+          # Opt-level 3 / no debug_assertions (the release-compiler panic).
+          # Skip fat LTO so this stays a focused label-lower check.
+          CARGO_PROFILE_RELEASE_LTO=off CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
+            cargo test --release -p compiler --lib \
+            il::module::tests::from_flat_keeps_trailing_if_end_on_previous_func \
+            -- --exact
+
       - name: Language harness (`coil test`)
         if: matrix.features.id == 'default'
         run: |
