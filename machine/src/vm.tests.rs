@@ -2511,6 +2511,65 @@
         drop(writer);
     }
 
+    /// Park + resume must pack `Result<(), IoError>` with the HostInvoke layout
+    /// (OptionNiche `Ok` = 0). A boxed Ok is a non-zero pointer and Coil match
+    /// takes `Err` (COI-408).
+    #[test]
+    fn finish_pending_io_wait_packs_option_niche_ok_as_zero() {
+        use crate::ffi::FfiSignatureBuilder;
+        use crate::io::{
+            alloc_stream, stream_await_readable, stream_close, stream_set_read_timeout,
+            take_pending_io_park,
+        };
+        use crate::io_handle::NativeHandle;
+        use crate::memory::{FfiType, StreamKind};
+        use common::{pack_host_invoke_operand, HOST_ENUM_LAYOUT_OPTION_NICHE};
+        use std::io::Write;
+        use std::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let mut writer = TcpStream::connect(addr).expect("connect");
+        let (reader, _) = listener.accept().expect("accept");
+
+        let mut vm = Machine::<8>::default();
+        let stream = alloc_stream(vm.heap_mut(), NativeHandle::Tcp(reader), StreamKind::Tcp)
+            .expect("alloc stream");
+        stream_set_read_timeout(vm.heap_mut(), stream, 250).expect("timeout");
+        let _ = take_pending_io_park();
+
+        let sig = FfiSignatureBuilder::new("await_readable")
+            .arg(FfiType::Int)
+            .ret(FfiType::Int)
+            .build()
+            .unwrap();
+        let fn_id = vm.register_fn(sig, |heap, args| {
+            stream_await_readable(heap, args[0])
+                .map_err(|tag| crate::ffi::FfiError::Unsupported(format!("{tag:?}")))
+        });
+
+        vm.push(Value::from(fn_id as i64));
+        vm.push(stream);
+        let operand = pack_host_invoke_operand(1, HOST_ENUM_LAYOUT_OPTION_NICHE);
+        let code = [
+            Byte::new(Instruction::HostInvoke).with_operand_u32(operand),
+            Byte::new(Instruction::HALT),
+        ];
+        let paused = vm.execute(&code, &[], 0);
+        assert!(paused, "empty socket must park");
+        let pending = vm.pending_io.take().expect("pending_io");
+        writer.write_all(b"x").expect("write");
+        vm.finish_pending_io_wait(pending);
+        let v = vm.pop();
+        assert_eq!(
+            v.raw() as u64,
+            0,
+            "OptionNiche Ok must be 0, not a boxed Result"
+        );
+        let _ = stream_close(vm.heap_mut(), stream);
+        drop(writer);
+    }
+
     fn install_program(vm: &mut Machine<512>, code: &[Byte]) {
         vm.program_code = Arc::new(unsafe {
             std::slice::from_raw_parts(code.as_ptr().cast::<RawByte>(), code.len()).to_vec()
