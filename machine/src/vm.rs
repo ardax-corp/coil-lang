@@ -12,9 +12,9 @@ use std::{
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use common::{
+    byte_to_position, likely, promise, set_field_slot_index, unlikely, unpack_init_typed,
     ArchivedByte as Byte, ArchivedInstruction as Instruction, ArrayVec, Byte as RawByte,
-    ProgramDebug, Value, byte_to_position, likely, promise, set_field_slot_index, unlikely,
-    unpack_init_typed,
+    ProgramDebug, Value,
 };
 
 use crate::{
@@ -314,6 +314,9 @@ struct PendingIoWait {
     request: crate::io::IoParkRequest,
     resume_ip: usize,
     resume_sp: usize,
+    /// Layout from the parked `HostInvoke` operand. Resume must pack with this
+    /// so `Result<(), IoError>` match sees OptionNiche `Ok` = `0`, not a box.
+    layout: crate::host_enum::HostEnumLayout,
 }
 
 /// One frame's pinned arrays, keyed by local slot (`ArrayPin` operand or
@@ -343,7 +346,11 @@ fn pinned_object_matching_in(
     addr: u64,
 ) -> Option<Object> {
     let obj = pinned_object_in(frame_pins, frames_len, slot)?;
-    if obj.addr() == addr { Some(obj) } else { None }
+    if obj.addr() == addr {
+        Some(obj)
+    } else {
+        None
+    }
 }
 
 #[inline]
@@ -1137,7 +1144,7 @@ impl<const S: usize> Machine<S> {
         sig: &crate::ffi::FfiSignature,
         args: &[Value],
     ) -> Result<Vec<Value>, crate::ffi::FfiError> {
-        use crate::ffi::{VmCallFn, callback_cif, make_int_callback};
+        use crate::ffi::{callback_cif, make_int_callback, VmCallFn};
         use crate::memory::FfiType;
         let mut out = args.to_vec();
         let vm_ptr = self as *mut Self as *mut c_void;
@@ -2125,6 +2132,7 @@ impl<const S: usize> Machine<S> {
         ip: &mut usize,
         sp: &mut usize,
         req: crate::io::IoParkRequest,
+        layout: crate::host_enum::HostEnumLayout,
     ) {
         let token = self.io_reactor.register_wait(req.handle, req.interest);
         let coro_ptr = self
@@ -2143,7 +2151,9 @@ impl<const S: usize> Machine<S> {
         if let Some(old) = old {
             self.io_reactor.cancel_wait(old);
         }
-        let ok = crate::io::as_result_unit(&mut self.heap, Ok(()));
+        let ok = crate::host_enum::with_host_enum_layout(layout, || {
+            crate::io::as_result_unit(&mut self.heap, Ok(()))
+        });
         self.stack.push(ok);
         // Yield value is discarded by `block_on`; multiplex loops ignore it.
         self.yield_coroutine(ip, sp, Value::from(0_i64));
@@ -2616,7 +2626,9 @@ impl<const S: usize> Machine<S> {
         self.frames.get_mut().set(pending.resume_sp);
         let req = pending.request;
         let wait = crate::thread::host_io_wait(req.handle, req.interest, req.timeout);
-        let v = crate::io::as_result_unit(&mut self.heap, wait);
+        let v = crate::host_enum::with_host_enum_layout(pending.layout, || {
+            crate::io::as_result_unit(&mut self.heap, wait)
+        });
         self.stack.push(v);
     }
 
@@ -2744,9 +2756,8 @@ impl<const S: usize> Machine<S> {
         self.stack.seek(saved_sp);
         self.nested_depth -= 1;
         let _ = self.nested_frame_depths.pop();
-        self.return_bookkeeping = self.nested_depth > 0
-            || !self.resume_stack.is_empty()
-            || !self.frame_pins.is_empty();
+        self.return_bookkeeping =
+            self.nested_depth > 0 || !self.resume_stack.is_empty() || !self.frame_pins.is_empty();
         self.nested_return.take().unwrap_or_default()
     }
 
@@ -2914,14 +2925,8 @@ impl<const S: usize> Machine<S> {
                         }
                         Some(dispatch::HotStop::Done(paused)) => return paused,
                         Some(dispatch::HotStop::Rest(op)) => {
-                            match self.exec_rest(
-                                &op,
-                                &mut ip,
-                                &mut sp,
-                                code,
-                                constants,
-                                stack_cap,
-                            ) {
+                            match self.exec_rest(&op, &mut ip, &mut sp, code, constants, stack_cap)
+                            {
                                 dispatch::RestFlow::Continue => continue,
                                 dispatch::RestFlow::Done(paused) => return paused,
                             }
@@ -3357,7 +3362,7 @@ impl<const S: usize> Machine<S> {
                 _ => match self.exec_rest(opcode, &mut ip, &mut sp, code, constants, stack_cap) {
                     dispatch::RestFlow::Continue => {}
                     dispatch::RestFlow::Done(paused) => return paused,
-                }
+                },
             }
         }
         false

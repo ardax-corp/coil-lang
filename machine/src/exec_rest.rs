@@ -530,13 +530,16 @@ impl<const S: usize> Machine<S> {
                                         if !self.resume_stack.is_empty() {
                                             // Inside a coroutine: register for batch
                                             // poll and yield (do not park the VM).
-                                            self.cooperative_io_await_yield(&mut ip, &mut sp, req);
+                                            self.cooperative_io_await_yield(
+                                                &mut ip, &mut sp, req, layout,
+                                            );
                                         } else {
                                             self.frames.get_mut().set(sp);
                                             self.pending_io = Some(PendingIoWait {
                                                 request: req,
                                                 resume_ip: ip,
                                                 resume_sp: sp,
+                                                layout,
                                             });
                                             *ip_out = ip;
                     *sp_out = sp;
