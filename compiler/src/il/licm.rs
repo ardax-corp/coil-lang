@@ -5,12 +5,13 @@ use std::collections::{HashMap, HashSet};
 use common::{DebugLoc, Instruction};
 
 use super::bounds;
-use super::op::{IlJumpKind, IlOp, Label};
+use super::op::{EntryKind, IlJumpKind, IlOp, Label};
 use super::sp;
 
 /// Hoist loop-invariant producers out of Known-SP natural loops: Const/Load,
 /// BinSlot*, tuple/array/dict construction, non-trapping int arith, FORMAT
-/// concat, and `len`. Also sinks table-indexed `STRING` field keys, CSEs
+/// concat, `len`, and proven-pure one-word `CALL`s (allocation is not a value
+/// effect). Also sinks table-indexed `STRING` field keys, CSEs
 /// `LOAD; CastIntToFloat`, and moves invariant `len(a)` ([`bounds`]).
 #[cfg(test)]
 pub fn licm(ops: &mut Vec<IlOp>) {
@@ -58,7 +59,10 @@ pub fn licm_with(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCall
 /// preheader temp. This is both plain LICM for `let f = n as float;` in a loop
 /// body and the follow-up step that carries a previous hoist's materialization
 /// further out — reusing `t` is what avoids leaving a `LOAD new; STORE t` copy.
-fn licm_cast_hoist_triple(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
+fn licm_cast_hoist_triple(
+    ops: &mut Vec<IlOp>,
+    purity: Option<&super::pure_call::PureCallCtx>,
+) -> bool {
     let info = sp::analyze(ops);
     let loops = ordered_loops(ops);
     for lp in &loops {
@@ -108,10 +112,7 @@ pub(super) fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> 
         match op {
             IlOp::StorePop { slot: s, .. } if *s == slot => n += 1,
             IlOp::Byte { byte, .. }
-                if matches!(
-                    *byte.bytecode(),
-                    Instruction::STORE | Instruction::StorePop
-                ) =>
+                if matches!(*byte.bytecode(), Instruction::STORE | Instruction::StorePop) =>
             {
                 for k in 0..byte.load_store_count() {
                     if byte.load_store_slot_at(k) == slot {
@@ -128,7 +129,10 @@ pub(super) fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> 
 /// CSE every invariant `LOAD slot; CastIntToFloat` in the innermost eligible
 /// loop: one preheader temp per distinct slot, reloaded in the body. Returns
 /// whether anything was rewritten.
-fn licm_cast_int_to_float(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
+fn licm_cast_int_to_float(
+    ops: &mut Vec<IlOp>,
+    purity: Option<&super::pure_call::PureCallCtx>,
+) -> bool {
     let info = sp::analyze(ops);
     let loops = ordered_loops(ops);
     for lp in &loops {
@@ -227,12 +231,7 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::P
         }
         let stored = slots_stored_in_loop(ops, &lp);
         let mut hoist: Vec<(usize, IlOp)> = Vec::new();
-        for (i, op) in ops
-            .iter()
-            .enumerate()
-            .take(lp.latch)
-            .skip(lp.body_start())
-        {
+        for (i, op) in ops.iter().enumerate().take(lp.latch).skip(lp.body_start()) {
             match op {
                 IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } => {
                     hoist.push((i, op.clone()));
@@ -261,7 +260,8 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::P
         // consumer inside the loop (skip orphan Const that changes SP freely).
         // Simpler gate: hoist at most a single invariant op per loop when it
         // appears as the first emitting op after the header label.
-        let first_emit = (lp.body_start()..lp.latch).find(|&i| !matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)));
+        let first_emit = (lp.body_start()..lp.latch)
+            .find(|&i| !matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)));
         let Some(fi) = first_emit else {
             continue;
         };
@@ -289,7 +289,10 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::P
 ///
 /// Unlike the older single-producer path, the preheader materializes the chain
 /// into a temp slot, so the loop gets a fresh stack value on every iteration.
-fn licm_float_expression_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
+fn licm_float_expression_chain(
+    ops: &mut Vec<IlOp>,
+    purity: Option<&super::pure_call::PureCallCtx>,
+) -> bool {
     let info = sp::analyze(ops);
     let loops = ordered_loops(ops);
 
@@ -312,10 +315,7 @@ fn licm_float_expression_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_
             let loc = chain[0].loc();
             let mut materialize = chain;
             materialize.push(IlOp::StorePop { slot: temp, loc });
-            ops.splice(
-                start..end,
-                std::iter::once(IlOp::Load { slot: temp, loc }),
-            );
+            ops.splice(start..end, std::iter::once(IlOp::Load { slot: temp, loc }));
             let Some(lp2) = find_natural_loops(ops)
                 .into_iter()
                 .find(|candidate| candidate.header_label == lp.header_label)
@@ -330,11 +330,15 @@ fn licm_float_expression_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_
 }
 
 /// Hoist a pure invariant stack expression (tuple/array/dict, int arith, concat,
-/// `len`) into a preheader temp. DIV/MOD/calls stay in the loop (they can trap
-/// or have effects). `ArrayLen` stays in the loop when the body can grow or
-/// rebind an array (`ArrayPush`, `MakeArray`, calls) — inlined `Vec::push` is
-/// not a LICM barrier, and hoisting `len(a)` makes `while len(a) < n` hang.
-fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
+/// `len`, proven-pure `CALL`) into a preheader temp. DIV/MOD and impure calls
+/// stay in the loop (they can trap or have effects). `ArrayLen` stays in the
+/// loop when the body can grow or rebind an array (`ArrayPush`, `MakeArray`,
+/// calls) — inlined `Vec::push` is not a LICM barrier, and hoisting `len(a)`
+/// makes `while len(a) < n` hang.
+fn licm_invariant_expr_chain(
+    ops: &mut Vec<IlOp>,
+    purity: Option<&super::pure_call::PureCallCtx>,
+) -> bool {
     let info = sp::analyze(ops);
     let loops = ordered_loops(ops);
     for lp in loops {
@@ -345,7 +349,7 @@ fn licm_invariant_expr_chain(ops: &mut Vec<IlOp>, purity: Option<&super::pure_ca
         let allow_array_len = !loop_may_change_array_length(ops, &lp);
         for start in lp.body_start()..lp.latch {
             let Some((end, chain)) =
-                collect_invariant_expr(ops, start, lp.latch, &stored, allow_array_len)
+                collect_invariant_expr(ops, start, lp.latch, &stored, allow_array_len, purity)
             else {
                 continue;
             };
@@ -376,6 +380,7 @@ fn collect_invariant_expr(
     latch: usize,
     stored: &HashSet<u32>,
     allow_array_len: bool,
+    purity: Option<&super::pure_call::PureCallCtx>,
 ) -> Option<(usize, Vec<IlOp>)> {
     let mut end = start;
     let mut height = 0i32;
@@ -383,7 +388,7 @@ fn collect_invariant_expr(
     let mut last_good: Option<(usize, Vec<IlOp>)> = None;
     while end < latch {
         let op = &ops[end];
-        if !is_pure_invariant_op(op, stored, allow_array_len) {
+        if !is_pure_invariant_op(op, stored, allow_array_len, purity) {
             break;
         }
         let Some(delta) = sp::stack_delta(op) else {
@@ -402,7 +407,32 @@ fn collect_invariant_expr(
     last_good
 }
 
-fn is_pure_invariant_op(op: &IlOp, stored: &HashSet<u32>, allow_array_len: bool) -> bool {
+fn is_pure_call_value(op: &IlOp, purity: Option<&super::pure_call::PureCallCtx>) -> bool {
+    match op {
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            target,
+            ret_words,
+            ..
+        } => *ret_words == 1 && purity.is_some_and(|c| c.call_is_pure(*target)),
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::CALL => {
+            let (_, target) = byte.call_parts();
+            byte.call_ret_words() == 1
+                && purity.is_some_and(|c| c.call_offset_is_pure(target as u32))
+        }
+        _ => false,
+    }
+}
+
+fn is_pure_invariant_op(
+    op: &IlOp,
+    stored: &HashSet<u32>,
+    allow_array_len: bool,
+    purity: Option<&super::pure_call::PureCallCtx>,
+) -> bool {
+    if is_pure_call_value(op, purity) {
+        return true;
+    }
     match op {
         IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } => true,
         IlOp::Load { slot, .. } => !stored.contains(slot),
@@ -440,6 +470,10 @@ fn is_interesting_invariant_op(op: &IlOp) -> bool {
     match op {
         IlOp::MakeTuple { .. } | IlOp::MakeArray { .. } | IlOp::Bin { .. } => true,
         IlOp::BinSlotImm { .. } | IlOp::BinSlotSlot { .. } => true,
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            ..
+        } => true,
         IlOp::Byte { byte, .. } => matches!(
             *byte.bytecode(),
             Instruction::MakeDict
@@ -448,6 +482,7 @@ fn is_interesting_invariant_op(op: &IlOp) -> bool {
                 | Instruction::ADD
                 | Instruction::SUB
                 | Instruction::MUL
+                | Instruction::CALL
         ),
         _ => false,
     }
@@ -1205,6 +1240,68 @@ mod tests {
     }
 
     #[test]
+    fn hoists_pure_call_of_invariant_slot() {
+        use super::super::pure_call::PureCallCtx;
+        let mut ctx = PureCallCtx::default();
+        ctx.pure_fns.insert("id".into());
+        ctx.label_callees.insert(3, "id".into());
+        let mut ops = vec![
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+                hint: Default::default(),
+            },
+            IlOp::Label(Label(0)),
+            IlOp::Load {
+                slot: 5,
+                loc: loc(),
+            },
+            IlOp::Entry {
+                kind: EntryKind::Call,
+                arity: 1,
+                target: Label(3),
+                loc: loc(),
+                ret_words: 1,
+            },
+            IlOp::Pop { loc: loc() },
+            IlOp::Jump {
+                kind: IlJumpKind::Unconditional,
+                target: Label(0),
+                loc: loc(),
+                hint: Default::default(),
+            },
+            IlOp::Halt { loc: loc() },
+        ];
+        crate::il::licm::licm_with(&mut ops, Some(&ctx));
+        let header = ops
+            .iter()
+            .position(|op| matches!(op, IlOp::Label(Label(0))))
+            .unwrap();
+        assert!(
+            ops[..header].iter().any(|op| matches!(
+                op,
+                IlOp::Entry {
+                    kind: EntryKind::Call,
+                    target: Label(3),
+                    ..
+                }
+            )),
+            "pure CALL should hoist before header"
+        );
+        assert!(
+            !ops[header + 1..].iter().any(|op| matches!(
+                op,
+                IlOp::Entry {
+                    kind: EntryKind::Call,
+                    ..
+                }
+            )),
+            "pure CALL should leave the loop body"
+        );
+    }
+
+    #[test]
     fn hoists_bin_slot_imm_when_slot_not_stored() {
         let mut ops = vec![
             IlOp::Jump {
@@ -1378,9 +1475,9 @@ mod tests {
             "the loop should reload the hoisted chain result"
         );
         assert!(
-            !ops[header..]
-                .iter()
-                .any(|op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::SUBF)),
+            !ops[header..].iter().any(
+                |op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::SUBF)
+            ),
             "the invariant chain should leave the loop body"
         );
     }
@@ -1397,10 +1494,7 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Label(Label(0)),
-            IlOp::ConstPool {
-                idx: 0,
-                loc: loc(),
-            },
+            IlOp::ConstPool { idx: 0, loc: loc() },
             IlOp::BinSlotSlot {
                 op: Instruction::DIVF as u8,
                 a: 1,
@@ -1408,10 +1502,7 @@ mod tests {
                 loc: loc(),
             },
             IlOp::byte(Byte::new(Instruction::MULF)),
-            IlOp::ConstPool {
-                idx: 1,
-                loc: loc(),
-            },
+            IlOp::ConstPool { idx: 1, loc: loc() },
             IlOp::byte(Byte::new(Instruction::SUBF)),
             IlOp::StorePop {
                 slot: 3,
@@ -1428,28 +1519,35 @@ mod tests {
 
         licm(&mut ops);
 
-                let header = ops
+        let header = ops
             .iter()
             .position(|op| matches!(op, IlOp::Label(Label(0))))
             .unwrap();
         let pre = &ops[..header];
         assert!(
-            pre.iter()
-                .any(|op| matches!(op, IlOp::Bin { op: Instruction::MULF, .. }))
-                && pre
-                    .iter()
-                    .any(|op| matches!(op, IlOp::Bin { op: Instruction::SUBF, .. }))
-                && pre.iter().any(|op| {
-                    matches!(
-                        op,
-                        IlOp::BinSlotSlot {
-                            op: o,
-                            a: 1,
-                            b: 2,
-                            ..
-                        } if *o == Instruction::DIVF as u8
-                    )
-                }),
+            pre.iter().any(|op| matches!(
+                op,
+                IlOp::Bin {
+                    op: Instruction::MULF,
+                    ..
+                }
+            )) && pre.iter().any(|op| matches!(
+                op,
+                IlOp::Bin {
+                    op: Instruction::SUBF,
+                    ..
+                }
+            )) && pre.iter().any(|op| {
+                matches!(
+                    op,
+                    IlOp::BinSlotSlot {
+                        op: o,
+                        a: 1,
+                        b: 2,
+                        ..
+                    } if *o == Instruction::DIVF as u8
+                )
+            }),
             "full multi-stage chain should materialize in the preheader"
         );
         assert!(
@@ -1460,14 +1558,19 @@ mod tests {
         );
         assert!(
             !ops[header..].iter().any(|op| {
-                matches!(op, IlOp::Bin { op: Instruction::MULF | Instruction::SUBF, .. })
-                    || matches!(
-                        op,
-                        IlOp::BinSlotSlot {
-                            op: o,
-                            ..
-                        } if *o == Instruction::DIVF as u8
-                    )
+                matches!(
+                    op,
+                    IlOp::Bin {
+                        op: Instruction::MULF | Instruction::SUBF,
+                        ..
+                    }
+                ) || matches!(
+                    op,
+                    IlOp::BinSlotSlot {
+                        op: o,
+                        ..
+                    } if *o == Instruction::DIVF as u8
+                )
             }),
             "no stage of the invariant chain should remain in the loop body"
         );
@@ -1476,10 +1579,7 @@ mod tests {
     #[test]
     fn hoists_repeated_string_keys_with_get_field() {
         let str_x = |ops: &mut Vec<IlOp>| {
-            ops.push(IlOp::String {
-                idx: 1,
-                loc: loc(),
-            });
+            ops.push(IlOp::String { idx: 1, loc: loc() });
         };
         let mut ops = vec![
             IlOp::Jump {
@@ -1540,10 +1640,7 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Label(Label(0)),
-            IlOp::String {
-                idx: 9,
-                loc: loc(),
-            },
+            IlOp::String { idx: 9, loc: loc() },
             IlOp::Pop { loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
@@ -1702,13 +1799,19 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Label(Label(0)),
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::Byte {
                 byte: common::Byte::new(Instruction::CastIntToFloat),
                 loc: loc(),
             },
             IlOp::Pop { loc: loc() },
-            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Load {
+                slot: 1,
+                loc: loc(),
+            },
             IlOp::Byte {
                 byte: common::Byte::new(Instruction::CastIntToFloat),
                 loc: loc(),
@@ -1727,10 +1830,16 @@ mod tests {
             .iter()
             .position(|op| matches!(op, IlOp::Label(Label(0))))
             .expect("loop header survives");
-        let casts_in_body = ops[header..].iter().filter(|op| is_cast_int_to_float(op)).count();
+        let casts_in_body = ops[header..]
+            .iter()
+            .filter(|op| is_cast_int_to_float(op))
+            .count();
         let casts_total = ops.iter().filter(|op| is_cast_int_to_float(op)).count();
         assert_eq!(casts_in_body, 0, "no cast should remain in the loop body");
-        assert_eq!(casts_total, 2, "both casts materialize once in the preheader");
+        assert_eq!(
+            casts_total, 2,
+            "both casts materialize once in the preheader"
+        );
         let stores: Vec<u32> = ops[..header]
             .iter()
             .filter_map(|op| match op {
@@ -1738,8 +1847,15 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(stores.len(), 2, "one temp per distinct slot; got {stores:?}");
-        assert_ne!(stores[0], stores[1], "temps must be distinct; got {stores:?}");
+        assert_eq!(
+            stores.len(),
+            2,
+            "one temp per distinct slot; got {stores:?}"
+        );
+        assert_ne!(
+            stores[0], stores[1],
+            "temps must be distinct; got {stores:?}"
+        );
     }
 
     #[test]
@@ -1754,13 +1870,22 @@ mod tests {
                 hint: Default::default(),
             },
             IlOp::Label(Label(0)),
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::Byte {
                 byte: common::Byte::new(Instruction::CastIntToFloat),
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 5, loc: loc() },
-            IlOp::Load { slot: 5, loc: loc() },
+            IlOp::StorePop {
+                slot: 5,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 5,
+                loc: loc(),
+            },
             IlOp::Pop { loc: loc() },
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
@@ -1776,7 +1901,10 @@ mod tests {
             .position(|op| matches!(op, IlOp::Label(Label(0))))
             .expect("loop header survives");
         assert_eq!(
-            ops[header..].iter().filter(|op| is_cast_int_to_float(op)).count(),
+            ops[header..]
+                .iter()
+                .filter(|op| is_cast_int_to_float(op))
+                .count(),
             0,
             "cast must leave the loop body"
         );
@@ -1796,7 +1924,11 @@ mod tests {
                 _ => None,
             })
             .collect();
-        assert_eq!(loads, vec![0, 5], "preheader LOAD 0 then body LOAD 5; got {loads:?}");
+        assert_eq!(
+            loads,
+            vec![0, 5],
+            "preheader LOAD 0 then body LOAD 5; got {loads:?}"
+        );
     }
 
     fn counted_header() -> Vec<IlOp> {
@@ -1900,9 +2032,9 @@ mod tests {
         ]);
         ops.extend(counted_latch());
         licm(&mut ops);
-        let in_body = body_between_header_and_latch(&ops).iter().any(|op| {
-            matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::MakeDict)
-        });
+        let in_body = body_between_header_and_latch(&ops).iter().any(
+            |op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::MakeDict),
+        );
         assert!(!in_body, "MakeDict must leave the loop body");
     }
 
@@ -1910,14 +2042,26 @@ mod tests {
     fn hoists_invariant_int_add() {
         let mut ops = vec![
             IlOp::Const { imm: 3, loc: loc() },
-            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::StorePop {
+                slot: 1,
+                loc: loc(),
+            },
             IlOp::Const { imm: 4, loc: loc() },
-            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::StorePop {
+                slot: 2,
+                loc: loc(),
+            },
         ];
         ops.extend(counted_header());
         ops.extend([
-            IlOp::Load { slot: 1, loc: loc() },
-            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::Load {
+                slot: 1,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 2,
+                loc: loc(),
+            },
             IlOp::Bin {
                 op: Instruction::ADD,
                 loc: loc(),
@@ -1929,7 +2073,13 @@ mod tests {
         assert!(
             !body_between_header_and_latch(&ops)
                 .iter()
-                .any(|op| matches!(op, IlOp::Bin { op: Instruction::ADD, .. })),
+                .any(|op| matches!(
+                    op,
+                    IlOp::Bin {
+                        op: Instruction::ADD,
+                        ..
+                    }
+                )),
             "invariant ADD must leave the loop body"
         );
     }
@@ -1945,9 +2095,9 @@ mod tests {
         ]);
         ops.extend(counted_latch());
         licm(&mut ops);
-        let in_body = body_between_header_and_latch(&ops).iter().any(|op| {
-            matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT)
-        });
+        let in_body = body_between_header_and_latch(&ops).iter().any(
+            |op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::FORMAT),
+        );
         assert!(!in_body, "FORMAT concat must leave the loop body");
     }
 
@@ -1958,19 +2108,25 @@ mod tests {
                 arity: 0,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 0, loc: loc() },
+            IlOp::StorePop {
+                slot: 0,
+                loc: loc(),
+            },
         ];
         ops.extend(counted_header());
         ops.extend([
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::byte(Byte::new(Instruction::ArrayLen)),
             IlOp::Pop { loc: loc() },
         ]);
         ops.extend(counted_latch());
         licm(&mut ops);
-        let in_body = body_between_header_and_latch(&ops).iter().any(|op| {
-            matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen)
-        });
+        let in_body = body_between_header_and_latch(&ops).iter().any(
+            |op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen),
+        );
         assert!(!in_body, "ArrayLen must leave the loop body");
     }
 
@@ -1983,23 +2139,32 @@ mod tests {
                 arity: 0,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 0, loc: loc() },
+            IlOp::StorePop {
+                slot: 0,
+                loc: loc(),
+            },
         ];
         ops.extend(counted_header());
         ops.extend([
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::byte(Byte::new(Instruction::ArrayLen)),
             IlOp::Pop { loc: loc() },
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::Const { imm: 0, loc: loc() },
             IlOp::byte(Byte::new(Instruction::ArrayPush)),
             IlOp::Pop { loc: loc() },
         ]);
         ops.extend(counted_latch());
         licm(&mut ops);
-        let in_body = body_between_header_and_latch(&ops).iter().any(|op| {
-            matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen)
-        });
+        let in_body = body_between_header_and_latch(&ops).iter().any(
+            |op| matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::ArrayLen),
+        );
         assert!(in_body, "ArrayLen of a growing array must stay in the loop");
     }
 
@@ -2011,7 +2176,9 @@ mod tests {
                 kind: crate::il::op::EntryKind::Call,
                 arity: 0,
                 target: Label(9),
-                loc: loc(), ret_words: 1,},
+                loc: loc(),
+                ret_words: 1,
+            },
             IlOp::Pop { loc: loc() },
         ]);
         ops.extend(counted_latch());
@@ -2041,9 +2208,14 @@ mod tests {
         assert!(
             body_between_header_and_latch(&ops)
                 .iter()
-                .any(|op| matches!(op, IlOp::Bin { op: Instruction::DIV, .. })),
+                .any(|op| matches!(
+                    op,
+                    IlOp::Bin {
+                        op: Instruction::DIV,
+                        ..
+                    }
+                )),
             "DIV must stay in the loop"
         );
     }
-
 }

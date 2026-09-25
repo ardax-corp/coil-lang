@@ -37,3 +37,22 @@ test("integer iv times const") {
     assert(iv_mul(1, 9) == 0)?;
     assert(iv_mul(0, 4) == 0)?;
 }
+
+fn id(int n) -> int {
+    return n;
+}
+
+fn sum_id(int n, int k) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + id(k);
+        i = i + 1;
+    }
+    return s;
+}
+
+test("invariant pure call") {
+    assert(sum_id(10, 3) == 30)?;
+    assert(sum_id(0, 9) == 0)?;
+}
