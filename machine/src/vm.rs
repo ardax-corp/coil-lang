@@ -54,6 +54,26 @@ pub fn dispatch_count() -> u64 {
 #[cfg(not(any(test, feature = "vm_profile")))]
 pub fn reset_dispatch_count() {}
 
+// Per-PC dispatch histogram (tests / `vm_profile` only). Off until
+// [`begin_pc_profile`] so ordinary test runs do not pay for it.
+#[cfg(any(test, feature = "vm_profile"))]
+thread_local! {
+    static VM_PC_PROFILE: std::cell::RefCell<Option<Vec<u64>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Start counting dispatches per PC on this thread.
+#[cfg(any(test, feature = "vm_profile"))]
+pub fn begin_pc_profile() {
+    VM_PC_PROFILE.with(|p| *p.borrow_mut() = Some(Vec::new()));
+}
+
+/// Stop profiling and return dispatch counts indexed by PC.
+#[cfg(any(test, feature = "vm_profile"))]
+pub fn take_pc_profile() -> Vec<u64> {
+    VM_PC_PROFILE.with(|p| p.borrow_mut().take().unwrap_or_default())
+}
+
 // Frame-relative cursor (`stack.tell() - sp`) observed before each dispatch,
 // paired with the PC. Feeds the differential test for the static cursor model
 // in `compiler::il::tell`, which cannot be trusted from code reading alone.
@@ -270,6 +290,14 @@ fn note_dispatch_at(ip: usize, stack: &Stack<Value>, sp: usize) {
     #[cfg(any(test, feature = "vm_profile"))]
     {
         VM_DISPATCH_COUNT.with(|c| c.fetch_add(1, Ordering::Relaxed));
+        VM_PC_PROFILE.with(|p| {
+            if let Some(counts) = p.borrow_mut().as_mut() {
+                if counts.len() <= ip {
+                    counts.resize(ip + 1, 0);
+                }
+                counts[ip] += 1;
+            }
+        });
         VM_CURSOR_TRACE.with(|t| {
             let mut t = t.borrow_mut();
             if t.len() < CURSOR_TRACE_CAP {
