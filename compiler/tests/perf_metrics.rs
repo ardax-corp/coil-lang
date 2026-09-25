@@ -1683,3 +1683,109 @@ fn perf_canon_stats_inventory() {
         );
     }
 }
+
+/// MIR keep-rate weighted by executed VM dispatches over `examples/perf`.
+///
+/// Manual census, not a gate:
+/// `COIL_AUTO_PAR=0 cargo test --release -p compiler --test perf_metrics -- --ignored mir_weighted_census --nocapture`
+#[test]
+#[ignore = "manual census; run with --release --ignored --nocapture"]
+fn mir_weighted_census() {
+    use std::collections::HashMap;
+
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let mut files: Vec<_> = std::fs::read_dir(root.join("examples/perf"))
+        .expect("examples/perf")
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "hy"))
+        .collect();
+    files.sort();
+
+    let mut by_tier: HashMap<String, u64> = HashMap::new();
+    let mut dense_reasons: HashMap<String, u64> = HashMap::new();
+    let mut lir_reasons: HashMap<String, u64> = HashMap::new();
+    let mut hot_fuse: Vec<(u64, String, String, String)> = Vec::new();
+    for path in files {
+        let rel = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+        let Ok(src) = std::fs::read_to_string(&path) else { continue };
+        let mut pipeline = Pipeline::new();
+        pipeline.bind_workspace_language_roots();
+        pipeline.set_collect_opt_stats(true);
+        let Ok((bytecode, constants)) = pipeline.compile_src(&src) else {
+            eprintln!("skip (compile) {rel}");
+            continue;
+        };
+        let tiers = compiler::last_opt_stats().body_tiers;
+        let tier_of: HashMap<&str, &compiler::BodyTier> =
+            tiers.iter().map(|t| (t.name.as_str(), t)).collect();
+        let mut syms = pipeline.program_debug().fn_symbols;
+        syms.sort_by_key(|s| s.entry_pc);
+
+        machine::begin_pc_profile();
+        // A debug-assert at VM teardown (e.g. heap byte accounting) must not
+        // drop the whole census; the profile is already filled by then.
+        let ran = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_dispatch(
+                bytecode.clone(),
+                constants,
+                pipeline.strings().to_vec(),
+                pipeline.static_slot_count(),
+                &pipeline,
+            )
+        }));
+        if ran.is_err() {
+            eprintln!("note: {rel} panicked at teardown; profile kept");
+        }
+        let counts = machine::take_pc_profile();
+
+        for (k, sym) in syms.iter().enumerate() {
+            let start = sym.entry_pc as usize;
+            let end = syms.get(k + 1).map(|s| s.entry_pc as usize).unwrap_or(bytecode.len());
+            let n: u64 = counts.get(start..end.min(counts.len())).map(|c| c.iter().sum()).unwrap_or(0);
+            if n == 0 {
+                continue;
+            }
+            let (tier, dr, lr) = match tier_of.get(sym.name.as_str()) {
+                Some(t) => (
+                    t.tier.clone(),
+                    t.dense_reason.clone().unwrap_or_default(),
+                    t.lir_reason.clone().unwrap_or_default(),
+                ),
+                None => ("unmapped".to_string(), String::new(), String::new()),
+            };
+            *by_tier.entry(tier.clone()).or_default() += n;
+            if tier == "fuse" {
+                *dense_reasons.entry(dr.clone()).or_default() += n;
+                *lir_reasons.entry(lr.clone()).or_default() += n;
+                hot_fuse.push((n, format!("{rel}::{}", sym.name), dr, lr));
+            }
+        }
+    }
+
+    let total: u64 = by_tier.values().sum();
+    let pct = |n: u64| 100.0 * n as f64 / total.max(1) as f64;
+    let ranked = |m: &HashMap<String, u64>| {
+        let mut v: Vec<_> = m.iter().map(|(k, v)| (*v, k.clone())).collect();
+        v.sort_by(|a, b| b.cmp(a));
+        v
+    };
+    println!("\n== dispatches by tier ({total} total)");
+    for (n, t) in ranked(&by_tier) {
+        println!("{:6.2}%  {t}", pct(n));
+    }
+    println!("\n== fuse-IL dispatches by dense refusal");
+    for (n, r) in ranked(&dense_reasons).into_iter().take(12) {
+        println!("{:6.2}%  {r}", pct(n));
+    }
+    println!("\n== fuse-IL dispatches by LIR refusal");
+    for (n, r) in ranked(&lir_reasons).into_iter().take(12) {
+        println!("{:6.2}%  {r}", pct(n));
+    }
+    hot_fuse.sort_by(|a, b| b.0.cmp(&a.0));
+    println!("\n== hottest fuse-IL functions");
+    for (n, name, dr, lr) in hot_fuse.into_iter().take(25) {
+        println!("{:6.2}%  {name}  [dense: {dr}] [lir: {lr}]", pct(n));
+    }
+}
