@@ -141,6 +141,16 @@ impl OptStats {
             "  bodies: {} dense, {} lir, {} fuse-il",
             self.bodies_dense, self.bodies_lir, self.bodies_fuse
         );
+        for b in &self.body_tiers {
+            let _ = writeln!(
+                out,
+                "    {}: {} (dense: {}; lir: {})",
+                b.name,
+                b.tier,
+                b.dense_reason.as_deref().unwrap_or("-"),
+                b.lir_reason.as_deref().unwrap_or("-")
+            );
+        }
         if !self.fuse_reasons.is_empty() {
             let _ = writeln!(out, "  fuse-il reasons:");
             let mut ranked = self.fuse_reasons.clone();
