@@ -320,6 +320,11 @@ impl Compiler {
         self.include_tests
     }
 
+    /// Disable automatic fork-join of pure recursive calls and counted loops.
+    pub fn set_auto_par(&mut self, on: bool) {
+        self.auto_par = on;
+    }
+
     /// Apply an [`crate::OptLevel`] preset to IL opts and tiny-inline budgets.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_options = level.options();
@@ -7684,6 +7689,64 @@ impl Compiler {
         true
     }
 
+    /// `f(k)` for a unary fork site: call the worker when `k` clears the cutoff.
+    ///
+    /// The worker has to already exist, so calls inside the sequential function
+    /// (compiled before the worker is registered) stay ordinary `CALL`s.
+    fn try_emit_par_dynamic_call(
+        &mut self,
+        fname: &str,
+        args: Option<&[Output<'_>]>,
+        bytecode: &mut CodeBuf,
+    ) -> bool {
+        if !crate::typechecking::par_expr_wide_enabled() {
+            return false;
+        }
+        let Some(args) = args else {
+            return false;
+        };
+        if args.len() != 1 {
+            return false;
+        }
+        if matches!(
+            unwrap_expr_output(&args[0]).1.as_ref(),
+            Expression::Integer(_)
+        ) {
+            return false;
+        }
+        let key = Self::par_shape_key(fname);
+        let Some(cutoff) = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, key) else {
+            return false;
+        };
+        let spec = crate::typechecking::par_worker_name(key);
+        let (Some(&worker), Some(&orig)) = (
+            self.functions.get(&spec),
+            self.functions
+                .get(fname)
+                .or_else(|| self.functions.get(key)),
+        ) else {
+            return false;
+        };
+
+        let mut arg_bc = self.do_compile(&args[0]);
+        bytecode.append(&mut arg_bc);
+        use crate::block_builder::{BlockBuilder, JumpKind};
+        let mut bb = BlockBuilder::new();
+        let use_worker = bb.fresh_label(bytecode.il_mut());
+        let done = bb.fresh_label(bytecode.il_mut());
+        bytecode.push(Byte::new(Instruction::DUPLICATE));
+        self.push_int_const_into(cutoff - 1, bytecode);
+        bytecode.push(Byte::new(Instruction::LE));
+        bb.emit_jump_to(use_worker, JumpKind::JumpIfFalse, bytecode.il_mut());
+        bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
+        bb.emit_jump_to(done, JumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(use_worker, bytecode.il_mut());
+        bytecode.push_const(crate::typechecking::PAR_SPEC_HOPS as i32);
+        bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
+        bb.bind_label(done, bytecode.il_mut());
+        true
+    }
+
     /// Emit one parameterized `__coil_par_{fn}(args…, hop)` AlwaysPar worker.
     fn emit_par_specializations_for(&mut self, bare_name: &str, table_key: &str) {
         if !self.par_workers.contains(bare_name) {
@@ -8169,17 +8232,26 @@ impl Compiler {
         else {
             return false;
         };
+        let mut live_slots = Vec::with_capacity(site.live_captures.len());
+        for name in &site.live_captures {
+            let Some(slot) = self.lookup_slot(name) else {
+                return false;
+            };
+            live_slots.push(slot);
+        }
+        let arity = 3 + live_slots.len() as u32;
+        if arity as usize > common::MAX_THREAD_SPAWN_ARGS {
+            return false;
+        }
+        for name in site.begin_local.iter().chain(&site.end_local) {
+            if self.lookup_slot(name).is_none() {
+                return false;
+            }
+        }
         let (Some(spawn_id), Some(join_id)) = (
             self.native_id("thread_spawn_shared")
                 .or_else(|| self.native_id("thread_spawn")),
             self.native_id("thread_join"),
-        ) else {
-            return false;
-        };
-        let (Ok(begin), Ok(mid), Ok(end)) = (
-            i32::try_from(site.begin),
-            i32::try_from(site.midpoint()),
-            i32::try_from(site.end),
         ) else {
             return false;
         };
@@ -8208,93 +8280,391 @@ impl Compiler {
         let worker = self.emit_par_loop_worker(&site, body);
         bb.bind_label(after_worker, self.bytecode.il_mut());
 
-        // MakeFn of the worker, then spawn the upper chunk.
+        // MakeFn of the worker, then spawn every chunk but the first.
         self.bytecode.push_const(0);
         self.bytecode
             .push(Byte::new(Instruction::CodePtr).with_operand_u32(worker));
-        self.bytecode
-            .push(Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, 3, false)));
+        self.bytecode.push(
+            Byte::new(Instruction::MakeFn).with_operand_u32(make_fn_operand(0, 0, arity, false)),
+        );
         let fn_tmp = self.alloc_temp_slot();
         self.bytecode.push_store_pop(fn_tmp);
 
-        let have_handle = bb.fresh_label(self.bytecode.il_mut());
         let seq = bb.fresh_label(self.bytecode.il_mut());
-        let joined = bb.fresh_label(self.bytecode.il_mut());
         let done = bb.fresh_label(self.bytecode.il_mut());
 
+        if site.is_dynamic() {
+            self.emit_dynamic_par_chunks(
+                &site,
+                &mut bb,
+                worker,
+                arity,
+                fn_tmp,
+                acc_slot,
+                index_slot,
+                &live_slots,
+                spawn_id,
+                join_id,
+                identity,
+                fold,
+                seq,
+                done,
+            );
+        } else {
+            let grain = crate::typechecking::par_loop_grain();
+            let bounds = if crate::typechecking::par_loop_wide_enabled() {
+                site.chunk_bounds(grain)
+                    .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end])
+            } else {
+                vec![site.begin, site.midpoint(), site.end]
+            };
+            self.emit_const_par_chunks(
+                &bounds,
+                &mut bb,
+                worker,
+                arity,
+                fn_tmp,
+                acc_slot,
+                &live_slots,
+                spawn_id,
+                join_id,
+                identity,
+                fold,
+                seq,
+                done,
+            );
+            self.push_int_const(site.final_index());
+            self.bytecode.push_store_pop(index_slot);
+        }
+
+        true
+    }
+
+    /// Const range: spawn chunks 1..n, run chunk 0 inline, fold in order.
+    fn emit_const_par_chunks(
+        &mut self,
+        bounds: &[i64],
+        bb: &mut BlockBuilder,
+        worker: u32,
+        arity: u32,
+        fn_tmp: u32,
+        acc_slot: u32,
+        live_slots: &[u32],
+        spawn_id: usize,
+        join_id: usize,
+        identity: i32,
+        fold: Instruction,
+        seq: crate::il::Label,
+        done: crate::il::Label,
+    ) {
+        let n = bounds.len() - 1;
+        let mut handles = Vec::new();
+        for c in 1..n {
+            let have = bb.fresh_label(self.bytecode.il_mut());
+            self.emit_chunk_spawn(
+                fn_tmp,
+                bounds[c],
+                bounds[c + 1],
+                identity,
+                live_slots,
+                spawn_id,
+                arity,
+            );
+            bb.emit_jump_to(
+                have,
+                BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+                self.bytecode.il_mut(),
+            );
+            self.bytecode.push_pop();
+            for h in &handles {
+                self.emit_join_discard(*h, join_id, bb);
+            }
+            bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            bb.bind_label(have, self.bytecode.il_mut());
+            let handle = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(handle);
+            handles.push(handle);
+        }
+
+        self.emit_chunk_call(
+            worker,
+            bounds[0],
+            bounds[1],
+            Some(acc_slot),
+            None,
+            live_slots,
+            arity,
+        );
+        let mut running = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(running);
+
+        for (i, handle) in handles.iter().enumerate() {
+            let joined = bb.fresh_label(self.bytecode.il_mut());
+            self.bytecode
+                .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
+            self.bytecode.push_load(*handle);
+            self.bytecode.push_host_invoke(1);
+            bb.emit_jump_to(
+                joined,
+                BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+                self.bytecode.il_mut(),
+            );
+            self.bytecode.push_pop();
+            for rest in &handles[i + 1..] {
+                self.emit_join_discard(*rest, join_id, bb);
+            }
+            bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
+            bb.bind_label(joined, self.bytecode.il_mut());
+            let partial = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(partial);
+            self.bytecode.push_load(running);
+            self.bytecode.push_load(partial);
+            self.bytecode.push(Byte::new(fold));
+            running = self.alloc_temp_slot();
+            self.bytecode.push_store_pop(running);
+        }
+        self.bytecode.push_load(running);
+        bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
+
+        bb.bind_label(seq, self.bytecode.il_mut());
+        self.emit_chunk_call(
+            worker,
+            bounds[0],
+            *bounds.last().expect("chunk bounds"),
+            Some(acc_slot),
+            None,
+            live_slots,
+            arity,
+        );
+        bb.bind_label(done, self.bytecode.il_mut());
+        self.bytecode.push_store_pop(acc_slot);
+    }
+
+    /// Dynamic `[begin, end)`: one compare against the grain floor, then a 2-way split.
+    fn emit_dynamic_par_chunks(
+        &mut self,
+        site: &crate::typechecking::LoopParSite,
+        bb: &mut BlockBuilder,
+        worker: u32,
+        arity: u32,
+        fn_tmp: u32,
+        acc_slot: u32,
+        index_slot: u32,
+        live_slots: &[u32],
+        spawn_id: usize,
+        join_id: usize,
+        identity: i32,
+        fold: Instruction,
+        seq: crate::il::Label,
+        done: crate::il::Label,
+    ) {
+        let begin_tmp = self.alloc_temp_slot();
+        let end_tmp = self.alloc_temp_slot();
+        self.emit_runtime_bound(&site.begin_local, site.begin, 0);
+        self.bytecode.push_store_pop(begin_tmp);
+        self.emit_runtime_bound(&site.end_local, site.end, site.end_bias);
+        self.bytecode.push_store_pop(end_tmp);
+
+        let trip_pos = bb.fresh_label(self.bytecode.il_mut());
+        let have_trip = bb.fresh_label(self.bytecode.il_mut());
+        self.bytecode.push_load(end_tmp);
+        self.bytecode.push_load(begin_tmp);
+        self.bytecode.push(Byte::new(Instruction::SUB));
+        let diff_tmp = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(diff_tmp);
+        self.bytecode.push_load(diff_tmp);
+        self.bytecode.push_const(0);
+        self.bytecode.push(Byte::new(Instruction::GT));
+        bb.emit_jump_to(trip_pos, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
+        // JumpIfFalse falls through when the condition is true (diff > 0).
+        self.bytecode.push_load(diff_tmp);
+        if site.stride > 1 {
+            self.push_int_const(site.stride - 1);
+            self.bytecode.push(Byte::new(Instruction::ADD));
+            self.push_int_const(site.stride);
+            self.bytecode.push(Byte::new(Instruction::DIV));
+        }
+        bb.emit_jump_to(have_trip, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        bb.bind_label(trip_pos, self.bytecode.il_mut());
+        self.bytecode.push_const(0);
+        bb.bind_label(have_trip, self.bytecode.il_mut());
+        let trip_tmp = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(trip_tmp);
+
+        let grain = crate::typechecking::par_loop_grain();
+        self.bytecode.push_load(trip_tmp);
+        self.push_int_const(grain.max(1));
+        self.bytecode.push(Byte::new(Instruction::GT));
+        bb.emit_jump_to(seq, BbJumpKind::JumpIfFalse, self.bytecode.il_mut());
+
+        let mid_tmp = self.alloc_temp_slot();
+        self.bytecode.push_load(trip_tmp);
+        self.bytecode.push_const(2);
+        self.bytecode.push(Byte::new(Instruction::DIV));
+        self.push_int_const(site.stride);
+        self.bytecode.push(Byte::new(Instruction::MUL));
+        self.bytecode.push_load(begin_tmp);
+        self.bytecode.push(Byte::new(Instruction::ADD));
+        self.bytecode.push_store_pop(mid_tmp);
+
+        let have = bb.fresh_label(self.bytecode.il_mut());
+        let joined = bb.fresh_label(self.bytecode.il_mut());
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
         self.bytecode.push_load(fn_tmp);
-        self.bytecode.push_const(mid);
-        self.bytecode.push_const(end);
+        self.bytecode.push_load(mid_tmp);
+        self.bytecode.push_load(end_tmp);
         self.bytecode.push_const(identity);
-        self.bytecode.push_host_invoke(4);
+        for slot in live_slots {
+            self.bytecode.push_load(*slot);
+        }
+        self.bytecode.push_host_invoke(arity + 1);
         bb.emit_jump_to(
-            have_handle,
+            have,
             BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             self.bytecode.il_mut(),
         );
         self.bytecode.push_pop();
         bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        bb.bind_label(have, self.bytecode.il_mut());
+        let handle = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(handle);
 
-        bb.bind_label(have_handle, self.bytecode.il_mut());
-        let handle_tmp = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(handle_tmp);
-
-        // Lower chunk inline while the worker runs, seeded with the live `acc`.
-        self.bytecode.push_const(begin);
-        self.bytecode.push_const(mid);
+        self.bytecode.push_load(begin_tmp);
+        self.bytecode.push_load(mid_tmp);
         self.bytecode.push_load(acc_slot);
+        for slot in live_slots {
+            self.bytecode.push_load(*slot);
+        }
         self.bytecode
-            .push(Byte::new(Instruction::CALL).with_call_packed(3, worker));
-        let lower_tmp = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(lower_tmp);
+            .push(Byte::new(Instruction::CALL).with_call_packed(arity, worker));
+        let lower = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(lower);
 
         self.bytecode
             .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
-        self.bytecode.push_load(handle_tmp);
+        self.bytecode.push_load(handle);
         self.bytecode.push_host_invoke(1);
         bb.emit_jump_to(
             joined,
             BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
             self.bytecode.il_mut(),
         );
-        // A failed join redoes the whole range sequentially; the worker is pure,
-        // so the discarded lower partial costs time but not correctness.
         self.bytecode.push_pop();
         bb.emit_jump_to(seq, BbJumpKind::Unconditional, self.bytecode.il_mut());
-
         bb.bind_label(joined, self.bytecode.il_mut());
-        let upper_tmp = self.alloc_temp_slot();
-        self.bytecode.push_store_pop(upper_tmp);
-        self.bytecode.push_load(lower_tmp);
-        self.bytecode.push_load(upper_tmp);
+        let upper = self.alloc_temp_slot();
+        self.bytecode.push_store_pop(upper);
+        self.bytecode.push_load(lower);
+        self.bytecode.push_load(upper);
         self.bytecode.push(Byte::new(fold));
         bb.emit_jump_to(done, BbJumpKind::Unconditional, self.bytecode.il_mut());
 
-        // Spawn / join failed: one worker call over the whole range.
         bb.bind_label(seq, self.bytecode.il_mut());
-        self.bytecode.push_const(begin);
-        self.bytecode.push_const(end);
+        self.bytecode.push_load(begin_tmp);
+        self.bytecode.push_load(end_tmp);
         self.bytecode.push_load(acc_slot);
+        for slot in live_slots {
+            self.bytecode.push_load(*slot);
+        }
         self.bytecode
-            .push(Byte::new(Instruction::CALL).with_call_packed(3, worker));
+            .push(Byte::new(Instruction::CALL).with_call_packed(arity, worker));
 
         bb.bind_label(done, self.bytecode.il_mut());
         self.bytecode.push_store_pop(acc_slot);
-        // The loop exits with the induction variable one past its range;
-        // later reads of it must not see the pre-loop value.
-        self.bytecode.push_const(end);
+        self.bytecode.push_load(trip_tmp);
+        self.push_int_const(site.stride);
+        self.bytecode.push(Byte::new(Instruction::MUL));
+        self.bytecode.push_load(begin_tmp);
+        self.bytecode.push(Byte::new(Instruction::ADD));
         self.bytecode.push_store_pop(index_slot);
-
-        true
     }
 
-    /// Emit the chunk worker `(lo, hi, acc) -> acc'` and return its entry offset.
+    fn emit_runtime_bound(&mut self, local: &Option<String>, konst: i64, bias: i64) {
+        if let Some(name) = local
+            && let Some(slot) = self.lookup_slot(name)
+        {
+            self.bytecode.push_load(slot);
+        } else {
+            self.push_int_const(konst);
+        }
+        if bias != 0 {
+            self.push_int_const(bias);
+            self.bytecode.push(Byte::new(Instruction::ADD));
+        }
+    }
+
+    fn emit_chunk_spawn(
+        &mut self,
+        fn_tmp: u32,
+        lo: i64,
+        hi: i64,
+        identity: i32,
+        live_slots: &[u32],
+        spawn_id: usize,
+        arity: u32,
+    ) {
+        self.bytecode
+            .push(Byte::new(Instruction::CONST).with_value_u32(spawn_id as u32));
+        self.bytecode.push_load(fn_tmp);
+        self.push_int_const(lo);
+        self.push_int_const(hi);
+        self.bytecode.push_const(identity);
+        for slot in live_slots {
+            self.bytecode.push_load(*slot);
+        }
+        self.bytecode.push_host_invoke(arity + 1);
+    }
+
+    fn emit_chunk_call(
+        &mut self,
+        worker: u32,
+        lo: i64,
+        hi: i64,
+        acc_slot: Option<u32>,
+        identity: Option<i32>,
+        live_slots: &[u32],
+        arity: u32,
+    ) {
+        self.push_int_const(lo);
+        self.push_int_const(hi);
+        if let Some(slot) = acc_slot {
+            self.bytecode.push_load(slot);
+        } else {
+            self.bytecode.push_const(identity.unwrap_or(0));
+        }
+        for slot in live_slots {
+            self.bytecode.push_load(*slot);
+        }
+        self.bytecode
+            .push(Byte::new(Instruction::CALL).with_call_packed(arity, worker));
+    }
+
+    /// Join `handle` and drop both the Ok payload and the Err, leaving the stack as it was.
+    fn emit_join_discard(&mut self, handle: u32, join_id: usize, bb: &mut BlockBuilder) {
+        let ok = bb.fresh_label(self.bytecode.il_mut());
+        let next = bb.fresh_label(self.bytecode.il_mut());
+        self.bytecode
+            .push(Byte::new(Instruction::CONST).with_value_u32(join_id as u32));
+        self.bytecode.push_load(handle);
+        self.bytecode.push_host_invoke(1);
+        bb.emit_jump_to(
+            ok,
+            BbJumpKind::JumpIfMatch { tag: 0, arity: 1 },
+            self.bytecode.il_mut(),
+        );
+        self.bytecode.push_pop();
+        bb.emit_jump_to(next, BbJumpKind::Unconditional, self.bytecode.il_mut());
+        bb.bind_label(ok, self.bytecode.il_mut());
+        self.bytecode.push_pop();
+        bb.bind_label(next, self.bytecode.il_mut());
+    }
+
+    /// Emit the chunk worker `(lo, hi, acc, …captures) -> acc'` and return its entry.
     ///
-    /// Runs in a private frame with the induction variable, the chunk bound and
-    /// the accumulator as slots 0..2, sound only because the site analysis
-    /// proved the body reads nothing else.
+    /// Slots 0..2 are the induction variable, the chunk bound, and the accumulator.
+    /// Later slots are int captures the body reads. Const ints are stored once
+    /// on entry; live ints arrive as arguments.
     fn emit_par_loop_worker(
         &mut self,
         site: &crate::typechecking::LoopParSite,
@@ -8308,13 +8678,17 @@ impl Compiler {
         let name = format!("__coil_par_loop_{}", self.loop_par_helpers);
         let (entry, _) = self.bind_function_entry(name.clone());
         let entry = entry as u32;
-        self.fn_arities.insert(name, (3, false));
+        let arity = 3 + site.live_captures.len() as u32;
+        self.fn_arities.insert(name, (arity, false));
 
         let prev_ctx = std::mem::take(&mut self.context);
         let prev_depth = std::mem::replace(&mut self.expr_depth, 0);
         self.context.variables.intern(site.index.clone());
         self.context.variables.intern("__coil_par_hi".to_string());
         self.context.variables.intern(site.acc.clone());
+        for name in &site.live_captures {
+            self.context.variables.intern(name.clone());
+        }
         let mut capture_inits = Vec::new();
         for (name, val) in &site.captures {
             let slot = self.context.variables.intern(name.clone()) as u32;
@@ -8337,7 +8711,7 @@ impl Compiler {
         self.bytecode.append(&mut body_bc);
         if site.implicit_step {
             self.bytecode.push_load(INDEX_SLOT);
-            self.bytecode.push_const(1);
+            self.push_int_const(site.stride);
             self.bytecode.push(Byte::new(Instruction::ADD));
             self.bytecode.push_store_pop(INDEX_SLOT);
         }
@@ -16667,13 +17041,13 @@ impl Compiler {
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast);
-        self.recursive_pure = if auto_par_enabled() {
+        self.recursive_pure = if self.auto_par && auto_par_enabled() {
             crate::typechecking::analyze_recursive_pure(ast)
         } else {
             HashSet::new()
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
-        if auto_par_enabled() {
+        if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);

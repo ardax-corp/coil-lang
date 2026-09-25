@@ -13,6 +13,7 @@
 //! hop/depth counter on that same worker — not a constellation of frozen arg
 //! clones (COI-366 F1). F2 broadens admission under those same gates (COI-368).
 
+use std::cell::Cell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{EnumConstructPayload, Expression, Output, Pattern};
@@ -50,6 +51,27 @@ pub fn par_loop_grain() -> i64 {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_LOOP_GRAIN)
     })
+}
+
+fn env_flag_default_on(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no") => false,
+        _ => true,
+    }
+}
+
+/// Dynamic bounds, int parameters, branches, and non-unit strides (`COIL_PAR_LOOP_WIDE`).
+///
+/// Default on. `0` / `false` / `off` / `no` keeps the original const unit-step loop shape.
+pub fn par_loop_wide_enabled() -> bool {
+    env_flag_default_on("COIL_PAR_LOOP_WIDE")
+}
+
+/// Unary dynamic call entry into an existing fork worker (`COIL_PAR_EXPR_WIDE`).
+///
+/// Default on. Off leaves only constant call sites on the worker.
+pub fn par_expr_wide_enabled() -> bool {
+    env_flag_default_on("COIL_PAR_EXPR_WIDE")
 }
 
 /// Binary op used at a [`ParCombine::BinOp`] fork site.
@@ -183,6 +205,12 @@ const WORK_MAX_DEPTH: u32 = 256;
 /// Distinct arg vectors the estimator will memoize before giving up.
 const WORK_MEMO_CAP: usize = 1 << 14;
 
+// True while `collect_const_calls` is inside a function that already has a fork
+// site. Those calls are the site's own arms (`fib(n)` inside `pair_fib`).
+thread_local! {
+    static ENCLOSING_FORK: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Bounded structural estimate of the grain below a fork site.
 ///
 /// Counts the fork-site nodes a concrete arg vector reaches through the arms'
@@ -271,6 +299,42 @@ pub fn args_worth_parallel(
     args: &[i64],
 ) -> bool {
     WorkEstimate::new(sites).worth_parallel(fn_name, args)
+}
+
+/// Smallest `n` in `0..=48` at which unary `fn_name(n)` clears the grain floor.
+///
+/// Only single-parameter fork sites. The runtime check is `arg >= cutoff`;
+/// multi-arg sites stay on the constant-call rewrite.
+pub fn unary_dynamic_cutoff(
+    sites: &HashMap<String, ParForkSite>,
+    fn_name: &str,
+) -> Option<i64> {
+    let site = sites.get(fn_name)?;
+    if site.param_count != 1 {
+        return None;
+    }
+    if site
+        .guards
+        .iter()
+        .any(|g| matches!(g, ParGuard::Opaque))
+    {
+        return None;
+    }
+    const HI_CAP: i64 = 48;
+    if !args_worth_parallel(sites, fn_name, &[HI_CAP]) {
+        return None;
+    }
+    let mut lo = 0i64;
+    let mut hi = HI_CAP;
+    while lo + 1 < hi {
+        let mid = lo + (hi - lo) / 2;
+        if args_worth_parallel(sites, fn_name, &[mid]) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    Some(hi)
 }
 
 /// Parameterized fork-worker name for `fn_name`.
@@ -1165,6 +1229,15 @@ fn collect_const_calls(
                 if work.worth_parallel(fname, &consts) {
                     out.entry(fname.to_string()).or_default().insert(consts);
                 }
+            } else if par_expr_wide_enabled()
+                && !ENCLOSING_FORK.with(Cell::get)
+                && args.len() == 1
+                && matches!(peel(&args[0]).1.as_ref(), Expression::Identifier(_))
+                && let Some(cut) = unary_dynamic_cutoff(sites, fname)
+            {
+                // `fib(k)` demands the worker. Recursive `fib(n - 1)` is not
+                // an identifier, so the sequential body does not re-enter.
+                out.entry(fname.to_string()).or_default().insert(vec![cut]);
             }
         }
         Expression::Construct { fields, .. } => match fields {
@@ -1209,10 +1282,17 @@ fn collect_const_calls(
         }
         Expression::LetDestructure { rhs, .. } => collect_const_calls(rhs, work, out),
         Expression::Function {
-            body: Some(body), ..
+            name,
+            body: Some(body),
+            ..
+        } => {
+            let prev = ENCLOSING_FORK.with(|c| c.replace(sites.contains_key(*name)));
+            collect_const_calls(body, work, out);
+            ENCLOSING_FORK.with(|c| c.set(prev));
         }
-        | Expression::Lambda { body, .. }
-        | Expression::Defer { body, .. } => collect_const_calls(body, work, out),
+        Expression::Lambda { body, .. } | Expression::Defer { body, .. } => {
+            collect_const_calls(body, work, out);
+        }
         Expression::Implementation { methods, .. } => {
             for m in methods {
                 collect_const_calls(m, work, out);
@@ -1488,7 +1568,7 @@ fn main() {
     }
 
     #[test]
-    fn below_threshold_and_dynamic_args_do_not_demand_specs() {
+    fn below_threshold_const_does_not_demand_a_worker() {
         let ast = parse(
             r#"
 fn fib(int n) -> int {
@@ -1496,9 +1576,7 @@ fn fib(int n) -> int {
     return fib(n - 1) + fib(n - 2);
 }
 fn main() {
-    let k = 20;
     let a = fib(20);
-    let b = fib(k);
     return;
 }
 "#,
@@ -1508,12 +1586,37 @@ fn main() {
         let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
             !demanded.contains("fib"),
-            "arg at the grain floor and dynamic args must not demand a worker: {demanded:?}"
+            "arg at the grain floor must not demand a worker: {demanded:?}"
         );
         assert!(!args_worth_parallel(&sites, "fib", &[20]));
         assert!(args_worth_parallel(&sites, "fib", &[21]));
         assert!(!args_worth_parallel(&sites, "fib", &[]));
         assert!(!args_worth_parallel(&sites, "nosuch", &[21]));
+        assert_eq!(unary_dynamic_cutoff(&sites, "fib"), Some(21));
+    }
+
+    #[test]
+    fn dynamic_unary_call_demands_one_worker() {
+        let ast = parse(
+            r#"
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    let k = 22;
+    let b = fib(k);
+    return;
+}
+"#,
+        );
+        let pure = analyze_pure_fns(&ast);
+        let sites = analyze_par_fork_sites(&ast, &pure);
+        let demanded = collect_par_worker_fns(&ast, &sites);
+        assert!(
+            demanded.contains("fib"),
+            "a dynamic unary call demands the parameterized worker: {demanded:?}"
+        );
     }
 
     /// Grain is `W` itself. For `n <= 1` fib, `W(n) = Fib(n+1) - 1`, and
