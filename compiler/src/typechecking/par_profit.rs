@@ -7,7 +7,7 @@
 //! `E::V(f(a), f(b))`, `(f(a), f(b))`, the tak-style `f(f(a), f(b), f(c))`,
 //! or `g(f(a), f(b))`. Arms are described structurally ([`ArgForm`]) rather
 //! than by function allowlists. Constant call sites whose fork-tree grain
-//! ([`par_work_grain`]) exceeds [`par_expr_grain`] rewrite to one parameterized
+//! ([`par_work_grain`]) exceeds [`par_expr_grain_for`] rewrite to one parameterized
 //! fork worker ([`par_worker_name`]) that takes the live args. Grain is the
 //! const-site entry gate (no hot-path skip-threshold). Nested AlwaysPar is a
 //! hop/depth counter on that same worker — not a constellation of frozen arg
@@ -22,9 +22,18 @@ use parser::ast::{EnumConstructPayload, Expression, Output, Pattern};
 ///
 /// Unit is fork-tree nodes `W`, not fib(n). Default [`DEFAULT_EXPR_GRAIN`]
 /// is `W(fib(20))` for the `n <= 1` recurrence (`Fib(21) - 1`): the spawn
-/// profitability floor previously written as fib-unit 20. Fork iff `W`
-/// is strictly greater.
+/// profitability floor previously written as fib-unit 20. Tight sites
+/// (unary const-guard, counted `W`) fork iff `W` is strictly greater.
+/// Loose sites ([`grain_w_is_tight`] is false) use [`DEFAULT_LOOSE_EXPR_GRAIN`].
 pub const DEFAULT_EXPR_GRAIN: i64 = 10_945;
+
+/// Floor for sites whose `W` undercounts sequential work.
+///
+/// `SelfCall` combine re-entry and multi-parameter guards (tak `y >= x`)
+/// leave most recursive calls as sequential leaves that `W` does not count.
+/// Scaled with [`par_expr_grain`]: default **8000** admits `tak(18, 12, 6)`
+/// (`W = 8398`) and keeps tight fib-shaped trees on [`DEFAULT_EXPR_GRAIN`].
+pub const DEFAULT_LOOSE_EXPR_GRAIN: i64 = 8_000;
 
 /// Loop IPA grain floor (`COIL_LOOP_GRAIN`). Unit is trip count of a
 /// counted `[begin, end)` range, not expression `W`. Isolate spawn still
@@ -40,6 +49,56 @@ pub fn par_expr_grain() -> i64 {
             .and_then(|s| s.parse().ok())
             .unwrap_or(DEFAULT_EXPR_GRAIN)
     })
+}
+
+/// Per-site expression grain floor, same units as `W`.
+///
+/// Tight recurrences keep [`par_expr_grain`]. Sites where `W` is a known
+/// undercount use the scaled loose floor so spawn can still pay off.
+pub fn par_expr_grain_for(site: &ParForkSite) -> i64 {
+    let base = par_expr_grain();
+    if grain_w_is_tight(site) {
+        base
+    } else {
+        loose_expr_grain(base)
+    }
+}
+
+fn loose_expr_grain(base: i64) -> i64 {
+    base.saturating_mul(DEFAULT_LOOSE_EXPR_GRAIN) / DEFAULT_EXPR_GRAIN.max(1)
+}
+
+/// True when `W` tracks sequential work at this site.
+///
+/// A guard that relates two parameters, or a [`ParCombine::SelfCall`] whose
+/// re-entry on joined values is invisible to `W`, leaves most recursive
+/// calls as sequential leaves. Those sites use the loose floor.
+pub fn grain_w_is_tight(site: &ParForkSite) -> bool {
+    if matches!(site.combine, ParCombine::SelfCall) {
+        return false;
+    }
+    if site.guards.iter().any(|g| matches!(g, ParGuard::Opaque)) {
+        return false;
+    }
+    !site.guards.iter().any(guard_compares_distinct_params)
+}
+
+fn guard_compares_distinct_params(g: &ParGuard) -> bool {
+    let ParGuard::Cmp { lhs, rhs, .. } = g else {
+        return false;
+    };
+    match (arg_form_param(lhs), arg_form_param(rhs)) {
+        (Some(a), Some(b)) => a != b,
+        _ => false,
+    }
+}
+
+fn arg_form_param(form: &ArgForm) -> Option<usize> {
+    match form {
+        ArgForm::Param(i) => Some(*i),
+        ArgForm::ParamMinus { param, .. } | ArgForm::ParamPlus { param, .. } => Some(*param),
+        ArgForm::Const(_) => None,
+    }
 }
 
 /// Compile-time counted-loop grain floor (`COIL_LOOP_GRAIN`, default 20).
@@ -218,7 +277,7 @@ thread_local! {
 /// are base cases and do no forkable work. Every imprecision (opaque callees, a
 /// `SelfCall` combine's re-entry on joined values, the caps below) resolves
 /// *downwards*, so the count is a lower bound: unknown structure only refuses.
-/// Compared **directly** to [`par_expr_grain`] — no fib-unit inversion.
+/// Compared **directly** to [`par_expr_grain_for`] — no fib-unit inversion.
 struct WorkEstimate<'a> {
     sites: &'a HashMap<String, ParForkSite>,
     /// Counting past the floor cannot change the verdict, so totals stop here.
@@ -242,8 +301,15 @@ impl<'a> WorkEstimate<'a> {
         self.nodes(fn_name, args, 0)
     }
 
+    fn site_floor(&self, fn_name: &str) -> i64 {
+        self.sites
+            .get(fn_name)
+            .map(par_expr_grain_for)
+            .unwrap_or_else(par_expr_grain)
+    }
+
     fn worth_parallel(&mut self, fn_name: &str, args: &[i64]) -> bool {
-        self.nodes(fn_name, args, 0) > par_expr_grain()
+        self.nodes(fn_name, args, 0) > self.site_floor(fn_name)
     }
 
     fn nodes(&mut self, fn_name: &str, args: &[i64], depth: u32) -> i64 {
@@ -292,7 +358,7 @@ pub fn par_work_grain(sites: &HashMap<String, ParForkSite>, fn_name: &str, args:
     WorkEstimate::new(sites).grain(fn_name, args)
 }
 
-/// True when `fn_name(args)` carries more grain than [`par_expr_grain`].
+/// True when `fn_name(args)` carries more grain than [`par_expr_grain_for`].
 pub fn args_worth_parallel(
     sites: &HashMap<String, ParForkSite>,
     fn_name: &str,
@@ -305,19 +371,12 @@ pub fn args_worth_parallel(
 ///
 /// Only single-parameter fork sites. The runtime check is `arg >= cutoff`;
 /// multi-arg sites stay on the constant-call rewrite.
-pub fn unary_dynamic_cutoff(
-    sites: &HashMap<String, ParForkSite>,
-    fn_name: &str,
-) -> Option<i64> {
+pub fn unary_dynamic_cutoff(sites: &HashMap<String, ParForkSite>, fn_name: &str) -> Option<i64> {
     let site = sites.get(fn_name)?;
     if site.param_count != 1 {
         return None;
     }
-    if site
-        .guards
-        .iter()
-        .any(|g| matches!(g, ParGuard::Opaque))
-    {
+    if site.guards.iter().any(|g| matches!(g, ParGuard::Opaque)) {
         return None;
     }
     const HI_CAP: i64 = 48;
@@ -392,7 +451,7 @@ pub const PAR_SPEC_HOPS: u32 = 2;
 /// Functions that need one parameterized fork worker.
 ///
 /// A name is demanded when some AST const call reaches its fork site (guards
-/// hold) with grain above [`par_expr_grain`]. Hops are depth on that worker,
+/// hold) with grain above [`par_expr_grain_for`]. Hops are depth on that worker,
 /// not extra demanded vectors.
 pub fn collect_par_worker_fns(
     ast: &Output<'_>,
@@ -1023,9 +1082,10 @@ fn resolve_arm_refs(
     for item in items {
         let expr = peel(item);
         if let Expression::Identifier(n) = expr.1.as_ref()
-            && !used.insert(*n) {
-                return None;
-            }
+            && !used.insert(*n)
+        {
+            return None;
+        }
         arms.push(resolve_arm(item, ctx, lets)?);
     }
     if !lets.is_empty() {
@@ -1689,13 +1749,11 @@ fn main() { return; }
 
     /// Rotating `tak` arms keep a large component alive, but most children miss
     /// the `y < x` guard and the `SelfCall` combine's re-entry is unknowable,
-    /// so the fair benchmark load scores **8398** grain — below the
-    /// fib-calibrated floor **10945**. Fib-unit inversion used to report this
-    /// as unit 20 (`Fib(21)-1 = 10945` is the next invert bucket). Only a
-    /// genuinely deeper tree crosses the floor.
+    /// so `W` is a lower bound (**8398** for the fair load). That sits below
+    /// the tight fib floor **10945** and above the loose floor **8000**.
     #[test]
-    fn fair_tak_load_scores_below_threshold() {
-        let floor = par_expr_grain();
+    fn fair_tak_load_uses_loose_grain() {
+        let tight = par_expr_grain();
         let sites = sites_of(
             r#"
 fn tak(int x, int y, int z) -> int {
@@ -1707,14 +1765,17 @@ fn tak(int x, int y, int z) -> int {
 fn main() { return; }
 "#,
         );
+        let tak = sites.get("tak").expect("tak fork");
+        assert!(!grain_w_is_tight(tak));
+        assert_eq!(par_expr_grain_for(tak), DEFAULT_LOOSE_EXPR_GRAIN);
         assert_eq!(par_work_grain(&sites, "tak", &[18, 12, 6]), 8398);
         assert!(
-            8398 < floor,
-            "fair tak grain must sit below the fib-calibrated floor"
+            8398 < tight,
+            "fair tak W must sit below the tight fib floor"
         );
         assert!(
-            !args_worth_parallel(&sites, "tak", &[18, 12, 6]),
-            "the fair tak(18, 12, 6) load must stay sequential"
+            args_worth_parallel(&sites, "tak", &[18, 12, 6]),
+            "loose grain admits the fair tak(18, 12, 6) load"
         );
         // `max(args)` alone rated this above the floor; it is 53 calls.
         assert!(
@@ -1723,6 +1784,22 @@ fn main() { return; }
         );
         assert!(args_worth_parallel(&sites, "tak", &[21, 12, 6]));
         assert!(args_worth_parallel(&sites, "tak", &[24, 16, 8]));
+    }
+
+    #[test]
+    fn fib_shape_keeps_tight_grain() {
+        let sites = sites_of(
+            r#"
+fn fib(int n) -> int {
+    if n <= 1 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() { return; }
+"#,
+        );
+        let fib = sites.get("fib").expect("fib fork");
+        assert!(grain_w_is_tight(fib));
+        assert_eq!(par_expr_grain_for(fib), DEFAULT_EXPR_GRAIN);
     }
 
     /// A cyclic arg graph (`Const` forms can raise a component) must not hang

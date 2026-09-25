@@ -120,22 +120,27 @@ helper arms count and trivial ones do not. The walk is memoized per arg vector
 and bounded by a depth cap, a memo-entry cap, and saturation one node past the
 grain floor.
 
-The default floor **10945** is a profitability constant in **grain** (nodes),
-not “fib(n)”. It is `W(fib(20))` for the `n <= 1` recurrence
+The default **tight** floor **10945** is a profitability constant in **grain**
+(nodes), not “fib(n)”. It is `W(fib(20))` for the `n <= 1` recurrence
 (`Fib(21) - 1`): the same spawn-profitability point previously written as
-fib-unit 20. `fib(20)` still refuses, `fib(21)` still forks. The fair
-`tak(18, 12, 6)` load is **8398** grain — below that floor (fib-units used
-to round it up to 20). It stays sequential.
+fib-unit 20. Tight sites (const-guard on one parameter, `W` tracks sequential
+work) still refuse `fib(20)` and fork `fib(21)`.
 
-| Site | `max(args)` | Grain `W` | Verdict (default floor) | Real calls |
-|---|---|---|---|---|
-| `fib(21)` | 21 | 17710 | fork | 35 421 |
-| `fib(20)` | 20 | 10945 | refuse | 21 891 |
-| `tak(18, 12, 6)` (fair bench) | 18 | 8398 | refuse | 63 609 |
-| `tak(21, 12, 6)` | 21 | >10945 | fork | 230 613 |
-| `tak(24, 22, 20)` | 24 | 53-scale | refuse | 53 |
-| `sq(n) + sq(n - 1)` at 22 | 22 | 1 | refuse | 2 |
-| `fib(n) + fib(n - 1)` at 22 | 22 | >10945 | fork | 92 734 |
+Sites whose `W` **undercounts** sequential work — `SelfCall` combine re-entry,
+or a guard that relates two parameters (`tak` `y >= x`) — use a scaled **loose**
+floor (default **8000**, `COIL_PAR_THRESHOLD * 8000 / 10945`). The fair
+`tak(18, 12, 6)` load is **8398** grain: below the tight floor, above the loose
+floor, so it forks.
+
+| Site | `max(args)` | Grain `W` | Floor | Verdict | Real calls |
+|---|---|---|---|---|---|
+| `fib(21)` | 21 | 17710 | tight 10945 | fork | 35 421 |
+| `fib(20)` | 20 | 10945 | tight 10945 | refuse | 21 891 |
+| `tak(18, 12, 6)` (fair bench) | 18 | 8398 | loose 8000 | fork | 63 609 |
+| `tak(21, 12, 6)` | 21 | >10945 | loose 8000 | fork | 230 613 |
+| `tak(24, 22, 20)` | 24 | 53-scale | loose 8000 | refuse | 53 |
+| `sq(n) + sq(n - 1)` at 22 | 22 | 1 | tight 10945 | refuse | 2 |
+| `fib(n) + fib(n - 1)` at 22 | 22 | >10945 | tight 10945 | fork | 92 734 |
 
 Every imprecision resolves *downwards* — an arm into a function with no fork
 site, a `SelfCall` combine's re-entry on joined values (unknowable statically),
@@ -143,15 +148,15 @@ the caps — so `W` is a lower bound on the tree and unknown structure can
 only make a site refuse. `tak` is the interesting case: its arms rotate
 parameters, so a large component stays alive, but many children miss the `y < x`
 guard and the combine's re-entry is invisible. The fair benchmark
-load lands **below** the floor (`W = 8398`) and stays sequential; only a genuinely deeper
-tree crosses it.
+load lands **below** the tight floor (`W = 8398`) and **above** the loose floor,
+so it forks; a narrow tree such as `tak(24, 22, 20)` still refuses.
 
-The default is a profitability floor, not an arbitrary gate: forking below
-it (e.g. `COIL_PAR_THRESHOLD=100` on `fib(32)` or `tak(18,12,6)`) multiplies
-reactor spawn/join work and is typically **slower** than sequential, and very
-low values can exhaust the specialization budget or overflow worker stacks.
-Raise the workload (larger const args) when you want IPA evidence; do not lower
-the grain floor to “force” more forks. Old fib-unit `N` corresponds to grain
+The tight floor is a profitability constant, not an arbitrary gate: forking a
+tight fib-shaped tree below it (e.g. `COIL_PAR_THRESHOLD=100` on `fib(32)`)
+multiplies reactor spawn/join work and is typically **slower** than sequential,
+and very low values can exhaust the specialization budget or overflow worker
+stacks. The loose floor exists because `W` is a lower bound on those shapes —
+unknown structure still only refuses. Old fib-unit `N` corresponds to grain
 `Fib(N+1)-1` (for `n <= 1` fib). One worker per site also means lowering the
 floor cannot explode archive size via extra clones.
 
@@ -248,7 +253,7 @@ there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 |-----|--------|
 | `COIL_MAX_WORKER_THREADS` | Pool size (1..=512). Default `available_parallelism` (min 2), or **1** when `CI` is set. `.cargo/config.toml` also sets this to `1` (`force = false`) for local cargo test runs. Export a higher value to profile parallelism. |
 | `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
-| `COIL_PAR_THRESHOLD` | Expression IPA grain floor (fork-tree nodes `W`). Default **10945**. |
+| `COIL_PAR_THRESHOLD` | Tight expression IPA grain floor (fork-tree nodes `W`). Default **10945**. Loose sites scale this by `8000/10945`. |
 | `COIL_LOOP_GRAIN` | Counted-loop IPA trip-count floor. Default **20**. |
 | `COIL_PAR_LOOP_WIDE` | `0` / `false` / `off` / `no` keeps const unit-step loop IPA. Default on: dynamic int bounds, int captures, pure branches, constant stride, and up to 4 chunks. |
 | `COIL_PAR_EXPR_WIDE` | `0` / `false` / `off` / `no` keeps expression IPA on constant calls. Default on: unary `f(local)` enters the worker when the local clears the cutoff. |

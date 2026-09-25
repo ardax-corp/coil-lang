@@ -6155,10 +6155,10 @@ fn main() {
     assert_eq!(output, "21");
 }
 
-/// The fair `tak(18, 12, 6)` benchmark load scores just under the threshold, so
-/// it must keep running on the sequential original.
+/// The fair `tak(18, 12, 6)` load is below the tight fib floor but above the
+/// loose `SelfCall` floor, so it emits one parameterized worker.
 #[test]
-fn auto_par_fair_tak_load_stays_sequential() {
+fn auto_par_fair_tak_load_emits_worker() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -6176,8 +6176,8 @@ fn main() {
     let mut pipeline = test_pipeline();
     let (bytecode, constants) = pipeline.compile_src(src).expect("fair tak should compile");
     assert!(
-        pipeline.function_offset("__coil_par_tak").is_none(),
-        "fair tak(18, 12, 6) must not get a parallel worker"
+        pipeline.function_offset("__coil_par_tak").is_some(),
+        "fair tak(18, 12, 6) must get a parallel worker under loose grain"
     );
     let output = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(output, "7");
