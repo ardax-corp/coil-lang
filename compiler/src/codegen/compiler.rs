@@ -7870,9 +7870,6 @@ impl Compiler {
         args: Option<&[Output<'_>]>,
         bytecode: &mut CodeBuf,
     ) -> bool {
-        if !crate::typechecking::par_expr_wide_enabled() {
-            return false;
-        }
         let Some(args) = args else {
             return false;
         };
@@ -8482,13 +8479,9 @@ impl Compiler {
                 done,
             });
         } else {
-            let grain = crate::typechecking::par_loop_grain();
-            let bounds = if crate::typechecking::par_loop_wide_enabled() {
-                site.chunk_bounds(grain)
-                    .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end])
-            } else {
-                vec![site.begin, site.midpoint(), site.end]
-            };
+            let bounds = site
+                .chunk_bounds(crate::typechecking::DEFAULT_LOOP_GRAIN)
+                .unwrap_or_else(|| vec![site.begin, site.midpoint(), site.end]);
             self.emit_const_par_chunks(EmitConstParChunksArgs {
                 bounds: &bounds,
                 bb: &mut bb,
@@ -8664,7 +8657,7 @@ impl Compiler {
         let trip_tmp = self.alloc_temp_slot();
         self.bytecode.push_store_pop(trip_tmp);
 
-        let grain = crate::typechecking::par_loop_grain();
+        let grain = crate::typechecking::DEFAULT_LOOP_GRAIN;
         self.bytecode.push_load(trip_tmp);
         self.push_int_const(grain.max(1));
         self.bytecode.push(Byte::new(Instruction::GT));

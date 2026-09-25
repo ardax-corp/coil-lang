@@ -369,13 +369,13 @@ Priority: landed; F0 drops fib-unit inversion (COI-367); F1 one parameterized
 fork worker per site (COI-366).
 
 IPA specialization used to invert guard-pruned fork-site nodes `W` into
-fib-equivalent units so `COIL_PAR_THRESHOLD` could stay **20**. F0 compares
+fib-equivalent units so the expression threshold could stay **20**. F0 compares
 `W` **directly** to a grain floor (default **10945** = `W(fib(20))` =
 `Fib(21)-1`). Verdicts on the calibrated loads stay the same: `fib(21)`
 forks, `fib(20)` refuses, `tak(24, 22, 20)` refuses, and the fair
 `tak(18, 12, 6)` bench load is 8398 grain (below the tight fib floor, above
 the loose `SelfCall` floor **8000**, so it forks). Loop IPA
-keeps trip-count grain via `COIL_LOOP_GRAIN` (default 20). Full formula and
+keeps trip-count grain via `DEFAULT_LOOP_GRAIN` (20). Full formula and
 verdict table in [auto-par](auto-par.md#expression-grain-w).
 
 The work cost is compile-time and bounded by construction: the walk is memoized
