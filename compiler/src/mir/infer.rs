@@ -217,9 +217,17 @@ fn infer_walk(
     // Map drafts always last-write recycled temps. Dense needs the same
     // when the body boxes (InitTyped / Make*) or has heap fields — ctor
     // temps become i64/bool after the object is stored (D1/D2).
+    // LIR does the same: fuse-IL recycles operand / local slots across
+    // disjoint live ranges (call args, then a FORMAT string). Lowering reads
+    // each slot's current SSA def, and SSA verify refuses a φ whose inputs
+    // disagree, so last-write typing cannot mistype a reconstruct.
     let reuse = mode == InferMode::Map
+        || mode == InferMode::Lir
         || (mode == InferMode::Dense
             && (allow_alloc || ops.iter().any(is_heap_field_op)));
+    // Operand painting stays strict for dense / map drafts (their lowering
+    // relies on it); LIR recycles like set_slot_reuse.
+    let _reuse_guard = WalkReuseGuard::enter(mode == InferMode::Lir);
 
     for op in ops {
         match op {
@@ -1681,13 +1689,34 @@ fn apply_host(
     Ok(())
 }
 
+thread_local! {
+    /// Whether the current [`infer_walk`] recycles painted operand types (LIR).
+    static WALK_REUSE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Restores the enclosing walk's reuse mode (walks can nest via callees).
+struct WalkReuseGuard(bool);
+
+impl WalkReuseGuard {
+    fn enter(reuse: bool) -> Self {
+        Self(WALK_REUSE.with(|c| c.replace(reuse)))
+    }
+}
+
+impl Drop for WalkReuseGuard {
+    fn drop(&mut self) {
+        WALK_REUSE.with(|c| c.set(self.0));
+    }
+}
+
+/// Type the slot a consumed operand came from, under the walk's reuse mode.
 fn paint(
     slot_ty: &mut HashMap<u32, MirTy>,
     pool_ty: &mut [Option<MirTy>],
     cell: Cell,
     ty: MirTy,
 ) -> Result<(), LowerError> {
-    paint_slots(slot_ty, pool_ty, cell, ty, false)
+    paint_slots(slot_ty, pool_ty, cell, ty, WALK_REUSE.with(std::cell::Cell::get))
 }
 
 fn paint_slots(
