@@ -25,6 +25,10 @@ use crate::Compiler;
 /// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
 type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
 
+/// Compile failed. Diagnostics are already on the pipeline; the error carries no extra payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompileFail;
+
 /// A queued file to compile, along with the path it was
 /// discovered under. The pipeline processes queued files
 /// in BFS order from the entry point.
@@ -207,16 +211,16 @@ impl Pipeline {
         constants: &[u64],
         strings: &[String],
     ) {
-        machine::wire_thread_program_with_maps(
+        machine::wire_thread_program_with_maps(machine::WireThreadProgramWithMapsArgs {
             machine,
             bytecode,
             constants,
             strings,
-            self.static_slot_count(),
-            self.program_debug(),
-            self.operand_stack_slots(),
-            self.stack_maps().to_vec(),
-        );
+            static_slot_count: self.static_slot_count(),
+            debug: self.program_debug(),
+            operand_stack_slots: self.operand_stack_slots(),
+            stack_maps: self.stack_maps().to_vec(),
+        });
     }
 
     /// Bytecode entry offset for a registered function (for tests).
@@ -1295,15 +1299,14 @@ impl Pipeline {
         (bytecode, self.compiler_lazy_mut().constants().to_vec())
     }
 
-    #[allow(clippy::result_unit_err)]
-    pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), ()> {
+    pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
         let parser = Pratt::default();
         let path = Path::new("<input>");
         let mut ast = match parser.parse(src) {
             Ok(ast) => ast,
             Err(err) => {
                 self.emit_message(path, src, &err);
-                return Err(());
+                return Err(CompileFail);
             }
         };
 
@@ -1320,7 +1323,7 @@ impl Pipeline {
         self.seed_fn_value_escapes(Some(&ast));
         self.emit_discovered_modules();
         if self.failed || self.had_errors() {
-            return Err(());
+            return Err(CompileFail);
         }
 
         self.compiler_lazy_mut().set_source_file(path);
@@ -1330,7 +1333,7 @@ impl Pipeline {
         let file_id = self.sink.register_source(path, src);
         self.emit_new_messages(file_id);
         if self.had_errors() {
-            return Err(());
+            return Err(CompileFail);
         }
 
         if self.retain_cursor_il {
@@ -1350,7 +1353,7 @@ impl Pipeline {
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
-            return Err(());
+            return Err(CompileFail);
         }
 
         Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
@@ -1359,8 +1362,7 @@ impl Pipeline {
     /// Like [`Self::compile_src`], but keeps post-opt pre-fuse IL for the
     /// cursor_model gate. Always available so `compiler/tests/cursor_model.rs`
     /// does not need the `dissect` feature.
-    #[allow(clippy::result_unit_err)]
-    pub fn compile_src_retaining_il(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), ()> {
+    pub fn compile_src_retaining_il(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
         self.retain_cursor_il = true;
         let result = self.compile_src(src);
         self.retain_cursor_il = false;
@@ -1402,8 +1404,7 @@ impl Pipeline {
     /// declarations by reading the referenced files from disk.
     ///
     /// Multi-file entry point: discovers and compiles the module graph from disk.
-    #[allow(clippy::result_unit_err)]
-    pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), ()> {
+    pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), CompileFail> {
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
@@ -1415,7 +1416,7 @@ impl Pipeline {
         self.compile_discovered_modules();
 
         if self.failed || self.had_errors() {
-            return Err(());
+            return Err(CompileFail);
         }
 
         // Linked IL → one lower (fuse-select + labels). See `Pipeline::compile`.
@@ -1430,7 +1431,7 @@ impl Pipeline {
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
-            return Err(());
+            return Err(CompileFail);
         }
 
         Ok((
@@ -1443,12 +1444,11 @@ impl Pipeline {
     ///
     /// When `capture_il` is true, retains pre-opt stack IL after finalize splices.
     #[cfg(any(test, feature = "dissect"))]
-    #[allow(clippy::result_unit_err)]
     pub fn compile_dissect(
         &mut self,
         file: &str,
         capture_il: bool,
-    ) -> Result<crate::DissectArtifacts, ()> {
+    ) -> Result<crate::DissectArtifacts, CompileFail> {
         let entry = PathBuf::from(file);
         self.reset_session();
         self.entry_file = Some(entry.clone());
@@ -1459,7 +1459,7 @@ impl Pipeline {
         self.compile_discovered_modules();
 
         if self.failed || self.had_errors() {
-            return Err(());
+            return Err(CompileFail);
         }
 
         let il = if capture_il {
@@ -1477,7 +1477,7 @@ impl Pipeline {
 
         // Warnings are kept for callers to inspect; only hard errors fail.
         if self.had_errors() {
-            return Err(());
+            return Err(CompileFail);
         }
 
         let functions = self.compiler_lazy_mut().function_symbols();
@@ -1625,19 +1625,19 @@ impl Pipeline {
             .collect()
     }
 
-    #[allow(clippy::result_unit_err)]
+
     pub fn run(
         self,
         filename: String,
-    ) -> Result<RunArtifacts, ()> {
+    ) -> Result<RunArtifacts, CompileFail> {
         let mut f = File::open(filename).expect("Unable to find file");
         let mut buffer = Vec::with_capacity(1024);
         f.read_to_end(&mut buffer).expect("Unable to read file");
 
-        let decoded = decode_archived_program(&buffer).map_err(|_| ())?;
+        let decoded = decode_archived_program(&buffer).map_err(|_| CompileFail)?;
 
         if self.failed {
-            return Err(());
+            return Err(CompileFail);
         }
 
         let program = decoded.program;

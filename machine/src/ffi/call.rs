@@ -160,7 +160,7 @@ fn intern_string_arg(heap: &mut Heap, value: &Value) -> Result<*const c_char, Ff
         Ok(None) => heap
             .intern_ffi_bytes(b"")
             .map_err(|_| FfiError::InteriorNul),
-        Err(()) => Err(FfiError::InteriorNul),
+        Err(crate::memory::InteriorNul) => Err(FfiError::InteriorNul),
     }
 }
 

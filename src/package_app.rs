@@ -24,7 +24,7 @@ fn compile_program_archive_bytes(
     filename: &str,
     strip_debug: bool,
 ) -> Result<Vec<u8>, ()> {
-    let (bytecode, constants) = pipeline.compile_src_from_file(filename)?;
+    let (bytecode, constants) = pipeline.compile_src_from_file(filename).map_err(|_| ())?;
     let debug = pipeline.program_debug();
     let (source_files, debug_locs) = if strip_debug {
         (Vec::new(), Vec::new())

@@ -320,21 +320,36 @@ fn arm_has_runtime_test(arm: &MatchArm) -> bool {
     }
 }
 
-/// Emit inner-pattern tests after outer tag dispatch (multi-arm groups).
-#[allow(clippy::too_many_arguments)]
-fn emit_inner_test<'compiler>(
+struct EmitInnerTestArgs<'args, 'compiler> {
     arm_idx: usize,
-    checker: &Checker,
-    enum_name: &str,
-    variant_name: &str,
-    payload: &PatternPayload<'compiler>,
-    match_bindings_per_arm: &mut HashMap<usize, HashMap<String, u32>>,
-    bytecode: &mut CodeBuf,
-    bb: &mut BlockBuilder,
+    checker: &'args Checker,
+    enum_name: &'args str,
+    variant_name: &'args str,
+    payload: &'args PatternPayload<'compiler>,
+    match_bindings_per_arm: &'args mut HashMap<usize, HashMap<String, u32>>,
+    bytecode: &'args mut CodeBuf,
+    bb: &'args mut BlockBuilder,
     pass_label: Option<crate::block_builder::Label>,
     _fail_label: crate::block_builder::Label,
     payload_base: u32,
-) {
+}
+
+/// Emit inner-pattern tests after outer tag dispatch (multi-arm groups).
+fn emit_inner_test<'compiler>(args: EmitInnerTestArgs<'_, 'compiler>) {
+    let EmitInnerTestArgs {
+        arm_idx,
+        checker,
+        enum_name,
+        variant_name,
+        payload,
+        match_bindings_per_arm,
+        bytecode,
+        bb,
+        pass_label,
+        _fail_label,
+        payload_base,
+    } = args;
+
     use parser::ast::PatternPayload;
     match payload {
         PatternPayload::Unit => {
@@ -376,19 +391,19 @@ fn emit_inner_test<'compiler>(
                             // in decl_order and emits per-field
                             // tests (POP / STORE / JUMP_IF_MATCH on
                             // further-nested tags).
-                            emit_inner_test(
+                            emit_inner_test(EmitInnerTestArgs {
                                 arm_idx,
                                 checker,
-                                sub_enum,
-                                sub_variant,
-                                sub_payload,
+                                enum_name: sub_enum,
+                                variant_name: sub_variant,
+                                payload: sub_payload,
                                 match_bindings_per_arm,
                                 bytecode,
                                 bb,
                                 pass_label,
                                 _fail_label,
                                 payload_base,
-                            );
+                            });
                         } else if let Some(label) = pass_label {
                             if let Some(inner_tag) = checker.tag_for(sub_enum, sub_variant) {
                                 bb.emit_jump_to(
@@ -461,19 +476,19 @@ fn emit_inner_test<'compiler>(
                         // the inner tag as before.
                         any_nested_ctor = true;
                         if matches!(sub_payload, PatternPayload::Record(_)) {
-                            emit_inner_test(
+                            emit_inner_test(EmitInnerTestArgs {
                                 arm_idx,
                                 checker,
-                                sub_enum,
-                                sub_variant,
-                                sub_payload,
+                                enum_name: sub_enum,
+                                variant_name: sub_variant,
+                                payload: sub_payload,
                                 match_bindings_per_arm,
                                 bytecode,
                                 bb,
                                 pass_label,
                                 _fail_label,
                                 payload_base,
-                            );
+                            });
                         } else if let Some(label) = pass_label {
                             if let Some(inner_tag) = checker.tag_for(sub_enum, sub_variant) {
                                 bb.emit_jump_to(
@@ -1133,17 +1148,29 @@ impl Context {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_pattern_binding<'compiler>(
-    checker: &Checker,
-    match_bindings: &mut HashMap<String, u32>,
-    next_slot: &mut u32,
-    pattern: &Pattern<'compiler>,
-    parent_decl_order: &[(String, Ty)],
-    bytecode: &mut CodeBuf,
+struct EmitPatternBindingArgs<'args, 'compiler> {
+    checker: &'args Checker,
+    match_bindings: &'args mut HashMap<String, u32>,
+    next_slot: &'args mut u32,
+    pattern: &'args Pattern<'compiler>,
+    parent_decl_order: &'args [(String, Ty)],
+    bytecode: &'args mut CodeBuf,
     consume_values: bool,
     is_outer: bool,
-) {
+}
+
+fn emit_pattern_binding<'compiler>(args: EmitPatternBindingArgs<'_, 'compiler>) {
+    let EmitPatternBindingArgs {
+        checker,
+        match_bindings,
+        next_slot,
+        pattern,
+        parent_decl_order,
+        bytecode,
+        consume_values,
+        is_outer,
+    } = args;
+
     use parser::ast::PatternPayload;
     match pattern {
         Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {
@@ -1192,16 +1219,16 @@ fn emit_pattern_binding<'compiler>(
                     } else {
                         Vec::new()
                     };
-                    emit_pattern_binding(
+                    emit_pattern_binding(EmitPatternBindingArgs {
                         checker,
                         match_bindings,
                         next_slot,
-                        &sub.1,
-                        &sub_decl_order,
+                        pattern: &sub.1,
+                        parent_decl_order: &sub_decl_order,
                         bytecode,
                         consume_values,
-                        false, // is_outer = false (recursion)
-                    );
+                        is_outer: false,
+                    });
                 }
             }
             PatternPayload::Record(fields) => {
@@ -1259,16 +1286,16 @@ fn emit_pattern_binding<'compiler>(
                         } else {
                             Vec::new()
                         };
-                        emit_pattern_binding(
+                        emit_pattern_binding(EmitPatternBindingArgs {
                             checker,
                             match_bindings,
                             next_slot,
-                            sub_pat,
-                            &sub_decl_order,
+                            pattern: sub_pat,
+                            parent_decl_order: &sub_decl_order,
                             bytecode,
                             consume_values,
-                            false, // is_outer = false (recursion)
-                        );
+                            is_outer: false,
+                        });
                     } else if consume_values {
                         // Field omitted from the pattern.
                         // Emit POP to keep the stack

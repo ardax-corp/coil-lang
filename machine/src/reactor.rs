@@ -197,7 +197,7 @@ impl Reactor {
         self.inflight.fetch_add(1, Ordering::SeqCst);
         match try_push_local(self, job) {
             Ok(()) => {}
-            Err(job) => self.injector.push(job),
+            Err(job) => self.injector.push(*job),
         }
         self.notify();
     }
@@ -328,10 +328,9 @@ fn reactor_id(reactor: &Reactor) -> *const Reactor {
 }
 
 /// Push onto this thread's local deque only when it belongs to `reactor`.
-#[allow(clippy::result_large_err)]
-fn try_push_local(reactor: &Reactor, job: Job) -> Result<(), Job> {
+/// The missed job is boxed so the `Err` variant stays small.
+fn try_push_local(reactor: &Reactor, job: Job) -> Result<(), Box<Job>> {
     let want = reactor_id(reactor);
-    #[allow(clippy::result_large_err)]
     LOCAL_WORKER.with(|slot| {
         let mut slot = slot.borrow_mut();
         match slot.as_mut() {
@@ -339,7 +338,7 @@ fn try_push_local(reactor: &Reactor, job: Job) -> Result<(), Job> {
                 local.worker.push(job);
                 Ok(())
             }
-            _ => Err(job),
+            _ => Err(Box::new(job)),
         }
     })
 }

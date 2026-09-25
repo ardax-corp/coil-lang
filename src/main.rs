@@ -66,7 +66,7 @@ fn compile_to_archive(pipeline: &mut Pipeline, filename: &str, output: &str) {
     // Multi-file entry: discovers `use` / `mod` via bound `--root` / default `src`.
     let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
-        Err(()) => {
+        Err(_) => {
             let _ = pipeline.finish_reporting();
             exit(1);
         }
@@ -245,19 +245,30 @@ fn maybe_warn_stale_default_out(pipeline: &mut Pipeline, entry: &str, debug: &Pr
     }
 }
 
-/// Run archived bytecode. Returns `true` when a language-level `panic` aborted.
-/// Uncaught `raise` from `main` is a `Result.Err` return and is not an abort (Q5).
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn execute_archive(
-    pipeline: &Pipeline,
-    bytecode: &[Byte],
-    constants: &[u64],
-    strings: &[String],
+struct ExecuteArchiveArgs<'a> {
+    pipeline: &'a Pipeline,
+    bytecode: &'a [Byte],
+    constants: &'a [u64],
+    strings: &'a [String],
     static_slots: u32,
     debug: ProgramDebug,
-    entry: Option<&Path>,
+    entry: Option<&'a Path>,
     operand_stack_slots: u32,
-) -> bool {
+}
+
+/// Run archived bytecode. Returns `true` when a language-level `panic` aborted.
+/// Uncaught `raise` from `main` is a `Result.Err` return and is not an abort (Q5).
+pub(crate) fn execute_archive(args: ExecuteArchiveArgs<'_>) -> bool {
+    let ExecuteArchiveArgs {
+        pipeline,
+        bytecode,
+        constants,
+        strings,
+        static_slots,
+        debug,
+        entry,
+        operand_stack_slots,
+    } = args;
     let operand_slots = operand_stack_slots
         .max(machine::DEFAULT_OPERAND_STACK_SLOTS as u32) as usize;
     let entry = entry.map(ffi_entry_path);
@@ -277,7 +288,7 @@ fn cmd_build_and_run(
 ) {
     let (bytecode, constants) = match pipeline.compile_src_from_file(filename) {
         Ok(ok) => ok,
-        Err(()) => {
+        Err(_) => {
             let _ = pipeline.finish_reporting();
             exit(1);
         }
@@ -298,16 +309,16 @@ fn cmd_build_and_run(
 
     maybe_warn_stale_default_out(pipeline, filename, &debug);
     let entry = ffi_entry_path(Path::new(filename));
-    let panicked = execute_archive(
+    let panicked = execute_archive(ExecuteArchiveArgs {
         pipeline,
-        &bytecode,
-        &constants,
-        &strings,
+        bytecode: &bytecode,
+        constants: &constants,
+        strings: &strings,
         static_slots,
         debug,
-        Some(entry.as_path()),
-        pipeline.operand_stack_slots(),
-    );
+        entry: Some(entry.as_path()),
+        operand_stack_slots: pipeline.operand_stack_slots(),
+    });
     if panicked {
         exit(1);
     }
@@ -416,10 +427,10 @@ fn is_compile_fail(path: &Path) -> bool {
 }
 
 /// Classify a `catch_unwind` compile result for a `compile_fail/` file.
-/// Only a clean diagnostic rejection (`Ok(Err(()))`) is harness success.
+/// Only a clean diagnostic rejection (`Ok(Err(_))`) is harness success.
 /// Panic does not count (release builds use `panic = "abort"`).
-fn compile_fail_rejected<T>(compiled: &std::thread::Result<Result<T, ()>>) -> bool {
-    matches!(compiled, Ok(Err(())))
+fn compile_fail_rejected<T, E>(compiled: &std::thread::Result<Result<T, E>>) -> bool {
+    matches!(compiled, Ok(Err(_)))
 }
 
 fn run_test_case(
@@ -507,7 +518,7 @@ fn run_test_suite(
 
         // catch_unwind isolates a compiler ICE from aborting the whole
         // harness under panic=unwind. Release builds use panic=abort, so
-        // compile_fail fixtures must reject via Ok(Err(())), not panic.
+        // compile_fail fixtures must reject via Ok(Err(_)), not panic.
         let compiled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             pipeline.compile_src_from_file(&display)
         }));
@@ -529,7 +540,7 @@ fn run_test_suite(
                     Err(_) => {
                         eprintln!("> Test \"{display}\" failed (compiler panicked)");
                     }
-                    Ok(Err(())) => unreachable!("compile_fail_rejected is true for Ok(Err)"),
+                    Ok(Err(_)) => unreachable!("compile_fail_rejected is true for Ok(Err(_))"),
                 }
                 if fail_fast {
                     stop = true;
@@ -546,7 +557,7 @@ fn run_test_suite(
                     }
                     false
                 }
-                Ok(Err(())) => {
+                Ok(Err(_)) => {
                     failed += 1;
                     eprintln!("> Test \"{display}\" failed");
                     if fail_fast {
@@ -563,16 +574,16 @@ fn run_test_suite(
                         let debug = pipeline.program_debug();
                         let operand_stack_slots = pipeline.operand_stack_slots();
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                            execute_archive(
-                                &pipeline,
-                                &bytecode,
-                                &constants,
-                                &strings,
+                            execute_archive(ExecuteArchiveArgs {
+                                pipeline: &pipeline,
+                                bytecode: &bytecode,
+                                constants: &constants,
+                                strings: &strings,
                                 static_slots,
                                 debug,
-                                Some(entry),
+                                entry: Some(entry),
                                 operand_stack_slots,
-                            )
+                            })
                         }));
                         let ok = match result {
                             Ok(panicked) => !panicked,

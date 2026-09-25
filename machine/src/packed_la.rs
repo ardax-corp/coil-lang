@@ -261,7 +261,16 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
     let len = m.saturating_mul(n);
     let mask = matches!(zip_kind, 2..=7 | 13 | 14);
     let c = if is_float && matches!(zip_kind, 0 | 1) {
-        let (a_cells, b_cells) = pack_f64_pair(heap, a, b, m, n, len, broadcast, scalar_left);
+        let (a_cells, b_cells) = pack_f64_pair(PackF64PairArgs {
+            heap,
+            a,
+            b,
+            m,
+            n,
+            len,
+            broadcast,
+            scalar_left,
+        });
         let nlen = a_cells.len().min(b_cells.len());
         let mut out = vec![0.0; nlen];
         if zip_kind == 1 {
@@ -274,7 +283,16 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
         }
         f64_to_values(&out[..len])
     } else if is_float && mask {
-        let (a_cells, b_cells) = pack_f64_pair(heap, a, b, m, n, len, broadcast, scalar_left);
+        let (a_cells, b_cells) = pack_f64_pair(PackF64PairArgs {
+            heap,
+            a,
+            b,
+            m,
+            n,
+            len,
+            broadcast,
+            scalar_left,
+        });
         let nlen = a_cells.len().min(b_cells.len());
         let mut out = vec![0_i64; len];
         coil_simd::zip_f64_mask(
@@ -285,7 +303,16 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
         );
         i64_to_values(&out)
     } else {
-        let (a_cells, b_cells) = pack_i64_pair(heap, a, b, m, n, len, broadcast, scalar_left);
+        let (a_cells, b_cells) = pack_i64_pair(PackI64PairArgs {
+            heap,
+            a,
+            b,
+            m,
+            n,
+            len,
+            broadcast,
+            scalar_left,
+        });
         let nlen = a_cells.len().min(b_cells.len());
         let mut out = vec![0_i64; len];
         if matches!(zip_kind, 0 | 1) {
@@ -308,9 +335,8 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
     alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn pack_f64_pair(
-    heap: &Heap,
+struct PackF64PairArgs<'a> {
+    heap: &'a Heap,
     a: Value,
     b: Value,
     m: usize,
@@ -318,7 +344,19 @@ fn pack_f64_pair(
     len: usize,
     broadcast: bool,
     scalar_left: bool,
-) -> (Vec<f64>, Vec<f64>) {
+}
+
+fn pack_f64_pair(args: PackF64PairArgs<'_>) -> (Vec<f64>, Vec<f64>) {
+    let PackF64PairArgs {
+        heap,
+        a,
+        b,
+        m,
+        n,
+        len,
+        broadcast,
+        scalar_left,
+    } = args;
     if broadcast {
         let (matrix, scalar) = if scalar_left {
             (b, a.as_float())
@@ -350,9 +388,8 @@ fn pack_f64_pair(
     (a_cells, b_cells)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn pack_i64_pair(
-    heap: &Heap,
+struct PackI64PairArgs<'a> {
+    heap: &'a Heap,
     a: Value,
     b: Value,
     m: usize,
@@ -360,7 +397,19 @@ fn pack_i64_pair(
     len: usize,
     broadcast: bool,
     scalar_left: bool,
-) -> (Vec<i64>, Vec<i64>) {
+}
+
+fn pack_i64_pair(args: PackI64PairArgs<'_>) -> (Vec<i64>, Vec<i64>) {
+    let PackI64PairArgs {
+        heap,
+        a,
+        b,
+        m,
+        n,
+        len,
+        broadcast,
+        scalar_left,
+    } = args;
     if broadcast {
         let (matrix, scalar) = if scalar_left {
             (b, a.as_int())

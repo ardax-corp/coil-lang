@@ -1681,17 +1681,29 @@ fn inline_attr_body<'a>(
     rewrite_expr_inline(attr_body, &target, &subs, decoratee_args)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn expand_function_user_attrs<'a>(
-    attr_bodies: &HashMap<String, Output<'a>>,
-    attrs: &mut Vec<Attribute<'a>>,
-    args: &Output<'a>,
-    body: &mut Option<Output<'a>>,
-    user_attrs: &HashSet<String>,
-    attr_extra_names: &HashMap<String, Vec<String>>,
+struct ExpandFunctionUserAttrsArgs<'args, 'a> {
+    attr_bodies: &'args HashMap<String, Output<'a>>,
+    attrs: &'args mut Vec<Attribute<'a>>,
+    args: &'args Output<'a>,
+    body: &'args mut Option<Output<'a>>,
+    user_attrs: &'args HashSet<String>,
+    attr_extra_names: &'args HashMap<String, Vec<String>>,
     span: SimpleSpan,
-    messages: &mut Vec<Message>,
-) {
+    messages: &'args mut Vec<Message>,
+}
+
+fn expand_function_user_attrs<'a>(args: ExpandFunctionUserAttrsArgs<'_, 'a>) {
+    let ExpandFunctionUserAttrsArgs {
+        attr_bodies,
+        attrs,
+        args,
+        body,
+        user_attrs,
+        attr_extra_names,
+        span,
+        messages,
+    } = args;
+
     let user_attrs_copy: Vec<Attribute<'static>> = user_attrs_on(attrs, user_attrs)
         .iter()
         .map(|a| clone_attr_static(a))
@@ -1956,7 +1968,7 @@ fn expand_decls<'a>(
                     });
                 }
                 if !user_attrs_on(attrs, user_attrs).is_empty() {
-                    expand_function_user_attrs(
+                    expand_function_user_attrs(ExpandFunctionUserAttrsArgs {
                         attr_bodies,
                         attrs,
                         args,
@@ -1964,8 +1976,8 @@ fn expand_decls<'a>(
                         user_attrs,
                         attr_extra_names,
                         span,
-                        &mut messages,
-                    );
+                        messages: &mut messages,
+                    });
                 }
             }
             if attrs.iter().any(|a| a.name == "ffi") {
@@ -1994,7 +2006,7 @@ fn expand_decls<'a>(
                     {
                         validate_attrs(attrs, "function", user_attrs, &mut messages, span, false);
                         if body.is_some() {
-                            expand_function_user_attrs(
+                            expand_function_user_attrs(ExpandFunctionUserAttrsArgs {
                                 attr_bodies,
                                 attrs,
                                 args,
@@ -2002,8 +2014,8 @@ fn expand_decls<'a>(
                                 user_attrs,
                                 attr_extra_names,
                                 span,
-                                &mut messages,
-                            );
+                                messages: &mut messages,
+                            });
                         }
                     }
             }
@@ -2091,16 +2103,16 @@ fn expand_decls<'a>(
                         .filter(|a| is_user_attr(a, user_attrs))
                         .cloned()
                         .collect();
-                    expand_function_user_attrs(
+                    expand_function_user_attrs(ExpandFunctionUserAttrsArgs {
                         attr_bodies,
-                        ctor_attrs,
+                        attrs: ctor_attrs,
                         args,
                         body,
                         user_attrs,
                         attr_extra_names,
                         span,
-                        &mut messages,
-                    );
+                        messages: &mut messages,
+                    });
                 }
                 decorated_class_ctors.insert(class_name.to_string(), format!("{class_name}__ctor"));
                 strip_user_attrs(
@@ -2121,17 +2133,17 @@ fn expand_decls<'a>(
                 variants,
                 variant_nodes,
                 scalar_backing,
-            }) => Some(expand_enum(
+            }) => Some(expand_enum(ExpandEnumArgs {
                 span,
                 name,
                 generic,
-                &derives,
-                &variants,
-                &variant_nodes,
+                derives: &derives,
+                variants: &variants,
+                _variant_nodes: &variant_nodes,
                 scalar_backing,
                 decls,
-                &mut messages,
-            )),
+                messages: &mut messages,
+            })),
             Some(Job::Class {
                 name,
                 generic,
@@ -2175,18 +2187,31 @@ fn expand_decls<'a>(
     messages
 }
 
-#[allow(clippy::too_many_arguments)]
-fn expand_enum<'a>(
+struct ExpandEnumArgs<'args, 'a> {
     span: SimpleSpan,
     name: &'a str,
     generic: bool,
-    derives: &[&'a str],
-    variants: &[VariantMeta<'a>],
-    _variant_nodes: &[Output<'a>],
+    derives: &'args [&'a str],
+    variants: &'args [VariantMeta<'a>],
+    _variant_nodes: &'args [Output<'a>],
     scalar_backing: Option<&'a str>,
-    decls: &[Output<'a>],
-    messages: &mut Vec<Message>,
-) -> Vec<Output<'a>> {
+    decls: &'args [Output<'a>],
+    messages: &'args mut Vec<Message>,
+}
+
+fn expand_enum<'a>(args: ExpandEnumArgs<'_, 'a>) -> Vec<Output<'a>> {
+    let ExpandEnumArgs {
+        span,
+        name,
+        generic,
+        derives,
+        variants,
+        _variant_nodes,
+        scalar_backing,
+        decls,
+        messages,
+    } = args;
+
     if generic {
         if !derives.is_empty() {
             messages.push(Message::error(
@@ -3116,7 +3141,16 @@ fn ord_method<'a>(
     // indexable, so `a[i]` is not an option).
     let mut arms = Vec::new();
     for (i, v) in variants.iter().enumerate() {
-        let (pattern, body) = ord_outer_arm(span, enum_name, variants, i, v, a, b, op);
+        let (pattern, body) = ord_outer_arm(OrdOuterArmArgs {
+            span,
+            enum_name,
+            variants,
+            left_idx: i,
+            left: v,
+            a,
+            b,
+            op,
+        });
         arms.push(MatchArm { pattern, body });
     }
     arms.push(MatchArm {
@@ -3139,17 +3173,29 @@ fn ord_method<'a>(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn ord_outer_arm<'a>(
+struct OrdOuterArmArgs<'args, 'a> {
     span: SimpleSpan,
     enum_name: &'a str,
-    variants: &[VariantMeta<'a>],
+    variants: &'args [VariantMeta<'a>],
     left_idx: usize,
-    left: &VariantMeta<'a>,
+    left: &'args VariantMeta<'a>,
     a: &'a str,
     b: &'a str,
     op: OrdOp,
-) -> (PatternOut<'a>, Output<'a>) {
+}
+
+fn ord_outer_arm<'a>(args: OrdOuterArmArgs<'_, 'a>) -> (PatternOut<'a>, Output<'a>) {
+    let OrdOuterArmArgs {
+        span,
+        enum_name,
+        variants,
+        left_idx,
+        left,
+        a,
+        b,
+        op,
+    } = args;
+
     let mut inner_arms = Vec::new();
     for (j, rv) in variants.iter().enumerate() {
         let body = if j == left_idx {

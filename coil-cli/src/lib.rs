@@ -10,7 +10,10 @@ use common::{
     embedded_archive_slice, format_archive_version, read_embedded_native_lock,
     read_package_trailer, resolve_archive_operand_slots,
 };
-use machine::{DloadGate, Machine, wire_standard_host_natives, wire_thread_program_with_maps};
+use machine::{
+    DloadGate, Machine, WireThreadProgramWithMapsArgs, wire_standard_host_natives,
+    wire_thread_program_with_maps,
+};
 
 /// Errors loading a `.hyc` / embedded archive blob.
 #[derive(Debug)]
@@ -120,16 +123,16 @@ pub fn execute_archived_program(
         machine.register_struct_layout(machine::CStructLayout::from_archive(layout));
     }
 
-    wire_thread_program_with_maps(
-        &mut machine,
-        &loaded.bytecode,
-        &loaded.constants,
-        &loaded.strings,
-        loaded.static_slots,
-        loaded.debug.clone(),
-        slots as u32,
-        loaded.stack_maps.clone(),
-    );
+    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
+        machine: &mut machine,
+        bytecode: &loaded.bytecode,
+        constants: &loaded.constants,
+        strings: &loaded.strings,
+        static_slot_count: loaded.static_slots,
+        debug: loaded.debug.clone(),
+        operand_stack_slots: slots as u32,
+        stack_maps: loaded.stack_maps.clone(),
+    });
     machine.set_program_debug(loaded.debug.clone());
     machine.run_raw(
         &loaded.bytecode,

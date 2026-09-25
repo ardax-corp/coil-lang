@@ -875,19 +875,19 @@ impl Compiler {
                         _ => continue,
                     };
 
-                    emit_inner_test(
+                    emit_inner_test(EmitInnerTestArgs {
                         arm_idx,
-                        &self.checker,
+                        checker: &self.checker,
                         enum_name,
                         variant_name,
                         payload,
-                        &mut match_bindings_per_arm,
-                        &mut self.bytecode,
-                        &mut bb,
+                        match_bindings_per_arm: &mut match_bindings_per_arm,
+                        bytecode: &mut self.bytecode,
+                        bb: &mut bb,
                         pass_label,
-                        fail_label,
+                        _fail_label: fail_label,
                         payload_base,
-                    );
+                    });
                 }
             }
 
@@ -926,16 +926,16 @@ impl Compiler {
                             ..
                         } => {
                             let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
-                            emit_pattern_binding(
-                                &self.checker,
-                                &mut arm_bindings,
-                                &mut next_slot,
-                                &arm.pattern.1,
-                                &decl_order,
-                                &mut self.bytecode,
-                                false,
-                                true, // is_outer: forward pass handled UNPACK/JUMP_IF_MATCH
-                            );
+                            emit_pattern_binding(EmitPatternBindingArgs {
+                                checker: &self.checker,
+                                match_bindings: &mut arm_bindings,
+                                next_slot: &mut next_slot,
+                                pattern: &arm.pattern.1,
+                                parent_decl_order: &decl_order,
+                                bytecode: &mut self.bytecode,
+                                consume_values: false,
+                                is_outer: true,
+                            });
                         }
                         Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                     }
@@ -951,16 +951,16 @@ impl Compiler {
                             ..
                         } => {
                             let decl_order = self.checker.payload_tys_for(enum_name, variant_name);
-                            emit_pattern_binding(
-                                &self.checker,
-                                &mut arm_bindings,
-                                &mut next_slot,
-                                &arm.pattern.1,
-                                &decl_order,
-                                &mut self.bytecode,
-                                true,
-                                true, // is_outer: forward pass handled UNPACK/JUMP_IF_MATCH
-                            );
+                            emit_pattern_binding(EmitPatternBindingArgs {
+                                checker: &self.checker,
+                                match_bindings: &mut arm_bindings,
+                                next_slot: &mut next_slot,
+                                pattern: &arm.pattern.1,
+                                parent_decl_order: &decl_order,
+                                bytecode: &mut self.bytecode,
+                                consume_values: true,
+                                is_outer: true,
+                            });
                         }
                         Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
                     }

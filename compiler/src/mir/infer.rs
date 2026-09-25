@@ -300,16 +300,16 @@ fn infer_walk(
                 paint(&mut slot_ty, &mut pool_ty, arr, MirTy::HeapRef)?;
             }
             IlOp::Bin { op: inst, .. } => {
-                apply_bin(
-                    &mut stack,
-                    &mut slot_ty,
-                    &mut pool_ty,
-                    *inst,
-                    &mut has_i32,
-                    &mut has_float_arith,
-                    &mut has_i64_arith,
+                apply_bin(ApplyBinArgs {
+                    stack: &mut stack,
+                    slot_ty: &mut slot_ty,
+                    pool_ty: &mut pool_ty,
+                    inst: *inst,
+                    has_i32: &mut has_i32,
+                    has_float_arith: &mut has_float_arith,
+                    has_i64_arith: &mut has_i64_arith,
                     reuse,
-                )?;
+                })?;
             }
             IlOp::BinSlotImm { op, slot, .. } => {
                 let inst = Instruction::from(*op);
@@ -571,16 +571,16 @@ fn infer_walk(
                         && super::abi::ret_words_ok(*ret_words)
                         && matches!(kind, EntryKind::Call))) =>
             {
-                apply_call(
-                    &mut stack,
-                    &mut slot_ty,
-                    &mut pool_ty,
-                    *arity,
-                    *ret_words,
-                    target.0,
+                apply_call(ApplyCallArgs {
+                    stack: &mut stack,
+                    slot_ty: &mut slot_ty,
+                    pool_ty: &mut pool_ty,
+                    arity: *arity,
+                    ret_words: *ret_words,
+                    target: target.0,
                     calls,
                     reuse,
-                )?;
+                })?;
             }
             IlOp::Entry {
                 kind: EntryKind::MakeCoro,
@@ -605,16 +605,16 @@ fn infer_walk(
                 });
             }
             IlOp::BinReturn { op, .. } => {
-                apply_bin(
-                    &mut stack,
-                    &mut slot_ty,
-                    &mut pool_ty,
-                    *op,
-                    &mut has_i32,
-                    &mut has_float_arith,
-                    &mut has_i64_arith,
+                apply_bin(ApplyBinArgs {
+                    stack: &mut stack,
+                    slot_ty: &mut slot_ty,
+                    pool_ty: &mut pool_ty,
+                    inst: *op,
+                    has_i32: &mut has_i32,
+                    has_float_arith: &mut has_float_arith,
+                    has_i64_arith: &mut has_i64_arith,
                     reuse,
-                )?;
+                })?;
             }
             _ => {
                 return Err(LowerError::Refused(format!(
@@ -1373,17 +1373,29 @@ fn is_cmp(inst: Instruction) -> bool {
     )
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_bin(
-    stack: &mut Vec<Cell>,
-    slot_ty: &mut HashMap<u32, MirTy>,
-    pool_ty: &mut [Option<MirTy>],
+struct ApplyBinArgs<'args> {
+    stack: &'args mut Vec<Cell>,
+    slot_ty: &'args mut HashMap<u32, MirTy>,
+    pool_ty: &'args mut [Option<MirTy>],
     inst: Instruction,
-    has_i32: &mut bool,
-    has_float_arith: &mut bool,
-    has_i64_arith: &mut bool,
+    has_i32: &'args mut bool,
+    has_float_arith: &'args mut bool,
+    has_i64_arith: &'args mut bool,
     reuse: bool,
-) -> Result<(), LowerError> {
+}
+
+fn apply_bin(args: ApplyBinArgs<'_>) -> Result<(), LowerError> {
+    let ApplyBinArgs {
+        stack,
+        slot_ty,
+        pool_ty,
+        inst,
+        has_i32,
+        has_float_arith,
+        has_i64_arith,
+        reuse,
+    } = args;
+
     let rhs = stack
         .pop()
         .ok_or_else(|| LowerError::Refused("bin stack".into()))?;
@@ -1524,17 +1536,29 @@ fn apply_store_index(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn apply_call(
-    stack: &mut Vec<Cell>,
-    slot_ty: &mut HashMap<u32, MirTy>,
-    pool_ty: &mut [Option<MirTy>],
+struct ApplyCallArgs<'args> {
+    stack: &'args mut Vec<Cell>,
+    slot_ty: &'args mut HashMap<u32, MirTy>,
+    pool_ty: &'args mut [Option<MirTy>],
     arity: u32,
     ret_words: u32,
     target: u32,
-    calls: &DenseCallMap,
+    calls: &'args DenseCallMap,
     reuse: bool,
-) -> Result<(), LowerError> {
+}
+
+fn apply_call(args: ApplyCallArgs<'_>) -> Result<(), LowerError> {
+    let ApplyCallArgs {
+        stack,
+        slot_ty,
+        pool_ty,
+        arity,
+        ret_words,
+        target,
+        calls,
+        reuse,
+    } = args;
+
     if !super::abi::ret_words_ok(ret_words) {
         return Err(LowerError::Refused(format!("CALL ret_words {ret_words}")));
     }

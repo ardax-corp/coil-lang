@@ -56,7 +56,14 @@ pub struct PassSpec {
     pub seed_entry_tell_after: bool,
     gate: fn(&OptimizeOptions) -> bool,
     set_flag: fn(&mut OptimizeOptions),
-    apply: fn(&mut Vec<IlOp>, &OptimizeOptions, &mut PassCtx<'_>) -> usize,
+    apply: ApplyFn,
+}
+
+/// Growth passes need `Vec` (splice / push). Pure rewrites only need a slice,
+/// so they are not forced through `&mut Vec`.
+enum ApplyFn {
+    Slice(fn(&mut [IlOp], &OptimizeOptions, &mut PassCtx<'_>) -> usize),
+    Grow(fn(&mut Vec<IlOp>, &OptimizeOptions, &mut PassCtx<'_>) -> usize),
 }
 
 impl PassSpec {
@@ -80,7 +87,10 @@ impl Pass for PassSpec {
             opts.collect_stats,
             Pass::name(self),
             self.kind,
-            |ops| (self.apply)(ops, opts, ctx),
+            |ops| match self.apply {
+                ApplyFn::Slice(apply) => apply(ops.as_mut_slice(), opts, ctx),
+                ApplyFn::Grow(apply) => apply(ops, opts, ctx),
+            },
         )
     }
 }
@@ -134,9 +144,7 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
 
 // Apply wrappers. Extra (unroll / branch / block-order counts) is the usize.
 
-// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
-#[allow(clippy::ptr_arg)]
-fn apply_jump_thread(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+fn apply_jump_thread(ops: &mut [IlOp], _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::cfg::jump_thread(ops);
     0
 }
@@ -151,23 +159,17 @@ fn apply_stack_dce(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>
     0
 }
 
-// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
-#[allow(clippy::ptr_arg)]
-fn apply_mem_fwd(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
+fn apply_mem_fwd(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::dce::mem_fwd(ops, ctx.entry_sp);
     0
 }
 
-// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
-#[allow(clippy::ptr_arg)]
-fn apply_copy_prop(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
+fn apply_copy_prop(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::dce::copy_prop(ops, ctx.entry_tell);
     0
 }
 
-// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
-#[allow(clippy::ptr_arg)]
-fn apply_dest_prop(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
+fn apply_dest_prop(ops: &mut [IlOp], _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::dest_prop::dest_prop(ops, ctx.entry_tell);
     0
 }
@@ -326,7 +328,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.jump_thread,
         set_flag: |o| o.jump_thread = true,
-        apply: apply_jump_thread,
+        apply: ApplyFn::Slice(apply_jump_thread),
     },
     PassSpec {
         name: "dead_block",
@@ -337,7 +339,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.dead_block,
         set_flag: |o| o.dead_block = true,
-        apply: apply_dead_block,
+        apply: ApplyFn::Grow(apply_dead_block),
     },
     PassSpec {
         name: "stack_dce",
@@ -348,7 +350,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.stack_dce,
         set_flag: |o| o.stack_dce = true,
-        apply: apply_stack_dce,
+        apply: ApplyFn::Grow(apply_stack_dce),
     },
     PassSpec {
         name: "mem_fwd",
@@ -359,7 +361,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: true,
         gate: |o| o.mem_fwd,
         set_flag: |o| o.mem_fwd = true,
-        apply: apply_mem_fwd,
+        apply: ApplyFn::Slice(apply_mem_fwd),
     },
     PassSpec {
         name: "copy_prop",
@@ -370,7 +372,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.copy_prop,
         set_flag: |o| o.copy_prop = true,
-        apply: apply_copy_prop,
+        apply: ApplyFn::Slice(apply_copy_prop),
     },
     PassSpec {
         name: "dest_prop",
@@ -381,7 +383,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.dest_prop,
         set_flag: |o| o.dest_prop = true,
-        apply: apply_dest_prop,
+        apply: ApplyFn::Slice(apply_dest_prop),
     },
     PassSpec {
         name: "dead_store",
@@ -392,7 +394,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.mem_fwd,
         set_flag: |o| o.mem_fwd = true,
-        apply: apply_dead_store,
+        apply: ApplyFn::Grow(apply_dead_store),
     },
     PassSpec {
         name: "canon",
@@ -403,7 +405,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.canon,
         set_flag: |o| o.canon = true,
-        apply: apply_canon,
+        apply: ApplyFn::Grow(apply_canon),
     },
     PassSpec {
         name: "algebraic",
@@ -414,7 +416,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.algebraic,
         set_flag: |o| o.algebraic = true,
-        apply: apply_algebraic,
+        apply: ApplyFn::Grow(apply_algebraic),
     },
     PassSpec {
         name: "instcombine",
@@ -425,7 +427,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.instcombine,
         set_flag: |o| o.instcombine = true,
-        apply: apply_instcombine,
+        apply: ApplyFn::Grow(apply_instcombine),
     },
     PassSpec {
         name: "local_cse",
@@ -436,7 +438,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.local_cse,
         set_flag: |o| o.local_cse = true,
-        apply: apply_local_cse,
+        apply: ApplyFn::Grow(apply_local_cse),
     },
     PassSpec {
         name: "cast_spill",
@@ -447,7 +449,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.cast_spill,
         set_flag: |o| o.cast_spill = true,
-        apply: apply_cast_spill,
+        apply: ApplyFn::Grow(apply_cast_spill),
     },
     PassSpec {
         name: "licm",
@@ -458,7 +460,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.licm,
         set_flag: |o| o.licm = true,
-        apply: apply_licm,
+        apply: ApplyFn::Grow(apply_licm),
     },
     PassSpec {
         name: "loop_bounds",
@@ -469,7 +471,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.loop_bounds,
         set_flag: |o| o.loop_bounds = true,
-        apply: apply_loop_bounds,
+        apply: ApplyFn::Grow(apply_loop_bounds),
     },
     PassSpec {
         name: "strength_reduce",
@@ -480,7 +482,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.strength_reduce,
         set_flag: |o| o.strength_reduce = true,
-        apply: apply_strength_reduce,
+        apply: ApplyFn::Grow(apply_strength_reduce),
     },
     PassSpec {
         name: "loop_unroll",
@@ -491,7 +493,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.loop_unroll,
         set_flag: |o| o.loop_unroll = true,
-        apply: apply_loop_unroll,
+        apply: ApplyFn::Grow(apply_loop_unroll),
     },
     PassSpec {
         name: "invariant_store_elim",
@@ -502,7 +504,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.invariant_store_elim,
         set_flag: |o| o.invariant_store_elim = true,
-        apply: apply_invariant_store_elim,
+        apply: ApplyFn::Grow(apply_invariant_store_elim),
     },
     PassSpec {
         name: "escape_analysis",
@@ -513,7 +515,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.escape_analysis,
         set_flag: |o| o.escape_analysis = true,
-        apply: apply_escape_analysis,
+        apply: ApplyFn::Grow(apply_escape_analysis),
     },
     PassSpec {
         name: "slot_promote",
@@ -524,7 +526,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.slot_promote,
         set_flag: |o| o.slot_promote = true,
-        apply: apply_slot_promote,
+        apply: ApplyFn::Grow(apply_slot_promote),
     },
     PassSpec {
         name: "tos_carry",
@@ -535,7 +537,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.tos_carry,
         set_flag: |o| o.tos_carry = true,
-        apply: apply_tos_carry,
+        apply: ApplyFn::Grow(apply_tos_carry),
     },
     PassSpec {
         name: "clone_shared_return",
@@ -546,7 +548,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.clone_shared_return,
         set_flag: |o| o.clone_shared_return = true,
-        apply: apply_clone_shared_return,
+        apply: ApplyFn::Grow(apply_clone_shared_return),
     },
     PassSpec {
         name: "return_convoy",
@@ -557,7 +559,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.return_convoy,
         set_flag: |o| o.return_convoy = true,
-        apply: apply_return_convoy,
+        apply: ApplyFn::Grow(apply_return_convoy),
     },
     PassSpec {
         name: "bin_join_convoy",
@@ -568,7 +570,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.bin_join_convoy,
         set_flag: |o| o.bin_join_convoy = true,
-        apply: apply_bin_join_convoy,
+        apply: ApplyFn::Grow(apply_bin_join_convoy),
     },
     PassSpec {
         name: "multi_op_join_convoy",
@@ -579,7 +581,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.multi_op_join_convoy,
         set_flag: |o| o.multi_op_join_convoy = true,
-        apply: apply_multi_op_join_convoy,
+        apply: ApplyFn::Grow(apply_multi_op_join_convoy),
     },
     PassSpec {
         name: "invert_guard_branch",
@@ -590,7 +592,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.invert_guard_branch,
         set_flag: |o| o.invert_guard_branch = true,
-        apply: apply_invert_guard_branch,
+        apply: ApplyFn::Grow(apply_invert_guard_branch),
     },
     PassSpec {
         name: "branch_optimization",
@@ -601,7 +603,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.branch_optimization,
         set_flag: |o| o.branch_optimization = true,
-        apply: apply_branch_optimization,
+        apply: ApplyFn::Grow(apply_branch_optimization),
     },
     PassSpec {
         name: "block_reordering",
@@ -612,7 +614,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.block_reordering,
         set_flag: |o| o.block_reordering = true,
-        apply: apply_block_reordering,
+        apply: ApplyFn::Grow(apply_block_reordering),
     },
     PassSpec {
         name: "seek_back_edge",
@@ -623,7 +625,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.seek_back_edge,
         set_flag: |o| o.seek_back_edge = true,
-        apply: apply_seek_back_edge,
+        apply: ApplyFn::Grow(apply_seek_back_edge),
     },
     PassSpec {
         name: "slot_promote_tell",
@@ -634,7 +636,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.slot_promote_tell,
         set_flag: |o| o.slot_promote_tell = true,
-        apply: apply_slot_promote_tell,
+        apply: ApplyFn::Grow(apply_slot_promote_tell),
     },
     PassSpec {
         name: "ssa_gvn",
@@ -645,7 +647,7 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         seed_entry_tell_after: false,
         gate: |o| o.ssa_gvn,
         set_flag: |o| o.ssa_gvn = true,
-        apply: apply_ssa_gvn,
+        apply: ApplyFn::Grow(apply_ssa_gvn),
     },
 ];
 

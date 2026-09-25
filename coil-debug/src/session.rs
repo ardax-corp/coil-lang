@@ -169,7 +169,7 @@ impl DebugSession {
         pipeline.bind_project_roots_with_default(dir, extra_roots);
         let artifacts = match pipeline.compile_dissect(filename, false) {
             Ok(a) => a,
-            Err(()) => {
+            Err(_) => {
                 let _ = pipeline.finish_reporting();
                 return Err(());
             }
@@ -200,16 +200,16 @@ impl DebugSession {
                 c_structs: &structs,
             },
         );
-        machine::wire_thread_program_with_maps(
-            &mut machine,
-            &artifacts.bytecode,
-            &artifacts.constants,
-            &artifacts.strings,
-            pipeline.static_slot_count(),
-            pipeline.program_debug(),
-            pipeline.operand_stack_slots(),
-            pipeline.stack_maps().to_vec(),
-        );
+        machine::wire_thread_program_with_maps(machine::WireThreadProgramWithMapsArgs {
+            machine: &mut machine,
+            bytecode: &artifacts.bytecode,
+            constants: &artifacts.constants,
+            strings: &artifacts.strings,
+            static_slot_count: pipeline.static_slot_count(),
+            debug: pipeline.program_debug(),
+            operand_stack_slots: pipeline.operand_stack_slots(),
+            stack_maps: pipeline.stack_maps().to_vec(),
+        });
         machine.set_program_debug(artifacts.debug.clone());
         machine.attach_debug(DebugController::new());
         let _ = pipeline.finish_reporting();

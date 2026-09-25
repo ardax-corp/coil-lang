@@ -349,10 +349,7 @@ impl<const S: usize> Machine<S> {
                                 .or_insert_with(|| lib_arc.clone());
                             let (object, _gc) = self.heap.alloc_library(lib_arc);
                             let addr = object.addr();
-                            // Object is a VM-local heap root, not a cross-thread value.
-                            #[allow(clippy::arc_with_non_send_sync)]
-                            self.userland_libraries
-                                .insert(addr, std::sync::Arc::new(object));
+                            self.userland_libraries.insert(addr, object);
                             self.push_result_ok(Value::from(addr as *mut u8));
                         }
                         Err(e) => {
@@ -438,10 +435,9 @@ impl<const S: usize> Machine<S> {
                     let name = Self::object_string_value(&self.heap, &name_val);
                     let lib_val = self.stack.pop();
                     let lib_addr = lib_val.raw() as u64;
-                    let lib_obj = self.userland_libraries.get(&lib_addr).cloned();
+                    let lib_obj = self.userland_libraries.get(&lib_addr).copied();
                     match lib_obj {
-                        Some(obj_arc) => {
-                            let mut owned = *obj_arc;
+                        Some(mut owned) => {
                             let ffi_sig = crate::ffi::FfiSignature {
                                 name,
                                 args: arg_types,
@@ -454,10 +450,7 @@ impl<const S: usize> Machine<S> {
                                 &self.struct_layouts,
                             ) {
                                 Ok(id) => {
-                                    // Object is a VM-local heap root, not a cross-thread value.
-                                    #[allow(clippy::arc_with_non_send_sync)]
-                                    self.userland_libraries
-                                        .insert(lib_addr, std::sync::Arc::new(owned));
+                                    self.userland_libraries.insert(lib_addr, owned);
                                     self.push_result_ok(Value::from(id as i64));
                                 }
                                 Err(e) => {

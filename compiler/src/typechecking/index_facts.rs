@@ -429,16 +429,16 @@ fn walk_tree(
             pattern: _,
             iterable,
             body,
-        } => walk_loop(
+        } => walk_loop(WalkLoopArgs {
             checker,
-            ast,
-            identifier.as_ref(),
+            loop_node: ast,
+            identifier: identifier.as_ref(),
             iterable,
             body,
             pure,
             env,
             calls,
-        ),
+        }),
         Expression::Call { name, args } => {
             walk_tree(checker, name, pure, env, calls);
             if let Some(args) = args {
@@ -620,17 +620,28 @@ fn walk_if(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn walk_loop(
-    checker: &mut Checker,
-    loop_node: &Output<'_>,
-    identifier: Option<&Output<'_>>,
-    iterable: &Output<'_>,
-    body: &Output<'_>,
-    pure: &HashSet<String>,
-    env: &mut Env,
-    calls: &mut Vec<CallSite>,
-) {
+struct WalkLoopArgs<'a> {
+    checker: &'a mut Checker,
+    loop_node: &'a Output<'a>,
+    identifier: Option<&'a Output<'a>>,
+    iterable: &'a Output<'a>,
+    body: &'a Output<'a>,
+    pure: &'a HashSet<String>,
+    env: &'a mut Env,
+    calls: &'a mut Vec<CallSite>,
+}
+
+fn walk_loop(args: WalkLoopArgs<'_>) {
+    let WalkLoopArgs {
+        checker,
+        loop_node,
+        identifier,
+        iterable,
+        body,
+        pure,
+        env,
+        calls,
+    } = args;
     if let Some(binding) = identifier {
         // for-in
         walk_tree(checker, iterable, pure, env, calls);

@@ -548,19 +548,19 @@ impl Checker {
                         );
                         method_names.push(mname.to_string());
                         method_fqns.insert(mname.to_string(), fqn.clone());
-                        self.infer_function(
-                            mname,
-                            mparams,
-                            margs,
-                            returns.as_ref(),
-                            where_cs,
-                            body.as_ref(),
-                            &m.0.into_range(),
-                            None,
+                        self.infer_function(super::infer_fn::InferFunctionArgs {
+                            name: mname,
+                            type_params: mparams,
+                            args: margs,
+                            returns: returns.as_ref(),
+                            where_constraints: where_cs,
+                            body: body.as_ref(),
+                            range: &m.0.into_range(),
+                            self_ty: None,
                             is_coro,
-                            None,
-                            false,
-                        );
+                            method_owner: None,
+                            is_static_method: false,
+                        });
                     } else {
                         let _ = self.infer(m);
                     }
@@ -828,19 +828,19 @@ impl Checker {
                     let self_ty = if *is_static { None } else { Some(&owner_ty) };
                     // Type params stay in the outer impl frame so `self`
                     // and method annotations share the same variables.
-                    let fun_ty = self.infer_function(
+                    let fun_ty = self.infer_function(super::infer_fn::InferFunctionArgs {
                         name,
-                        &[],
+                        type_params: &[],
                         args,
-                        returns.as_ref(),
+                        returns: returns.as_ref(),
                         where_constraints,
-                        func_body.as_ref(),
-                        &method.0.into_range(),
+                        body: func_body.as_ref(),
+                        range: &method.0.into_range(),
                         self_ty,
-                        *is_coro,
-                        Some(&owner_key),
-                        *is_static,
-                    );
+                        is_coro: *is_coro,
+                        method_owner: Some(&owner_key),
+                        is_static_method: *is_static,
+                    });
                     if *name == "drop" {
                         let mut ret = apply_ty(&self.subst, &fun_ty);
                         while let Ty::Fun(_, r) = ret {

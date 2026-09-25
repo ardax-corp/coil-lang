@@ -159,9 +159,17 @@ fn fold_inst(
             lhs,
             rhs,
             dest: _,
-        } => fold_bin(
-            *op, *ty, *lhs, *rhs, consts, finite, nonzero, neg_of, inst,
-        ),
+        } => fold_bin(FoldBinArgs {
+            op: *op,
+            ty: *ty,
+            lhs: *lhs,
+            rhs: *rhs,
+            consts,
+            finite,
+            nonzero,
+            neg_of,
+            inst,
+        }),
         MirInst::Cmp {
             op,
             ty,
@@ -210,18 +218,31 @@ fn fold_inst(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn fold_bin(
+struct FoldBinArgs<'args> {
     op: MirBinOp,
     ty: MirTy,
     lhs: ValueId,
     rhs: ValueId,
-    consts: &HashMap<ValueId, MirConst>,
-    finite: &HashSet<ValueId>,
-    nonzero: &HashSet<ValueId>,
-    neg_of: &HashMap<ValueId, ValueId>,
-    inst: &mut MirInst,
-) -> Fold {
+    consts: &'args HashMap<ValueId, MirConst>,
+    finite: &'args HashSet<ValueId>,
+    nonzero: &'args HashSet<ValueId>,
+    neg_of: &'args HashMap<ValueId, ValueId>,
+    inst: &'args mut MirInst,
+}
+
+fn fold_bin(args: FoldBinArgs<'_>) -> Fold {
+    let FoldBinArgs {
+        op,
+        ty,
+        lhs,
+        rhs,
+        consts,
+        finite,
+        nonzero,
+        neg_of,
+        inst,
+    } = args;
+
     let lc = consts.get(&lhs).copied();
     let rc = consts.get(&rhs).copied();
     if let (Some(a), Some(b)) = (lc, rc)

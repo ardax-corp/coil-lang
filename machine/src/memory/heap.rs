@@ -162,23 +162,21 @@ impl Heap {
 
     /// Intern bytes as a NUL-terminated C string for this invoke.
     /// Errors on an interior NUL.
-    #[allow(clippy::result_unit_err)]
     pub fn intern_ffi_bytes(
         &mut self,
         bytes: &[u8],
-    ) -> Result<*const std::os::raw::c_char, ()> {
-        let s = std::ffi::CString::new(bytes).map_err(|_| ())?;
+    ) -> Result<*const std::os::raw::c_char, InteriorNul> {
+        let s = std::ffi::CString::new(bytes).map_err(|_| InteriorNul)?;
         self.ffi_strings.push(s);
         Ok(self.ffi_strings.last().unwrap().as_ptr())
     }
 
     /// Look up a heap string and intern it in the FFI arena (no `Box::leak`).
-    /// `Ok(None)` if `addr` is not a string. `Err(())` on interior NUL.
-    #[allow(clippy::result_unit_err)]
+    /// `Ok(None)` if `addr` is not a string. `Err(InteriorNul)` on interior NUL.
     pub fn cstr_from_addr(
         &mut self,
         addr: u64,
-    ) -> Result<Option<*const std::os::raw::c_char>, ()> {
+    ) -> Result<Option<*const std::os::raw::c_char>, InteriorNul> {
         let bytes = match self.find_object_by_addr(addr) {
             Some(crate::memory::Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
             _ => return Ok(None),
@@ -2198,6 +2196,10 @@ impl<T: GcSized + Copy> GcSized for Cell<T> {
         self.get().size()
     }
 }
+
+/// `CString::new` rejected an interior NUL. No extra payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteriorNul;
 
 pub struct Gc<T> {
     ptr: NonNull<GcData<T>>,

@@ -821,7 +821,17 @@ fn elide_copy_only_latch_shuffles(ops: &mut Vec<IlOp>, _entry_tell: u32) {
                         continue;
                     }
                     if let Some(def_idx) =
-                        find_latch_coalesce_def(ops, &live, &blocks, &preds, &members, header, i, t, s)
+                        find_latch_coalesce_def(FindLatchCoalesceDefArgs {
+                            ops,
+                            live: &live,
+                            blocks: &blocks,
+                            preds: &preds,
+                            members: &members,
+                            header,
+                            copy_idx: i,
+                            t,
+                            s,
+                        })
                     {
                         chosen = Some((def_idx, i, t, s));
                         break;
@@ -859,21 +869,34 @@ fn elide_copy_only_latch_shuffles(ops: &mut Vec<IlOp>, _entry_tell: u32) {
     }
 }
 
-/// Unique in-loop reaching def of `t` for a latch copy, walking only along
-/// single-predecessor edges inside the natural loop (excluding the header).
-/// Multi-pred joins are φ-like and refuse. Opaque ops refuse.
-#[allow(clippy::too_many_arguments)]
-fn find_latch_coalesce_def(
-    ops: &[IlOp],
-    live: &SlotLiveness,
-    blocks: &[Block],
-    preds: &[Vec<usize>],
-    members: &HashSet<usize>,
+struct FindLatchCoalesceDefArgs<'args> {
+    ops: &'args [IlOp],
+    live: &'args SlotLiveness,
+    blocks: &'args [Block],
+    preds: &'args [Vec<usize>],
+    members: &'args HashSet<usize>,
     header: usize,
     copy_idx: usize,
     t: u32,
     s: u32,
-) -> Option<usize> {
+}
+
+/// Unique in-loop reaching def of `t` for a latch copy, walking only along
+/// single-predecessor edges inside the natural loop (excluding the header).
+/// Multi-pred joins are φ-like and refuse. Opaque ops refuse.
+fn find_latch_coalesce_def(args: FindLatchCoalesceDefArgs<'_>) -> Option<usize> {
+    let FindLatchCoalesceDefArgs {
+        ops,
+        live,
+        blocks,
+        preds,
+        members,
+        header,
+        copy_idx,
+        t,
+        s,
+    } = args;
+
     let mut bi = block_index_containing(blocks, copy_idx)?;
     if !members.contains(&bi) {
         return None;

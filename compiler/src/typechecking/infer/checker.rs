@@ -3006,18 +3006,18 @@ impl Checker {
                 returns,
                 where_constraints,
                 body,
-            } => self.infer_function_expr(
+            } => self.infer_function_expr(infer_fn::InferFunctionExprArgs {
                 attrs,
                 name,
-                *is_coro,
-                *is_static,
+                is_coro: *is_coro,
+                is_static: *is_static,
                 type_params,
                 args,
                 returns,
                 where_constraints,
                 body,
                 range,
-            ),
+            }),
 
             Expression::Lambda {
                 args,
@@ -4257,8 +4257,7 @@ impl Checker {
                     &scheme,
                     &arg_tys,
                     args.as_deref(),
-                    id,
-                    range,
+                    (id, range),
                 );
             }
             if let Some(receiver_var) = Self::constraint_var_of_ty(&resolved) {
@@ -4999,8 +4998,7 @@ impl Checker {
                 &scheme,
                 &arg_tys,
                 args.as_deref(),
-                id,
-                range,
+                (id, range),
             );
         }
         let candidates = self.bound_method_candidates(&ident, None);
@@ -8014,7 +8012,6 @@ impl Checker {
         self.variadic_call_arg_tags.get(&span).map(|v| v.as_slice())
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn apply_existential_method(
         &mut self,
         class: &str,
@@ -8022,9 +8019,9 @@ impl Checker {
         scheme: &Scheme,
         arg_tys: &[Ty],
         arg_exprs: Option<&[Output]>,
-        call_id: Option<NodeId>,
-        range: Range<usize>,
+        at: (Option<NodeId>, Range<usize>),
     ) -> Ty {
+        let (call_id, range) = at;
         let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(scheme);
         let result = self.apply_function(
             Some(&format!("{}::{}", class, method)),

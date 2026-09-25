@@ -9,7 +9,7 @@ use common::{dense, simd, Byte, DebugLoc, Instruction};
 
 use crate::il::{IlJumpKind, IlOp, Label};
 
-use super::emit::{assign_regs, emit_inst, max_label_hint};
+use super::emit::{assign_regs, emit_inst, max_label_hint, EmitInstArgs};
 use super::func::MirFunc;
 use super::inst::{
     BlockId, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirInst, MirUnaryOp, Terminator, ValueId,
@@ -132,40 +132,49 @@ fn try_vectorize_chain(
                     if inst.is_phi() {
                         continue;
                     }
-                    emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+                    emit_inst(EmitInstArgs {
+                        out: &mut out,
+                        inst,
+                        func,
+                        regs: &regs,
+                        scratch,
+                        pool,
+                        loc,
+                        across_alloc: false,
+                    }).ok()?;
                 }
             }
             ChainPiece::Store(spec) => {
                 let cont = Label(next_label);
                 next_label += 1;
-                append_store_loop(
-                    &mut out,
+                append_store_loop(AppendStoreLoopArgs {
+                    out: &mut out,
                     func,
                     spec,
-                    &regs,
+                    regs: &regs,
                     scratch,
                     pool,
                     loc,
-                    &mut next_label,
+                    next_label: &mut next_label,
                     cont,
-                )?;
+                })?;
                 out.push(IlOp::Label(cont));
             }
             ChainPiece::Reduce(spec) => {
                 let cont = Label(next_label);
                 next_label += 1;
                 acc_alias = Some((spec.acc, spec.acc_next, regs[spec.acc.index()]));
-                append_reduce_loop(
-                    &mut out,
+                append_reduce_loop(AppendReduceLoopArgs {
+                    out: &mut out,
                     func,
                     spec,
-                    &regs,
+                    regs: &regs,
                     scratch,
                     pool,
                     loc,
-                    &mut next_label,
+                    next_label: &mut next_label,
                     cont,
-                )?;
+                })?;
                 out.push(IlOp::Label(cont));
             }
             ChainPiece::Exit(id) => {
@@ -173,7 +182,16 @@ fn try_vectorize_chain(
                     if inst.is_phi() {
                         continue;
                     }
-                    emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+                    emit_inst(EmitInstArgs {
+                        out: &mut out,
+                        inst,
+                        func,
+                        regs: &regs,
+                        scratch,
+                        pool,
+                        loc,
+                        across_alloc: false,
+                    }).ok()?;
                 }
                 match func.block(*id).term.as_ref()? {
                     Terminator::Return { lo: Some(v), hi: None } => {
@@ -671,18 +689,31 @@ fn vbin_kind(op: MirBinOp, ty: MirTy) -> Option<u8> {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn append_store_loop(
-    out: &mut Vec<IlOp>,
-    func: &MirFunc,
-    spec: &StoreLoop,
-    regs: &[u8],
+struct AppendStoreLoopArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    func: &'args MirFunc,
+    spec: &'args StoreLoop,
+    regs: &'args [u8],
     scratch: u8,
-    pool: &mut Vec<u64>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-    next_label: &mut u32,
+    next_label: &'args mut u32,
     cont: Label,
-) -> Option<()> {
+}
+
+fn append_store_loop(args: AppendStoreLoopArgs<'_>) -> Option<()> {
+    let AppendStoreLoopArgs {
+        out,
+        func,
+        spec,
+        regs,
+        scratch,
+        pool,
+        loc,
+        next_label,
+        cont,
+    } = args;
+
     let i_slot = *regs.get(spec.iv.index())?;
     let n_slot = *regs.get(spec.n.index())?;
     let nvec = scratch;
@@ -693,12 +724,28 @@ fn append_store_loop(
     let rem = Label(*next_label);
     *next_label += 1;
     let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(
-        out, func, spec.header, spec.n, regs, scratch, pool, loc, &mut emitted_header,
-    )?;
-    emit_header_invariant(
-        out, func, spec.header, spec.init, regs, scratch, pool, loc, &mut emitted_header,
-    )?;
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out,
+        func,
+        header: spec.header,
+        v: spec.n,
+        regs,
+        scratch,
+        pool,
+        loc,
+        seen: &mut emitted_header,
+    })?;
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out,
+        func,
+        header: spec.header,
+        v: spec.init,
+        regs,
+        scratch,
+        pool,
+        loc,
+        seen: &mut emitted_header,
+    })?;
     emit_iv_init(out, func, spec.init, i_slot, regs, pool, loc)?;
     out.push(IlOp::byte(
         Byte::new(Instruction::DenseConst).with_dense_const(dense::TY_I64, eight, 8, false),
@@ -718,7 +765,16 @@ fn append_store_loop(
     });
     let mut next_v = 0u8;
     for st in &spec.stores {
-        let v = emit_vop(out, &st.value, regs, i_slot, st.ty, &mut next_v, pool, max_reg)?;
+        let v = emit_vop(EmitVopArgs {
+            out,
+            op: &st.value,
+            regs,
+            i_slot,
+            store_ty: st.ty,
+            next_v: &mut next_v,
+            pool,
+            idx_tmp: max_reg,
+        })?;
         let index = index_slot(out, i_slot, st.index_off, max_reg, pool, loc)?;
         out.push(IlOp::byte(Byte::new(Instruction::VStore).with_dense_abc(
             st.ty, v, regs[st.array.index()], index,
@@ -750,7 +806,16 @@ fn append_store_loop(
         if is_iv_step(func, inst, spec.iv) {
             continue;
         }
-        emit_inst(out, inst, func, regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out,
+            inst,
+            func,
+            regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     out.push(emit_const_i64(pool, max_reg, 1, loc)?);
     out.push(IlOp::byte(Byte::new(Instruction::DenseBin).with_dense_abc(
@@ -765,18 +830,31 @@ fn append_store_loop(
     Some(())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn append_reduce_loop(
-    out: &mut Vec<IlOp>,
-    func: &MirFunc,
-    spec: &ReduceLoop,
-    regs: &[u8],
+struct AppendReduceLoopArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    func: &'args MirFunc,
+    spec: &'args ReduceLoop,
+    regs: &'args [u8],
     scratch: u8,
-    pool: &mut Vec<u64>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-    next_label: &mut u32,
+    next_label: &'args mut u32,
     cont: Label,
-) -> Option<()> {
+}
+
+fn append_reduce_loop(args: AppendReduceLoopArgs<'_>) -> Option<()> {
+    let AppendReduceLoopArgs {
+        out,
+        func,
+        spec,
+        regs,
+        scratch,
+        pool,
+        loc,
+        next_label,
+        cont,
+    } = args;
+
     let i_slot = *regs.get(spec.iv.index())?;
     let n_slot = *regs.get(spec.n.index())?;
     let acc_slot = *regs.get(spec.acc.index())?;
@@ -790,16 +868,41 @@ fn append_reduce_loop(
     if defined_in(func, spec.acc_init) == Some(spec.header) {
         let inst = def(func, spec.acc_init)?;
         if !inst.is_phi() {
-            emit_inst(out, inst, func, regs, scratch, pool, loc, false).ok()?;
+            emit_inst(EmitInstArgs {
+                out,
+                inst,
+                func,
+                regs,
+                scratch,
+                pool,
+                loc,
+                across_alloc: false,
+            }).ok()?;
         }
     }
     let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(
-        out, func, spec.header, spec.n, regs, scratch, pool, loc, &mut emitted_header,
-    )?;
-    emit_header_invariant(
-        out, func, spec.header, spec.iv_init, regs, scratch, pool, loc, &mut emitted_header,
-    )?;
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out,
+        func,
+        header: spec.header,
+        v: spec.n,
+        regs,
+        scratch,
+        pool,
+        loc,
+        seen: &mut emitted_header,
+    })?;
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out,
+        func,
+        header: spec.header,
+        v: spec.iv_init,
+        regs,
+        scratch,
+        pool,
+        loc,
+        seen: &mut emitted_header,
+    })?;
     emit_iv_init(out, func, spec.iv_init, i_slot, regs, pool, loc)?;
     let init_slot = *regs.get(spec.acc_init.index())?;
     if acc_slot != init_slot {
@@ -824,7 +927,16 @@ fn append_reduce_loop(
         hint: Default::default(),
     });
     let mut next_v = 0u8;
-    let v = emit_vop(out, &spec.term, regs, i_slot, spec.ty, &mut next_v, pool, max_reg)?;
+    let v = emit_vop(EmitVopArgs {
+        out,
+        op: &spec.term,
+        regs,
+        i_slot,
+        store_ty: spec.ty,
+        next_v: &mut next_v,
+        pool,
+        idx_tmp: max_reg,
+    })?;
     out.push(IlOp::byte(Byte::new(Instruction::VReduce).with_dense_abc(
         spec.ty, acc_slot, v, spec.fold,
     )));
@@ -854,7 +966,16 @@ fn append_reduce_loop(
         if is_iv_step(func, inst, spec.iv) {
             continue;
         }
-        emit_inst(out, inst, func, regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out,
+            inst,
+            func,
+            regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     let acc_next_slot = *regs.get(spec.acc_next.index())?;
     if acc_next_slot != acc_slot {
@@ -922,37 +1043,55 @@ fn emit_vectorized(
             if inst.is_phi() {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+            emit_inst(EmitInstArgs {
+                out: &mut out,
+                inst,
+                func,
+                regs: &regs,
+                scratch,
+                pool,
+                loc,
+                across_alloc: false,
+            }).ok()?;
         }
     }
     // Bound may be an ArrayLen that SSA left in the exit block.
     if defined_in(func, spec.n) == Some(spec.exit) {
         let inst = def(func, spec.n)?;
-        emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out: &mut out,
+            inst,
+            func,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(
-        &mut out,
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out: &mut out,
         func,
-        spec.header,
-        spec.n,
-        &regs,
+        header: spec.header,
+        v: spec.n,
+        regs: &regs,
         scratch,
         pool,
         loc,
-        &mut emitted_header,
-    )?;
-    emit_header_invariant(
-        &mut out,
+        seen: &mut emitted_header,
+    })?;
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out: &mut out,
         func,
-        spec.header,
-        spec.init,
-        &regs,
+        header: spec.header,
+        v: spec.init,
+        regs: &regs,
         scratch,
         pool,
         loc,
-        &mut emitted_header,
-    )?;
+        seen: &mut emitted_header,
+    })?;
 
     emit_iv_init(&mut out, func, spec.init, i_slot, &regs, pool, loc)?;
     // `i + 8 <= n`  <=>  `i <= n - 8`. Works for a non-zero start; `n & -8`
@@ -989,16 +1128,16 @@ fn emit_vectorized(
 
     let mut next_v = 0u8;
     for st in &spec.stores {
-        let v = emit_vop(
-            &mut out,
-            &st.value,
-            &regs,
+        let v = emit_vop(EmitVopArgs {
+            out: &mut out,
+            op: &st.value,
+            regs: &regs,
             i_slot,
-            st.ty,
-            &mut next_v,
+            store_ty: st.ty,
+            next_v: &mut next_v,
             pool,
-            max_reg,
-        )?;
+            idx_tmp: max_reg,
+        })?;
         let arr = regs[st.array.index()];
         let index = index_slot(&mut out, i_slot, st.index_off, max_reg, pool, loc)?;
         out.push(IlOp::byte(Byte::new(Instruction::VStore).with_dense_abc(
@@ -1052,7 +1191,16 @@ fn emit_vectorized(
         ) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out: &mut out,
+            inst,
+            func,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     // IV step +1 (DenseConst into scratch — not CONST; STORE; DenseBin)
     let one = {
@@ -1080,7 +1228,16 @@ fn emit_vectorized(
         if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out: &mut out,
+            inst,
+            func,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     match func.block(spec.exit).term.as_ref()? {
         Terminator::Return { lo: Some(v), hi: None } => {
@@ -1151,42 +1308,69 @@ fn emit_reduced(
             if inst.is_phi() {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+            emit_inst(EmitInstArgs {
+                out: &mut out,
+                inst,
+                func,
+                regs: &regs,
+                scratch,
+                pool,
+                loc,
+                across_alloc: false,
+            }).ok()?;
         }
     }
     if defined_in(func, spec.n) == Some(spec.exit) {
         let inst = def(func, spec.n)?;
-        emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out: &mut out,
+            inst,
+            func,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     if defined_in(func, spec.acc_init) == Some(spec.header) {
         let inst = def(func, spec.acc_init)?;
         if !inst.is_phi() {
-            emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+            emit_inst(EmitInstArgs {
+                out: &mut out,
+                inst,
+                func,
+                regs: &regs,
+                scratch,
+                pool,
+                loc,
+                across_alloc: false,
+            }).ok()?;
         }
     }
     let mut emitted_header = std::collections::HashSet::new();
-    emit_header_invariant(
-        &mut out,
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out: &mut out,
         func,
-        spec.header,
-        spec.n,
-        &regs,
+        header: spec.header,
+        v: spec.n,
+        regs: &regs,
         scratch,
         pool,
         loc,
-        &mut emitted_header,
-    )?;
-    emit_header_invariant(
-        &mut out,
+        seen: &mut emitted_header,
+    })?;
+    emit_header_invariant(EmitHeaderInvariantArgs {
+        out: &mut out,
         func,
-        spec.header,
-        spec.iv_init,
-        &regs,
+        header: spec.header,
+        v: spec.iv_init,
+        regs: &regs,
         scratch,
         pool,
         loc,
-        &mut emitted_header,
-    )?;
+        seen: &mut emitted_header,
+    })?;
 
     emit_iv_init(&mut out, func, spec.iv_init, i_slot, &regs, pool, loc)?;
     let init_slot = regs[spec.acc_init.index()];
@@ -1226,16 +1410,16 @@ fn emit_reduced(
     });
 
     let mut next_v = 0u8;
-    let v = emit_vop(
-        &mut out,
-        &spec.term,
-        &regs,
+    let v = emit_vop(EmitVopArgs {
+        out: &mut out,
+        op: &spec.term,
+        regs: &regs,
         i_slot,
-        spec.ty,
-        &mut next_v,
+        store_ty: spec.ty,
+        next_v: &mut next_v,
         pool,
-        max_reg,
-    )?;
+        idx_tmp: max_reg,
+    })?;
     out.push(IlOp::byte(Byte::new(Instruction::VReduce).with_dense_abc(
         spec.ty, acc_slot, v, spec.fold,
     )));
@@ -1286,7 +1470,16 @@ fn emit_reduced(
         ) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out: &mut out,
+            inst,
+            func,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     let acc_next_slot = regs[spec.acc_next.index()];
     if acc_next_slot != acc_slot {
@@ -1319,7 +1512,16 @@ fn emit_reduced(
         if inst.dest() == spec.n && defined_in(func, spec.n) == Some(spec.exit) {
             continue;
         }
-        emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, false).ok()?;
+        emit_inst(EmitInstArgs {
+            out: &mut out,
+            inst,
+            func,
+            regs: &regs,
+            scratch,
+            pool,
+            loc,
+            across_alloc: false,
+        }).ok()?;
     }
     match func.block(spec.exit).term.as_ref()? {
         Terminator::Return { lo: Some(v), hi: None } => {
@@ -1349,17 +1551,29 @@ fn emit_reduced(
     Some(out)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_vop(
-    out: &mut Vec<IlOp>,
-    op: &VOp,
-    regs: &[u8],
+struct EmitVopArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    op: &'args VOp,
+    regs: &'args [u8],
     i_slot: u8,
     store_ty: u8,
-    next_v: &mut u8,
-    pool: &mut Vec<u64>,
+    next_v: &'args mut u8,
+    pool: &'args mut Vec<u64>,
     idx_tmp: u8,
-) -> Option<u8> {
+}
+
+fn emit_vop(args: EmitVopArgs<'_>) -> Option<u8> {
+    let EmitVopArgs {
+        out,
+        op,
+        regs,
+        i_slot,
+        store_ty,
+        next_v,
+        pool,
+        idx_tmp,
+    } = args;
+
     match op {
         VOp::Splat { v, ty } => {
             let dest = alloc_v(next_v)?;
@@ -1404,8 +1618,26 @@ fn emit_vop(
             Some(dest)
         }
         VOp::Bin { kind, lhs, rhs } => {
-            let l = emit_vop(out, lhs, regs, i_slot, ty_for_kind(*kind), next_v, pool, idx_tmp)?;
-            let r = emit_vop(out, rhs, regs, i_slot, ty_for_kind(*kind), next_v, pool, idx_tmp)?;
+            let l = emit_vop(EmitVopArgs {
+                out,
+                op: lhs,
+                regs,
+                i_slot,
+                store_ty: ty_for_kind(*kind),
+                next_v,
+                pool,
+                idx_tmp,
+            })?;
+            let r = emit_vop(EmitVopArgs {
+                out,
+                op: rhs,
+                regs,
+                i_slot,
+                store_ty: ty_for_kind(*kind),
+                next_v,
+                pool,
+                idx_tmp,
+            })?;
             let dest = alloc_v(next_v)?;
             out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
                 *kind, dest, l, r,
@@ -1413,7 +1645,16 @@ fn emit_vop(
             Some(dest)
         }
         VOp::Neg { kind, src } => {
-            let s = emit_vop(out, src, regs, i_slot, ty_for_kind(*kind), next_v, pool, idx_tmp)?;
+            let s = emit_vop(EmitVopArgs {
+                out,
+                op: src,
+                regs,
+                i_slot,
+                store_ty: ty_for_kind(*kind),
+                next_v,
+                pool,
+                idx_tmp,
+            })?;
             let dest = alloc_v(next_v)?;
             out.push(IlOp::byte(Byte::new(Instruction::VBin).with_dense_abc(
                 *kind, dest, s, 0,
@@ -1421,9 +1662,36 @@ fn emit_vop(
             Some(dest)
         }
         VOp::Fma { ty, a, b, c } => {
-            let va = emit_vop(out, a, regs, i_slot, *ty, next_v, pool, idx_tmp)?;
-            let vb = emit_vop(out, b, regs, i_slot, *ty, next_v, pool, idx_tmp)?;
-            let vc = emit_vop(out, c, regs, i_slot, *ty, next_v, pool, idx_tmp)?;
+            let va = emit_vop(EmitVopArgs {
+                out,
+                op: a,
+                regs,
+                i_slot,
+                store_ty: *ty,
+                next_v,
+                pool,
+                idx_tmp,
+            })?;
+            let vb = emit_vop(EmitVopArgs {
+                out,
+                op: b,
+                regs,
+                i_slot,
+                store_ty: *ty,
+                next_v,
+                pool,
+                idx_tmp,
+            })?;
+            let vc = emit_vop(EmitVopArgs {
+                out,
+                op: c,
+                regs,
+                i_slot,
+                store_ty: *ty,
+                next_v,
+                pool,
+                idx_tmp,
+            })?;
             out.push(IlOp::byte(Byte::new(Instruction::VFma).with_dense_abc(
                 *ty, vc, va, vb,
             )));
@@ -1434,16 +1702,16 @@ fn emit_vop(
             // Exact for |i| < 2^53 (index loops).
             match src.as_ref() {
                 VOp::Iota => {
-                    let dest = emit_vop(
+                    let dest = emit_vop(EmitVopArgs {
                         out,
-                        &VOp::Iota,
+                        op: &VOp::Iota,
                         regs,
                         i_slot,
-                        dense::TY_F64,
+                        store_ty: dense::TY_F64,
                         next_v,
                         pool,
                         idx_tmp,
-                    )?;
+                    })?;
                     Some(dest)
                 }
                 VOp::Splat { v, .. } => {
@@ -1511,18 +1779,31 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn emit_header_invariant(
-    out: &mut Vec<IlOp>,
-    func: &MirFunc,
+struct EmitHeaderInvariantArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    func: &'args MirFunc,
     header: BlockId,
     v: ValueId,
-    regs: &[u8],
+    regs: &'args [u8],
     scratch: u8,
-    pool: &mut Vec<u64>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-    seen: &mut std::collections::HashSet<ValueId>,
-) -> Option<()> {
+    seen: &'args mut std::collections::HashSet<ValueId>,
+}
+
+fn emit_header_invariant(args: EmitHeaderInvariantArgs<'_>) -> Option<()> {
+    let EmitHeaderInvariantArgs {
+        out,
+        func,
+        header,
+        v,
+        regs,
+        scratch,
+        pool,
+        loc,
+        seen,
+    } = args;
+
     if !seen.insert(v) || defined_in(func, v) != Some(header) {
         return Some(());
     }
@@ -1532,18 +1813,67 @@ fn emit_header_invariant(
     }
     match inst {
         MirInst::Bin { lhs, rhs, .. } => {
-            emit_header_invariant(out, func, header, *lhs, regs, scratch, pool, loc, seen)?;
-            emit_header_invariant(out, func, header, *rhs, regs, scratch, pool, loc, seen)?;
+            emit_header_invariant(EmitHeaderInvariantArgs {
+                out,
+                func,
+                header,
+                v: *lhs,
+                regs,
+                scratch,
+                pool,
+                loc,
+                seen,
+            })?;
+            emit_header_invariant(EmitHeaderInvariantArgs {
+                out,
+                func,
+                header,
+                v: *rhs,
+                regs,
+                scratch,
+                pool,
+                loc,
+                seen,
+            })?;
         }
         MirInst::Unary { src, .. } | MirInst::Cast { src, .. } => {
-            emit_header_invariant(out, func, header, *src, regs, scratch, pool, loc, seen)?;
+            emit_header_invariant(EmitHeaderInvariantArgs {
+                out,
+                func,
+                header,
+                v: *src,
+                regs,
+                scratch,
+                pool,
+                loc,
+                seen,
+            })?;
         }
         MirInst::ArrayLen { array, .. } | MirInst::Index { array, .. } => {
-            emit_header_invariant(out, func, header, *array, regs, scratch, pool, loc, seen)?;
+            emit_header_invariant(EmitHeaderInvariantArgs {
+                out,
+                func,
+                header,
+                v: *array,
+                regs,
+                scratch,
+                pool,
+                loc,
+                seen,
+            })?;
         }
         _ => {}
     }
-    emit_inst(out, inst, func, regs, scratch, pool, loc, false).ok()?;
+    emit_inst(EmitInstArgs {
+        out,
+        inst,
+        func,
+        regs,
+        scratch,
+        pool,
+        loc,
+        across_alloc: false,
+    }).ok()?;
     Some(())
 }
 

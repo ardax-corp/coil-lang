@@ -1029,12 +1029,10 @@ fn collect_rec_entry_sites(
         shapes,
         wrapper_consts,
         &mut env,
-        consts,
-        dynamic,
+        (consts, dynamic),
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn walk_entry_sites(
     ast: &Output<'_>,
     inside: Option<&str>,
@@ -1042,9 +1040,9 @@ fn walk_entry_sites(
     shapes: &HashMap<String, RecMeasureShape>,
     wrapper_consts: &FnConstParams,
     env: &mut HashMap<String, ConstValue>,
-    consts: &mut HashMap<String, BTreeSet<i64>>,
-    dynamic: &mut HashSet<String>,
+    accum: (&mut HashMap<String, BTreeSet<i64>>, &mut HashSet<String>),
 ) {
+    let (consts, dynamic) = accum;
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::If(items) => {
             for item in items {
@@ -1055,8 +1053,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
         }
@@ -1069,8 +1066,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
                 match eval_expr(init, env) {
                     Some(v) => {
@@ -1089,8 +1085,7 @@ fn walk_entry_sites(
                         shapes,
                         wrapper_consts,
                         env,
-                        consts,
-                        dynamic,
+                        (consts, dynamic),
                     );
                 }
             }
@@ -1121,8 +1116,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Add(a, b)
@@ -1152,8 +1146,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             walk_entry_sites(
                 b,
@@ -1162,8 +1155,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Assignment(lhs, rhs) => {
@@ -1174,8 +1166,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             kill_binding(lhs, env);
         }
@@ -1187,8 +1178,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             walk_entry_sites(
                 rhs,
@@ -1197,8 +1187,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             kill_binding(lhs, env);
         }
@@ -1210,8 +1199,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             kill_binding(target, env);
         }
@@ -1223,8 +1211,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             let callee = match peel(name).1.as_ref() {
                 Expression::Identifier(n) => Some(*n),
@@ -1239,8 +1226,7 @@ fn walk_entry_sites(
                         shapes,
                         wrapper_consts,
                         env,
-                        consts,
-                        dynamic,
+                        (consts, dynamic),
                     );
                 }
             }
@@ -1280,8 +1266,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
             walk_entry_sites(
@@ -1291,8 +1276,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Match { scrutinee, arms } => {
@@ -1303,8 +1287,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             for arm in arms {
                 walk_entry_sites(
@@ -1314,8 +1297,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
         }
@@ -1333,8 +1315,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
             walk_entry_sites(
@@ -1344,8 +1325,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             walk_entry_sites(
                 body,
@@ -1354,8 +1334,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Function {
@@ -1375,8 +1354,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 &mut inner,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Lambda { body, .. } | Expression::Defer { body, .. } => {
@@ -1387,8 +1365,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::TestCase { body, .. } => {
@@ -1400,8 +1377,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 &mut inner,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Implementation { methods, .. } => {
@@ -1413,8 +1389,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
         }
@@ -1428,8 +1403,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         _ => {}

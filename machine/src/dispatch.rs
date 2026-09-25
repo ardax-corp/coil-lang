@@ -513,19 +513,31 @@ pub(super) enum DenseFail {
     SetFieldNonInstance,
 }
 
+pub(super) struct DenseIndexArgs<'a> {
+    pub stack: &'a mut Stack<Value>,
+    pub sp: usize,
+    pub opcode: &'a Byte,
+    pub heap: &'a Heap,
+    pub frames_len: usize,
+    pub frame_pins: &'a mut Vec<FramePins>,
+    pub dense_obj_addr: &'a mut u64,
+    pub dense_obj: &'a mut Option<Object>,
+    pub stack_cap: usize,
+}
+
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn dense_index(
-    stack: &mut Stack<Value>,
-    sp: usize,
-    opcode: &Byte,
-    heap: &Heap,
-    frames_len: usize,
-    frame_pins: &mut Vec<FramePins>,
-    dense_obj_addr: &mut u64,
-    dense_obj: &mut Option<Object>,
-    stack_cap: usize,
-) -> Result<(), DenseFail> {
+pub(super) fn dense_index(args: DenseIndexArgs<'_>) -> Result<(), DenseFail> {
+    let DenseIndexArgs {
+        stack,
+        sp,
+        opcode,
+        heap,
+        frames_len,
+        frame_pins,
+        dense_obj_addr,
+        dense_obj,
+        stack_cap,
+    } = args;
     let (flags, dest, arr, idx) = opcode.dense_abc_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + arr < stack_cap);
@@ -557,19 +569,31 @@ pub(super) fn dense_index(
     Ok(())
 }
 
+pub(super) struct DenseStoreIndexArgs<'a> {
+    pub stack: &'a mut Stack<Value>,
+    pub sp: usize,
+    pub opcode: &'a Byte,
+    pub heap: &'a Heap,
+    pub frames_len: usize,
+    pub frame_pins: &'a mut Vec<FramePins>,
+    pub dense_obj_addr: &'a mut u64,
+    pub dense_obj: &'a mut Option<Object>,
+    pub stack_cap: usize,
+}
+
 #[inline(always)]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn dense_store_index(
-    stack: &mut Stack<Value>,
-    sp: usize,
-    opcode: &Byte,
-    heap: &Heap,
-    frames_len: usize,
-    frame_pins: &mut Vec<FramePins>,
-    dense_obj_addr: &mut u64,
-    dense_obj: &mut Option<Object>,
-    stack_cap: usize,
-) -> Result<(), DenseFail> {
+pub(super) fn dense_store_index(args: DenseStoreIndexArgs<'_>) -> Result<(), DenseFail> {
+    let DenseStoreIndexArgs {
+        stack,
+        sp,
+        opcode,
+        heap,
+        frames_len,
+        frame_pins,
+        dense_obj_addr,
+        dense_obj,
+        stack_cap,
+    } = args;
     let (flags, dest, arr, idx) = opcode.dense_abc_parts();
     promise!(sp + dest < stack_cap);
     promise!(sp + arr < stack_cap);
@@ -1363,17 +1387,17 @@ fn op_dense_bin_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[inline(never)]
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_index_jmpf(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    if dense_index(
-        ctx.stack,
-        ctx.sp,
-        &opcode,
-        ctx.heap,
-        ctx.extra.frames_len,
-        ctx.extra.frame_pins,
-        ctx.extra.dense_obj_addr,
-        ctx.extra.dense_obj,
-        ctx.stack_cap,
-    )
+    if dense_index(DenseIndexArgs {
+        stack: ctx.stack,
+        sp: ctx.sp,
+        opcode: &opcode,
+        heap: ctx.heap,
+        frames_len: ctx.extra.frames_len,
+        frame_pins: ctx.extra.frame_pins,
+        dense_obj_addr: ctx.extra.dense_obj_addr,
+        dense_obj: ctx.extra.dense_obj,
+        stack_cap: ctx.stack_cap,
+    })
     .is_err()
     {
         ctx.panic_msg = Some("index out of bounds");
@@ -1515,17 +1539,17 @@ fn op_bin_slot_slot_store(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[inline(never)]
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    if dense_index(
-        ctx.stack,
-        ctx.sp,
-        &opcode,
-        ctx.heap,
-        ctx.extra.frames_len,
-        ctx.extra.frame_pins,
-        ctx.extra.dense_obj_addr,
-        ctx.extra.dense_obj,
-        ctx.stack_cap,
-    )
+    if dense_index(DenseIndexArgs {
+        stack: ctx.stack,
+        sp: ctx.sp,
+        opcode: &opcode,
+        heap: ctx.heap,
+        frames_len: ctx.extra.frames_len,
+        frame_pins: ctx.extra.frame_pins,
+        dense_obj_addr: ctx.extra.dense_obj_addr,
+        dense_obj: ctx.extra.dense_obj,
+        stack_cap: ctx.stack_cap,
+    })
     .is_err()
     {
         ctx.panic_msg = Some("index out of bounds");
@@ -1535,17 +1559,17 @@ fn op_dense_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
 #[inline(never)]
 #[cfg_attr(target_os = "linux", unsafe(link_section = ".text.hot"))]
 fn op_dense_store_index(ctx: &mut HotCtx<'_, '_>, opcode: Byte) {
-    match dense_store_index(
-        ctx.stack,
-        ctx.sp,
-        &opcode,
-        ctx.heap,
-        ctx.extra.frames_len,
-        ctx.extra.frame_pins,
-        ctx.extra.dense_obj_addr,
-        ctx.extra.dense_obj,
-        ctx.stack_cap,
-    ) {
+    match dense_store_index(DenseStoreIndexArgs {
+        stack: ctx.stack,
+        sp: ctx.sp,
+        opcode: &opcode,
+        heap: ctx.heap,
+        frames_len: ctx.extra.frames_len,
+        frame_pins: ctx.extra.frame_pins,
+        dense_obj_addr: ctx.extra.dense_obj_addr,
+        dense_obj: ctx.extra.dense_obj,
+        stack_cap: ctx.stack_cap,
+    }) {
         Ok(()) => apply_trailing_dense_bin_jmp(ctx),
         Err(DenseFail::IndexOob) => ctx.panic_msg = Some("index out of bounds"),
         Err(_) => ctx.panic_msg = Some("StoreIndex on non-array"),
@@ -1646,17 +1670,17 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             apply_jump(ctx, target);
         }
         Instruction::DenseIndexJmpf => {
-            if dense_index(
-                ctx.stack,
-                ctx.sp,
-                &opcode,
-                ctx.heap,
-                ctx.extra.frames_len,
-                ctx.extra.frame_pins,
-                ctx.extra.dense_obj_addr,
-                ctx.extra.dense_obj,
-                ctx.stack_cap,
-            )
+            if dense_index(DenseIndexArgs {
+                stack: ctx.stack,
+                sp: ctx.sp,
+                opcode: &opcode,
+                heap: ctx.heap,
+                frames_len: ctx.extra.frames_len,
+                frame_pins: ctx.extra.frame_pins,
+                dense_obj_addr: ctx.extra.dense_obj_addr,
+                dense_obj: ctx.extra.dense_obj,
+                stack_cap: ctx.stack_cap,
+            })
             .is_err()
             {
                 ctx.panic_msg = Some("index out of bounds");
@@ -1740,33 +1764,33 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
             bin_slot_slot_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap)
         }
         Instruction::DenseIndex => {
-            if dense_index(
-                ctx.stack,
-                ctx.sp,
-                &opcode,
-                ctx.heap,
-                ctx.extra.frames_len,
-                ctx.extra.frame_pins,
-                ctx.extra.dense_obj_addr,
-                ctx.extra.dense_obj,
-                ctx.stack_cap,
-            )
+            if dense_index(DenseIndexArgs {
+                stack: ctx.stack,
+                sp: ctx.sp,
+                opcode: &opcode,
+                heap: ctx.heap,
+                frames_len: ctx.extra.frames_len,
+                frame_pins: ctx.extra.frame_pins,
+                dense_obj_addr: ctx.extra.dense_obj_addr,
+                dense_obj: ctx.extra.dense_obj,
+                stack_cap: ctx.stack_cap,
+            })
             .is_err()
             {
                 ctx.panic_msg = Some("index out of bounds");
             }
         }
-        Instruction::DenseStoreIndex => match dense_store_index(
-            ctx.stack,
-            ctx.sp,
-            &opcode,
-            ctx.heap,
-            ctx.extra.frames_len,
-            ctx.extra.frame_pins,
-            ctx.extra.dense_obj_addr,
-            ctx.extra.dense_obj,
-            ctx.stack_cap,
-        ) {
+        Instruction::DenseStoreIndex => match dense_store_index(DenseStoreIndexArgs {
+            stack: ctx.stack,
+            sp: ctx.sp,
+            opcode: &opcode,
+            heap: ctx.heap,
+            frames_len: ctx.extra.frames_len,
+            frame_pins: ctx.extra.frame_pins,
+            dense_obj_addr: ctx.extra.dense_obj_addr,
+            dense_obj: ctx.extra.dense_obj,
+            stack_cap: ctx.stack_cap,
+        }) {
             Ok(()) => apply_trailing_dense_bin_jmp(ctx),
             Err(DenseFail::IndexOob) => ctx.panic_msg = Some("index out of bounds"),
             Err(_) => ctx.panic_msg = Some("StoreIndex on non-array"),
@@ -1876,24 +1900,39 @@ pub(super) enum HotStop {
     Rest(Byte),
 }
 
+pub(super) struct RunHotStreakArgs<'a, const S: usize> {
+    pub stack: &'a mut Stack<Value>,
+    pub sp: &'a mut usize,
+    pub ip: &'a mut usize,
+    pub code: &'a [Byte],
+    pub constants: &'a [u64],
+    pub heap: &'a mut Heap,
+    pub frames: &'a mut ArrayVec<Frame, S>,
+    pub frame_pins: &'a mut Vec<FramePins>,
+    pub dense_obj_addr: &'a mut u64,
+    pub dense_obj: &'a mut Option<Object>,
+    pub stack_cap: usize,
+    pub mode: Mode,
+}
+
 /// Consume a streak of hot ops at `*ip`. Leaves `*ip` on the first cold op
 /// (or `code.len()`).
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
-pub(super) fn run_hot_streak<const S: usize>(
-    stack: &mut Stack<Value>,
-    sp: &mut usize,
-    ip: &mut usize,
-    code: &[Byte],
-    constants: &[u64],
-    heap: &mut Heap,
-    frames: &mut ArrayVec<Frame, S>,
-    frame_pins: &mut Vec<FramePins>,
-    dense_obj_addr: &mut u64,
-    dense_obj: &mut Option<Object>,
-    stack_cap: usize,
-    mode: Mode,
-) -> Option<HotStop> {
+pub(super) fn run_hot_streak<const S: usize>(args: RunHotStreakArgs<'_, S>) -> Option<HotStop> {
+    let RunHotStreakArgs {
+        stack,
+        sp,
+        ip,
+        code,
+        constants,
+        heap,
+        frames,
+        frame_pins,
+        dense_obj_addr,
+        dense_obj,
+        stack_cap,
+        mode,
+    } = args;
     let frames_len = frames.len();
     let mut extra = HotExtra {
         frames_len,
@@ -1951,26 +1990,42 @@ pub(super) fn run_hot_streak<const S: usize>(
     }
 }
 
+pub(super) struct ConsumeAlwaysHotStreakArgs<'a, const S: usize> {
+    pub stack: &'a mut Stack<Value>,
+    pub sp: &'a mut usize,
+    pub ip: &'a mut usize,
+    pub code: &'a [Byte],
+    pub constants: &'a [u64],
+    pub heap: &'a mut Heap,
+    pub frames: &'a mut ArrayVec<Frame, S>,
+    pub frame_pins: &'a mut Vec<FramePins>,
+    pub dense_obj_addr: &'a mut u64,
+    pub dense_obj: &'a mut Option<Object>,
+    pub stack_cap: usize,
+}
+
 /// After the giant match handles one always-hot opcode, keep going through
 /// `execute_dense` while the following words are still always-hot.
 ///
 /// `*ip` already points at the next instruction. Fib never calls this.
 /// Mandelbrot enters once and stays in the dense loop across the back edge.
 #[inline(never)]
-#[allow(clippy::too_many_arguments)]
 pub(super) fn consume_always_hot_streak<const S: usize>(
-    stack: &mut Stack<Value>,
-    sp: &mut usize,
-    ip: &mut usize,
-    code: &[Byte],
-    constants: &[u64],
-    heap: &mut Heap,
-    frames: &mut ArrayVec<Frame, S>,
-    frame_pins: &mut Vec<FramePins>,
-    dense_obj_addr: &mut u64,
-    dense_obj: &mut Option<Object>,
-    stack_cap: usize,
+    args: ConsumeAlwaysHotStreakArgs<'_, S>,
 ) -> Option<HotStop> {
+    let ConsumeAlwaysHotStreakArgs {
+        stack,
+        sp,
+        ip,
+        code,
+        constants,
+        heap,
+        frames,
+        frame_pins,
+        dense_obj_addr,
+        dense_obj,
+        stack_cap,
+    } = args;
     if *ip >= code.len() {
         return None;
     }
