@@ -64,6 +64,13 @@ pub fn prune_unused_functions(
             continue;
         }
         let start = ordered[i].0;
+        // Loop-IPA chunk workers are emitted inside the caller and only get an
+        // entry PC. A fallback span from that PC would overlap the caller's
+        // recorded body and, when the caller is dropped, leave its jump to the
+        // post-worker label behind.
+        if spans.values().any(|&(s, e)| start > s && start < e) {
+            continue;
+        }
         let mut end = if i + 1 < ordered.len() {
             ordered[i + 1].0
         } else {
