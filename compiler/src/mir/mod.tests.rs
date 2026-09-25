@@ -6031,3 +6031,27 @@ fn main() {
     vm.run_raw(&bc, &constants, p.strings(), p.static_slot_count());
     assert!(!vm.panicked(), "range assign checksum");
 }
+
+/// `NEGF` on a heap element read (typed `i64` by default) must not lower to
+/// integer negation of the float bits (it printed `-3.0` for `-(1.5)`).
+#[test]
+fn float_opcode_on_word_operand_refuses_lift() {
+    let loc = loc();
+    let ops = vec![
+        IlOp::Label(Label(0)),
+        IlOp::Load { slot: 0, loc },
+        IlOp::Const { imm: 0, loc },
+        IlOp::Index { loc },
+        IlOp::byte(Byte::new(Instruction::NEGF)),
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let mut hints = LowerHints::new("neg_elem");
+    hints.param_count = 1;
+    hints.allow_index = true;
+    hints.slot_ty.insert(0, super::ty::MirTy::HeapRef);
+    let err = match try_lower_numeric(&ops, &hints) {
+        Ok(f) => panic!("NEGF on an i64 word must refuse, got:\n{f}"),
+        Err(e) => e.to_string(),
+    };
+    assert!(err.contains("NEGF"), "{err}");
+}

@@ -1024,6 +1024,7 @@ fn lower_byte(
             let v = tos
                 .pop()
                 .ok_or_else(|| LowerError::Refused("neg stack".into()))?;
+            opcode_matches_operands(*byte.bytecode(), &[b.value_ty(v)])?;
             tos.push(b.ins_neg(v)?);
             Ok(())
         }
@@ -1275,12 +1276,32 @@ fn is_float_inst(inst: Instruction) -> bool {
     )
 }
 
+/// The IL opcode fixes the domain; MIR ops are untyped (`Add`, `Neg`). A
+/// float opcode on words typed `i64` (e.g. a heap tuple element read) would
+/// otherwise lower to integer arithmetic on float bits. Refuse the lift.
+fn opcode_matches_operands(inst: Instruction, tys: &[MirTy]) -> Result<(), LowerError> {
+    let float_op = is_float_inst(inst) || inst == Instruction::NEGF;
+    let int_op = !float_op && !matches!(inst, Instruction::EQ | Instruction::NEQ);
+    let bad = tys
+        .iter()
+        .any(|t| (float_op && !t.is_float()) || (int_op && t.is_float()));
+    if bad {
+        return Err(LowerError::Refused(format!(
+            "{} on {}",
+            inst.mnemonic(),
+            tys.iter().map(|t| t.to_string()).collect::<Vec<_>>().join(", ")
+        )));
+    }
+    Ok(())
+}
+
 fn apply_bin(
     b: &mut MirBuilder,
     inst: Instruction,
     lhs: ValueId,
     rhs: ValueId,
 ) -> Result<ValueId, LowerError> {
+    opcode_matches_operands(inst, &[b.value_ty(lhs), b.value_ty(rhs)])?;
     if let Some(op) = map_bin(inst) {
         return Ok(b.ins_binop(op, lhs, rhs)?);
     }

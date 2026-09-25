@@ -1114,6 +1114,11 @@ impl MirBuilder {
         v
     }
 
+    /// SSA type of `v` after φ / copy substitution.
+    pub fn value_ty(&self, v: ValueId) -> MirTy {
+        self.resolve_ty(v)
+    }
+
     fn resolve_ty(&self, v: ValueId) -> MirTy {
         self.func.ty(self.resolve(v))
     }
