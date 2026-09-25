@@ -33,6 +33,36 @@ reconstruct across HostInvoke / box / CALL edges, not operator refuses or
 cost-gate tuning. Fuse-IL stays the majority path, so the stack-IL pipeline
 cannot be trimmed ahead of MIR yet.
 
+### Weighted by executed dispatches
+
+Count-based keep-rate overstates the gap: cold `main` wrappers count the
+same as hot loops. `mir_weighted_census` in `compiler/tests/perf_metrics.rs`
+runs every `examples/perf` program with the `vm_profile` per-PC counter and
+attributes dispatches to each body's tier and refusal reasons:
+
+```bash
+COIL_AUTO_PAR=0 CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+  cargo test --release -p compiler --features vm-wire --test perf_metrics \
+  -- --ignored mir_weighted_census --nocapture
+```
+
+Snapshot (3.53G dispatches): dense 32.7%, LIR 8.1%, fuse-IL 59.1%. Fuse-IL
+dispatches by the reason that stopped the body:
+
+| Reason (dense / LIR) | Share of all dispatches |
+|---|---|
+| `alloc only after loops` (whole body refused for a cold post-loop alloc) | 32.1% |
+| dense: non-empty operand stack at CFG edge → LIR cost gate | 7.7% |
+| `binop OR` (strict bool `\|\|` in lookup helpers) | 6.8% |
+| `branch cond must be bool` | 6.0% |
+| dense: niche Result vs heapref return → LIR `HeapField` wall | 3.3% |
+| everything else (incl. LIR `Call` 0.9%, `Host` ~0%) | < 3% |
+
+The LIR `Host` / `Call` walls that dominate the count census carry almost
+no executed work here, so they are not the next lever. The whole-body
+`alloc only after loops` refuse is: churn benchmark `main` loops run on
+fuse-IL because of a single allocation after the loop.
+
 ## Cross-check (open Linear / landed PRs)
 
 | Ticket | Status | What actually landed | Leftover |
