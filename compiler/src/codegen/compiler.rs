@@ -495,7 +495,20 @@ impl Compiler {
             return bytecode;
         }
 
-        if self.unbox_enum_context > 0 {
+        // Niche Option/Result keep one word even inside a two-slot Result
+        // CALL (`unbox_enum_context`): emitting `[payload, tag]` for
+        // `Option::None` in that CALL's arguments shifts the frame so
+        // `Stream.fd()` sees the host string (InvalidInput).
+        let niche_option = common::is_builtin_option_enum(enum_name)
+            && !self.force_heap_option
+            && (self
+                .codegen_expr_ty(ast)
+                .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+                || self.force_niche_option);
+        let niche_unit_result = self.should_niche_unit_result_construct(enum_name, ast);
+        let niche_result = self.should_niche_result_construct(enum_name, ast);
+
+        if self.unbox_enum_context > 0 && !niche_option && !niche_unit_result && !niche_result {
             match fields {
                 EnumConstructPayload::Unit if arity == 0 => {
                     bytecode.push_const(0);
@@ -9081,6 +9094,16 @@ impl Compiler {
             || self.checker.gc_fn_in_scope(name).is_some()
             || self.string_builtin_for_call(name).is_some()
             || self.checker.ffi_fn_in_scope(name).is_some()
+            || Self::is_stream_host_method(name)
+    }
+
+    /// `Stream.fd` / `attach` / `park` are HostInvoke thunks, not two-slot CALLs.
+    fn is_stream_host_method(name: &str) -> bool {
+        let Some((owner, method)) = name.rsplit_once("::") else {
+            return false;
+        };
+        owner == crate::typechecking::ty::STREAM
+            && matches!(method, "fd" | "attach" | "park")
     }
 
     /// `true` when `callee` is a statically resolvable direct call (free
@@ -9113,16 +9136,20 @@ impl Compiler {
                     .receiver_type(recv)
                     .or_else(|| self.codegen_expr_ty(recv))
                     .and_then(|ty| Checker::class_name_of_ty(&ty).map(str::to_string))?;
-                if let Some(fqn) = self
+                let fqn = format!("{owner}::{method}");
+                if self.ident_is_host_native(method) || self.ident_is_host_native(&fqn) {
+                    return None;
+                }
+                if let Some(resolved) = self
                     .context
                     .methods
                     .get(&owner)
                     .and_then(|m| m.get(*method))
                     .cloned()
                 {
-                    return self.two_word_return_kind(&fqn);
+                    return self.two_word_return_kind(&resolved);
                 }
-                self.two_word_return_kind(&format!("{owner}::{method}"))
+                self.two_word_return_kind(&fqn)
             }
             Expression::Group(inner) | Expression::Expr(inner) => {
                 self.direct_call_two_word_kind(inner)
@@ -15331,10 +15358,9 @@ impl Compiler {
                     }
                 }
             }
-            Expression::Integer(num) => bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(*num).raw() as _,
-            )),
+            Expression::Integer(num) => {
+                self.push_int_const_into(*num, &mut bytecode);
+            }
             Expression::Bool(state) => bytecode.push(Byte::new_with_value(
                 Instruction::CONST,
                 Value::from(*state).raw() as _,
