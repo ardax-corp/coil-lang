@@ -1079,9 +1079,7 @@ fn perf_phase0_mandelbrot_shape_inventory() {
     // Phase 4 fuse-feed / near-miss audit:
     //   FCS≥2 / ConstJmpf≥1 / expand_dup squares intact; no promotion split.
     //   would_be_jmpt_after_invert=0 (escape inverted to BinSlotSlotConstJmpt).
-    // Phase cast_spill: cr/ci casts hoist to temps; FloatChainStore=4,
-    //   residual float_arith=0, float_chain_cast_blocked=0; STORE budget +1.
-    //   float_chain_stage_cap_leftover=0 (no 4-stage truncation).
+    // cast_spill / FloatChainStore are retired; cr/ci float chains stay unfused.
     //   unary / pool-imm / packing_holes / BinSlot→branch miss = 0.
     let (h, g) = compile_fn_inventory("examples/perf/mandelbrot.hy", "mandelbrot");
 

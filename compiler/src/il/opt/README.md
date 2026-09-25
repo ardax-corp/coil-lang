@@ -69,16 +69,16 @@ pipeline. No solo “pass” tests.
 
 1. `jump_thread` → 2. `dead_block` → 3. `stack_dce` → 4. `mem_fwd` →
 5. `copy_prop` → 6. `dest_prop` → 7. `dead_store` (same flag as `mem_fwd`) →
-8. `canon` → 9. `algebraic` → 10. `instcombine` → 11. `local_cse` → 12. `cast_spill`
+8. `canon` → 9. `algebraic` → 10. `instcombine` → 11. `local_cse`
 
 **Decision** (`decision_once_at`), in order:
 
-13. `licm` → 14. `loop_bounds` → 15. `strength_reduce` → 16. `loop_unroll`
-→ 17. `invariant_store_elim` → 18. `escape_analysis` → 19. `slot_promote`
-(+ `dead_store`) → 20. `tos_carry` → 21. `clone_shared_return` →
-22. `return_convoy` → 23. `bin_join_convoy` → 24. `multi_op_join_convoy` →
-25. `invert_guard_branch` → 26. `branch_optimization` → 27. `block_reordering`
-→ 28. `seek_back_edge` → 29. `slot_promote_tell` → 30. `ssa_gvn`
+12. `licm` → 13. `loop_bounds` → 14. `strength_reduce` → 15. `loop_unroll`
+→ 16. `invariant_store_elim` → 17. `escape_analysis` → 18. `slot_promote`
+(+ `dead_store`) → 19. `tos_carry` → 20. `clone_shared_return` →
+21. `return_convoy` → 22. `bin_join_convoy` → 23. `multi_op_join_convoy` →
+24. `invert_guard_branch` → 25. `branch_optimization` → 26. `block_reordering`
+→ 27. `seek_back_edge` → 28. `slot_promote_tell` → 29. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
 opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
@@ -278,24 +278,6 @@ float identities / pool fold.
   `does_not_cross_basic_block`. Isolated flag:
   `isolated_optimize_flag_runs_pass`. Hit benches: `examples/perf/cse_index_recompute.hy`,
   `cse_cast_recompute.hy` ([#317](https://github.com/ardax-corp/coil-lang/pull/317)).
-
-## `cast_spill`
-
-**Flag:** `cast_spill` (default on). **Fn:**
-`il::cast_spill::spill_cast_before_float_chain`.
-
-- **Input:** `CastIntToFloat` inside a float-arith → `StorePop` window
-  (mandelbrot `CONST; LOAD; Cast; …; STORE`).
-- **Output:** Hoists `LOAD; Cast` into a prefix `LOAD; Cast; STORE t` and rewrites
-  the body to `LOAD t` so fuse-select can match `LOAD; CONST` / const-under
-  (FCS is a tombstone; not selected). New temps are fresh high slots. Labels unchanged; extra
-  stores raise `tell` on purpose.
-- **Refusals:** No float-chain-store after the cast; jump interrupting the
-  window; already-hoisted `Cast; STORE`. Residual `Byte` casts are recognized
-  via `as_encode_byte` (`CastIntToFloat`).
-- **Tests:** `il/cast_spill.rs` `spills_cast_inside_float_arith_store_window`,
-  `refuses_cast_without_float_chain_store_window`. Isolated off:
-  `optimize_with_cast_spill_disabled_keeps_inline_cast`.
 
 ## `licm`
 
@@ -671,8 +653,8 @@ and encode stay in `lower_optimized`. No post-lower `adjust_target`.
   `lower_fuses_const_return_imm`, `lower_fuses_load_const_add_store_to_bin_slot_imm_store`,
   `lower_fuses_two_stage_float_chain_store`, `lower_refuses_cmp_jmpf_when_jump_is_nofuse`,
   `lower_refuses_const_return_across_value_join`,
-  `fuse_select_refuses_residual_byte_in_window`. Cast-spill → fuse:
-  `cast_spill_feeds_float_chain_store`. Invert-guard: `opt/convoy.tests.rs`
+  `fuse_select_refuses_residual_byte_in_window`. Retired float chain:
+  `cast_float_chain_is_not_fused`. Invert-guard: `opt/convoy.tests.rs`
   `invert_guard_refuses_value_under_jmp_hint`.
 
 ---
@@ -694,7 +676,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | algebraic | `algebraic.rs` | no |
 | instcombine | `instcombine.rs` | yes |
 | local_cse | `early_cse.rs` | yes |
-| cast_spill | `cast_spill.rs` | no |
 | licm | `licm.rs` | no |
 | loop_bounds | `bounds.rs` | no |
 | strength_reduce | `strength.rs` | yes |

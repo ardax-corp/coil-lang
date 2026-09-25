@@ -12,7 +12,6 @@ mod analysis;
 mod bounds;
 mod builder;
 mod canon;
-mod cast_spill;
 mod codebuf;
 mod emit_buf;
 mod func;

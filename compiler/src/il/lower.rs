@@ -1650,7 +1650,7 @@ mod tests {
         );
     }
 
-    /// Stage0 `LOAD; CONST; op` (post-cast_spill shape) fuses with continuations.
+    /// Stage0 `LOAD; CONST; op` float chain stays unfused (FloatChainStore is retired).
     #[test]
     fn lower_fuses_load_const_stage0_float_chain_store() {
         let mut pool = vec![
@@ -1677,9 +1677,9 @@ mod tests {
         );
     }
 
-    /// `CastIntToFloat` spill + const-under stage0 → `FloatChainStore` (mandelbrot `cr`).
+    /// Mandelbrot `cr` cast + const-under chain stays unfused (FloatChainStore is retired).
     #[test]
-    fn cast_spill_feeds_float_chain_store() {
+    fn cast_float_chain_is_not_fused() {
         let loc = DebugLoc::unknown();
         let mut pool = vec![
             Value::from(2.0_f64).raw() as u64,

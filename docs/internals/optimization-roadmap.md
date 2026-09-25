@@ -352,7 +352,7 @@ existing opcode; fits append-only opcode ABI.
 | Family | Evidence (post Phases 1–4) | Est. dynamic weight | Recommendation | Rationale |
 |--------|----------------------------|---------------------|----------------|-----------|
 | `*Jmpt` counterparts (`CmpJmpt` / `BinSlot*Jmpt` / `BinSlotSlotConstJmpt` / …) | mandelbrot escape `BinSlotSlotConstJmpt`; `would_be_jmpt_after_invert=0`; tak/nsieve/numeric stay 0 | ~1.28M/run (iter escape, one dispatch not two) | **done** ([COI-87](https://linear.app/ardax/issue/COI-87)) | Invert fused `*Jmpf; JMP` into `*Jmpt`. Same packing as the false twins. Loop headers remain `*Jmpf`. |
-| Cast spill → `FloatChainStore` | mandelbrot `cr`/`ci` casts | material in mandelbrot float body | **done** | Hoist `LOAD; Cast` to float temps (`il::cast_spill`, default on) + fuse stage0 `LOAD;CONST` / const-under (existing ext flags). |
+| Cast spill → `FloatChainStore` | mandelbrot `cr`/`ci` casts | material in mandelbrot float body | **removed** | `il::cast_spill` only fed `FloatChainStore`; once that opcode was retired the pass was forced off at every level and has been deleted. |
 | Function tree-shake | eager `Hash__*`/`Show__*`/… thunks in archives | binary size / dissect noise | **done** | Reachability prune before lower (`il::treeshake`); roots = `main` (+ tests when included). |
 | Unused-slot DCE across jumps | assignment-only locals kept by jump-as-used | IL store noise | **done** | `dead_store` whole-body unread slots ignore Jump/Label; cursor proof unchanged. |
 | `FloatChain` 4-stage / wider | `float_chain_stage_cap_leftover=0` | — | **defer** | No truncation leftover on current benches; zero evidence for a wider opcode. |

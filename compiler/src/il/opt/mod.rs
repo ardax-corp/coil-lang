@@ -34,8 +34,6 @@ pub struct OptimizeOptions {
     pub tos_carry: bool,
     /// Operand-order canon (`Const;Load` → `Load;Const`, load/load slot order).
     pub canon: bool,
-    /// Spill `CastIntToFloat` ahead of float-arith → STORE windows.
-    pub cast_spill: bool,
     /// Algebraic / strength peeps (x+0, x*1, cmp fold, …) when SP Known.
     pub algebraic: bool,
     /// Local InstCombine / peephole (const-cond branches, pair-match identity).

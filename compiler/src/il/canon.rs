@@ -722,7 +722,6 @@ mod tests {
             &mut ops,
             &OptimizeOptions {
                 canon: false,
-                cast_spill: false,
                 algebraic: false,
                 ..OptimizeOptions::default()
             },

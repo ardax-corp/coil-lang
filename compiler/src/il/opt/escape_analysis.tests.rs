@@ -31,7 +31,6 @@ fn isolated() -> OptimizeOptions {
         slot_promote: false,
         tos_carry: false,
         canon: false,
-        cast_spill: false,
         algebraic: false,
         instcombine: false,
         local_cse: false,

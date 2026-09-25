@@ -130,7 +130,6 @@ fn all_off() -> OptimizeOptions {
         slot_promote: false,
         tos_carry: false,
         canon: false,
-        cast_spill: false,
         algebraic: false,
         instcombine: false,
         local_cse: false,
@@ -161,9 +160,6 @@ fn all_off() -> OptimizeOptions {
 
 fn pass_included(level: OptLevel, spec: &super::driver::PassSpec) -> bool {
     use super::driver::OptFloor;
-    if spec.name == "cast_spill" {
-        return false;
-    }
     let ceiling = match level {
         OptLevel::None => OptFloor::None,
         OptLevel::Basic | OptLevel::Debug => OptFloor::Basic,
@@ -198,7 +194,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.slot_promote,
         o.tos_carry,
         o.canon,
-        o.cast_spill,
         o.algebraic,
         o.instcombine,
         o.local_cse,

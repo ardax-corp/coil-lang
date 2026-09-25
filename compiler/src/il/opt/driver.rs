@@ -197,11 +197,6 @@ fn apply_local_cse(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<
     super::early_cse::early_cse_with(ops, opts.pure_call_ctx.as_ref())
 }
 
-fn apply_cast_spill(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    crate::il::cast_spill::spill_cast_before_float_chain(ops);
-    0
-}
-
 fn apply_licm(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     crate::il::licm::licm_with(ops, opts.pure_call_ctx.as_ref());
     0
@@ -441,17 +436,6 @@ pub static PRODUCTION_PASSES: &[PassSpec] = &[
         apply: ApplyFn::Grow(apply_local_cse),
     },
     PassSpec {
-        name: "cast_spill",
-        phase: Phase::Cleanup,
-        kind: PassKind::Generic,
-        floor: OptFloor::Standard,
-        omit_from_size: false,
-        seed_entry_tell_after: false,
-        gate: |o| o.cast_spill,
-        set_flag: |o| o.cast_spill = true,
-        apply: ApplyFn::Grow(apply_cast_spill),
-    },
-    PassSpec {
         name: "licm",
         phase: Phase::Decision,
         kind: PassKind::Generic,
@@ -665,7 +649,6 @@ pub const D1_PASS_ORDER: &[&str] = &[
     "algebraic",
     "instcombine",
     "local_cse",
-    "cast_spill",
     "licm",
     "loop_bounds",
     "strength_reduce",
