@@ -11,11 +11,12 @@
 //! refuse rules — GVN feeds cleaner identical tails into those passes.
 //! COI-82: this intra-block + join-sink ceiling is the contract; no CFG copy-prop.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use common::Instruction;
 
-use super::op::{IlJumpKind, IlOp, Label};
+use super::op::IlOp;
+use super::analysis::{Block, build_blocks, preds_of};
 use super::sp;
 
 /// Pure stack producer suitable for local numbering / join CSE.
@@ -99,110 +100,6 @@ fn producer_key(op: &IlOp) -> Option<u64> {
     Some(((*b.bytecode() as u64) << 32) | (b.operand_u32() as u64))
 }
 
-#[derive(Clone, Debug)]
-struct Block {
-    start: usize,
-    end: usize, // exclusive
-    succs: Vec<usize>,
-}
-
-fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
-    if ops.is_empty() {
-        return Vec::new();
-    }
-    let mut leaders: HashSet<usize> = HashSet::new();
-    leaders.insert(0);
-    let mut label_at: HashMap<u32, usize> = HashMap::new();
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) = op {
-            label_at.insert(*id, i);
-            leaders.insert(i);
-        }
-    }
-    for (i, op) in ops.iter().enumerate() {
-        if let IlOp::Jump { target, .. } = op {
-            if let Some(&t) = label_at.get(&target.0) {
-                leaders.insert(t);
-            }
-            if i + 1 < ops.len() {
-                leaders.insert(i + 1);
-            }
-        } else if matches!(
-            op,
-            IlOp::Return { .. }
-                | IlOp::Halt { .. }
-                | IlOp::LoadReturnSlot { .. }
-                | IlOp::ConstReturnImm { .. }
-                | IlOp::BinReturn { .. }
-        ) && i + 1 < ops.len()
-        {
-            leaders.insert(i + 1);
-        }
-    }
-    let mut starts: Vec<usize> = leaders.into_iter().collect();
-    starts.sort_unstable();
-    let mut blocks: Vec<Block> = Vec::new();
-    for (bi, &start) in starts.iter().enumerate() {
-        let end = starts.get(bi + 1).copied().unwrap_or(ops.len());
-        blocks.push(Block {
-            start,
-            end,
-            succs: Vec::new(),
-        });
-    }
-    let block_at: HashMap<usize, usize> = blocks
-        .iter()
-        .enumerate()
-        .map(|(i, b)| (b.start, i))
-        .collect();
-
-    for block in &mut blocks {
-        let end = block.end;
-        if end == block.start {
-            continue;
-        }
-        let last = end - 1;
-        match &ops[last] {
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target,
-                ..
-            } => {
-                if let Some(&t) = label_at.get(&target.0)
-                    && let Some(&sb) = block_at.get(&t)
-                {
-                    block.succs.push(sb);
-                }
-            }
-            IlOp::Jump { target, .. } => {
-                if let Some(&t) = label_at.get(&target.0)
-                    && let Some(&sb) = block_at.get(&t)
-                {
-                    block.succs.push(sb);
-                }
-                if end < ops.len()
-                    && let Some(&fb) = block_at.get(&end)
-                {
-                    block.succs.push(fb);
-                }
-            }
-            IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. } => {}
-            _ => {
-                if end < ops.len()
-                    && let Some(&fb) = block_at.get(&end)
-                {
-                    block.succs.push(fb);
-                }
-            }
-        }
-    }
-    blocks
-}
-
 /// Block ranges and predecessor lists for SSA-GVN (COI-121).
 pub(crate) fn gvn_cfg(ops: &[IlOp]) -> (Vec<(usize, usize)>, Vec<Vec<usize>>) {
     let blocks = build_blocks(ops);
@@ -219,15 +116,6 @@ pub(crate) fn gvn_cfg(ops: &[IlOp]) -> (Vec<(usize, usize)>, Vec<Vec<usize>>) {
     (ranges, preds)
 }
 
-fn preds_of(blocks: &[Block]) -> Vec<Vec<usize>> {
-    let mut preds = vec![Vec::new(); blocks.len()];
-    for (i, b) in blocks.iter().enumerate() {
-        for &s in &b.succs {
-            preds[s].push(i);
-        }
-    }
-    preds
-}
 
 /// Local CSE within each block: identical Const/Load → Dup; then LoadField CSE.
 fn gvn_within_blocks(ops: &mut Vec<IlOp>, blocks: &[Block]) {
@@ -568,7 +456,7 @@ fn last_emitting_non_jump(ops: &[IlOp], b: &Block) -> Option<usize> {
         if matches!(ops[i], IlOp::Jump { .. }) {
             continue;
         }
-        if is_return_like(&ops[i]) {
+        if IlOp::is_terminator(&ops[i]) {
             continue;
         }
         return Some(i);
@@ -613,7 +501,7 @@ fn join_pure_tail(ops: &[IlOp], start: usize, end: usize, len: usize) -> Option<
 fn pred_tail_keys(ops: &[IlOp], b: &Block, len: usize) -> Option<Vec<u64>> {
     let mut emitting = Vec::new();
     for (i, op) in ops.iter().enumerate().take(b.end).skip(b.start) {
-        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Jump { .. }) || is_return_like(op)
+        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Jump { .. }) || op.is_terminator()
         {
             continue;
         }
@@ -633,16 +521,6 @@ fn pred_tail_keys(ops: &[IlOp], b: &Block, len: usize) -> Option<Vec<u64>> {
     Some(keys)
 }
 
-fn is_return_like(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::Return { .. }
-            | IlOp::Halt { .. }
-            | IlOp::LoadReturnSlot { .. }
-            | IlOp::ConstReturnImm { .. }
-            | IlOp::BinReturn { .. }
-    )
-}
 
 /// Run CFG-local GVN on a single function body in place.
 #[cfg(test)]
@@ -673,6 +551,7 @@ mod ssa_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::il::op::{IlJumpKind, Label};
     use common::DebugLoc;
 
     fn loc() -> DebugLoc {
