@@ -81,12 +81,6 @@ pub struct OptimizeOptions {
     /// Sink jump-only terminating blocks to the end (COI-129). Fall-through
     /// chains stay adjacent; branch labels are not rewritten.
     pub block_reordering: bool,
-    /// Re-run the pass pipeline until a round is a no-op, or
-    /// [`Self::max_optimization_iterations`] (COI-130). Default **off**.
-    pub iterative_optimization: bool,
-    /// Cap on full pipeline rounds when [`Self::iterative_optimization`] is on.
-    /// Clamped to `1..=10` at run time.
-    pub max_optimization_iterations: usize,
     /// Record per-pass counters into [`stats::OptStats`] (COI-131). Default **off**.
     pub collect_stats: bool,
     /// Pure user `fn` names + entry labels for COI-99 length-proof barriers.
@@ -98,97 +92,6 @@ pub struct OptimizeOptions {
 }
 
 // Default is `OptLevel::Standard.options()` (derived from the driver table).
-
-/// One pipeline round: whether the op buffer changed, and its length.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct PassStats {
-    pub changed: bool,
-    pub ops_before: usize,
-    pub ops_after: usize,
-}
-
-/// Result of [`optimize_iteratively`]: round count and whether a no-op round
-/// was observed before the iteration cap.
-///
-/// Per-pass counters (COI-176) live on [`OptStats`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct OptimizationStats {
-    pub iterations: usize,
-    pub converged: bool,
-    pub hit_iteration_limit: bool,
-    pub passes: Vec<PassStats>,
-}
-
-/// Run the current pipeline once. Ignores [`OptimizeOptions::iterative_optimization`].
-#[cfg(test)]
-pub fn run_optimization_pass(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    pool: &mut Vec<u64>,
-) -> PassStats {
-    let mut next = branch_opt::next_fresh_label(ops);
-    run_optimization_pass_at(ops, opts, 0, pool, &mut next)
-}
-
-fn run_optimization_pass_at(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    pool: &mut Vec<u64>,
-    next_label: &mut u32,
-) -> PassStats {
-    let before = ops.clone();
-    optimize_once_at(ops, opts, entry_sp, pool, next_label);
-    PassStats {
-        changed: *ops != before,
-        ops_before: before.len(),
-        ops_after: ops.len(),
-    }
-}
-
-/// Repeat [`run_optimization_pass`] until a round is a no-op or `max_iterations`
-/// (clamped to `1..=10`) is reached.
-#[cfg(test)]
-pub fn optimize_iteratively(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    pool: &mut Vec<u64>,
-    max_iterations: usize,
-) -> OptimizationStats {
-    let mut next = branch_opt::next_fresh_label(ops);
-    optimize_iteratively_at(ops, opts, 0, pool, max_iterations, &mut next)
-}
-
-fn optimize_iteratively_at(
-    ops: &mut Vec<IlOp>,
-    opts: &OptimizeOptions,
-    entry_sp: i32,
-    pool: &mut Vec<u64>,
-    max_iterations: usize,
-    next_label: &mut u32,
-) -> OptimizationStats {
-    let cap = max_iterations.clamp(1, 10);
-    let mut passes = Vec::new();
-    for i in 1..=cap {
-        let stats = run_optimization_pass_at(ops, opts, entry_sp, pool, next_label);
-        let changed = stats.changed;
-        passes.push(stats);
-        if !changed {
-            return OptimizationStats {
-                iterations: i,
-                converged: true,
-                hit_iteration_limit: false,
-                passes,
-            };
-        }
-    }
-    OptimizationStats {
-        iterations: cap,
-        converged: false,
-        hit_iteration_limit: true,
-        passes,
-    }
-}
 
 /// Run IL opts in place. Safe to call before [`super::lower`].
 ///
@@ -216,20 +119,6 @@ pub(crate) fn optimize_at_with_labels(
     pool: &mut Vec<u64>,
     next_label: &mut u32,
 ) {
-    if opts.iterative_optimization {
-        let round = optimize_iteratively_at(
-            ops,
-            opts,
-            entry_sp,
-            pool,
-            opts.max_optimization_iterations,
-            next_label,
-        );
-        if opts.collect_stats {
-            stats::set_iterations(round.iterations);
-        }
-        return;
-    }
     if opts.collect_stats {
         stats::set_iterations(1);
     }

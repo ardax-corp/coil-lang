@@ -55,8 +55,6 @@ pipeline. No solo “pass” tests.
 
 | Knob | Default | Role |
 |------|---------|------|
-| `iterative_optimization` | off | Re-run `optimize_once_at` until a no-op round or the cap. |
-| `max_optimization_iterations` | 10 | Cap, clamped to `1..=10`. |
 | `collect_stats` | off | Record per-pass counters into `OptStats`. |
 | `pure_call_ctx` | `None` | Sidecar-proven pure user `fn` names + entries for COI-99 length-proof / LICM barriers (`$mono$` clones match the source bind). |
 | `loop_unroll_factor` | 8 | Trip cap for `loop_unroll` (clamped to 8). Parameter of that pass. |

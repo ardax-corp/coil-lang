@@ -110,7 +110,7 @@ titles can oversell.
 | **`loop_unroll`** | Full unroll counted natural loops, trip ≤ 8 | Calls, `break`, nested loops refuse. `LEQ` accepted for **trip count** only — separate from bounds Index proofs (COI-98). |
 | **`invert` + `*Jmpt`** | `JMPF; JMP` → `JMPT`; fuse-select emits fused `*Jmpt` twins | Loop headers stay `*Jmpf` (COI-87). |
 | **`seek_back_edge`** | `Seek` latch to expose in-loop self-stores when header becomes `Known` | **Default off** on `Standard` (cursor: Seek poisons latch operand-height). **`Aggressive` / `-O3` turns it on**. |
-| **`iterative_optimization`** | Fixpoint re-runs of the IL pipeline | **Default off** (COI-130). |
+| ~~`iterative_optimization`~~ | Fixpoint re-runs of the IL pipeline | **Removed** (COI-130): re-running miscompiled `loops.hy` / `licm_invariants.hy`. |
 | **`collect_stats`** | Per-pass counters to stderr / JSON | **Default off** (`--opt-stats`, COI-131). |
 | **Branch layout / block reorder** | Heuristic layout + sink jump-only terminators | Default **on** (COI-128 / COI-129). Known-SP gates; module-wide label watermark. |
 

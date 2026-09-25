@@ -726,13 +726,8 @@ mod tests {
     }
 
     #[test]
-    fn iterative_opt_reuses_the_same_table() {
-        // optimize_iteratively_at re-runs run_once, which walks PRODUCTION_PASSES.
-        assert_eq!(
-            PRODUCTION_PASSES.len(),
-            D1_PASS_ORDER.len(),
-            "iterative rounds walk the same production table"
-        );
+    fn production_table_matches_documented_order() {
+        assert_eq!(PRODUCTION_PASSES.len(), D1_PASS_ORDER.len());
         let names: Vec<_> = PRODUCTION_PASSES.iter().map(|p| p.name).collect();
         assert_eq!(names, D1_PASS_ORDER);
     }

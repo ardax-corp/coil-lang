@@ -40,7 +40,7 @@ pub struct PassHit {
     pub ops_delta: i64,
 }
 
-/// Counters from IL opts (and tiny-inline when compiling). COI-176 `OptimizationStats`.
+/// Counters from IL opts (and tiny-inline when compiling). COI-176.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OptStats {
     pub ops_eliminated: usize,
@@ -202,8 +202,7 @@ fn count_stores(ops: &[IlOp]) -> usize {
 /// Run `f` and, when `collect`, fill a [`PassDelta`] from before/after ops.
 ///
 /// When `collect` is off the buffer is not cloned (same as the old
-/// `run_named_pass`); `changed` is then `false` and iterative opt still
-/// compares the whole round via [`super::PassStats`].
+/// `run_named_pass`); `changed` is then `false`.
 pub(crate) fn measure_pass(
     ops: &mut Vec<IlOp>,
     collect: bool,
