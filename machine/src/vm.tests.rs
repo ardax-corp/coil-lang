@@ -5217,7 +5217,7 @@
     }
 
     #[test]
-    fn coi_373_hot_dispatch_modes_agree_on_dense_move() {
+    fn coi_373_dispatch_runs_dense_move() {
         let ty = common::dense::TY_I64;
         let packed_const = ((ty as u32 & 0x7F) << 24) | 7;
         let packed_move = 1u32 << 8;
@@ -5228,47 +5228,30 @@
             Byte::new(Instruction::LOAD).with_load_store_slot(1),
             Byte::new(Instruction::HALT),
         ];
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.pop().as_int()
         };
-        let match_v = run(super::dispatch::Mode::Match);
-        let table_v = run(super::dispatch::Mode::Table);
-        let hot_v = run(super::dispatch::Mode::HotMatch);
+        let match_v = run();
         assert_eq!(match_v, 7);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
-    fn run_pool_modes(code: &[Byte], pool: &[u64]) -> (i64, i64, i64) {
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(code, pool, &[], 0);
-            super::dispatch::override_mode(None);
-            vm.pop().as_int()
-        };
-        (
-            run(super::dispatch::Mode::Match),
-            run(super::dispatch::Mode::Table),
-            run(super::dispatch::Mode::HotMatch),
-        )
+    fn run_pool(code: &[Byte], pool: &[u64]) -> i64 {
+        let mut vm = Machine::<8>::default();
+        vm.run_with_pool(code, pool, &[], 0);
+        vm.pop().as_int()
     }
 
     #[test]
-    fn coi_374_hot_dispatch_modes_agree_on_fused_fib() {
+    fn coi_374_dispatch_runs_fused_fib() {
         let (code, pool) = fused_fib_bytecode(13);
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        let match_v = run_pool(&code, &pool);
         assert_eq!(match_v, 233);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_374_hot_dispatch_modes_agree_on_dense_index() {
+    fn coi_374_dispatch_runs_dense_index() {
         let code = [
             Byte::new(Instruction::Seek).with_operand_u32(4),
             const_int(5),
@@ -5281,10 +5264,8 @@
             load(2),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 6);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     fn dense_bin2_code() -> [Byte; 8] {
@@ -5343,45 +5324,17 @@
     }
 
     #[test]
-    fn coi_381_dense_bin2_sequential_ieee_all_modes() {
+    fn coi_381_dense_bin2_sequential_ieee() {
         let code = dense_bin2_code();
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 20, "sequential (2+3)*4, not a fused FMA");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_389_dense_bin2_residue_peek_all_modes() {
+    fn coi_389_dense_bin2_residue_peek() {
         let code = dense_bin2_residue_code();
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 22, "sequential (2+3)*4+2 residue");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
-    }
-
-    #[test]
-    fn coi_389_table_peek_saves_a_dispatch() {
-        let code = dense_bin2_residue_code();
-        let count = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            reset_dispatch_count();
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
-            dispatch_count()
-        };
-        let match_n = count(super::dispatch::Mode::Match);
-        let table_n = count(super::dispatch::Mode::Table);
-        let hot_n = count(super::dispatch::Mode::HotMatch);
-        assert!(
-            match_n <= table_n,
-            "match streak should cover residue DenseBin (table={table_n}, match={match_n})"
-        );
-        assert!(
-            match_n <= hot_n,
-            "match streak should cover residue DenseBin (hot={hot_n}, match={match_n})"
-        );
     }
 
     fn dense_cast_bin_code() -> [Byte; 6] {
@@ -5414,25 +5367,19 @@
     }
 
     #[test]
-    fn coi_380_dense_cast_bin_peek_all_modes() {
+    fn coi_380_dense_cast_bin_peek() {
         let code = dense_cast_bin_code();
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.pop().as_float()
         };
-        let match_v = run(super::dispatch::Mode::Match);
-        let table_v = run(super::dispatch::Mode::Table);
-        let hot_v = run(super::dispatch::Mode::HotMatch);
+        let match_v = run();
         assert_eq!(match_v, 14.0, "i2f(7)+i2f(7)");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_380_dense_cast_bin2_peek_all_modes() {
+    fn coi_380_dense_cast_bin2_peek() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5460,47 +5407,17 @@
             load(3),
             Byte::new(Instruction::HALT),
         ];
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.pop().as_float()
         };
-        let match_v = run(super::dispatch::Mode::Match);
-        let table_v = run(super::dispatch::Mode::Table);
-        let hot_v = run(super::dispatch::Mode::HotMatch);
+        let match_v = run();
         assert_eq!(match_v, 21.0, "7+7 then +7");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_380_table_peek_saves_a_dispatch() {
-        let code = dense_cast_bin_code();
-        let count = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            reset_dispatch_count();
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
-            dispatch_count()
-        };
-        let match_n = count(super::dispatch::Mode::Match);
-        let table_n = count(super::dispatch::Mode::Table);
-        let hot_n = count(super::dispatch::Mode::HotMatch);
-        assert!(
-            match_n <= table_n,
-            "match streak should cover DenseBin (table={table_n}, match={match_n})"
-        );
-        assert!(
-            match_n <= hot_n,
-            "match streak should cover DenseBin (hot={hot_n}, match={match_n})"
-        );
-    }
-
-    #[test]
-    fn coi_377_dense_bin_jmpf_all_modes() {
+    fn coi_377_dense_bin_jmpf() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5531,14 +5448,12 @@
             const_int(0),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        let match_v = run_pool(&code, &pool);
         assert_eq!(match_v, 5, "bin must run (2+3) before GT vs 4");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_379_dense_index_jmpf_all_modes() {
+    fn coi_379_dense_index_jmpf() {
         let abc = |op: Instruction, flags: u8, dest: u8, arr: u8, idx: u8| {
             Byte::new(op).with_operand_u32(
                 ((flags as u32) << 24)
@@ -5571,10 +5486,8 @@
             const_int(0),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &pool);
+        let match_v = run_pool(&code, &pool);
         assert_eq!(match_v, 1, "index then EQ 1 must fall through");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     fn dense_store_bin_jmp_code() -> [Byte; 14] {
@@ -5610,40 +5523,14 @@
     }
 
     #[test]
-    fn coi_382_dense_store_bin_jmp_all_modes() {
+    fn coi_382_dense_store_bin_jmp() {
         let code = dense_store_bin_jmp_code();
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 1, "store then k = k + p then JMP skips poison");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_382_table_peek_saves_dispatches() {
-        let code = dense_store_bin_jmp_code();
-        let count = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
-            reset_dispatch_count();
-            let mut vm = Machine::<8>::default();
-            vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
-            dispatch_count()
-        };
-        let match_n = count(super::dispatch::Mode::Match);
-        let table_n = count(super::dispatch::Mode::Table);
-        let hot_n = count(super::dispatch::Mode::HotMatch);
-        assert!(
-            match_n <= table_n,
-            "match streak should cover DenseBin+JMP (table={table_n}, match={match_n})"
-        );
-        assert!(
-            match_n <= hot_n,
-            "match streak should cover DenseBin+JMP (hot={hot_n}, match={match_n})"
-        );
-    }
-
-    #[test]
-    fn coi_387_dense_bin_jmp_all_modes() {
+    fn coi_387_dense_bin_jmp() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5667,14 +5554,12 @@
             load(3),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 5, "bin then JMP must skip the poison CONST");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_387_dense_bin2_jmp_all_modes() {
+    fn coi_387_dense_bin2_jmp() {
         let ty = common::dense::TY_I64 as u32;
         let c = |dest: u8, imm: u16| {
             Byte::new(Instruction::DenseConst)
@@ -5700,10 +5585,8 @@
             load(4),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 20, "two bins then JMP, sequential (2+3)*4");
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
@@ -5714,22 +5597,17 @@
             Byte::new(Instruction::ADD),
             Byte::new(Instruction::HALT),
         ];
-        let (match_v, table_v, hot_v) = run_pool_modes(&code, &[]);
+        let match_v = run_pool(&code, &[]);
         assert_eq!(match_v, 42);
-        assert_eq!(table_v, match_v);
-        assert_eq!(hot_v, match_v);
     }
 
     #[test]
-    fn coi_375_table_tombstone_panics_like_match() {
+    fn coi_375_tombstone_panics() {
         let code = [Byte::new(Instruction::HostInvokeNiche)];
-        let run = |mode: super::dispatch::Mode| {
-            super::dispatch::override_mode(Some(mode));
+        let run = || {
             let mut vm = Machine::<8>::default();
             vm.run_with_pool(&code, &[], &[], 0);
-            super::dispatch::override_mode(None);
             vm.panicked()
         };
-        assert!(run(super::dispatch::Mode::Match));
-        assert!(run(super::dispatch::Mode::Table));
+        assert!(run());
     }

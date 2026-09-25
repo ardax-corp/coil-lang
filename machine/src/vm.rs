@@ -2785,35 +2785,10 @@ impl<const S: usize> Machine<S> {
     /// Fused jump tables live *inside* this outlined copy. Bytecode prefetch
     /// was removed: the next word is already in L1 on the flagship loops, and
     /// the guard compare retired on every dispatch.
-    /// Hot dense/jmp ops may divert into `dispatch` when
-    /// `COIL_THREADED_DISPATCH` selects table or hotmatch. The default is
-    /// this match. An always-hot arm then continues the streak in
-    /// `execute_dense`, so a dense loop does not return here per opcode.
-    /// CALL/RETURN stay on this match.
-    ///
-    /// `PEEK` is false for the default match. The table/hotmatch test is
-    /// then absent from the loop; fib, tak, and other non-dense code do
-    /// not compare the dispatch mode on every opcode.
+    /// An always-hot arm continues the streak in `execute_dense`, so a dense
+    /// loop does not return here per opcode. CALL/RETURN stay on this match.
     #[inline(never)]
     fn execute(&mut self, code: &[Byte], constants: &[u64], start_ip: usize) -> bool {
-        #[cfg(any(test, feature = "debugger"))]
-        let debug_attached = self.debug.is_some();
-        #[cfg(not(any(test, feature = "debugger")))]
-        let debug_attached = false;
-        if !debug_attached && dispatch::mode() != dispatch::Mode::Match {
-            self.execute_loop::<true>(code, constants, start_ip)
-        } else {
-            self.execute_loop::<false>(code, constants, start_ip)
-        }
-    }
-
-    #[inline(never)]
-    fn execute_loop<const PEEK: bool>(
-        &mut self,
-        code: &[Byte],
-        constants: &[u64],
-        start_ip: usize,
-    ) -> bool {
         let _active_guard = crate::thread::HostStateGuard::enter(self);
 
         let mut ip: usize = start_ip;
@@ -2823,7 +2798,7 @@ impl<const S: usize> Machine<S> {
 
         macro_rules! then_hot_streak {
             () => {
-                if let Some(stop) = dispatch::consume_always_hot_streak(
+                if let Some(msg) = dispatch::consume_always_hot_streak(
                     dispatch::ConsumeAlwaysHotStreakArgs {
                         stack: &mut self.stack,
                         sp: &mut sp,
@@ -2838,13 +2813,7 @@ impl<const S: usize> Machine<S> {
                         stack_cap,
                     },
                 ) {
-                    match stop {
-                        dispatch::HotStop::Panic(msg) => {
-                            return self.runtime_panic(msg, ip.saturating_sub(1));
-                        }
-                        dispatch::HotStop::Done(paused) => return paused,
-                        dispatch::HotStop::Rest(_) => {}
-                    }
+                    return self.runtime_panic(msg, ip.saturating_sub(1));
                 }
                 if unlikely(!self.frame_pins.is_empty()) {
                     self.return_bookkeeping = true;
@@ -2867,51 +2836,6 @@ impl<const S: usize> Machine<S> {
             let debug_attached = self.debug.is_some();
             #[cfg(not(any(test, feature = "debugger")))]
             let debug_attached = false;
-
-            if PEEK {
-                promise!(ip < code_len);
-                let peek = unsafe { code.get_unchecked(ip) };
-                let peek_bc = *peek.bytecode();
-                // Fib never takes this; keep the giant match as fall-through.
-                // Remaining (non-hot) ops use `_ => exec_rest` in this match —
-                // do not divert `!is_kernel` or fib bounces on stack ADD.
-                if unlikely(dispatch::is_hot(peek_bc)) {
-                    let dispatch_mode = dispatch::mode();
-                    // If the streak does not consume this word, fall through
-                    // into the match. `continue` here used to spin: table
-                    // mode can report `CALL` as hot while leaving `ip` and
-                    // the operand stack untouched.
-                    let ip_at_peek = ip;
-                    match dispatch::run_hot_streak(dispatch::RunHotStreakArgs {
-                        stack: &mut self.stack,
-                        sp: &mut sp,
-                        ip: &mut ip,
-                        code,
-                        constants,
-                        heap: &mut self.heap,
-                        frames: &mut self.frames,
-                        frame_pins: &mut self.frame_pins,
-                        dense_obj_addr: &mut self.dense_obj_addr,
-                        dense_obj: &mut self.dense_obj,
-                        stack_cap,
-                        mode: dispatch_mode,
-                    }) {
-                        Some(dispatch::HotStop::Panic(msg)) => {
-                            return self.runtime_panic(msg, ip.saturating_sub(1));
-                        }
-                        Some(dispatch::HotStop::Done(paused)) => return paused,
-                        Some(dispatch::HotStop::Rest(op)) => {
-                            match self.exec_rest(&op, &mut ip, &mut sp, code, constants, stack_cap)
-                            {
-                                dispatch::RestFlow::Continue => continue,
-                                dispatch::RestFlow::Done(paused) => return paused,
-                            }
-                        }
-                        None if ip != ip_at_peek => continue,
-                        None => {}
-                    }
-                }
-            }
 
             note_dispatch_at(ip, &self.stack, sp);
 
