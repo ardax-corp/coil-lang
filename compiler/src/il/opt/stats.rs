@@ -40,6 +40,16 @@ pub struct PassHit {
     pub ops_delta: i64,
 }
 
+/// Final tier of one function body, with why MIR tiers refused it.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct BodyTier {
+    pub name: String,
+    /// `dense`, `lir`, or `fuse`.
+    pub tier: String,
+    pub dense_reason: Option<String>,
+    pub lir_reason: Option<String>,
+}
+
 /// Counters from IL opts (and tiny-inline when compiling). COI-176.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct OptStats {
@@ -62,6 +72,9 @@ pub struct OptStats {
     /// Why fuse-IL bodies were not taken by MIR→LIR (coarse keys, counted).
     #[serde(default)]
     pub fuse_reasons: Vec<PassHit>,
+    /// Per-body tier records (census input for dynamic weighting).
+    #[serde(default)]
+    pub body_tiers: Vec<BodyTier>,
     pub passes: Vec<PassHit>,
 }
 
@@ -100,6 +113,7 @@ impl OptStats {
         for hit in &other.fuse_reasons {
             note_reason(&mut self.fuse_reasons, &hit.name, hit.applied);
         }
+        self.body_tiers.extend(other.body_tiers.iter().cloned());
         for hit in &other.passes {
             self.merge_pass(&hit.name, hit.applied, hit.ops_delta);
         }
@@ -219,6 +233,11 @@ fn note_reason(reasons: &mut Vec<PassHit>, name: &str, n: usize) {
 /// Count one body that stayed fuse-IL for `reason`.
 pub(crate) fn note_fuse_reason(reason: &str) {
     with_stats(|s| note_reason(&mut s.fuse_reasons, reason, 1));
+}
+
+/// Record one body's final tier and refusal reasons.
+pub(crate) fn note_body_tier(record: BodyTier) {
+    with_stats(|s| s.body_tiers.push(record));
 }
 
 /// Record which tier each function body ended in (MIR keep-rate census).

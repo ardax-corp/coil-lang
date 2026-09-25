@@ -282,6 +282,9 @@ impl IlModule {
         }
         let mut dense_calls = crate::mir::DenseCallMap::new();
         let mut pending: Vec<usize> = (0..self.funcs.len()).collect();
+        let mut dense_why: Vec<Option<String>> = vec![None; self.funcs.len()];
+        let mut lir_why: Vec<Option<String>> = vec![None; self.funcs.len()];
+        let mut tier: Vec<&'static str> = vec!["fuse"; self.funcs.len()];
         let mut side_remaps = HashMap::<String, HashMap<u32, u32>>::new();
         let mut side_deopts = Vec::new();
         while !pending.is_empty() && opts.mir_specialize {
@@ -312,8 +315,10 @@ impl IlModule {
                         dense_calls.insert(id, abi);
                     }
                     body.ops = dense;
+                    tier[i] = "dense";
                     progressed = true;
                 } else {
+                    dense_why[i] = crate::mir::take_dense_refusal();
                     next.push(i);
                 }
             }
@@ -349,13 +354,18 @@ impl IlModule {
                         side_deopts.push(deopt);
                     }
                     body.ops = lir;
+                    tier[i] = "lir";
                     lir_kept += 1;
-                } else if opts.collect_stats {
-                    super::opt::note_fuse_reason("lir cost gate");
+                } else {
+                    lir_why[i] = Some("lir cost gate".to_string());
                 }
-            } else if opts.collect_stats {
-                let why = crate::mir::take_lir_refusal();
-                super::opt::note_fuse_reason(why.as_deref().unwrap_or("lir refused"));
+            } else {
+                lir_why[i] = Some(
+                    crate::mir::take_lir_refusal().unwrap_or_else(|| "lir refused".to_string()),
+                );
+            }
+            if opts.collect_stats && let Some(why) = &lir_why[i] {
+                super::opt::note_fuse_reason(why);
             }
         }
         if opts.collect_stats {
@@ -365,6 +375,14 @@ impl IlModule {
                 (0, self.funcs.len())
             };
             super::opt::note_body_tiers(dense, lir_kept, fuse);
+            for (i, body) in self.funcs.iter().enumerate() {
+                super::opt::note_body_tier(super::opt::BodyTier {
+                    name: body.meta.name.clone(),
+                    tier: tier[i].to_string(),
+                    dense_reason: dense_why[i].take(),
+                    lir_reason: lir_why[i].take(),
+                });
+            }
         }
         self.debug_slot_remaps.extend(side_remaps);
         self.deopt_map_drafts.extend(side_deopts);

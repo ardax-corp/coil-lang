@@ -10,7 +10,7 @@ mod dissect;
 // the IL stays crate-private.
 pub(crate) mod il;
 pub(crate) mod mir;
-pub use il::opt::{OptStats, last_opt_stats};
+pub use il::opt::{BodyTier, OptStats, last_opt_stats};
 pub use il::tell;
 pub use il::{BoundsStats, CanonStats, OptLevel, last_bounds_stats, last_canon_stats};
 mod host_grants;
