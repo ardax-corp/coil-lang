@@ -1046,7 +1046,7 @@ mod tests {
         );
         assert_eq!(
             names.last().map(String::as_str),
-            Some(common::THREAD_SPAWN_SHARED_NATIVE)
+            Some(common::STREAM_FD_NATIVE)
         );
         assert_eq!(attach, 119);
     }
@@ -1264,6 +1264,7 @@ mod tests {
             common::host_native_id(common::THREAD_SPAWN_SHARED_NATIVE),
             Some(137)
         );
+        assert_eq!(common::host_native_id(common::STREAM_FD_NATIVE), Some(138));
     }
 
     #[test]
@@ -1321,6 +1322,10 @@ mod tests {
             registrations.get(end + 1).map(|(n, _)| n.as_str()),
             Some(common::THREAD_SPAWN_SHARED_NATIVE)
         );
-        assert_eq!(registrations.len(), end + 2);
+        assert_eq!(
+            registrations.get(end + 2).map(|(n, _)| n.as_str()),
+            Some(common::STREAM_FD_NATIVE)
+        );
+        assert_eq!(registrations.len(), end + 3);
     }
 }
