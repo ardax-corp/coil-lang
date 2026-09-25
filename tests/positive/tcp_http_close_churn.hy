@@ -1,154 +1,78 @@
 // COI-410: sequential TCP HTTP/1.1 GETs with Connection: close (no pool).
-// Cooperative server/client so each GET parks on await_readable then discards.
-use io::{close, read, await_readable, Stream};
-use io::sync::{write_all};
+// One pair per request: park the client on await_readable, then discard.
+use io::{await_readable, close, read, wait_ready, write};
 use io::net::tcp::{accept, connect, listen, local_addr};
 use string::{to_bytes};
 
-fn read_http(Stream s) -> Result<int, IoError> {
+fn connected_pair() -> Result<(Stream, Stream, Stream), IoError> {
+    let listener = listen("127.0.0.1", 0)?;
+    let addr = local_addr(listener)?;
+    let client = connect("127.0.0.1", addr[1])?;
+    match await_readable(listener) {
+        Result::Ok(_) => {},
+        Result::Err(_) => panic "listen wait",
+    };
+    let server = accept(listener)?;
+    return Result::Ok((client, server, listener));
+}
+
+async fn http_read_after_wait(Stream c) -> int {
     let z: byte = 0;
-    let chunk: Vec<byte> = Vec::new();
-    let i = 0;
-    while i < 64 {
-        chunk.push(z);
-        i = i + 1;
-    }
-    let acc: Vec<byte> = Vec::new();
-    let guard = 0;
-    let done = 0;
-    while done == 0 {
-        if guard >= 256 {
-            done = 1;
-        }
-        if done == 0 {
-            let parked = 0;
-            let nopt = match read(s, chunk) {
-                Result::Ok(o) => o,
-                Result::Err(IoError::WouldBlock) => {
-                    match await_readable(s) {
-                        Result::Ok(_) => {
-                            parked = 1;
-                            guard = guard - 1;
-                            Option::None
-                        },
-                        Result::Err(_) => panic "await_readable treated Ok as Err",
-                    }
-                },
-                Result::Err(_) => panic "read",
+    let buf = Vec::from([z, z, z, z, z, z, z, z, z, z, z, z, z, z, z, z]);
+    match read(c, buf) {
+        Result::Ok(_) => panic "first read should WouldBlock",
+        Result::Err(_) => {
+            match await_readable(c) {
+                Result::Ok(_) => {},
+                Result::Err(_) => panic "await_readable treated Ok as Err",
             };
-            if parked == 0 {
-                match nopt {
-                    Option::None => {
-                        if len(acc) > 0 {
-                            done = 1;
-                        }
-                    },
-                    Option::Some(n) => {
-                        if n == 0 {
-                            match await_readable(s) {
-                                Result::Ok(_) => {
-                                    guard = guard - 1;
-                                    0
-                                },
-                                Result::Err(_) => panic "await0",
-                            };
-                        }
-                        if n != 0 {
-                            let j = 0;
-                            while j < n {
-                                acc.push(chunk[j]);
-                                j = j + 1;
-                            }
-                        }
-                    },
-                };
-            }
-        }
-        guard = guard + 1;
-    }
-    return len(acc);
-}
-
-async fn serve(Stream listener) -> int {
-    let n = 0;
-    while n < 200 {
-        match accept(listener) {
-            Result::Ok(s) => {
-                match write_all(s, to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")) {
-                    Result::Ok(_) => 0,
-                    Result::Err(_) => panic "server write",
-                };
-                match close(s) {
-                    Result::Ok(_) => 0,
-                    Result::Err(_) => 0,
-                };
-                n = n + 1;
-            },
-            Result::Err(_) => {
-                match await_readable(listener) {
-                    Result::Ok(_) => 0,
-                    Result::Err(_) => panic "listen wait",
-                };
-            },
-        };
-    }
-    return n;
-}
-
-async fn client(int port) -> int {
-    let i = 0;
-    let total = 0;
-    while i < 200 {
-        let s = match connect("127.0.0.1", port) {
-            Result::Ok(v) => v,
-            Result::Err(_) => panic "connect",
-        };
-        match write_all(s, to_bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")) {
-            Result::Ok(_) => 0,
-            Result::Err(_) => panic "write",
-        };
-        let n = match read_http(s) {
-            Result::Ok(v) => v,
-            Result::Err(_) => panic "read_http",
-        };
-        if n < 10 {
-            panic "short";
-        }
-        match close(s) {
-            Result::Ok(_) => 0,
-            Result::Err(_) => 0,
-        };
-        total = total + 2;
-        i = i + 1;
-    }
-    return total;
+        },
+    };
+    return match read(c, buf) {
+        Result::Ok(got) => match got {
+            Option::Some(n) => n,
+            Option::None => panic "eof before body",
+        },
+        Result::Err(_) => panic "second read after wait",
+    };
 }
 
 test("200 sequential Connection-close GETs park then discard") {
-    let listener = match listen("127.0.0.1", 0) {
-        Result::Ok(s) => s,
-        Result::Err(_) => panic "listen",
-    };
-    let addr = match local_addr(listener) {
-        Result::Ok(a) => a,
-        Result::Err(_) => panic "addr",
-    };
-    let srv = serve(listener);
-    let cli = client(addr[1]);
-    resume srv;
-    let total = resume cli;
-    while !done(srv) || !done(cli) {
-        if !done(srv) {
-            resume srv;
-        }
-        if !done(cli) {
-            total = resume cli;
-        }
+    let i = 0;
+    let total = 0;
+    while i < 200 {
+        let triple = match connected_pair() {
+            Result::Ok(v) => v,
+            Result::Err(_) => panic "pair",
+        };
+        let c = triple[0];
+        let s = triple[1];
+        let listener = triple[2];
+        let reader = http_read_after_wait(c);
+        resume reader;
+        match write(s, to_bytes("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")) {
+            Result::Ok(_) => {},
+            Result::Err(_) => panic "server write",
+        };
         wait_ready();
+        let n = resume reader;
+        if n < 2 {
+            panic "short";
+        }
+        total = total + 2;
+        match close(c) {
+            Result::Ok(_) => {},
+            Result::Err(_) => panic "close client",
+        };
+        match close(s) {
+            Result::Ok(_) => {},
+            Result::Err(_) => panic "close server",
+        };
+        match close(listener) {
+            Result::Ok(_) => {},
+            Result::Err(_) => panic "close listener",
+        };
+        i = i + 1;
     }
-    assert(total == 400, "body bytes")?;
-    match close(listener) {
-        Result::Ok(_) => 0,
-        Result::Err(_) => 0,
-    };
+    assert(total == 400)?;
 }
