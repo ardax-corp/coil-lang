@@ -412,6 +412,38 @@
         );
     }
 
+    /// COI-410: incremental sweep unlinks interned literals then frees them
+    /// across later alloc safepoints. STRING must not reuse a cache pointer
+    /// into an unmarked slot (the `no_pool` UAF / bad-status path).
+    #[test]
+    fn program_string_cache_dropped_when_incremental_sweep_starts() {
+        reset_alloc_profile();
+        let strings = vec!["keep".to_owned()];
+        let mut bytecode = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::POP),
+        ];
+        let n = 400usize;
+        for _ in 0..n {
+            bytecode.push(const_int(0));
+            bytecode.push(make_enum(0, 1));
+            bytecode.push(Byte::new(Instruction::POP));
+        }
+        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
+        bytecode.push(Byte::new(Instruction::HALT));
+
+        let mut vm = Machine::<32>::default();
+        vm.heap_mut().set_gc_threshold_for_test(1);
+        vm.run_with_pool(&bytecode, &[], &strings, 0);
+        assert!(!vm.panicked(), "stale STRING cache must not UAF mid-sweep");
+        let keep = vm.pop();
+        let text = match vm.heap().find_object_by_addr(keep.raw() as u64) {
+            Some(Object::String(gc)) => gc.as_ref().data.clone(),
+            _ => panic!("STRING after incremental sweep must be a live string"),
+        };
+        assert_eq!(text, "keep");
+    }
+
     #[test]
     fn program_string_cache_is_not_a_gc_root() {
         reset_alloc_profile();
@@ -2568,6 +2600,127 @@
         );
         let _ = stream_close(vm.heap_mut(), stream);
         drop(writer);
+    }
+
+    /// COI-410: one TCP GET per request, park on `await_readable`, then
+    /// `Connection: close`. Sequential delayed responses force that cycle on
+    /// the release VM (the STRING-cache UAF showed up as SIGSEGV / bad status).
+    #[test]
+    fn no_pool_close_park_resume_two_hundred() {
+        use crate::ffi::FfiSignatureBuilder;
+        use crate::io::{
+            alloc_stream, stream_await_readable, stream_close, stream_read, stream_write,
+            take_pending_io_park, IoErrorTag,
+        };
+        use crate::io_handle::NativeHandle;
+        use crate::memory::{FfiType, ObjArray, StreamKind};
+        use common::{pack_host_invoke_operand, HOST_ENUM_LAYOUT_OPTION_NICHE};
+        use std::io::{Read, Write};
+        use std::net::{TcpListener, TcpStream};
+        use std::thread;
+        use std::time::Duration;
+
+        const N: usize = 200;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = thread::spawn(move || {
+            let body = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+            for _ in 0..N {
+                let (mut s, _) = listener.accept().expect("accept");
+                let mut buf = [0u8; 256];
+                let _ = s.read(&mut buf);
+                thread::sleep(Duration::from_millis(2));
+                s.write_all(body).expect("write response");
+            }
+        });
+
+        let mut vm = Machine::<64>::default();
+        let sig = FfiSignatureBuilder::new("await_readable")
+            .arg(FfiType::Int)
+            .ret(FfiType::Int)
+            .build()
+            .unwrap();
+        let fn_id = vm.register_fn(sig, |heap, args| {
+            stream_await_readable(heap, args[0])
+                .map_err(|tag| crate::ffi::FfiError::Unsupported(format!("{tag:?}")))
+        });
+        let operand = pack_host_invoke_operand(1, HOST_ENUM_LAYOUT_OPTION_NICHE);
+        let code = [
+            Byte::new(Instruction::HostInvoke).with_operand_u32(operand),
+            Byte::new(Instruction::HALT),
+        ];
+
+        fn byte_array(heap: &mut Heap, bytes: &[u8]) -> Value {
+            let elements: Vec<Value> = bytes.iter().map(|&b| Value::from(b as i64)).collect();
+            let (obj, _) = heap.alloc(ObjArray { elements }, Object::Array);
+            Value::from(obj.addr())
+        }
+
+        let mut parks = 0usize;
+        for round in 0..N {
+            let client = TcpStream::connect(addr).unwrap_or_else(|e| {
+                panic!("connect round {round}: {e}");
+            });
+            client.set_nonblocking(true).expect("nonblocking");
+            let stream = alloc_stream(vm.heap_mut(), NativeHandle::Tcp(client), StreamKind::Tcp)
+                .expect("alloc stream");
+            let req = byte_array(
+                vm.heap_mut(),
+                b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+            );
+            match stream_write(vm.heap_mut(), stream, req) {
+                Ok(_) => {}
+                Err(IoErrorTag::WouldBlock) => {}
+                Err(e) => panic!("write round {round}: {e:?}"),
+            }
+
+            let buf = byte_array(vm.heap_mut(), &[0u8; 128]);
+            let mut got: Vec<u8> = Vec::new();
+            let mut spins = 0usize;
+            while got.len() < 20 && spins < 64 {
+                spins += 1;
+                let _ = take_pending_io_park();
+                match stream_read(vm.heap_mut(), stream, buf) {
+                    Ok(Some(n)) if n > 0 => {
+                        if let Some(Object::Array(arr)) =
+                            vm.heap().find_object_by_addr(buf.raw() as u64)
+                        {
+                            for v in arr.as_ref().elements.iter().take(n) {
+                                got.push(v.as_int() as u8);
+                            }
+                        }
+                    }
+                    Ok(None) => break,
+                    Ok(Some(_)) | Err(IoErrorTag::WouldBlock) => {
+                        vm.push(Value::from(fn_id as i64));
+                        vm.push(stream);
+                        let paused = vm.execute(&code, &[], 0);
+                        assert!(paused, "empty socket must park round {round}");
+                        let pending = vm.pending_io.take().expect("pending_io");
+                        vm.finish_pending_io_wait(pending);
+                        let v = vm.pop();
+                        assert_eq!(
+                            v.raw() as u64,
+                            0,
+                            "OptionNiche Ok must be 0 after park round {round}"
+                        );
+                        parks += 1;
+                    }
+                    Err(e) => panic!("read round {round}: {e:?}"),
+                }
+            }
+            assert!(
+                got.windows(4).any(|w| w == b"\r\nok") || got.windows(2).any(|w| w == b"ok"),
+                "round {round} missing body, got {:?}",
+                String::from_utf8_lossy(&got)
+            );
+            stream_close(vm.heap_mut(), stream).expect("close");
+        }
+        assert!(
+            parks > 0,
+            "delayed server must force at least one await_readable park"
+        );
+        server.join().expect("server");
     }
 
     fn install_program(vm: &mut Machine<512>, code: &[Byte]) {

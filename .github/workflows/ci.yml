@@ -109,6 +109,31 @@ jobs:
           CARGO_PROFILE_RELEASE_PANIC=unwind \
             cargo test --release -p compiler --test coi407_trailing_label -- --exact
 
+      - name: Release VM no_pool park/close (COI-410)
+        if: matrix.features.id == 'default' && runner.os == 'Linux'
+        run: |
+          # Opt-level 3 like the release VM. Tests need Debug on Value
+          # (`cfg(debug_assertions)`) and unwind so the harness can compile.
+          CARGO_PROFILE_RELEASE_LTO=off \
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+          CARGO_PROFILE_RELEASE_PANIC=unwind \
+            cargo test --release -p machine --lib \
+            vm::tests::no_pool_close_park_resume_two_hundred \
+            -- --exact
+          CARGO_PROFILE_RELEASE_LTO=off \
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS=8 \
+          CARGO_PROFILE_RELEASE_DEBUG_ASSERTIONS=true \
+          CARGO_PROFILE_RELEASE_PANIC=unwind \
+            cargo test --release -p machine --lib \
+            vm::tests::program_string_cache_dropped_when_incremental_sweep_starts \
+            -- --exact
+          # Debug compiler + VM, but this is the only CI job that runs pipeline.rs
+          # (`required-features = ["vm-wire"]` is skipped by the workspace suite).
+          cargo test -p compiler --test pipeline --features vm-wire \
+            http_no_pool_two_hundred_connection_close_gets \
+            -- --exact
+
       - name: Language harness (`coil test`)
         if: matrix.features.id == 'default'
         run: |

@@ -4246,6 +4246,137 @@ fn main() {
     assert_eq!(output, "ok");
 }
 
+/// COI-410: 200 sequential HTTP/1.1 GETs with `Connection: close` (no pool).
+/// A separate-thread server delays each response so `await_readable` parks,
+/// then the client discards the socket — the release-only crash path.
+#[test]
+fn http_no_pool_two_hundred_connection_close_gets() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::thread;
+    use std::time::Duration;
+
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let server = thread::spawn(move || {
+        let body = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+        for _ in 0..200 {
+            let (mut s, _) = listener.accept().expect("accept");
+            let mut buf = [0u8; 256];
+            let _ = s.read(&mut buf);
+            thread::sleep(Duration::from_millis(2));
+            s.write_all(body).expect("write");
+        }
+    });
+
+    let src = format!(
+        r#"
+use io::{{close, read, await_readable, stdout}};
+use io::sync::{{write_all}};
+use io::net::tcp::{{connect}};
+use string::{{to_bytes}};
+use conv::{{int_to_dec}};
+
+fn read_http(Stream s) -> Result<int, IoError> {{
+    let z: byte = 0;
+    let chunk: Vec<byte> = Vec::new();
+    let i = 0;
+    while i < 64 {{
+        chunk.push(z);
+        i = i + 1;
+    }}
+    let acc: Vec<byte> = Vec::new();
+    let guard = 0;
+    let done = 0;
+    while done == 0 {{
+        if guard >= 256 {{
+            done = 1;
+        }}
+        if done == 0 {{
+            let parked = 0;
+            let nopt = match read(s, chunk) {{
+                Result::Ok(o) => o,
+                Result::Err(IoError::WouldBlock) => {{
+                    match await_readable(s) {{
+                        Result::Ok(_) => {{
+                            parked = 1;
+                            guard = guard - 1;
+                            Option::None
+                        }},
+                        Result::Err(_) => panic "await",
+                    }}
+                }},
+                Result::Err(_) => panic "read",
+            }};
+            if parked == 0 {{
+                match nopt {{
+                    Option::None => {{
+                        if len(acc) > 0 {{
+                            done = 1;
+                        }}
+                    }},
+                    Option::Some(n) => {{
+                        if n == 0 {{
+                            match await_readable(s) {{
+                                Result::Ok(_) => {{
+                                    guard = guard - 1;
+                                    0
+                                }},
+                                Result::Err(_) => panic "await0",
+                            }};
+                        }}
+                        if n != 0 {{
+                            let j = 0;
+                            while j < n {{
+                                acc.push(chunk[j]);
+                                j = j + 1;
+                            }}
+                        }}
+                    }},
+                }};
+            }}
+        }}
+        guard = guard + 1;
+    }}
+    return len(acc);
+}}
+
+fn main() {{
+    let i = 0;
+    let total = 0;
+    while i < 200 {{
+        let s = match connect("127.0.0.1", {port}) {{
+            Result::Ok(v) => v,
+            Result::Err(_) => panic "connect",
+        }};
+        match write_all(s, to_bytes("GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")) {{
+            Result::Ok(_) => 0,
+            Result::Err(_) => panic "write",
+        }};
+        let n = match read_http(s) {{
+            Result::Ok(v) => v,
+            Result::Err(_) => panic "read_http",
+        }};
+        if n < 10 {{
+            panic "short";
+        }}
+        match close(s) {{
+            Result::Ok(_) => 0,
+            Result::Err(_) => 0,
+        }};
+        total = total + 2;
+        i = i + 1;
+    }}
+    write_all(stdout(), to_bytes(int_to_dec(total)));
+}}
+"#
+    );
+
+    let output = run_example_src(&src);
+    assert_eq!(output, "400");
+    server.join().expect("server");
+}
+
 /// `let x = match …` inside `while` must not corrupt loop locals across iterations.
 #[test]
 fn while_let_result_ok_panic_match_preserves_locals() {
