@@ -80,9 +80,9 @@ and relocate mapped slots on collect.
 5. **Native / Cranelift** — parked (P5). Native must not keep an unmapped
    heap pointer across a helper or alloc. Do not invent rooted JIT here.
 
-Write barriers (`GcBarrier` kind `write`) stay named only. S4 SATB
-already shades at VM field / vec stores; a compiler opcode would not
-pay rent. I6 marks impure HostInvoke / CALL as effect barriers instead
+Write barriers (`GcBarrier` kind `write`) stay named only. S4 marks
+to completion before the mutator runs, so no store needs a barrier; a
+compiler opcode would not pay rent. I6 marks impure HostInvoke / CALL as effect barriers instead
 of growing GC maps.
 
 See [mir-islands.md](mir-islands.md) (I5),

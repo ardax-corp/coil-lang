@@ -19,7 +19,7 @@ How coil is structured for contributors. End-user language docs live in [coil-we
 | [Optimization roadmap](optimization-roadmap.md) | AOT/JIT plan; landed opts (#304–#318); hit-bench prove rule; PGO removed (#301). Extra benches: `gc_churn`, Option/Result churn, `iv_mul_sr` / `licm_nested_chains` / `tail_sibling` / `cse_*` / `dest_prop_field_alias` |
 | [Threaded execute dispatch](threaded-dispatch.md) | COI-373–376 G0–G3: fn-ptr / hotmatch vs `execute`; G3 hot/cold I-cache split |
 | [Heap identity](heap-identity.md) | Mapped slab + header poison for `find_object_by_addr` (COI-200) |
-| [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark + SATB + lazy sweep; moving GC deferred |
+| [Incremental GC](gc-incremental.md) | COI-309 S4: safepoint mark (no write barrier) + lazy sweep; moving GC deferred |
 | [SIMD](simd.md) | `coil-simd` — packed LA + V0/V1 `V*` opcode backend |
 | [Auto-par](auto-par.md) | Purity + parameterized AlwaysPar IPA (COI-366 F1 hop/grain); F2 broader admission (COI-368); loop IPA (COI-362 E4); C1/C2 shared-heap spawn (E6/E7); [branch-miss notes](auto-par-branch-misses.md) |
 | [Par lock hints](par-lock-hints.md) | F3 (COI-369): userland locks + E0805 call-bag escape hints (no compiler locks) |
