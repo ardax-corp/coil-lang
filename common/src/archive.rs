@@ -270,10 +270,12 @@ pub struct ArchivedProgramV12 {
 }
 
 /// Failed `.hyc` / embed envelope access.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ArchiveDecodeError {
     Corrupt,
     Version(u32),
+    /// Envelope decoded but the bytecode failed [`crate::verify_bytecode`].
+    Invalid(crate::BytecodeError),
 }
 
 /// Owned archive plus which additive fields were on the wire.
@@ -367,7 +369,23 @@ pub fn resolve_archive_operand_slots(persisted: Option<u32>, bytecode: &[Byte]) 
 
 /// Access a `.hyc` blob. Same major + archive minor ≤ runtime; older
 /// envelopes without `operand_stack_slots` / S2b maps still load.
+/// Bytecode is verified before it is returned.
 pub fn decode_archived_program(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> {
+    let decoded = decode_envelope(buffer)?;
+    let p = &decoded.program;
+    crate::verify_bytecode(
+        &p.bytecode,
+        &p.constants,
+        crate::VerifyLimits {
+            strings: p.strings.len(),
+            static_slots: p.static_slot_count as usize,
+        },
+    )
+    .map_err(ArchiveDecodeError::Invalid)?;
+    Ok(decoded)
+}
+
+fn decode_envelope(buffer: &[u8]) -> Result<DecodedArchive, ArchiveDecodeError> {
     use rkyv::rancor::Error;
 
     let current = rkyv::access::<ArchivedArchivedProgram, Error>(buffer)
