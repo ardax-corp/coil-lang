@@ -3950,6 +3950,24 @@ fn example_perf_fib_prints_checksum() {
 }
 
 #[test]
+fn example_perf_mandelbrot_ipa_emits_chunk_worker() {
+    let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("workspace root");
+    let full = workspace_root.join("examples/perf/mandelbrot_ipa.hy");
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src_from_file(full.to_str().unwrap())
+        .expect("mandelbrot_ipa should compile");
+    assert!(
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "flat pixel scan must emit a loop-IPA chunk worker"
+    );
+    let output = run_bytecode(bytecode, constants, &pipeline, Some(full.as_path()));
+    assert_eq!(output, "625885");
+}
+
+#[test]
 fn example_perf_numeric_prints_expected_sum() {
     let output = run_example("examples/perf/numeric.hy");
     assert_eq!(output, "1999000");

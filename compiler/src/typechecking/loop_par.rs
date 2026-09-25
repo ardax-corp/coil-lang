@@ -1294,6 +1294,33 @@ fn main() {{
     }
 
     #[test]
+    fn admits_flat_pixel_scan_with_literal_divisors() {
+        let site = one_site(
+            r#"
+fn pixel(int x, int y) -> int {
+    return x + y;
+}
+fn mandelbrot() -> int {
+    let sum = 0;
+    let i = 0;
+    while i < 25600 {
+        let x = i % 160;
+        let y = i / 160;
+        sum = sum + pixel(x, y);
+        i = i + 1;
+    }
+    return sum;
+}
+fn main() { return; }
+"#,
+        );
+        assert_eq!(site.index, "i");
+        assert_eq!(site.acc, "sum");
+        assert_eq!(site.trip_count(), 25600);
+        assert!(!site.is_dynamic());
+    }
+
+    #[test]
     fn admits_dynamic_parameter_bounds() {
         let while_site = one_site(
             r#"
