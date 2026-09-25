@@ -7,17 +7,21 @@
 //! range folds to the sequential result.
 //!
 //! Detection is structural — no function, module or benchmark allowlists — and
-//! fails closed. Anything the walk cannot prove independent (a nested branch, a
-//! read of an enclosing local, an impure call, a second reduction) simply
-//! leaves the loop sequential. Counted `for x in` / range (Q6 literal, B5
-//! const range locals) share this shape; the latch `+ 1` is implicit. Dynamic
-//! C2 trip counts stay sequential.
+//! fails closed. Anything the walk cannot prove independent (a nested loop, an
+//! impure call, a second reduction, a non-int capture) leaves the loop
+//! sequential. Counted `for x in` / range (Q6 literal, B5 const range locals)
+//! share this shape; the latch is implicit.
+//!
+//! Wide shapes (`COIL_PAR_LOOP_WIDE`, default on) also admit a dynamic int
+//! bound, an int parameter or int local capture, a pure `if` whose arms share
+//! one reduction, and a positive constant stride. `COIL_PAR_LOOP_WIDE=0`
+//! keeps the original const unit-step shape.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use parser::ast::{AdjustOp, AssignOp, Expression, Output};
 
-use super::par_profit::par_loop_grain;
+use super::par_profit::{par_loop_grain, par_loop_wide_enabled};
 
 /// Associative operator folding a loop's per-iteration contributions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,21 +62,84 @@ pub struct LoopParSite {
     pub implicit_step: bool,
     /// Pointer of the induction identifier's `Expression` (sidecar lookup).
     pub index_expr_ptr: usize,
-    /// Pointer of `e` in `acc = acc ⊕ e`.
+    /// Pointer of `e` in `acc = acc ⊕ e` (the first reduction; `if` arms may hold more).
     pub reduce_expr_ptr: usize,
     /// Enclosing const-int locals the body reads (inlined into the worker).
     pub captures: Vec<(String, i64)>,
+    /// Int parameters and non-const int locals passed as extra worker arguments.
+    pub live_captures: Vec<String>,
+    /// Added to the induction variable each trip. Always positive.
+    pub stride: i64,
+    /// Runtime start local. `None` means [`Self::begin`] is the start.
+    pub begin_local: Option<String>,
+    /// Runtime exclusive-end local, before [`Self::end_bias`].
+    pub end_local: Option<String>,
+    /// Added to a runtime end (`1` for `i <= n` / `..=`). Const ends bake this in.
+    pub end_bias: i64,
 }
 
+/// Upper bound on chunks for one counted loop. The joiner runs the first.
+pub const LOOP_PAR_MAX_CHUNKS: i64 = 4;
+
 impl LoopParSite {
-    pub fn trip_count(&self) -> i64 {
-        self.end - self.begin
+    pub fn is_dynamic(&self) -> bool {
+        self.begin_local.is_some() || self.end_local.is_some()
     }
 
-    /// Split point of a 2-way chunking: `[begin, mid)` and `[mid, end)`.
-    pub fn midpoint(&self) -> i64 {
-        self.begin + self.trip_count() / 2
+    /// Iteration count of a const range. `0` when an endpoint is dynamic.
+    pub fn trip_count(&self) -> i64 {
+        if self.is_dynamic() {
+            return 0;
+        }
+        iteration_count(self.begin, self.end, self.stride).unwrap_or(0)
     }
+
+    /// 2-way split on the induction lattice. Dynamic sites return `begin`.
+    pub fn midpoint(&self) -> i64 {
+        let half = self.trip_count() / 2;
+        self.begin + half * self.stride
+    }
+
+    /// Exclusive chunk edges, including `begin` and `end`.
+    ///
+    /// `None` for a dynamic range (the split is computed at runtime) or a
+    /// trip count that does not clear `grain`. At most [`LOOP_PAR_MAX_CHUNKS`]
+    /// pieces; each piece except the last has `trips / n` iterations.
+    pub fn chunk_bounds(&self, grain: i64) -> Option<Vec<i64>> {
+        if self.is_dynamic() {
+            return None;
+        }
+        let trips = iteration_count(self.begin, self.end, self.stride)?;
+        let grain = grain.max(1);
+        if trips <= grain {
+            return None;
+        }
+        let n = (trips / grain).clamp(2, LOOP_PAR_MAX_CHUNKS);
+        let base = trips / n;
+        let mut bounds = Vec::with_capacity(n as usize + 1);
+        bounds.push(self.begin);
+        for i in 1..n {
+            bounds.push(self.begin + i * base * self.stride);
+        }
+        bounds.push(self.end);
+        Some(bounds)
+    }
+
+    /// Induction variable after a const loop that actually runs.
+    pub fn final_index(&self) -> i64 {
+        self.begin + self.stride * self.trip_count()
+    }
+}
+
+fn iteration_count(begin: i64, end: i64, stride: i64) -> Option<i64> {
+    if stride <= 0 {
+        return None;
+    }
+    let diff = end.checked_sub(begin)?;
+    if diff <= 0 {
+        return Some(0);
+    }
+    diff.checked_add(stride - 1)?.checked_div(stride)
 }
 
 /// Detected sites keyed by the loop node's source span (codegen's join key).
@@ -88,7 +155,7 @@ pub fn analyze_loop_par_sites(ast: &Output<'_>, pure_fns: &HashSet<String>) -> L
         pure_fns,
         out: LoopParSites::new(),
     };
-    scan.walk(ast, &mut ConstLocals::new());
+    scan.walk(ast, &mut ConstLocals::new(), &mut HashSet::new());
     scan.out
 }
 
@@ -113,19 +180,16 @@ struct Scan<'a> {
 
 impl Scan<'_> {
     /// Statement list: each item may bind or invalidate a const local for the
-    /// statements that follow it.
-    fn walk_block(&mut self, items: &[Output<'_>], consts: &mut ConstLocals) {
+    /// statements that follow it. `ints` is every name still known to be an int.
+    fn walk_block(
+        &mut self,
+        items: &[Output<'_>],
+        consts: &mut ConstLocals,
+        ints: &mut HashSet<String>,
+    ) {
         for item in items {
-            self.walk(item, consts);
-            for name in assigned_names(item) {
-                consts.remove(&name);
-            }
-            if let Some((name, init)) = let_binding(item) {
-                match const_val(init, consts) {
-                    Some(v) => consts.insert(name.to_string(), v),
-                    None => consts.remove(name),
-                };
-            }
+            self.walk(item, consts, ints);
+            note_binding_effects(item, consts, ints);
         }
     }
 
@@ -133,19 +197,27 @@ impl Scan<'_> {
     ///
     /// Everything the loop assigns is dropped first: a const local's binding no
     /// longer describes every visit to a program point inside a loop.
-    fn walk_loop_body(&mut self, loop_node: &Output<'_>, body: &Output<'_>, consts: &ConstLocals) {
+    fn walk_loop_body(
+        &mut self,
+        loop_node: &Output<'_>,
+        body: &Output<'_>,
+        consts: &ConstLocals,
+        ints: &HashSet<String>,
+    ) {
         let mut inner = consts.clone();
+        let mut inner_ints = ints.clone();
         for name in assigned_names(loop_node) {
             inner.remove(&name);
+            inner_ints.remove(&name);
         }
-        self.walk(body, &mut inner);
+        self.walk(body, &mut inner, &mut inner_ints);
     }
 
-    fn walk(&mut self, ast: &Output<'_>, consts: &mut ConstLocals) {
+    fn walk(&mut self, ast: &Output<'_>, consts: &mut ConstLocals, ints: &mut HashSet<String>) {
         match ast.1.as_ref() {
             // A nested block's own bindings do not outlive it.
             Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
-                self.walk_block(items, &mut consts.clone());
+                self.walk_block(items, &mut consts.clone(), &mut ints.clone());
             }
             Expression::Module(_, inner)
             | Expression::Statement(inner)
@@ -153,28 +225,32 @@ impl Scan<'_> {
             | Expression::ExprStatement(inner)
             | Expression::Group(inner)
             | Expression::Return(inner)
-            | Expression::ImplicitReturn(inner) => self.walk(inner, consts),
-            // Parameters are not const locals, so a body starts from nothing.
+            | Expression::ImplicitReturn(inner) => self.walk(inner, consts, ints),
             Expression::Function {
-                body: Some(body), ..
-            } => self.walk(body, &mut ConstLocals::new()),
+                args,
+                body: Some(body),
+                ..
+            } => {
+                let mut ints = int_param_names(args);
+                self.walk(body, &mut ConstLocals::new(), &mut ints);
+            }
             Expression::Implementation { methods, .. } => {
                 for m in methods {
-                    self.walk(m, &mut ConstLocals::new());
+                    self.walk(m, &mut ConstLocals::new(), &mut HashSet::new());
                 }
             }
             Expression::Method(_, inner) | Expression::Member(inner) => {
-                self.walk(inner, &mut ConstLocals::new());
+                self.walk(inner, &mut ConstLocals::new(), &mut HashSet::new());
             }
             Expression::If(branches) => {
                 for b in branches {
-                    self.walk(b, &mut consts.clone());
+                    self.walk(b, &mut consts.clone(), &mut ints.clone());
                 }
             }
-            Expression::Branch(_, body) => self.walk(body, &mut consts.clone()),
+            Expression::Branch(_, body) => self.walk(body, &mut consts.clone(), &mut ints.clone()),
             Expression::Match { arms, .. } => {
                 for arm in arms {
-                    self.walk(&arm.body, &mut consts.clone());
+                    self.walk(&arm.body, &mut consts.clone(), &mut ints.clone());
                 }
             }
             Expression::Loop {
@@ -182,24 +258,24 @@ impl Scan<'_> {
                 pattern: None,
                 iterable,
                 body,
-            } => match self.match_counted_while(iterable, body, consts) {
+            } => match self.match_counted_while(iterable, body, consts, ints) {
                 Some(site) => {
                     self.out.insert((ast.0.start, ast.0.end), site);
                 }
-                None => self.walk_loop_body(ast, body, consts),
+                None => self.walk_loop_body(ast, body, consts, ints),
             },
             Expression::Loop {
                 identifier: Some(binding),
                 pattern: None,
                 iterable,
                 body,
-            } => match self.match_counted_for_range(binding, iterable, body, consts) {
+            } => match self.match_counted_for_range(binding, iterable, body, consts, ints) {
                 Some(site) => {
                     self.out.insert((ast.0.start, ast.0.end), site);
                 }
-                None => self.walk_loop_body(ast, body, consts),
+                None => self.walk_loop_body(ast, body, consts, ints),
             },
-            Expression::Loop { body, .. } => self.walk_loop_body(ast, body, consts),
+            Expression::Loop { body, .. } => self.walk_loop_body(ast, body, consts, ints),
             _ => {}
         }
     }
@@ -210,17 +286,37 @@ impl Scan<'_> {
         cond: &Output<'_>,
         body: &Output<'_>,
         consts: &ConstLocals,
+        ints: &HashSet<String>,
     ) -> Option<LoopParSite> {
-        let (index, index_expr_ptr, bound, inclusive) = counted_bound(cond, consts)?;
-        let ConstVal::Int(begin) = *consts.get(&index)? else {
+        let (index, index_expr_ptr, end_local, end_const, inclusive) =
+            counted_bound(cond, consts, ints)?;
+        let (begin, begin_local) = if let Some(ConstVal::Int(b)) = consts.get(&index) {
+            (*b, None)
+        } else if ints.contains(&index) {
+            (0, Some(index.clone()))
+        } else {
             return None;
         };
-        let end = if inclusive {
-            bound.checked_add(1)?
+        let (end, end_bias) = if end_local.is_some() {
+            (end_const, if inclusive { 1 } else { 0 })
+        } else if inclusive {
+            (end_const.checked_add(1)?, 0)
         } else {
-            bound
+            (end_const, 0)
         };
-        self.finish_counted_site(body, index, index_expr_ptr, begin, end, consts, false)
+        self.finish_counted_site(
+            body,
+            index,
+            index_expr_ptr,
+            begin,
+            end,
+            begin_local,
+            end_local,
+            end_bias,
+            consts,
+            ints,
+            false,
+        )
     }
 
     /// Match `for x in START..END` / `..=`, or `for x in r` when `r` is a
@@ -232,17 +328,22 @@ impl Scan<'_> {
         iterable: &Output<'_>,
         body: &Output<'_>,
         consts: &ConstLocals,
+        ints: &HashSet<String>,
     ) -> Option<LoopParSite> {
         let binding = peel(binding);
         let index = ident_name(binding)?;
-        let (begin, end) = counted_range(iterable, consts)?;
+        let (begin, end, begin_local, end_local, end_bias) = counted_range(iterable, consts, ints)?;
         self.finish_counted_site(
             body,
             index.to_string(),
             std::ptr::from_ref(binding) as *const Output<'_> as usize,
             begin,
             end,
+            begin_local,
+            end_local,
+            end_bias,
             consts,
+            ints,
             true,
         )
     }
@@ -254,40 +355,37 @@ impl Scan<'_> {
         index_expr_ptr: usize,
         begin: i64,
         end: i64,
+        begin_local: Option<String>,
+        end_local: Option<String>,
+        end_bias: i64,
         consts: &ConstLocals,
+        ints: &HashSet<String>,
         implicit_step: bool,
     ) -> Option<LoopParSite> {
-        // Profitability: trip-count grain, same spawn-floor idea as
-        // expression `W` but a different unit (iterations, not fork-tree nodes).
-        if end.checked_sub(begin)? <= par_loop_grain() {
+        let dynamic = begin_local.is_some() || end_local.is_some();
+        let forms = classify_body(body, &index, true)?;
+        let mut reduces: Vec<(&str, LoopReduceOp, &Output<'_>)> = Vec::new();
+        let mut steps = Vec::new();
+        let mut has_if = false;
+        collect_forms(&forms, &mut reduces, &mut steps, &mut has_if);
+        let expect_steps = if implicit_step { 0 } else { 1 };
+        if steps.len() != expect_steps {
             return None;
         }
-
-        let items = block_items(body)?;
-        let forms = items
-            .iter()
-            .map(|item| statement_form(peel(item), &index))
-            .collect::<Option<Vec<_>>>()?;
-
-        let mut acc_op: Option<(&str, LoopReduceOp, &Output<'_>)> = None;
-        let mut steps = 0usize;
-        for form in &forms {
-            match form {
-                StmtForm::Step => steps += 1,
-                StmtForm::Reduce { acc, op, expr } => {
-                    if acc_op.is_some() {
-                        return None;
-                    }
-                    acc_op = Some((acc, *op, expr));
-                }
-                StmtForm::Local { .. } => {}
+        let stride = if implicit_step { 1 } else { steps[0] };
+        if stride <= 0 {
+            return None;
+        }
+        if !dynamic {
+            let trips = iteration_count(begin, end, stride)?;
+            if trips <= par_loop_grain() {
+                return None;
             }
         }
-        let expect_steps = if implicit_step { 0 } else { 1 };
-        if steps != expect_steps {
+        let (acc, op, reduce_expr) = *reduces.first()?;
+        if reduces.iter().any(|(a, o, _)| *a != acc || *o != op) {
             return None;
         }
-        let (acc, op, reduce_expr) = acc_op?;
         if acc == index {
             return None;
         }
@@ -298,29 +396,34 @@ impl Scan<'_> {
             return None;
         }
 
-        // Every value the body computes must depend only on the induction
-        // variable, temps declared earlier in the same body, and enclosing
-        // const-int locals (those become worker-frame immediates).
         let mut locals = HashSet::new();
         let mut captures = BTreeSet::new();
-        for form in &forms {
-            match form {
-                StmtForm::Local { name, init } => {
-                    if *name == index
-                        || *name == acc
-                        || !self.independent(init, &index, acc, &locals, consts, &mut captures)
-                    {
-                        return None;
-                    }
-                    locals.insert((*name).to_string());
-                }
-                StmtForm::Reduce { expr, .. } => {
-                    if !self.independent(expr, &index, acc, &locals, consts, &mut captures) {
-                        return None;
-                    }
-                }
-                StmtForm::Step => {}
-            }
+        let mut live = BTreeSet::new();
+        if !self.forms_independent(
+            &forms,
+            &index,
+            acc,
+            &mut locals,
+            consts,
+            ints,
+            &mut captures,
+            &mut live,
+        ) {
+            return None;
+        }
+        // The bound locals are worker arguments already (lo/hi), not body captures.
+        if let Some(name) = &begin_local {
+            live.remove(name);
+        }
+        if let Some(name) = &end_local {
+            live.remove(name);
+        }
+        live.remove(&index);
+        live.remove(acc);
+
+        let wide = dynamic || stride != 1 || !live.is_empty() || has_if;
+        if wide && !par_loop_wide_enabled() {
+            return None;
         }
 
         Some(LoopParSite {
@@ -333,17 +436,70 @@ impl Scan<'_> {
             index_expr_ptr,
             reduce_expr_ptr: std::ptr::from_ref(reduce_expr) as *const Output<'_> as usize,
             captures: captures.into_iter().collect(),
+            live_captures: live.into_iter().collect(),
+            stride,
+            begin_local,
+            end_local,
+            end_bias,
         })
     }
 
+    fn forms_independent(
+        &self,
+        forms: &[StmtForm<'_>],
+        index: &str,
+        acc: &str,
+        locals: &mut HashSet<String>,
+        consts: &ConstLocals,
+        ints: &HashSet<String>,
+        captures: &mut BTreeSet<(String, i64)>,
+        live: &mut BTreeSet<String>,
+    ) -> bool {
+        for form in forms {
+            match form {
+                StmtForm::Local { name, init } => {
+                    if *name == index
+                        || *name == acc
+                        || !self.independent(init, index, acc, locals, consts, ints, captures, live)
+                    {
+                        return false;
+                    }
+                    locals.insert((*name).to_string());
+                }
+                StmtForm::Reduce { expr, .. } => {
+                    if !self.independent(expr, index, acc, locals, consts, ints, captures, live) {
+                        return false;
+                    }
+                }
+                StmtForm::Step(_) => {}
+                StmtForm::If { arms } => {
+                    for arm in arms {
+                        if let Some(cond) = arm.cond
+                            && !self
+                                .independent(cond, index, acc, locals, consts, ints, captures, live)
+                        {
+                            return false;
+                        }
+                        let mut inner = locals.clone();
+                        if !self.forms_independent(
+                            &arm.body, index, acc, &mut inner, consts, ints, captures, live,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Whether `expr` reads nothing but the induction variable, loop-private
-    /// temps, enclosing const ints, and integer literals, and calls nothing but
-    /// pure functions.
+    /// temps, enclosing const ints, int locals/parameters, and integer literals,
+    /// and calls nothing but pure functions.
     ///
-    /// Deliberately narrow: division and modulo can trap, and every other node
-    /// kind (index, field, method, lambda, `try`) either reaches shared state or
-    /// cannot be re-emitted into a private frame. Const-int captures are
-    /// re-materialized as immediates in that frame (not live outer slots).
+    /// Division and modulo are admitted only with a non-zero literal divisor.
+    /// Index, field, method, lambda, and `try` stay refused. Const ints are
+    /// immediates in the worker; other int names are extra arguments.
     fn independent(
         &self,
         expr: &Output<'_>,
@@ -351,12 +507,17 @@ impl Scan<'_> {
         acc: &str,
         locals: &HashSet<String>,
         consts: &ConstLocals,
+        ints: &HashSet<String>,
         captures: &mut BTreeSet<(String, i64)>,
+        live: &mut BTreeSet<String>,
     ) -> bool {
         let expr = peel(expr);
-        let both = |a: &Output<'_>, b: &Output<'_>, captures: &mut BTreeSet<(String, i64)>| {
-            self.independent(a, index, acc, locals, consts, captures)
-                && self.independent(b, index, acc, locals, consts, captures)
+        let both = |a: &Output<'_>,
+                    b: &Output<'_>,
+                    captures: &mut BTreeSet<(String, i64)>,
+                    live: &mut BTreeSet<String>| {
+            self.independent(a, index, acc, locals, consts, ints, captures, live)
+                && self.independent(b, index, acc, locals, consts, ints, captures, live)
         };
         match expr.1.as_ref() {
             Expression::Integer(_) => true,
@@ -372,11 +533,18 @@ impl Scan<'_> {
                         captures.insert(((*n).to_string(), *k));
                         true
                     }
+                    _ if ints.contains(*n) => {
+                        live.insert((*n).to_string());
+                        true
+                    }
                     _ => false,
                 }
             }
-            Expression::Negate(a) | Expression::Positive(a) => {
-                self.independent(a, index, acc, locals, consts, captures)
+            Expression::Negate(a)
+            | Expression::Positive(a)
+            | Expression::Not(a)
+            | Expression::LogicalNot(a) => {
+                self.independent(a, index, acc, locals, consts, ints, captures, live)
             }
             Expression::Add(a, b)
             | Expression::Sub(a, b)
@@ -385,7 +553,18 @@ impl Scan<'_> {
             | Expression::Shr(a, b)
             | Expression::Xor(a, b)
             | Expression::BitAnd(a, b)
-            | Expression::BitOr(a, b) => both(a, b, captures),
+            | Expression::BitOr(a, b)
+            | Expression::Eq(a, b)
+            | Expression::Neq(a, b)
+            | Expression::Le(a, b)
+            | Expression::Gt(a, b)
+            | Expression::Leq(a, b)
+            | Expression::Geq(a, b)
+            | Expression::And(a, b)
+            | Expression::Or(a, b) => both(a, b, captures, live),
+            Expression::Div(a, b) | Expression::Mod(a, b) => {
+                int_literal(b).is_some_and(|k| k != 0) && both(a, b, captures, live)
+            }
             Expression::Call {
                 name,
                 args: Some(args),
@@ -395,9 +574,9 @@ impl Scan<'_> {
                     Expression::Identifier(f) if self.pure_fns.contains(*f)
                 );
                 pure_callee
-                    && args
-                        .iter()
-                        .all(|a| self.independent(a, index, acc, locals, consts, captures))
+                    && args.iter().all(|a| {
+                        self.independent(a, index, acc, locals, consts, ints, captures, live)
+                    })
             }
             _ => false,
         }
@@ -406,8 +585,8 @@ impl Scan<'_> {
 
 /// One admissible statement of a loop-IPA body.
 enum StmtForm<'a> {
-    /// `i = i + 1` / `i += 1` / `i++`.
-    Step,
+    /// `i = i + k` / `i += k` / `i++` with `k > 0`.
+    Step(i64),
     /// `acc = acc ⊕ expr` / `acc ⊕= expr`.
     Reduce {
         acc: &'a str,
@@ -416,24 +595,87 @@ enum StmtForm<'a> {
     },
     /// `let name = init` — a loop-private temp.
     Local { name: &'a str, init: &'a Output<'a> },
+    /// Pure `if` / `else`. Arms share the enclosing reduction.
+    If { arms: Vec<IfArm<'a>> },
+}
+
+struct IfArm<'a> {
+    cond: Option<&'a Output<'a>>,
+    body: Vec<StmtForm<'a>>,
+}
+
+/// Classify a loop body. `allow_step` is false inside `if` (the latch stays outside).
+fn classify_body<'a>(
+    body: &'a Output<'a>,
+    index: &str,
+    allow_step: bool,
+) -> Option<Vec<StmtForm<'a>>> {
+    if let Some(items) = block_items(body) {
+        items
+            .iter()
+            .map(|item| statement_form(peel(item), index, allow_step))
+            .collect()
+    } else {
+        Some(vec![statement_form(peel(body), index, allow_step)?])
+    }
+}
+
+fn collect_forms<'a>(
+    forms: &'a [StmtForm<'a>],
+    reduces: &mut Vec<(&'a str, LoopReduceOp, &'a Output<'a>)>,
+    steps: &mut Vec<i64>,
+    has_if: &mut bool,
+) {
+    for form in forms {
+        match form {
+            StmtForm::Step(k) => steps.push(*k),
+            StmtForm::Reduce { acc, op, expr } => reduces.push((acc, *op, expr)),
+            StmtForm::Local { .. } => {}
+            StmtForm::If { arms } => {
+                *has_if = true;
+                for arm in arms {
+                    collect_forms(&arm.body, reduces, steps, has_if);
+                }
+            }
+        }
+    }
 }
 
 /// Classify one body statement; `None` rejects the whole loop.
-fn statement_form<'a>(item: &'a Output<'a>, index: &str) -> Option<StmtForm<'a>> {
+fn statement_form<'a>(item: &'a Output<'a>, index: &str, allow_step: bool) -> Option<StmtForm<'a>> {
     if let Some((name, init)) = let_binding(item) {
         return Some(StmtForm::Local { name, init });
     }
     match item.1.as_ref() {
+        Expression::If(branches) => {
+            let mut arms = Vec::new();
+            for b in branches {
+                let Expression::Branch(cond, body) = peel(b).1.as_ref() else {
+                    return None;
+                };
+                arms.push(IfArm {
+                    cond: cond.as_ref(),
+                    body: classify_body(body, index, false)?,
+                });
+            }
+            if arms.is_empty() {
+                return None;
+            }
+            Some(StmtForm::If { arms })
+        }
         Expression::Adjust {
             op: AdjustOp::Inc,
             target,
             ..
-        } => (ident_name(target)? == index).then_some(StmtForm::Step),
+        } => (allow_step && ident_name(target)? == index).then_some(StmtForm::Step(1)),
         Expression::CompoundAssign(lhs, op, rhs) => {
             let name = ident_name(lhs)?;
             if name == index {
-                return (*op == AssignOp::Add && int_literal(rhs) == Some(1))
-                    .then_some(StmtForm::Step);
+                let k = (*op == AssignOp::Add && allow_step)
+                    .then(|| int_literal(rhs))
+                    .flatten()
+                    .filter(|k| *k > 0)?;
+                return Some(StmtForm::Step(k));
             }
             let op = compound_reduce_op(*op)?;
             Some(StmtForm::Reduce {
@@ -445,11 +687,8 @@ fn statement_form<'a>(item: &'a Output<'a>, index: &str) -> Option<StmtForm<'a>>
         Expression::Assignment(lhs, rhs) => {
             let name = ident_name(lhs)?;
             if name == index {
-                let Expression::Add(a, b) = peel(rhs).1.as_ref() else {
-                    return None;
-                };
-                return (ident_name(a) == Some(index) && int_literal(b) == Some(1))
-                    .then_some(StmtForm::Step);
+                let k = allow_step.then(|| step_stride(rhs, index)).flatten()?;
+                return Some(StmtForm::Step(k));
             }
             // `acc = acc ⊕ expr` or `acc = expr ⊕ acc` for commutative ops.
             let (op, expr) = match peel(rhs).1.as_ref() {
@@ -466,6 +705,21 @@ fn statement_form<'a>(item: &'a Output<'a>, index: &str) -> Option<StmtForm<'a>>
         }
         _ => None,
     }
+}
+
+/// `i = i + k` or `i = k + i` with `k > 0`.
+fn step_stride(rhs: &Output<'_>, index: &str) -> Option<i64> {
+    let Expression::Add(a, b) = peel(rhs).1.as_ref() else {
+        return None;
+    };
+    let k = if ident_name(a) == Some(index) {
+        int_literal(b)
+    } else if ident_name(b) == Some(index) {
+        int_literal(a)
+    } else {
+        None
+    }?;
+    (k > 0).then_some(k)
 }
 
 fn compound_reduce_op(op: AssignOp) -> Option<LoopReduceOp> {
@@ -493,8 +747,14 @@ fn commute_reduce<'a>(
     }
 }
 
-/// `i < K` / `i <= K` with a compile-time `K`: `(index, index span, K, inclusive)`.
-fn counted_bound(cond: &Output<'_>, consts: &ConstLocals) -> Option<(String, usize, i64, bool)> {
+/// `i < K` / `i <= K`. The bound is a const int or an int local.
+///
+/// Returns `(index, index ptr, end local, end const, inclusive)`.
+fn counted_bound(
+    cond: &Output<'_>,
+    consts: &ConstLocals,
+    ints: &HashSet<String>,
+) -> Option<(String, usize, Option<String>, i64, bool)> {
     let cond = peel(cond);
     let (lhs, rhs, inclusive) = match cond.1.as_ref() {
         Expression::Le(a, b) => (a, b, false),
@@ -503,21 +763,57 @@ fn counted_bound(cond: &Output<'_>, consts: &ConstLocals) -> Option<(String, usi
     };
     let lhs = peel(lhs);
     let index = ident_name(lhs)?;
-    let bound = const_int(rhs, consts)?;
+    let (local, konst) = int_endpoint(rhs, consts, ints)?;
     Some((
         index.to_string(),
         std::ptr::from_ref(lhs) as *const Output<'_> as usize,
-        bound,
+        local,
+        konst,
         inclusive,
     ))
 }
 
-/// Compile-time integer range on a for-in iterable, already half-open.
-fn counted_range(iterable: &Output<'_>, consts: &ConstLocals) -> Option<(i64, i64)> {
-    match const_val(iterable, consts)? {
-        ConstVal::Range { begin, end } => Some((begin, end)),
-        ConstVal::Int(_) => None,
+/// Integer range on a for-in iterable, half-open when both ends are const.
+///
+/// Returns `(begin, end, begin local, end local, end bias)`.
+fn counted_range(
+    iterable: &Output<'_>,
+    consts: &ConstLocals,
+    ints: &HashSet<String>,
+) -> Option<(i64, i64, Option<String>, Option<String>, i64)> {
+    if let Some(ConstVal::Range { begin, end }) = const_val(iterable, consts) {
+        return Some((begin, end, None, None, 0));
     }
+    let expr = peel(iterable);
+    let Expression::Range {
+        start,
+        end,
+        inclusive,
+    } = expr.1.as_ref()
+    else {
+        return None;
+    };
+    let (begin_local, begin) = int_endpoint(start, consts, ints)?;
+    let (end_local, end) = int_endpoint(end, consts, ints)?;
+    if begin_local.is_none() && end_local.is_none() {
+        let end = if *inclusive { end.checked_add(1)? } else { end };
+        return Some((begin, end, None, None, 0));
+    }
+    let bias = if *inclusive { 1 } else { 0 };
+    Some((begin, end, begin_local, end_local, bias))
+}
+
+/// Const int, or an int-typed local. `(local name, const value)`.
+fn int_endpoint(
+    expr: &Output<'_>,
+    consts: &ConstLocals,
+    ints: &HashSet<String>,
+) -> Option<(Option<String>, i64)> {
+    if let Some(k) = const_int(expr, consts) {
+        return Some((None, k));
+    }
+    let name = ident_name(peel(expr))?;
+    ints.contains(name).then(|| (Some(name.to_string()), 0))
 }
 
 fn const_val(expr: &Output<'_>, consts: &ConstLocals) -> Option<ConstVal> {
@@ -550,6 +846,87 @@ fn const_int(expr: &Output<'_>, consts: &ConstLocals) -> Option<i64> {
         },
         _ => None,
     }
+}
+
+fn note_binding_effects(item: &Output<'_>, consts: &mut ConstLocals, ints: &mut HashSet<String>) {
+    if let Some((lhs, rhs)) = assign_pair(item) {
+        if let Some(name) = ident_name(lhs) {
+            consts.remove(name);
+            if is_int_expr(rhs, ints) {
+                ints.insert(name.to_string());
+            } else {
+                ints.remove(name);
+            }
+        }
+    } else {
+        for name in assigned_names(item) {
+            consts.remove(&name);
+            ints.remove(&name);
+        }
+    }
+    if let Some((name, init)) = let_binding(item) {
+        match const_val(init, consts) {
+            Some(v) => {
+                consts.insert(name.to_string(), v);
+            }
+            None => {
+                consts.remove(name);
+            }
+        }
+        if is_int_expr(init, ints) {
+            ints.insert(name.to_string());
+        } else {
+            ints.remove(name);
+        }
+    }
+}
+
+fn assign_pair<'a>(item: &'a Output<'a>) -> Option<(&'a Output<'a>, &'a Output<'a>)> {
+    match peel(item).1.as_ref() {
+        Expression::Assignment(lhs, rhs) | Expression::CompoundAssign(lhs, _, rhs) => {
+            Some((lhs, rhs))
+        }
+        _ => None,
+    }
+}
+
+fn is_int_expr(expr: &Output<'_>, ints: &HashSet<String>) -> bool {
+    let expr = peel(expr);
+    match expr.1.as_ref() {
+        Expression::Integer(_) => true,
+        Expression::Identifier(n) => ints.contains(*n),
+        Expression::Negate(a) | Expression::Positive(a) => is_int_expr(a, ints),
+        Expression::Add(a, b)
+        | Expression::Sub(a, b)
+        | Expression::Mul(a, b)
+        | Expression::Shl(a, b)
+        | Expression::Shr(a, b)
+        | Expression::Xor(a, b)
+        | Expression::BitAnd(a, b)
+        | Expression::BitOr(a, b) => is_int_expr(a, ints) && is_int_expr(b, ints),
+        _ => false,
+    }
+}
+
+fn int_param_names(args: &Output<'_>) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let items = match args.1.as_ref() {
+        Expression::Fragment(items) | Expression::Block(items) => items.as_slice(),
+        _ => return out,
+    };
+    for item in items {
+        let Expression::Argument { name, ty, .. } = peel(item).1.as_ref() else {
+            continue;
+        };
+        let ty_name = ty.as_ref().and_then(|t| match peel(t).1.as_ref() {
+            Expression::Type(n) | Expression::Identifier(n) => Some(*n),
+            _ => None,
+        });
+        if matches!(ty_name, Some("int") | Some("byte")) {
+            out.insert((*name).to_string());
+        }
+    }
+    out
 }
 
 /// Statement list of a loop body, or `None` for a single-expression body.
@@ -903,10 +1280,9 @@ fn main() {{
     }
 
     #[test]
-    fn rejects_dynamic_bound() {
-        assert!(
-            sites_of(
-                r#"
+    fn admits_dynamic_parameter_bounds() {
+        let while_site = one_site(
+            r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int n) -> int {
     let acc = 0;
@@ -918,14 +1294,12 @@ fn run(int n) -> int {
     return acc;
 }
 fn main() { return; }
-"#
-            )
-            .is_empty(),
-            "a parameter bound is not a compile-time trip count"
+"#,
         );
-        assert!(
-            sites_of(
-                r#"
+        assert!(while_site.is_dynamic());
+        assert_eq!(while_site.end_local.as_deref(), Some("n"));
+        let for_site = one_site(
+            r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int n) -> int {
     let acc = 0;
@@ -935,11 +1309,11 @@ fn run(int n) -> int {
     return acc;
 }
 fn main() { return; }
-"#
-            )
-            .is_empty(),
-            "a parameter range end is not a compile-time trip count"
+"#,
         );
+        assert!(for_site.is_dynamic());
+        assert_eq!(for_site.end_local.as_deref(), Some("n"));
+        assert!(for_site.implicit_step);
     }
 
     #[test]
@@ -1009,10 +1383,9 @@ fn main() {
     }
 
     #[test]
-    fn rejects_outer_local_read() {
-        assert!(
-            sites_of(
-                r#"
+    fn admits_int_parameter_capture() {
+        let site = one_site(
+            r#"
 fn sq(int i) -> int { return i * i; }
 fn run(int k) -> int {
     let acc = 0;
@@ -1024,10 +1397,33 @@ fn run(int k) -> int {
     return acc;
 }
 fn main() { return; }
+"#,
+        );
+        assert_eq!(site.live_captures, vec!["k".to_string()]);
+        assert_eq!(site.trip_count(), 100);
+    }
+
+    #[test]
+    fn rejects_non_int_capture() {
+        assert!(
+            sites_of(
+                r#"
+fn sq(int i) -> int { return i * i; }
+fn run(string s) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + sq(i);
+        let t = s;
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() { return; }
 "#
             )
             .is_empty(),
-            "a parameter capture is not a compile-time int"
+            "a string local is not an int capture"
         );
     }
 
@@ -1081,21 +1477,94 @@ fn main() { return; }
     }
 
     #[test]
-    fn rejects_branch_in_body() {
-        assert!(
-            sites_of(&program(
-                r#"
+    fn admits_pure_branch_on_one_reduction() {
+        let site = one_site(&program(
+            r#"
     let acc = 0;
     let i = 0;
     while i < 100 {
         if i > 3 { acc = acc + 1; }
         i = i + 1;
     }
+"#,
+        ));
+        assert_eq!(site.op, LoopReduceOp::Add);
+        assert_eq!(site.trip_count(), 100);
+    }
+
+    #[test]
+    fn rejects_mixed_ops_across_branch() {
+        assert!(
+            sites_of(&program(
+                r#"
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        if i > 3 { acc = acc + 1; } else { acc = acc * 2; }
+        i = i + 1;
+    }
 "#
             ))
             .is_empty(),
-            "conditional bodies are out of the first slice"
+            "both arms must fold with the same operator"
         );
+    }
+
+    #[test]
+    fn admits_dynamic_end_and_const_stride() {
+        let site = one_site(
+            r#"
+fn sq(int i) -> int { return i * i; }
+fn run(int n) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() { return; }
+"#,
+        );
+        assert!(site.is_dynamic());
+        assert_eq!(site.end_local.as_deref(), Some("n"));
+        assert_eq!(site.stride, 1);
+        assert_eq!(site.trip_count(), 0);
+    }
+
+    #[test]
+    fn chunks_a_unit_stride_range_into_at_most_four() {
+        let site = one_site(&program(
+            r#"
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+"#,
+        ));
+        assert_eq!(site.chunk_bounds(20), Some(vec![0, 25, 50, 75, 100]));
+        assert_eq!(site.midpoint(), 50);
+    }
+
+    #[test]
+    fn admits_positive_stride() {
+        let site = one_site(&program(
+            r#"
+    let acc = 0;
+    let i = 0;
+    while i < 80 {
+        acc = acc + i;
+        i = i + 2;
+    }
+"#,
+        ));
+        assert_eq!(site.stride, 2);
+        assert_eq!(site.trip_count(), 40);
+        assert_eq!(site.final_index(), 80);
+        assert_eq!(site.chunk_bounds(20), Some(vec![0, 40, 80]));
     }
 
     #[test]

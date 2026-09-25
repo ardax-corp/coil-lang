@@ -52,6 +52,20 @@ pub fn par_loop_grain() -> i64 {
     })
 }
 
+fn env_flag_default_on(key: &str) -> bool {
+    match std::env::var(key) {
+        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no") => false,
+        _ => true,
+    }
+}
+
+/// Dynamic bounds, int parameters, branches, and non-unit strides (`COIL_PAR_LOOP_WIDE`).
+///
+/// Default on. `0` / `false` / `off` / `no` keeps the original const unit-step loop shape.
+pub fn par_loop_wide_enabled() -> bool {
+    env_flag_default_on("COIL_PAR_LOOP_WIDE")
+}
+
 /// Binary op used at a [`ParCombine::BinOp`] fork site.
 ///
 /// `Add` / `Mul` / `Xor` are associative (and commutative) on `int`, so a
@@ -1488,7 +1502,7 @@ fn main() {
     }
 
     #[test]
-    fn below_threshold_and_dynamic_args_do_not_demand_specs() {
+    fn below_threshold_const_does_not_demand_a_worker() {
         let ast = parse(
             r#"
 fn fib(int n) -> int {
@@ -1496,9 +1510,7 @@ fn fib(int n) -> int {
     return fib(n - 1) + fib(n - 2);
 }
 fn main() {
-    let k = 20;
     let a = fib(20);
-    let b = fib(k);
     return;
 }
 "#,
@@ -1508,7 +1520,7 @@ fn main() {
         let demanded = collect_par_worker_fns(&ast, &sites);
         assert!(
             !demanded.contains("fib"),
-            "arg at the grain floor and dynamic args must not demand a worker: {demanded:?}"
+            "arg at the grain floor must not demand a worker: {demanded:?}"
         );
         assert!(!args_worth_parallel(&sites, "fib", &[20]));
         assert!(args_worth_parallel(&sites, "fib", &[21]));

@@ -6664,6 +6664,119 @@ fn main() {
     assert_eq!(output, "328350,100");
 }
 
+/// A parameter bound is split only when the trip count clears the grain floor.
+#[test]
+fn auto_par_loop_dynamic_bound_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn sq(int i) -> int {
+    return i * i;
+}
+fn run(int n) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < n {
+        acc = acc + sq(i);
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i,%i", run(40), run(10))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("dynamic loop should compile");
+    assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
+    // sum of squares 0..40 is 20540; 0..10 stays under the grain floor.
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "20540,285");
+}
+
+/// An int parameter is a worker argument, not a reason to stay sequential.
+#[test]
+fn auto_par_loop_int_capture_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn run(int k) -> int {
+    let acc = 0;
+    let i = 0;
+    while i < 100 {
+        acc = acc + k;
+        i = i + 1;
+    }
+    return acc;
+}
+fn main() {
+    write(stdout(), to_bytes(format("%i", run(3))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("captured int loop should compile");
+    assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "300");
+}
+
+/// A pure branch still folds to the sequential sum.
+#[test]
+fn auto_par_loop_branch_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let acc = 0;
+    let i = 0;
+    while i < 40 {
+        if i % 2 == 0 {
+            acc = acc + i;
+        }
+        i = i + 1;
+    }
+    write(stdout(), to_bytes(format("%i,%i", acc, i)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("branched loop should compile");
+    assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "380,40");
+}
+
+/// Constant stride partitions the same lattice the sequential loop walks.
+#[test]
+fn auto_par_loop_stride_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn main() {
+    let acc = 0;
+    let i = 0;
+    while i < 80 {
+        acc = acc + i;
+        i = i + 2;
+    }
+    write(stdout(), to_bytes(format("%i,%i", acc, i)));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("stride loop should compile");
+    assert!(pipeline.function_offset("__coil_par_loop_1").is_some());
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    // 0+2+...+78 = 1560, and the induction variable lands on 80.
+    assert_eq!(output, "1560,80");
+}
+
 /// C1 loop IPA emits `thread_spawn_shared` and skips `PortableValue` encode.
 #[test]
 fn auto_par_loop_uses_shared_heap_spawn() {
@@ -7235,9 +7348,9 @@ fn main() {
     assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
 }
 
-/// Dynamic `for x in 0..n` (C2-shaped) stays sequential — no runtime grain tax.
+/// Dynamic `for x in 0..n` splits when the runtime trip count clears the grain floor.
 #[test]
-fn dynamic_for_range_skips_par_worker() {
+fn dynamic_for_range_splits_and_matches_sequential() {
     let src = r#"
 use io::{stdout, write};
 use string::{format, to_bytes};
@@ -7260,8 +7373,8 @@ fn main() {
         .compile_src(src)
         .expect("dynamic for-range should compile");
     assert!(
-        pipeline.function_offset("__coil_par_loop_1").is_none(),
-        "a parameter range must not spawn"
+        pipeline.function_offset("__coil_par_loop_1").is_some(),
+        "a parameter range above the grain floor should spawn"
     );
     assert_eq!(run_bytecode(bytecode, constants, &pipeline, None), "328350");
 }

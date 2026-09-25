@@ -163,15 +163,19 @@ only when **every** gate holds:
 |---|---|
 | Shape | `while i < K` / `i <= K`, or counted `for x in START..END` / `..=` (Q6 literal), or `for x in r` when `r` is a const range local (B5) |
 | Induction | `while`: exactly one `i = i + 1` / `i += 1` / `i++` on a const-initialized local. `for`: the binding is the IV; the Q6 `+ 1` latch is implicit (no extra step in the body) |
-| Trip count | compile-time `[begin, end)` with `end - begin > COIL_LOOP_GRAIN` (default **20**; trip-count grain — same spawn-floor idea as expression `W`, different unit) |
-| Reduction | exactly one `acc = acc ⊕ e` / `acc = e ⊕ acc` / `acc ⊕= e` for associative `⊕` (`+` / `*` / `^`) on a const-initialized local |
-| Independence | `e` never reads `acc`; the body reads only the IV, its own `let` temps, int literals, and enclosing **const-int** locals (those become worker immediates) |
-| Purity | body calls only pure user functions; no index / field / static writes, no branches, `break`, `return` or `yield` |
+| Trip count | compile-time `[begin, end)` with iteration count `> COIL_LOOP_GRAIN` (default **20**), or a dynamic int bound checked once at runtime (`COIL_PAR_LOOP_WIDE`, default on) |
+| Reduction | exactly one `acc = acc ⊕ e` / `acc = e ⊕ acc` / `acc ⊕= e` for associative `⊕` (`+` / `*` / `^`) on a const-initialized local. A pure `if` is admitted when every arm uses that same fold |
+| Independence | `e` never reads `acc`; the body reads only the IV, its own `let` temps, int literals, enclosing **const-int** locals (worker immediates), and enclosing **int** parameters/locals (extra worker args) |
+| Purity | body calls only pure user functions; no index / field / static writes, no `break`, `return` or `yield`. Division and modulo need a non-zero literal divisor |
+| Stride | unit `+ 1`, or a positive constant `i = i + k` (`COIL_PAR_LOOP_WIDE`) |
 | Types | the induction variable and `e` both infer to `int` — float reduction is not associative |
 
 Ranges are normalized half-open (`i <= K` and `..=` become `end = K + 1`), so a
-split is just a partition of `[begin, end)`. Dynamic `for x in 0..n` / C2
-parameter ranges stay sequential (same refusal as `while i < n`).
+split is just a partition of `[begin, end)`. A dynamic int bound (`while i < n`,
+`for x in 0..n`) is the same partition with `lo` / `hi` loaded at runtime; the
+grain compare runs once. Const ranges with wide mode on split into up to four
+chunks (`trips / COIL_LOOP_GRAIN`, clamped to 2..=4). The joiner runs the
+first chunk; the others start from the operator identity.
 
 Codegen emits one private **chunk worker** per site,
 `__coil_par_loop_{n}(lo, hi, acc)`, holding the original body over `[lo, hi)` and
@@ -214,11 +218,13 @@ Still refuses (and why):
 | `a + a` from one let | one value, not two calls |
 | `f(n) + (n - 2)` mixed operand | combine needs every leaf to be a pure call |
 | `n % 2 == 0` path guard | unevaluable → `Opaque`, never specialize |
-| `while i < n` / `for x in 0..n` | dynamic trip count would be a runtime grain tax |
-| `acc = acc + k` for parameter `k` | worker frame has no live outer slots |
+| `while i < n` / `for x in 0..n` when `COIL_PAR_LOOP_WIDE=0` | dynamic trip count stays sequential; default on checks the grain once |
+| `acc = acc + k` for a non-int `k` | only int parameters and int locals are worker arguments |
 | `min` / `max` / user operators, float reduce | not proven associative here |
-| `i += 2`, countdown `i = i - 1` | first slice keeps unit-step `[begin, end)` |
-| conditionals / `break` / heap writes in the body | independence unproven |
+| `i = i - 1` countdown | the split walks a positive stride |
+| `i += 2` when `COIL_PAR_LOOP_WIDE=0` | unit step only |
+| `break` / heap writes in the body | independence unproven |
+| `if` arms that use different folds | one associative operator per loop |
 | array / dict / coro `for` | sendability (C1 leftover), not F2 |
 
 ## Work-stealing reactor
@@ -238,6 +244,7 @@ there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 | `COIL_AUTO_PAR` | `0` / `false` / `off` / `no` disables auto fork-join codegen. |
 | `COIL_PAR_THRESHOLD` | Expression IPA grain floor (fork-tree nodes `W`). Default **10945**. |
 | `COIL_LOOP_GRAIN` | Counted-loop IPA trip-count floor. Default **20**. |
+| `COIL_PAR_LOOP_WIDE` | `0` / `false` / `off` / `no` keeps const unit-step loop IPA. Default on: dynamic int bounds, int captures, pure branches, constant stride, and up to 4 chunks. |
 | `COIL_SHARED_HEAP` | Removed. Shared-heap spawn stays on. Debugger-attached runs and programs without stack maps still fall back to isolate `PortableValue` spawn. |
 | `COIL_PAR_STATS` | `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). |
 
