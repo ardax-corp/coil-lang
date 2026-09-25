@@ -1248,7 +1248,7 @@ impl<const S: usize> Machine<S> {
             unsafe { self.heap.sweep() };
             self.relocate_mapped_slots();
             // Cache is not a GC root; unmarked interned literals are gone.
-            self.program_string_cache.fill(Value::default());
+            self.invalidate_program_string_cache();
             if !self.gc_deferred {
                 break;
             }
@@ -1329,14 +1329,22 @@ impl<const S: usize> Machine<S> {
         }
         self.heap.clear_dead_weaks();
         self.heap.begin_sweep();
+        // Intern table is unlinked; unmarked literals will be freed across
+        // later sweep quantums. Drop the STRING index cache now so the mutator
+        // cannot reload a pointer that this cycle will dealloc (COI-410).
+        self.invalidate_program_string_cache();
         self.gc_sweep_slice();
+    }
+
+    fn invalidate_program_string_cache(&mut self) {
+        self.program_string_cache.fill(Value::default());
     }
 
     fn gc_sweep_slice(&mut self) {
         let n = self.heap.gc_work_quantum();
         if self.heap.sweep_quantum(n) {
             self.relocate_mapped_slots();
-            self.program_string_cache.fill(Value::default());
+            self.invalidate_program_string_cache();
         }
     }
 
