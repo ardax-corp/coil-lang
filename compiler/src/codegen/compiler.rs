@@ -1662,7 +1662,9 @@ impl Compiler {
         // Q1: stack-array args box to one heap object. Tiny-inline remaps
         // callee Index as if the arg were scalar slots and breaks `test()`.
         // Nested `observe(bounce(xs), …)` must not compile `xs` speculatively.
-        if arg_slice.iter().any(|a| self.expr_mentions_stack_array(a)) {
+        if arg_slice.iter().any(|a| {
+            self.expr_mentions_stack_array(a) || self.expr_mentions_unboxed_class(a)
+        }) {
             return false;
         }
         let mut temps = Vec::new();
@@ -2058,6 +2060,11 @@ impl Compiler {
         };
         // The guard reads some arguments ahead of the others and the false path
         // evaluates them again, so no argument may carry a side effect.
+        if flat.iter().any(|a| {
+            self.expr_mentions_stack_array(a) || self.expr_mentions_unboxed_class(a)
+        }) {
+            return false;
+        }
         if !flat.iter().all(Self::peel_arg_is_pure) {
             return false;
         }
@@ -3240,6 +3247,27 @@ impl Compiler {
         self.context.stack_array_box.get(name).copied()
     }
 
+    /// True when `expr` names a Q2 unboxed class local (including nested).
+    fn expr_mentions_unboxed_class(&self, expr: &Output<'_>) -> bool {
+        let node = unwrap_expr_output(expr);
+        match node.1.as_ref() {
+            Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {
+                self.expr_mentions_unboxed_class(v)
+            }
+            Expression::Identifier(name) => self.unboxed_class_info(name).is_some(),
+            Expression::Call { name, args } => {
+                self.expr_mentions_unboxed_class(name)
+                    || args.as_ref().is_some_and(|items| {
+                        items.iter().any(|a| self.expr_mentions_unboxed_class(a))
+                    })
+            }
+            Expression::Access(recv, _) | Expression::OptionalAccess(recv, _) => {
+                self.expr_mentions_unboxed_class(recv)
+            }
+            _ => false,
+        }
+    }
+
     /// True when `expr` names a multi-slot `[T; N]` local (including nested).
     fn expr_mentions_stack_array(&self, expr: &Output<'_>) -> bool {
         let node = unwrap_expr_output(expr);
@@ -3879,6 +3907,18 @@ impl Compiler {
 
         if !pack_rest && !box_generic && self.callee_has_unboxed_range_params(fn_name) {
             return self.emit_call_args_range_pairs(fn_name, &fixed, bytecode);
+        }
+
+        // Q1/Q2 box identity lives in a frame slot. Sequential pushes plus
+        // park-from-TOS reorder after an earlier CALL. Stage each arg to a
+        // temp (same as methods) then park above those temps.
+        if !pack_rest
+            && (!self.context.stack_array_box.is_empty()
+                || !self.context.unboxed_class_box.is_empty())
+        {
+            let n = self.emit_call_args_stage_all(&fixed, bytecode, box_generic);
+            self.park_args_above_stack_array_boxes(bytecode, n);
+            return n;
         }
 
         if !pack_rest && Self::should_reorder_pure_call_args(&fixed) {
