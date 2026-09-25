@@ -13,6 +13,7 @@ mod bounds;
 mod builder;
 mod canon;
 mod codebuf;
+mod effects;
 mod emit_buf;
 mod func;
 mod gvn;
