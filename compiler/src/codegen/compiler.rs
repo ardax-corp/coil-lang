@@ -8797,7 +8797,7 @@ impl Compiler {
         methods.insert("park".to_string(), format!("{owner}::park"));
         methods.insert("fd".to_string(), format!("{owner}::fd"));
 
-        let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32]| {
+        let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32], layout: u32| {
             if compiler.functions.contains_key(&fqn) {
                 return;
             }
@@ -8811,7 +8811,18 @@ impl Compiler {
             for &slot in slots {
                 compiler.bytecode.push_load(slot);
             }
-            compiler.bytecode.push_host_invoke(slots.len() as u32);
+            // `Result<Stream, E>` is heap-heap niche; `Result<(), E>` is
+            // unit/option niche. Boxed HostInvoke made `match` take Err.
+            if matches!(
+                layout,
+                common::HOST_ENUM_LAYOUT_OPTION_NICHE | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+            ) {
+                compiler
+                    .bytecode
+                    .push_host_invoke_layout(slots.len() as u32, layout);
+            } else {
+                compiler.bytecode.push_host_invoke(slots.len() as u32);
+            }
             compiler.bytecode.push_return();
         };
         emit_host(
@@ -8819,18 +8830,21 @@ impl Compiler {
             format!("{owner}::attach"),
             common::STREAM_ATTACH_NATIVE,
             &[0, 1, 2, 3, 4, 5],
+            common::HOST_ENUM_LAYOUT_RESULT_NICHE,
         );
         emit_host(
             self,
             format!("{owner}::park"),
             common::STREAM_PARK_NATIVE,
             &[0],
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE,
         );
         emit_host(
             self,
             format!("{owner}::fd"),
             common::STREAM_FD_NATIVE,
             &[0],
+            common::HOST_ENUM_LAYOUT_BOXED,
         );
     }
 

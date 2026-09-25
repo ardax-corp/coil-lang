@@ -8316,6 +8316,54 @@ fn main() {
 }
 
 #[test]
+fn stream_attach_thunk_sets_result_niche_layout() {
+    let mut ast = Pratt::default()
+        .parse(
+            r#"
+use io::{stdout};
+fn main() {
+    let s = stdout();
+    let _ = s.attach(1, 2, 3, 4, 5);
+    let _ = s.park();
+}
+"#,
+        )
+        .expect("parse");
+    let mut compiler = Compiler::default();
+    let mut grants = crate::HostGrants::deny_all();
+    grants.allow_attach = true;
+    compiler.set_host_grants(grants, Vec::new());
+    compiler.register_native_id(common::STREAM_ATTACH_NATIVE, 119);
+    compiler.register_native_id(common::STREAM_PARK_NATIVE, 120);
+    compiler.register_native_id(common::STREAM_FD_NATIVE, 138);
+    let bc = compiler.compile("", &mut ast);
+    assert!(
+        bc.iter().any(|b| {
+            matches!(b.bytecode(), Instruction::HostInvoke)
+                && (b.operand_u32() & common::HOST_INVOKE_ARITY_MASK) == 6
+                && common::host_invoke_enum_layout(b.operand_u32())
+                    == common::HOST_ENUM_LAYOUT_RESULT_NICHE
+        }),
+        "Stream::attach thunk must HostInvoke ResultNiche; opcodes={:?}",
+        bc.iter()
+            .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+            .collect::<Vec<_>>(),
+    );
+    assert!(
+        bc.iter().any(|b| {
+            matches!(b.bytecode(), Instruction::HostInvoke)
+                && (b.operand_u32() & common::HOST_INVOKE_ARITY_MASK) == 1
+                && common::host_invoke_enum_layout(b.operand_u32())
+                    == common::HOST_ENUM_LAYOUT_OPTION_NICHE
+        }),
+        "Stream::park thunk must HostInvoke OptionNiche; opcodes={:?}",
+        bc.iter()
+            .map(|b| format!("{:?} {:#x}", b.bytecode(), b.operand_u32()))
+            .collect::<Vec<_>>(),
+    );
+}
+
+#[test]
 fn from_bytes_sets_result_niche_layout() {
     let mut ast = Pratt::default()
         .parse(
