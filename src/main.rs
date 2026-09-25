@@ -193,6 +193,19 @@ mod archive_staleness {
             None => true,
         }
     }
+
+    /// True when a recorded source that still exists is newer than `archive`.
+    /// Missing sources are ignored: a shipped archive may outlive its tree.
+    pub(super) fn recorded_sources_newer(archive: &str, debug: &ProgramDebug) -> bool {
+        let Some(arch_mtime) = archive_mtime(archive) else {
+            return false;
+        };
+        debug
+            .source_files
+            .iter()
+            .filter_map(|src| archive_source_mtime(src))
+            .any(|m| m > arch_mtime)
+    }
 }
 
 /// Canonical entry path for FFI `base_dir` resolution (best-effort absolute).
@@ -206,21 +219,7 @@ fn maybe_warn_stale_archive(
     archive: &str,
     debug: &ProgramDebug,
 ) {
-    if debug.source_files.is_empty() {
-        return;
-    }
-    let entry = debug
-        .source_files
-        .iter()
-        .find(|p| {
-            Path::new(p)
-                .extension()
-                .is_some_and(|ext| ext == "hy")
-                && !p.contains("stdlib/")
-        })
-        .map(|s| s.as_str())
-        .unwrap_or(archive);
-    if archive_staleness::archive_is_stale(entry, archive, debug) {
+    if archive_staleness::recorded_sources_newer(archive, debug) {
         pipeline.emit_spanless_warning(
             ErrorCode::IoError,
             format!(
@@ -1038,6 +1037,35 @@ mod tests {
             archive_is_stale(entry.to_str().unwrap(), arch.to_str().unwrap(), &debug),
             "missing recorded dependency must invalidate the archive"
         );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recorded_sources_newer_only_flags_edited_sources() {
+        use super::archive_staleness::recorded_sources_newer;
+        let dir = unique_tmp("run_archive_sources");
+        std::fs::create_dir_all(dir.join("stdlib/io")).unwrap();
+        let dep = dir.join("stdlib/io/sync.hy");
+        let entry = dir.join("main.hy");
+        let arch = dir.join("out.hyc");
+        std::fs::write(&dep, b"fn f() {}").unwrap();
+        std::fs::write(&entry, b"fn main() {}").unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&arch, b"x").unwrap();
+        let debug = ProgramDebug {
+            source_files: vec![
+                dep.to_string_lossy().into_owned(),
+                entry.to_string_lossy().into_owned(),
+                dir.join("gone.hy").to_string_lossy().into_owned(),
+            ],
+            debug_locs: vec![],
+            fn_symbols: Vec::new(),
+        };
+        let a = arch.to_str().unwrap();
+        assert!(!recorded_sources_newer(a, &debug), "fresh archive");
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        std::fs::write(&entry, b"fn main() { /* edited */ }").unwrap();
+        assert!(recorded_sources_newer(a, &debug), "edited entry");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

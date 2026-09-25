@@ -144,6 +144,8 @@ impl Compiler {
 
     pub fn set_source_file(&mut self, path: impl Into<std::path::PathBuf>) {
         self.current_source_file = Some(path.into());
+        // Record every compiled file, not only those that emit a located byte.
+        self.intern_source_file();
     }
 
     pub fn source_files_list(&self) -> Vec<String> {
