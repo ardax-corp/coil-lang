@@ -5058,7 +5058,6 @@ fn main() {
         per.multi_op_join_convoy = false;
         per.invert_guard_branch = false;
         per.slot_promote_tell = false;
-        per.seek_back_edge = false;
         per.ssa_gvn = false;
         let mut next_label = 1u32;
         let mut entered = Vec::new();

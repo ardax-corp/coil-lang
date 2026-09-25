@@ -218,13 +218,10 @@ impl IlModule {
         let run_invert = per.invert_guard_branch;
         per.invert_guard_branch = false;
         // GVN reasons about slot defs; promotion removes the store that makes one
-        // visible, so it runs after GVN has seen the body. Seek-normalize poisons
-        // operand-height at the latch, so it also waits until after GVN.
+        // visible, so it runs after GVN has seen the body.
         let run_slot_promote_tell = per.slot_promote_tell;
-        let run_seek_back_edge = per.seek_back_edge;
         let run_ssa_gvn = per.ssa_gvn;
         per.slot_promote_tell = false;
-        per.seek_back_edge = false;
         per.ssa_gvn = false;
 
         if self.funcs.is_empty() {
@@ -253,9 +250,6 @@ impl IlModule {
                 &mut next_label,
             );
             super::gvn::cfg_gvn_with(&mut body.ops, false);
-            if run_seek_back_edge {
-                opt::seek_normalize_back_edges(&mut body.ops, body.meta.entry_sp);
-            }
             if run_slot_promote_tell {
                 opt::slot_promote_at(&mut body.ops, body.meta.entry_sp);
             }
@@ -1341,7 +1335,6 @@ mod tests {
                 multi_op_join_convoy: true,
                 invert_guard_branch: false,
                 slot_promote_tell: false,
-                seek_back_edge: false,
                 loop_unroll: false,
                 loop_unroll_factor: 8,
                 invariant_store_elim: false,
@@ -1395,7 +1388,7 @@ mod tests {
         ]
     }
 
-    fn seek_promote_opts(on: bool) -> OptimizeOptions {
+    fn seek_promote_opts() -> OptimizeOptions {
         OptimizeOptions {
             jump_thread: false,
             dead_block: false,
@@ -1418,7 +1411,6 @@ mod tests {
             multi_op_join_convoy: false,
             invert_guard_branch: false,
             slot_promote_tell: true,
-            seek_back_edge: on,
             loop_unroll: false,
             loop_unroll_factor: 8,
             invariant_store_elim: false,
@@ -1432,12 +1424,8 @@ mod tests {
         }
     }
 
-    fn is_seek(op: &IlOp) -> bool {
-        matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek)
-    }
-
-    /// Production `optimize_and_flatten` with default `seek_back_edge` off
-    /// must not apply the flag-on Seek-normalize (Seek-to-tell + drop store).
+    /// Production `optimize_and_flatten` must not Seek-normalize a raising
+    /// loop (Seek-to-tell + drop store); that pass was removed.
     /// LIR reconstruct may rewrite the loop; that is not Seek-normalize.
     #[test]
     fn optimize_and_flatten_default_does_not_seek_normalize() {
@@ -1445,7 +1433,7 @@ mod tests {
         let emit_end = ops.iter().filter(|op| op.emits_code()).count();
         let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 2)];
         let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(false), &mut Vec::new());
+        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(), &mut Vec::new());
         let seek_to = flat.iter().find_map(|op| match op {
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
                 Some(byte.operand_u32())
@@ -1472,43 +1460,4 @@ mod tests {
         );
     }
 
-    /// Flag on: Seek sits on the latch after GVN, then promotion drops the
-    /// self-store. Mandelbrot never takes this path (`seek_back_edge` stays off).
-    #[test]
-    fn optimize_and_flatten_seek_back_edge_elides_raising_loop_store() {
-        let ops = raising_loop();
-        let emit_end = ops.iter().filter(|op| op.emits_code()).count();
-        let funcs = vec![IlFunc::with_entry_sp("f", None, 0, emit_end, 2)];
-        let mut m = IlModule::from_flat(&ops, &funcs);
-        let (flat, _, _) = m.optimize_and_flatten(&seek_promote_opts(true), &mut Vec::new());
-        assert!(
-            flat.windows(2).any(|w| {
-                is_seek(&w[0])
-                    && matches!(
-                        w[1],
-                        IlOp::Jump {
-                            kind: IlJumpKind::Unconditional,
-                            ..
-                        }
-                    )
-            }),
-            "Seek must sit on the latch after GVN"
-        );
-        let seek_to = flat.iter().find_map(|op| match op {
-            IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Seek => {
-                Some(byte.operand_u32())
-            }
-            _ => None,
-        });
-        assert_eq!(
-            seek_to,
-            Some(2),
-            "Seek must re-anchor to the forward-edge tell"
-        );
-        let stores = flat
-            .iter()
-            .filter(|op| matches!(op, IlOp::StorePop { .. }))
-            .count();
-        assert_eq!(stores, 0);
-    }
 }

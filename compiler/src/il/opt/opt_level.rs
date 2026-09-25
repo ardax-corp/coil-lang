@@ -22,7 +22,7 @@ pub enum OptLevel {
     /// All currently-on production passes. Backward-compatible default.
     #[default]
     Standard,
-    /// Standard plus `seek_back_edge` and a larger inline budget.
+    /// Standard plus a larger inline budget.
     Aggressive,
     /// Standard with unrolling and return cloning off (less code growth).
     Size,
@@ -142,7 +142,6 @@ fn all_off() -> OptimizeOptions {
         multi_op_join_convoy: false,
         invert_guard_branch: false,
         slot_promote_tell: false,
-        seek_back_edge: false,
         loop_unroll: false,
         loop_unroll_factor: 8,
         invariant_store_elim: false,
@@ -204,7 +203,6 @@ fn flag_vec(o: &OptimizeOptions) -> Vec<bool> {
         o.multi_op_join_convoy,
         o.invert_guard_branch,
         o.slot_promote_tell,
-        o.seek_back_edge,
         o.loop_unroll,
         o.invariant_store_elim,
         o.ssa_gvn,
@@ -268,7 +266,6 @@ mod tests {
         assert!(!o.slot_promote);
         assert!(!o.escape_analysis);
         assert!(!o.loop_unroll);
-        assert!(!o.seek_back_edge);
         assert!(!o.instcombine && !o.local_cse);
     }
 
@@ -281,14 +278,8 @@ mod tests {
     }
 
     #[test]
-    fn aggressive_is_standard_plus_seek() {
-        let s = OptLevel::Standard.options();
-        let a = OptLevel::Aggressive.options();
-        assert!(!s.seek_back_edge);
-        assert!(a.seek_back_edge);
-        let mut s2 = s.clone();
-        s2.seek_back_edge = true;
-        assert_eq!(a, s2);
+    fn aggressive_runs_the_standard_passes() {
+        assert_eq!(OptLevel::Standard.options(), OptLevel::Aggressive.options());
     }
 
     #[test]
@@ -335,19 +326,8 @@ mod tests {
     }
 
     #[test]
-    fn aggressive_pass_names_are_standard_plus_seek() {
-        let standard = OptLevel::Standard.pass_names();
-        let aggressive = OptLevel::Aggressive.pass_names();
-        let extra: Vec<_> = aggressive
-            .iter()
-            .copied()
-            .filter(|n| !standard.contains(n))
-            .collect();
-        assert_eq!(extra, vec!["seek_back_edge"]);
-        assert!(
-            standard.iter().all(|n| aggressive.contains(n)),
-            "Aggressive must include every Standard name"
-        );
+    fn aggressive_pass_names_match_standard() {
+        assert_eq!(OptLevel::Standard.pass_names(), OptLevel::Aggressive.pass_names());
     }
 
     #[test]

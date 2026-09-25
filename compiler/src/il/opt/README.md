@@ -76,11 +76,11 @@ pipeline. No solo “pass” tests.
 (+ `dead_store`) → 19. `tos_carry` → 20. `clone_shared_return` →
 21. `return_convoy` → 22. `bin_join_convoy` → 23. `multi_op_join_convoy` →
 24. `invert_guard_branch` → 25. `branch_optimization` → 26. `block_reordering`
-→ 27. `seek_back_edge` → 28. `slot_promote_tell` → 29. `ssa_gvn`
+→ 27. `slot_promote_tell` → 28. `ssa_gvn`
 
 **Production** (`IlModule::optimize_and_flatten`, non-empty `funcs`): per-body
-opts run with `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
-and `slot_promote_tell` **deferred**. Then per-body **`cfg_gvn`**, then seek +
+opts run with `multi_op_join_convoy`, `invert_guard_branch`,
+and `slot_promote_tell` **deferred**. Then per-body **`cfg_gvn`**, then
 slot_promote_tell, then concat, then whole-buffer multi_op + invert. Bare-buffer
 `optimize()` (empty `funcs` / unit tests) does **not** run `cfg_gvn`.
 
@@ -564,23 +564,6 @@ except block reorder / seek / tell-promote. Heuristic only (no profile).
 - **Tests:** `opt/block_order.rs` `cold_return_block_moves_past_join`,
   `linear_code_unchanged`, `branch_targets_keep_the_same_label_ids`.
 
-## `seek_back_edge`
-
-**Flag:** `seek_back_edge` (default **off**; on at `-O3` Aggressive only).
-**Fn:** `slot_promote::seek_normalize_back_edges`. Uses **`tell`**.
-
-- **Input:** Innermost natural loop whose forward-edge cursor is Known and whose
-  body has self-stores the header join currently hides (COI-97).
-- **Output:** Inserts `Seek` (residual `Byte`) at the latch to the forward-edge
-  cursor so the header becomes Known; later `slot_promote_tell` can drop in-loop
-  self-stores. `Seek` is `tell::Set` and does not change eval-stack height.
-- **Refusals:** Outer (non-innermost) loops — outer Seek used to split
-  tombstoned `FloatChainStore` (mandelbrot `cr`); no profitable self-store; latch already
-  has `Seek`. Off on Standard because innermost mandelbrot has no such stores.
-- **Tests:** `opt/slot_promote.rs` `seek_on_back_edge_elides_loop_self_store`,
-  `optimize_at_default_does_not_seek_normalize`,
-  `optimize_at_seek_back_edge_elides_raising_loop_store`.
-
 ## `slot_promote_tell`
 
 **Flag:** `slot_promote_tell` (default on). **Fn:** `slot_promote::slot_promote_at`.
@@ -689,7 +672,6 @@ calls the pass function directly or runs `optimize` with only that flag true.
 | invert_guard_branch | `convoy.tests.rs` | no |
 | branch_optimization | `branch_opt.rs` | no |
 | block_reordering | `block_order.rs` | no |
-| seek_back_edge | `slot_promote.rs` | no |
 | slot_promote_tell | `slot_promote.rs` | no |
 | cfg_gvn | `gvn.rs` | no |
 | fuse-select (D4) | `lower.rs` | no |

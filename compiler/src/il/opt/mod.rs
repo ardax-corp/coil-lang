@@ -5,7 +5,7 @@
 //! [`stats::PassDelta`]; `collect_stats` records that delta (`PassKind` lives
 //! on the table row, not a match in the driver loop).
 //! [`super::IlModule::optimize_and_flatten`] still defers
-//! `multi_op_join_convoy`, `invert_guard_branch`, `seek_back_edge`,
+//! `multi_op_join_convoy`, `invert_guard_branch`,
 //! `slot_promote_tell`, and `ssa_gvn` around per-body `cfg_gvn` — those are not folded into
 //! the OptLevel table. Fuse-select stays in `lower_optimized`.
 //!
@@ -59,11 +59,6 @@ pub struct OptimizeOptions {
     /// Drop `LOAD`/`STORE` the shared cursor proves redundant, promoting the
     /// slot out of the frame. Runs last, after every slot-tracking pass.
     pub slot_promote_tell: bool,
-    /// `Seek` the latch of a natural loop back to the forward-edge cursor when
-    /// that makes the header `Known` and exposes in-loop self-stores.
-    /// Aggressive-only: Seek poisons operand-height at the latch (cursor), not
-    /// to protect fused opcodes.
-    pub seek_back_edge: bool,
     /// Full-unroll counted natural loops with a known trip count ≤ 8.
     pub loop_unroll: bool,
     /// Cap on trips fully unrolled (clamped to 8). Loops with more trips stay rolled.
@@ -240,7 +235,7 @@ mod tos_carry;
 
 pub(crate) use cfg::invert_branch_over_jump as invert_guard_branch;
 pub(crate) use convoy::multi_op_join_convoy;
-pub(crate) use slot_promote::{seek_normalize_back_edges, slot_promote_at};
+pub(crate) use slot_promote::slot_promote_at;
 
 #[cfg(test)]
 #[path = "mod.tests.rs"]

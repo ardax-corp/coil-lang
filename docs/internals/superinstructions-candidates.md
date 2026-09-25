@@ -145,7 +145,7 @@ they are not emitted. `BinSlotSlotConstJmpt` still has a live handler.
 | `il/lower.rs` `try_fuse_slots` | `FloatChainStore` / `BinSlotSlotConstJmpf` | “not emitted” |
 | `il/canon.rs` | `Load; Load; op` swap | Unknown SP; float; non-commutative ops. `Const; Load; op` is stack-relative (COI-384). |
 | COI-87 / `opt/cfg.rs` | invert loop headers to `*Jmpt` | headers stay `*Jmpf` |
-| `seek_back_edge` | Seek latch on Standard | off except `-O3` |
+| `seek_back_edge` | Seek latch on Standard | removed (blocked MIR dense) |
 | `mir/entry.rs` `hard_refuse` | MIR→LIR leftover | Call / Host / heap field / Box / unmapped alloc |
 | `mir/specialize.rs` | keep dense | no arith; unmapped alloc; post-loop `return [x]`; cost `emit_cost`; residual heap box |
 | `mir/infer.rs` | dense infer | residual `Byte`; `Pow`/`AND`/`OR`; Q9 table string ops |

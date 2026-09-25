@@ -1228,7 +1228,6 @@ mod tests {
                 multi_op_join_convoy: false,
                 invert_guard_branch: false,
                 slot_promote_tell: false,
-                seek_back_edge: false,
                 loop_unroll: false,
                 loop_unroll_factor: 8,
                 invariant_store_elim: false,
