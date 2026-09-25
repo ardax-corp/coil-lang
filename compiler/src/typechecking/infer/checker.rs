@@ -4473,12 +4473,12 @@ impl Checker {
                 range,
             );
         }
-        return self.error_with_help(
+        self.error_with_help(
             ErrorCode::NotAFunction,
             format!("Cannot call method `{}` on non-class type", method),
             range,
             Some("method calls require a class instance receiver".to_string()),
-        );
+        )
     }
 
     fn infer_call_expr(

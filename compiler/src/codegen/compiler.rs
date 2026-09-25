@@ -14037,7 +14037,7 @@ impl Compiler {
                     // Statement form: last-arm is StorePop; ExprStatement
                     // skips the extra POP. Do not rematerialize TOS.
                     self.emit_stack_array_select_store(EmitStackArraySelectStoreArgs {
-                        bytecode: bytecode,
+                        bytecode,
                         base,
                         n,
                         idx_slot: tmp_idx,
