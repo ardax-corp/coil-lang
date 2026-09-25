@@ -1356,7 +1356,23 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
+        self.debug_verify(&bytecode);
         Ok((bytecode, self.compiler_lazy_mut().constants().to_vec()))
+    }
+
+    /// Debug builds verify every compiled program the way archive load does,
+    /// so the test suite catches codegen that emits out-of-range operands.
+    fn debug_verify(&self, bytecode: &[Byte]) {
+        if cfg!(debug_assertions) {
+            let c = self.compiler_lazy();
+            let limits = common::VerifyLimits {
+                strings: c.strings().len(),
+                static_slots: c.static_slot_count() as usize,
+            };
+            if let Err(e) = common::verify_bytecode(bytecode, c.constants(), limits) {
+                panic!("compiler emitted {e}");
+            }
+        }
     }
 
     /// Like [`Self::compile_src`], but keeps post-opt pre-fuse IL for the
@@ -1434,6 +1450,7 @@ impl Pipeline {
             return Err(CompileFail);
         }
 
+        self.debug_verify(&self.bytecode);
         Ok((
             std::mem::take(&mut self.bytecode),
             self.compiler_lazy_mut().constants().to_vec(),

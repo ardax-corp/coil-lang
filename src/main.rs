@@ -363,6 +363,11 @@ fn cmd_run(pipeline: &mut Pipeline, archive: &str) {
                 format_archive_version(ARCHIVE_VERSION)
             ),
         ),
+        Err(LoadErr::Invalid(e)) => fail_and_exit(
+            pipeline,
+            ErrorCode::IoError,
+            format!("Bytecode archive `{archive}` is invalid ({e}). Please recompile from source."),
+        ),
     };
 
     maybe_warn_stale_archive(pipeline, archive, &loaded.debug);
@@ -926,6 +931,19 @@ mod tests {
         assert!(loaded.struct_layouts.is_empty());
         assert_eq!(loaded.operand_stack_slots, Some(256));
         let _ = std::fs::remove_file(&ok_path);
+
+        let bad_path = unique_tmp("bad_jump");
+        let bad_prog = ArchivedProgram {
+            bytecode: vec![Byte::new(common::Instruction::JMP).with_operand_u32(99)],
+            ..ok_prog
+        };
+        let bad_bytes = rkyv::to_bytes::<Error>(&bad_prog).unwrap();
+        std::fs::write(&bad_path, bad_bytes.as_slice()).unwrap();
+        assert!(matches!(
+            try_load_archive(bad_path.to_str().unwrap()),
+            Err(LoadErr::Invalid(e)) if e.pc == 0
+        ));
+        let _ = std::fs::remove_file(&bad_path);
     }
 
     #[test]

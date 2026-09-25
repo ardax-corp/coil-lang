@@ -21,6 +21,8 @@ pub enum LoadErr {
     Missing,
     Corrupt,
     Version(u32),
+    /// Bytecode failed load-time verification.
+    Invalid(common::BytecodeError),
 }
 
 /// Owned archive payload restored by CLI and packaged execute.
@@ -53,6 +55,7 @@ fn decode_archive(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
     let decoded = decode_archived_program(buffer).map_err(|e| match e {
         ArchiveDecodeError::Corrupt => LoadErr::Corrupt,
         ArchiveDecodeError::Version(v) => LoadErr::Version(v),
+        ArchiveDecodeError::Invalid(e) => LoadErr::Invalid(e),
     })?;
     let program = decoded.program;
     Ok(LoadedArchive {
@@ -200,6 +203,10 @@ pub fn try_run_embedded() -> Option<bool> {
                 format_archive_version(v),
                 format_archive_version(ARCHIVE_VERSION)
             );
+            exit(1);
+        }
+        Err(LoadErr::Invalid(e)) => {
+            eprintln!("embedded bytecode archive is invalid: {e}");
             exit(1);
         }
         Err(_) => {
