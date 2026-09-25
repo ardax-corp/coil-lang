@@ -278,21 +278,21 @@ pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> 
         _mm256_storeu_pd(ax.as_mut_ptr(), _mm256_mul_pd(va, vx));
         // set_pd is high-to-low: ax[0]=a*x0 … after storeu matches memory order of set_pd
         // `_mm256_set_pd(e3,e2,e1,e0)` → memory [e0,e1,e2,e3]
-        s = s + ax[0];
-        s = s + y;
-        s = s + ax[1];
-        s = s + y;
-        s = s + ax[2];
-        s = s + y;
-        s = s + ax[3];
-        s = s + y;
+        s += ax[0];
+        s += y;
+        s += ax[1];
+        s += y;
+        s += ax[2];
+        s += y;
+        s += ax[3];
+        s += y;
         x = x3 + dx;
         i += 4;
     }
     while i < n {
-        s = s + a * x;
-        s = s + y;
-        x = x + dx;
+        s += a * x;
+        s += y;
+        x += dx;
         i += 1;
     }
     s
@@ -349,7 +349,7 @@ pub unsafe fn zip_i64_op(kind: u8, a: &[i64], b: &[i64], out: &mut [i64], byte_w
             }
             _ => zero,
         };
-        if byte_width && matches!(kind, 8 | 9 | 10 | 11) {
+        if byte_width && matches!(kind, 8..=11) {
             r = _mm256_and_si256(r, byte_mask);
         }
         _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, r);

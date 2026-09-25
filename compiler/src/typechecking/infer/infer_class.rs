@@ -303,8 +303,8 @@ impl Checker {
                         || self.generics.instances[idx].range.start == usize::MAX)
             })
         });
-        if let Some(existing) = overlapping.as_ref() {
-            if !same_decl {
+        if let Some(existing) = overlapping.as_ref()
+            && !same_decl {
                 let mut msg = Message::error(
                     ErrorCode::GenericTypeError,
                     format!(
@@ -330,7 +330,6 @@ impl Checker {
                 }
                 self.messages.push(msg);
             }
-        }
         // Build method_fqns, assoc_tys, and register instance.
         let mut method_fqns = HashMap::new();
         let mut method_names = Vec::new();
@@ -719,7 +718,6 @@ impl Checker {
     }
 
     #[inline(never)]
-
     pub(super) fn infer_impl(
         &mut self,
         what: &str,

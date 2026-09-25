@@ -183,10 +183,6 @@ enum InferMode {
 }
 
 impl InferMode {
-    fn lir_shape(self) -> bool {
-        matches!(self, Self::Lir | Self::Map)
-    }
-
     fn allows_alloc(self, across: bool) -> bool {
         matches!(self, Self::Map) || across
     }
@@ -693,11 +689,10 @@ fn infer_walk(
                 });
             }
             IlOp::StorePop { slot, .. } => {
-                if let Some(c) = stack.pop() {
-                    if let Some(ty) = slot_ty.get(slot).copied() {
+                if let Some(c) = stack.pop()
+                    && let Some(ty) = slot_ty.get(slot).copied() {
                         let _ = paint(&mut slot_ty, &mut pool_ty, c, ty);
                     }
-                }
             }
             IlOp::BinSlotImm { .. } | IlOp::BinSlotSlot { .. } => {
                 stack.push(Cell {
@@ -914,11 +909,10 @@ fn infer_walk(
                 }
             }
             IlOp::LoadReturnSlot { slot, .. } => {
-                if let Some(c) = stack.pop() {
-                    if let Some(ty) = slot_ty.get(slot).copied() {
+                if let Some(c) = stack.pop()
+                    && let Some(ty) = slot_ty.get(slot).copied() {
                         let _ = paint(&mut slot_ty, &mut pool_ty, c, ty);
                     }
-                }
             }
             IlOp::ConstReturnImm { .. } => {
                 let _ = stack.pop();
@@ -1047,13 +1041,10 @@ fn loop_ranges(ops: &[IlOp]) -> Vec<(usize, usize)> {
         if let IlOp::Jump {
             target: Label(id), ..
         } = op
-        {
-            if let Some(&h) = label_at.get(id) {
-                if h < j {
+            && let Some(&h) = label_at.get(id)
+                && h < j {
                     ranges.push((h, j));
                 }
-            }
-        }
     }
     ranges
 }
@@ -1188,11 +1179,10 @@ fn apply_array_push(
         .pop()
         .ok_or_else(|| LowerError::Refused("ArrayPush stack".into()))?;
     paint(slot_ty, pool_ty, arr, MirTy::HeapRef)?;
-    if let Some(ty) = val.ty {
-        if ty.is_word_lane() {
+    if let Some(ty) = val.ty
+        && ty.is_word_lane() {
             paint(slot_ty, pool_ty, val, ty)?;
         }
-    }
     stack.push(Cell {
         origin: Origin::Tmp,
         ty: Some(MirTy::HeapRef),
@@ -1215,11 +1205,10 @@ fn apply_resume_coro(
         let send = stack
             .pop()
             .ok_or_else(|| LowerError::Refused("ResumeCoro send stack".into()))?;
-        if let Some(ty) = send.ty {
-            if ty.is_word_lane() {
+        if let Some(ty) = send.ty
+            && ty.is_word_lane() {
                 paint(slot_ty, pool_ty, send, ty)?;
             }
-        }
     }
     stack.push(Cell {
         origin: Origin::Tmp,
@@ -1384,6 +1373,7 @@ fn is_cmp(inst: Instruction) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_bin(
     stack: &mut Vec<Cell>,
     slot_ty: &mut HashMap<u32, MirTy>,
@@ -1422,8 +1412,8 @@ fn apply_bin(
     if matches!(
         inst,
         Instruction::BITAND | Instruction::BITOR | Instruction::XOR
-    ) {
-        if let Some(result) = bitwise_heap_result(inst, lhs.ty, rhs.ty) {
+    )
+        && let Some(result) = bitwise_heap_result(inst, lhs.ty, rhs.ty) {
             paint_keep_heap(slot_ty, pool_ty, lhs, result)?;
             paint_keep_heap(slot_ty, pool_ty, rhs, result)?;
             stack.push(Cell {
@@ -1433,7 +1423,6 @@ fn apply_bin(
             });
             return Ok(());
         }
-    }
     let ty = operand_ty(inst);
     if ty == MirTy::I32 {
         *has_i32 = true;
@@ -1473,11 +1462,10 @@ fn paint_keep_heap(
     cell: Cell,
     result: MirTy,
 ) -> Result<(), LowerError> {
-    if cell.ty.is_some_and(|t| t.is_heap_word()) {
-        if let Some(ty) = cell.ty {
+    if cell.ty.is_some_and(|t| t.is_heap_word())
+        && let Some(ty) = cell.ty {
             return paint(slot_ty, pool_ty, cell, ty);
         }
-    }
     if cell.ty.is_some_and(MirTy::is_numeric) {
         return paint(slot_ty, pool_ty, cell, cell.ty.unwrap());
     }
@@ -1528,15 +1516,15 @@ fn apply_store_index(
             .ok_or_else(|| LowerError::Refused("StoreIndex stack".into()))?;
         paint(slot_ty, pool_ty, arr, MirTy::HeapRef)?;
     }
-    if let Some(ty) = val.ty {
-        if ty.is_word_lane() {
+    if let Some(ty) = val.ty
+        && ty.is_word_lane() {
             paint(slot_ty, pool_ty, val, ty)?;
         }
-    }
     stack.push(val);
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_call(
     stack: &mut Vec<Cell>,
     slot_ty: &mut HashMap<u32, MirTy>,

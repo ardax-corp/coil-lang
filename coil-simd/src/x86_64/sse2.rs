@@ -220,17 +220,17 @@ pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> 
         let vx = _mm_set_pd(x1, x0);
         let mut ax = [0.0; 2];
         _mm_storeu_pd(ax.as_mut_ptr(), _mm_mul_pd(va, vx));
-        s = s + ax[0];
-        s = s + y;
-        s = s + ax[1];
-        s = s + y;
+        s += ax[0];
+        s += y;
+        s += ax[1];
+        s += y;
         x = x1 + dx;
         i += 2;
     }
     while i < n {
-        s = s + a * x;
-        s = s + y;
-        x = x + dx;
+        s += a * x;
+        s += y;
+        x += dx;
         i += 1;
     }
     s

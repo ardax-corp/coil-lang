@@ -264,14 +264,12 @@ impl CodeBuf {
             if !op.emits_code() {
                 continue;
             }
-            if emitting >= from_code {
-                if let IlOp::Byte { byte, loc } = op {
-                    if let Some((kind, arity, label, ret_words)) = self.entry_from_abs_byte(*byte)
+            if emitting >= from_code
+                && let IlOp::Byte { byte, loc } = op
+                    && let Some((kind, arity, label, ret_words)) = self.entry_from_abs_byte(*byte)
                     {
                         rewrites.push((i, kind, arity, label, *loc, ret_words));
                     }
-                }
-            }
             emitting += 1;
         }
         for (i, kind, arity, target, loc, ret_words) in rewrites {

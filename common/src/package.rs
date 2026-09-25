@@ -508,12 +508,11 @@ pub fn append_package_payload_with_natives(
     out.resize(out.len() + pad, 0);
     out.extend_from_slice(archive);
     let mut flags = flags;
-    if let Some(lock) = native_lock {
-        if !lock.is_empty() {
+    if let Some(lock) = native_lock
+        && !lock.is_empty() {
             out.extend_from_slice(lock);
             flags |= PACKAGE_FLAG_HAS_NATIVE_LOCK;
         }
-    }
     let trailer = PackageTrailer {
         archive_offset: offset,
         archive_len: len,
@@ -541,11 +540,10 @@ pub fn is_system_ffi_stem(name: &str) -> bool {
         } else if let Some(stripped) = stem.strip_suffix(".dll") {
             stem = stripped.to_string();
         }
-        if let Some(stripped) = stem.strip_prefix("lib") {
-            if !stripped.is_empty() {
+        if let Some(stripped) = stem.strip_prefix("lib")
+            && !stripped.is_empty() {
                 stem = stripped.to_string();
             }
-        }
         matches!(
             stem.as_str(),
             "c" | "system" | "system.b" | "ucrtbase" | "msvcrt"
@@ -620,6 +618,14 @@ pub fn default_natives_root() -> std::path::PathBuf {
 mod tests {
     use super::*;
     use crate::opcode::Byte;
+
+    #[test]
+    fn json_bool_roundtrip() {
+        let v = Json::parse(r#"{"ok": true, "off": false}"#).expect("parse");
+        let obj = v.as_object().expect("object");
+        assert!(matches!(json_obj_get(obj, "ok"), Some(Json::Bool(true))));
+        assert!(matches!(json_obj_get(obj, "off"), Some(Json::Bool(false))));
+    }
 
     #[test]
     fn trailer_round_trip() {

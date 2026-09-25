@@ -141,6 +141,7 @@ impl Checker {
         Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), false)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn infer_function(
         &mut self,
         name: &str,
@@ -397,13 +398,13 @@ impl Checker {
                 // Unannotated / still-open returns that fall through are unit,
                 // not an invented typed value (codegen used to emit `CONST 0`).
                 if matches!(&ret, Ty::Var(_)) {
-                    self.unify(&ret, &unit_ty(), &range, "missing return");
+                    self.unify(&ret, &unit_ty(), range, "missing return");
                 } else if self.fn_result_mode.is_some()
                     && let Some((ok, _)) = result_ok_err(&ret)
                 {
                     let ok = apply_ty_prune(&self.subst, &ok);
                     if matches!(&ok, Ty::Var(_)) {
-                        self.unify(&ok, &unit_ty(), &range, "missing return");
+                        self.unify(&ok, &unit_ty(), range, "missing return");
                     }
                 }
                 let ret = self

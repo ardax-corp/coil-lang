@@ -107,9 +107,7 @@ fn classify_counted_loop(
     if loop_has_call(ops, header, latch) {
         return None;
     }
-    let Some(init) = last_const_store_before(ops, header, index_slot) else {
-        return None;
-    };
+    let init = last_const_store_before(ops, header, index_slot)?;
     if init != 0 {
         return None;
     }
@@ -274,13 +272,12 @@ fn header_has_foreign_jumps(
         {
             return true;
         }
-        if i > header && i < latch {
-            if let IlOp::Entry { target, .. } = op
+        if i > header && i < latch
+            && let IlOp::Entry { target, .. } = op
                 && *target == header_label
             {
                 return true;
             }
-        }
     }
     false
 }
@@ -291,8 +288,8 @@ fn body_has_disallowed_control(
     latch: usize,
     header_label: Label,
 ) -> bool {
-    for i in (jmpf + 1)..latch {
-        match &ops[i] {
+    for op in ops.iter().take(latch).skip(jmpf + 1) {
+        match op {
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 target,

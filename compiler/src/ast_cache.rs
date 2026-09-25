@@ -26,7 +26,7 @@ pub struct CachedAst {
 impl CachedAst {
     pub fn parse(source: String) -> Self {
         let source = Pin::from(source.into_boxed_str());
-        match Pratt::default().parse(&*source) {
+        match Pratt::default().parse(&source) {
             Ok(ast) => {
                 // SAFETY: `ast` borrows the pinned `Box<str>`. The pin is never
                 // moved out of this struct; `ast` is dropped first.

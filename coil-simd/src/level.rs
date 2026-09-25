@@ -38,7 +38,7 @@ fn probe() -> SimdLevel {
             return SimdLevel::Avx2;
         }
         // SSE2 is part of the x86_64 ABI / stdlib baseline.
-        return SimdLevel::Sse2;
+        SimdLevel::Sse2
     }
     #[cfg(target_arch = "aarch64")]
     {

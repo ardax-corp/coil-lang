@@ -81,11 +81,6 @@ impl MirBuilder {
         self.func.entry
     }
 
-    #[allow(dead_code)]
-    pub fn current_block(&self) -> Option<BlockId> {
-        self.current
-    }
-
     pub fn set_ret_ty(&mut self, ty: MirTy) {
         self.func.ret_ty = Some(ty);
     }
@@ -525,11 +520,10 @@ impl MirBuilder {
         if !dest_ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldLoad dest {dest_ty}")));
         }
-        if let Some(n) = name {
-            if self.resolve_ty(n) != MirTy::HeapRef {
+        if let Some(n) = name
+            && self.resolve_ty(n) != MirTy::HeapRef {
                 return Err(MirError::msg("HeapFieldLoad name"));
             }
-        }
         let dest = self.alloc(dest_ty);
         self.push(MirInst::HeapFieldLoad {
             dest,
@@ -558,11 +552,10 @@ impl MirBuilder {
         if !ty.is_specialized() {
             return Err(MirError::msg(format!("HeapFieldStore value {ty}")));
         }
-        if let Some(n) = name {
-            if self.resolve_ty(n) != MirTy::HeapRef {
+        if let Some(n) = name
+            && self.resolve_ty(n) != MirTy::HeapRef {
                 return Err(MirError::msg("HeapFieldStore name"));
             }
-        }
         let dest = self.alloc(ty);
         let value = self.resolve(value);
         self.push(MirInst::HeapFieldStore {
@@ -878,11 +871,6 @@ impl MirBuilder {
         })
     }
 
-    #[allow(dead_code)]
-    pub fn unreachable(&mut self) -> Result<(), MirError> {
-        self.set_term(Terminator::Unreachable)
-    }
-
     pub fn finish(mut self) -> Result<MirFunc, MirError> {
         self.seal_all();
         self.rewrite_subst();
@@ -1073,11 +1061,9 @@ impl MirBuilder {
             .insts
             .iter_mut()
             .find(|i| i.dest() == phi)
-        {
-            if let MirInst::Phi { args: slot, .. } = inst {
+            && let MirInst::Phi { args: slot, .. } = inst {
                 *slot = args;
             }
-        }
         self.try_remove_trivial_phi(phi, block);
     }
 

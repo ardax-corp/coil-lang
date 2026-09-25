@@ -133,8 +133,6 @@ struct GenericFnSig {
     def_id: DefId,
     fn_name: String,
     type_params: Vec<String>,
-    #[allow(dead_code)] // kept on the sig for bound-aware planning / tests
-    type_param_bounds: Vec<Vec<String>>,
     /// For each formal: which type-parameter index it references (if any).
     param_type_params: Vec<Option<usize>>,
     /// Parallel to `param_type_params`: true when the formal is `T... name`.
@@ -196,8 +194,8 @@ fn collect_generic_functions(
             body,
             ..
         } => {
-            if !type_params.is_empty() {
-                if let Some(def_id) = checker
+            if !type_params.is_empty()
+                && let Some(def_id) = checker
                     .def_id_of(name)
                     .or_else(|| checker.interned_def(module, name))
                 {
@@ -209,7 +207,6 @@ fn collect_generic_functions(
                         sigs.insert(format!("{module}::{name}"), sig);
                     }
                 }
-            }
             if let Some(body) = body {
                 collect_generic_functions(module, body, checker, sigs);
             }
@@ -224,10 +221,6 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
     let type_param_names = type_params
         .iter()
         .map(|tp| tp.name.to_string())
-        .collect::<Vec<_>>();
-    let type_param_bounds = type_params
-        .iter()
-        .map(|tp| tp.bounds.iter().map(|b| b.to_string()).collect::<Vec<_>>())
         .collect::<Vec<_>>();
 
     let mut param_type_params = Vec::new();
@@ -248,7 +241,6 @@ fn signature_from_function(type_params: &[TypeParam<'_>], args: &Output) -> Gene
         def_id: DefId::from_u32(0),
         fn_name: String::new(),
         type_params: type_param_names,
-        type_param_bounds,
         param_type_params,
         param_is_rest,
     }
@@ -274,7 +266,7 @@ fn collect_candidates(
         if let Expression::Identifier(fn_name) = name.1.as_ref()
             && let Some(sig) = sigs.get(*fn_name)
             && let Some(specialization) =
-                candidate_for_call(*fn_name, sig, args.as_deref(), checker, intern)
+                candidate_for_call(fn_name, sig, args.as_deref(), checker, intern)
         {
             out.push(MonoCandidate {
                 span: node.0,
@@ -465,11 +457,10 @@ pub fn ground_ty(checker: &Checker, expr: &Output) -> Option<Ty> {
         _ => {}
     }
 
-    if let Some(ty) = checker.lookup_for_codegen_span(expr.0.start, expr.0.end) {
-        if let Some(ty) = concrete_ty(&ty) {
+    if let Some(ty) = checker.lookup_for_codegen_span(expr.0.start, expr.0.end)
+        && let Some(ty) = concrete_ty(&ty) {
             return Some(ty);
         }
-    }
 
     match expr.1.as_ref() {
         Expression::Integer(_) => Some(Ty::Con("int".into())),

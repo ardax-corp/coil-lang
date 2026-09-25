@@ -66,8 +66,7 @@ impl Checker {
                     variant_name,
                     ..
                 } = &arm.pattern.1
-            {
-                if let Some(tag) = self
+                && let Some(tag) = self
                     .enum_tags
                     .get(*enum_name)
                     .and_then(|t| t.get(*variant_name).copied())
@@ -109,7 +108,6 @@ impl Checker {
                         .insert((*scrut_name).to_string(), ctor);
                     refined_scrut = Some(((*scrut_name).to_string(), prev_cg));
                 }
-            }
 
             self.unify(
                 &resolved_scrutinee,

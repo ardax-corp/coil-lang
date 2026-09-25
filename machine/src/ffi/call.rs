@@ -178,7 +178,7 @@ impl Drop for FfiStringReset {
 
 fn member_to_value(member: &Member) -> Value {
     match member {
-        Member::Value(v) => Value::from(*v),
+        Member::Value(v) => *v,
         Member::Object(o) => Value::from(o.addr()),
     }
 }
@@ -885,8 +885,8 @@ mod tests {
             args: *const *const c_void,
             _userdata: &(),
         ) {
-            let arg_ptr = *args;
-            let arg = *(arg_ptr as *const i64);
+            let arg_ptr = unsafe { *args };
+            let arg = unsafe { *(arg_ptr as *const i64) };
             LAST.store(arg, Ordering::SeqCst);
             *result = arg * 2;
         }

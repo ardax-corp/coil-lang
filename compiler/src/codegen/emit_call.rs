@@ -195,11 +195,10 @@ impl Compiler {
             return bytecode;
         }
 
-        if let Some(hint) = self.existential_method_hint(self_id, span.start, span.end) {
-            if self.emit_existential_method_call(&mut bytecode, name, args.as_ref(), &hint) {
+        if let Some(hint) = self.existential_method_hint(self_id, span.start, span.end)
+            && self.emit_existential_method_call(&mut bytecode, name, args.as_ref(), &hint) {
                 return bytecode;
             }
-        }
 
         if let Some(hint) = self.bound_method_hint(self_id, span.start, span.end) {
             let dict_name = format!("__dict{}", hint.dict_index);
@@ -448,11 +447,10 @@ impl Compiler {
                     let mut arg_temps: Vec<u32> = Vec::new();
                     for arg in &fixed {
                         self.append_with_existential_pack(&mut bytecode, arg);
-                        if box_generic_args {
-                            if let Some(arg_ty) = self.codegen_expr_ty(arg) {
+                        if box_generic_args
+                            && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                                 Self::emit_box_if_needed(&mut bytecode, &arg_ty);
                             }
-                        }
                         let tmp = self.alloc_temp_slot();
                         bytecode.push_store_pop(tmp);
                         arg_temps.push(tmp);
@@ -460,11 +458,10 @@ impl Compiler {
                     let nargs = if pack_rest {
                         for arg in &rest {
                             self.append_with_existential_pack(&mut bytecode, arg);
-                            if box_generic_args {
-                                if let Some(arg_ty) = self.codegen_expr_ty(arg) {
+                            if box_generic_args
+                                && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                                     Self::emit_box_if_needed(&mut bytecode, &arg_ty);
                                 }
-                            }
                         }
                         if self.checker.fn_tuple_rest(&lookup_name) {
                             bytecode.push_make_tuple(rest.len() as u32);
@@ -544,11 +541,10 @@ impl Compiler {
                     } else if !self.emit_direct_fn_call(&mut bytecode, &call_name, call_arity) {
                         self.missing_call_target(&call_name, span.into_range());
                     }
-                    if is_generic && self.generic_return_is_boxed(&lookup_name) {
-                        if let Some(call_ty) = self.codegen_expr_ty(ast) {
+                    if is_generic && self.generic_return_is_boxed(&lookup_name)
+                        && let Some(call_ty) = self.codegen_expr_ty(ast) {
                             Self::emit_unbox_if_needed(&mut bytecode, &call_ty);
                         }
-                    }
                 } else {
                     let mut message = Message::error(
                         ErrorCode::UnknownFunction,
@@ -587,8 +583,8 @@ impl Compiler {
                 );
                 return bytecode;
             }
-            if let Expression::Identifier(raw) = name.1.as_ref() {
-                if *raw == "len" {
+            if let Expression::Identifier(raw) = name.1.as_ref()
+                && *raw == "len" {
                     let provided = args.as_ref().map(|items| items.len()).unwrap_or(0);
                     if let Some(items) = args
                         && items.len() == 1
@@ -654,7 +650,6 @@ impl Compiler {
                         return bytecode;
                     }
                 }
-            }
 
             let identifier = self.resolve_variable_checked(name);
             let n = self.resolve_free_fn(&identifier);
@@ -1010,11 +1005,10 @@ impl Compiler {
                 ) {
                     self.missing_call_target(&n, span.into_range());
                 }
-                if let Some(enum_name) = two_word {
-                    if self.unbox_enum_context == 0 {
+                if let Some(enum_name) = two_word
+                    && self.unbox_enum_context == 0 {
                         self.emit_box_pair_after_call(&mut bytecode, &enum_name);
                     }
-                }
                 // Generic→concrete unbox: only when the return type
                 // parameter was boxed as a top-level argument
                 // (`id<T>(T) -> T`). Nested params (`F<A> -> A`) are
@@ -1063,12 +1057,11 @@ impl Compiler {
                 let needs_arg_box = self.local_call_needs_arg_boxing(&identifier);
                 for arg in &flat_args {
                     self.append_with_existential_pack(&mut bytecode, arg);
-                    if needs_arg_box {
-                        if let Some(arg_ty) = self.codegen_expr_ty(arg) {
+                    if needs_arg_box
+                        && let Some(arg_ty) = self.codegen_expr_ty(arg) {
                             Self::emit_box_if_needed(&mut bytecode, &arg_ty);
                             arg_tys.push(arg_ty);
                         }
-                    }
                 }
                 let mut dict_count = 0u32;
                 if let Some(source) = polyfn_source.as_ref() {

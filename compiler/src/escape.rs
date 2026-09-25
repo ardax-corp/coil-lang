@@ -28,11 +28,10 @@ impl ArrayEscape {
 /// How a named `new C` local may be rewritten (Q2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClassEscape {
-    /// Field-only, non-escaping. Invisible field-SROA (consecutive slots).
-    #[allow(dead_code)]
-    Private,
     /// Identity use (call, return, method, drop-as-value, alias, compare).
     /// Materialize **one** heap instance and reuse it (Q1 box-once).
+    /// Field-only `new C` also lands here: `for_named_new` does not invent a
+    /// separate private state, because the use-site fact is box-at-identity.
     BoxOnce,
     /// Stay heap from construction: `fn drop()`, arity 0 or > 32, parameters.
     Heap,
@@ -49,9 +48,9 @@ impl ClassEscape {
         }
     }
 
-    /// Field slots are sound (private region, or box-at-identity).
+    /// Field slots are sound when the class is box-at-identity.
     pub fn stack_allocatable(self) -> bool {
-        matches!(self, Self::Private | Self::BoxOnce)
+        matches!(self, Self::BoxOnce)
     }
 }
 
@@ -74,5 +73,15 @@ mod tests {
         }
         assert!(!is_fixed_array_grow_method("len"));
         assert!(!is_fixed_array_grow_method("capacity"));
+    }
+
+    #[test]
+    fn named_new_is_box_once_until_drop_or_bad_arity() {
+        assert_eq!(ClassEscape::for_named_new(false, 2), ClassEscape::BoxOnce);
+        assert!(ClassEscape::for_named_new(false, 2).stack_allocatable());
+        assert_eq!(ClassEscape::for_named_new(true, 2), ClassEscape::Heap);
+        assert_eq!(ClassEscape::for_named_new(false, 0), ClassEscape::Heap);
+        assert_eq!(ClassEscape::for_named_new(false, 33), ClassEscape::Heap);
+        assert!(!ClassEscape::Heap.stack_allocatable());
     }
 }

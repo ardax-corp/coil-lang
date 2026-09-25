@@ -122,7 +122,7 @@ pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 ///
 /// Append-only: keep prior ids stable. Collect and register_finalizer are
 /// registered immediately after this table.
-pub const GC_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
+pub const GC_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("gc_root", 1, host_gc_root),
     ("gc_unroot", 1, host_gc_unroot),
     ("gc_get", 1, host_gc_get),
@@ -197,14 +197,11 @@ mod tests {
         let mut heap = Heap::default();
         let s = intern(&mut heap, "ephemeral");
         let w = host_gc_weak(&mut heap, &[s]);
-        match host_gc_upgrade(&mut heap, &[w]) {
-            some => {
-                // Option::Some
-                match heap.find_object_by_addr(some.raw() as u64) {
-                    Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 1),
-                    _ => panic!("expected Option"),
-                }
-            }
+        let some = host_gc_upgrade(&mut heap, &[w]);
+        // Option::Some
+        match heap.find_object_by_addr(some.raw() as u64) {
+            Some(Object::Enum(gc)) => assert_eq!(gc.as_ref().tag, 1),
+            _ => panic!("expected Option"),
         }
         force_collect(&mut heap, &[w]);
         let up = host_gc_upgrade(&mut heap, &[w]);

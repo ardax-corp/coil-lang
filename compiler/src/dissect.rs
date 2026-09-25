@@ -144,11 +144,10 @@ fn annotate_pc(pc: usize, pc_names: &HashMap<usize, &str>) -> String {
 
 fn format_load_store_slots(byte: &Byte) -> String {
     let n = byte.load_store_count();
-    if n == 1 {
-        if let Some(s) = byte.load_store_single_slot() {
+    if n == 1
+        && let Some(s) = byte.load_store_single_slot() {
             return format!("slot={s}");
         }
-    }
     let mut parts = Vec::with_capacity(n);
     for i in 0..n {
         parts.push(format!("s{i}={}", byte.load_store_slot_at(i)));
@@ -500,11 +499,10 @@ pub fn format_prologue(
 /// Format final bytecode for matching functions (or all when `pat` is `None`).
 pub fn format_bytecode(artifacts: &DissectArtifacts, pat: Option<&str>) -> Result<String, String> {
     let matched = filter_symbols(&artifacts.functions, pat);
-    if let Some(p) = pat {
-        if matched.is_empty() {
+    if let Some(p) = pat
+        && matched.is_empty() {
             return Err(format!("no functions matching `--fn {p}`"));
         }
-    }
     let pc_names = artifacts.pc_to_name();
     let ranges = artifacts.function_ranges();
     let mut out = String::new();
@@ -620,7 +618,7 @@ pub(crate) fn format_il_op(op: &IlOp) -> String {
 
 /// Format pre-opt IL for matching functions (or all when `pat` is `None`).
 pub fn format_il(snapshot: &IlSnapshot, pat: Option<&str>) -> Result<String, String> {
-    let mut funcs: Vec<&IlFunc> = snapshot.funcs.iter().collect();
+    let mut funcs: Vec<&IlFunc> = snapshot.funcs().iter().collect();
     if let Some(p) = pat {
         funcs.retain(|f| matches_fn_pat(&f.name, p));
         if funcs.is_empty() {
@@ -636,7 +634,7 @@ pub fn format_il(snapshot: &IlSnapshot, pat: Option<&str>) -> Result<String, Str
             f.name, f.code_start, f.code_end
         );
         let mut emitting = 0usize;
-        for op in &snapshot.ops {
+        for op in snapshot.ops() {
             if let IlOp::Label(_) = op {
                 if emitting >= f.code_start && emitting <= f.code_end {
                     let _ = writeln!(out, "  {emitting:5}  {}", format_il_op(op));

@@ -44,6 +44,10 @@ impl<T: Default + Hash + Eq + Clone> Interner<T> {
     pub fn len(&self) -> usize {
         self.storage.len()
     }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }
 
 #[cfg(debug_assertions)]
@@ -60,8 +64,11 @@ mod tests {
     #[test]
     fn test_interning() {
         let mut interner = Interner::default();
+        assert!(interner.is_empty());
 
         assert_eq!(0, interner.intern("Hello"));
+        assert!(!interner.is_empty());
+        assert_eq!(interner.len(), 1);
         assert_eq!(1, interner.intern("World"));
         assert_eq!(0, interner.intern("Hello"));
         assert_eq!(1, interner.intern("World"));

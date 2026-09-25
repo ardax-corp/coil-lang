@@ -46,12 +46,9 @@ pub use kind::Kind;
 pub use loop_par::{LoopParSite, LoopParSites, LoopReduceOp, analyze_loop_par_sites};
 #[allow(unused_imports)] // public API re-export
 pub use par_hint::{EscapeKind, NamedEscape, ParEscapeHint, analyze_par_escape_hints};
-#[cfg(test)]
-pub use par_profit::par_work_grain;
 pub use par_profit::{
     ArgForm, PAR_SPEC_HOPS, ParArm, ParBinOp, ParCombine, ParForkSite, analyze_par_fork_sites,
-    args_worth_parallel, arm_callee, collect_par_worker_fns, eval_arm_args, guards_hold,
-    par_expr_grain, par_expr_wide_enabled, par_loop_grain, par_loop_wide_enabled, par_worker_name,
+    args_worth_parallel, arm_callee, collect_par_worker_fns, guards_hold, par_expr_wide_enabled, par_loop_grain, par_loop_wide_enabled, par_worker_name,
     unary_dynamic_cutoff,
 };
 #[allow(unused_imports)] // public API re-export

@@ -144,12 +144,10 @@ impl ConvoyPlan {
                     dest_hi: Some(hi),
                     ..
                 } = inst
-                {
-                    if need_slot[dest.index()] || need_slot[hi.index()] {
+                    && (need_slot[dest.index()] || need_slot[hi.index()]) {
                         need_slot[dest.index()] = true;
                         need_slot[hi.index()] = true;
                     }
-                }
             }
         }
 
@@ -231,11 +229,10 @@ fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
                 scrutinee,
                 payloads,
                 ..
-            }) => {
-                if *scrutinee == dest || payloads.contains(&dest) {
+            })
+                if (*scrutinee == dest || payloads.contains(&dest)) => {
                     return true;
                 }
-            }
             _ => {}
         }
     }
@@ -353,11 +350,10 @@ fn feeds_only_tail_call(
                 saw = true;
             }
         }
-        if let Some(term) = &block.term {
-            if term_uses(term).contains(&v) {
+        if let Some(term) = &block.term
+            && term_uses(term).contains(&v) {
                 return false;
             }
-        }
     }
     saw
 }
@@ -400,8 +396,8 @@ fn is_convoy_shape(
                 saw = true;
             }
         }
-        if let Some(term) = &block.term {
-            if term_uses(term).contains(&v) {
+        if let Some(term) = &block.term
+            && term_uses(term).contains(&v) {
                 if block.id != home {
                     return false;
                 }
@@ -410,7 +406,6 @@ fn is_convoy_shape(
                 }
                 saw = true;
             }
-        }
     }
     saw
 }
@@ -558,11 +553,10 @@ fn join_bin(func: &MirFunc, dest: ValueId, convoy: &[bool], entry: Option<Label>
                     if *v == dest {
                         only_ret = true;
                     }
-                } else if let Some(term) = &b.term {
-                    if term_uses(term).contains(&dest) {
+                } else if let Some(term) = &b.term
+                    && term_uses(term).contains(&dest) {
                         return false;
                     }
-                }
             }
             return only_ret;
         }

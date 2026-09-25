@@ -115,9 +115,7 @@ fn find_induction(ops: &[IlOp], lp: &NaturalLoop) -> Option<Induction> {
         {
             stores += 1;
             step = step_before_store(ops, i, idx, &stored);
-            if step.is_none() {
-                return None;
-            }
+            step?;
         }
         i += 1;
     }
@@ -186,11 +184,9 @@ fn step_before_store(ops: &[IlOp], store_i: usize, iv: u32, stored: &HashSet<u32
         && matches!(&ops[store_i - 1], IlOp::Bin { op: Instruction::ADD, .. })
         && matches!(&ops[store_i - 2], IlOp::Const { imm, .. } if *imm > 0)
         && matches!(&ops[store_i - 3], IlOp::Load { slot, .. } if *slot == iv)
-    {
-        if let IlOp::Const { imm, .. } = &ops[store_i - 2] {
+        && let IlOp::Const { imm, .. } = &ops[store_i - 2] {
             return Some(Step::Imm(*imm));
         }
-    }
     if store_i >= 1
         && let IlOp::BinSlotImm {
             op,

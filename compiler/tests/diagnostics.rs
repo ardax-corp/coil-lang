@@ -21,7 +21,7 @@ fn check(src: &str) -> (String, Vec<String>) {
     let ty_str = if probe.is_some() {
         c.env()
             .lookup("__coil_diag_probe__")
-            .map(|scheme| peel_fn_ret_display(scheme))
+            .map(peel_fn_ret_display)
             .unwrap_or_else(|| format!("{ty}"))
     } else {
         format!("{ty}")

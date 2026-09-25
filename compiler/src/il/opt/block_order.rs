@@ -159,11 +159,9 @@ fn targeted_by_uncond(ops: &[IlOp], start: usize, end: usize) -> bool {
             target,
             ..
         } = op
-        {
-            if labels.contains(&target.0) {
+            && labels.contains(&target.0) {
                 return true;
             }
-        }
     }
     false
 }
@@ -189,13 +187,11 @@ fn successors(
     let (s, e) = blocks[bi];
     let mut succs = Vec::new();
     for op in &ops[s..e] {
-        if let IlOp::Jump { target, .. } = op {
-            if let Some(&t) = label_block.get(&target.0) {
-                if !succs.contains(&t) {
+        if let IlOp::Jump { target, .. } = op
+            && let Some(&t) = label_block.get(&target.0)
+                && !succs.contains(&t) {
                     succs.push(t);
                 }
-            }
-        }
     }
     if e > s && can_fall_through(&ops[e - 1]) && bi + 1 < blocks.len() && !succs.contains(&(bi + 1))
     {

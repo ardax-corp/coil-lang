@@ -283,17 +283,17 @@ pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> 
         let vx = _mm512_loadu_pd(xs.as_ptr());
         let mut ax = [0.0; 8];
         _mm512_storeu_pd(ax.as_mut_ptr(), _mm512_mul_pd(va, vx));
-        for k in 0..8 {
-            s = s + ax[k];
-            s = s + y;
+        for lane in &ax {
+            s += *lane;
+            s += y;
         }
         x = xs[7] + dx;
         i += 8;
     }
     while i < n {
-        s = s + a * x;
-        s = s + y;
-        x = x + dx;
+        s += a * x;
+        s += y;
+        x += dx;
         i += 1;
     }
     s

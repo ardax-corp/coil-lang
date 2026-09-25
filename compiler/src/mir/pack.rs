@@ -115,11 +115,10 @@ fn match_axpy(func: &MirFunc) -> Option<AxpySpec> {
                 acc = Some((*dest, step, init));
             }
             MirTy::F64 if xphi.is_none() => {
-                if let Some(dx) = is_fadd_invariant_step(func, step, *dest, &lp.blocks) {
-                    if is_invariant(func, init, &lp.blocks) {
+                if let Some(dx) = is_fadd_invariant_step(func, step, *dest, &lp.blocks)
+                    && is_invariant(func, init, &lp.blocks) {
                         xphi = Some((*dest, init, dx));
                     }
-                }
             }
             _ => return None,
         }
@@ -134,11 +133,10 @@ fn match_axpy(func: &MirFunc) -> Option<AxpySpec> {
     if !is_invariant(func, n, &lp.blocks) {
         return None;
     }
-    if let Some(trips) = as_const_i64(func, n) {
-        if trips < 8 {
+    if let Some(trips) = as_const_i64(func, n)
+        && trips < 8 {
             return None;
         }
-    }
 
     let (a, x0, dx, y) = if let Some((x_dest, x_init, dx)) = xphi {
         let (a, y) = match_acc_from_x(func, acc_step, acc_phi, x_dest)?;
@@ -214,8 +212,8 @@ fn match_acc_from_x(
             }
         }
         // (s + a*x) + y
-        if let Some((il, ir)) = as_fadd(func, l) {
-            if other_of(il, ir, acc_phi)
+        if let Some((il, ir)) = as_fadd(func, l)
+            && other_of(il, ir, acc_phi)
                 .and_then(|m| as_fmul_of(func, m, x))
                 .is_some()
             {
@@ -223,9 +221,8 @@ fn match_acc_from_x(
                 let a = as_fmul_of(func, mul, x)?.0;
                 return Some((a, PackVal::Ssa(r)));
             }
-        }
-        if let Some((il, ir)) = as_fadd(func, r) {
-            if other_of(il, ir, acc_phi)
+        if let Some((il, ir)) = as_fadd(func, r)
+            && other_of(il, ir, acc_phi)
                 .and_then(|m| as_fmul_of(func, m, x))
                 .is_some()
             {
@@ -233,7 +230,6 @@ fn match_acc_from_x(
                 let a = as_fmul_of(func, mul, x)?.0;
                 return Some((a, PackVal::Ssa(l)));
             }
-        }
     }
     None
 }
@@ -261,24 +257,22 @@ struct AffineX {
 
 fn find_affine_x(func: &MirFunc, root: ValueId, iv: ValueId) -> Option<AffineX> {
     fn walk(func: &MirFunc, v: ValueId, iv: ValueId) -> Option<AffineX> {
-        if let Some(src) = as_i2f(func, v) {
-            if src == iv {
+        if let Some(src) = as_i2f(func, v)
+            && src == iv {
                 return Some(AffineX {
                     x: v,
                     x0: PackVal::F64(0.0),
                     dx: PackVal::F64(1.0),
                 });
             }
-        }
-        if let Some((l, r)) = as_fmul(func, v) {
-            if let Some(mut inner) = walk(func, l, iv).or_else(|| walk(func, r, iv)) {
+        if let Some((l, r)) = as_fmul(func, v)
+            && let Some(mut inner) = walk(func, l, iv).or_else(|| walk(func, r, iv)) {
                 let factor = if walk(func, l, iv).is_some() { r } else { l };
                 inner.x = v;
                 inner.dx = PackVal::Ssa(factor);
                 inner.x0 = PackVal::F64(0.0);
                 return Some(inner);
             }
-        }
         if let Some((l, r)) = as_fadd(func, v) {
             if let Some(mut inner) = walk(func, l, iv) {
                 inner.x = v;

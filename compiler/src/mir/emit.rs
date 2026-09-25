@@ -392,10 +392,10 @@ fn latch_overwrite_ok(
         // `i` before later arms / `i % n`.
         return false;
     }
-    match &block.term {
-        Some(Terminator::Br { cond, .. }) if *cond == dest => false,
-        _ => true,
-    }
+    !matches!(
+        &block.term,
+        Some(Terminator::Br { cond, .. }) if *cond == dest
+    )
 }
 
 
@@ -427,17 +427,17 @@ fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
                     return true;
                 }
             }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
-                if *scrutinee == dest || payloads.contains(&dest) {
+            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. })
+                if (*scrutinee == dest || payloads.contains(&dest)) => {
                     return true;
                 }
-            }
             _ => {}
         }
     }
     false
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_br_cond(
     out: &mut Vec<IlOp>,
     block: &super::func::MirBlock,
@@ -693,6 +693,7 @@ fn is_jmpf_cond_op(i: Instruction) -> bool {
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn emit_inst(
     out: &mut Vec<IlOp>,
     inst: &MirInst,
@@ -1025,8 +1026,8 @@ pub(super) fn emit_inst(
                     "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
                 ));
             }
-            if let Some(obj) = paired_alloc_dest(func, *dest) {
-                if regs[dest.index()] != regs[obj.index()] {
+            if let Some(obj) = paired_alloc_dest(func, *dest)
+                && regs[dest.index()] != regs[obj.index()] {
                     out.push(IlOp::Load {
                         slot: u32::from(regs[obj.index()]),
                         loc,
@@ -1036,7 +1037,6 @@ pub(super) fn emit_inst(
                         loc,
                     });
                 }
-            }
         }
         MirInst::Deopt { .. } => {}
         MirInst::String { dest, idx } => {
@@ -1056,6 +1056,7 @@ pub(super) fn emit_inst(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_term(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1142,8 +1143,7 @@ fn emit_term(
                     target,
                     args,
                 }) = block.insts.last()
-                {
-                    if *dest == *v && *dest_hi == *hi {
+                    && *dest == *v && *dest_hi == *hi {
                         emit_call(
                             out,
                             stacked,
@@ -1161,7 +1161,6 @@ fn emit_term(
                         )?;
                         return Ok(());
                     }
-                }
                 emit_stack_value(out, stacked, *v, func, plan, regs, pool, loc)?;
             } else {
                 out.push(IlOp::Const { imm: 0, loc });
@@ -1353,6 +1352,7 @@ fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u16, LowerError> {
     Ok(i as u16)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_dense_jump_if_match(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1540,6 +1540,7 @@ fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<
     group
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_boxed_last_arm_unpack(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1573,6 +1574,7 @@ fn emit_boxed_last_arm_unpack(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_boxed_jump_if_match(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1722,6 +1724,7 @@ fn gather_base(
     Ok(scratch)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_call(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1824,6 +1827,7 @@ fn store_or_stack_call(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_args_on_stack(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1843,6 +1847,7 @@ fn emit_args_on_stack(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_stack_value(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1895,6 +1900,7 @@ fn emit_stack_value(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_stack_bin(
     out: &mut Vec<IlOp>,
     stacked: &mut Vec<ValueId>,
@@ -1989,12 +1995,11 @@ fn push_stack_const(
 ) -> Result<(), LowerError> {
     match c {
         MirConst::I64(v) => {
-            if let Ok(imm) = i32::try_from(v) {
-                if imm >= 0 {
+            if let Ok(imm) = i32::try_from(v)
+                && imm >= 0 {
                     out.push(IlOp::Const { imm, loc });
                     return Ok(());
                 }
-            }
             let idx = u32::from(intern_pool(pool, v as u64)?);
             out.push(IlOp::ConstPool { idx, loc });
         }

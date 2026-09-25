@@ -233,8 +233,8 @@ pub enum Instruction {
     /// - `[15:8]`  = filled param count
     /// - `[23:16]` = arity (fixed N, or rest nfixed)
     /// - `[24]`    = is_rest flag
-    /// `filled_mask` is an int on the stack (bit i ⇒ fixed param i is bound).
-    /// `entry` is a code offset (CodePtr / int).
+    ///   `filled_mask` is an int on the stack (bit i ⇒ fixed param i is bound).
+    ///   `entry` is a code offset (CodePtr / int).
     MakeFn,
 
     /// LoadStatic: operands[31:0] = static slot index → push statics[slot].

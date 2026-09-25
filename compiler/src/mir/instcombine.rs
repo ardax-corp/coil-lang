@@ -210,6 +210,7 @@ fn fold_inst(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn fold_bin(
     op: MirBinOp,
     ty: MirTy,
@@ -223,11 +224,10 @@ fn fold_bin(
 ) -> Fold {
     let lc = consts.get(&lhs).copied();
     let rc = consts.get(&rhs).copied();
-    if let (Some(a), Some(b)) = (lc, rc) {
-        if let Some(c) = eval_bin(op, ty, a, b) {
+    if let (Some(a), Some(b)) = (lc, rc)
+        && let Some(c) = eval_bin(op, ty, a, b) {
             return Fold::ToConst(c);
         }
-    }
     if let Some(keep) = identity(op, ty, lhs, rhs, lc, rc) {
         return Fold::Subst(keep);
     }
@@ -429,14 +429,12 @@ fn rewrite_exact_recip_consts(
     }
     for block in &mut func.blocks {
         for inst in &mut block.insts {
-            if let MirInst::Const { dest, c } = inst {
-                if rewrite.contains(dest) {
-                    if let Some(r) = exact_recip(*c) {
+            if let MirInst::Const { dest, c } = inst
+                && rewrite.contains(dest)
+                    && let Some(r) = exact_recip(*c) {
                         *c = r;
                         consts.insert(*dest, r);
                     }
-                }
-            }
         }
     }
 }
@@ -473,11 +471,10 @@ fn known_finite(func: &MirFunc, consts: &HashMap<ValueId, MirConst>) -> HashSet<
                     } if finite.contains(src) => {
                         finite.insert(*dest);
                     }
-                    MirInst::Phi { dest, args, ty, .. } if ty.is_float() => {
-                        if args.iter().all(|(_, v)| finite.contains(v)) {
+                    MirInst::Phi { dest, args, ty, .. } if ty.is_float()
+                        && args.iter().all(|(_, v)| finite.contains(v)) => {
                             finite.insert(*dest);
                         }
-                    }
                     _ => {}
                 }
             }
@@ -627,17 +624,17 @@ fn is_plus_two(ty: MirTy, c: Option<MirConst>) -> bool {
 }
 
 fn is_int_zero(ty: MirTy, c: Option<MirConst>) -> bool {
-    match (ty, c) {
-        (MirTy::I32, Some(MirConst::I32(0))) | (MirTy::I64, Some(MirConst::I64(0))) => true,
-        _ => false,
-    }
+    matches!(
+        (ty, c),
+        (MirTy::I32, Some(MirConst::I32(0))) | (MirTy::I64, Some(MirConst::I64(0)))
+    )
 }
 
 fn is_int_minus_one(ty: MirTy, c: Option<MirConst>) -> bool {
-    match (ty, c) {
-        (MirTy::I32, Some(MirConst::I32(-1))) | (MirTy::I64, Some(MirConst::I64(-1))) => true,
-        _ => false,
-    }
+    matches!(
+        (ty, c),
+        (MirTy::I32, Some(MirConst::I32(-1))) | (MirTy::I64, Some(MirConst::I64(-1)))
+    )
 }
 
 fn int_zero(ty: MirTy) -> MirConst {
@@ -764,9 +761,7 @@ fn cmp_ord<T: Ord>(op: MirCmpOp, a: T, b: T) -> bool {
 
 /// Ordered float compares (dense `fcmp.o*`). Refuse NaN — leave the cmp.
 fn cmp_float<T: PartialOrd>(op: MirCmpOp, a: T, b: T) -> Option<bool> {
-    if a.partial_cmp(&b).is_none() {
-        return None;
-    }
+    a.partial_cmp(&b)?;
     Some(match op {
         MirCmpOp::Lt => a < b,
         MirCmpOp::Le => a <= b,

@@ -214,11 +214,10 @@ fn match_shaped_il(ops: &[IlOp]) -> bool {
                 ..
             } => return true,
             IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::Unpack => return true,
-            IlOp::Dup { .. } => {
-                if peek_tag_or_niche_test(&ops[i + 1..]) {
+            IlOp::Dup { .. }
+                if peek_tag_or_niche_test(&ops[i + 1..]) => {
                     return true;
                 }
-            }
             _ => {}
         }
         i += 1;
@@ -228,14 +227,10 @@ fn match_shaped_il(ops: &[IlOp]) -> bool {
 
 fn peek_tag_or_niche_test(ops: &[IlOp]) -> bool {
     match ops {
-        [IlOp::LogNot { .. }, IlOp::Jump { kind, .. }, ..]
-            if matches!(
-                kind,
-                IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse
-            ) =>
-        {
-            true
-        }
+        [IlOp::LogNot { .. }, IlOp::Jump {
+            kind: IlJumpKind::JumpIfTrue | IlJumpKind::JumpIfFalse,
+            ..
+        }, ..] => true,
         [IlOp::Const { .. }, IlOp::Bin { op, .. }, IlOp::Jump { kind, .. }, ..]
             if matches!(*op, Instruction::EQ | Instruction::NEQ)
                 && matches!(

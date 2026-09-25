@@ -543,21 +543,22 @@
     #[test]
     fn make_dict_set_field_get_field_roundtrip_via_intern_key() {
         let strings = vec!["k".to_owned()];
-        let mut code = Vec::new();
-        code.push(const_int(1));
-        code.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        code.push(Byte::new(Instruction::MakeDict).with_operand_u32(1));
-        code.push(store_pop(0));
         // SetField pops name, target, value, push value, dict, key.
-        code.push(const_int(99));
-        code.push(load(0));
-        code.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        code.push(Byte::new(Instruction::SetField));
-        code.push(Byte::new(Instruction::POP));
-        code.push(load(0));
-        code.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        code.push(Byte::new(Instruction::GetField));
-        code.push(Byte::new(Instruction::HALT));
+        let code = vec![
+            const_int(1),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::MakeDict).with_operand_u32(1),
+            store_pop(0),
+            const_int(99),
+            load(0),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::SetField),
+            Byte::new(Instruction::POP),
+            load(0),
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::GetField),
+            Byte::new(Instruction::HALT),
+        ];
 
         let mut vm = Machine::<16>::default();
         vm.run_with_pool(&code, &[], &strings, 0);
@@ -577,12 +578,13 @@
         use crate::memory::Member;
 
         let strings = vec!["payload".to_owned()];
-        let mut code = Vec::new();
         // Declaration order (int, string): push string then int so payload[0]=int.
-        code.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        code.push(const_int(7));
-        code.push(make_enum(3, 2));
-        code.push(Byte::new(Instruction::HALT));
+        let code = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            const_int(7),
+            make_enum(3, 2),
+            Byte::new(Instruction::HALT),
+        ];
 
         let mut vm = Machine::<8>::default();
         vm.run_with_pool(&code, &[], &strings, 0);
@@ -1811,12 +1813,12 @@
         vm.with_output(TestOutputBuf(Arc::clone(&buf)));
 
         let strings = vec!["boom".to_string()];
-        let mut bytecode = Vec::new();
-        // STRING table[0] == "boom"
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        bytecode.push(Byte::new(Instruction::Panic));
-        // Unreachable if Panic aborts.
-        bytecode.push(Byte::new(Instruction::HALT));
+        // STRING table[0] == "boom". Unreachable HALT if Panic aborts.
+        let bytecode = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::Panic),
+            Byte::new(Instruction::HALT),
+        ];
 
         vm.run_with_pool(&bytecode, &[], &strings, 0);
         assert!(vm.panicked());
@@ -1833,10 +1835,11 @@
         vm.with_output(TestOutputBuf(Arc::clone(&buf)));
 
         let strings = vec!["hello".to_string()];
-        let mut bytecode: Vec<Byte> = Vec::new();
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        bytecode.push(Byte::new(Instruction::PRINT));
-        bytecode.push(Byte::new(Instruction::HALT));
+        let bytecode: Vec<Byte> = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::PRINT),
+            Byte::new(Instruction::HALT),
+        ];
 
         vm.run_with_pool(&bytecode, &[], &strings, 0);
 
@@ -1921,13 +1924,14 @@
     fn jump_if_match_does_not_treat_tagged_err_as_enum() {
         let mut vm = Machine::<16>::default();
         let strings = vec!["n".to_string()];
-        let mut bytecode = Vec::new();
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        bytecode.push(Byte::new(Instruction::CONST).with_const_inline(1));
-        bytecode.push(Byte::new(Instruction::BITOR));
-        bytecode.push(jump_if_match(0, 0));
-        bytecode.push(Byte::new(Instruction::POP));
-        bytecode.push(Byte::new(Instruction::HALT));
+        let mut bytecode = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::CONST).with_const_inline(1),
+            Byte::new(Instruction::BITOR),
+            jump_if_match(0, 0),
+            Byte::new(Instruction::POP),
+            Byte::new(Instruction::HALT),
+        ];
         let panic_arm = bytecode.len();
         bytecode.push(Byte::new(Instruction::Panic));
         let constants = [panic_arm as u64];
@@ -2081,15 +2085,16 @@
         // PRINT
         // HALT
         let strings = vec!["hi".to_string(), "s".to_string()];
-        let mut bytecode: Vec<Byte> = Vec::new();
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(1));
-        bytecode.push(Byte::new(Instruction::MakeDict).with_operand_u32(1));
-        bytecode.push(Byte::new(Instruction::DUPLICATE));
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(1));
-        bytecode.push(Byte::new(Instruction::GetField));
-        bytecode.push(Byte::new(Instruction::PRINT));
-        bytecode.push(Byte::new(Instruction::HALT));
+        let bytecode: Vec<Byte> = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::MakeDict).with_operand_u32(1),
+            Byte::new(Instruction::DUPLICATE),
+            Byte::new(Instruction::STRING).with_operand_u32(1),
+            Byte::new(Instruction::GetField),
+            Byte::new(Instruction::PRINT),
+            Byte::new(Instruction::HALT),
+        ];
 
         let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
         vm.with_output(TestOutputBuf(Arc::clone(&buf)));
@@ -2357,10 +2362,11 @@
         });
 
         let strings = vec!["xyz".to_string()];
-        let mut bytecode = Vec::new();
-        bytecode.push(Byte::new(Instruction::STRING).with_operand_u32(0));
-        bytecode.push(Byte::new(Instruction::PRINT));
-        bytecode.push(Byte::new(Instruction::HALT));
+        let bytecode = vec![
+            Byte::new(Instruction::STRING).with_operand_u32(0),
+            Byte::new(Instruction::PRINT),
+            Byte::new(Instruction::HALT),
+        ];
         vm.run_with_pool(&bytecode, &[], &strings, 0);
         let _ = vm.restore_output();
         let text = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
@@ -3339,9 +3345,9 @@
             Byte::new(Instruction::LogNot),
             Byte::new(Instruction::HALT),
         ]);
-        assert_eq!(vm.pop().as_bool(), false);
-        assert_eq!(vm.pop().as_bool(), true);
-        assert_eq!(vm.pop().as_bool(), false);
+        assert!(!vm.pop().as_bool());
+        assert!(vm.pop().as_bool());
+        assert!(!vm.pop().as_bool());
     }
 
     #[test]
@@ -4295,11 +4301,10 @@
 
         let mut tag99 = HashSet::new();
         for obj in vm.heap().into_iter() {
-            if let Object::Enum(gc) = obj {
-                if gc.as_ref().tag == 99 {
+            if let Object::Enum(gc) = obj
+                && gc.as_ref().tag == 99 {
                     tag99.insert(obj.addr());
                 }
-            }
         }
         assert!(
             tag99.is_empty(),
@@ -4595,7 +4600,7 @@
     fn bin_slot_imm_store_writes_dest() {
         let add = Instruction::ADD as u8;
         // slot0=10; BinSlotImmStore ADD src=0 imm=1 dest=0 → slot0=11; return slot0
-        let packed = (0u64 << 32) | (1u16 as u64);
+        let packed = 1u16 as u64;
         let mut vm = Machine::<32>::default();
         vm.run_with_pool(
             &[
@@ -4632,7 +4637,7 @@
             &[],
             0,
         );
-        assert_eq!(vm.pop().as_bool(), true);
+        assert!(vm.pop().as_bool());
     }
 
     /// CmpJmpf / LogNotJmpf resolve large targets via the constant pool.
@@ -5045,12 +5050,10 @@
         use common::Instruction as OwnedInsn;
 
         // Build owned bytes then transmute like run_raw.
-        let owned = vec![
-            OwnedByte::new(OwnedInsn::CONST).with_const_inline(1),
+        let owned = [OwnedByte::new(OwnedInsn::CONST).with_const_inline(1),
             OwnedByte::new(OwnedInsn::CONST).with_const_inline(2),
             OwnedByte::new(OwnedInsn::ADD),
-            OwnedByte::new(OwnedInsn::HALT),
-        ];
+            OwnedByte::new(OwnedInsn::HALT)];
         let code: &[Byte] =
             unsafe { std::slice::from_raw_parts(owned.as_ptr().cast(), owned.len()) };
 
@@ -5078,11 +5081,9 @@
         use common::Byte as OwnedByte;
         use common::Instruction as OwnedInsn;
 
-        let owned = vec![
-            OwnedByte::new(OwnedInsn::CONST).with_const_inline(7),
+        let owned = [OwnedByte::new(OwnedInsn::CONST).with_const_inline(7),
             OwnedByte::new(OwnedInsn::CONST).with_const_inline(8),
-            OwnedByte::new(OwnedInsn::HALT),
-        ];
+            OwnedByte::new(OwnedInsn::HALT)];
         let code: &[Byte] =
             unsafe { std::slice::from_raw_parts(owned.as_ptr().cast(), owned.len()) };
 
@@ -5219,7 +5220,7 @@
     fn coi_373_hot_dispatch_modes_agree_on_dense_move() {
         let ty = common::dense::TY_I64;
         let packed_const = ((ty as u32 & 0x7F) << 24) | 7;
-        let packed_move = (1u32 << 8) | 0;
+        let packed_move = 1u32 << 8;
         let code = [
             Byte::new(Instruction::Seek).with_operand_u32(2),
             Byte::new(Instruction::DenseConst).with_operand_u32(packed_const),

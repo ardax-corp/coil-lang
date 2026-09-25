@@ -361,15 +361,14 @@ fn pin_current_array_in(
     obj: Object,
 ) {
     let idx = slot as usize;
-    if let Some(pins) = frame_pins.last_mut() {
-        if pins.depth == frames_len {
+    if let Some(pins) = frame_pins.last_mut()
+        && pins.depth == frames_len {
             if pins.by_slot.len() <= idx {
                 pins.by_slot.resize(idx + 1, None);
             }
             pins.by_slot[idx] = Some(obj);
             return;
         }
-    }
     let mut by_slot = vec![None; idx + 1];
     by_slot[idx] = Some(obj);
     frame_pins.push(FramePins {
@@ -1189,6 +1188,8 @@ impl<const S: usize> Machine<S> {
         .map_err(|e| e.to_string())?;
         let (object, _gc) = self.heap.alloc_library(lib_arc.clone());
         let addr = object.addr();
+        // Object is a VM-local heap root, not a cross-thread value.
+        #[allow(clippy::arc_with_non_send_sync)]
         self.userland_libraries
             .insert(addr, std::sync::Arc::new(object));
         self.libraries
@@ -1971,6 +1972,8 @@ impl<const S: usize> Machine<S> {
             let obj_lib: &mut crate::memory::ObjLibrary = (**gc).as_mut();
             let id = crate::ffi::register_on_library(obj_lib, signature, &self.struct_layouts)
                 .map_err(|e| e.to_string())?;
+            // Object is a VM-local heap root, not a cross-thread value.
+            #[allow(clippy::arc_with_non_send_sync)]
             self.userland_libraries
                 .insert(addr, std::sync::Arc::new(*lib_obj_mut));
             Ok(id)
@@ -2037,16 +2040,15 @@ impl<const S: usize> Machine<S> {
         let sub_addr = sub.as_ptr() as u64;
         let mut current = self.heap.head_for_lookup();
         while let Some(reference) = current {
-            if let Object::Coroutine(gc) = reference {
-                if gc
+            if let Object::Coroutine(gc) = reference
+                && gc
                     .as_ref()
                     .yield_from
                     .as_ref()
                     .is_some_and(|d| d.as_ptr() as u64 == sub_addr)
                 {
-                    return Some(gc.clone());
+                    return Some(gc);
                 }
-            }
             current = reference.get_next();
         }
         None

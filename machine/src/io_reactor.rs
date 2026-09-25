@@ -123,11 +123,10 @@ impl IoReactor {
                         continue;
                     }
                     let now = Instant::now();
-                    if let Some(end) = deadline {
-                        if now >= end {
+                    if let Some(end) = deadline
+                        && now >= end {
                             return Err(IoErrorTag::TimedOut);
                         }
-                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -189,7 +188,7 @@ impl IoReactor {
         let deadline = timeout.map(|d| Instant::now() + d);
         let mut ready = self.inner.ready.lock().unwrap_or_else(|e| e.into_inner());
         loop {
-            if ready.iter().any(|t| *t == token) {
+            if ready.contains(&token) {
                 ready.retain(|t| *t != token);
                 self.inner
                     .waits
@@ -248,11 +247,10 @@ impl IoReactor {
                 .collect()
         };
         if snapshot.is_empty() {
-            if let Some(d) = timeout {
-                if !d.is_zero() {
+            if let Some(d) = timeout
+                && !d.is_zero() {
                     std::thread::sleep(d.min(Duration::from_millis(1)));
                 }
-            }
             return 0;
         }
         let timeout_ms = match timeout {
@@ -269,13 +267,12 @@ impl IoReactor {
         let mut ready = self.inner.ready.lock().unwrap_or_else(|e| e.into_inner());
         for i in ready_idx {
             let token = snapshot[i].0;
-            if let Some(w) = waits.get_mut(&token) {
-                if !w.done {
+            if let Some(w) = waits.get_mut(&token)
+                && !w.done {
                     w.done = true;
                     ready.push(token);
                     n += 1;
                 }
-            }
         }
         if n > 0 {
             self.inner.cvar.notify_all();

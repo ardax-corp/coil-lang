@@ -68,8 +68,8 @@ fn pack_f64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<f64>
     }
     out.clear();
     out.reserve(m.saturating_mul(n));
-    for i in 0..m {
-        let Some(row_obj) = find_object(heap, rows[i].raw() as u64) else {
+    for row in rows.iter().take(m) {
+        let Some(row_obj) = find_object(heap, row.raw() as u64) else {
             return false;
         };
         let Some(cells) = elements_of(&row_obj) else {
@@ -95,8 +95,8 @@ fn pack_i64_matrix(heap: &Heap, v: Value, m: usize, n: usize, out: &mut Vec<i64>
     }
     out.clear();
     out.reserve(m.saturating_mul(n));
-    for i in 0..m {
-        let Some(row_obj) = find_object(heap, rows[i].raw() as u64) else {
+    for row in rows.iter().take(m) {
+        let Some(row_obj) = find_object(heap, row.raw() as u64) else {
             return false;
         };
         let Some(cells) = elements_of(&row_obj) else {
@@ -308,6 +308,7 @@ pub fn packed_matrix_zip(heap: &mut Heap, args: &[Value]) -> Value {
     alloc_nested_matrix(heap, c, m, n, outer_is_tuple, row_is_tuple)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_f64_pair(
     heap: &Heap,
     a: Value,
@@ -349,6 +350,7 @@ fn pack_f64_pair(
     (a_cells, b_cells)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn pack_i64_pair(
     heap: &Heap,
     a: Value,
@@ -714,7 +716,7 @@ mod tests {
         let mut heap = Heap::default();
         let a = alloc_matrix2(&mut heap, [[1, 2], [3, 4]]);
         let b = alloc_matrix2(&mut heap, [[1, 1], [1, 1]]);
-        let add_meta = Value::from((2 | (2 << 8) | (0 << 16)) as i64); // Add
+        let add_meta = Value::from((2 | (2 << 8)) as i64); // Add
         let sum = packed_matrix_zip(&mut heap, &[a, b, add_meta]);
         let rows = aggregate_elements(&heap, sum).expect("rows");
         let r0 = aggregate_elements(&heap, rows[0]).expect("r0");

@@ -12,6 +12,8 @@ use super::func::IlFunc;
 use super::op::{IlJumpKind, IlOp, Label};
 use super::opt::{self, OptimizeOptions};
 
+type FlatIl = (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>);
+
 /// One function's owned IL ops (labels inclusive at span edges).
 #[derive(Clone)]
 pub struct IlFuncBody {
@@ -115,7 +117,7 @@ impl IlModule {
     /// per-func opts; remap on concat so lower never binds a jump to another
     /// function's label with the same numeric id. Prologue/epilogue are copied
     /// verbatim; cross-function `Jump`/`Entry` targets are patched per segment.
-    pub fn to_flat(&self) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
+    pub fn to_flat(&self) -> FlatIl {
         let mut module = self.clone();
         absorb_trailing_labels(&mut module);
         let mut out = Vec::new();
@@ -208,7 +210,7 @@ impl IlModule {
         &mut self,
         opts: &OptimizeOptions,
         pool: &mut Vec<u64>,
-    ) -> (Vec<IlOp>, HashMap<u32, u32>, Vec<HashMap<u32, u32>>) {
+    ) -> FlatIl {
         let mut per = opts.clone();
         let run_multi = per.multi_op_join_convoy;
         per.multi_op_join_convoy = false;
@@ -604,11 +606,10 @@ fn remap_cross_function_entry_call_targets(
             if local.contains(&target.0) {
                 continue;
             }
-            if let Some(new_id) = resolve_cross_function_entry(target.0, maps, entry_labels) {
-                if new_id != target.0 && !local.contains(&new_id) {
+            if let Some(new_id) = resolve_cross_function_entry(target.0, maps, entry_labels)
+                && new_id != target.0 && !local.contains(&new_id) {
                     target.0 = new_id;
                 }
-            }
         }
     }
 }
@@ -635,11 +636,10 @@ fn remap_cross_function_jump_targets(
             if flat_label_ids.contains(&target.0) {
                 continue;
             }
-            if let Some(&new_id) = prior.get(&target.0) {
-                if new_id != target.0 && !local.contains(&new_id) {
+            if let Some(&new_id) = prior.get(&target.0)
+                && new_id != target.0 && !local.contains(&new_id) {
                     target.0 = new_id;
                 }
-            }
         }
     }
 }
@@ -1123,20 +1123,22 @@ mod tests {
     fn to_flat_remaps_prologue_codeptr_entry_targets() {
         let loc = loc();
         let drop_entry = Label(0);
-        let mut m = IlModule::default();
-        m.prologue = vec![
-            IlOp::Entry {
-                kind: EntryKind::CodePtr,
-                arity: 0,
-                target: drop_entry,
-                loc, ret_words: 1,},
-            IlOp::Jump {
-                kind: IlJumpKind::Unconditional,
-                target: Label(99),
-                loc,
-                hint: Default::default(),
-            },
-        ];
+        let mut m = IlModule {
+            prologue: vec![
+                IlOp::Entry {
+                    kind: EntryKind::CodePtr,
+                    arity: 0,
+                    target: drop_entry,
+                    loc, ret_words: 1,},
+                IlOp::Jump {
+                    kind: IlJumpKind::Unconditional,
+                    target: Label(99),
+                    loc,
+                    hint: Default::default(),
+                },
+            ],
+            ..Default::default()
+        };
         m.funcs.push(IlFuncBody {
             meta: IlFunc::new("drop", Some(drop_entry), 0, 2),
             ops: vec![IlOp::Label(drop_entry), IlOp::Return { loc, ret_words: 1}],

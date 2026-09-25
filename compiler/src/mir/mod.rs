@@ -65,22 +65,21 @@ mod string_barrier;
 mod text;
 mod ty;
 
-pub use abi::{DenseAbi, DenseCallMap};
+pub use abi::DenseCallMap;
 pub use builder::{MirBuilder, MirError};
 pub use cse::{cse, gvn};
 pub use destprop::destprop;
 pub use emit::emit_dense;
 pub use emit_lir::emit_lir;
 pub use entry::{lir_eligible, lir_refuse, LirRefuse};
-pub use func::{DeoptSite, MirBlock, MirFunc};
-pub use gc::{fill_live_roots, LiveRootSet};
-pub use deopt::{DraftDeoptMap, DraftDeoptSite};
+pub use func::{MirBlock, MirFunc};
+pub use deopt::DraftDeoptMap;
 pub use stackmap::{bind_drafts, try_build_draft, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
 };
-pub use infer::{infer_lir_with_seed, infer_stack_map, numeric_work_ops};
+pub use infer::{infer_lir_with_seed, numeric_work_ops};
 pub use instcombine::instcombine;
 pub use layout::MirLayout;
 pub use licm::licm;

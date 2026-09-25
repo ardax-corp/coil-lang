@@ -39,7 +39,7 @@ pub const DLOAD_PRODUCTION_STEMS: &[&str] = &["crypto", "tls", "regex", "time"];
 
 /// Whether `stem` is one of [`DLOAD_PRODUCTION_STEMS`] (docs/tests only).
 pub fn is_production_dload_stem(stem: &str) -> bool {
-    DLOAD_PRODUCTION_STEMS.iter().any(|&s| s == stem)
+    DLOAD_PRODUCTION_STEMS.contains(&stem)
 }
 
 /// Filename stem for the dload gate (`/abs/libfoo.so` → `foo`).

@@ -514,6 +514,7 @@ pub(super) enum DenseFail {
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn dense_index(
     stack: &mut Stack<Value>,
     sp: usize,
@@ -557,6 +558,7 @@ pub(super) fn dense_index(
 }
 
 #[inline(always)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn dense_store_index(
     stack: &mut Stack<Value>,
     sp: usize,
@@ -643,7 +645,7 @@ pub(super) fn dense_field_load(
             _ => None,
         }
     } else {
-        let field_index = c as usize;
+        let field_index = c;
         match heap.find_object_by_addr(addr) {
             Some(Object::Enum(enum_ref)) => {
                 let enum_ref = enum_ref.as_ref();
@@ -695,7 +697,7 @@ pub(super) fn dense_field_store(
             gc.as_mut()
                 .set(key, super::Machine::<8>::value_as_member(heap, value));
         } else {
-            let idx = c as usize;
+            let idx = c;
             promise!(gc.as_ref().slot_len().is_some_and(|n| idx < n));
             gc.as_mut()
                 .set_slot(idx, super::Machine::<8>::value_as_member(heap, value));
@@ -1777,11 +1779,10 @@ fn exec_dense(ctx: &mut HotCtx<'_, '_>, bc: Instruction, opcode: Byte) {
                 ctx.panic_msg = Some("no such field");
             }
         }
-        Instruction::DenseFieldStore => {
-            if dense_field_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() {
+        Instruction::DenseFieldStore
+            if dense_field_store(ctx.stack, ctx.sp, &opcode, ctx.heap, ctx.stack_cap).is_err() => {
                 ctx.panic_msg = Some("SetField on non-instance");
             }
-        }
         _ => {}
     }
 }
@@ -1878,6 +1879,7 @@ pub(super) enum HotStop {
 /// Consume a streak of hot ops at `*ip`. Leaves `*ip` on the first cold op
 /// (or `code.len()`).
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn run_hot_streak<const S: usize>(
     stack: &mut Stack<Value>,
     sp: &mut usize,
@@ -1955,6 +1957,7 @@ pub(super) fn run_hot_streak<const S: usize>(
 /// `*ip` already points at the next instruction. Fib never calls this.
 /// Mandelbrot enters once and stays in the dense loop across the back edge.
 #[inline(never)]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn consume_always_hot_streak<const S: usize>(
     stack: &mut Stack<Value>,
     sp: &mut usize,

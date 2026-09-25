@@ -22,6 +22,9 @@ use crate::manifest::{
 };
 use crate::Compiler;
 
+/// Bytecode, constants, strings, static slot count, and debug sidecar from `Pipeline::run`.
+type RunArtifacts = (Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug);
+
 /// A queued file to compile, along with the path it was
 /// discovered under. The pipeline processes queued files
 /// in BFS order from the entry point.
@@ -877,12 +880,11 @@ impl Pipeline {
                     order_paths.push(item.file.clone());
                 }
             }
-            if let Some(ref e) = entry {
-                if let Some(i) = order_paths.iter().position(|p| p == e) {
+            if let Some(ref e) = entry
+                && let Some(i) = order_paths.iter().position(|p| p == e) {
                     let last = order_paths.remove(i);
                     order_paths.push(last);
                 }
-            }
         }
         let mut by_path: HashMap<PathBuf, WorkItem> =
             items.into_iter().map(|i| (i.file.clone(), i)).collect();
@@ -1066,11 +1068,7 @@ impl Pipeline {
         // Scan each worklist file once (`already_scanned`), re-enqueue at the
         // back for the compile pass. `enqueue_file` dedupes via `processed`.
         let mut already_scanned: Vec<PathBuf> = Vec::new();
-        loop {
-            let item = match self.worklist.pop_front() {
-                Some(i) => i,
-                None => break,
-            };
+        while let Some(item) = self.worklist.pop_front() {
             let file = item.file.clone();
             if already_scanned.contains(&file) {
                 // Already scanned; keep on worklist for the compile pass.
@@ -1297,6 +1295,7 @@ impl Pipeline {
         (bytecode, self.compiler_lazy_mut().constants().to_vec())
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn compile_src(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), ()> {
         let parser = Pratt::default();
         let path = Path::new("<input>");
@@ -1360,6 +1359,7 @@ impl Pipeline {
     /// Like [`Self::compile_src`], but keeps post-opt pre-fuse IL for the
     /// cursor_model gate. Always available so `compiler/tests/cursor_model.rs`
     /// does not need the `dissect` feature.
+    #[allow(clippy::result_unit_err)]
     pub fn compile_src_retaining_il(&mut self, src: &str) -> Result<(Vec<Byte>, Vec<u64>), ()> {
         self.retain_cursor_il = true;
         let result = self.compile_src(src);
@@ -1402,6 +1402,7 @@ impl Pipeline {
     /// declarations by reading the referenced files from disk.
     ///
     /// Multi-file entry point: discovers and compiles the module graph from disk.
+    #[allow(clippy::result_unit_err)]
     pub fn compile_src_from_file(&mut self, file: &str) -> Result<(Vec<Byte>, Vec<u64>), ()> {
         let entry = PathBuf::from(file);
         self.reset_session();
@@ -1442,6 +1443,7 @@ impl Pipeline {
     ///
     /// When `capture_il` is true, retains pre-opt stack IL after finalize splices.
     #[cfg(any(test, feature = "dissect"))]
+    #[allow(clippy::result_unit_err)]
     pub fn compile_dissect(
         &mut self,
         file: &str,
@@ -1623,10 +1625,11 @@ impl Pipeline {
             .collect()
     }
 
+    #[allow(clippy::result_unit_err)]
     pub fn run(
         self,
         filename: String,
-    ) -> Result<(Vec<Byte>, Vec<u64>, Vec<String>, u32, ProgramDebug), ()> {
+    ) -> Result<RunArtifacts, ()> {
         let mut f = File::open(filename).expect("Unable to find file");
         let mut buffer = Vec::with_capacity(1024);
         f.read_to_end(&mut buffer).expect("Unable to read file");

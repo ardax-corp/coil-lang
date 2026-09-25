@@ -349,6 +349,8 @@ impl<const S: usize> Machine<S> {
                                 .or_insert_with(|| lib_arc.clone());
                             let (object, _gc) = self.heap.alloc_library(lib_arc);
                             let addr = object.addr();
+                            // Object is a VM-local heap root, not a cross-thread value.
+                            #[allow(clippy::arc_with_non_send_sync)]
                             self.userland_libraries
                                 .insert(addr, std::sync::Arc::new(object));
                             self.push_result_ok(Value::from(addr as *mut u8));
@@ -452,6 +454,8 @@ impl<const S: usize> Machine<S> {
                                 &self.struct_layouts,
                             ) {
                                 Ok(id) => {
+                                    // Object is a VM-local heap root, not a cross-thread value.
+                                    #[allow(clippy::arc_with_non_send_sync)]
                                     self.userland_libraries
                                         .insert(lib_addr, std::sync::Arc::new(owned));
                                     self.push_result_ok(Value::from(id as i64));
@@ -1302,7 +1306,7 @@ impl<const S: usize> Machine<S> {
                     let packed = opcode.operand_u32();
                     let value_arity = (packed & 0xFFFF) as usize;
                     let app_dict_arity = ((packed >> 16) & 0xFFFF) as usize;
-                    promise!(self.stack.tell() >= value_arity + app_dict_arity + 1);
+                    promise!(self.stack.tell() > value_arity + app_dict_arity);
                     let raw = self.stack.pop();
 
                     // First-class ObjFn: merge new args into holes / captures.
@@ -1341,35 +1345,33 @@ impl<const S: usize> Machine<S> {
                         let mut slot_vals: Vec<Option<Value>> = vec![None; arity];
                         {
                             let mut old_i = 0usize;
-                            for slot in 0..arity {
-                                if filled_mask & (1u64 << slot) != 0 {
-                                    if old_i < base.captured_args.len() {
-                                        slot_vals[slot] = Some(base.captured_args[old_i]);
+                            for (slot, slot_val) in slot_vals.iter_mut().enumerate() {
+                                if filled_mask & (1u64 << slot) != 0
+                                    && old_i < base.captured_args.len() {
+                                        *slot_val = Some(base.captured_args[old_i]);
                                         old_i += 1;
                                     }
-                                }
                             }
                         }
                         let mut arg_i = 0usize;
-                        for slot in 0..arity {
+                        for (slot, slot_val) in slot_vals.iter_mut().enumerate() {
                             if filled_mask & (1u64 << slot) != 0 {
                                 continue;
                             }
                             if arg_i >= new_args.len() {
                                 break;
                             }
-                            slot_vals[slot] = Some(new_args[arg_i]);
+                            *slot_val = Some(new_args[arg_i]);
                             filled_mask |= 1u64 << slot;
                             arg_i += 1;
                         }
 
                         let mut captured_args: Vec<Value> = Vec::with_capacity(arity);
-                        for slot in 0..arity {
-                            if filled_mask & (1u64 << slot) != 0 {
-                                if let Some(v) = slot_vals[slot] {
+                        for (slot, slot_val) in slot_vals.iter().enumerate() {
+                            if filled_mask & (1u64 << slot) != 0
+                                && let Some(v) = *slot_val {
                                     captured_args.push(v);
                                 }
-                            }
                         }
 
                         let fixed_filled = filled_mask.count_ones() as usize;
@@ -1521,7 +1523,7 @@ impl<const S: usize> Machine<S> {
                     let op = opcode.operand_u32();
                     let n_captures = (op & 0xFF) as usize;
                     let n_filled = ((op >> 8) & 0xFF) as usize;
-                    let arity = ((op >> 16) & 0xFF) as u32;
+                    let arity = (op >> 16) & 0xFF;
                     let is_rest = (op & (1 << 24)) != 0;
 
                     let entry = self.stack.pop().as_int() as u32;

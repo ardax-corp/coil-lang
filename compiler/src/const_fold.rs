@@ -497,7 +497,7 @@ pub fn range_trip_count<'a>(start: &Output<'a>, end: &Output<'a>, inclusive: boo
     } else {
         e.saturating_sub(s)
     };
-    if count < 0 || count > 8 {
+    if !(0..=8).contains(&count) {
         return None;
     }
     Some(count as u32)

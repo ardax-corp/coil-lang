@@ -29,6 +29,10 @@ pub mod value_eq;
 pub mod vec_ops;
 mod vm;
 
+/// Host native `(heap, args) -> value`. Arity lives in the wiring column, so
+/// zero-arg clocks and three-arg vec helpers share this function type.
+pub type HostValueFn = fn(&mut memory::Heap, &[common::Value]) -> common::Value;
+
 #[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, StepMode, StopReason};
 pub use clock::CLOCK_WIRING;

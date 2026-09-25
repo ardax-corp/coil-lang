@@ -348,6 +348,7 @@ impl Scan<'_> {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn finish_counted_site(
         &self,
         body: &Output<'_>,
@@ -444,6 +445,7 @@ impl Scan<'_> {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn forms_independent(
         &self,
         forms: &[StmtForm<'_>],
@@ -500,6 +502,7 @@ impl Scan<'_> {
     /// Division and modulo are admitted only with a non-zero literal divisor.
     /// Index, field, method, lambda, and `try` stay refused. Const ints are
     /// immediates in the worker; other int names are extra arguments.
+    #[allow(clippy::too_many_arguments)]
     fn independent(
         &self,
         expr: &Output<'_>,
@@ -776,11 +779,13 @@ fn counted_bound(
 /// Integer range on a for-in iterable, half-open when both ends are const.
 ///
 /// Returns `(begin, end, begin local, end local, end bias)`.
+type CountedRange = (i64, i64, Option<String>, Option<String>, i64);
+
 fn counted_range(
     iterable: &Output<'_>,
     consts: &ConstLocals,
     ints: &HashSet<String>,
-) -> Option<(i64, i64, Option<String>, Option<String>, i64)> {
+) -> Option<CountedRange> {
     if let Some(ConstVal::Range { begin, end }) = const_val(iterable, consts) {
         return Some((begin, end, None, None, 0));
     }
@@ -1104,7 +1109,7 @@ mod tests {
         let pure = analyze_pure_fns(&ast);
         let mut sites: Vec<LoopParSite> =
             analyze_loop_par_sites(&ast, &pure).into_values().collect();
-        sites.sort_by(|a, b| a.begin.cmp(&b.begin));
+        sites.sort_by_key(|a| a.begin);
         sites
     }
 

@@ -178,8 +178,8 @@ fn unique_forward_exit_label(ops: &[IlOp], lp: &LoopInfo) -> Option<usize> {
 }
 
 fn loop_has_extra_exit(ops: &[IlOp], lp: &LoopInfo) -> bool {
-    for i in (lp.header + 1)..lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch).skip(lp.header + 1) {
+        match op {
             IlOp::Jump {
                 kind: IlJumpKind::Unconditional,
                 ..

@@ -243,22 +243,19 @@ impl MirFunc {
                     if hi.is_some() && lo.is_none() {
                         return Err("two-slot return missing payload word".into());
                     }
-                    if let Some(v) = lo {
-                        if let Some(rt) = self.ret_ty {
-                            if !self.ty(*v).le(rt) && self.ty(*v) != rt {
+                    if let Some(v) = lo
+                        && let Some(rt) = self.ret_ty
+                            && !self.ty(*v).le(rt) && self.ty(*v) != rt {
                                 return Err(format!("return {} : {} vs {rt}", v, self.ty(*v)));
                             }
-                        }
-                    }
                     if let Some(v) = hi {
                         if self.ret_layout != MirLayout::TwoSlot {
                             return Err("hi return word requires twoslot layout".into());
                         }
-                        if let Some(rt) = self.ret_hi_ty {
-                            if !self.ty(*v).le(rt) && self.ty(*v) != rt {
+                        if let Some(rt) = self.ret_hi_ty
+                            && !self.ty(*v).le(rt) && self.ty(*v) != rt {
                                 return Err(format!("return hi {} : {} vs {rt}", v, self.ty(*v)));
                             }
-                        }
                     }
                 }
                 _ => {}
@@ -402,11 +399,10 @@ impl MirFunc {
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} call dest is not a word lane"));
                 }
-                if let Some(hi) = dest_hi {
-                    if !self.ty(*hi).is_word_lane() {
+                if let Some(hi) = dest_hi
+                    && !self.ty(*hi).is_word_lane() {
                         return Err(format!("{hi} call hi dest is not a word lane"));
                     }
-                }
                 for (i, a) in args.iter().enumerate() {
                     if !self.ty(*a).is_word_lane() {
                         return Err(format!("{dest} call arg {i} type"));
@@ -461,11 +457,10 @@ impl MirFunc {
                 if !self.ty(*dest).is_word_lane() {
                     return Err(format!("{dest} ResumeCoro dest type"));
                 }
-                if let Some(s) = send {
-                    if !self.ty(*s).is_word_lane() {
+                if let Some(s) = send
+                    && !self.ty(*s).is_word_lane() {
                         return Err(format!("{dest} ResumeCoro send type"));
                     }
-                }
             }
             MirInst::DoneCoro { dest, handle } => {
                 if self.ty(*handle) != MirTy::HeapRef {
@@ -540,11 +535,10 @@ impl MirFunc {
                 if !self.ty(*dest).is_specialized() {
                     return Err(format!("{dest} HeapFieldLoad dest type"));
                 }
-                if let Some(n) = name {
-                    if self.ty(*n) != MirTy::HeapRef {
+                if let Some(n) = name
+                    && self.ty(*n) != MirTy::HeapRef {
                         return Err(format!("{dest} HeapFieldLoad name type"));
                     }
-                }
                 if *index > 32 {
                     return Err(format!("{dest} HeapFieldLoad index"));
                 }
@@ -565,11 +559,10 @@ impl MirFunc {
                 if self.ty(*dest) != self.ty(*value) {
                     return Err(format!("{dest} HeapFieldStore dest type"));
                 }
-                if let Some(n) = name {
-                    if self.ty(*n) != MirTy::HeapRef {
+                if let Some(n) = name
+                    && self.ty(*n) != MirTy::HeapRef {
                         return Err(format!("{dest} HeapFieldStore name type"));
                     }
-                }
                 if index.is_some_and(|i| i > 32) {
                     return Err(format!("{dest} HeapFieldStore index"));
                 }

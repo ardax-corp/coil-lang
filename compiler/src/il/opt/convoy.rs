@@ -365,12 +365,11 @@ pub(super) fn bin_join_convoy(ops: &mut Vec<IlOp>) {
         } else {
             // Unconditional-only: identical tails (legacy; no SP gate — fall-through
             // arms after JMP are often SP-unreachable in linear analysis).
-            if let Some((_, ft)) = fall {
-                if ft != template {
+            if let Some((_, ft)) = fall
+                && ft != template {
                     r += 1;
                     continue;
                 }
-            }
             for &(j, k) in &jump_preds {
                 let Some((_, t)) = convoy_pred_bin_tail_before(ops, j, k) else {
                     ok = false;
@@ -440,8 +439,8 @@ pub(super) fn bin_join_convoy(ops: &mut Vec<IlOp>) {
             continue;
         }
         if let Some((cluster_end, fused, keep_slot)) = rewrite.remove(&idx) {
-            for k in idx..=cluster_end {
-                out.push(ops[k].clone());
+            for op in ops.iter().take(cluster_end.saturating_add(1)).skip(idx) {
+                out.push(op.clone());
             }
             if let Some(f) = fused {
                 out.push(f);
@@ -665,11 +664,10 @@ pub(crate) fn multi_op_join_convoy(ops: &mut Vec<IlOp>) {
                 continue;
             };
 
-            if let Some(f) = fall {
-                if !suffixes_equal(template, f) {
+            if let Some(f) = fall
+                && !suffixes_equal(template, f) {
                     continue;
                 }
-            }
 
             for &(j, jk) in &jump_preds {
                 let Some(end) = multi_op_pred_suffix_end(j, jk) else {
@@ -727,13 +725,11 @@ pub(crate) fn multi_op_join_convoy(ops: &mut Vec<IlOp>) {
             } = op
                 && is_multi_op_join_pred_kind(*jk)
                 && cluster.iter().any(|l| l == target)
-            {
-                if let Some(end) = multi_op_pred_suffix_end(j, *jk) {
+                && let Some(end) = multi_op_pred_suffix_end(j, *jk) {
                     for i in (end - len)..end {
                         remove_at.insert(i);
                     }
                 }
-            }
         }
         rewrite.insert(*cluster_start, (*cluster_end, *kind, suffix.clone()));
     }
@@ -746,8 +742,8 @@ pub(crate) fn multi_op_join_convoy(ops: &mut Vec<IlOp>) {
             continue;
         }
         if let Some((cluster_end, kind, suffix)) = rewrite.remove(&idx) {
-            for k in idx..=cluster_end {
-                out.push(ops[k].clone());
+            for op in ops.iter().take(cluster_end.saturating_add(1)).skip(idx) {
+                out.push(op.clone());
             }
             out.extend(suffix);
             match kind {
@@ -1022,12 +1018,11 @@ pub(super) fn return_convoy(ops: &mut Vec<IlOp>) {
                 continue;
             }
         } else {
-            if let Some((_, fp)) = fall {
-                if fp != template {
+            if let Some((_, fp)) = fall
+                && fp != template {
                     r += 1;
                     continue;
                 }
-            }
             for &(j, k) in &jump_preds {
                 let Some((_, p)) = convoy_pred_producer_before(ops, j, k) else {
                     ok = false;
@@ -1093,8 +1088,8 @@ pub(super) fn return_convoy(ops: &mut Vec<IlOp>) {
         }
         if let Some((cluster_end, fused)) = fuse_at_cluster.remove(&idx) {
             // Keep Label cluster, replace following RETURN with fused.
-            for k in idx..=cluster_end {
-                out.push(ops[k].clone());
+            for op in ops.iter().take(cluster_end.saturating_add(1)).skip(idx) {
+                out.push(op.clone());
             }
             out.push(fused);
             idx = cluster_end + 2; // skip cluster + RETURN

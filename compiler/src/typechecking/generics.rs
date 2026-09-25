@@ -1106,7 +1106,7 @@ mod tests {
 
     #[test]
     fn unknown_instance_methods_reports_methods_not_in_class() {
-        let unknown = Generics::unknown_instance_methods(&class_def(), ["add", "foo"].into_iter());
+        let unknown = Generics::unknown_instance_methods(&class_def(), ["add", "foo"]);
 
         assert_eq!(unknown, vec!["foo".to_string()]);
     }
@@ -1149,7 +1149,7 @@ mod tests {
         let g = Generics::new();
         for ty in [int(), float(), string(), boolean(), unit(), byte()] {
             assert!(
-                g.find_instance("Hash", &[ty.clone()]).is_some(),
+                g.find_instance("Hash", std::slice::from_ref(&ty)).is_some(),
                 "missing Hash instance for {ty:?}"
             );
         }

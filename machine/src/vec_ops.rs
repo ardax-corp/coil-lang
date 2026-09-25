@@ -126,7 +126,7 @@ pub fn host_vec_from_array(heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// Append-only HostInvoke wiring for Vec helpers.
-pub const VEC_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
+pub const VEC_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("vec_with_capacity", 1, host_vec_with_capacity),
     ("vec_capacity", 1, host_vec_capacity),
     ("vec_reserve", 2, host_vec_reserve),

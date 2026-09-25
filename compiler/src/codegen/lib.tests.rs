@@ -71,8 +71,10 @@ fn codegen_depth_guard_panics_with_expected_diagnostic_past_limit() {
     let ast = Pratt::default()
         .parse("1;")
         .expect("trivial literal parses");
-    let mut compiler = Compiler::default();
-    compiler.codegen_depth = super::CODEGEN_RECURSION_LIMIT;
+    let mut compiler = Compiler {
+        codegen_depth: super::CODEGEN_RECURSION_LIMIT,
+        ..Default::default()
+    };
     let result =
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| compiler.do_compile(&ast)));
     assert!(result.is_err(), "expected the recursion-limit panic");
@@ -4191,7 +4193,7 @@ fn predicate_peel_emits_cmp_jmp_before_call() {
         .map(|(i, _)| i)
         .collect();
     assert!(
-        cmp_jmps.len() >= 1,
+        !cmp_jmps.is_empty(),
         "peeled call site should keep a cmp-jmp; got {} opcodes: {:?}",
         cmp_jmps.len(),
         bc.iter().map(|b| b.bytecode()).collect::<Vec<_>>()
@@ -6303,9 +6305,7 @@ fn generic_call_with_concrete_arg_emits_box_value() {
         .map(|b| b.operand_u32())
         .collect();
     assert!(
-        box_ops
-            .iter()
-            .any(|&tag| tag == common::ValueTag::Int as u32),
+        box_ops.contains(&(common::ValueTag::Int as u32)),
         "BoxValue operand should be ValueTag::Int ({}), got: {:?}",
         common::ValueTag::Int as u32,
         box_ops
@@ -6366,9 +6366,7 @@ fn generic_call_emits_box_and_unbox() {
         .map(|b| b.operand_u32() & 0xFFFF)
         .collect();
     assert!(
-        unbox_ops
-            .iter()
-            .any(|&tag| tag == common::ValueTag::Int as u32),
+        unbox_ops.contains(&(common::ValueTag::Int as u32)),
         "UnboxValue operand should be ValueTag::Int ({}), got: {:?}",
         common::ValueTag::Int as u32,
         unbox_ops
@@ -6432,7 +6430,7 @@ fn bounded_generic_add_ground_call_uses_specialized_clone() {
     assert!(
         !boxed_before_call,
         "ground monomorphic add call should not box args; opcodes near CALL: {:?}",
-        &bc[main_call.saturating_sub(4)..=main_call]
+        bc[main_call.saturating_sub(4)..=main_call]
             .iter()
             .map(|b| b.bytecode())
             .collect::<Vec<_>>()
@@ -7920,7 +7918,7 @@ fn main() {
     // the increment (still inside the loop). Only the while-exit must land
     // past the back-edge JMP.
     let mut saw_while_exit = false;
-    for (_i, b) in bc.iter().enumerate() {
+    for b in bc.iter() {
         if *b.bytecode() != Instruction::BinSlotSlotJmpf {
             continue;
         }
@@ -7977,7 +7975,7 @@ fn main() {
         .expect("object make");
     let (tid, nfields) = if *init.bytecode() == Instruction::DenseMakeObject {
         let (_, n, t) = common::dense::unpack_make_object(init.operand_u32());
-        (u32::from(t), u32::from(n))
+        (t, u32::from(n))
     } else {
         common::unpack_init_typed(init.operand_u32())
     };
@@ -8790,7 +8788,7 @@ fn main() {
         "mismatched-Result method Try must not box before pair tag check; opcodes={ops:?}",
     );
     assert!(
-        bc.iter().any(|b| tests_err_bit(b)),
+        bc.iter().any(tests_err_bit),
         "mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
     );
     assert!(
@@ -8842,7 +8840,7 @@ fn main() {
         "forward mismatched-Result Try must not box before pair tag check; opcodes={ops:?}",
     );
     assert!(
-        bc.iter().any(|b| tests_err_bit(b)),
+        bc.iter().any(tests_err_bit),
         "forward mismatched-Result Try on heap-heap Result tests the Err bit; opcodes={ops:?}",
     );
     assert!(

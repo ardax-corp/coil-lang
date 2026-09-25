@@ -134,6 +134,8 @@ fn run_phase(phase: Phase, ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mu
 
 // Apply wrappers. Extra (unroll / branch / block-order counts) is the usize.
 
+// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
+#[allow(clippy::ptr_arg)]
 fn apply_jump_thread(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::cfg::jump_thread(ops);
     0
@@ -149,16 +151,22 @@ fn apply_stack_dce(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>
     0
 }
 
+// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
+#[allow(clippy::ptr_arg)]
 fn apply_mem_fwd(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::dce::mem_fwd(ops, ctx.entry_sp);
     0
 }
 
+// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
+#[allow(clippy::ptr_arg)]
 fn apply_copy_prop(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::dce::copy_prop(ops, ctx.entry_tell);
     0
 }
 
+// `PassSpec::apply` is `fn(&mut Vec<IlOp>, ...)`, so this cannot be a slice.
+#[allow(clippy::ptr_arg)]
 fn apply_dest_prop(ops: &mut Vec<IlOp>, _: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
     super::dest_prop::dest_prop(ops, ctx.entry_tell);
     0

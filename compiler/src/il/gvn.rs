@@ -156,10 +156,9 @@ fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
         .map(|(i, b)| (b.start, i))
         .collect();
 
-    for bi in 0..blocks.len() {
-        let start = blocks[bi].start;
-        let end = blocks[bi].end;
-        if end == start {
+    for block in &mut blocks {
+        let end = block.end;
+        if end == block.start {
             continue;
         }
         let last = end - 1;
@@ -172,19 +171,19 @@ fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
                 if let Some(&t) = label_at.get(&target.0)
                     && let Some(&sb) = block_at.get(&t)
                 {
-                    blocks[bi].succs.push(sb);
+                    block.succs.push(sb);
                 }
             }
             IlOp::Jump { target, .. } => {
                 if let Some(&t) = label_at.get(&target.0)
                     && let Some(&sb) = block_at.get(&t)
                 {
-                    blocks[bi].succs.push(sb);
+                    block.succs.push(sb);
                 }
                 if end < ops.len()
                     && let Some(&fb) = block_at.get(&end)
                 {
-                    blocks[bi].succs.push(fb);
+                    block.succs.push(fb);
                 }
             }
             IlOp::Return { .. }
@@ -196,11 +195,10 @@ fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
                 if end < ops.len()
                     && let Some(&fb) = block_at.get(&end)
                 {
-                    blocks[bi].succs.push(fb);
+                    block.succs.push(fb);
                 }
             }
         }
-        let _ = start;
     }
     blocks
 }
@@ -308,8 +306,8 @@ fn get_field_cse(ops: &mut Vec<IlOp>, blocks: &[Block]) {
                     && pk == key
                 {
                     let mut only_labels = true;
-                    for j in fi + 1..i {
-                        if !matches!(ops[j], IlOp::Label(_) | IlOp::JoinLabel(_)) {
+                    for op in ops.iter().take(i).skip(fi + 1) {
+                        if !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
                             only_labels = false;
                             break;
                         }
@@ -420,8 +418,8 @@ fn load_field_cse(ops: &mut Vec<IlOp>, blocks: &[Block]) {
                     && pi == index
                 {
                     let mut only_labels = true;
-                    for j in fi + 1..i {
-                        if !matches!(ops[j], IlOp::Label(_) | IlOp::JoinLabel(_)) {
+                    for op in ops.iter().take(i).skip(fi + 1) {
+                        if !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
                             only_labels = false;
                             break;
                         }
@@ -497,13 +495,13 @@ fn gvn_at_joins(ops: &mut Vec<IlOp>, blocks: &[Block]) {
         }
 
         let mut join_prod = None;
-        for i in b.start..b.end {
-            if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) {
+        for (i, op) in ops.iter().enumerate().take(b.end).skip(b.start) {
+            if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
                 continue;
             }
-            if is_pure_producer(&ops[i])
+            if is_pure_producer(op)
                 && matches!(
-                    &ops[i],
+                    op,
                     IlOp::Const { .. }
                         | IlOp::ConstPool { .. }
                         | IlOp::String { .. }
@@ -581,16 +579,16 @@ fn last_emitting_non_jump(ops: &[IlOp], b: &Block) -> Option<usize> {
 /// First `len` consecutive pure producers in a join block (skipping labels).
 fn join_pure_tail(ops: &[IlOp], start: usize, end: usize, len: usize) -> Option<Vec<usize>> {
     let mut idxs = Vec::with_capacity(len);
-    for i in start..end {
-        if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_)) {
+    for (i, op) in ops.iter().enumerate().take(end).skip(start) {
+        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)) {
             continue;
         }
-        if !is_pure_producer(&ops[i]) {
+        if !is_pure_producer(op) {
             break;
         }
         // Length-2 join CSE: Const/Load/Bin/BinSlot/Index/LoadField only.
         if !matches!(
-            &ops[i],
+            op,
             IlOp::Const { .. }
                 | IlOp::ConstPool { .. }
                 | IlOp::Load { .. }
@@ -598,7 +596,7 @@ fn join_pure_tail(ops: &[IlOp], start: usize, end: usize, len: usize) -> Option<
                 | IlOp::BinSlotImm { .. }
                 | IlOp::BinSlotSlot { .. }
                 | IlOp::Index { .. }
-            | IlOp::IndexUnchecked { .. }
+                | IlOp::IndexUnchecked { .. }
                 | IlOp::LoadField { .. }
                 | IlOp::Dup { .. }
         ) {
@@ -614,8 +612,9 @@ fn join_pure_tail(ops: &[IlOp], start: usize, end: usize, len: usize) -> Option<
 
 fn pred_tail_keys(ops: &[IlOp], b: &Block, len: usize) -> Option<Vec<u64>> {
     let mut emitting = Vec::new();
-    for i in b.start..b.end {
-        if matches!(ops[i], IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Jump { .. }) || is_return_like(&ops[i]) {
+    for (i, op) in ops.iter().enumerate().take(b.end).skip(b.start) {
+        if matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_) | IlOp::Jump { .. }) || is_return_like(op)
+        {
             continue;
         }
         emitting.push(i);

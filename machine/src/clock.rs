@@ -8,6 +8,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use common::Value;
 
 use crate::memory::Heap;
+use crate::HostValueFn;
 
 /// UTC/unix wall time as nanoseconds since the Unix epoch.
 pub fn wall_nanos() -> i64 {
@@ -24,11 +25,10 @@ pub fn mono_nanos() -> i64 {
 
 /// Block the calling thread for `ms` milliseconds. Negative durations are no-ops.
 pub fn sleep_ms(ms: i64) {
-    if let Ok(ms) = u64::try_from(ms) {
-        if ms > 0 {
+    if let Ok(ms) = u64::try_from(ms)
+        && ms > 0 {
             std::thread::sleep(Duration::from_millis(ms));
         }
-    }
 }
 
 fn mono_origin() -> Instant {
@@ -57,7 +57,7 @@ fn host_sleep_ms(_heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// Pipeline wiring: `(registry_name, arity, host_fn)`.
-pub const CLOCK_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
+pub const CLOCK_WIRING: &[(&str, usize, HostValueFn)] = &[
     (common::CLOCK_WALL_NANOS_NATIVE, 0, host_wall_nanos),
     (common::CLOCK_MONO_NANOS_NATIVE, 0, host_mono_nanos),
     (common::CLOCK_SLEEP_MS_NATIVE, 1, host_sleep_ms),
@@ -95,6 +95,15 @@ mod tests {
             "negative sleep must not block: delta={}",
             m1 - m0
         );
+    }
+
+    #[test]
+    fn host_value_fn_runs_zero_arg_and_one_arg() {
+        let mut heap = Heap::default();
+        let wall: crate::HostValueFn = host_wall_nanos;
+        let sleep: crate::HostValueFn = host_sleep_ms;
+        assert!(wall(&mut heap, &[]).as_int() > 0);
+        assert_eq!(sleep(&mut heap, &[Value::from(0i64)]).as_int(), 0);
     }
 
     #[test]

@@ -317,11 +317,10 @@ fn match_store_on(func: &MirFunc, lp: &super::licm::LoopInfo, require_return: bo
     if !is_invariant(func, n, &lp.blocks) {
         return None;
     }
-    if let Some(k) = as_const_i64(func, n) {
-        if k < LANES {
+    if let Some(k) = as_const_i64(func, n)
+        && k < LANES {
             return None;
         }
-    }
 
     let mut stores = Vec::new();
     let mut stored_arrs = Vec::new();
@@ -479,11 +478,10 @@ fn match_reduce_on(
     if !is_invariant(func, n, &lp.blocks) {
         return None;
     }
-    if let Some(k) = as_const_i64(func, n) {
-        if k < LANES {
+    if let Some(k) = as_const_i64(func, n)
+        && k < LANES {
             return None;
         }
-    }
 
     let bin = def(func, acc_next)?;
     let MirInst::Bin {
@@ -614,8 +612,8 @@ fn classify(
             rhs,
             ..
         } => {
-            if *op == MirBinOp::Add && matches!(ty, MirTy::I64 | MirTy::F64) {
-                if let Some((a, b, c)) = split_fma(func, *lhs, *rhs) {
+            if *op == MirBinOp::Add && matches!(ty, MirTy::I64 | MirTy::F64)
+                && let Some((a, b, c)) = split_fma(func, *lhs, *rhs) {
                     let va = classify(func, a, iv, loop_blocks, stored)?;
                     let vb = classify(func, b, iv, loop_blocks, stored)?;
                     let vc = classify(func, c, iv, loop_blocks, stored)?;
@@ -626,7 +624,6 @@ fn classify(
                         c: Box::new(vc),
                     });
                 }
-            }
             let kind = vbin_kind(*op, *ty)?;
             let l = classify(func, *lhs, iv, loop_blocks, stored)?;
             let r = classify(func, *rhs, iv, loop_blocks, stored)?;
@@ -674,6 +671,7 @@ fn vbin_kind(op: MirBinOp, ty: MirTy) -> Option<u8> {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_store_loop(
     out: &mut Vec<IlOp>,
     func: &MirFunc,
@@ -767,6 +765,7 @@ fn append_store_loop(
     Some(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_reduce_loop(
     out: &mut Vec<IlOp>,
     func: &MirFunc,
@@ -1324,9 +1323,7 @@ fn emit_reduced(
     }
     match func.block(spec.exit).term.as_ref()? {
         Terminator::Return { lo: Some(v), hi: None } => {
-            let ret = if *v == spec.acc_next {
-                acc_slot
-            } else if *v == spec.acc {
+            let ret = if *v == spec.acc_next || *v == spec.acc {
                 acc_slot
             } else {
                 regs[v.index()]
@@ -1352,6 +1349,7 @@ fn emit_reduced(
     Some(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_vop(
     out: &mut Vec<IlOp>,
     op: &VOp,
@@ -1513,6 +1511,7 @@ fn region_has_barrier(func: &MirFunc, blocks: &[BlockId]) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_header_invariant(
     out: &mut Vec<IlOp>,
     func: &MirFunc,

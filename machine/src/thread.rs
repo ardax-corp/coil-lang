@@ -53,11 +53,10 @@ impl WorkerCap {
 fn max_worker_threads() -> usize {
     static MAX: OnceLock<usize> = OnceLock::new();
     *MAX.get_or_init(|| {
-        if let Ok(raw) = std::env::var("COIL_MAX_WORKER_THREADS") {
-            if let Ok(n) = raw.parse::<usize>() {
+        if let Ok(raw) = std::env::var("COIL_MAX_WORKER_THREADS")
+            && let Ok(n) = raw.parse::<usize>() {
                 return n.clamp(1, 512);
             }
-        }
         // GitHub Actions (and most CI) set `CI=true`. One worker per root
         // Machine keeps parallel cargo tests from exploding OS-thread counts
         // that amplify macOS cargo `--list` EAGAIN flakes.
@@ -380,8 +379,9 @@ impl MutexInner {
         unsafe { self.lock.unlock() }
     }
 
-    unsafe fn value_mut(&self) -> &mut PortableValue {
-        unsafe { &mut *self.value.get() }
+    /// Payload pointer while `lock` is held. Callers only have `&MutexInner`.
+    fn value(&self) -> *mut PortableValue {
+        self.value.get()
     }
 }
 
@@ -622,7 +622,7 @@ fn mapped_module_path(ptr: *const std::ffi::c_void) -> Option<String> {
         return None;
     }
     // Interior pointers (not a symbol start) are not typed code pointers.
-    if info.dli_saddr.is_null() || info.dli_saddr as *const std::ffi::c_void != ptr {
+    if info.dli_saddr.is_null() || !std::ptr::eq(info.dli_saddr, ptr) {
         return None;
     }
     Some(
@@ -1367,10 +1367,10 @@ fn try_host_with_lock(
     let inner = Arc::clone(&gc.as_ref().inner);
     inner.lock();
     let _unlock = RawUnlock(&inner);
-    let t_val = portable_to_value(heap, unsafe { inner.value_mut().clone() })?;
+    let t_val = portable_to_value(heap, unsafe { (*inner.value()).clone() })?;
     let ret = host_call_function(entry, &[t_val])?;
     let (new_t, out_r) = parse_lock_callback_result(heap, ret)?;
-    *unsafe { inner.value_mut() } = value_to_portable(heap, new_t)?;
+    unsafe { *inner.value() = value_to_portable(heap, new_t)? };
     Ok(out_r)
 }
 

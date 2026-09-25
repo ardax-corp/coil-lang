@@ -190,8 +190,8 @@ impl EmitPlan {
                         );
                     }
                 }
-                if let Some(d) = term_cmp_dest(func, block) {
-                    if let Some(MirInst::Cmp { lhs, rhs, .. }) =
+                if let Some(d) = term_cmp_dest(func, block)
+                    && let Some(MirInst::Cmp { lhs, rhs, .. }) =
                         def[d.index()].and_then(|(b, i)| {
                             (b == block.id).then_some(&func.block(b).insts[i])
                         })
@@ -209,7 +209,6 @@ impl EmitPlan {
                             );
                         }
                     }
-                }
                 for inst in &block.insts {
                     if inst.is_phi() || fused[inst.dest().index()] {
                         continue;
@@ -286,6 +285,7 @@ impl EmitPlan {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn mark_tree(
     v: ValueId,
     use_block: BlockId,
@@ -455,6 +455,7 @@ fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
 }
 
 /// Prefer `BinSlotImm` / `BinSlotSlot` so pre-fuse cost matches opted fuse-IL.
+#[allow(clippy::too_many_arguments)]
 fn emit_bin(
     out: &mut Vec<IlOp>,
     op: Instruction,
@@ -781,6 +782,7 @@ fn emit_stored(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_lir_call(
     out: &mut Vec<IlOp>,
     dest: ValueId,
@@ -818,6 +820,7 @@ fn emit_lir_call(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_alloc_stack(
     out: &mut Vec<IlOp>,
     kind: MirAllocKind,
@@ -835,6 +838,7 @@ fn emit_alloc_stack(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_lir_resume(
     out: &mut Vec<IlOp>,
     dest: ValueId,
@@ -868,6 +872,7 @@ fn emit_lir_resume(
 }
 
 /// `return k, k + 1` after `k` is already TOS: `DUP; CONST 1; ADD`.
+#[allow(clippy::too_many_arguments)]
 fn emit_hi_after_lo(
     out: &mut Vec<IlOp>,
     lo: ValueId,
@@ -894,6 +899,7 @@ fn emit_hi_after_lo(
     emit_stack(out, hi, func, plan, regs, pool, loc)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_heap_field_load(
     out: &mut Vec<IlOp>,
     object: ValueId,
@@ -915,6 +921,7 @@ fn emit_heap_field_load(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_heap_field_store(
     out: &mut Vec<IlOp>,
     object: ValueId,
@@ -1100,14 +1107,13 @@ fn emit_stack(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
         MirInst::MatchPayload { dest, .. } => {
-            if is_jim_term_payload(func, *dest) {
-                if plan.need_slot[dest.index()] {
+            if is_jim_term_payload(func, *dest)
+                && plan.need_slot[dest.index()] {
                     out.push(IlOp::Load {
                         slot: u32::from(regs[dest.index()]),
                         loc,
                     });
                 }
-            }
             Ok(())
         }
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
@@ -1192,6 +1198,7 @@ fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind, loc: DebugLoc) -> Result<()
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_term(
     out: &mut Vec<IlOp>,
     block: &super::func::MirBlock,
@@ -1333,6 +1340,7 @@ fn emit_term(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_br_cond(
     out: &mut Vec<IlOp>,
     block: &super::func::MirBlock,
@@ -1442,12 +1450,11 @@ fn push_const(
     match c {
         MirConst::I64(v) => {
             // Inline CONST uses bit 31 as POOL_FLAG; negatives must go through the pool.
-            if let Ok(imm) = i32::try_from(v) {
-                if imm >= 0 {
+            if let Ok(imm) = i32::try_from(v)
+                && imm >= 0 {
                     out.push(IlOp::Const { imm, loc });
                     return Ok(());
                 }
-            }
             let idx = intern_pool(pool, v as u64)?;
             out.push(IlOp::ConstPool { idx, loc });
         }

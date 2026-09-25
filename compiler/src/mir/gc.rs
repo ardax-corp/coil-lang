@@ -162,11 +162,10 @@ fn apply_barrier_roots(func: &mut MirFunc) {
         .collect();
     for block in &mut func.blocks {
         for inst in &mut block.insts {
-            if let MirInst::GcBarrier { dest, roots, .. } = inst {
-                if let Some(v) = by_at.get(dest) {
+            if let MirInst::GcBarrier { dest, roots, .. } = inst
+                && let Some(v) = by_at.get(dest) {
                     *roots = v.clone();
                 }
-            }
         }
     }
 }

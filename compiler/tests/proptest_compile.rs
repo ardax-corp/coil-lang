@@ -28,10 +28,8 @@ fn small_program(a: i32, b: i32, kind: u8) -> String {
         2 => format!(
             "fn main() {{\n    if {a} < {b} {{\n        write(stdout(), to_bytes(format(\"%i\", 1)));\n    }} else {{\n        write(stdout(), to_bytes(format(\"%i\", 0)));\n    }}\n}}\n"
         ),
-        3 => format!(
-            "enum Color {{\n    Red,\n    Blue,\n}}\n\
-             fn main() {{\n    let c = Color::Red;\n    write(stdout(), to_bytes(format(\"%z\", c == Color::Red)));\n}}\n"
-        ),
+        3 => "enum Color {\n    Red,\n    Blue,\n}\n\
+             fn main() {\n    let c = Color::Red;\n    write(stdout(), to_bytes(format(\"%z\", c == Color::Red)));\n}\n".to_string(),
         4 => format!(
             "fn main() {{\n    let a = [{a}, {b}, {a} + {b}];\n    write(stdout(), to_bytes(format(\"%i\", a[0] + a[2])));\n}}\n"
         ),

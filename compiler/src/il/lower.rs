@@ -425,8 +425,7 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
     if window.len() >= 2
         && let (Some(b0), Some((if_true, tgt, jmp_hint))) =
             (slot_as_byte(&window[0]), cond_jump(&window[1]))
-    {
-        if !jmp_hint.blocks_cmp_jmp_fuse() {
+        && !jmp_hint.blocks_cmp_jmp_fuse() {
             if *b0.bytecode() == Instruction::BinSlotImm {
                 let (op, slot, imm) = b0.bin_slot_imm_parts();
                 if is_jmpf_cond_op(Instruction::from(op)) {
@@ -469,7 +468,6 @@ fn try_fuse_slots(window: &[Slot], pool: &mut Vec<u64>) -> Option<(Slot, usize)>
                 ));
             }
         }
-    }
     if window.len() >= 2
         && let (Some(a), Some(b)) = (slot_as_byte(&window[0]), slot_as_byte(&window[1]))
     {
@@ -2001,7 +1999,7 @@ mod tests {
 
     #[test]
     fn residual_abs_jmp_byte_is_detected() {
-        let ops = vec![IlOp::byte(Byte::new(Instruction::JMP).with_operand_u32(42))];
+        let ops = [IlOp::byte(Byte::new(Instruction::JMP).with_operand_u32(42))];
         assert!(is_residual_abs_jump(&ops[0]));
     }
 

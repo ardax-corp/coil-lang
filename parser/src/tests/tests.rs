@@ -1486,8 +1486,8 @@
             Expression::If(branches) => {
                 assert_eq!(branches.len(), 3, "if/else-if/else has 3 branches");
                 // First two: Some(cond)
-                for i in 0..2 {
-                    let (cond_opt, _) = match branches[i].1.as_ref() {
+                for (i, branch) in branches.iter().take(2).enumerate() {
+                    let (cond_opt, _) = match branch.1.as_ref() {
                         Expression::Branch(c, b) => (c.clone(), b.clone()),
                         other => panic!("expected Branch at index {}, got {:?}", i, other),
                     };
@@ -1513,8 +1513,8 @@
         match unwrap_fn_if(src) {
             Expression::If(branches) => {
                 assert_eq!(branches.len(), 4, "if/else-if/else-if/else has 4 branches");
-                for i in 0..3 {
-                    let (cond_opt, _) = match branches[i].1.as_ref() {
+                for (i, branch) in branches.iter().take(3).enumerate() {
+                    let (cond_opt, _) = match branch.1.as_ref() {
                         Expression::Branch(c, b) => (c.clone(), b.clone()),
                         other => panic!("expected Branch at index {}, got {:?}", i, other),
                     };
@@ -1853,18 +1853,15 @@
     #[test]
     fn import_path_is_parse_error_not_use() {
         let src = "import foo::bar;";
-        match Pratt::default().parse(src) {
-            Ok((_, expr)) => match expr.as_ref() {
-                Expression::Use { .. } => {
-                    panic!("import foo::bar; must not parse as Use")
-                }
-                other => panic!(
-                    "import foo::bar; must be a parse error, not silently accepted, got {:?}",
-                    other
-                ),
-            },
-            Err(_) => {}
-        }
+        if let Ok((_, expr)) = Pratt::default().parse(src) { match expr.as_ref() {
+            Expression::Use { .. } => {
+                panic!("import foo::bar; must not parse as Use")
+            }
+            other => panic!(
+                "import foo::bar; must be a parse error, not silently accepted, got {:?}",
+                other
+            ),
+        } }
     }
 
     /// COI-73: alias / brace / glob shapes must also fail, not become `Use`.
@@ -1875,18 +1872,15 @@
             "import foo::{bar};",
             "import foo::*;",
         ] {
-            match Pratt::default().parse(src) {
-                Ok((_, expr)) => match expr.as_ref() {
-                    Expression::Use { .. } => {
-                        panic!("{src} must not parse as Use")
-                    }
-                    other => panic!(
-                        "{src} must be a parse error, not silently accepted, got {:?}",
-                        other
-                    ),
-                },
-                Err(_) => {}
-            }
+            if let Ok((_, expr)) = Pratt::default().parse(src) { match expr.as_ref() {
+                Expression::Use { .. } => {
+                    panic!("{src} must not parse as Use")
+                }
+                other => panic!(
+                    "{src} must be a parse error, not silently accepted, got {:?}",
+                    other
+                ),
+            } }
         }
     }
 
@@ -1912,18 +1906,15 @@
     #[test]
     fn case_scrutinee_is_parse_error_not_match() {
         let src = "case x { Option::None => 0, Option::Some(v) => v }";
-        match Pratt::default().parse(src) {
-            Ok((_, expr)) => match expr.as_ref() {
-                Expression::Match { .. } => {
-                    panic!("case x {{ … }} must not parse as Match")
-                }
-                other => panic!(
-                    "case x {{ … }} must be a parse error, not silently accepted, got {:?}",
-                    other
-                ),
-            },
-            Err(_) => {}
-        }
+        if let Ok((_, expr)) = Pratt::default().parse(src) { match expr.as_ref() {
+            Expression::Match { .. } => {
+                panic!("case x {{ … }} must not parse as Match")
+            }
+            other => panic!(
+                "case x {{ … }} must be a parse error, not silently accepted, got {:?}",
+                other
+            ),
+        } }
     }
 
     /// COI-74: wildcard / single-arm / statement shapes must also fail, not become `Match`.
@@ -1934,18 +1925,15 @@
             "case x { Option::None => 0 }",
             "fn main() { case x { Option::None => 0 }; }",
         ] {
-            match Pratt::default().parse(src) {
-                Ok((_, expr)) => match expr.as_ref() {
-                    Expression::Match { .. } => {
-                        panic!("{src} must not parse as Match")
-                    }
-                    other => panic!(
-                        "{src} must be a parse error, not silently accepted, got {:?}",
-                        other
-                    ),
-                },
-                Err(_) => {}
-            }
+            if let Ok((_, expr)) = Pratt::default().parse(src) { match expr.as_ref() {
+                Expression::Match { .. } => {
+                    panic!("{src} must not parse as Match")
+                }
+                other => panic!(
+                    "{src} must be a parse error, not silently accepted, got {:?}",
+                    other
+                ),
+            } }
         }
     }
 
@@ -2012,23 +2000,20 @@
     #[test]
     fn nested_case_inside_match_arm_is_parse_error_not_match() {
         let src = "match x { _ => case y { _ => 0 } }";
-        match Pratt::default().parse(src) {
-            Ok((_, expr)) => match expr.as_ref() {
-                Expression::Match { arms, .. } => {
-                    for arm in arms {
-                        if matches!(arm.body.1.as_ref(), Expression::Match { .. }) {
-                            panic!("{src} must not nest Match via case synonym");
-                        }
+        if let Ok((_, expr)) = Pratt::default().parse(src) { match expr.as_ref() {
+            Expression::Match { arms, .. } => {
+                for arm in arms {
+                    if matches!(arm.body.1.as_ref(), Expression::Match { .. }) {
+                        panic!("{src} must not nest Match via case synonym");
                     }
-                    panic!("{src} must be a parse error, not a Match with non-Match arm body");
                 }
-                other => panic!(
-                    "{src} must be a parse error, not silently accepted, got {:?}",
-                    other
-                ),
-            },
-            Err(_) => {}
-        }
+                panic!("{src} must be a parse error, not a Match with non-Match arm body");
+            }
+            other => panic!(
+                "{src} must be a parse error, not silently accepted, got {:?}",
+                other
+            ),
+        } }
     }
 
     #[test]

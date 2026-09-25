@@ -781,3 +781,19 @@ impl Terminator {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn f32_const_roundtrips_through_f64_view() {
+        let c = MirConst::f32(1.5);
+        assert_eq!(c.ty(), MirTy::F32);
+        assert_eq!(c.as_f64(), Some(1.5));
+        assert_eq!(MirConst::f64(-2.25).as_f64(), Some(-2.25));
+        assert_eq!(MirConst::f64(-2.25).ty(), MirTy::F64);
+        assert_eq!(MirConst::I32(1).as_f64(), None);
+        assert_eq!(MirConst::Bool(true).as_f64(), None);
+    }
+}

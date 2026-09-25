@@ -54,10 +54,10 @@ pub fn par_loop_grain() -> i64 {
 }
 
 fn env_flag_default_on(key: &str) -> bool {
-    match std::env::var(key) {
-        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no") => false,
-        _ => true,
-    }
+    !matches!(
+        std::env::var(key),
+        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
+    )
 }
 
 /// Dynamic bounds, int parameters, branches, and non-unit strides (`COIL_PAR_LOOP_WIDE`).
@@ -1022,11 +1022,10 @@ fn resolve_arm_refs(
     let mut arms = Vec::with_capacity(items.len());
     for item in items {
         let expr = peel(item);
-        if let Expression::Identifier(n) = expr.1.as_ref() {
-            if !used.insert(*n) {
+        if let Expression::Identifier(n) = expr.1.as_ref()
+            && !used.insert(*n) {
                 return None;
             }
-        }
         arms.push(resolve_arm(item, ctx, lets)?);
     }
     if !lets.is_empty() {

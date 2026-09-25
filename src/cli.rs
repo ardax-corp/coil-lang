@@ -440,7 +440,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<CliArgs, String> {
             return Err(format_clap_error(e));
         }
     };
-    let raw = RawCli::from_arg_matches(&matches).map_err(|e| format_clap_error(e))?;
+    let raw = RawCli::from_arg_matches(&matches).map_err(format_clap_error)?;
     raw.into_cli_args()
 }
 
@@ -585,11 +585,10 @@ impl RawCli {
                 fail_fast,
                 path,
             }) => {
-                if let Some(p) = &path {
-                    if is_reserved(p) {
+                if let Some(p) = &path
+                    && is_reserved(p) {
                         return Err("test path must be a directory".into());
                     }
-                }
                 cli_from(
                     Command::Test { path, fail_fast },
                     log,

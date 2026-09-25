@@ -104,8 +104,8 @@ fn licm_cast_hoist_triple(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call:
 
 pub(super) fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> usize {
     let mut n = 0;
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
+        match op {
             IlOp::StorePop { slot: s, .. } if *s == slot => n += 1,
             IlOp::Byte { byte, .. }
                 if matches!(
@@ -227,10 +227,15 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::P
         }
         let stored = slots_stored_in_loop(ops, &lp);
         let mut hoist: Vec<(usize, IlOp)> = Vec::new();
-        for i in lp.body_start()..lp.latch {
-            match &ops[i] {
+        for (i, op) in ops
+            .iter()
+            .enumerate()
+            .take(lp.latch)
+            .skip(lp.body_start())
+        {
+            match op {
                 IlOp::Const { .. } | IlOp::ConstPool { .. } | IlOp::String { .. } => {
-                    hoist.push((i, ops[i].clone()));
+                    hoist.push((i, op.clone()));
                 }
                 // Do not hoist bare `Load`: even when the slot is unchanged,
                 // the push is needed every iteration (e.g. `while len(a) < n`
@@ -238,12 +243,12 @@ fn licm_stack_producers(ops: &mut Vec<IlOp>, purity: Option<&super::pure_call::P
                 // producer and empties the stack under ArrayLen.
                 IlOp::Load { .. } => {}
                 IlOp::BinSlotImm { slot, .. } if !stored.contains(&(*slot as u32)) => {
-                    hoist.push((i, ops[i].clone()));
+                    hoist.push((i, op.clone()));
                 }
                 IlOp::BinSlotSlot { a, b, .. }
                     if !stored.contains(&(*a as u32)) && !stored.contains(&(*b as u32)) =>
                 {
-                    hoist.push((i, ops[i].clone()));
+                    hoist.push((i, op.clone()));
                 }
                 _ => {}
             }
@@ -704,8 +709,8 @@ fn ordered_loops(ops: &[IlOp]) -> Vec<NaturalLoop> {
 /// is not a general LICM barrier (inlined `Vec::push`), but `len` is not
 /// invariant in that case.
 fn loop_may_change_array_length(ops: &[IlOp], lp: &NaturalLoop) -> bool {
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
+        match op {
             IlOp::MakeArray { .. } | IlOp::HostInvoke { .. } | IlOp::Entry { .. } => return true,
             IlOp::Byte { byte, .. }
                 if matches!(
@@ -746,8 +751,8 @@ pub(super) fn loop_has_barrier(
 /// Barriers that block string-key LICM. GetField/SetField are allowed — the
 /// keys themselves are still loop-invariant.
 fn loop_has_hard_barrier(ops: &[IlOp], lp: &NaturalLoop) -> bool {
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
+        match op {
             IlOp::HostInvoke { .. } | IlOp::Print { .. } | IlOp::Entry { .. } => return true,
             IlOp::Jump {
                 kind: IlJumpKind::JumpIfMatch { .. },
@@ -774,8 +779,8 @@ fn loop_has_hard_barrier(ops: &[IlOp], lp: &NaturalLoop) -> bool {
 }
 
 fn loop_has_field_ops(ops: &[IlOp], lp: &NaturalLoop) -> bool {
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
+        match op {
             IlOp::GetField { .. } | IlOp::SetField { .. } => return true,
             IlOp::Byte { byte, .. }
                 if matches!(
@@ -793,8 +798,8 @@ fn loop_has_field_ops(ops: &[IlOp], lp: &NaturalLoop) -> bool {
 
 pub(super) fn slots_stored_in_loop(ops: &[IlOp], lp: &NaturalLoop) -> HashSet<u32> {
     let mut s = HashSet::new();
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
+        match op {
             IlOp::StorePop { slot, .. } => {
                 s.insert(*slot);
             }

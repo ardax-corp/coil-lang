@@ -455,9 +455,7 @@ fn unify_builtin_app_sum(subst: &Subst, app: &Ty, sum: &Ty) -> Option<Result<Sub
                     right: sum.clone(),
                 }));
             }
-            let Some(inner) = option_inner(sum) else {
-                return None;
-            };
+            let inner = option_inner(sum)?;
             return Some(unify_with(subst, &args[0], &inner));
         }
 
@@ -468,9 +466,7 @@ fn unify_builtin_app_sum(subst: &Subst, app: &Ty, sum: &Ty) -> Option<Result<Sub
                     right: sum.clone(),
                 }));
             }
-            let Some((ok, err)) = result_ok_err(sum) else {
-                return None;
-            };
+            let (ok, err) = result_ok_err(sum)?;
             let s = match unify_with(subst, &args[0], &ok) {
                 Ok(s) => s,
                 Err(e) => return Some(Err(e)),

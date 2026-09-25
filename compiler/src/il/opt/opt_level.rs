@@ -32,6 +32,7 @@ pub enum OptLevel {
 
 impl OptLevel {
     /// Parse CLI / config tokens, including `-O2` / `O2` / `2` / `standard`.
+    #[allow(clippy::result_unit_err)]
     pub fn parse(name: &str) -> Result<Self, ()> {
         name.parse()
     }

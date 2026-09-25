@@ -35,12 +35,6 @@ pub enum LirRefuse {
     HeapField,
     /// `BoxValue` / `UnboxValue`.
     Box,
-    /// `JumpIfMatch` / `Unpack` the reconstruct cannot model.
-    #[allow(dead_code)]
-    Match,
-    /// Residual `Unpack` the reconstruct cannot model.
-    #[allow(dead_code)]
-    Unpack,
 }
 
 /// Production LIR entry after dense specialize misses.

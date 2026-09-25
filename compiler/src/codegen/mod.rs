@@ -119,21 +119,19 @@ pub fn unescape_coil_string(s: &str) -> String {
                 if chars.next() == Some('{') {
                     let mut hex = String::new();
                     let mut closed = false;
-                    while let Some(ch) = chars.next() {
+                    for ch in chars.by_ref() {
                         if ch == '}' {
                             closed = true;
                             break;
                         }
                         hex.push(ch);
                     }
-                    if closed {
-                        if let Ok(code) = u32::from_str_radix(&hex, 16) {
-                            if let Some(ch) = char::from_u32(code) {
+                    if closed
+                        && let Ok(code) = u32::from_str_radix(&hex, 16)
+                            && let Some(ch) = char::from_u32(code) {
                                 out.push(ch);
                                 continue;
                             }
-                        }
-                    }
                 }
                 out.push('\\');
                 out.push('u');
@@ -323,6 +321,7 @@ fn arm_has_runtime_test(arm: &MatchArm) -> bool {
 }
 
 /// Emit inner-pattern tests after outer tag dispatch (multi-arm groups).
+#[allow(clippy::too_many_arguments)]
 fn emit_inner_test<'compiler>(
     arm_idx: usize,
     checker: &Checker,
@@ -587,11 +586,10 @@ fn collect_pattern_binding_types_with_expected(
     match pattern {
         Pattern::Wildcard | Pattern::Default | Pattern::Integer(_) => {}
         Pattern::Binding { name } => {
-            if let Some(ty) = expected {
-                if !is_open_schema_ty(checker, enum_name, ty) {
+            if let Some(ty) = expected
+                && !is_open_schema_ty(checker, enum_name, ty) {
                     out.insert(name.to_string(), ty.clone());
                 }
-            }
         }
         Pattern::Constructor { .. } => {
             collect_pattern_binding_types(checker, pattern, out);
@@ -1105,7 +1103,7 @@ impl Default for Compiler {
     }
 }
 
-impl<'ctx> Context {
+impl Context {
     fn child(&self) -> Self {
         Self {
             current: self.current.clone(),
@@ -1129,12 +1127,13 @@ impl<'ctx> Context {
     }
 }
 
-impl<'ctx> Context {
+impl Context {
     pub fn get_prev(&self) -> &Option<Box<Self>> {
         &self.prev
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_pattern_binding<'compiler>(
     checker: &Checker,
     match_bindings: &mut HashMap<String, u32>,
@@ -1313,10 +1312,10 @@ fn unwrap_expr_output<'a>(expr: &'a Output<'a>) -> &'a Output<'a> {
 
 /// `COIL_AUTO_PAR=0` disables automatic fork-join of pure recursive binops.
 fn auto_par_enabled() -> bool {
-    match std::env::var("COIL_AUTO_PAR") {
-        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no") => false,
-        _ => true,
-    }
+    !matches!(
+        std::env::var("COIL_AUTO_PAR"),
+        Ok(v) if matches!(v.as_str(), "0" | "false" | "off" | "no")
+    )
 }
 
 fn unwrapped_identifier<'a>(expr: &'a Output<'a>) -> Option<&'a str> {

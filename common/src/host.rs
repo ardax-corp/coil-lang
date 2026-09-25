@@ -884,11 +884,10 @@ pub fn library_stem(name: &str) -> String {
     } else if let Some(stripped) = stem.strip_suffix(".dll") {
         stem = stripped.to_string();
     }
-    if let Some(stripped) = stem.strip_prefix("lib") {
-        if !stripped.is_empty() {
+    if let Some(stripped) = stem.strip_prefix("lib")
+        && !stripped.is_empty() {
             stem = stripped.to_string();
         }
-    }
     stem
 }
 

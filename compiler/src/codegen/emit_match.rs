@@ -284,9 +284,9 @@ impl Compiler {
                     self.bytecode.il_mut(),
                 );
                 self.bytecode.push_pop();
-            } else if *tag != u32::MAX && is_last {
-                self.bytecode.push_pop();
-            } else if *tag == u32::MAX {
+            } else {
+                // Last concrete tag and the wildcard tag both discard the
+                // scrutinee; only a non-final concrete tag compares.
                 self.bytecode.push_pop();
             }
             let slot = binding.map(|name| {
@@ -302,7 +302,7 @@ impl Compiler {
             } else {
                 self.bytecode.push_pop();
             }
-            self.compile_pair_match_body(&arms[*arm_idx], *binding, slot);
+            self.compile_pair_match_body(arms[*arm_idx], *binding, slot);
             let more = i + 1 < n_dispatch || wildcard.is_some();
             if more {
                 bb.emit_jump_to(end, BbJumpKind::Unconditional, self.bytecode.il_mut());
@@ -314,7 +314,7 @@ impl Compiler {
         if let Some(w) = wildcard {
             self.bytecode.push_pop();
             self.bytecode.push_pop();
-            self.compile_pair_match_body(&arms[w], None, None);
+            self.compile_pair_match_body(arms[w], None, None);
         }
         bb.bind_label(end, self.bytecode.il_mut());
         if let Some((payload, tag_slot)) = from_ident {
@@ -419,7 +419,7 @@ impl Compiler {
         } else {
             self.bytecode.push_pop();
         }
-        self.compile_niche_match_body(&arms[some_index], some_binding, some_slot);
+        self.compile_niche_match_body(arms[some_index], some_binding, some_slot);
         bb.emit_jump_to(end_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
 
         bb.bind_label(fallback_label, self.bytecode.il_mut());
@@ -436,7 +436,7 @@ impl Compiler {
         } else {
             self.bytecode.push_pop();
         }
-        self.compile_niche_match_body(&arms[fallback_index], fallback_binding, fallback_slot);
+        self.compile_niche_match_body(arms[fallback_index], fallback_binding, fallback_slot);
 
         bb.bind_label(end_label, self.bytecode.il_mut());
         true
@@ -523,7 +523,7 @@ impl Compiler {
         } else {
             self.bytecode.push_pop();
         }
-        self.compile_niche_match_body(&arms[err_index], err_binding, err_slot);
+        self.compile_niche_match_body(arms[err_index], err_binding, err_slot);
         bb.emit_jump_to(end_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
 
         bb.bind_label(ok_label, self.bytecode.il_mut());
@@ -540,7 +540,7 @@ impl Compiler {
         } else {
             self.bytecode.push_pop();
         }
-        self.compile_niche_match_body(&arms[ok_index], ok_binding, ok_slot);
+        self.compile_niche_match_body(arms[ok_index], ok_binding, ok_slot);
 
         bb.bind_label(end_label, self.bytecode.il_mut());
         true
@@ -627,7 +627,7 @@ impl Compiler {
         } else {
             self.bytecode.push_pop();
         }
-        self.compile_niche_match_body(&arms[ok_index], ok_binding, ok_slot);
+        self.compile_niche_match_body(arms[ok_index], ok_binding, ok_slot);
         bb.emit_jump_to(end_label, BbJumpKind::Unconditional, self.bytecode.il_mut());
 
         bb.bind_label(err_label, self.bytecode.il_mut());
@@ -645,7 +645,7 @@ impl Compiler {
         } else {
             self.bytecode.push_pop();
         }
-        self.compile_niche_match_body(&arms[err_index], err_binding, err_slot);
+        self.compile_niche_match_body(arms[err_index], err_binding, err_slot);
 
         bb.bind_label(end_label, self.bytecode.il_mut());
         true
@@ -830,7 +830,7 @@ impl Compiler {
                 let has_runtime_test = group
                     .arm_indices
                     .iter()
-                    .any(|&i| arm_has_runtime_test(&arms[i]));
+                    .any(|&i| arm_has_runtime_test(arms[i]));
                 if !has_runtime_test {
                     continue;
                 }
@@ -989,11 +989,10 @@ impl Compiler {
                 // Per-arm types so Access on a reused binding name sees this arm's payload.
                 let mut arm_binding_tys = HashMap::new();
                 collect_pattern_binding_types(&self.checker, &arm.pattern.1, &mut arm_binding_tys);
-                if let Pattern::Binding { name } = &arm.pattern.1 {
-                    if let Some(ty) = self.checker.codegen_var_type(name) {
+                if let Pattern::Binding { name } = &arm.pattern.1
+                    && let Some(ty) = self.checker.codegen_var_type(name) {
                         arm_binding_tys.insert(name.to_string(), ty.clone());
                     }
-                }
                 self.mono_codegen_var_types.push(arm_binding_tys);
 
                 // Skip body for identity bind (`Ok(x) => x`): payload already at slot.

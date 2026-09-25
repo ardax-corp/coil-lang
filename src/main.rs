@@ -247,6 +247,7 @@ fn maybe_warn_stale_default_out(pipeline: &mut Pipeline, entry: &str, debug: &Pr
 
 /// Run archived bytecode. Returns `true` when a language-level `panic` aborted.
 /// Uncaught `raise` from `main` is a `Result.Err` return and is not an abort (Q5).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_archive(
     pipeline: &Pipeline,
     bytecode: &[Byte],
@@ -261,8 +262,8 @@ pub(crate) fn execute_archive(
         .max(machine::DEFAULT_OPERAND_STACK_SLOTS as u32) as usize;
     let entry = entry.map(ffi_entry_path);
     let mut machine = Machine::<256>::with_operand_capacity(operand_slots);
-    crate::host_wire::wire_pipeline_vm(&pipeline, &mut machine, entry.as_deref());
-    crate::host_wire::wire_pipeline_threads(&pipeline, &mut machine, bytecode, constants, strings);
+    crate::host_wire::wire_pipeline_vm(pipeline, &mut machine, entry.as_deref());
+    crate::host_wire::wire_pipeline_threads(pipeline, &mut machine, bytecode, constants, strings);
     machine.set_program_debug(debug);
     machine.run_raw(bytecode, constants, strings, static_slots);
     machine.panicked()
@@ -494,7 +495,15 @@ fn run_test_suite(
         pipeline.set_include_tests(true);
         pipeline.set_opt_level(opt_level);
         pipeline.set_host_grants(grants.clone());
-        bind_cli_roots(&mut pipeline, extra_roots.to_vec());
+        // Same search path CI passes with `--root`: examples and a sibling
+        // coil-stdlib checkout, when those directories exist.
+        let mut roots = extra_roots.to_vec();
+        for extra in compiler::Pipeline::workspace_language_extra_roots() {
+            if extra.is_dir() && !roots.contains(&extra) {
+                roots.push(extra);
+            }
+        }
+        bind_cli_roots(&mut pipeline, roots);
 
         // catch_unwind isolates a compiler ICE from aborting the whole
         // harness under panic=unwind. Release builds use panic=abort, so

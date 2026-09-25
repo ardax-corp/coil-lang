@@ -70,7 +70,7 @@ pub fn scale_i64(a: &[i64; LANES], scalar: i64, out: &mut [i64; LANES]) {
 pub fn fold_add_f64(init: f64, lanes: &[f64; LANES]) -> f64 {
     let mut s = init;
     for x in lanes {
-        s = s + *x;
+        s += *x;
     }
     s
 }
@@ -90,7 +90,7 @@ pub fn fold_add_i64(init: i64, lanes: &[i64; LANES]) -> i64 {
 pub fn fold_mul_f64(init: f64, lanes: &[f64; LANES]) -> f64 {
     let mut s = init;
     for x in lanes {
-        s = s * *x;
+        s *= *x;
     }
     s
 }
@@ -148,7 +148,7 @@ mod tests {
         let lanes = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
         let mut s = 10.0;
         for x in lanes {
-            s = s + x;
+            s += x;
         }
         assert_eq!(fold_add_f64(10.0, &lanes), s);
     }

@@ -171,8 +171,8 @@ fn header_lt_bound_for_test(ops: &[IlOp], lp: &NaturalLoop) -> Option<(u32, u32)
 
 fn slots_stored_in_loop(ops: &[IlOp], lp: &NaturalLoop) -> HashSet<u32> {
     let mut s = HashSet::new();
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
+        match op {
             IlOp::StorePop { slot, .. } => {
                 s.insert(*slot);
             }
@@ -194,8 +194,8 @@ fn slots_stored_in_loop(ops: &[IlOp], lp: &NaturalLoop) -> HashSet<u32> {
 
 fn store_count_in_loop(ops: &[IlOp], lp: &NaturalLoop, slot: u32) -> usize {
     let mut n = 0;
-    for i in lp.header..=lp.latch {
-        match &ops[i] {
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
+        match op {
             IlOp::StorePop { slot: s, .. } if *s == slot => n += 1,
             IlOp::Byte { byte, .. }
                 if matches!(
@@ -221,8 +221,7 @@ fn array_length_sensitive(ops: &[IlOp], lp: &NaturalLoop, arr_slot: u32, purity:
     if stored.contains(&arr_slot) {
         return true;
     }
-    for i in lp.header..=lp.latch {
-        let op = &ops[i];
+    for op in ops.iter().take(lp.latch.saturating_add(1)).skip(lp.header) {
         if is_array_push(op) {
             // Conservative: any push may extend an array reachable here.
             return true;

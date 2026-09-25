@@ -37,7 +37,7 @@ pub struct LoadedArchive {
 /// Deserialize an `ArchivedProgram` blob (from `.hyc` or an embedded slice).
 pub fn load_archive_bytes(buffer: &[u8]) -> Result<LoadedArchive, LoadErr> {
     let align = std::mem::align_of::<ArchivedArchivedProgram>();
-    if (buffer.as_ptr() as usize) % align == 0 {
+    if (buffer.as_ptr() as usize).is_multiple_of(align) {
         decode_archive(buffer)
     } else {
         let mut aligned = rkyv::util::AlignedVec::<16>::with_capacity(buffer.len());
@@ -148,16 +148,14 @@ fn ensure_native_cache(lock: &NativeLock, exe: &Path) -> Result<Vec<PathBuf>, St
     for entry in &lock.entries {
         let path = NativeLock::entry_cache_path(&root, entry);
         let dir = NativeLock::entry_cache_dir(&root, entry);
-        if path.is_file() {
-            if let Ok(meta) = std::fs::metadata(&path) {
-                if meta.len() == entry.size {
+        if path.is_file()
+            && let Ok(meta) = std::fs::metadata(&path)
+                && meta.len() == entry.size {
                     if !dirs.iter().any(|d: &PathBuf| d == &dir) {
                         dirs.push(dir);
                     }
                     continue;
                 }
-            }
-        }
         missing.push(format!(
             "{} {} ({})",
             entry.package, entry.version, entry.filename

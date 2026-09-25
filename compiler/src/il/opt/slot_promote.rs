@@ -238,8 +238,10 @@ fn loop_block_set(header: usize, preds: &[Vec<usize>], blocks: &[Block]) -> Hash
 fn slots_stored_in_blocks(ops: &[IlOp], blocks: &[Block], members: &HashSet<usize>) -> HashSet<u32> {
     let mut stored = HashSet::new();
     for &bi in members {
-        for i in blocks[bi].start..blocks[bi].end {
-            match &ops[i] {
+        let start = blocks[bi].start;
+        let end = blocks[bi].end;
+        for op in ops.iter().take(end).skip(start) {
+            match op {
                 IlOp::StorePop { slot, .. } => {
                     stored.insert(*slot);
                 }
@@ -860,6 +862,7 @@ fn elide_copy_only_latch_shuffles(ops: &mut Vec<IlOp>, _entry_tell: u32) {
 /// Unique in-loop reaching def of `t` for a latch copy, walking only along
 /// single-predecessor edges inside the natural loop (excluding the header).
 /// Multi-pred joins are φ-like and refuse. Opaque ops refuse.
+#[allow(clippy::too_many_arguments)]
 fn find_latch_coalesce_def(
     ops: &[IlOp],
     live: &SlotLiveness,
@@ -1191,8 +1194,8 @@ fn raise_producer_into_dead_peel_floor(ops: &mut Vec<IlOp>, entry_tell: u32) {
             // def, mid must not be needed under a different reaching def. Require
             // no later STORE of mid before we finish rewriting (fail closed on
             // another def of mid).
-            for t in i + 2..ops.len() {
-                let (_u, defs, opaque) = op_slot_use_def(&ops[t]);
+            for (t, op) in ops.iter().enumerate().skip(i + 2) {
+                let (_u, defs, opaque) = op_slot_use_def(op);
                 if opaque {
                     // Residual forms: only OK if mid is not live there.
                     if live.live_before.get(t).is_some_and(|s| s.contains(&mid)) {
@@ -1226,15 +1229,15 @@ fn raise_producer_into_dead_peel_floor(ops: &mut Vec<IlOp>, entry_tell: u32) {
             return;
         }
         // Rewrite uses of mid → high until the next def of mid.
-        for t in def_idx + 1..ops.len() {
-            let (_u, defs, opaque) = op_slot_use_def(&ops[t]);
+        for op in ops.iter_mut().skip(def_idx + 1) {
+            let (_u, defs, opaque) = op_slot_use_def(op);
             if opaque {
                 break;
             }
             if defs.contains(&mid) {
                 break;
             }
-            rewrite_slot_uses(&mut ops[t], mid, high);
+            rewrite_slot_uses(op, mid, high);
         }
         // Drop peel alias copies [first_copy, high_copy+1].
         let mut idx = high_copy + 1;
@@ -3209,7 +3212,7 @@ mod tests {
     #[test]
     fn refuses_coalesce_when_opaque_between_def_and_copy() {
         // FloatChainStore is opaque — coalescing across it must fail closed.
-        let chain = common::Byte::new(Instruction::FloatChainStore).with_operand_u32((7 << 16) | 0);
+        let chain = common::Byte::new(Instruction::FloatChainStore).with_operand_u32(7 << 16);
         let mut ops = vec![
             IlOp::Const { imm: 1, loc: loc() },
             IlOp::StorePop {

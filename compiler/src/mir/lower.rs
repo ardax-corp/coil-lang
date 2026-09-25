@@ -385,6 +385,7 @@ fn match_payload_ty(src_ty: MirTy) -> MirTy {
 /// declaration order onto consecutive reserved slots (`payload_base + i`).
 /// Nested rematch: a later arm's LOAD of an outer slot is not this JIM's
 /// overlap — `jim_seek` is the frame Seek before the match.
+#[allow(clippy::too_many_arguments)]
 fn bind_match_payloads(
     b: &mut MirBuilder,
     src: ValueId,
@@ -405,11 +406,10 @@ fn bind_match_payloads(
         return Ok(payloads);
     }
     let mut slot = overlap_base(next, rest);
-    if let Some(base) = jim_seek {
-        if slot.is_some_and(|s| s < base) || (slot.is_none() && !identity_return) {
+    if let Some(base) = jim_seek
+        && (slot.is_some_and(|s| s < base) || (slot.is_none() && !identity_return)) {
             slot = Some(base);
         }
-    }
     if let Some(slot) = slot {
         for (i, &p) in payloads.iter().enumerate() {
             let local = LocalId(slot + i as u32);
@@ -488,6 +488,7 @@ fn is_term(op: &IlOp) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn emit_term(
     b: &mut MirBuilder,
     tos: &mut Vec<ValueId>,
@@ -500,18 +501,15 @@ fn emit_term(
     incoming: &mut HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>>,
     overlap_defs: &mut HashMap<BlockId, Vec<(LocalId, ValueId)>>,
 ) -> Result<(), LowerError> {
-    if hints.allow_deopt {
-        if let Some(op) = last {
-            if matches!(
+    if hints.allow_deopt
+        && let Some(op) = last
+            && matches!(
                 op,
                 IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. }
-            ) {
-                if let Some(kind) = super::deopt::boundary_for_op(op) {
+            )
+                && let Some(kind) = super::deopt::boundary_for_op(op) {
                     b.ins_deopt(kind, op.loc())?;
                 }
-            }
-        }
-    }
     match last {
         Some(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
@@ -1208,15 +1206,14 @@ fn bin_stack(
 fn const_native_id(b: &MirBuilder, v: ValueId) -> Option<u16> {
     for block in &b.func().blocks {
         for inst in &block.insts {
-            if let MirInst::Const { dest, c } = inst {
-                if *dest == v {
+            if let MirInst::Const { dest, c } = inst
+                && *dest == v {
                     return match *c {
                         MirConst::I64(n) => u16::try_from(n).ok(),
                         MirConst::I32(n) => u16::try_from(n).ok(),
                         _ => None,
                     };
                 }
-            }
         }
     }
     None
