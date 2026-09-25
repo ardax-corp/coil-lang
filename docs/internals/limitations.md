@@ -4,7 +4,7 @@ Tracked in Linear: [Known limitations](https://linear.app/ardax/project/known-li
 
 Actionable gaps in the compiler, VM, and language surface. For opcode/archive rules see [AGENTS.md](../../AGENTS.md); for typechecker error codes see [error-codes.md](https://github.com/ardax-corp/coil-website/blob/main/src/content/docs/references/error-codes.md).
 
-**Design rule:** prefer **method-based APIs** (`impl` methods on classes) over free functions for type-tied operations — stdlib, new language features, and codegen fixes should default to methods. Virtual-module host primitives (`io::read`) remain free functions. Free generic `fn f<T>(T) -> Option<T>` is still `E0127` (shared body boxes `T`); put that return on an inherent method.
+**Design rule:** prefer **method-based APIs** (`impl` methods on classes) over free functions for type-tied operations — stdlib, new language features, and codegen fixes should default to methods. Virtual-module host primitives (`io::read`) remain free functions. Free generic `fn f<T>(T) -> Option<T>` is still `E0127` (shared body boxes `T`); put that return on an inherent method. The same shared-body boxing makes a generic `fn` taken **as a value** (`let f = head;`) misread any type parameter nested in its signature (`Vec<T>`, `Option<T>`, tuples, classes); that is also `E0127` now (it silently returned wrong values before). Bare `T` params / returns stay allowed; wrap nested cases in a lambda at a concrete type.
 
 **Priority key:** blocking = correctness crash or major feature blocked; high = reliability or significant DX gap; medium = partial support; low = deferred polish.
 

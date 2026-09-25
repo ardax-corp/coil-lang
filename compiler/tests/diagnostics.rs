@@ -2821,6 +2821,36 @@ fn free_generic_option_return_inferred_has_stable_code() {
     );
 }
 
+fn has_e0127(src: &str) -> bool {
+    check_messages(src)
+        .iter()
+        .any(|m| m.code() == Some(ErrorCode::UnsupportedGenericOptionReturn))
+}
+
+#[test]
+fn generic_fn_value_with_nested_type_param_is_rejected() {
+    assert!(has_e0127(
+        "fn head<T>(Vec<T> v) -> T { return v[0]; }\nfn main() { let f = head; }"
+    ));
+    assert!(has_e0127(
+        "fn wrap<T>(T a) -> (T, int) { return (a, 1); }\nfn main() { let f = wrap; }"
+    ));
+}
+
+#[test]
+fn generic_fn_value_with_bare_type_params_is_ok() {
+    assert!(!has_e0127(
+        "fn both<T>(T a, T b) -> T { return b; }\nfn main() { let f = both; let _ = f(1, 2); }"
+    ));
+}
+
+#[test]
+fn generic_fn_direct_call_with_nested_param_is_ok() {
+    assert!(!has_e0127(
+        "fn head<T>(Vec<T> v) -> T { return v[0]; }\nfn main() { let v: Vec<int> = Vec::new(); v.push(1); let _ = head(v); }"
+    ));
+}
+
 #[test]
 fn free_generic_option_of_ground_payload_is_ok() {
     let msgs = check_messages(
