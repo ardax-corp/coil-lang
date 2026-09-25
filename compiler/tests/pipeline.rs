@@ -5780,8 +5780,11 @@ fn two_local_compare_break_bin_slot_slot_jmpt_runs() {
 use io::{stdout, write};
 use string::{format, to_bytes};
 fn main() {
-    let a = 1;
-    let b = 2;
+    let v: Vec<int> = Vec::new();
+    v.push(1);
+    v.push(2);
+    let a = v[0];
+    let b = v[1];
     let n = 0;
     while (n < 10) {
         if a < b { break; }
@@ -5790,6 +5793,7 @@ fn main() {
     write(stdout(), to_bytes(format("%i", n)));
 }
 "#;
+    // Heap reads, not literals: MIR→LIR would fold a constant compare away.
     let mut pipeline = test_pipeline();
     let (bytecode, _) = pipeline.compile_src(src).expect("compile");
     assert!(

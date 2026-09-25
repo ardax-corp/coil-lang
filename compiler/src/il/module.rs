@@ -345,8 +345,7 @@ impl IlModule {
             ) {
                 // Do not re-run stack-IL opts: `local_cse` refuses MOD and
                 // rematerializes a stored remainder (pair_int_churn +12%).
-                let fuse = lir_emit_cost(&body.ops);
-                if lir_emit_cost(&lir) <= fuse.saturating_add(lir_cost_slack(&body.ops)) {
+                if lir_keeps(&body.ops, &lir) {
                     if !side.debug_slot_remap.is_empty() {
                         side_remaps.insert(body.meta.name.clone(), side.debug_slot_remap);
                     }
@@ -497,17 +496,48 @@ pub(crate) fn prove_trailing_if_end_after_next_body_replace() {
 /// Emitting-op cost for MIR→LIR replace: refuse a reconstruct that grew
 /// the body (naive slot spill). Labels are free. `Seek` / `StorePop` are
 /// expensive so leftover lets keep fuse-IL (ConstReturnImm).
-fn lir_emit_cost(ops: &[IlOp]) -> usize {
+/// Keep a MIR→LIR reconstruct when it is no costlier than the opted fuse-IL
+/// (+ match slack). Costs weight loop bodies (×8 per nesting level) so a
+/// smaller hot loop can win against a larger cold tail — a flat count kept
+/// fuse-IL on churn `main`s whose LIR loop was faster. Weighting needs both
+/// sides to expose the same loops; otherwise compare flat counts.
+/// A weighted tie is settled by the flat count.
+fn lir_keeps(fuse_ops: &[IlOp], lir: &[IlOp]) -> bool {
+    let fuse_loops = super::analysis::find_natural_loops(fuse_ops);
+    let lir_loops = super::analysis::find_natural_loops(lir);
+    let slack = lir_cost_slack(fuse_ops);
+    let flat_ok = lir_emit_cost(lir, &[]) <= lir_emit_cost(fuse_ops, &[]).saturating_add(slack);
+    if fuse_loops.is_empty() || fuse_loops.len() != lir_loops.len() {
+        return flat_ok;
+    }
+    let f = lir_emit_cost(fuse_ops, &fuse_loops);
+    let l = lir_emit_cost(lir, &lir_loops);
+    // IL-level cost cannot see fuse-select packing; a weighted tie goes to
+    // the flat count, which still favours the tighter fuse-IL loop.
+    l < f || (l <= f.saturating_add(slack) && flat_ok)
+}
+
+/// Static reconstruct cost; ops inside `loops` weigh ×8 per level (max 2).
+fn lir_emit_cost(ops: &[IlOp], loops: &[super::analysis::NaturalLoop]) -> usize {
     ops.iter()
-        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
-        .map(|op| match op {
-            IlOp::StorePop { .. } => 2,
-            IlOp::Byte { byte, .. }
-                if matches!(*byte.bytecode(), common::Instruction::Seek) =>
-            {
-                2 + (byte.operand_u32() as usize) / 16
-            }
-            _ => 1,
+        .enumerate()
+        .filter(|(_, op)| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)))
+        .map(|(i, op)| {
+            let base = match op {
+                IlOp::StorePop { .. } => 2,
+                IlOp::Byte { byte, .. }
+                    if matches!(*byte.bytecode(), common::Instruction::Seek) =>
+                {
+                    2 + (byte.operand_u32() as usize) / 16
+                }
+                _ => 1,
+            };
+            let depth = loops
+                .iter()
+                .filter(|lp| lp.header <= i && i <= lp.latch)
+                .count()
+                .min(2) as u32;
+            base * 8usize.pow(depth)
         })
         .sum()
 }
