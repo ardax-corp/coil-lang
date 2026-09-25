@@ -1,5 +1,10 @@
 # Threaded execute dispatch (COI-373 G0, COI-374 G1, COI-375 G2, COI-376 G3)
 
+> **Status: removed.** The table and hotmatch paths and `COIL_THREADED_DISPATCH`
+> were deleted after a re-measure (fib ~8% faster, tak ~20% slower, others flat).
+> The giant match plus the `execute_dense` streak is the only dispatch path. The
+> notes below are the historical A/B record.
+
 Can a portable **fn-pointer** interpreter beat the outlined giant `match` in
 `Machine::execute` on flagship `.hyc`?
 
