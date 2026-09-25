@@ -1,6 +1,14 @@
 # VM opcodes (builtins-related)
 
-User code does not name these directly; the compiler emits them:
+User code does not name these directly; the compiler emits them.
+
+**Load-time verification.** `decode_archived_program` runs
+`common::verify_bytecode` on every archive (`coil run`, `coil-embed`,
+pipeline reload); debug builds also verify freshly compiled programs. It
+rejects retired opcodes (tombstones below) and out-of-range jump / call
+targets (including pool-held fused-jump descriptors), constant-pool,
+string-table and static-slot indices. Frame-slot operands and stack height
+remain compiler invariants.
 
 | Opcode | Role |
 |--------|------|
