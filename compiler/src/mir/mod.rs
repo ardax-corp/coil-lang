@@ -1121,6 +1121,7 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
+        p.set_auto_par(false);
         let (bc, constants) = p.compile_src(src).expect("compile widened vector loops");
         let symbols = p.program_debug().fn_symbols.clone();
         for name in ["sum_i", "sum_from", "sum_next", "sum_after_call"] {
@@ -1259,6 +1260,7 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
+        p.set_auto_par(false);
         let (bc, constants) = p.compile_src(src).expect("compile i64 loop");
         assert!(
             bc.iter().any(|b| is_dense_bin_op(*b.bytecode())),
@@ -4143,6 +4145,7 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
+        p.set_auto_par(false);
         p.set_debugger_attached(true);
         let (bc, constants) = p.compile_src(src).expect("compile");
         assert!(
@@ -5479,6 +5482,7 @@ fn main() {
 }
 "#;
         let mut p = crate::Pipeline::new();
+        p.set_auto_par(false);
         let (bc, constants) = p.compile_src(src).expect("compile range for-in");
         let symbols = p.program_debug().fn_symbols;
         let i = symbols

@@ -80,6 +80,8 @@ pub struct Pipeline {
     ast_cache: crate::ast_cache::AstCache,
     /// When true, harness tests are compiled into the program (see `--include-tests`).
     include_tests: bool,
+    /// When false, skip auto fork-join even if `COIL_AUTO_PAR` is on.
+    auto_par: bool,
     /// Host/test `dload` grants (stem + file to hash). Not written from coil.toml.
     extra_dload_grants: Vec<(String, PathBuf)>,
     /// Host/test extra stems with no lock hash (`set_dload_allowlist`).
@@ -244,6 +246,7 @@ impl Pipeline {
             c.set_opt_level(self.opt_level);
             c.set_collect_opt_stats(self.collect_opt_stats);
             c.set_debugger_attached(self.debugger_attached);
+            c.set_auto_par(self.auto_par);
             c
         })
     }
@@ -606,6 +609,7 @@ impl Pipeline {
             overlays: HashMap::new(),
             ast_cache: crate::ast_cache::AstCache::default(),
             include_tests: false,
+            auto_par: true,
             extra_dload_grants: Vec::new(),
             extra_dload_stems: Vec::new(),
             host_grants: HostGrants::deny_all(),
@@ -1500,6 +1504,14 @@ impl Pipeline {
 
     pub fn include_tests(&self) -> bool {
         self.include_tests
+    }
+
+    /// Disable automatic fork-join of pure recursive calls and counted loops.
+    pub fn set_auto_par(&mut self, on: bool) {
+        self.auto_par = on;
+        if self.compiler.get().is_some() {
+            self.compiler_lazy_mut().set_auto_par(on);
+        }
     }
 
     /// Select an IL optimization preset. Default is [`crate::OptLevel::Standard`].

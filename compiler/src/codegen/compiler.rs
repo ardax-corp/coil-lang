@@ -320,6 +320,11 @@ impl Compiler {
         self.include_tests
     }
 
+    /// Disable automatic fork-join of pure recursive calls and counted loops.
+    pub fn set_auto_par(&mut self, on: bool) {
+        self.auto_par = on;
+    }
+
     /// Apply an [`crate::OptLevel`] preset to IL opts and tiny-inline budgets.
     pub fn set_opt_level(&mut self, level: crate::OptLevel) {
         self.opt_options = level.options();
@@ -17036,13 +17041,13 @@ impl Compiler {
         self.messages.extend(stack_bound.messages);
         self.operand_stack_slots = stack_bound.operand_slots_needed;
         self.recursive_fns = crate::typechecking::analyze_recursive_fns(ast);
-        self.recursive_pure = if auto_par_enabled() {
+        self.recursive_pure = if self.auto_par && auto_par_enabled() {
             crate::typechecking::analyze_recursive_pure(ast)
         } else {
             HashSet::new()
         };
         self.pure_fns = self.typed_sidecar.pure_fn_names().clone();
-        if auto_par_enabled() {
+        if self.auto_par && auto_par_enabled() {
             // IPA sites on any pure function (self-recursion or helper arms).
             let pure = &self.pure_fns;
             self.par_shapes = crate::typechecking::analyze_par_fork_sites(ast, pure);
