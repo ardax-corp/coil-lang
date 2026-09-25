@@ -17,6 +17,7 @@ use common::Instruction;
 
 use super::op::IlOp;
 use super::analysis::{Block, build_blocks, preds_of};
+use super::effects::{Effects, effects};
 use super::sp;
 
 /// Pure stack producer suitable for local numbering / join CSE.
@@ -55,40 +56,15 @@ fn is_pure_producer(op: &IlOp) -> bool {
     )
 }
 
+/// Ends a CSE window: a slot store, or any effect except `JumpIfMatch`
+/// (a jump already ends the block).
 fn is_mem_barrier(op: &IlOp) -> bool {
-    matches!(
-        op,
-        IlOp::StorePop { .. }
-            | IlOp::SetField { .. }
-            | IlOp::HostInvoke { .. }
-            | IlOp::Print { .. }
-            | IlOp::Entry { .. }
-            | IlOp::MakeTuple { .. }
-            | IlOp::MakeArray { .. }
-            | IlOp::MakeEnum { .. }
-            | IlOp::BoxValue { .. }
-            | IlOp::GetField { .. }
-    ) || matches!(
-        op.as_encode_byte(),
-        Some(b) if matches!(
-            *b.bytecode(),
-            Instruction::STORE
-                | Instruction::StorePop
-                | Instruction::SetField
-                | Instruction::HostInvoke
-                | Instruction::PRINT
-                | Instruction::CALL
-                | Instruction::TailCall
-                | Instruction::MakeCoro
-                | Instruction::GetField
-                | Instruction::MakeTuple
-                | Instruction::MakeArray
-                | Instruction::MakeEnum
-                | Instruction::BoxValue
-                | Instruction::FORMAT
-                | Instruction::FfiInvoke
-        )
-    )
+    let is_store = matches!(op, IlOp::StorePop { .. })
+        || matches!(
+            op.as_encode_byte(),
+            Some(b) if matches!(*b.bytecode(), Instruction::STORE | Instruction::StorePop)
+        );
+    is_store || effects(op, None).any(!Effects::MATCH)
 }
 
 fn producer_key(op: &IlOp) -> Option<u64> {
