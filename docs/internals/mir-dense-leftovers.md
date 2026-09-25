@@ -11,6 +11,28 @@ D1 [COI-355](https://linear.app/ardax/issue/COI-355) (`e046af78`).
 D2 [COI-356](https://linear.app/ardax/issue/COI-356) (`0cbc2dce`, #409).
 D3 [COI-357](https://linear.app/ardax/issue/COI-357) boxed multi-payload match (this PR).
 
+## Keep-rate census
+
+`coil compile --opt-stats` (or `--opt-stats-json`) now reports how many
+function bodies end in each tier and why fuse-IL bodies were not taken by
+MIR→LIR (`bodies_dense` / `bodies_lir` / `bodies_fuse`, `fuse_reasons`).
+Snapshot at this tip over `examples/perf`, `examples`, and `tests/positive`
+(with coil-stdlib on the search path):
+
+| Corpus | Bodies | Dense | LIR | Fuse-IL |
+|--------|--------|-------|-----|---------|
+| `examples/perf` | 290 | 28% | 2% | 70% |
+| `examples` | 349 | 3% | 3% | 94% |
+| `tests/positive` | 484 | 13% | 10% | 77% |
+
+Fuse-IL reasons (907 bodies): LIR walls `Host` 38%, `Box` 20%, `Call` 11%,
+`HeapField` 8%, `Alloc` 7%; LIR cost gate 4%; alloc only after loops 3%;
+everything else (bool-cond lowering, residual `CallIndirect` / yield bytes,
+`Pow` / `AND` / `OR`) is under 2% each. The next coverage lever is LIR
+reconstruct across HostInvoke / box / CALL edges, not operator refuses or
+cost-gate tuning. Fuse-IL stays the majority path, so the stack-IL pipeline
+cannot be trimmed ahead of MIR yet.
+
 ## Cross-check (open Linear / landed PRs)
 
 | Ticket | Status | What actually landed | Leftover |
