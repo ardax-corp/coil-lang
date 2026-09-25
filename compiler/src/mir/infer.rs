@@ -1417,6 +1417,19 @@ fn apply_bin(args: ApplyBinArgs<'_>) -> Result<(), LowerError> {
     let lhs = stack
         .pop()
         .ok_or_else(|| LowerError::Refused("bin stack".into()))?;
+    // Strict `&&` / `||` (codegen emits them for pure compares) are bitwise
+    // on 0/1 words; only accept operands already known to be `Bool`.
+    if matches!(inst, Instruction::AND | Instruction::OR)
+        && lhs.ty == Some(MirTy::Bool)
+        && rhs.ty == Some(MirTy::Bool)
+    {
+        stack.push(Cell {
+            origin: Origin::Tmp,
+            ty: Some(MirTy::Bool),
+            imm: None,
+        });
+        return Ok(());
+    }
     if matches!(
         inst,
         Instruction::Pow | Instruction::PowF | Instruction::AND | Instruction::OR

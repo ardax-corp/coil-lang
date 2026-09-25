@@ -2923,13 +2923,19 @@ fn main() -> int {
             .expect("compile helper callee guard");
         let syms = pipeline.program_debug().fn_symbols;
         let at = fn_ops(&bytecode, &syms, "at");
+        // Dense keeps the proof as the `DenseIndex` unchecked flag (bit 0 of
+        // [31:24]) and caches the object instead of pinning.
+        let dense_unchecked = |b: &common::Byte| {
+            *b.bytecode() == Instruction::DenseIndex && (b.operand_u32() >> 24) & 1 == 1
+        };
+        let dense = at.iter().any(|b| *b.bytecode() == Instruction::DenseIndex);
         assert!(
-            at.iter().any(|b| is_unchecked_index(*b.bytecode())),
+            at.iter().any(|b| is_unchecked_index(*b.bytecode()) || dense_unchecked(b)),
             "i < a.len() in callee should uncheck a[i]; body={:?}",
             at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );
         assert!(
-            at.iter().any(|b| is_pin_op(*b.bytecode())),
+            dense || at.iter().any(|b| is_pin_op(*b.bytecode())),
             "callee-proven helper should ArrayPin; body={:?}",
             at.iter().map(|b| b.bytecode().mnemonic()).collect::<Vec<_>>()
         );

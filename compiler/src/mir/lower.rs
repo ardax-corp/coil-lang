@@ -1302,6 +1302,11 @@ fn apply_bin(
     rhs: ValueId,
 ) -> Result<ValueId, LowerError> {
     opcode_matches_operands(inst, &[b.value_ty(lhs), b.value_ty(rhs)])?;
+    match inst {
+        Instruction::AND => return Ok(b.ins_bool_logic(MirBinOp::BitAnd, lhs, rhs)?),
+        Instruction::OR => return Ok(b.ins_bool_logic(MirBinOp::BitOr, lhs, rhs)?),
+        _ => {}
+    }
     if let Some(op) = map_bin(inst) {
         return Ok(b.ins_binop(op, lhs, rhs)?);
     }

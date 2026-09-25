@@ -6055,3 +6055,46 @@ fn float_opcode_on_word_operand_refuses_lift() {
     };
     assert!(err.contains("NEGF"), "{err}");
 }
+
+/// Strict `||` of two compares lowers to a bool `BitOr` and emits on both
+/// dense and LIR; a non-bool operand still refuses.
+#[test]
+fn strict_bool_or_of_compares_lowers() {
+    let loc = loc();
+    let cmp = |slot, imm, op| {
+        [
+            IlOp::Load { slot, loc },
+            IlOp::Const { imm, loc },
+            IlOp::Bin { op, loc },
+        ]
+    };
+    let mut ops = vec![IlOp::Label(Label(0))];
+    ops.extend(cmp(0, 0, Instruction::LE));
+    ops.extend(cmp(0, 9, Instruction::GEQ));
+    ops.push(IlOp::Bin {
+        op: Instruction::OR,
+        loc,
+    });
+    ops.push(IlOp::Return { loc, ret_words: 1 });
+    let inferred = super::infer::infer_lir(&ops, 0, 1).expect("OR of bools infers");
+    let mut hints = LowerHints::new("or_guard");
+    hints.param_count = 1;
+    hints.slot_ty = inferred.slot_ty;
+    let f = try_lower_numeric(&ops, &hints).expect("OR of bools lowers");
+    f.verify().unwrap();
+    assert!(f.to_string().contains("ior"), "{f}");
+    let mut pool = Vec::new();
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits");
+    assert!(lir.iter().any(|op| matches!(
+        op,
+        IlOp::Bin { op: Instruction::BITOR, .. }
+    ) || matches!(op, IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::BITOR)));
+
+    let mut int_or = vec![IlOp::Label(Label(0)), IlOp::Load { slot: 0, loc }, IlOp::Load { slot: 0, loc }];
+    int_or.push(IlOp::Bin {
+        op: Instruction::OR,
+        loc,
+    });
+    int_or.push(IlOp::Return { loc, ret_words: 1 });
+    assert!(super::infer::infer_lir(&int_or, 0, 1).is_err(), "OR on int words refuses");
+}

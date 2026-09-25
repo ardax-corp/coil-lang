@@ -297,8 +297,16 @@ impl MirFunc {
                     if !ok(lt) || !ok(rt) {
                         return Err(format!("{dest} heap bitwise operand type"));
                     }
+                } else if *ty == MirTy::Bool {
+                    let logic = matches!(
+                        op,
+                        super::inst::MirBinOp::BitAnd | super::inst::MirBinOp::BitOr
+                    );
+                    if !logic || lt != MirTy::Bool || rt != MirTy::Bool {
+                        return Err(format!("{dest} binop on {ty}"));
+                    }
                 } else {
-                    if !ty.is_numeric() || *ty == MirTy::Bool {
+                    if !ty.is_numeric() {
                         return Err(format!("{dest} binop on {ty}"));
                     }
                     if op.requires_int() && !ty.is_int() {

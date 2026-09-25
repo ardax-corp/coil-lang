@@ -243,6 +243,28 @@ impl MirBuilder {
         Ok(dest)
     }
 
+    /// Strict bool `&&` / `||` as `BitAnd` / `BitOr` on `Bool` (0/1) values.
+    pub fn ins_bool_logic(
+        &mut self,
+        op: MirBinOp,
+        lhs: ValueId,
+        rhs: ValueId,
+    ) -> Result<ValueId, MirError> {
+        let (lt, rt) = (self.resolve_ty(lhs), self.resolve_ty(rhs));
+        if lt != MirTy::Bool || rt != MirTy::Bool || !matches!(op, MirBinOp::BitAnd | MirBinOp::BitOr) {
+            return Err(MirError::msg(format!("bool logic {op:?} on {lt}, {rt}")));
+        }
+        let dest = self.alloc(MirTy::Bool);
+        self.push(MirInst::Bin {
+            dest,
+            op,
+            ty: MirTy::Bool,
+            lhs: self.resolve(lhs),
+            rhs: self.resolve(rhs),
+        })?;
+        Ok(dest)
+    }
+
     pub fn ins_neg(&mut self, src: ValueId) -> Result<ValueId, MirError> {
         let t = self.resolve_ty(src);
         if !t.is_int() && !t.is_float() {
