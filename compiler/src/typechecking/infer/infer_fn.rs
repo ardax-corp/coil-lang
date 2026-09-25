@@ -9,22 +9,49 @@ use crate::typechecking::ty::{Scheme, Ty, unit as unit_ty};
 
 use super::*;
 
+pub(super) struct InferFunctionExprArgs<'a> {
+    pub(super) attrs: &'a [parser::ast::Attribute<'a>],
+    pub(super) name: &'a str,
+    pub(super) is_coro: bool,
+    pub(super) is_static: bool,
+    pub(super) type_params: &'a [TypeParam<'a>],
+    pub(super) args: &'a Output<'a>,
+    pub(super) returns: &'a Option<Output<'a>>,
+    pub(super) where_constraints: &'a [parser::ast::WhereConstraint<'a>],
+    pub(super) body: &'a Option<Output<'a>>,
+    pub(super) range: Range<usize>,
+}
+
+pub(super) struct InferFunctionArgs<'a> {
+    pub name: &'a str,
+    pub type_params: &'a [parser::ast::TypeParam<'a>],
+    pub args: &'a Output<'a>,
+    pub returns: Option<&'a Output<'a>>,
+    pub where_constraints: &'a [parser::ast::WhereConstraint<'a>],
+    pub body: Option<&'a Output<'a>>,
+    pub range: &'a Range<usize>,
+    pub self_ty: Option<&'a Ty>,
+    pub is_coro: bool,
+    /// Inherent `impl` method owner. Bare `name` must not shadow imports.
+    pub method_owner: Option<&'a str>,
+    pub is_static_method: bool,
+}
+
 impl Checker {
     #[inline(never)]
-    #[allow(clippy::too_many_arguments)]
-    pub(super) fn infer_function_expr(
-        &mut self,
-        attrs: &[parser::ast::Attribute],
-        name: &str,
-        is_coro: bool,
-        is_static: bool,
-        type_params: &[TypeParam],
-        args: &Output,
-        returns: &Option<Output>,
-        where_constraints: &[parser::ast::WhereConstraint],
-        body: &Option<Output>,
-        range: Range<usize>,
-    ) -> Ty {
+    pub(super) fn infer_function_expr(&mut self, args: InferFunctionExprArgs<'_>) -> Ty {
+        let InferFunctionExprArgs {
+            attrs,
+            name,
+            is_coro,
+            is_static,
+            type_params,
+            args,
+            returns,
+            where_constraints,
+            body,
+            range,
+        } = args;
         if is_static {
             return self.error_with_help(
                 ErrorCode::GenericTypeError,
@@ -55,19 +82,19 @@ impl Checker {
             });
         }
 
-        self.infer_function(
+        self.infer_function(InferFunctionArgs {
             name,
             type_params,
             args,
-            returns.as_ref(),
+            returns: returns.as_ref(),
             where_constraints,
-            body.as_ref(),
-            &range,
-            None,
+            body: body.as_ref(),
+            range: &range,
+            self_ty: None,
             is_coro,
-            None,
-            false,
-        );
+            method_owner: None,
+            is_static_method: false,
+        });
 
         self.registering_overloadable_fn = prev_overloadable;
         unit_ty()
@@ -141,23 +168,20 @@ impl Checker {
         Self::seal_nullary_fun_ty(fun_ty, arg_tys.len(), false)
     }
 
-    pub(super) fn infer_function(
-        &mut self,
-        name: &str,
-        type_params: &[parser::ast::TypeParam],
-        args: &Output,
-        returns: Option<&Output>,
-        where_constraints: &[parser::ast::WhereConstraint],
-        body: Option<&Output>,
-        range: &Range<usize>,
-        self_ty: Option<&Ty>,
-        is_coro: bool,
-        // When set, this is an inherent `impl` method. Bare `name` must
-        // not shadow imports (`use thread::{send}` → `send`); recursion uses
-        // `self.name(...)` / `Owner::name(...)` instead.
-        method_owner: Option<&str>,
-        is_static_method: bool,
-    ) -> Ty {
+    pub(super) fn infer_function(&mut self, args: InferFunctionArgs<'_>) -> Ty {
+        let InferFunctionArgs {
+            name,
+            type_params,
+            args,
+            returns,
+            where_constraints,
+            body,
+            range,
+            self_ty,
+            is_coro,
+            method_owner,
+            is_static_method,
+        } = args;
         if name == "drop" && method_owner.is_none() {
             self.messages.push(Message::error(
                 ErrorCode::InvalidDrop,
@@ -397,13 +421,13 @@ impl Checker {
                 // Unannotated / still-open returns that fall through are unit,
                 // not an invented typed value (codegen used to emit `CONST 0`).
                 if matches!(&ret, Ty::Var(_)) {
-                    self.unify(&ret, &unit_ty(), &range, "missing return");
+                    self.unify(&ret, &unit_ty(), range, "missing return");
                 } else if self.fn_result_mode.is_some()
                     && let Some((ok, _)) = result_ok_err(&ret)
                 {
                     let ok = apply_ty_prune(&self.subst, &ok);
                     if matches!(&ok, Ty::Var(_)) {
-                        self.unify(&ok, &unit_ty(), &range, "missing return");
+                        self.unify(&ok, &unit_ty(), range, "missing return");
                     }
                 }
                 let ret = self

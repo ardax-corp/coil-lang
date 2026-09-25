@@ -332,9 +332,6 @@ pub const RWLOCK: &str = "RwLock";
 pub const ROOT: &str = "Root";
 /// Name of the `Weak` type constructor (`gc::Weak`).
 pub const WEAK: &str = "Weak";
-/// Name of the `List` type constructor.
-#[allow(dead_code)] // name reserved; list types still use Ty::List, not Ty::Con(LIST)
-pub const LIST: &str = "List";
 
 /// Build the `int` type.
 pub fn int() -> Ty {
@@ -611,7 +608,7 @@ pub fn readonly_ty(ty: Ty) -> Ty {
 }
 
 /// Peel `readonly` qualifiers for read/mutation checks.
-pub fn strip_readonly<'a>(ty: &'a Ty) -> &'a Ty {
+pub fn strip_readonly(ty: &Ty) -> &Ty {
     match ty {
         Ty::Readonly(inner) => strip_readonly(inner),
         other => other,
@@ -1079,7 +1076,7 @@ mod tests {
     fn range_app_distinguishes_half_open_and_inclusive() {
         let half = range_ty(int());
         assert_eq!(
-            range_app(&half).map(|(e, inc)| (e, inc)),
+            range_app(&half),
             Some((&int(), false))
         );
         let closed = range_inclusive_ty(float());

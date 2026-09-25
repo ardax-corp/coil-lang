@@ -109,18 +109,18 @@ pub fn emit_lir(
             }
             emit_stored(&mut out, inst, func, &plan, &regs, pool, loc)?;
         }
-        emit_term(
-            &mut out,
+        emit_term(EmitTermArgs {
+            out: &mut out,
             block,
             func,
-            &plan,
-            &regs,
+            plan: &plan,
+            regs: &regs,
             scratch,
-            &block_lab,
-            &mut next_label,
+            block_lab: &block_lab,
+            next_label: &mut next_label,
             pool,
-            term_loc,
-        )?;
+            loc: term_loc,
+        })?;
     }
     Ok(out)
 }
@@ -185,40 +185,53 @@ impl EmitPlan {
             for block in &func.blocks {
                 if let Some(Terminator::Return { lo, hi }) = &block.term {
                     for v in [*lo, *hi].into_iter().flatten() {
-                        changed |= mark_tree(
-                            v, block.id, &mut tree, &uses, &phi_in, &def_block, &func.params, &fused,
-                        );
+                        changed |= mark_tree(MarkTreeArgs {
+                            v,
+                            use_block: block.id,
+                            tree: &mut tree,
+                            uses: &uses,
+                            phi_in: &phi_in,
+                            def_block: &def_block,
+                            params: &func.params,
+                            fused: &fused,
+                        });
                     }
                 }
-                if let Some(d) = term_cmp_dest(func, block) {
-                    if let Some(MirInst::Cmp { lhs, rhs, .. }) =
+                if let Some(d) = term_cmp_dest(func, block)
+                    && let Some(MirInst::Cmp { lhs, rhs, .. }) =
                         def[d.index()].and_then(|(b, i)| {
                             (b == block.id).then_some(&func.block(b).insts[i])
                         })
                     {
                         for v in [*lhs, *rhs] {
-                            changed |= mark_tree(
+                            changed |= mark_tree(MarkTreeArgs {
                                 v,
-                                block.id,
-                                &mut tree,
-                                &uses,
-                                &phi_in,
-                                &def_block,
-                                &func.params,
-                                &fused,
-                            );
+                                use_block: block.id,
+                                tree: &mut tree,
+                                uses: &uses,
+                                phi_in: &phi_in,
+                                def_block: &def_block,
+                                params: &func.params,
+                                fused: &fused,
+                            });
                         }
                     }
-                }
                 for inst in &block.insts {
                     if inst.is_phi() || fused[inst.dest().index()] {
                         continue;
                     }
                     // Operands of stored bins can still be tree (i % 10 → BinSlotImm).
                     for v in inst.operands() {
-                        changed |= mark_tree(
-                            v, block.id, &mut tree, &uses, &phi_in, &def_block, &func.params, &fused,
-                        );
+                        changed |= mark_tree(MarkTreeArgs {
+                            v,
+                            use_block: block.id,
+                            tree: &mut tree,
+                            uses: &uses,
+                            phi_in: &phi_in,
+                            def_block: &def_block,
+                            params: &func.params,
+                            fused: &fused,
+                        });
                     }
                 }
             }
@@ -286,16 +299,29 @@ impl EmitPlan {
     }
 }
 
-fn mark_tree(
+struct MarkTreeArgs<'args> {
     v: ValueId,
     use_block: BlockId,
-    tree: &mut [bool],
-    uses: &[u32],
-    phi_in: &[bool],
-    def_block: &[Option<BlockId>],
-    params: &[ValueId],
-    fused: &[bool],
-) -> bool {
+    tree: &'args mut [bool],
+    uses: &'args [u32],
+    phi_in: &'args [bool],
+    def_block: &'args [Option<BlockId>],
+    params: &'args [ValueId],
+    fused: &'args [bool],
+}
+
+fn mark_tree(args: MarkTreeArgs<'_>) -> bool {
+    let MarkTreeArgs {
+        v,
+        use_block,
+        tree,
+        uses,
+        phi_in,
+        def_block,
+        params,
+        fused,
+    } = args;
+
     let i = v.index();
     if tree[i] || fused[i] || phi_in[i] || uses[i] != 1 {
         return false;
@@ -454,18 +480,32 @@ fn tree_i16(func: &MirFunc, plan: &EmitPlan, v: ValueId) -> Option<i16> {
     i16::try_from(n).ok()
 }
 
-/// Prefer `BinSlotImm` / `BinSlotSlot` so pre-fuse cost matches opted fuse-IL.
-fn emit_bin(
-    out: &mut Vec<IlOp>,
+struct EmitBinArgs<'args> {
+    out: &'args mut Vec<IlOp>,
     op: Instruction,
     lhs: ValueId,
     rhs: ValueId,
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+/// Prefer `BinSlotImm` / `BinSlotSlot` so pre-fuse cost matches opted fuse-IL.
+fn emit_bin(args: EmitBinArgs<'_>) -> Result<(), LowerError> {
+    let EmitBinArgs {
+        out,
+        op,
+        lhs,
+        rhs,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     if plan.need_slot[lhs.index()]
         && let Some(imm) = tree_i16(func, plan, rhs)
     {
@@ -516,17 +556,17 @@ fn emit_stored(
             lhs,
             rhs,
         } => {
-            emit_bin(
+            emit_bin(EmitBinArgs {
                 out,
-                stack_bin(*op, *ty)?,
-                *lhs,
-                *rhs,
+                op: stack_bin(*op, *ty)?,
+                lhs: *lhs,
+                rhs: *rhs,
                 func,
                 plan,
                 regs,
                 pool,
                 loc,
-            )?;
+            })?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -585,9 +625,17 @@ fn emit_stored(
             name,
             index,
         } => {
-            emit_heap_field_load(
-                out, *object, *name, *index, func, plan, regs, pool, loc,
-            )?;
+            emit_heap_field_load(EmitHeapFieldLoadArgs {
+                out,
+                object: *object,
+                name: *name,
+                index: *index,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            })?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -600,9 +648,18 @@ fn emit_stored(
             name,
             index,
         } => {
-            emit_heap_field_store(
-                out, *object, *value, *name, *index, func, plan, regs, pool, loc,
-            )?;
+            emit_heap_field_store(EmitHeapFieldStoreArgs {
+                out,
+                object: *object,
+                value: *value,
+                name: *name,
+                index: *index,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            })?;
             if plan.need_slot[dest.index()] {
                 out.push(IlOp::StorePop {
                     slot: u32::from(regs[dest.index()]),
@@ -685,7 +742,18 @@ fn emit_stored(
             handle,
             send,
         } => {
-            emit_lir_resume(out, *dest, *handle, *send, func, plan, regs, pool, loc, true)?;
+            emit_lir_resume(EmitLirResumeArgs {
+                out,
+                dest: *dest,
+                handle: *handle,
+                send: *send,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+                always_store: true,
+            })?;
         }
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
@@ -719,10 +787,30 @@ fn emit_stored(
             target,
             args,
         } => {
-            emit_lir_call(out, *dest, *dest_hi, *target, args, func, plan, regs, pool, loc)?;
+            emit_lir_call(EmitLirCallArgs {
+                out,
+                dest: *dest,
+                dest_hi: *dest_hi,
+                target: *target,
+                args,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            })?;
         }
         MirInst::Alloc { dest, kind, elems } => {
-            emit_alloc_stack(out, *kind, elems, func, plan, regs, pool, loc)?;
+            emit_alloc_stack(EmitAllocStackArgs {
+                out,
+                kind: *kind,
+                elems,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            })?;
             out.push(IlOp::StorePop {
                 slot: u32::from(regs[dest.index()]),
                 loc,
@@ -781,18 +869,33 @@ fn emit_stored(
     Ok(())
 }
 
-fn emit_lir_call(
-    out: &mut Vec<IlOp>,
+struct EmitLirCallArgs<'args> {
+    out: &'args mut Vec<IlOp>,
     dest: ValueId,
     dest_hi: Option<ValueId>,
     target: crate::il::Label,
-    args: &[ValueId],
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    args: &'args [ValueId],
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_lir_call(args: EmitLirCallArgs<'_>) -> Result<(), LowerError> {
+    let EmitLirCallArgs {
+        out,
+        dest,
+        dest_hi,
+        target,
+        args,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     for a in args {
         emit_stack(out, *a, func, plan, regs, pool, loc)?;
     }
@@ -818,16 +921,29 @@ fn emit_lir_call(
     Ok(())
 }
 
-fn emit_alloc_stack(
-    out: &mut Vec<IlOp>,
+struct EmitAllocStackArgs<'args> {
+    out: &'args mut Vec<IlOp>,
     kind: MirAllocKind,
-    elems: &[ValueId],
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    elems: &'args [ValueId],
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_alloc_stack(args: EmitAllocStackArgs<'_>) -> Result<(), LowerError> {
+    let EmitAllocStackArgs {
+        out,
+        kind,
+        elems,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     for e in elems {
         emit_stack(out, *e, func, plan, regs, pool, loc)?;
     }
@@ -835,18 +951,33 @@ fn emit_alloc_stack(
     Ok(())
 }
 
-fn emit_lir_resume(
-    out: &mut Vec<IlOp>,
+struct EmitLirResumeArgs<'args> {
+    out: &'args mut Vec<IlOp>,
     dest: ValueId,
     handle: ValueId,
     send: Option<ValueId>,
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
     always_store: bool,
-) -> Result<(), LowerError> {
+}
+
+fn emit_lir_resume(args: EmitLirResumeArgs<'_>) -> Result<(), LowerError> {
+    let EmitLirResumeArgs {
+        out,
+        dest,
+        handle,
+        send,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+        always_store,
+    } = args;
+
     if let Some(s) = send {
         emit_stack(out, s, func, plan, regs, pool, loc)?;
     }
@@ -867,17 +998,30 @@ fn emit_lir_resume(
     Ok(())
 }
 
-/// `return k, k + 1` after `k` is already TOS: `DUP; CONST 1; ADD`.
-fn emit_hi_after_lo(
-    out: &mut Vec<IlOp>,
+struct EmitHiAfterLoArgs<'args> {
+    out: &'args mut Vec<IlOp>,
     lo: ValueId,
     hi: ValueId,
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+/// `return k, k + 1` after `k` is already TOS: `DUP; CONST 1; ADD`.
+fn emit_hi_after_lo(args: EmitHiAfterLoArgs<'_>) -> Result<(), LowerError> {
+    let EmitHiAfterLoArgs {
+        out,
+        lo,
+        hi,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     if plan.tree[hi.index()]
         && let Some((bid, idx)) = plan.def[hi.index()]
         && let MirInst::Bin { op, ty, lhs, rhs, .. } = &func.block(bid).insts[idx]
@@ -894,17 +1038,31 @@ fn emit_hi_after_lo(
     emit_stack(out, hi, func, plan, regs, pool, loc)
 }
 
-fn emit_heap_field_load(
-    out: &mut Vec<IlOp>,
+struct EmitHeapFieldLoadArgs<'args> {
+    out: &'args mut Vec<IlOp>,
     object: ValueId,
     name: Option<ValueId>,
     index: u32,
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_heap_field_load(args: EmitHeapFieldLoadArgs<'_>) -> Result<(), LowerError> {
+    let EmitHeapFieldLoadArgs {
+        out,
+        object,
+        name,
+        index,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     emit_stack(out, object, func, plan, regs, pool, loc)?;
     if let Some(n) = name {
         emit_stack(out, n, func, plan, regs, pool, loc)?;
@@ -915,18 +1073,33 @@ fn emit_heap_field_load(
     Ok(())
 }
 
-fn emit_heap_field_store(
-    out: &mut Vec<IlOp>,
+struct EmitHeapFieldStoreArgs<'args> {
+    out: &'args mut Vec<IlOp>,
     object: ValueId,
     value: ValueId,
     name: Option<ValueId>,
     index: Option<u32>,
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_heap_field_store(args: EmitHeapFieldStoreArgs<'_>) -> Result<(), LowerError> {
+    let EmitHeapFieldStoreArgs {
+        out,
+        object,
+        value,
+        name,
+        index,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     emit_stack(out, value, func, plan, regs, pool, loc)?;
     emit_stack(out, object, func, plan, regs, pool, loc)?;
     if let Some(n) = name {
@@ -961,30 +1134,30 @@ fn emit_stack(
         MirInst::Const { c, .. } => push_const(out, *c, pool, loc),
         MirInst::Bin {
             op, ty, lhs, rhs, ..
-        } => emit_bin(
+        } => emit_bin(EmitBinArgs {
             out,
-            stack_bin(*op, *ty)?,
-            *lhs,
-            *rhs,
+            op: stack_bin(*op, *ty)?,
+            lhs: *lhs,
+            rhs: *rhs,
             func,
             plan,
             regs,
             pool,
             loc,
-        ),
+        }),
         MirInst::Cmp {
             op, ty, lhs, rhs, ..
-        } => emit_bin(
+        } => emit_bin(EmitBinArgs {
             out,
-            stack_cmp(*op, *ty)?,
-            *lhs,
-            *rhs,
+            op: stack_cmp(*op, *ty)?,
+            lhs: *lhs,
+            rhs: *rhs,
             func,
             plan,
             regs,
             pool,
             loc,
-        ),
+        }),
         MirInst::Unary { op, src, .. } => {
             emit_stack(out, *src, func, plan, regs, pool, loc)?;
             push_unary(out, *op, func.ty(*src), loc);
@@ -1064,9 +1237,18 @@ fn emit_stack(
             dest,
             handle,
             send,
-        } => emit_lir_resume(
-            out, *dest, *handle, *send, func, plan, regs, pool, loc, false,
-        ),
+        } => emit_lir_resume(EmitLirResumeArgs {
+            out,
+            dest: *dest,
+            handle: *handle,
+            send: *send,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+            always_store: false,
+        }),
         MirInst::DoneCoro { dest, handle } => {
             emit_stack(out, *handle, func, plan, regs, pool, loc)?;
             out.push(IlOp::from_plain_byte(Byte::new(Instruction::DoneCoro), loc));
@@ -1100,14 +1282,13 @@ fn emit_stack(
             "MIR→LIR leafs do not emit HostInvoke/CALL (dense W4/M2)".into(),
         )),
         MirInst::MatchPayload { dest, .. } => {
-            if is_jim_term_payload(func, *dest) {
-                if plan.need_slot[dest.index()] {
+            if is_jim_term_payload(func, *dest)
+                && plan.need_slot[dest.index()] {
                     out.push(IlOp::Load {
                         slot: u32::from(regs[dest.index()]),
                         loc,
                     });
                 }
-            }
             Ok(())
         }
         MirInst::FieldLoad { object, .. } => emit_stack(out, *object, func, plan, regs, pool, loc),
@@ -1116,21 +1297,47 @@ fn emit_stack(
             name,
             index,
             ..
-        } => emit_heap_field_load(
-            out, *object, *name, *index, func, plan, regs, pool, loc,
-        ),
+        } => emit_heap_field_load(EmitHeapFieldLoadArgs {
+            out,
+            object: *object,
+            name: *name,
+            index: *index,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        }),
         MirInst::HeapFieldStore {
             object,
             value,
             name,
             index,
             ..
-        } => emit_heap_field_store(
-            out, *object, *value, *name, *index, func, plan, regs, pool, loc,
-        ),
+        } => emit_heap_field_store(EmitHeapFieldStoreArgs {
+            out,
+            object: *object,
+            value: *value,
+            name: *name,
+            index: *index,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        }),
         MirInst::FieldStore { src, .. } => emit_stack(out, *src, func, plan, regs, pool, loc),
         MirInst::Alloc { kind, elems, .. } => {
-            emit_alloc_stack(out, *kind, elems, func, plan, regs, pool, loc)
+            emit_alloc_stack(EmitAllocStackArgs {
+                out,
+                kind: *kind,
+                elems,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            })
         }
         MirInst::GcBarrier { dest, .. } => {
             if let Some(obj) = paired_alloc_dest(func, *dest) {
@@ -1192,18 +1399,33 @@ fn push_cast(out: &mut Vec<IlOp>, kind: MirCastKind, loc: DebugLoc) -> Result<()
     }
 }
 
-fn emit_term(
-    out: &mut Vec<IlOp>,
-    block: &super::func::MirBlock,
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
+struct EmitTermArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    block: &'args super::func::MirBlock,
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
     scratch: u8,
-    block_lab: &[Label],
-    next_label: &mut u32,
-    pool: &mut Vec<u64>,
+    block_lab: &'args [Label],
+    next_label: &'args mut u32,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
+    let EmitTermArgs {
+        out,
+        block,
+        func,
+        plan,
+        regs,
+        scratch,
+        block_lab,
+        next_label,
+        pool,
+        loc,
+    } = args;
+
     let Some(term) = &block.term else {
         return Err(LowerError::Refused("missing terminator".into()));
     };
@@ -1226,7 +1448,16 @@ fn emit_term(
         } => {
             let t_moves = phi_moves(func, block.id, *taken, regs, scratch);
             let f_moves = phi_moves(func, block.id, *not_taken, regs, scratch);
-            emit_br_cond(out, block, func, plan, regs, *cond, pool, loc)?;
+            emit_br_cond(EmitBrCondArgs {
+                out,
+                block,
+                func,
+                plan,
+                regs,
+                cond: *cond,
+                pool,
+                loc,
+            })?;
             if t_moves.is_empty() && f_moves.is_empty() {
                 emit_cond_jumps(out, func, block.id, *taken, *not_taken, block_lab, loc);
             } else {
@@ -1275,7 +1506,16 @@ fn emit_term(
             }
             if let Some(v) = hi {
                 if let Some(lo_v) = *lo {
-                    emit_hi_after_lo(out, lo_v, *v, func, plan, regs, pool, loc)?;
+                    emit_hi_after_lo(EmitHiAfterLoArgs {
+                        out,
+                        lo: lo_v,
+                        hi: *v,
+                        func,
+                        plan,
+                        regs,
+                        pool,
+                        loc,
+                    })?;
                 } else {
                     emit_stack(out, *v, func, plan, regs, pool, loc)?;
                 }
@@ -1333,32 +1573,45 @@ fn emit_term(
     Ok(())
 }
 
-fn emit_br_cond(
-    out: &mut Vec<IlOp>,
-    block: &super::func::MirBlock,
-    func: &MirFunc,
-    plan: &EmitPlan,
-    regs: &[u8],
+struct EmitBrCondArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    block: &'args super::func::MirBlock,
+    func: &'args MirFunc,
+    plan: &'args EmitPlan,
+    regs: &'args [u8],
     cond: ValueId,
-    pool: &mut Vec<u64>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
+    let EmitBrCondArgs {
+        out,
+        block,
+        func,
+        plan,
+        regs,
+        cond,
+        pool,
+        loc,
+    } = args;
+
     if let Some(MirInst::Cmp {
         op, ty, lhs, rhs, ..
     }) = block.insts.iter().find(|inst| {
         matches!(inst, MirInst::Cmp { dest, .. } if *dest == cond)
     }) {
-        return emit_bin(
+        return emit_bin(EmitBinArgs {
             out,
-            stack_cmp(*op, *ty)?,
-            *lhs,
-            *rhs,
+            op: stack_cmp(*op, *ty)?,
+            lhs: *lhs,
+            rhs: *rhs,
             func,
             plan,
             regs,
             pool,
             loc,
-        );
+        });
     }
     emit_stack(out, cond, func, plan, regs, pool, loc)
 }
@@ -1442,12 +1695,11 @@ fn push_const(
     match c {
         MirConst::I64(v) => {
             // Inline CONST uses bit 31 as POOL_FLAG; negatives must go through the pool.
-            if let Ok(imm) = i32::try_from(v) {
-                if imm >= 0 {
+            if let Ok(imm) = i32::try_from(v)
+                && imm >= 0 {
                     out.push(IlOp::Const { imm, loc });
                     return Ok(());
                 }
-            }
             let idx = intern_pool(pool, v as u64)?;
             out.push(IlOp::ConstPool { idx, loc });
         }

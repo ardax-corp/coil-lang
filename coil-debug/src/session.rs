@@ -9,6 +9,9 @@ use compiler::{DissectArtifacts, FnSym, HostGrants, Pipeline, matches_fn_pat};
 use machine::{DebugController, Machine, StopReason};
 use reporting::ReportConfig;
 
+type SourceLine = (u32, bool, String);
+type ListedSource = (PathBuf, u32, Vec<SourceLine>);
+
 /// Resolved breakpoint for display / DAP.
 #[derive(Clone, Debug)]
 pub struct BreakpointInfo {
@@ -166,7 +169,7 @@ impl DebugSession {
         pipeline.bind_project_roots_with_default(dir, extra_roots);
         let artifacts = match pipeline.compile_dissect(filename, false) {
             Ok(a) => a,
-            Err(()) => {
+            Err(_) => {
                 let _ = pipeline.finish_reporting();
                 return Err(());
             }
@@ -197,16 +200,16 @@ impl DebugSession {
                 c_structs: &structs,
             },
         );
-        machine::wire_thread_program_with_maps(
-            &mut machine,
-            &artifacts.bytecode,
-            &artifacts.constants,
-            &artifacts.strings,
-            pipeline.static_slot_count(),
-            pipeline.program_debug(),
-            pipeline.operand_stack_slots(),
-            pipeline.stack_maps().to_vec(),
-        );
+        machine::wire_thread_program_with_maps(machine::WireThreadProgramWithMapsArgs {
+            machine: &mut machine,
+            bytecode: &artifacts.bytecode,
+            constants: &artifacts.constants,
+            strings: &artifacts.strings,
+            static_slot_count: pipeline.static_slot_count(),
+            debug: pipeline.program_debug(),
+            operand_stack_slots: pipeline.operand_stack_slots(),
+            stack_maps: pipeline.stack_maps().to_vec(),
+        });
         machine.set_program_debug(artifacts.debug.clone());
         machine.attach_debug(DebugController::new());
         let _ = pipeline.finish_reporting();
@@ -303,15 +306,6 @@ impl DebugSession {
         out
     }
 
-    pub fn set_line_breakpoints(
-        &mut self,
-        file_hint: Option<&str>,
-        lines: &[u32],
-    ) -> Vec<LineBreakpointResult> {
-        let source = file_hint.unwrap_or(&self.entry).to_string();
-        self.replace_line_breakpoints(&source, lines)
-    }
-
     pub fn set_function_breakpoint(&mut self, name: &str) -> Result<BreakpointInfo, String> {
         let (pcs, label) = self.resolve_break_target(name)?;
         if pcs.is_empty() {
@@ -345,16 +339,6 @@ impl DebugSession {
             self.sync_vm_breakpoints();
             return Ok(Vec::new());
         }
-        names
-            .iter()
-            .map(|n| self.set_function_breakpoint(n))
-            .collect()
-    }
-
-    pub fn set_function_breakpoints(
-        &mut self,
-        names: &[&str],
-    ) -> Result<Vec<BreakpointInfo>, String> {
         names
             .iter()
             .map(|n| self.set_function_breakpoint(n))
@@ -404,18 +388,16 @@ impl DebugSession {
         self.sync_vm_breakpoints();
         let entry_pc = 0;
         let already_bp = self.breakpoints.iter().any(|b| b.pc == entry_pc);
-        if stop_on_entry && !already_bp {
-            if let Some(dbg) = self.machine.debug_controller_mut() {
+        if stop_on_entry && !already_bp
+            && let Some(dbg) = self.machine.debug_controller_mut() {
                 dbg.add_breakpoint(entry_pc);
             }
-        }
         self.started = true;
         let reason = self.run_from(self.machine.debug_ip());
-        if stop_on_entry && !already_bp {
-            if let Some(dbg) = self.machine.debug_controller_mut() {
+        if stop_on_entry && !already_bp
+            && let Some(dbg) = self.machine.debug_controller_mut() {
                 dbg.remove_breakpoint(entry_pc);
             }
-        }
         if matches!(reason, StopReason::Halt | StopReason::Panic) {
             self.started = false;
         }
@@ -591,7 +573,7 @@ impl DebugSession {
         (ip, sp, depth)
     }
 
-    pub fn list_source(&self) -> Result<(PathBuf, u32, Vec<(u32, bool, String)>), String> {
+    pub fn list_source(&self) -> Result<ListedSource, String> {
         if !self.started {
             return Err("not started".into());
         }
@@ -801,7 +783,7 @@ pub fn symbol_at_pc(functions: &[FnSym], pc: usize) -> Option<&str> {
     best.map(|s| s.name.as_str())
 }
 
-fn locals_for_pc<'a>(session: &'a DebugSession, pc: usize) -> Option<&'a [(String, u32)]> {
+fn locals_for_pc(session: &DebugSession, pc: usize) -> Option<&[(String, u32)]> {
     let name = symbol_at_pc(&session.artifacts.functions, pc)?;
     session
         .artifacts

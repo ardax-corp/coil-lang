@@ -13,7 +13,7 @@ use std::cell::Cell;
 
 use common::{
     host_invoke_enum_layout, Value, HOST_ENUM_LAYOUT_BOXED, HOST_ENUM_LAYOUT_OPTION_NICHE,
-    HOST_ENUM_LAYOUT_RESERVED, HOST_ENUM_LAYOUT_RESULT_NICHE,
+    HOST_ENUM_LAYOUT_RESULT_NICHE,
 };
 
 use crate::io::{alloc_option_none, alloc_option_some, alloc_result_err, alloc_result_ok};
@@ -181,10 +181,7 @@ pub fn pack_result_unit(
         HostEnumLayout::OptionNiche => pack_option(
             heap,
             HostEnumLayout::OptionNiche,
-            match value {
-                Ok(()) => None,
-                Err(payload) => Some(payload),
-            },
+            value.err(),
         ),
         HostEnumLayout::ResultNiche => Err(HostEnumMismatch(
             "pack_result_unit called with ResultNiche layout",
@@ -502,7 +499,7 @@ mod tests {
     #[test]
     fn reserved_layout_3_decodes_as_boxed() {
         assert_eq!(
-            HostEnumLayout::from_u32(HOST_ENUM_LAYOUT_RESERVED),
+            HostEnumLayout::from_u32(common::HOST_ENUM_LAYOUT_RESERVED),
             HostEnumLayout::Boxed
         );
         assert_eq!(HostEnumLayout::from_u32(99), HostEnumLayout::Boxed);

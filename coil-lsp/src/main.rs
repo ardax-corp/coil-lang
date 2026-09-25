@@ -422,11 +422,10 @@ fn handle_notification(
         "textDocument/didClose" => {
             let params: lsp_types::DidCloseTextDocumentParams =
                 serde_json::from_value(notification.params.clone())?;
-            if let Some(path) = uri_path(&params.text_document.uri) {
-                if let Some(index) = state.project_index.as_mut() {
+            if let Some(path) = uri_path(&params.text_document.uri)
+                && let Some(index) = state.project_index.as_mut() {
                     index.pipeline_mut().clear_file_text(&path);
                 }
-            }
             state.documents.remove(&params.text_document.uri);
             let params = PublishDiagnosticsParams {
                 uri: params.text_document.uri,
@@ -584,8 +583,8 @@ fn percent_decode(input: &str) -> String {
     let mut out = Vec::with_capacity(bytes.len());
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'%' && index + 2 < bytes.len() {
-            if let Ok(value) = u8::from_str_radix(
+        if bytes[index] == b'%' && index + 2 < bytes.len()
+            && let Ok(value) = u8::from_str_radix(
                 std::str::from_utf8(&bytes[index + 1..index + 3]).unwrap_or(""),
                 16,
             ) {
@@ -593,7 +592,6 @@ fn percent_decode(input: &str) -> String {
                 index += 3;
                 continue;
             }
-        }
         out.push(bytes[index]);
         index += 1;
     }
@@ -747,11 +745,10 @@ fn identifier_locations(
 
     if let Some(project) = &state.project_index {
         for path in project.indexed_paths() {
-            if let Some(source) = project.source_for(path) {
-                if let Some(index) = project.symbols_for(path) {
+            if let Some(source) = project.source_for(path)
+                && let Some(index) = project.symbols_for(path) {
                     visit_index(path, source, index);
                 }
-            }
         }
     }
 
@@ -792,10 +789,11 @@ fn rename_identifier(
     new_name: &str,
 ) -> lsp_types::WorkspaceEdit {
     let locations = identifier_locations(state, uri, position, true);
-    let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+    // Group by URI text, then parse back into the `WorkspaceEdit` map.
+    let mut by_uri: HashMap<String, Vec<TextEdit>> = HashMap::new();
     for location in locations {
-        changes
-            .entry(location.uri)
+        by_uri
+            .entry(location.uri.to_string())
             .or_default()
             .push(TextEdit {
                 range: location.range,
@@ -803,7 +801,15 @@ fn rename_identifier(
             });
     }
     lsp_types::WorkspaceEdit {
-        changes: Some(changes),
+        changes: Some(
+            by_uri
+                .into_iter()
+                .map(|(uri, edits)| {
+                    let uri: Uri = uri.parse().expect("uri roundtrip");
+                    (uri, edits)
+                })
+                .collect(),
+        ),
         document_changes: None,
         change_annotations: None,
     }
@@ -1273,12 +1279,11 @@ fn collect_decl_candidates(expression: &Expression<'_>, out: &mut HashMap<String
             if let Some(candidate) = out.get_mut(*name) {
                 candidate.parameter_names = function_parameter_names(args);
             }
-            if let Some(parameters) = parameter_docs_markdown(args) {
-                if let Some(candidate) = out.get_mut(*name) {
+            if let Some(parameters) = parameter_docs_markdown(args)
+                && let Some(candidate) = out.get_mut(*name) {
                     let base = candidate.documentation.take().unwrap_or_default();
                     candidate.documentation = Some(format!("{base}{parameters}"));
                 }
-            }
             collect_decl_candidates(args.1.as_ref(), out);
             if let Some(body) = body {
                 collect_decl_candidates(body.1.as_ref(), out);
@@ -1430,10 +1435,8 @@ fn collect_virtual_candidates(
                 );
             }
         }
-        Expression::Function { body, .. } => {
-            if let Some(body) = body {
-                collect_virtual_candidates(body.1.as_ref(), modules, out);
-            }
+        Expression::Function { body: Some(body), .. } => {
+            collect_virtual_candidates(body.1.as_ref(), modules, out);
         }
         Expression::Method(_, inner) => {
             collect_virtual_candidates(inner.1.as_ref(), modules, out);
@@ -1546,7 +1549,8 @@ fn builtin_documentation(path: &[String], name: &str, export: &BuiltinExport) ->
 }
 
 fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> String {
-    let description = match (module, name) {
+    
+    match (module, name) {
         ("io", "stdin") => "Returns a stream connected to standard input.".into(),
         ("io", "stdout") => "Returns a stream connected to standard output.".into(),
         ("io", "stderr") => "Returns a stream connected to standard error.".into(),
@@ -1676,8 +1680,7 @@ fn builtin_description(module: &str, name: &str, export: &BuiltinExport) -> Stri
                 "Provides the `{name}` operation; see the reference for its signature and behavior."
             ),
         },
-    };
-    description
+    }
 }
 
 fn parameter_docs_markdown(args: &Output<'_>) -> Option<String> {
@@ -1742,11 +1745,10 @@ fn hover(document: &Document, position: Position) -> Option<Hover> {
     let range = word_range(&document.text, offset)?;
     let name = document.text.get(range.clone())?.to_owned();
 
-    if let Some(hover) = hover_from_source(&document.text, &name, offset, range.clone()) {
-        if hover_has_detail(&hover) {
+    if let Some(hover) = hover_from_source(&document.text, &name, offset, range.clone())
+        && hover_has_detail(&hover) {
             return Some(hover);
         }
-    }
 
     // Mid-edit buffers often fail to parse because of an incomplete *other*
     // token (e.g. `fi` in `main` while hovering `fib`). Repair near EOF, not
@@ -1754,11 +1756,10 @@ fn hover(document: &Document, position: Position) -> Option<Hover> {
     let repair_offset = document.text.len().saturating_sub(1);
     if repair_offset < range.start || repair_offset >= range.end {
         for sanitized in sanitize_variants(&document.text, repair_offset) {
-            if let Some(hover) = hover_from_source(&sanitized, &name, offset, range.clone()) {
-                if hover_has_detail(&hover) {
+            if let Some(hover) = hover_from_source(&sanitized, &name, offset, range.clone())
+                && hover_has_detail(&hover) {
                     return Some(hover);
                 }
-            }
         }
     }
 
@@ -2050,8 +2051,8 @@ fn find_param_docs_for_name(expression: &Expression<'_>, name: &str) -> Option<S
                 .find_map(|(_, item)| find_param_docs_for_name(item, name))
         }
         Expression::Function { args, body, .. } => {
-            if let Expression::Fragment(items) = args.1.as_ref() {
-                if let Some(docs) = items.iter().find_map(|(_, item)| {
+            if let Expression::Fragment(items) = args.1.as_ref()
+                && let Some(docs) = items.iter().find_map(|(_, item)| {
                     let Expression::Argument {
                         docs,
                         name: param_name,
@@ -2061,11 +2062,10 @@ fn find_param_docs_for_name(expression: &Expression<'_>, name: &str) -> Option<S
                         return None;
                     };
                     (*param_name == name && !docs.is_empty())
-                        .then(|| docs_markdown(&docs))
+                        .then(|| docs_markdown(docs))
                 }) {
                     return docs;
                 }
-            }
             body.as_ref()
                 .and_then(|body| find_param_docs_for_name(body.1.as_ref(), name))
         }
@@ -2103,8 +2103,8 @@ fn signature_help(document: &Document, position: Position) -> Option<SignatureHe
             documentation: None,
         })
         .collect::<Vec<_>>();
-    if let Ok(ast) = Pratt::default().parse(source) {
-        if let Some(docs) = function_parameter_docs(ast.1.as_ref(), name) {
+    if let Ok(ast) = Pratt::default().parse(source)
+        && let Some(docs) = function_parameter_docs(ast.1.as_ref(), name) {
             for (parameter, docs) in parameters.iter_mut().zip(docs) {
                 if let Some(docs) = docs {
                     parameter.documentation = Some(Documentation::MarkupContent(MarkupContent {
@@ -2114,7 +2114,6 @@ fn signature_help(document: &Document, position: Position) -> Option<SignatureHe
                 }
             }
         }
-    }
     let active_parameter = prefix[open + 1..]
         .matches(',')
         .count()
@@ -2251,8 +2250,8 @@ fn find_parameter_type_for_name(expression: &Expression<'_>, name: &str) -> Opti
                 .find_map(|(_, item)| find_parameter_type_for_name(item, name))
         }
         Expression::Function { args, body, .. } => {
-            if let Expression::Fragment(items) = args.1.as_ref() {
-                if let Some(ty) = items.iter().find_map(|(_, item)| {
+            if let Expression::Fragment(items) = args.1.as_ref()
+                && let Some(ty) = items.iter().find_map(|(_, item)| {
                     let Expression::Argument {
                         ty,
                         name: parameter_name,
@@ -2267,7 +2266,6 @@ fn find_parameter_type_for_name(expression: &Expression<'_>, name: &str) -> Opti
                 }) {
                     return Some(ty);
                 }
-            }
             body.as_ref()
                 .and_then(|body| find_parameter_type_for_name(body.1.as_ref(), name))
         }
@@ -2301,7 +2299,7 @@ fn function_parameter_docs(
                             let Expression::Argument { docs, .. } = item.as_ref() else {
                                 return None;
                             };
-                            Some(docs_markdown(&docs))
+                            Some(docs_markdown(docs))
                         })
                         .collect(),
                 );
@@ -2491,7 +2489,7 @@ fn definition_token_type(checker: &Checker, definition: &compiler::SymbolDef) ->
         SymbolKind::Function | SymbolKind::Method => TOKEN_FUNCTION,
         SymbolKind::Variable => checker
             .codegen_var_type(&definition.name)
-            .map(|ty| semantic_token_type_for_ty(ty))
+            .map(semantic_token_type_for_ty)
             .or_else(|| {
                 checker
                     .env()
@@ -2663,19 +2661,9 @@ fn scan_lexical_tokens(source: &str) -> Vec<SpannedToken> {
                 index += 1;
             }
             let word = &source[start..index];
-            if coil_keywords().contains(&word) {
-                tokens.push(SpannedToken {
-                    range: start..index,
-                    token_type: TOKEN_KEYWORD,
-                    priority: 3,
-                });
-            } else if word == "from" && is_yield_from_keyword(source, start) {
-                tokens.push(SpannedToken {
-                    range: start..index,
-                    token_type: TOKEN_KEYWORD,
-                    priority: 3,
-                });
-            } else if word == "with" && is_resume_with_keyword(source, start) {
+            let contextual_keyword = (word == "from" && is_yield_from_keyword(source, start))
+                || (word == "with" && is_resume_with_keyword(source, start));
+            if coil_keywords().contains(&word) || contextual_keyword {
                 tokens.push(SpannedToken {
                     range: start..index,
                     token_type: TOKEN_KEYWORD,
@@ -3245,9 +3233,7 @@ fn main() {
             Some(right_line_start..source.len()),
         );
         assert!(filtered.len() < full.len());
-        assert!(token_types_at_word(source, &filtered, "right")
-            .iter()
-            .any(|token_type| *token_type == TOKEN_FUNCTION));
+        assert!(token_types_at_word(source, &filtered, "right").contains(&TOKEN_FUNCTION));
         assert!(token_types_at_word(source, &filtered, "left").is_empty());
     }
 

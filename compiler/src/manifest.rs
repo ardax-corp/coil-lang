@@ -13,14 +13,11 @@ pub fn default_module_roots() -> Vec<PathBuf> {
 
 /// Errors that can occur while loading a `coil.toml` manifest.
 #[derive(Debug, Clone, PartialEq)]
-#[allow(dead_code)] // some variants are reserved for future strict-mode validation
 pub enum ManifestError {
     /// The manifest file could not be read (I/O error).
     Io(String),
     /// A line failed to parse (invalid syntax).
     Parse { line: usize, message: String },
-    /// A required section is missing.
-    MissingSection(&'static str),
     /// A required key is missing from a section.
     MissingKey {
         section: &'static str,
@@ -35,7 +32,6 @@ impl std::fmt::Display for ManifestError {
             ManifestError::Parse { line, message } => {
                 write!(f, "manifest parse error at line {}: {}", line, message)
             }
-            ManifestError::MissingSection(s) => write!(f, "missing manifest section: [{}]", s),
             ManifestError::MissingKey { section, key } => {
                 write!(f, "missing manifest key: {}.{}", section, key)
             }

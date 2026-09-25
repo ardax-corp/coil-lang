@@ -135,7 +135,7 @@ fn collect_candidates(checker: &Checker, ast: &Output<'_>, cands: &mut HashMap<S
 }
 
 fn scan_uses(
-    checker: &Checker,
+    _checker: &Checker,
     ast: &Output<'_>,
     cands: &HashMap<String, Candidate>,
     escaped: &mut HashSet<String>,
@@ -147,7 +147,7 @@ fn scan_uses(
         }
         | Expression::Lambda { body, .. }
         | Expression::TestCase { body, .. } => {
-            scan_uses(checker, body, cands, escaped, true);
+            scan_uses(_checker, body, cands, escaped, true);
         }
         Expression::Match { scrutinee, arms } => {
             let s = peel(scrutinee);
@@ -156,10 +156,10 @@ fn scan_uses(
                     escaped.insert((*n).to_string());
                 }
             } else {
-                scan_uses(checker, scrutinee, cands, escaped, nested_fn);
+                scan_uses(_checker, scrutinee, cands, escaped, nested_fn);
             }
             for arm in arms {
-                scan_uses(checker, &arm.body, cands, escaped, nested_fn);
+                scan_uses(_checker, &arm.body, cands, escaped, nested_fn);
             }
         }
         Expression::Access(recv, _) => {
@@ -167,42 +167,40 @@ fn scan_uses(
             if let Expression::Identifier(n) = r.1.as_ref() {
                 if nested_fn && cands.contains_key(*n) {
                     escaped.insert((*n).to_string());
-                } else if let Some(cand) = cands.get(*n) {
-                    if !cand.is_class {
+                } else if let Some(cand) = cands.get(*n)
+                    && !cand.is_class {
                         escaped.insert((*n).to_string());
                     }
-                }
             } else {
-                scan_uses(checker, recv, cands, escaped, nested_fn);
+                scan_uses(_checker, recv, cands, escaped, nested_fn);
             }
         }
         Expression::OptionalAccess(recv, _) => {
             poison_idents(recv, cands, escaped);
-            scan_uses(checker, recv, cands, escaped, nested_fn);
+            scan_uses(_checker, recv, cands, escaped, nested_fn);
         }
         Expression::Assignment(lhs, rhs) => {
             if let Expression::Access(recv, _) = peel(lhs).1.as_ref() {
                 note_field_store(recv, cands, escaped, nested_fn);
-                scan_uses(checker, rhs, cands, escaped, nested_fn);
+                scan_uses(_checker, rhs, cands, escaped, nested_fn);
             } else if let Expression::Identifier(n) = peel(lhs).1.as_ref() {
                 if cands.contains_key(*n) {
                     let r = peel(rhs);
                     if nested_fn || !is_in_frame_ctor(r) {
                         escaped.insert((*n).to_string());
                     }
-                    if let Expression::Identifier(src) = r.1.as_ref() {
-                        if cands.contains_key(*src) {
+                    if let Expression::Identifier(src) = r.1.as_ref()
+                        && cands.contains_key(*src) {
                             escaped.insert((*n).to_string());
                             escaped.insert((*src).to_string());
                         }
-                    }
-                    scan_uses(checker, rhs, cands, escaped, nested_fn);
+                    scan_uses(_checker, rhs, cands, escaped, nested_fn);
                 } else {
-                    scan_uses(checker, rhs, cands, escaped, nested_fn);
+                    scan_uses(_checker, rhs, cands, escaped, nested_fn);
                 }
             } else {
-                scan_uses(checker, lhs, cands, escaped, nested_fn);
-                scan_uses(checker, rhs, cands, escaped, nested_fn);
+                scan_uses(_checker, lhs, cands, escaped, nested_fn);
+                scan_uses(_checker, rhs, cands, escaped, nested_fn);
             }
         }
         Expression::CompoundAssign(lhs, _, rhs) => {
@@ -211,8 +209,8 @@ fn scan_uses(
             } else {
                 poison_idents(lhs, cands, escaped);
             }
-            scan_uses(checker, lhs, cands, escaped, nested_fn);
-            scan_uses(checker, rhs, cands, escaped, nested_fn);
+            scan_uses(_checker, lhs, cands, escaped, nested_fn);
+            scan_uses(_checker, rhs, cands, escaped, nested_fn);
         }
         Expression::Call { name, args } => {
             let callee = peel(name);
@@ -224,10 +222,10 @@ fn scan_uses(
             if let Some(args) = args {
                 for a in args {
                     poison_idents(a, cands, escaped);
-                    scan_uses(checker, a, cands, escaped, nested_fn);
+                    scan_uses(_checker, a, cands, escaped, nested_fn);
                 }
             }
-            scan_uses(checker, name, cands, escaped, nested_fn);
+            scan_uses(_checker, name, cands, escaped, nested_fn);
         }
         Expression::Return(inner)
         | Expression::ImplicitReturn(inner)
@@ -236,7 +234,7 @@ fn scan_uses(
         | Expression::YieldFrom(inner)
         | Expression::Try(inner) => {
             poison_idents(inner, cands, escaped);
-            scan_uses(checker, inner, cands, escaped, nested_fn);
+            scan_uses(_checker, inner, cands, escaped, nested_fn);
         }
         Expression::Eq(a, b)
         | Expression::Neq(a, b)
@@ -250,7 +248,7 @@ fn scan_uses(
                         escaped.insert((*n).to_string());
                     }
                 } else {
-                    scan_uses(checker, side, cands, escaped, nested_fn);
+                    scan_uses(_checker, side, cands, escaped, nested_fn);
                 }
             }
         }
@@ -261,53 +259,52 @@ fn scan_uses(
         }
         Expression::Fragment(items) if items.len() == 2 && binder_name(&items[0]).is_some() => {
             let rhs = peel(&items[1]);
-            if let Expression::Identifier(src) = rhs.1.as_ref() {
-                if cands.contains_key(*src) {
+            if let Expression::Identifier(src) = rhs.1.as_ref()
+                && cands.contains_key(*src) {
                     escaped.insert((*src).to_string());
                     if let Some(dst) = binder_name(&items[0]) {
                         escaped.insert(dst);
                     }
                 }
-            }
-            scan_uses(checker, &items[1], cands, escaped, nested_fn);
+            scan_uses(_checker, &items[1], cands, escaped, nested_fn);
         }
         Expression::Construct { fields, .. } => match fields {
             EnumConstructPayload::Unit => {}
             EnumConstructPayload::Tuple(args) => {
                 for a in args {
                     poison_idents(a, cands, escaped);
-                    scan_uses(checker, a, cands, escaped, nested_fn);
+                    scan_uses(_checker, a, cands, escaped, nested_fn);
                 }
             }
             EnumConstructPayload::Record(parts) => {
                 for p in parts {
                     poison_idents(&p.value, cands, escaped);
-                    scan_uses(checker, &p.value, cands, escaped, nested_fn);
+                    scan_uses(_checker, &p.value, cands, escaped, nested_fn);
                 }
             }
         },
         Expression::Instantiate(_, Some(args)) => {
             for a in args {
                 poison_idents(a, cands, escaped);
-                scan_uses(checker, a, cands, escaped, nested_fn);
+                scan_uses(_checker, a, cands, escaped, nested_fn);
             }
         }
         Expression::Array(items) | Expression::Tuple(items) | Expression::List(items) => {
             for item in items {
                 poison_idents(item, cands, escaped);
-                scan_uses(checker, item, cands, escaped, nested_fn);
+                scan_uses(_checker, item, cands, escaped, nested_fn);
             }
         }
         Expression::Index(base, idx) => {
             poison_idents(base, cands, escaped);
-            scan_uses(checker, base, cands, escaped, nested_fn);
+            scan_uses(_checker, base, cands, escaped, nested_fn);
             if let Some(idx) = idx {
                 poison_idents(idx, cands, escaped);
-                scan_uses(checker, idx, cands, escaped, nested_fn);
+                scan_uses(_checker, idx, cands, escaped, nested_fn);
             }
         }
         _ => walk_children(ast, &mut |child| {
-            scan_uses(checker, child, cands, escaped, nested_fn)
+            scan_uses(_checker, child, cands, escaped, nested_fn)
         }),
     }
 }
@@ -427,13 +424,11 @@ fn note_field_store(
     nested_fn: bool,
 ) {
     let r = peel(recv);
-    if let Expression::Identifier(n) = r.1.as_ref() {
-        if cands.contains_key(*n) {
-            if nested_fn || !cands.get(*n).is_some_and(|c| c.is_class) {
+    if let Expression::Identifier(n) = r.1.as_ref()
+        && cands.contains_key(*n)
+            && (nested_fn || !cands.get(*n).is_some_and(|c| c.is_class)) {
                 escaped.insert((*n).to_string());
             }
-        }
-    }
 }
 
 fn poison_idents(
@@ -448,11 +443,10 @@ fn poison_idents(
         Expression::Access(recv, _) => {
             // Passing `p.x` does not pass `p`.
             let r = peel(recv);
-            if let Expression::Identifier(n) = r.1.as_ref() {
-                if cands.contains_key(*n) {
+            if let Expression::Identifier(n) = r.1.as_ref()
+                && cands.contains_key(*n) {
                     return;
                 }
-            }
             walk_children(ast, &mut |child| poison_idents(child, cands, escaped));
         }
         _ => walk_children(ast, &mut |child| poison_idents(child, cands, escaped)),
@@ -500,11 +494,10 @@ fn candidate_is_unbox(
     peeled: &Output<'_>,
 ) -> bool {
     for node in [binder, unpeeled, peeled] {
-        if let Some(ty) = ty_of(checker, node) {
-            if is_unbox_ty(checker, &ty) {
+        if let Some(ty) = ty_of(checker, node)
+            && is_unbox_ty(checker, &ty) {
                 return true;
             }
-        }
     }
     construct_is_unbox(checker, peeled) || instantiate_is_unbox(checker, peeled)
 }
@@ -531,11 +524,10 @@ fn instantiate_is_unbox(checker: &Checker, ast: &Output<'_>) -> bool {
     let Expression::Instantiate(class, _) = peel(ast).1.as_ref() else {
         return false;
     };
-    if let Some(ty) = ty_of(checker, ast) {
-        if is_unbox_ty(checker, &ty) {
+    if let Some(ty) = ty_of(checker, ast)
+        && is_unbox_ty(checker, &ty) {
             return true;
         }
-    }
     let name = match peel(class).1.as_ref() {
         Expression::Identifier(n) => *n,
         _ => return false,
@@ -570,11 +562,10 @@ fn walk_last_ident(
         Expression::Match { scrutinee, arms } => {
             let s = peel(scrutinee);
             if let Expression::Identifier(n) = s.1.as_ref() {
-                if cands.contains_key(*n) && !escaped.contains(*n) {
-                    if let Some(id) = nid(checker, s).or_else(|| nid(checker, scrutinee)) {
+                if cands.contains_key(*n) && !escaped.contains(*n)
+                    && let Some(id) = nid(checker, s).or_else(|| nid(checker, scrutinee)) {
                         last.insert((*n).to_string(), id);
                     }
-                }
             } else {
                 walk_last_ident(checker, scrutinee, cands, escaped, last);
             }
@@ -585,21 +576,19 @@ fn walk_last_ident(
         Expression::Access(recv, _) => {
             let r = peel(recv);
             if let Expression::Identifier(n) = r.1.as_ref() {
-                if cands.contains_key(*n) && !escaped.contains(*n) {
-                    if let Some(id) = nid(checker, r) {
+                if cands.contains_key(*n) && !escaped.contains(*n)
+                    && let Some(id) = nid(checker, r) {
                         last.insert((*n).to_string(), id);
                     }
-                }
             } else {
                 walk_last_ident(checker, recv, cands, escaped, last);
             }
         }
         Expression::Identifier(n) => {
-            if cands.contains_key(*n) && !escaped.contains(*n) {
-                if let Some(id) = nid(checker, ast) {
+            if cands.contains_key(*n) && !escaped.contains(*n)
+                && let Some(id) = nid(checker, ast) {
                     last.insert((*n).to_string(), id);
                 }
-            }
         }
         _ => walk_children(ast, &mut |child| {
             walk_last_ident(checker, child, cands, escaped, last)

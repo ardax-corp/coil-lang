@@ -45,8 +45,7 @@ pub const IO_FS_MODULE: &str = "io::fs";
 /// Process environment (`args`, `var`, `exec`, …).
 pub const ENV_MODULE: &str = "env";
 
-/// PCRE2 regex moved to [coil-regex](https://github.com/ardax-corp/coil-regex).
-/// Cryptographic primitives moved to [coil-crypto](https://github.com/ardax-corp/coil-crypto).
+// PCRE2 regex moved to coil-regex. Cryptographic primitives moved to coil-crypto.
 
 /// Explicit GC pins and weak handles (`root`, `weak`, `Root`, `Weak`, …).
 pub const GC_MODULE: &str = "gc";
@@ -1055,14 +1054,14 @@ impl VirtualModules {
             out.extend(e.iter().cloned());
         }
         if let Some(e) = self.modules.get(PRELUDE_MATH_MODULE) {
-            out.extend(e.iter().cloned().filter(|export| {
+            out.extend(e.iter().filter(|&export| {
                 !matches!(
                     export,
                     BuiltinExport::Fn {
                         kind: PreludeFn::Pow
                     }
                 )
-            }));
+            }).cloned());
         }
         out
     }

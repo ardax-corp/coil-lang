@@ -30,7 +30,7 @@ thread_local! {
     static PENDING_IO_PARK: RefCell<Option<IoParkRequest>> = const { RefCell::new(None) };
     static OUTPUT_REDIRECT: RefCell<Option<OutputRedirect>> = RefCell::new(None);
     static SHARED_PRINT: RefCell<Option<std::sync::Arc<std::sync::Mutex<Vec<u8>>>>> =
-        RefCell::new(None);
+        const { RefCell::new(None) };
 }
 
 pub(crate) fn take_pending_io_park() -> Option<IoParkRequest> {
@@ -402,8 +402,8 @@ fn stream_read_into(
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
         let olds: Vec<Value> = arr.elements[..n].to_vec();
-        for i in 0..n {
-            arr.elements[i] = Value::from(tmp[i] as i64);
+        for (dst, src) in arr.elements[..n].iter_mut().zip(tmp[..n].iter()) {
+            *dst = Value::from(*src as i64);
         }
         heap.satb_shade_values(&olds);
         Ok(Some(n))
@@ -707,10 +707,12 @@ pub fn io_wait_ready(_heap: &mut Heap) -> Value {
 
 pub(crate) fn stream_wait_handle(heap: &mut Heap, stream: Value) -> Result<WaitHandle, IoErrorTag> {
     with_stream_mut(heap, stream, |s| {
-        if s.closed || s.handle.is_none() {
+        if s.closed {
             Err(IoErrorTag::AlreadyClosed)
+        } else if let Some(handle) = s.handle.as_ref() {
+            Ok(handle.wait_handle())
         } else {
-            Ok(s.handle.as_ref().unwrap().wait_handle())
+            Err(IoErrorTag::AlreadyClosed)
         }
     })?
 }
@@ -1142,8 +1144,8 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
         let olds: Vec<Value> = arr.elements[..n].to_vec();
-        for i in 0..n {
-            arr.elements[i] = Value::from(tmp[i] as i64);
+        for (dst, src) in arr.elements[..n].iter_mut().zip(tmp[..n].iter()) {
+            *dst = Value::from(*src as i64);
         }
         heap.satb_shade_values(&olds);
     }
@@ -1587,7 +1589,7 @@ mod tests {
     fn tcp_listen_accept_echo_localhost() {
         let mut heap = Heap::default();
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = listener.local_addr().unwrap().port() as u16;
+        let port = listener.local_addr().unwrap().port();
         listener.set_nonblocking(true).unwrap();
         let listen_stream = alloc_stream(
             &mut heap,
@@ -1631,7 +1633,7 @@ mod tests {
         .unwrap();
         let reply = make_byte_array(&mut heap, b"ok");
 
-        for round in 0..2 {
+        for _round in 0..2 {
             let client = thread::spawn(move || {
                 thread::sleep(Duration::from_millis(20));
                 let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();

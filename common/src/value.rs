@@ -88,7 +88,7 @@ impl<T> From<*mut T> for Value {
     }
 }
 
-impl<'a> Value {
+impl Value {
     const fn new(raw: Storage) -> Self {
         Self(raw as _)
     }
@@ -98,7 +98,7 @@ impl<'a> Value {
     }
 }
 
-impl<'a> Value {
+impl Value {
     /// ```
     /// use common::Value;
     /// assert_eq!(Value::from(42).as_int(), 42);

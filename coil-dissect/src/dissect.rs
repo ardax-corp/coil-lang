@@ -28,7 +28,7 @@ pub fn cmd_dissect(config: ReportConfig, args: DissectArgs) {
 
     let artifacts = match pipeline.compile_dissect(&args.filename, args.show_il) {
         Ok(a) => a,
-        Err(()) => {
+        Err(_) => {
             let _ = pipeline.finish_reporting();
             exit(1);
         }

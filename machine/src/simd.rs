@@ -118,15 +118,15 @@ pub fn eval_vbin(kind: u8, lhs: &[u64; LANES], rhs: &[u64; LANES], scalar: Value
         simd::SPLAT_F64 => [scalar.as_float().to_bits(); LANES],
         simd::IOTA_I64 => {
             let mut o = [0u64; LANES];
-            for i in 0..LANES {
-                o[i] = i as u64;
+            for (i, lane) in o.iter_mut().enumerate() {
+                *lane = i as u64;
             }
             o
         }
         simd::IOTA_F64 => {
             let mut o = [0u64; LANES];
-            for i in 0..LANES {
-                o[i] = (i as f64).to_bits();
+            for (i, lane) in o.iter_mut().enumerate() {
+                *lane = (i as f64).to_bits();
             }
             o
         }

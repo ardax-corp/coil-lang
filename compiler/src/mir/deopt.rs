@@ -133,13 +133,12 @@ fn site_from(
     fallback: &[(LocalId, ValueId)],
 ) -> DeoptSite {
     let mut slots: BTreeSet<(u32, ValueId)> = BTreeSet::new();
-    if let Some(at) = at {
-        if let Some(env) = func.slot_env.get(&at) {
+    if let Some(at) = at
+        && let Some(env) = func.slot_env.get(&at) {
             for (l, v) in env {
                 slots.insert((l.0, *v));
             }
         }
-    }
     if slots.is_empty() {
         for (l, v) in fallback {
             slots.insert((l.0, *v));
@@ -165,7 +164,7 @@ pub fn debug_slot_remap(
     let mut out = HashMap::new();
     for (local, val) in &func.debug_slots {
         let idx = val.index();
-        let is_param = func.params.iter().any(|p| *p == *val);
+        let is_param = func.params.contains(val);
         if !is_param && !need_slot.get(idx).copied().unwrap_or(false) {
             continue;
         }
@@ -185,17 +184,16 @@ pub fn encode_draft(func: &MirFunc, regs: &[u8], need_slot: &[bool]) -> DraftDeo
         let mut mapped = Vec::new();
         for (local, val) in &site.slots {
             let idx = val.index();
-            let is_param = func.params.iter().any(|p| *p == *val);
+            let is_param = func.params.contains(val);
             let slotted = is_param || need_slot.get(idx).copied().unwrap_or(false);
             if let Ok(il) = u16::try_from(local.0) {
                 il_slots.push(il);
             }
-            if slotted {
-                if let Some(&r) = regs.get(idx) {
+            if slotted
+                && let Some(&r) = regs.get(idx) {
                     mapped.push(u16::from(r));
                     continue;
                 }
-            }
             complete = false;
         }
         sites.push(DraftDeoptSite {

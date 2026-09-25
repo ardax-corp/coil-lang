@@ -14,6 +14,9 @@ use super::ty::{Ty, strip_readonly, vec_element_ty};
 
 const MAX_FACT_ARRAY_ARITY: usize = 32;
 
+type ParamSlot = (String, NodeId, bool);
+type FnParamShape = (String, Vec<ParamSlot>);
+
 #[derive(Clone, Default)]
 struct Env {
     /// Names proven `>= 0` (init from a non-negative const or `++`/`+= k>0`).
@@ -91,7 +94,7 @@ pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     let mut used_as_value: HashSet<String> = HashSet::new();
     collect_value_uses(ast, &mut used_as_value);
 
-    let mut shapes: Vec<(String, Vec<(String, NodeId, bool)>)> = Vec::new();
+    let mut shapes: Vec<FnShape> = Vec::new();
     collect_fn_shapes(checker, ast, &mut shapes);
 
     walk_tree(checker, ast, &pure, &mut Env::default(), &mut calls);
@@ -100,10 +103,12 @@ pub fn analyze_index_facts(checker: &mut Checker, ast: &Output<'_>) {
     pin_callee_proven_params(checker, ast, &shapes);
 }
 
+type FnShape = (String, Vec<(String, NodeId, bool)>);
+
 fn collect_fn_shapes(
     checker: &Checker,
     ast: &Output<'_>,
-    out: &mut Vec<(String, Vec<(String, NodeId, bool)>)>,
+    out: &mut Vec<FnShape>,
 ) {
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::Fragment(items) => {
@@ -424,16 +429,16 @@ fn walk_tree(
             pattern: _,
             iterable,
             body,
-        } => walk_loop(
+        } => walk_loop(WalkLoopArgs {
             checker,
-            ast,
-            identifier.as_ref(),
+            loop_node: ast,
+            identifier: identifier.as_ref(),
             iterable,
             body,
             pure,
             env,
             calls,
-        ),
+        }),
         Expression::Call { name, args } => {
             walk_tree(checker, name, pure, env, calls);
             if let Some(args) = args {
@@ -615,16 +620,28 @@ fn walk_if(
     }
 }
 
-fn walk_loop(
-    checker: &mut Checker,
-    loop_node: &Output<'_>,
-    identifier: Option<&Output<'_>>,
-    iterable: &Output<'_>,
-    body: &Output<'_>,
-    pure: &HashSet<String>,
-    env: &mut Env,
-    calls: &mut Vec<CallSite>,
-) {
+struct WalkLoopArgs<'a> {
+    checker: &'a mut Checker,
+    loop_node: &'a Output<'a>,
+    identifier: Option<&'a Output<'a>>,
+    iterable: &'a Output<'a>,
+    body: &'a Output<'a>,
+    pure: &'a HashSet<String>,
+    env: &'a mut Env,
+    calls: &'a mut Vec<CallSite>,
+}
+
+fn walk_loop(args: WalkLoopArgs<'_>) {
+    let WalkLoopArgs {
+        checker,
+        loop_node,
+        identifier,
+        iterable,
+        body,
+        pure,
+        env,
+        calls,
+    } = args;
     if let Some(binding) = identifier {
         // for-in
         walk_tree(checker, iterable, pure, env, calls);
@@ -757,7 +774,7 @@ fn collect_value_uses(ast: &Output<'_>, used: &mut HashSet<String>) {
 fn apply_interproc(
     checker: &mut Checker,
     ast: &Output<'_>,
-    shapes: &[(String, Vec<(String, NodeId, bool)>)],
+    shapes: &[FnParamShape],
     calls: &[CallSite],
     used_as_value: &HashSet<String>,
 ) {
@@ -819,7 +836,7 @@ fn apply_interproc(
 fn pin_callee_proven_params(
     checker: &mut Checker,
     ast: &Output<'_>,
-    shapes: &[(String, Vec<(String, NodeId, bool)>)],
+    shapes: &[FnParamShape],
 ) {
     for (fname, params) in shapes {
         let Some(body) = fn_body(ast, fname) else {

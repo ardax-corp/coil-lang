@@ -303,7 +303,7 @@ fs_host_2!(host_fs_copy, fs_copy);
 fs_host_2!(host_fs_symlink, fs_symlink);
 
 /// Pipeline wiring: `(registry_name, arity, host_fn)`.
-pub const FS_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
+pub const FS_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("fs_exists", 1, host_fs_exists),
     ("fs_is_file", 1, host_fs_is_file),
     ("fs_is_dir", 1, host_fs_is_dir),

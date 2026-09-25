@@ -49,7 +49,7 @@ impl IdTable {
     }
 
     pub fn id_of_expr(&self, expr: &Expression<'_>) -> Option<NodeId> {
-        self.id_of_ptr(std::ptr::from_ref(expr) as *const Expression<'_> as usize)
+        self.id_of_ptr(std::ptr::from_ref(expr) as usize)
     }
 
     pub fn id_of_output(&self, node: &Output<'_>) -> Option<NodeId> {

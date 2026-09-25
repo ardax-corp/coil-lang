@@ -119,21 +119,21 @@ pub fn emit_dense(
                 args,
             } = inst
             {
-                emit_call(
-                    &mut out,
-                    &mut stacked,
-                    crate::il::EntryKind::Call,
-                    *dest,
-                    *dest_hi,
-                    *target,
+                emit_call(EmitCallArgs {
+                    out: &mut out,
+                    stacked: &mut stacked,
+                    kind: crate::il::EntryKind::Call,
+                    dest: *dest,
+                    dest_hi: *dest_hi,
+                    target: *target,
                     args,
                     func,
-                    &plan,
-                    &regs,
+                    plan: &plan,
+                    regs: &regs,
                     scratch,
                     pool,
                     loc,
-                )?;
+                })?;
                 continue;
             }
             if let MirInst::MatchPayload {
@@ -148,54 +148,63 @@ pub fn emit_dense(
                 let st = func.ty(*scrutinee);
                 if matches!(st, MirTy::NicheOpt | MirTy::NicheRes) {
                     if plan.needs_slot(*dest) {
-                        emit_inst(
-                            &mut out,
+                        emit_inst(EmitInstArgs {
+                            out: &mut out,
                             inst,
                             func,
-                            &regs,
+                            regs: &regs,
                             scratch,
                             pool,
                             loc,
                             across_alloc,
-                        )?;
+                        })?;
                         stacked.clear();
                     }
                     continue;
                 }
                 if *index == 0 {
-                    emit_boxed_last_arm_unpack(
-                        &mut out,
-                        &mut stacked,
+                    emit_boxed_last_arm_unpack(EmitBoxedLastArmUnpackArgs {
+                        out: &mut out,
+                        stacked: &mut stacked,
                         func,
-                        block.id,
-                        *scrutinee,
-                        &plan,
-                        &regs,
+                        block: block.id,
+                        scrutinee: *scrutinee,
+                        plan: &plan,
+                        regs: &regs,
                         loc,
-                    );
+                    });
                 }
                 continue;
             }
             if !plan.needs_slot(inst.dest()) {
                 continue;
             }
-            emit_inst(&mut out, inst, func, &regs, scratch, pool, loc, across_alloc)?;
+            emit_inst(EmitInstArgs {
+                out: &mut out,
+                inst,
+                func,
+                regs: &regs,
+                scratch,
+                pool,
+                loc,
+                across_alloc,
+            })?;
             stacked.clear();
         }
-        emit_term(
-            &mut out,
-            &mut stacked,
+        emit_term(EmitTermArgs {
+            out: &mut out,
+            stacked: &mut stacked,
             block,
             func,
-            &plan,
-            &regs,
+            plan: &plan,
+            regs: &regs,
             scratch,
-            &block_lab,
-            &mut next_label,
-            &reserved,
+            block_lab: &block_lab,
+            next_label: &mut next_label,
+            reserved: &reserved,
             pool,
-            func.term_loc(block.id),
-        )?;
+            loc: func.term_loc(block.id),
+        })?;
     }
     coalesce_dense_moves(&mut out);
     pack_chained_dense_bin(&mut out);
@@ -392,10 +401,10 @@ fn latch_overwrite_ok(
         // `i` before later arms / `i % n`.
         return false;
     }
-    match &block.term {
-        Some(Terminator::Br { cond, .. }) if *cond == dest => false,
-        _ => true,
-    }
+    !matches!(
+        &block.term,
+        Some(Terminator::Br { cond, .. }) if *cond == dest
+    )
 }
 
 
@@ -427,27 +436,39 @@ fn cmp_used_outside_term(func: &MirFunc, dest: ValueId, home: BlockId) -> bool {
                     return true;
                 }
             }
-            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. }) => {
-                if *scrutinee == dest || payloads.contains(&dest) {
+            Some(Terminator::JumpIfMatch { scrutinee, payloads, .. })
+                if (*scrutinee == dest || payloads.contains(&dest)) => {
                     return true;
                 }
-            }
             _ => {}
         }
     }
     false
 }
 
-pub(super) fn emit_br_cond(
-    out: &mut Vec<IlOp>,
-    block: &super::func::MirBlock,
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    regs: &[u8],
+pub(super) struct EmitBrCondArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    block: &'args super::func::MirBlock,
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    regs: &'args [u8],
     cond: ValueId,
-    pool: &mut Vec<u64>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+pub(super) fn emit_br_cond(args: EmitBrCondArgs<'_>) -> Result<(), LowerError> {
+    let EmitBrCondArgs {
+        out,
+        block,
+        func,
+        plan,
+        regs,
+        cond,
+        pool,
+        loc,
+    } = args;
+
     if let Some(MirInst::Cmp {
         op, ty, lhs, rhs, ..
     }) = block.insts.iter().find(|inst| {
@@ -474,16 +495,16 @@ pub(super) fn emit_br_cond(
                 loc,
             });
         } else {
-            emit_stack_value(
+            emit_stack_value(EmitStackValueArgs {
                 out,
-                &mut Vec::new(),
-                *rhs,
+                stacked: &mut Vec::new(),
+                v: *rhs,
                 func,
                 plan,
                 regs,
                 pool,
                 loc,
-            )?;
+            })?;
         }
         out.push(IlOp::Bin {
             op: stack_cmp_op(*op, *ty)?,
@@ -693,16 +714,29 @@ fn is_jmpf_cond_op(i: Instruction) -> bool {
     )
 }
 
-pub(super) fn emit_inst(
-    out: &mut Vec<IlOp>,
-    inst: &MirInst,
-    func: &MirFunc,
-    regs: &[u8],
-    scratch: u8,
-    pool: &mut Vec<u64>,
-    loc: DebugLoc,
-    across_alloc: bool,
-) -> Result<(), LowerError> {
+pub(super) struct EmitInstArgs<'args> {
+    pub(super) out: &'args mut Vec<IlOp>,
+    pub(super) inst: &'args MirInst,
+    pub(super) func: &'args MirFunc,
+    pub(super) regs: &'args [u8],
+    pub(super) scratch: u8,
+    pub(super) pool: &'args mut Vec<u64>,
+    pub(super) loc: DebugLoc,
+    pub(super) across_alloc: bool,
+}
+
+pub(super) fn emit_inst(args: EmitInstArgs<'_>) -> Result<(), LowerError> {
+    let EmitInstArgs {
+        out,
+        inst,
+        func,
+        regs,
+        scratch,
+        pool,
+        loc,
+        across_alloc,
+    } = args;
+
     let byte = |b: Byte| IlOp::from_plain_byte(b, loc);
     match inst {
         MirInst::Const { dest, c } => {
@@ -1025,8 +1059,8 @@ pub(super) fn emit_inst(
                     "dense emit refuses Alloc/GcBarrier without S2b maps (S2c)".into(),
                 ));
             }
-            if let Some(obj) = paired_alloc_dest(func, *dest) {
-                if regs[dest.index()] != regs[obj.index()] {
+            if let Some(obj) = paired_alloc_dest(func, *dest)
+                && regs[dest.index()] != regs[obj.index()] {
                     out.push(IlOp::Load {
                         slot: u32::from(regs[obj.index()]),
                         loc,
@@ -1036,7 +1070,6 @@ pub(super) fn emit_inst(
                         loc,
                     });
                 }
-            }
         }
         MirInst::Deopt { .. } => {}
         MirInst::String { dest, idx } => {
@@ -1056,20 +1089,37 @@ pub(super) fn emit_inst(
     Ok(())
 }
 
-fn emit_term(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
-    block: &super::func::MirBlock,
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    regs: &[u8],
+struct EmitTermArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
+    block: &'args super::func::MirBlock,
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    regs: &'args [u8],
     scratch: u8,
-    block_lab: &[Label],
-    next_label: &mut u32,
-    reserved: &HashSet<u32>,
-    pool: &mut Vec<u64>,
+    block_lab: &'args [Label],
+    next_label: &'args mut u32,
+    reserved: &'args HashSet<u32>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
+    let EmitTermArgs {
+        out,
+        stacked,
+        block,
+        func,
+        plan,
+        regs,
+        scratch,
+        block_lab,
+        next_label,
+        reserved,
+        pool,
+        loc,
+    } = args;
+
     let Some(term) = &block.term else {
         return Err(LowerError::Refused("missing terminator".into()));
     };
@@ -1092,7 +1142,16 @@ fn emit_term(
         } => {
             let t_moves = phi_moves(func, block.id, *taken, regs, scratch);
             let f_moves = phi_moves(func, block.id, *not_taken, regs, scratch);
-            emit_br_cond(out, block, func, plan, regs, *cond, pool, loc)?;
+            emit_br_cond(EmitBrCondArgs {
+                out,
+                block,
+                func,
+                plan,
+                regs,
+                cond: *cond,
+                pool,
+                loc,
+            })?;
             if t_moves.is_empty() && f_moves.is_empty() {
                 emit_cond_jumps(
                     out,
@@ -1142,15 +1201,14 @@ fn emit_term(
                     target,
                     args,
                 }) = block.insts.last()
-                {
-                    if *dest == *v && *dest_hi == *hi {
-                        emit_call(
+                    && *dest == *v && *dest_hi == *hi {
+                        emit_call(EmitCallArgs {
                             out,
                             stacked,
-                            crate::il::EntryKind::TailCall,
-                            *dest,
-                            *dest_hi,
-                            *target,
+                            kind: crate::il::EntryKind::TailCall,
+                            dest: *dest,
+                            dest_hi: *dest_hi,
+                            target: *target,
                             args,
                             func,
                             plan,
@@ -1158,16 +1216,33 @@ fn emit_term(
                             scratch,
                             pool,
                             loc,
-                        )?;
+                        })?;
                         return Ok(());
                     }
-                }
-                emit_stack_value(out, stacked, *v, func, plan, regs, pool, loc)?;
+                emit_stack_value(EmitStackValueArgs {
+                    out,
+                    stacked,
+                    v: *v,
+                    func,
+                    plan,
+                    regs,
+                    pool,
+                    loc,
+                })?;
             } else {
                 out.push(IlOp::Const { imm: 0, loc });
             }
             if let Some(h) = hi {
-                emit_stack_value(out, stacked, *h, func, plan, regs, pool, loc)?;
+                emit_stack_value(EmitStackValueArgs {
+                    out,
+                    stacked,
+                    v: *h,
+                    func,
+                    plan,
+                    regs,
+                    pool,
+                    loc,
+                })?;
             }
             out.push(IlOp::Return {
                 loc,
@@ -1184,17 +1259,17 @@ fn emit_term(
             taken,
             not_taken,
         } => {
-            emit_dense_jump_if_match(
+            emit_dense_jump_if_match(EmitDenseJumpIfMatchArgs {
                 out,
                 stacked,
                 func,
                 plan,
                 block,
-                *scrutinee,
-                *tag,
+                scrutinee: *scrutinee,
+                tag: *tag,
                 payloads,
-                *taken,
-                *not_taken,
+                taken: *taken,
+                not_taken: *not_taken,
                 regs,
                 scratch,
                 block_lab,
@@ -1202,7 +1277,7 @@ fn emit_term(
                 reserved,
                 pool,
                 loc,
-            )?;
+            })?;
         }
     }
     Ok(())
@@ -1353,28 +1428,50 @@ fn intern_pool(pool: &mut Vec<u64>, bits: u64) -> Result<u16, LowerError> {
     Ok(i as u16)
 }
 
-fn emit_dense_jump_if_match(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    block: &super::func::MirBlock,
+struct EmitDenseJumpIfMatchArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    block: &'args super::func::MirBlock,
     scrutinee: ValueId,
     tag: u32,
-    payloads: &[ValueId],
+    payloads: &'args [ValueId],
     taken: BlockId,
     not_taken: BlockId,
-    regs: &[u8],
+    regs: &'args [u8],
     scratch: u8,
-    block_lab: &[Label],
-    next_label: &mut u32,
-    reserved: &HashSet<u32>,
-    pool: &mut Vec<u64>,
+    block_lab: &'args [Label],
+    next_label: &'args mut u32,
+    reserved: &'args HashSet<u32>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_dense_jump_if_match(args: EmitDenseJumpIfMatchArgs<'_>) -> Result<(), LowerError> {
+    let EmitDenseJumpIfMatchArgs {
+        out,
+        stacked,
+        func,
+        plan,
+        block,
+        scrutinee,
+        tag,
+        payloads,
+        taken,
+        not_taken,
+        regs,
+        scratch,
+        block_lab,
+        next_label,
+        reserved,
+        pool,
+        loc,
+    } = args;
+
     let st = func.ty(scrutinee);
     if !matches!(st, MirTy::NicheOpt | MirTy::NicheRes) {
-        return emit_boxed_jump_if_match(
+        return emit_boxed_jump_if_match(EmitBoxedJumpIfMatchArgs {
             out,
             stacked,
             func,
@@ -1390,7 +1487,7 @@ fn emit_dense_jump_if_match(
             block_lab,
             pool,
             loc,
-        );
+        });
     }
     if tag > 1 {
         return Err(LowerError::Refused(
@@ -1540,16 +1637,29 @@ fn last_arm_payloads(func: &MirFunc, block: BlockId, scrutinee: ValueId) -> Vec<
     group
 }
 
-fn emit_boxed_last_arm_unpack(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
-    func: &MirFunc,
+struct EmitBoxedLastArmUnpackArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
+    func: &'args MirFunc,
     block: BlockId,
     scrutinee: ValueId,
-    plan: &ConvoyPlan,
-    regs: &[u8],
+    plan: &'args ConvoyPlan,
+    regs: &'args [u8],
     loc: DebugLoc,
-) {
+}
+
+fn emit_boxed_last_arm_unpack(args: EmitBoxedLastArmUnpackArgs<'_>) {
+    let EmitBoxedLastArmUnpackArgs {
+        out,
+        stacked,
+        func,
+        block,
+        scrutinee,
+        plan,
+        regs,
+        loc,
+    } = args;
+
     let group = last_arm_payloads(func, block, scrutinee);
     let arity = group.len() as u32;
     if arity == 0 {
@@ -1573,23 +1683,43 @@ fn emit_boxed_last_arm_unpack(
     }
 }
 
-fn emit_boxed_jump_if_match(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    block: &super::func::MirBlock,
+struct EmitBoxedJumpIfMatchArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    block: &'args super::func::MirBlock,
     scrutinee: ValueId,
     tag: u32,
-    payloads: &[ValueId],
+    payloads: &'args [ValueId],
     taken: BlockId,
     not_taken: BlockId,
-    regs: &[u8],
+    regs: &'args [u8],
     scratch: u8,
-    block_lab: &[Label],
-    pool: &mut Vec<u64>,
+    block_lab: &'args [Label],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_boxed_jump_if_match(args: EmitBoxedJumpIfMatchArgs<'_>) -> Result<(), LowerError> {
+    let EmitBoxedJumpIfMatchArgs {
+        out,
+        stacked,
+        func,
+        plan,
+        block,
+        scrutinee,
+        tag,
+        payloads,
+        taken,
+        not_taken,
+        regs,
+        scratch,
+        block_lab,
+        pool,
+        loc,
+    } = args;
+
     if !phi_moves(func, block.id, taken, regs, scratch).is_empty()
         || !phi_moves(func, block.id, not_taken, regs, scratch).is_empty()
     {
@@ -1597,7 +1727,16 @@ fn emit_boxed_jump_if_match(
             "dense boxed JumpIfMatch + phi moves (keep fuse-IL)".into(),
         ));
     }
-    emit_stack_value(out, stacked, scrutinee, func, plan, regs, pool, loc)?;
+    emit_stack_value(EmitStackValueArgs {
+        out,
+        stacked,
+        v: scrutinee,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    })?;
     out.push(IlOp::Jump {
         kind: IlJumpKind::JumpIfMatch {
             tag,
@@ -1722,26 +1861,53 @@ fn gather_base(
     Ok(scratch)
 }
 
-fn emit_call(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
+struct EmitCallArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
     kind: crate::il::EntryKind,
     dest: ValueId,
     dest_hi: Option<ValueId>,
     target: crate::il::Label,
-    args: &[ValueId],
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    regs: &[u8],
+    args: &'args [ValueId],
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    regs: &'args [u8],
     scratch: u8,
-    pool: &mut Vec<u64>,
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_call(args: EmitCallArgs<'_>) -> Result<(), LowerError> {
+    let EmitCallArgs {
+        out,
+        stacked,
+        kind,
+        dest,
+        dest_hi,
+        target,
+        args,
+        func,
+        plan,
+        regs,
+        scratch,
+        pool,
+        loc,
+    } = args;
+
     let ret_words = super::abi::ret_words_from_hi(dest_hi);
     // TailCall (self or sibling): args on the operand stack, then jump.
     // Do not DensePush / convoy a foreign CALL dest as a self-return (B2).
     if kind == crate::il::EntryKind::TailCall {
-        emit_args_on_stack(out, stacked, args, func, plan, regs, pool, loc)?;
+        emit_args_on_stack(EmitArgsOnStackArgs {
+            out,
+            stacked,
+            args,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        })?;
         out.push(IlOp::Entry {
             kind,
             arity: args.len() as u32,
@@ -1764,7 +1930,16 @@ fn emit_call(
         store_or_stack_call(out, stacked, dest, dest_hi, plan, regs, loc);
         return Ok(());
     }
-    emit_args_on_stack(out, stacked, args, func, plan, regs, pool, loc)?;
+    emit_args_on_stack(EmitArgsOnStackArgs {
+        out,
+        stacked,
+        args,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    })?;
     out.push(IlOp::Entry {
         kind,
         arity: args.len() as u32,
@@ -1824,35 +1999,70 @@ fn store_or_stack_call(
     }
 }
 
-fn emit_args_on_stack(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
-    args: &[ValueId],
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+struct EmitArgsOnStackArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
+    args: &'args [ValueId],
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_args_on_stack(args: EmitArgsOnStackArgs<'_>) -> Result<(), LowerError> {
+    let EmitArgsOnStackArgs {
+        out,
+        stacked,
+        args,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     if !args.is_empty() && stacked.ends_with(args) {
         return Ok(());
     }
     for &a in args {
-        emit_stack_value(out, stacked, a, func, plan, regs, pool, loc)?;
+        emit_stack_value(EmitStackValueArgs {
+            out,
+            stacked,
+            v: a,
+            func,
+            plan,
+            regs,
+            pool,
+            loc,
+        })?;
     }
     Ok(())
 }
 
-fn emit_stack_value(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
+struct EmitStackValueArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
     v: ValueId,
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_stack_value(args: EmitStackValueArgs<'_>) -> Result<(), LowerError> {
+    let EmitStackValueArgs {
+        out,
+        stacked,
+        v,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     if stacked.last() == Some(&v) {
         return Ok(());
     }
@@ -1880,7 +2090,20 @@ fn emit_stack_value(
             lhs,
             rhs,
         } => {
-            emit_stack_bin(out, stacked, *op, *ty, *lhs, *rhs, *dest, func, plan, regs, pool, loc)
+            emit_stack_bin(EmitStackBinArgs {
+                out,
+                stacked,
+                op: *op,
+                ty: *ty,
+                lhs: *lhs,
+                rhs: *rhs,
+                dest: *dest,
+                func,
+                plan,
+                regs,
+                pool,
+                loc,
+            })
         }
         // A slotless call result is only valid while it is still TOS
         // (`stacked.last()` above). Reloading `regs[v]` reads an
@@ -1895,20 +2118,37 @@ fn emit_stack_value(
     }
 }
 
-fn emit_stack_bin(
-    out: &mut Vec<IlOp>,
-    stacked: &mut Vec<ValueId>,
+struct EmitStackBinArgs<'args> {
+    out: &'args mut Vec<IlOp>,
+    stacked: &'args mut Vec<ValueId>,
     op: MirBinOp,
     ty: MirTy,
     lhs: ValueId,
     rhs: ValueId,
     dest: ValueId,
-    func: &MirFunc,
-    plan: &ConvoyPlan,
-    regs: &[u8],
-    pool: &mut Vec<u64>,
+    func: &'args MirFunc,
+    plan: &'args ConvoyPlan,
+    regs: &'args [u8],
+    pool: &'args mut Vec<u64>,
     loc: DebugLoc,
-) -> Result<(), LowerError> {
+}
+
+fn emit_stack_bin(args: EmitStackBinArgs<'_>) -> Result<(), LowerError> {
+    let EmitStackBinArgs {
+        out,
+        stacked,
+        op,
+        ty,
+        lhs,
+        rhs,
+        dest,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    } = args;
+
     let stack_op = stack_bin_op(op, ty)?;
     if stacked.len() >= 2
         && stacked[stacked.len() - 2] == lhs
@@ -1935,8 +2175,26 @@ fn emit_stack_bin(
         stacked.push(dest);
         return Ok(());
     }
-    emit_stack_value(out, stacked, lhs, func, plan, regs, pool, loc)?;
-    emit_stack_value(out, stacked, rhs, func, plan, regs, pool, loc)?;
+    emit_stack_value(EmitStackValueArgs {
+        out,
+        stacked,
+        v: lhs,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    })?;
+    emit_stack_value(EmitStackValueArgs {
+        out,
+        stacked,
+        v: rhs,
+        func,
+        plan,
+        regs,
+        pool,
+        loc,
+    })?;
     out.push(IlOp::Bin {
         op: stack_op,
         loc,
@@ -1989,12 +2247,11 @@ fn push_stack_const(
 ) -> Result<(), LowerError> {
     match c {
         MirConst::I64(v) => {
-            if let Ok(imm) = i32::try_from(v) {
-                if imm >= 0 {
+            if let Ok(imm) = i32::try_from(v)
+                && imm >= 0 {
                     out.push(IlOp::Const { imm, loc });
                     return Ok(());
                 }
-            }
             let idx = u32::from(intern_pool(pool, v as u64)?);
             out.push(IlOp::ConstPool { idx, loc });
         }

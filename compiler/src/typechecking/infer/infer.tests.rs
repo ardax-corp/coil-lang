@@ -242,7 +242,7 @@ fn probe_fn_return_type(wrapped: &str) -> Option<Ty> {
     let _ = c.check_program(&ast);
     let scheme = c.env().lookup("__coil_check_expr__")?;
     let mut counter = TyVarCounter::new();
-    let fn_ty = apply_ty_prune(&c.subst(), &instantiate(scheme, &mut counter));
+    let fn_ty = apply_ty_prune(c.subst(), &instantiate(scheme, &mut counter));
     Some(peel_fn_return(fn_ty))
 }
 
@@ -3945,11 +3945,11 @@ fn async_fn_call_has_coroutine_type() {
     let (c, _) = check(src);
     assert!(c.messages().is_empty(), "unexpected: {:?}", c.messages());
     let ty = c.codegen_var_type("h").expect("h should be recorded");
-    match apply_ty_prune(&c.subst(), ty) {
+    match apply_ty_prune(c.subst(), ty) {
         Ty::App(con, args) => {
             assert_eq!(con.as_ref(), &Ty::Con("coroutine".to_string()));
             assert_eq!(args.len(), 2);
-            assert_eq!(apply_ty_prune(&c.subst(), &args[1]), unit_ty());
+            assert_eq!(apply_ty_prune(c.subst(), &args[1]), unit_ty());
         }
         other => panic!("expected coroutine<_, unit>, got {:?}", other),
     }

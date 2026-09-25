@@ -115,18 +115,18 @@ fn hoist_casts_in_window(
         .collect();
 
     let mut body: Vec<IlOp> = Vec::new();
-    for idx in start..store_i {
+    for (idx, op) in ops.iter().enumerate().take(store_i).skip(start) {
         if site_load.contains(&idx) {
             continue;
         }
         if let Some(&temp) = site_cast.get(&idx) {
             body.push(IlOp::Load {
                 slot: temp,
-                loc: ops[idx].loc(),
+                loc: op.loc(),
             });
             continue;
         }
-        body.push(ops[idx].clone());
+        body.push(op.clone());
     }
     body.push(ops[store_i].clone());
 

@@ -305,7 +305,7 @@ fn push_gc_host_ops(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
 fn push_wiring(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
-    table: &[(&str, usize, fn(&mut crate::Heap, &[Value]) -> Value)],
+    table: &[(&str, usize, crate::HostValueFn)],
     label: &str,
 ) {
     for &(name, arity, host) in table {
@@ -335,7 +335,7 @@ fn push_math_libm(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut
 fn push_math_libm_wiring(
     out: &mut Vec<Arc<dyn NativeFn>>,
     register_id: &mut impl FnMut(&str, usize),
-    wiring: &[(&str, usize, fn(&mut crate::Heap, &[Value]) -> Value)],
+    wiring: &[(&str, usize, crate::HostValueFn)],
 ) {
     for &(name, arity, host) in wiring {
         let args = vec![FfiType::Float; arity];
@@ -385,7 +385,7 @@ fn push_prelude_char_ord(
 }
 
 fn push_packed_la(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
-    let specs: &[(&str, usize, fn(&mut crate::Heap, &[Value]) -> Value)] = &[
+    let specs: &[(&str, usize, crate::HostValueFn)] = &[
         (PACKED_DOT, 3, packed_dot),
         (PACKED_MATMUL, 3, packed_matmul),
         (PACKED_MATRIX_ZIP, 3, packed_matrix_zip),

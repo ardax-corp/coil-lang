@@ -39,7 +39,7 @@ fn imported_fn_def_id_matches_defining_module() {
     let (root, entry) = build_project("use_same_id", &files, "src/main.hy");
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
-    if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+    if pipeline.compile_src_from_file(entry.to_str().unwrap()).is_err() {
         for msg in pipeline.messages() {
             eprintln!("PIPELINE ERROR: {}", msg.message());
         }
@@ -78,7 +78,7 @@ fn imported_one_item_per_file_def_id_matches_defining_module() {
     let (root, entry) = build_project("use_file_per_item", &files, "src/main.hy");
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
-    if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+    if pipeline.compile_src_from_file(entry.to_str().unwrap()).is_err() {
         for msg in pipeline.messages() {
             eprintln!("PIPELINE ERROR: {}", msg.message());
         }
@@ -109,7 +109,7 @@ fn imported_alias_one_item_per_file_def_id_matches_defining_module() {
     let (root, entry) = build_project("use_file_per_item_alias", &files, "src/main.hy");
     let mut pipeline = Pipeline::new();
     pipeline.bind_project_roots_with_default(root, Vec::<PathBuf>::new());
-    if let Err(()) = pipeline.compile_src_from_file(entry.to_str().unwrap()) {
+    if pipeline.compile_src_from_file(entry.to_str().unwrap()).is_err() {
         for msg in pipeline.messages() {
             eprintln!("PIPELINE ERROR: {}", msg.message());
         }

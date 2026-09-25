@@ -128,7 +128,7 @@ fn rewrite_alias_uses(op: &mut IlOp, aliases: &HashMap<u32, u32>) {
 }
 
 /// Forward `LOAD src; STORE dest` aliases through heap-read / aggregate ops.
-pub(super) fn dest_prop(ops: &mut Vec<IlOp>, _entry_tell: u32) {
+pub(super) fn dest_prop(ops: &mut [IlOp], _entry_tell: u32) {
     if ops.len() < 2 {
         return;
     }

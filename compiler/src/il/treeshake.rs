@@ -78,11 +78,10 @@ pub fn prune_unused_functions(
         };
         // Builtin thunks are packed before setup; do not extend a thunk span
         // through static-init / JMP-to-main into the next user function.
-        if let Some(preserve) = input.preserve_emit_start {
-            if start < preserve && end > preserve {
+        if let Some(preserve) = input.preserve_emit_start
+            && start < preserve && end > preserve {
                 end = preserve;
             }
-        }
         if start < end {
             spans.insert(name.clone(), (start, end));
         }
@@ -115,11 +114,10 @@ pub fn prune_unused_functions(
     }
     if input.include_tests {
         for &(_, pc) in input.test_cases.iter() {
-            if let Some(name) = pc_to_name.get(&(pc as usize)) {
-                if live.insert(name.clone()) {
+            if let Some(name) = pc_to_name.get(&(pc as usize))
+                && live.insert(name.clone()) {
                     work.push_back(name.clone());
                 }
-            }
         }
     }
 
@@ -137,11 +135,10 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, setup_start, setup_end);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name) {
-                    if live.insert(callee.clone()) {
+                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                    && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
-                }
             }
         }
     }
@@ -150,11 +147,10 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, 0, setup_start.min(3));
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name) {
-                    if live.insert(callee.clone()) {
+                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                    && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
-                }
             }
         }
     }
@@ -166,11 +162,10 @@ pub fn prune_unused_functions(
         let (raw_s, raw_e) = emitting_range_to_raw(ops, start, end);
         for op in &ops[raw_s..raw_e] {
             for target in entry_targets(op) {
-                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name) {
-                    if live.insert(callee.clone()) {
+                if let Some(callee) = resolve_target(&target, &label_to_name, &pc_to_name)
+                    && live.insert(callee.clone()) {
                         work.push_back(callee);
                     }
-                }
             }
         }
     }
@@ -270,7 +265,7 @@ fn absolute_call_targets(byte: &common::Byte) -> Vec<Target> {
     match *byte.bytecode() {
         Instruction::CALL | Instruction::TailCall | Instruction::MakeCoro => {
             let (_arity, pc) = byte.call_parts();
-            vec![Target::Pc(pc as usize)]
+            vec![Target::Pc(pc)]
         }
         Instruction::CodePtr | Instruction::MakePolyFn => {
             vec![Target::Pc(byte.operand_u32() as usize)]

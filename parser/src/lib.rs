@@ -84,12 +84,7 @@ where
     I: IntoIterator<Item = &'a str>,
 {
     let mut seen = HashSet::new();
-    for name in names {
-        if !seen.insert(name) {
-            return Some(name);
-        }
-    }
-    None
+    names.into_iter().find(|&name| !seen.insert(name)).map(|v| v as _)
 }
 
 fn duplicate_field_error<'src>(
@@ -348,7 +343,7 @@ impl<'pratt> Pratt<'pratt> {
 
         // After `:`, try kind first (leading `*` or `(`), else class bounds.
         let after_colon = kind_ann
-            .then(op!(",").ignore_then(class_bounds.clone()).or_not())
+            .then(op!(",").ignore_then(class_bounds).or_not())
             .map(|(kind, bounds)| (bounds.unwrap_or_default(), kind))
             .or(class_bounds.map(|bounds| (bounds, Kind::Type)));
 
@@ -452,7 +447,8 @@ impl<'pratt> Pratt<'pratt> {
                 self.ident(),
             ));
 
-            let pratt_expr = choice((atom, self.group(expr.clone()))).pratt((
+            
+            choice((atom, self.group(expr.clone()))).pratt((
                 // No postfix `!` here — it would conflict with `!=`
                 // (which should be parsed as a single infix operator).
                 // Prefix `!` is logical NOT; prefix `~` is bitwise NOT on integers.
@@ -689,8 +685,7 @@ impl<'pratt> Pratt<'pratt> {
                     op!("as").ignore_then(self.type_annotation()),
                     |lhs, ty, e| (e.span(), Box::new(Expression::Cast(lhs, ty))),
                 ),
-            ));
-            pratt_expr
+            ))
         })
         .map_with(output!(Expr))
     }

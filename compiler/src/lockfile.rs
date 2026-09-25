@@ -45,16 +45,14 @@ impl Lockfile {
                 return;
             }
             let mapped = dload_stem_for_package(pkg, stem.as_deref());
-            if stem.is_some() || sha.is_some() {
-                if !mapped.is_empty() {
+            if (stem.is_some() || sha.is_some())
+                && !mapped.is_empty() {
                     package_stems.push((pkg.to_string(), mapped.clone()));
                 }
-            }
-            if let Some(sha256) = sha {
-                if !mapped.is_empty() && sha256.len() == 64 {
+            if let Some(sha256) = sha
+                && !mapped.is_empty() && sha256.len() == 64 {
                     pins.push((mapped, sha256.clone()));
                 }
-            }
         };
 
         for raw in source.lines() {
@@ -128,11 +126,10 @@ impl Lockfile {
 /// Map a lock package to the `dload` stem. `coil-tls` → `tls` unless
 /// `[[package.native]]` sets `stem` / `lib`.
 pub(crate) fn dload_stem_for_package(pkg: &str, native_stem: Option<&str>) -> String {
-    if let Some(stem) = native_stem {
-        if !stem.is_empty() {
+    if let Some(stem) = native_stem
+        && !stem.is_empty() {
             return stem.to_string();
         }
-    }
     pkg.strip_prefix("coil-").unwrap_or(pkg).to_string()
 }
 

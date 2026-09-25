@@ -588,8 +588,10 @@ pub struct Checker {
     /// (assoc_var, arg_tys)` (Phase 6 + GATs). Used for `T::Elem` /
     /// `T::Ref<A>` when `T: Collect` is active; pinned when a ground instance
     /// is discharged.
-    open_assoc_projections: HashMap<(TyVarId, String, Vec<String>), (TyVarId, Vec<Ty>)>,
+    open_assoc_projections: OpenAssocProjections,
 }
+
+type OpenAssocProjections = HashMap<(TyVarId, String, Vec<String>), (TyVarId, Vec<Ty>)>;
 
 /// C-layout struct registered via `extern struct Name { ... }`.
 #[derive(Clone, Debug)]

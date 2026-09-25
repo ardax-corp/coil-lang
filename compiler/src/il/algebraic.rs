@@ -240,9 +240,7 @@ fn bin_slot_imm_identity(op: u8, slot: u8, imm: i16, loc: common::DebugLoc) -> O
             slot: slot as u32,
             loc,
         })
-    } else if matches!(insn, Instruction::MUL) && imm == 0 {
-        Some(IlOp::Const { imm: 0, loc })
-    } else if matches!(insn, Instruction::BITAND) && imm == 0 {
+    } else if imm == 0 && matches!(insn, Instruction::MUL | Instruction::BITAND) {
         Some(IlOp::Const { imm: 0, loc })
     } else if matches!(insn, Instruction::Pow) && imm == 0 {
         Some(IlOp::Const { imm: 1, loc })
@@ -421,6 +419,25 @@ mod tests {
         ];
         algebraic_simplify(&mut ops, &mut Vec::new());
         assert!(matches!(ops[0], IlOp::Const { imm: 0, .. }));
+    }
+
+    #[test]
+    fn bin_slot_imm_bitand_zero_to_const_zero() {
+        let mut ops = vec![
+            IlOp::BinSlotImm {
+                op: Instruction::BITAND as u8,
+                slot: 2,
+                imm: 0,
+                loc: loc(),
+            },
+            IlOp::Return {
+                loc: loc(),
+                ret_words: 1,
+            },
+        ];
+        algebraic_simplify(&mut ops, &mut Vec::new());
+        assert!(matches!(ops[0], IlOp::Const { imm: 0, .. }));
+        assert!(matches!(ops[1], IlOp::Return { .. }));
     }
 
     #[test]

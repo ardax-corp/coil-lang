@@ -245,7 +245,7 @@ fn try_host_exec(heap: &mut Heap, args: &[Value]) -> Result<i64, EnvErrorTag> {
 }
 
 /// Pipeline wiring: `(registry_name, arity, host_fn)`.
-pub const ENV_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
+pub const ENV_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("env_args", 0, host_args),
     ("env_var", 1, host_var),
     ("env_set_var", 2, host_set_var),

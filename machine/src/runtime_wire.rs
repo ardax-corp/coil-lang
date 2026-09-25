@@ -62,7 +62,7 @@ pub fn wire_thread_program<const N: usize>(
     debug: ProgramDebug,
     operand_stack_slots: u32,
 ) {
-    wire_thread_program_with_maps(
+    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
         machine,
         bytecode,
         constants,
@@ -70,22 +70,35 @@ pub fn wire_thread_program<const N: usize>(
         static_slot_count,
         debug,
         operand_stack_slots,
-        Vec::new(),
-    )
+        stack_maps: Vec::new(),
+    })
+}
+
+/// Arguments for [`wire_thread_program_with_maps`].
+pub struct WireThreadProgramWithMapsArgs<'a, const N: usize> {
+    pub machine: &'a mut Machine<N>,
+    pub bytecode: &'a [Byte],
+    pub constants: &'a [u64],
+    pub strings: &'a [String],
+    pub static_slot_count: u32,
+    pub debug: ProgramDebug,
+    pub operand_stack_slots: u32,
+    pub stack_maps: Vec<common::FrameStackMap>,
 }
 
 /// Like [`wire_thread_program`], attaching S2b maps for compile-and-run
 /// and archive/embed load.
-pub fn wire_thread_program_with_maps<const N: usize>(
-    machine: &mut Machine<N>,
-    bytecode: &[Byte],
-    constants: &[u64],
-    strings: &[String],
-    static_slot_count: u32,
-    debug: ProgramDebug,
-    operand_stack_slots: u32,
-    stack_maps: Vec<common::FrameStackMap>,
-) {
+pub fn wire_thread_program_with_maps<const N: usize>(args: WireThreadProgramWithMapsArgs<'_, N>) {
+    let WireThreadProgramWithMapsArgs {
+        machine,
+        bytecode,
+        constants,
+        strings,
+        static_slot_count,
+        debug,
+        operand_stack_slots,
+        stack_maps,
+    } = args;
     machine.set_thread_program(Arc::new(ThreadProgram {
         code: Arc::from(bytecode.to_vec()),
         constants: Arc::from(constants.to_vec()),

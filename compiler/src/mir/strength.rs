@@ -186,8 +186,8 @@ fn find_inductions(
                 Some(_) => {}
             }
         }
-        if ok && saw_back {
-            if let Some(step) = step {
+        if ok && saw_back
+            && let Some(step) = step {
                 out.insert(
                     *dest,
                     Induction {
@@ -197,7 +197,6 @@ fn find_inductions(
                     },
                 );
             }
-        }
     }
     out
 }
@@ -323,11 +322,10 @@ fn materialize_product(
 ) -> Option<ValueId> {
     let a = coerce_to(func, pre, a, ty)?;
     let b = coerce_to(func, pre, b, ty)?;
-    if let (Some(ca), Some(cb)) = (const_of(func, a), const_of(func, b)) {
-        if let Some(c) = fold_mul(ty, ca, cb) {
+    if let (Some(ca), Some(cb)) = (const_of(func, a), const_of(func, b))
+        && let Some(c) = fold_mul(ty, ca, cb) {
             return Some(insert_const(func, pre, c));
         }
-    }
     if is_one_const(func, a) {
         return Some(b);
     }
@@ -354,11 +352,10 @@ fn materialize_product(
 
 fn coerce_to(func: &mut MirFunc, pre: BlockId, v: ValueId, ty: MirTy) -> Option<ValueId> {
     let from = func.ty(v);
-    if let Some(c) = const_of(func, v) {
-        if let Some(folded) = cast_const(c, ty) {
+    if let Some(c) = const_of(func, v)
+        && let Some(folded) = cast_const(c, ty) {
             return Some(insert_const(func, pre, folded));
         }
-    }
     if from == ty {
         return Some(v);
     }

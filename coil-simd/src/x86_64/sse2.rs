@@ -1,10 +1,12 @@
 //! SSE2 kernels (2-wide `f64` / `i64`). Always available on x86_64.
 
-#![allow(clippy::missing_safety_doc)]
-
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     let n = a.len().min(b.len());
@@ -24,26 +26,46 @@ pub unsafe fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     sum
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_add_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm_add_pd(x, y), |x, y| x + y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_sub_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm_sub_pd(x, y), |x, y| x - y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_mul_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm_mul_pd(x, y), |x, y| x * y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_div_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm_div_pd(x, y), |x, y| x / y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn scale_f64(a: &[f64], scalar: f64, out: &mut [f64]) {
     let n = a.len().min(out.len());
@@ -60,6 +82,10 @@ pub unsafe fn scale_f64(a: &[f64], scalar: f64, out: &mut [f64]) {
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_neg_f64(a: &[f64], out: &mut [f64]) {
     let n = a.len().min(out.len());
@@ -76,16 +102,28 @@ pub unsafe fn zip_neg_f64(a: &[f64], out: &mut [f64]) {
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_add_i64(a: &[i64], b: &[i64], out: &mut [i64]) {
     zip_binop_i64(a, b, out, |x, y| _mm_add_epi64(x, y), i64::wrapping_add);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_sub_i64(a: &[i64], b: &[i64], out: &mut [i64]) {
     zip_binop_i64(a, b, out, |x, y| _mm_sub_epi64(x, y), i64::wrapping_sub);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn zip_neg_i64(a: &[i64], out: &mut [i64]) {
     let n = a.len().min(out.len());
@@ -106,6 +144,10 @@ pub unsafe fn zip_neg_i64(a: &[i64], out: &mut [i64]) {
 }
 
 /// GEMM with contiguous B/C rows: for each `a_it`, `c_row += a_it * b_row`.
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn matmul_f64(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
     c.fill(0.0);
@@ -119,6 +161,10 @@ pub unsafe fn matmul_f64(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn matmul_i64(a: &[i64], b: &[i64], c: &mut [i64], m: usize, k: usize, n: usize) {
     // No cheap 64-bit integer multiply in SSE2 — keep scalar product, SIMD adds via saxpy fallback.
@@ -209,6 +255,10 @@ unsafe fn hsum_pd(v: __m128d) -> f64 {
 }
 
 /// 2-wide `a*x` then left-fold `(s + ax) + y`.
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "sse2")]
 pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
     let mut s = 0.0;
@@ -220,17 +270,17 @@ pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> 
         let vx = _mm_set_pd(x1, x0);
         let mut ax = [0.0; 2];
         _mm_storeu_pd(ax.as_mut_ptr(), _mm_mul_pd(va, vx));
-        s = s + ax[0];
-        s = s + y;
-        s = s + ax[1];
-        s = s + y;
+        s += ax[0];
+        s += y;
+        s += ax[1];
+        s += y;
         x = x1 + dx;
         i += 2;
     }
     while i < n {
-        s = s + a * x;
-        s = s + y;
-        x = x + dx;
+        s += a * x;
+        s += y;
+        x += dx;
         i += 1;
     }
     s

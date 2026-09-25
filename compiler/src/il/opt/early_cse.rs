@@ -502,37 +502,38 @@ mod tests {
     }
 
     fn isolated() -> OptimizeOptions {
-        let mut o = OptimizeOptions::default();
-        o.jump_thread = false;
-        o.dead_block = false;
-        o.stack_dce = false;
-        o.mem_fwd = false;
-        o.copy_prop = false;
-        o.dest_prop = false;
-        o.slot_promote = false;
-        o.tos_carry = false;
-        o.canon = false;
-        o.cast_spill = false;
-        o.algebraic = false;
-        o.instcombine = false;
-        o.licm = false;
-        o.loop_bounds = false;
-        o.strength_reduce = false;
-        o.return_convoy = false;
-        o.clone_shared_return = false;
-        o.bin_join_convoy = false;
-        o.multi_op_join_convoy = false;
-        o.invert_guard_branch = false;
-        o.slot_promote_tell = false;
-        o.seek_back_edge = false;
-        o.loop_unroll = false;
-        o.invariant_store_elim = false;
-        o.ssa_gvn = false;
-        o.escape_analysis = false;
-        o.branch_optimization = false;
-        o.block_reordering = false;
-        o.local_cse = true;
-        o
+        OptimizeOptions {
+            jump_thread: false,
+            dead_block: false,
+            stack_dce: false,
+            mem_fwd: false,
+            copy_prop: false,
+            dest_prop: false,
+            slot_promote: false,
+            tos_carry: false,
+            canon: false,
+            cast_spill: false,
+            algebraic: false,
+            instcombine: false,
+            licm: false,
+            loop_bounds: false,
+            strength_reduce: false,
+            return_convoy: false,
+            clone_shared_return: false,
+            bin_join_convoy: false,
+            multi_op_join_convoy: false,
+            invert_guard_branch: false,
+            slot_promote_tell: false,
+            seek_back_edge: false,
+            loop_unroll: false,
+            invariant_store_elim: false,
+            ssa_gvn: false,
+            escape_analysis: false,
+            branch_optimization: false,
+            block_reordering: false,
+            local_cse: true,
+            ..Default::default()
+        }
     }
 
     #[test]

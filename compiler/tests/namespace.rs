@@ -109,7 +109,7 @@ fn run_project_with_extra(project_root: &PathBuf, entry: &PathBuf, extra: &[Path
         bind_ns_pipeline(&mut pipeline, extra);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
-            Err(()) => {
+            Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
                 }
@@ -168,7 +168,7 @@ fn compile_entry_and_assert_jump_if_match_pool_valid(
     bind_ns_pipeline(&mut pipeline, &[]);
     let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
         Ok(pair) => pair,
-        Err(()) => {
+        Err(_) => {
             for msg in pipeline.messages() {
                 eprintln!("MSG: {}", msg.message());
             }
@@ -540,7 +540,7 @@ fn two_module_polyfn_and_fib_fuse_and_run() {
     bind_ns_pipeline(&mut pipeline, &[]);
     let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
         Ok(pair) => pair,
-        Err(()) => {
+        Err(_) => {
             for msg in pipeline.messages() {
                 eprintln!("PIPELINE ERROR: {}", msg.message());
             }
@@ -1245,7 +1245,7 @@ fn main() {
         pipeline.grant_dload_file("sum", libsum);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
-            Err(()) => {
+            Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
                 }
@@ -1342,7 +1342,7 @@ fn main() {
         bind_ns_pipeline(&mut pipeline, &[]);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
-            Err(()) => {
+            Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
                 }
@@ -1411,7 +1411,7 @@ fn main() {
         bind_ns_pipeline(&mut pipeline, &[]);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
-            Err(()) => {
+            Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
                 }
@@ -1488,7 +1488,7 @@ fn main() {
         bind_ns_pipeline(&mut pipeline, &[]);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
-            Err(()) => {
+            Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
                 }
@@ -1585,7 +1585,7 @@ fn main() {
         bind_ns_pipeline(&mut pipeline, &[]);
         let (bytecode, constants) = match pipeline.compile_src_from_file(entry.to_str().unwrap()) {
             Ok(pair) => pair,
-            Err(()) => {
+            Err(_) => {
                 for msg in pipeline.messages() {
                     eprintln!("PIPELINE ERROR: {}", msg.message());
                 }

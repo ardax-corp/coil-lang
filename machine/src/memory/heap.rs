@@ -65,6 +65,7 @@ pub struct Heap {
 }
 
 /// Machine-owned heap that can borrow the root Heap for a C1 steal job.
+#[derive(Default)]
 pub struct HeapSlot {
     owned: Heap,
     borrowed: Option<NonNull<Heap>>,
@@ -96,14 +97,6 @@ impl Default for Heap {
     }
 }
 
-impl Default for HeapSlot {
-    fn default() -> Self {
-        Self {
-            owned: Heap::default(),
-            borrowed: None,
-        }
-    }
-}
 
 impl HeapSlot {
     pub fn get(&self) -> &Heap {
@@ -172,18 +165,18 @@ impl Heap {
     pub fn intern_ffi_bytes(
         &mut self,
         bytes: &[u8],
-    ) -> Result<*const std::os::raw::c_char, ()> {
-        let s = std::ffi::CString::new(bytes).map_err(|_| ())?;
+    ) -> Result<*const std::os::raw::c_char, InteriorNul> {
+        let s = std::ffi::CString::new(bytes).map_err(|_| InteriorNul)?;
         self.ffi_strings.push(s);
         Ok(self.ffi_strings.last().unwrap().as_ptr())
     }
 
     /// Look up a heap string and intern it in the FFI arena (no `Box::leak`).
-    /// `Ok(None)` if `addr` is not a string. `Err(())` on interior NUL.
+    /// `Ok(None)` if `addr` is not a string. `Err(InteriorNul)` on interior NUL.
     pub fn cstr_from_addr(
         &mut self,
         addr: u64,
-    ) -> Result<Option<*const std::os::raw::c_char>, ()> {
+    ) -> Result<Option<*const std::os::raw::c_char>, InteriorNul> {
         let bytes = match self.find_object_by_addr(addr) {
             Some(crate::memory::Object::String(gc)) => gc.as_ref().data.as_bytes().to_vec(),
             _ => return Ok(None),
@@ -1370,15 +1363,17 @@ pub struct ObjInstance {
     pub finalized: bool,
 }
 
-impl ObjInstance {
-    #[must_use]
-    pub fn default() -> Self {
+impl Default for ObjInstance {
+    fn default() -> Self {
         Self {
             storage: InstanceStorage::Table(Table::default()),
             type_id: 0,
             finalized: false,
         }
     }
+}
+
+impl ObjInstance {
 
     #[must_use]
     pub fn with_type_id(type_id: u32) -> Self {
@@ -1423,11 +1418,10 @@ impl ObjInstance {
     }
 
     pub fn set_slot(&mut self, index: usize, value: Member) {
-        if let Some(slots) = self.storage.as_mut_slice() {
-            if let Some(slot) = slots.get_mut(index) {
+        if let Some(slots) = self.storage.as_mut_slice()
+            && let Some(slot) = slots.get_mut(index) {
                 *slot = value;
             }
-        }
     }
 
     pub fn slot_len(&self) -> Option<usize> {
@@ -2203,6 +2197,10 @@ impl<T: GcSized + Copy> GcSized for Cell<T> {
     }
 }
 
+/// `CString::new` rejected an interior NUL. No extra payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InteriorNul;
+
 pub struct Gc<T> {
     ptr: NonNull<GcData<T>>,
 }
@@ -2239,6 +2237,7 @@ impl<T> Gc<T> {
     }
 
     /// Mutable access to the inner payload (single-threaded VM only).
+    #[allow(clippy::mut_from_ref)] // `Gc<T>` is a copyable slot handle; the VM mutates the payload through shared `&self`
     pub fn payload_mut(&self) -> &mut T {
         unsafe {
             let ptr = self.ptr.as_ptr().cast::<GcData<T>>();
@@ -2300,6 +2299,11 @@ impl<V> Table<V> {
     pub fn len(&self) -> usize {
         let store = unsafe { &*self.0.get() };
         store.lives
+    }
+
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 
     #[inline]
@@ -2579,6 +2583,13 @@ mod tests {
             addrs.insert(obj.addr());
         }
         addrs
+    }
+
+    #[test]
+    fn fresh_string_table_is_empty() {
+        let table: Table<u32> = Table::new();
+        assert!(table.is_empty());
+        assert_eq!(table.len(), 0);
     }
 
     #[test]

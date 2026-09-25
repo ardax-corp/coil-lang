@@ -13,7 +13,7 @@ pub(super) fn label_targets(ops: &[IlOp]) -> std::collections::HashMap<u32, usiz
     map
 }
 
-pub(super) fn jump_thread(ops: &mut Vec<IlOp>) {
+pub(super) fn jump_thread(ops: &mut [IlOp]) {
     let targets = label_targets(ops);
     for i in 0..ops.len() {
         let IlOp::Jump {

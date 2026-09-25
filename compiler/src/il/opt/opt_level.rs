@@ -32,7 +32,7 @@ pub enum OptLevel {
 
 impl OptLevel {
     /// Parse CLI / config tokens, including `-O2` / `O2` / `2` / `standard`.
-    pub fn parse(name: &str) -> Result<Self, ()> {
+    pub fn parse(name: &str) -> Result<Self, BadOptLevel> {
         name.parse()
     }
 
@@ -79,8 +79,12 @@ impl OptLevel {
     }
 }
 
+/// `OptLevel::parse` rejected the token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BadOptLevel;
+
 impl FromStr for OptLevel {
-    type Err = ();
+    type Err = BadOptLevel;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let t = s.trim();
@@ -97,7 +101,7 @@ impl FromStr for OptLevel {
             "aggressive" | "3" => Self::Aggressive,
             "size" | "s" => Self::Size,
             "debug" | "g" => Self::Debug,
-            _ => return Err(()),
+            _ => return Err(BadOptLevel),
         })
     }
 }

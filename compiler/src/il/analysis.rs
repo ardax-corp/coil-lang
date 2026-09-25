@@ -132,9 +132,9 @@ pub(crate) fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
         .map(|(i, b)| (b.start, i))
         .collect();
 
-    for bi in 0..blocks.len() {
-        let end = blocks[bi].end;
-        if end == blocks[bi].start {
+    for block in &mut blocks {
+        let end = block.end;
+        if end == block.start {
             continue;
         }
         let last = end - 1;
@@ -147,19 +147,19 @@ pub(crate) fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
                 if let Some(&t) = label_at.get(&target.0)
                     && let Some(&sb) = block_at.get(&t)
                 {
-                    blocks[bi].succs.push(sb);
+                    block.succs.push(sb);
                 }
             }
             IlOp::Jump { target, .. } => {
                 if let Some(&t) = label_at.get(&target.0)
                     && let Some(&sb) = block_at.get(&t)
                 {
-                    blocks[bi].succs.push(sb);
+                    block.succs.push(sb);
                 }
                 if end < ops.len()
                     && let Some(&fb) = block_at.get(&end)
                 {
-                    blocks[bi].succs.push(fb);
+                    block.succs.push(fb);
                 }
             }
             IlOp::Return { .. }
@@ -171,7 +171,7 @@ pub(crate) fn build_blocks(ops: &[IlOp]) -> Vec<Block> {
                 if end < ops.len()
                     && let Some(&fb) = block_at.get(&end)
                 {
-                    blocks[bi].succs.push(fb);
+                    block.succs.push(fb);
                 }
             }
         }
@@ -244,7 +244,7 @@ pub(crate) fn op_slot_use_def(op: &IlOp) -> (HashSet<u32>, HashSet<u32>, bool) {
                 }
                 Instruction::BinSlotSlotConstJmpf | Instruction::BinSlotSlotConstJmpt => {
                     let o = byte.operand_u32();
-                    uses.insert(((o >> 16) & 0xff) as u32);
+                    uses.insert((o >> 16) & 0xff);
                     opaque = true;
                 }
                 Instruction::FloatChainStore => {

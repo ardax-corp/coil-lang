@@ -29,6 +29,10 @@ use crate::typechecking::virtual_modules::{
 
 use super::*;
 
+type OpenAssocOwner = (TyVarId, String, Vec<String>);
+type OpenAssocValue = (TyVarId, Vec<Ty>);
+type OpenAssocKey = (OpenAssocOwner, OpenAssocValue);
+
 #[path = "host_caps.rs"]
 mod host_caps;
 #[path = "infer_class.rs"]
@@ -313,7 +317,7 @@ impl Checker {
             let vec_t = vec_app_ty(Ty::Var(t));
             let ty = match name {
                 // Nullary sealed: call site `Vec::new()` applies unit.
-                "new" => fun(&[unit.clone()], vec_t),
+                "new" => fun(std::slice::from_ref(&unit), vec_t),
                 "with_capacity" => fun(&[int()], vec_t),
                 "from" => fun(&[array(Ty::Var(t))], vec_t),
                 _ => unreachable!("unknown Vec static method"),
@@ -366,7 +370,7 @@ impl Checker {
         for owner in [RANGE, RANGE_INCLUSIVE] {
             self.classes
                 .entry(owner.to_string())
-                .or_insert_with(Vec::new);
+                .or_default();
             let t = self.counter.fresh();
             let recv = if owner == RANGE {
                 range_ty(Ty::Var(t))
@@ -402,7 +406,7 @@ impl Checker {
         self.overload_sets.retain(|k, _| !k.starts_with("Stream::"));
         self.classes
             .entry(STREAM.to_string())
-            .or_insert_with(Vec::new);
+            .or_default();
 
         let fun = |params: &[Ty], ret: Ty| {
             params
@@ -421,7 +425,7 @@ impl Checker {
             &[stream.clone(), int(), int(), int(), int(), int()],
             res_stream,
         );
-        let park_ty = fun(&[stream.clone()], res_unit);
+        let park_ty = fun(std::slice::from_ref(&stream), res_unit);
         let fd_ty = fun(&[stream], res_int);
         let attach_params = ["ptr", "read", "write", "shutdown", "free"];
 
@@ -1281,7 +1285,7 @@ impl Checker {
                         ErrorCode::GenericTypeError,
                         format!(
                             "spawn argument type `{}` is not sendable across threads",
-                            arg_resolved.to_string()
+                            arg_resolved
                         ),
                         range.clone(),
                         Some(
@@ -2468,9 +2472,8 @@ impl Checker {
                 // `x = resume x` overwrites the coroutine handle with the yield value.
                 if let (Expression::Identifier(var_name), Expression::Resume(target, None)) =
                     (name.1.as_ref(), value.1.as_ref())
-                {
-                    if let Expression::Identifier(target_name) = target.1.as_ref() {
-                        if var_name == target_name {
+                    && let Expression::Identifier(target_name) = target.1.as_ref()
+                        && var_name == target_name {
                             let val_ty = self.infer(value);
                             if self.env.lookup(var_name).is_some() {
                                 self.env
@@ -2479,8 +2482,6 @@ impl Checker {
                             }
                             return val_ty;
                         }
-                    }
-                }
 
                 if is_yield_expression(value) {
                     self.yield_receives_used = true;
@@ -2599,8 +2600,8 @@ impl Checker {
                 then_arm,
                 else_arm,
             } => {
-                let ty = self.infer_match(scrutinee, &[then_arm, else_arm], range);
-                ty
+                
+                self.infer_match(scrutinee, &[then_arm, else_arm], range)
             }
             Expression::WhileLet {
                 scrutinee,
@@ -3005,18 +3006,18 @@ impl Checker {
                 returns,
                 where_constraints,
                 body,
-            } => self.infer_function_expr(
+            } => self.infer_function_expr(infer_fn::InferFunctionExprArgs {
                 attrs,
                 name,
-                *is_coro,
-                *is_static,
+                is_coro: *is_coro,
+                is_static: *is_static,
                 type_params,
                 args,
                 returns,
                 where_constraints,
                 body,
                 range,
-            ),
+            }),
 
             Expression::Lambda {
                 args,
@@ -3445,11 +3446,10 @@ impl Checker {
         self.reexport_module_item(&fqn, &local);
         // Re-export overload families under the local alias so
         // `use num::{abs}` can still type-dispatch.
-        if let Some(cands) = self.overload_sets.get(&fqn).cloned() {
-            if cands.len() > 1 {
+        if let Some(cands) = self.overload_sets.get(&fqn).cloned()
+            && cands.len() > 1 {
                 self.overload_sets.insert(local.clone(), cands);
             }
-        }
         // Disk imports are file-level globals, track for lambda/defer
         // rebind after `take_and_isolate`.
         if name != "*" {
@@ -3955,7 +3955,7 @@ impl Checker {
                 // Overloaded: multiple matches or no expected type → ambiguous.
                 let arities: Vec<String> = candidates
                     .iter()
-                    .map(|c| Self::overload_sig_label(c))
+                    .map(Self::overload_sig_label)
                     .collect();
                 return self.error_with_help(
                     ErrorCode::AmbiguousOverload,
@@ -3973,7 +3973,7 @@ impl Checker {
             // No overload candidate unifies with expected type: dedicated diagnostic (not last scheme).
             let arities: Vec<String> = candidates
                 .iter()
-                .map(|c| Self::overload_sig_label(c))
+                .map(Self::overload_sig_label)
                 .collect();
             let expected_pretty = expected
                 .as_ref()
@@ -4091,10 +4091,10 @@ impl Checker {
         id: Option<NodeId>,
         range: Range<usize>,
     ) -> Ty {
-        if let Expression::Identifier(callee) = name.1.as_ref() {
-            if let Some(arg_list) = args.as_deref() {
-                if arg_list.len() == 1 {
-                    if let Expression::Spread(pack) = arg_list[0].1.as_ref() {
+        if let Expression::Identifier(callee) = name.1.as_ref()
+            && let Some(arg_list) = args.as_deref()
+                && arg_list.len() == 1
+                    && let Expression::Spread(pack) = arg_list[0].1.as_ref() {
                         if self.next_id_idx < self.ids.ids().len() {
                             self.next_id_idx += 1;
                         }
@@ -4104,9 +4104,6 @@ impl Checker {
                             return ty;
                         }
                     }
-                }
-            }
-        }
         // Method call: `recv.method(args)`, Access callee.
         if let Expression::Access(recv, method) = name.1.as_ref() {
             let method_args = args.as_deref().unwrap_or(&[]);
@@ -4260,8 +4257,7 @@ impl Checker {
                     &scheme,
                     &arg_tys,
                     args.as_deref(),
-                    id,
-                    range,
+                    (id, range),
                 );
             }
             if let Some(receiver_var) = Self::constraint_var_of_ty(&resolved) {
@@ -4748,12 +4744,11 @@ impl Checker {
             );
         }
 
-        if !has_named && self.lookup_fn_scheme(&ident).is_none() && !self.is_overloaded(&ident) {
-            if let Some(ty) = self.try_infer_bare_constructor_call(&ident, args, range.clone(), id)
+        if !has_named && self.lookup_fn_scheme(&ident).is_none() && !self.is_overloaded(&ident)
+            && let Some(ty) = self.try_infer_bare_constructor_call(&ident, args, range.clone(), id)
             {
                 return ty;
             }
-        }
 
         // Must happen before `has_named` and `fn_has_rest` branches so
         // the correct candidate's param_names / is_rest are used.
@@ -4780,7 +4775,7 @@ impl Checker {
                     // "no overload" error listing the available arities.
                     let available: Vec<String> = self
                         .overload_candidates(&ident)
-                        .map(|cs| cs.iter().map(|c| Self::overload_sig_label(c)).collect())
+                        .map(|cs| cs.iter().map(Self::overload_sig_label).collect())
                         .unwrap_or_default();
                     return self.error_with_help(
                         ErrorCode::WrongArity,
@@ -5003,8 +4998,7 @@ impl Checker {
                 &scheme,
                 &arg_tys,
                 args.as_deref(),
-                id,
-                range,
+                (id, range),
             );
         }
         let candidates = self.bound_method_candidates(&ident, None);
@@ -5590,11 +5584,10 @@ impl Checker {
             if self.try_mark_string_literal_as_byte(rhs) {
                 return boolean();
             }
-        } else if Self::is_byte_ty(&rt) && Self::is_string_ty(&lt) {
-            if self.try_mark_string_literal_as_byte(lhs) {
+        } else if Self::is_byte_ty(&rt) && Self::is_string_ty(&lt)
+            && self.try_mark_string_literal_as_byte(lhs) {
                 return boolean();
             }
-        }
         let unified = self.unify(&lt, &rt, &range, "comparison operands");
         if let Ty::Var(var) = apply_ty_prune(&self.subst, &unified) {
             if self.user_dict_index(var, class).is_none() {
@@ -6394,8 +6387,8 @@ impl Checker {
             Expression::Construct {
                 enum_name,
                 variant_name,
-                fields,
-            } if matches!(fields, parser::ast::EnumConstructPayload::Unit) => {
+                fields: parser::ast::EnumConstructPayload::Unit,
+            } => {
                 let fqn = self.class_member_fqn(enum_name, variant_name);
                 if let Some(ty) = self.static_slot_types.get(&fqn).cloned() {
                     if self.is_static_const_fqn(&fqn) {
@@ -6434,9 +6427,9 @@ impl Checker {
                 let _ = unify_with(&self.subst, &apply_ty_prune(&self.subst, &index_ty), &int());
                 match &target_ty {
                     Ty::Array { element, length } => {
-                        if let ArrayLength::Static(n) = length {
-                            if let Expression::Integer(i) = idx.1.as_ref() {
-                                if *i < 0 || (*i as usize) >= *n {
+                        if let ArrayLength::Static(n) = length
+                            && let Expression::Integer(i) = idx.1.as_ref()
+                                && (*i < 0 || (*i as usize) >= *n) {
                                     let _ = self.error_with_help(
                                         ErrorCode::IndexOutOfBounds,
                                         format!(
@@ -6447,8 +6440,6 @@ impl Checker {
                                         None,
                                     );
                                 }
-                            }
-                        }
                         (**element).clone()
                     }
                     other if vec_element_ty(other).is_some() => {
@@ -6609,8 +6600,8 @@ impl Checker {
         let resolved = apply_ty_prune(&self.subst, target_ty);
         let receiver_var = Self::constraint_var_of_ty(&resolved);
         let candidates = self.bound_method_candidates("len", receiver_var);
-        if !candidates.is_empty() {
-            if let Some((dict_index, dict_class, class, method_slot, scheme)) =
+        if !candidates.is_empty()
+            && let Some((dict_index, dict_class, class, method_slot, scheme)) =
                 self.select_bound_method(candidates, "len", &range)
             {
                 self.bind_matching_abstract_constraints(receiver_var, &dict_class);
@@ -6648,7 +6639,6 @@ impl Checker {
                 }
                 return result;
             }
-        }
 
         let Some(scheme) = self
             .typeclass_method_schemes
@@ -8029,9 +8019,9 @@ impl Checker {
         scheme: &Scheme,
         arg_tys: &[Ty],
         arg_exprs: Option<&[Output]>,
-        call_id: Option<NodeId>,
-        range: Range<usize>,
+        at: (Option<NodeId>, Range<usize>),
     ) -> Ty {
+        let (call_id, range) = at;
         let (fun_ty, constraints, _mapping) = self.instantiate_scheme_mapped(scheme);
         let result = self.apply_function(
             Some(&format!("{}::{}", class, method)),
@@ -8279,7 +8269,7 @@ impl Checker {
     }
 
     fn is_vec_byte_ty(ty: &Ty) -> bool {
-        vec_element_ty(ty).is_some_and(|e| Self::is_byte_ty(e))
+        vec_element_ty(ty).is_some_and(Self::is_byte_ty)
     }
 
     fn byte_array_tys_compatible(src: &Ty, dst: &Ty) -> bool {
@@ -8567,9 +8557,7 @@ impl Checker {
                 if !covered {
                     self.messages.push(Message::error(
                         ErrorCode::GenericTypeError,
-                        format!(
-                            "Cannot pass constrained polymorphic value where unconstrained `forall` is expected"
-                        ),
+                        "Cannot pass constrained polymorphic value where unconstrained `forall` is expected".to_string(),
                         arg_expr
                             .map(|arg| arg.0.into_range())
                             .unwrap_or_else(|| range.clone()),
@@ -9097,9 +9085,7 @@ impl Checker {
                 if class_def.type_params.len() != constraint.args.len() {
                     return None;
                 }
-                if self.class_own_method_slot(name, method).is_none() {
-                    return None;
-                }
+                self.class_own_method_slot(name, method)?;
                 let kinds_match = constraint
                     .args
                     .iter()
@@ -9398,11 +9384,10 @@ impl Checker {
             return Kind::from(tp.kind.clone());
         }
         for bound in &tp.bounds {
-            if let Some(class_def) = self.generics.typeclass(bound) {
-                if class_def.type_params.len() == 1 && class_def.is_constructor_kind_at(0) {
+            if let Some(class_def) = self.generics.typeclass(bound)
+                && class_def.type_params.len() == 1 && class_def.is_constructor_kind_at(0) {
                     return class_def.kind_at(0);
                 }
-            }
         }
         Kind::from(tp.kind.clone())
     }
@@ -9998,12 +9983,11 @@ impl Checker {
                         }
                         // Superclass assoc types (rare; check flattened supers).
                         for super_name in &cdef.superclasses {
-                            if let Some(sdef) = self.generics.typeclass(super_name) {
-                                if let Some(decl) = sdef.assoc_type(assoc) {
+                            if let Some(sdef) = self.generics.typeclass(super_name)
+                                && let Some(decl) = sdef.assoc_type(assoc) {
                                     matching_decl = Some((super_name.clone(), decl.clone()));
                                     break;
                                 }
-                            }
                         }
                         if matching_decl.is_some() {
                             break;
@@ -10099,7 +10083,7 @@ impl Checker {
         }
 
         // Pin open `T::Elem` projections whose owner unifies with instance.args.
-        let open_keys: Vec<((TyVarId, String, Vec<String>), (TyVarId, Vec<Ty>))> = self
+        let open_keys: Vec<OpenAssocKey> = self
             .open_assoc_projections
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
@@ -10559,8 +10543,8 @@ impl Checker {
             self.record_ffi_declare_metadata(name.to_string(), dargs, false);
             return;
         }
-        if let Expression::Access(receiver, field) = init.1.as_ref() {
-            if let Some(class) = self.class_name_for_field_receiver(receiver) {
+        if let Expression::Access(receiver, field) = init.1.as_ref()
+            && let Some(class) = self.class_name_for_field_receiver(receiver) {
                 let key = Self::qualified_class_field_key(&class, field);
                 if let Some(ret) = self.ffi_fn_ret_by_field.get(&key).cloned() {
                     let variadic = self
@@ -10580,7 +10564,6 @@ impl Checker {
                     self.ffi_fn_arg_tags.insert(name.to_string(), arg_tags);
                 }
             }
-        }
     }
 
     fn record_ffi_param_invoke_flow(
@@ -10975,7 +10958,7 @@ impl Checker {
         let key = self.qualify_module_name(name);
         // Bind the FQN before parsing fields so recursive types
         // (`next: Option<Node<T>>`) resolve to `module::Node`, not a dummy Con.
-        self.classes.entry(key.clone()).or_insert_with(Vec::new);
+        self.classes.entry(key.clone()).or_default();
         if !self.class_type_ids.contains_key(&key) {
             let id = self.next_class_type_id;
             self.next_class_type_id = self.next_class_type_id.saturating_add(1);
@@ -11053,15 +11036,14 @@ impl Checker {
             }
         }
         // Schemaize param vars → `Con(name)` for generic class fields.
-        if let Some(frame) = self.type_params_in_scope.last() {
-            if !frame.is_empty() {
+        if let Some(frame) = self.type_params_in_scope.last()
+            && !frame.is_empty() {
                 let var_to_name: HashMap<TyVarId, String> =
                     frame.iter().map(|(n, id)| (*id, n.clone())).collect();
                 for (_, _, ty) in &mut field_info {
                     *ty = schemaize_ty(ty, &var_to_name);
                 }
             }
-        }
         self.classes.insert(key, field_info);
         let _ = range;
     }
@@ -11293,9 +11275,9 @@ impl Checker {
     /// Parse `fn(T x, ...args) -> R` function types.
     fn parse_fn_sig_type(&mut self, params: &Output, ret: &Output) -> Ty {
         // Sole bare `...args` in a fn type: opaque callable unified at spread calls.
-        if let Expression::Fragment(children) = params.1.as_ref() {
-            if children.len() == 1 {
-                if let Expression::Argument {
+        if let Expression::Fragment(children) = params.1.as_ref()
+            && children.len() == 1
+                && let Expression::Argument {
                     ty: None,
                     is_rest: true,
                     ..
@@ -11303,8 +11285,6 @@ impl Checker {
                 {
                     return Ty::Var(self.counter.fresh());
                 }
-            }
-        }
         let param_tys = self.parse_arg_list(params);
         let ret_ty = self.parse_type_name(ret);
         let mut fun_ty = ret_ty;
@@ -11315,8 +11295,8 @@ impl Checker {
     }
 
     fn tuple_pack_ty_for_args(args: &Output, counter: &mut TyVarCounter) -> Option<Ty> {
-        if let Expression::Fragment(children) = args.1.as_ref() {
-            if children.last().is_some_and(|c| {
+        if let Expression::Fragment(children) = args.1.as_ref()
+            && children.last().is_some_and(|c| {
                 matches!(
                     c.1.as_ref(),
                     Expression::Argument {
@@ -11328,7 +11308,6 @@ impl Checker {
             }) {
                 return Some(Ty::Var(counter.fresh()));
             }
-        }
         None
     }
 
@@ -11364,7 +11343,7 @@ impl Checker {
                 return None;
             };
             self.unify(&arg, elem, range, "spread call argument");
-            fun = apply_ty_prune(&self.subst, &*ret);
+            fun = apply_ty_prune(&self.subst, &ret);
         }
         self.spread_call_arity
             .insert((range.start, range.end), elems.len());
@@ -11522,7 +11501,7 @@ impl Checker {
     /// True when `fn_name` has more than one overload candidate.
     pub fn is_overloaded(&self, fn_name: &str) -> bool {
         self.overload_candidates(fn_name)
-            .map_or(false, |v| v.len() > 1)
+            .is_some_and(|v| v.len() > 1)
     }
 
     /// Select an overload by arity only (no argument types).
@@ -11609,7 +11588,7 @@ impl Checker {
     fn ambiguous_overload_help(&self, fn_name: &str) -> String {
         let available: Vec<String> = self
             .overload_candidates(fn_name)
-            .map(|cs| cs.iter().map(|c| Self::overload_sig_label(c)).collect())
+            .map(|cs| cs.iter().map(Self::overload_sig_label).collect())
             .unwrap_or_default();
         format!(
             "available overloads: {}; arguments do not uniquely select one",
@@ -11803,8 +11782,8 @@ impl Checker {
     /// `[byte]`) does not coerce string/int literals inside the argument list
     /// before parameter types are applied via `coerce_or_unify`.
     fn infer_call_arg(&mut self, arg: &Output) -> Ty {
-        if let Expression::Index(target, Some(index_expr)) = arg.1.as_ref() {
-            if self
+        if let Expression::Index(target, Some(index_expr)) = arg.1.as_ref()
+            && self
                 .spread_expanded_bases
                 .contains(&(target.0.start, target.0.end))
             {
@@ -11814,7 +11793,6 @@ impl Checker {
                     .or_insert_with(|| ty.clone());
                 return ty;
             }
-        }
         let prev_expected = self.current_expected.take();
         let ty = self.infer(arg);
         self.current_expected = prev_expected;
@@ -12522,11 +12500,10 @@ impl Checker {
                     self.pre_process_top_level_use_node(child);
                 }
             }
-            Expression::Use { path, name, alias } => {
-                if name != "*" {
+            Expression::Use { path, name, alias }
+                if name != "*" => {
                     let _ = self.apply_virtual_use(path, name, alias.as_deref());
                 }
-            }
             _ => {}
         }
     }
@@ -12573,11 +12550,9 @@ impl Checker {
                             is_rest: false,
                             ..
                         } = child.1.as_ref()
-                        {
-                            if let Expression::Identifier(class) = ty.1.as_ref() {
+                            && let Expression::Identifier(class) = ty.1.as_ref() {
                                 scope.insert(name.to_string(), class.to_string());
                             }
-                        }
                     }
                 }
                 local_class_scopes.push(scope);
@@ -12769,13 +12744,11 @@ impl Checker {
                                     false,
                                 );
                             }
-                            if let Expression::Instantiate(class, _) = unwrapped.1.as_ref() {
-                                if let Expression::Identifier(class_name) = class.1.as_ref() {
-                                    if let Some(scope) = local_class_scopes.last_mut() {
+                            if let Expression::Instantiate(class, _) = unwrapped.1.as_ref()
+                                && let Expression::Identifier(class_name) = class.1.as_ref()
+                                    && let Some(scope) = local_class_scopes.last_mut() {
                                         scope.insert(var_name.to_string(), class_name.to_string());
                                     }
-                                }
-                            }
                             self.pre_pass_ffi_invoke_param_flow_walk(next, local_class_scopes);
                             i += 2;
                             continue;
@@ -13088,8 +13061,8 @@ impl Checker {
                 }
                 Some(_) => {}
             }
-            if let Some(want) = declared_kind {
-                if kind != want {
+            if let Some(want) = declared_kind
+                && kind != want {
                     errors.push(Message::error(
                         ErrorCode::InvalidEnumRepr,
                         format!(
@@ -13099,7 +13072,6 @@ impl Checker {
                     ));
                     return;
                 }
-            }
             values.push(val);
         }
 
@@ -13862,11 +13834,10 @@ impl Checker {
                 let static_fqn = self.class_member_fqn(enum_name, variant_name);
                 // Bare / `()` Unit form: prefer static field, then 0-arg
                 // static method (`Counter::fresh()`).
-                if matches!(fields, EnumConstructPayload::Unit) {
-                    if let Some(ty) = self.static_slot_types.get(&static_fqn).cloned() {
+                if matches!(fields, EnumConstructPayload::Unit)
+                    && let Some(ty) = self.static_slot_types.get(&static_fqn).cloned() {
                         return apply_ty_prune(&self.subst, &ty);
                     }
-                }
                 if let Some(ty) = self.try_infer_static_method_call(
                     enum_name,
                     variant_name,
@@ -14201,11 +14172,10 @@ impl Checker {
             },
             _ => None,
         };
-        if let Some(variants) = sum {
-            if let Some((_, payload)) = variants.get(tag as usize) {
+        if let Some(variants) = sum
+            && let Some((_, payload)) = variants.get(tag as usize) {
                 return Some(payload.clone());
             }
-        }
         if let Some(payload) = self.poly_payload_from_app(enum_name, tag, &resolved) {
             return Some(payload);
         }
@@ -15013,14 +14983,13 @@ impl Checker {
             'z' => Some(boolean()),
             _ => None,
         };
-        if let Some(expected_ty) = backing_expected {
-            if self
+        if let Some(expected_ty) = backing_expected
+            && self
                 .coerce_scalar_enum_to_backing(&expected_ty, arg_ty)
                 .is_some()
             {
                 return;
             }
-        }
         if !type_matches_specifier(arg_ty, spec) {
             let mut msg = Message::error(
                 ErrorCode::FormatSpecifierMismatch,
@@ -15232,11 +15201,10 @@ impl Checker {
                     }
                 }
                 EnumVariantPayloadTy::Tuple(parts) => {
-                    if let Ok(idx) = field.parse::<usize>() {
-                        if idx < parts.len() {
+                    if let Ok(idx) = field.parse::<usize>()
+                        && idx < parts.len() {
                             return Some((variant_name, idx as u16));
                         }
-                    }
                 }
                 _ => {}
             }
@@ -15262,8 +15230,8 @@ impl Checker {
             let mut match_count = 0;
             let mut found: Option<(String, u16)> = None;
             for (i, payload) in payloads.iter().enumerate() {
-                if let EnumVariantPayloadTy::Tuple(parts) = payload {
-                    if idx < parts.len() {
+                if let EnumVariantPayloadTy::Tuple(parts) = payload
+                    && idx < parts.len() {
                         match_count += 1;
                         let variant_name = names
                             .get(i)
@@ -15271,7 +15239,6 @@ impl Checker {
                             .unwrap_or_else(|| format!("variant_{}", i));
                         found = Some((variant_name, idx as u16));
                     }
-                }
             }
             if match_count == 1 {
                 return found;
@@ -15297,12 +15264,11 @@ impl Checker {
             let mut match_count = 0;
             let mut found: Option<Ty> = None;
             for payload in payloads {
-                if let EnumVariantPayloadTy::Tuple(parts) = payload {
-                    if let Some(fty) = parts.get(idx) {
+                if let EnumVariantPayloadTy::Tuple(parts) = payload
+                    && let Some(fty) = parts.get(idx) {
                         match_count += 1;
                         found = Some(fty.clone());
                     }
-                }
             }
             if match_count == 1 {
                 return found;
@@ -15721,7 +15687,7 @@ impl Checker {
             return Some(item);
         }
 
-        match self.find_unique_instance("IntoIterator", &[te.clone()], iterable_range) {
+        match self.find_unique_instance("IntoIterator", std::slice::from_ref(te), iterable_range) {
             Ok(Some(into_inst)) => {
                 let item = into_inst
                     .assoc_tys
@@ -15760,7 +15726,7 @@ impl Checker {
                     );
                     return Some(item_ty);
                 }
-                match self.find_unique_instance("Iterator", &[into_iter_ty.clone()], iterable_range)
+                match self.find_unique_instance("Iterator", std::slice::from_ref(&into_iter_ty), iterable_range)
                 {
                     Ok(Some(iter_inst)) => {
                         if let Some(iter_item) = iter_inst.assoc_tys.get("Item") {
@@ -15870,10 +15836,7 @@ impl Checker {
                     );
                     return None;
                 }
-                match self.homogeneous_types(elems, range, "tuple") {
-                    Some(item) => Some((item, ForInKind::Tuple { arity: elems.len() })),
-                    None => None,
-                }
+                self.homogeneous_types(elems, range, "tuple").map(|item| (item, ForInKind::Tuple { arity: elems.len() }))
             }
             Ty::Record { fields } => {
                 let value_tys: Vec<Ty> = fields.iter().map(|(_, ty)| ty.clone()).collect();
@@ -15882,10 +15845,7 @@ impl Checker {
                     let v = Ty::Var(self.counter.fresh());
                     return Some((tuple_ty(vec![string(), v]), ForInKind::Dict));
                 }
-                match self.homogeneous_types(&value_tys, range, "dict") {
-                    Some(v) => Some((tuple_ty(vec![string(), v]), ForInKind::Dict)),
-                    None => None,
-                }
+                self.homogeneous_types(&value_tys, range, "dict").map(|v| (tuple_ty(vec![string(), v]), ForInKind::Dict))
             }
             Ty::App(head, args) => {
                 if matches!(head.as_ref(), Ty::Con(n) if n == "coroutine") && args.len() == 2 {
@@ -16348,11 +16308,10 @@ impl Checker {
                     )
                 }
                 EnumVariantPayloadTy::Tuple(parts) => {
-                    if let Ok(idx) = field.parse::<usize>() {
-                        if let Some(fty) = parts.get(idx) {
+                    if let Ok(idx) = field.parse::<usize>()
+                        && let Some(fty) = parts.get(idx) {
                             return fty.clone();
                         }
-                    }
                     self.error_with_help(
                         ErrorCode::GenericTypeError,
                         format!("Cannot access field `{}` on tuple variant", field),
@@ -16390,13 +16349,11 @@ impl Checker {
                             candidates.push(fty);
                         }
                     }
-                } else if let EnumVariantPayloadTy::Tuple(parts) = payload {
-                    if let Ok(idx) = field.parse::<usize>() {
-                        if let Some(fty) = parts.get(idx) {
+                } else if let EnumVariantPayloadTy::Tuple(parts) = payload
+                    && let Ok(idx) = field.parse::<usize>()
+                        && let Some(fty) = parts.get(idx) {
                             candidates.push(fty);
                         }
-                    }
-                }
             }
             match candidates.len() {
                 0 => {

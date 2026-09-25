@@ -235,18 +235,18 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
             if let Some(op) = last {
                 b.pending_loc = op.loc();
             }
-            emit_term(
-                &mut b,
-                &mut tos,
+            emit_term(EmitTermArgs {
+                b: &mut b,
+                tos: &mut tos,
                 last,
                 ops,
-                &label_block,
-                ranges.get(i + 1).map(|_| range_blocks[i + 1]),
+                labels: &label_block,
+                fallthrough: ranges.get(i + 1).map(|_| range_blocks[i + 1]),
                 hints,
-                bid,
-                &mut incoming,
-                &mut overlap_defs,
-            )?;
+                pred: bid,
+                incoming: &mut incoming,
+                overlap_defs: &mut overlap_defs,
+            })?;
         }
         if !tos.is_empty()
             && !hints.allow_match
@@ -381,21 +381,35 @@ fn match_payload_ty(src_ty: MirTy) -> MirTy {
     }
 }
 
+struct BindMatchPayloadsArgs<'args> {
+    b: &'args mut MirBuilder,
+    src: ValueId,
+    n: u32,
+    next: Option<&'args IlOp>,
+    rest: &'args [IlOp],
+    tos: &'args mut Vec<ValueId>,
+    overlap: Option<&'args mut Vec<(LocalId, ValueId)>>,
+    jim_seek: Option<u32>,
+    identity_return: bool,
+}
+
 /// Bind `n` per-index payloads. Overlap `LOAD` / `BinSlotImm` maps
 /// declaration order onto consecutive reserved slots (`payload_base + i`).
 /// Nested rematch: a later arm's LOAD of an outer slot is not this JIM's
 /// overlap — `jim_seek` is the frame Seek before the match.
-fn bind_match_payloads(
-    b: &mut MirBuilder,
-    src: ValueId,
-    n: u32,
-    next: Option<&IlOp>,
-    rest: &[IlOp],
-    tos: &mut Vec<ValueId>,
-    mut overlap: Option<&mut Vec<(LocalId, ValueId)>>,
-    jim_seek: Option<u32>,
-    identity_return: bool,
-) -> Result<Vec<ValueId>, LowerError> {
+fn bind_match_payloads(args: BindMatchPayloadsArgs<'_>) -> Result<Vec<ValueId>, LowerError> {
+    let BindMatchPayloadsArgs {
+        b,
+        src,
+        n,
+        next,
+        rest,
+        tos,
+        mut overlap,
+        jim_seek,
+        identity_return,
+    } = args;
+
     let ty = match_payload_ty(b.func().ty(src));
     let mut payloads = Vec::with_capacity(n as usize);
     for i in 0..n {
@@ -405,11 +419,10 @@ fn bind_match_payloads(
         return Ok(payloads);
     }
     let mut slot = overlap_base(next, rest);
-    if let Some(base) = jim_seek {
-        if slot.is_some_and(|s| s < base) || (slot.is_none() && !identity_return) {
+    if let Some(base) = jim_seek
+        && (slot.is_some_and(|s| s < base) || (slot.is_none() && !identity_return)) {
             slot = Some(base);
         }
-    }
     if let Some(slot) = slot {
         for (i, &p) in payloads.iter().enumerate() {
             let local = LocalId(slot + i as u32);
@@ -488,30 +501,42 @@ fn is_term(op: &IlOp) -> bool {
     }
 }
 
-fn emit_term(
-    b: &mut MirBuilder,
-    tos: &mut Vec<ValueId>,
-    last: Option<&IlOp>,
-    ops: &[IlOp],
-    labels: &HashMap<Label, BlockId>,
+struct EmitTermArgs<'args> {
+    b: &'args mut MirBuilder,
+    tos: &'args mut Vec<ValueId>,
+    last: Option<&'args IlOp>,
+    ops: &'args [IlOp],
+    labels: &'args HashMap<Label, BlockId>,
     fallthrough: Option<BlockId>,
-    hints: &LowerHints,
+    hints: &'args LowerHints,
     pred: BlockId,
-    incoming: &mut HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>>,
-    overlap_defs: &mut HashMap<BlockId, Vec<(LocalId, ValueId)>>,
-) -> Result<(), LowerError> {
-    if hints.allow_deopt {
-        if let Some(op) = last {
-            if matches!(
+    incoming: &'args mut HashMap<BlockId, Vec<(BlockId, Vec<ValueId>)>>,
+    overlap_defs: &'args mut HashMap<BlockId, Vec<(LocalId, ValueId)>>,
+}
+
+fn emit_term(args: EmitTermArgs<'_>) -> Result<(), LowerError> {
+    let EmitTermArgs {
+        b,
+        tos,
+        last,
+        ops,
+        labels,
+        fallthrough,
+        hints,
+        pred,
+        incoming,
+        overlap_defs,
+    } = args;
+
+    if hints.allow_deopt
+        && let Some(op) = last
+            && matches!(
                 op,
                 IlOp::Return { .. } | IlOp::Halt { .. } | IlOp::Jump { .. }
-            ) {
-                if let Some(kind) = super::deopt::boundary_for_op(op) {
+            )
+                && let Some(kind) = super::deopt::boundary_for_op(op) {
                     b.ins_deopt(kind, op.loc())?;
                 }
-            }
-        }
-    }
     match last {
         Some(IlOp::Jump {
             kind: IlJumpKind::Unconditional,
@@ -626,17 +651,18 @@ fn emit_term(
             let n_payloads = jim_taken_payloads(*arity, first);
             let mut taken_stack = tos.clone();
             let mut taken_overlap = Vec::new();
-            let payloads = bind_match_payloads(
+            let jim_seek = b.match_seek;
+            let payloads = bind_match_payloads(BindMatchPayloadsArgs {
                 b,
-                scrutinee,
-                n_payloads,
-                first,
-                taken_rest,
-                &mut taken_stack,
-                Some(&mut taken_overlap),
-                b.match_seek,
-                identity_taken_arm(first),
-            )?;
+                src: scrutinee,
+                n: n_payloads,
+                next: first,
+                rest: taken_rest,
+                tos: &mut taken_stack,
+                overlap: Some(&mut taken_overlap),
+                jim_seek,
+                identity_return: identity_taken_arm(first),
+            })?;
             if !taken_overlap.is_empty() {
                 overlap_defs
                     .entry(taken)
@@ -1113,17 +1139,17 @@ fn lower_byte(
                 .pop()
                 .ok_or_else(|| LowerError::Refused("Unpack stack".into()))?;
             let n_payloads = jim_taken_payloads(arity, next);
-            bind_match_payloads(
+            bind_match_payloads(BindMatchPayloadsArgs {
                 b,
                 src,
-                n_payloads,
+                n: n_payloads,
                 next,
                 rest,
                 tos,
-                None,
-                None,
-                false,
-            )?;
+                overlap: None,
+                jim_seek: None,
+                identity_return: false,
+            })?;
             Ok(())
         }
         other => Err(LowerError::Refused(format!(
@@ -1208,15 +1234,14 @@ fn bin_stack(
 fn const_native_id(b: &MirBuilder, v: ValueId) -> Option<u16> {
     for block in &b.func().blocks {
         for inst in &block.insts {
-            if let MirInst::Const { dest, c } = inst {
-                if *dest == v {
+            if let MirInst::Const { dest, c } = inst
+                && *dest == v {
                     return match *c {
                         MirConst::I64(n) => u16::try_from(n).ok(),
                         MirConst::I32(n) => u16::try_from(n).ok(),
                         _ => None,
                     };
                 }
-            }
         }
     }
     None

@@ -21,11 +21,13 @@ struct PageMeta {
     first_off: u32,
 }
 
+type FreeLists = Vec<((u32, u32), Vec<NonNull<u8>>)>;
+
 pub struct Slab {
     chunks: Vec<Chunk>,
     /// Free lists keyed by `(slot_size, align)`. A handful of classes; a
     /// linear scan is cheaper than hashing the pair on every alloc.
-    free: Vec<((u32, u32), Vec<NonNull<u8>>)>,
+    free: FreeLists,
     /// Last chunk that contained a lookup. Relaxed: a stale hint misses and
     /// falls back to the scan. Not a synchronization point.
     last_start: AtomicU64,
@@ -47,11 +49,10 @@ impl Slab {
     pub fn alloc(&mut self, layout: Layout) -> NonNull<u8> {
         let (slot_size, align) = slot_dims(layout);
         let key = (slot_size as u32, align as u32);
-        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key) {
-            if let Some(p) = slots.pop() {
+        if let Some((_, slots)) = self.free.iter_mut().find(|(k, _)| *k == key)
+            && let Some(p) = slots.pop() {
                 return p;
             }
-        }
         self.carve_page(slot_size, align)
     }
 
@@ -86,7 +87,7 @@ impl Slab {
                 return false;
             }
             let rel = off - meta.first_off;
-            rel % meta.slot_size == 0 && (off as usize) + (meta.slot_size as usize) <= CHUNK
+            rel.is_multiple_of(meta.slot_size) && (off as usize) + (meta.slot_size as usize) <= CHUNK
         })
     }
 

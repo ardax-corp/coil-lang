@@ -133,7 +133,7 @@ impl DapServer {
                 let path = resolve_program_path(program, cwd.as_deref());
                 let path_str = path.to_string_lossy().into_owned();
                 let config = ReportConfig::from_cli_flags(false, false).map_err(|e| {
-                    io::Error::new(io::ErrorKind::Other, e.to_string())
+                    io::Error::other(e.to_string())
                 })?;
                 let grants = merge_launch_grants(&self.grants, &args);
                 match DebugSession::compile(
@@ -325,8 +325,8 @@ impl DapServer {
                     Ok(items) => {
                         let variables: Vec<Value> = items
                             .into_iter()
-                            .enumerate()
-                            .map(|(_i, loc)| {
+                            
+                            .map(|loc| {
                                 json!({
                                     "name": loc.name,
                                     "value": loc.value,
@@ -561,10 +561,7 @@ pub fn run_dap_server(extra_roots: Vec<PathBuf>, grants: HostGrants) -> io::Resu
     let mut reader = BufReader::new(stdin.lock());
     let mut server = DapServer::new(extra_roots, grants);
 
-    loop {
-        let Some(msg) = read_message(&mut reader)? else {
-            break;
-        };
+    while let Some(msg) = read_message(&mut reader)? {
         if msg.msg_type == "request" {
             let keep_going = server.handle_request(&mut stdout, &msg)?;
             if !keep_going {

@@ -659,7 +659,6 @@ impl IlOp {
         }
     }
 
-    #[allow(dead_code)]
     pub fn set_loc(&mut self, loc: DebugLoc) {
         match self {
             IlOp::Byte { loc: l, .. }

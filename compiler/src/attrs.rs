@@ -94,11 +94,10 @@ pub fn expand_program(ast: &mut Output<'_>) -> ExpandResult {
 fn derive_traits_from_attrs<'a>(attrs: &[Attribute<'a>]) -> Vec<&'a str> {
     let mut out = Vec::new();
     for attr in attrs {
-        if attr.name == "derive" {
-            if let AttrArgs::Idents(idents) = &attr.args {
+        if attr.name == "derive"
+            && let AttrArgs::Idents(idents) = &attr.args {
                 out.extend(idents.iter().copied());
             }
-        }
     }
     out
 }
@@ -162,7 +161,7 @@ fn validate_attrs(
 }
 
 fn collect_and_desugar_attr_decls(
-    decls: &mut Vec<Output<'_>>,
+    decls: &mut [Output<'_>],
     user_attrs: &mut HashSet<String>,
     attr_extra_names: &mut HashMap<String, Vec<String>>,
     messages: &mut Vec<Message>,
@@ -1087,10 +1086,10 @@ fn rewrite_expr_inline<'a>(
 
         Expression::Resume(handle, send) => at(
             span,
-            Expression::Resume(rw(handle), send.as_ref().map(|s| rw(s))),
+            Expression::Resume(rw(handle), send.as_ref().map(&rw)),
         ),
         Expression::OptionalAccess(receiver, field) => {
-            at(span, Expression::OptionalAccess(rw(receiver), *field))
+            at(span, Expression::OptionalAccess(rw(receiver), field))
         }
         Expression::CompoundAssign(lhs, op, rhs) => {
             at(span, Expression::CompoundAssign(rw(lhs), *op, rw(rhs)))
@@ -1141,18 +1140,18 @@ fn rewrite_expr_inline<'a>(
             },
         ),
         Expression::Assignment(lhs, rhs) => at(span, Expression::Assignment(rw(lhs), rw(rhs))),
-        Expression::Access(receiver, field) => at(span, Expression::Access(rw(receiver), *field)),
+        Expression::Access(receiver, field) => at(span, Expression::Access(rw(receiver), field)),
         Expression::Index(receiver, index) => at(
             span,
-            Expression::Index(rw(receiver), index.as_ref().map(|idx| rw(idx))),
+            Expression::Index(rw(receiver), index.as_ref().map(&rw)),
         ),
-        Expression::NamedArg(name, value) => at(span, Expression::NamedArg(*name, rw(value))),
+        Expression::NamedArg(name, value) => at(span, Expression::NamedArg(name, rw(value))),
         Expression::Branch(cond, body) => at(
             span,
-            Expression::Branch(cond.as_ref().map(|c| rw(c)), rw(body)),
+            Expression::Branch(cond.as_ref().map(&rw), rw(body)),
         ),
         Expression::If(branches) => {
-            let branches = branches.iter().map(|branch| rw(branch)).collect();
+            let branches = branches.iter().map(&rw).collect();
             at(span, Expression::If(branches))
         }
         Expression::Match { scrutinee, arms } => {
@@ -1215,7 +1214,7 @@ fn rewrite_expr_inline<'a>(
         } => at(
             span,
             Expression::Loop {
-                identifier: identifier.as_ref().map(|id| rw(id)),
+                identifier: identifier.as_ref().map(&rw),
                 pattern: pattern.clone(),
                 iterable: rw(iterable),
                 body: rw(body),
@@ -1261,18 +1260,18 @@ fn rewrite_expr_inline<'a>(
         } => at(
             span,
             Expression::Construct {
-                enum_name: *enum_name,
-                variant_name: *variant_name,
+                enum_name,
+                variant_name,
                 fields: rewrite_construct_payload(fields, target, subs, decoratee_args),
             },
         ),
         Expression::Variable(name, init) => at(
             span,
-            Expression::Variable(*name, init.as_ref().map(|e| rw(e))),
+            Expression::Variable(name, init.as_ref().map(&rw)),
         ),
         Expression::Constant(ty, init) => at(
             span,
-            Expression::Constant(rw(ty), init.as_ref().map(|e| rw(e))),
+            Expression::Constant(rw(ty), init.as_ref().map(&rw)),
         ),
         Expression::LetDestructure { pattern, rhs } => at(
             span,
@@ -1290,8 +1289,8 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::Argument {
                 docs: docs.clone(),
-                ty: ty.as_ref().map(|t| rw(t)),
-                name: *name,
+                ty: ty.as_ref().map(&rw),
+                name,
                 is_rest: *rest,
             },
         ),
@@ -1305,15 +1304,15 @@ fn rewrite_expr_inline<'a>(
         Expression::TypeApp { name, args } => at(
             span,
             Expression::TypeApp {
-                name: *name,
+                name,
                 args: rewrite_outputs(args, target, subs, decoratee_args),
             },
         ),
         Expression::TypeProjection { owner, name, args } => at(
             span,
             Expression::TypeProjection {
-                owner: *owner,
-                name: *name,
+                owner,
+                name,
                 args: rewrite_outputs(args, target, subs, decoratee_args),
             },
         ),
@@ -1334,7 +1333,7 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::TypeAlias {
                 docs: docs.clone(),
-                name: *name,
+                name,
                 type_params: type_params.clone(),
                 ty: Box::new(rw(ty)),
             },
@@ -1346,7 +1345,7 @@ fn rewrite_expr_inline<'a>(
         } => at(
             span,
             Expression::AssocTypeDef {
-                name: *name,
+                name,
                 type_params: type_params.clone(),
                 ty: Box::new(rw(ty)),
             },
@@ -1363,10 +1362,10 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::AttrDecl {
                 docs: docs.clone(),
-                name: *name,
+                name,
                 type_params: type_params.clone(),
                 args: rw(args),
-                returns: returns.as_ref().map(|r| rw(r)),
+                returns: returns.as_ref().map(&rw),
                 where_constraints: where_constraints.clone(),
                 body: rw(body),
             },
@@ -1387,14 +1386,14 @@ fn rewrite_expr_inline<'a>(
             Expression::Function {
                 docs: docs.clone(),
                 attrs: attrs.clone(),
-                name: *name,
+                name,
                 is_coro: *is_coro,
                 is_static: *is_static,
                 type_params: type_params.clone(),
                 args: rw(args),
-                returns: returns.as_ref().map(|r| rw(r)),
+                returns: returns.as_ref().map(&rw),
                 where_constraints: where_constraints.clone(),
-                body: body.as_ref().map(|b| rw(b)),
+                body: body.as_ref().map(&rw),
             },
         ),
         Expression::Lambda {
@@ -1441,15 +1440,15 @@ fn rewrite_expr_inline<'a>(
                 modifier: *modifier,
                 name: rw(name),
                 ty: rw(ty),
-                init: init.as_ref().map(|e| rw(e)),
+                init: init.as_ref().map(&rw),
             },
         ),
         Expression::Readonly(inner) => at(span, Expression::Readonly(rw(inner))),
         Expression::QualifiedAccess { owner, member } => at(
             span,
             Expression::QualifiedAccess {
-                owner: *owner,
-                member: *member,
+                owner,
+                member,
             },
         ),
         Expression::StaticDecl {
@@ -1461,8 +1460,8 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::StaticDecl {
                 is_const: *is_const,
-                name: *name,
-                ty: ty.as_ref().map(|t| rw(t)),
+                name,
+                ty: ty.as_ref().map(&rw),
                 init: rw(init),
             },
         ),
@@ -1478,7 +1477,7 @@ fn rewrite_expr_inline<'a>(
             Expression::Class {
                 docs: docs.clone(),
                 attrs: attrs.clone(),
-                name: *name,
+                name,
                 type_params: type_params.clone(),
                 fields: rewrite_outputs(fields, target, subs, decoratee_args),
             },
@@ -1491,8 +1490,8 @@ fn rewrite_expr_inline<'a>(
         } => at(
             span,
             Expression::Implementation {
-                what: *what,
-                owner: *owner,
+                what,
+                owner,
                 type_params: type_params.clone(),
                 methods: rewrite_outputs(methods, target, subs, decoratee_args),
             },
@@ -1508,7 +1507,7 @@ fn rewrite_expr_inline<'a>(
             Expression::EnumDecl {
                 docs: docs.clone(),
                 attrs: attrs.clone(),
-                name: *name,
+                name,
                 type_params: type_params.clone(),
                 variants: rewrite_outputs(variants, target, subs, decoratee_args),
             },
@@ -1522,11 +1521,11 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::EnumVariant {
                 docs: docs.clone(),
-                name: *name,
+                name,
                 payload: rewrite_enum_variant_payload(payload, target, subs, decoratee_args),
                 discriminant: discriminant
                     .as_ref()
-                    .map(|d| rw(d)),
+                    .map(&rw),
             },
         ),
         Expression::ExternStruct(decl) => at(
@@ -1562,7 +1561,7 @@ fn rewrite_expr_inline<'a>(
             span,
             Expression::TypeClass {
                 docs: docs.clone(),
-                name: *name,
+                name,
                 type_params: type_params.clone(),
                 methods: rewrite_outputs(methods, target, subs, decoratee_args),
             },
@@ -1574,7 +1573,7 @@ fn rewrite_expr_inline<'a>(
         } => at(
             span,
             Expression::TypeClassImpl {
-                class: *class,
+                class,
                 args: rewrite_outputs(args, target, subs, decoratee_args),
                 methods: rewrite_outputs(methods, target, subs, decoratee_args),
             },
@@ -1682,16 +1681,29 @@ fn inline_attr_body<'a>(
     rewrite_expr_inline(attr_body, &target, &subs, decoratee_args)
 }
 
-fn expand_function_user_attrs<'a>(
-    attr_bodies: &HashMap<String, Output<'a>>,
-    attrs: &mut Vec<Attribute<'a>>,
-    args: &Output<'a>,
-    body: &mut Option<Output<'a>>,
-    user_attrs: &HashSet<String>,
-    attr_extra_names: &HashMap<String, Vec<String>>,
+struct ExpandFunctionUserAttrsArgs<'args, 'a> {
+    attr_bodies: &'args HashMap<String, Output<'a>>,
+    attrs: &'args mut Vec<Attribute<'a>>,
+    args: &'args Output<'a>,
+    body: &'args mut Option<Output<'a>>,
+    user_attrs: &'args HashSet<String>,
+    attr_extra_names: &'args HashMap<String, Vec<String>>,
     span: SimpleSpan,
-    messages: &mut Vec<Message>,
-) {
+    messages: &'args mut Vec<Message>,
+}
+
+fn expand_function_user_attrs<'a>(args: ExpandFunctionUserAttrsArgs<'_, 'a>) {
+    let ExpandFunctionUserAttrsArgs {
+        attr_bodies,
+        attrs,
+        args,
+        body,
+        user_attrs,
+        attr_extra_names,
+        span,
+        messages,
+    } = args;
+
     let user_attrs_copy: Vec<Attribute<'static>> = user_attrs_on(attrs, user_attrs)
         .iter()
         .map(|a| clone_attr_static(a))
@@ -1754,8 +1766,7 @@ fn synthesize_class_ctor<'a>(
             ty: ty_expr,
             ..
         } = field.1.as_ref()
-        {
-            if let Expression::Identifier(name) = name_expr.1.as_ref() {
+            && let Expression::Identifier(name) = name_expr.1.as_ref() {
                 args.push(at(
                     span,
                     Expression::Argument {
@@ -1767,7 +1778,6 @@ fn synthesize_class_ctor<'a>(
                 ));
                 call_args.push(ident(span, name));
             }
-        }
     }
     let ctor_name = leak(format!("{class_name}__ctor"));
     let body = block_return(
@@ -1958,7 +1968,7 @@ fn expand_decls<'a>(
                     });
                 }
                 if !user_attrs_on(attrs, user_attrs).is_empty() {
-                    expand_function_user_attrs(
+                    expand_function_user_attrs(ExpandFunctionUserAttrsArgs {
                         attr_bodies,
                         attrs,
                         args,
@@ -1966,8 +1976,8 @@ fn expand_decls<'a>(
                         user_attrs,
                         attr_extra_names,
                         span,
-                        &mut messages,
-                    );
+                        messages: &mut messages,
+                    });
                 }
             }
             if attrs.iter().any(|a| a.name == "ffi") {
@@ -1988,15 +1998,15 @@ fn expand_decls<'a>(
         // Expand user attrs on impl methods.
         if let Expression::Implementation { methods, .. } = decls[i].1.as_mut() {
             for method in methods.iter_mut() {
-                if let Expression::Method(_, func_out) = method.1.as_mut() {
-                    if let Expression::Function {
+                if let Expression::Method(_, func_out) = method.1.as_mut()
+                    && let Expression::Function {
                         docs: _,
                         attrs, args, body, ..
                     } = func_out.1.as_mut()
                     {
                         validate_attrs(attrs, "function", user_attrs, &mut messages, span, false);
                         if body.is_some() {
-                            expand_function_user_attrs(
+                            expand_function_user_attrs(ExpandFunctionUserAttrsArgs {
                                 attr_bodies,
                                 attrs,
                                 args,
@@ -2004,11 +2014,10 @@ fn expand_decls<'a>(
                                 user_attrs,
                                 attr_extra_names,
                                 span,
-                                &mut messages,
-                            );
+                                messages: &mut messages,
+                            });
                         }
                     }
-                }
             }
         }
 
@@ -2075,8 +2084,7 @@ fn expand_decls<'a>(
             fields,
             ..
         } = decls[i].1.as_ref()
-        {
-            if !user_attrs_on(attrs, user_attrs).is_empty() {
+            && !user_attrs_on(attrs, user_attrs).is_empty() {
                 let class_name = *name;
                 let fields_copy = fields.clone();
                 let mut ctor = synthesize_class_ctor(span, class_name, &fields_copy);
@@ -2095,16 +2103,16 @@ fn expand_decls<'a>(
                         .filter(|a| is_user_attr(a, user_attrs))
                         .cloned()
                         .collect();
-                    expand_function_user_attrs(
+                    expand_function_user_attrs(ExpandFunctionUserAttrsArgs {
                         attr_bodies,
-                        ctor_attrs,
+                        attrs: ctor_attrs,
                         args,
                         body,
                         user_attrs,
                         attr_extra_names,
                         span,
-                        &mut messages,
-                    );
+                        messages: &mut messages,
+                    });
                 }
                 decorated_class_ctors.insert(class_name.to_string(), format!("{class_name}__ctor"));
                 strip_user_attrs(
@@ -2116,7 +2124,6 @@ fn expand_decls<'a>(
                 );
                 ctor_insert = Some(ctor);
             }
-        }
 
         let synthesized = match job {
             Some(Job::Enum {
@@ -2126,17 +2133,17 @@ fn expand_decls<'a>(
                 variants,
                 variant_nodes,
                 scalar_backing,
-            }) => Some(expand_enum(
+            }) => Some(expand_enum(ExpandEnumArgs {
                 span,
                 name,
                 generic,
-                &derives,
-                &variants,
-                &variant_nodes,
+                derives: &derives,
+                variants: &variants,
+                _variant_nodes: &variant_nodes,
                 scalar_backing,
-                &decls,
-                &mut messages,
-            )),
+                decls,
+                messages: &mut messages,
+            })),
             Some(Job::Class {
                 name,
                 generic,
@@ -2148,7 +2155,7 @@ fn expand_decls<'a>(
                 generic,
                 &derives,
                 &fields,
-                &decls,
+                decls,
                 &mut messages,
             )),
             None => None,
@@ -2180,17 +2187,31 @@ fn expand_decls<'a>(
     messages
 }
 
-fn expand_enum<'a>(
+struct ExpandEnumArgs<'args, 'a> {
     span: SimpleSpan,
     name: &'a str,
     generic: bool,
-    derives: &[&'a str],
-    variants: &[VariantMeta<'a>],
-    _variant_nodes: &[Output<'a>],
+    derives: &'args [&'a str],
+    variants: &'args [VariantMeta<'a>],
+    _variant_nodes: &'args [Output<'a>],
     scalar_backing: Option<&'a str>,
-    decls: &[Output<'a>],
-    messages: &mut Vec<Message>,
-) -> Vec<Output<'a>> {
+    decls: &'args [Output<'a>],
+    messages: &'args mut Vec<Message>,
+}
+
+fn expand_enum<'a>(args: ExpandEnumArgs<'_, 'a>) -> Vec<Output<'a>> {
+    let ExpandEnumArgs {
+        span,
+        name,
+        generic,
+        derives,
+        variants,
+        _variant_nodes,
+        scalar_backing,
+        decls,
+        messages,
+    } = args;
+
     if generic {
         if !derives.is_empty() {
             messages.push(Message::error(
@@ -2295,14 +2316,14 @@ fn push_default_display_impls<'a>(
     scalar_backing: Option<&'a str>,
     out: &mut Vec<Output<'a>>,
 ) {
-    if !derives.iter().any(|t| *t == "Show") && !has_explicit_impl(decls, "Show", name) {
+    if !derives.contains(&"Show") && !has_explicit_impl(decls, "Show", name) {
         if let Some(backing) = scalar_backing {
             out.push(synth_show_scalar_enum(span, name, backing));
         } else {
             out.push(synth_show_type_name(span, name));
         }
     }
-    if !derives.iter().any(|t| *t == "String") && !has_explicit_impl(decls, "String", name) {
+    if !derives.contains(&"String") && !has_explicit_impl(decls, "String", name) {
         if let Some(backing) = scalar_backing {
             out.push(synth_string_scalar_enum(span, name, backing));
         } else {
@@ -3120,7 +3141,16 @@ fn ord_method<'a>(
     // indexable, so `a[i]` is not an option).
     let mut arms = Vec::new();
     for (i, v) in variants.iter().enumerate() {
-        let (pattern, body) = ord_outer_arm(span, enum_name, variants, i, v, a, b, op);
+        let (pattern, body) = ord_outer_arm(OrdOuterArmArgs {
+            span,
+            enum_name,
+            variants,
+            left_idx: i,
+            left: v,
+            a,
+            b,
+            op,
+        });
         arms.push(MatchArm { pattern, body });
     }
     arms.push(MatchArm {
@@ -3143,16 +3173,29 @@ fn ord_method<'a>(
     )
 }
 
-fn ord_outer_arm<'a>(
+struct OrdOuterArmArgs<'args, 'a> {
     span: SimpleSpan,
     enum_name: &'a str,
-    variants: &[VariantMeta<'a>],
+    variants: &'args [VariantMeta<'a>],
     left_idx: usize,
-    left: &VariantMeta<'a>,
+    left: &'args VariantMeta<'a>,
     a: &'a str,
     b: &'a str,
     op: OrdOp,
-) -> (PatternOut<'a>, Output<'a>) {
+}
+
+fn ord_outer_arm<'a>(args: OrdOuterArmArgs<'_, 'a>) -> (PatternOut<'a>, Output<'a>) {
+    let OrdOuterArmArgs {
+        span,
+        enum_name,
+        variants,
+        left_idx,
+        left,
+        a,
+        b,
+        op,
+    } = args;
+
     let mut inner_arms = Vec::new();
     for (j, rv) in variants.iter().enumerate() {
         let body = if j == left_idx {

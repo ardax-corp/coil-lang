@@ -132,11 +132,10 @@ impl ProjectIndex {
                     .and_then(|s| s.def_id)
             });
 
-        if let Some(id) = from_site.or_else(|| index.def_id_for_name(name)) {
-            if let Some(loc) = self.location_of(id) {
+        if let Some(id) = from_site.or_else(|| index.def_id_for_name(name))
+            && let Some(loc) = self.location_of(id) {
                 return vec![loc];
             }
-        }
 
         index
             .definitions(name)

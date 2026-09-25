@@ -21,11 +21,10 @@
                     continue;
                 }
                 for m in methods {
-                    if let Expression::Method(_, f) = m.1.as_ref() {
-                        if let Expression::Function { name, .. } = f.1.as_ref() {
+                    if let Expression::Method(_, f) = m.1.as_ref()
+                        && let Expression::Function { name, .. } = f.1.as_ref() {
                             names.push((*name).to_string());
                         }
-                    }
                 }
             }
         }

@@ -54,8 +54,8 @@ impl Diagnostic {
         // Producers often set only a primary `range` (no labels). Ariadne
         // draws source underlines from labels only — synthesize one so
         // EXXXX pretty reports include the code snippet.
-        if diag.labels.is_empty() {
-            if let Some(range) = diag
+        if diag.labels.is_empty()
+            && let Some(range) = diag
                 .location
                 .as_ref()
                 .filter(|loc| loc.range.start < loc.range.end)
@@ -63,7 +63,6 @@ impl Diagnostic {
             {
                 diag = diag.with_label(RelatedLabel::new(Location::new(file, range), ""));
             }
-        }
 
         diag
     }

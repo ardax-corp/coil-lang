@@ -90,7 +90,7 @@ pub fn math_tanh(_heap: &mut Heap, args: &[Value]) -> Value {
 }
 
 /// Frozen HostInvoke block **102–110**. Do not append here — later ids would slide.
-pub const MATH_LIBM_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
+pub const MATH_LIBM_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("math_sin", 1, math_sin),
     ("math_cos", 1, math_cos),
     ("math_tan", 1, math_tan),
@@ -103,7 +103,7 @@ pub const MATH_LIBM_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] =
 ];
 
 /// M1 expansion, appended after `result_unit_probe` (ids **125–135**).
-pub const MATH_LIBM_M1_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)] = &[
+pub const MATH_LIBM_M1_WIRING: &[(&str, usize, crate::HostValueFn)] = &[
     ("math_atan", 1, math_atan),
     ("math_atan2", 2, math_atan2),
     ("math_asin", 1, math_asin),
@@ -121,7 +121,7 @@ pub const MATH_LIBM_M1_WIRING: &[(&str, usize, fn(&mut Heap, &[Value]) -> Value)
 mod tests {
     use super::*;
 
-    fn call(host: fn(&mut Heap, &[Value]) -> Value, args: &[f64]) -> f64 {
+    fn call(host: crate::HostValueFn, args: &[f64]) -> f64 {
         let mut heap = Heap::default();
         let values: Vec<Value> = args.iter().copied().map(Value::from).collect();
         host(&mut heap, &values).as_float()
@@ -129,7 +129,7 @@ mod tests {
 
     #[test]
     fn math_libm_unary_functions_match_f64() {
-        let cases: &[(fn(&mut Heap, &[Value]) -> Value, f64, f64)] = &[
+        let cases: &[(crate::HostValueFn, f64, f64)] = &[
             (math_sin, std::f64::consts::FRAC_PI_2, 1.0),
             (math_cos, std::f64::consts::PI, -1.0),
             (math_tan, 0.0, 0.0),
@@ -157,7 +157,7 @@ mod tests {
 
     #[test]
     fn math_libm_m1_unary_functions_match_f64() {
-        let cases: &[(fn(&mut Heap, &[Value]) -> Value, f64, f64)] = &[
+        let cases: &[(crate::HostValueFn, f64, f64)] = &[
             (math_atan, 1.0, std::f64::consts::FRAC_PI_4),
             (math_asin, 1.0, std::f64::consts::FRAC_PI_2),
             (math_acos, 1.0, 0.0),

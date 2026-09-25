@@ -291,7 +291,7 @@ mod tests {
         );
         let imported = *entry_locals.get("f").expect("imported alias f");
         assert_eq!(imported, defined);
-        assert!(entry_locals.get("sadge").is_none());
+        assert!(!entry_locals.contains_key("sadge"));
     }
 
     #[test]

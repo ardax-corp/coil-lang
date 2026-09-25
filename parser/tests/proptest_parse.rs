@@ -54,15 +54,9 @@ fn syntax_shape(kind: u8, a: i32, b: i32) -> String {
         5 => format!(
             "fn main() {{ let d = {{ v: {a} }}; write_all(stdout(), to_bytes(format(\"%i\", d.v + {b}))); }}\n"
         ),
-        6 => format!(
-            "enum C {{ A, B }}\nfn main() {{ let c = C::A; write_all(stdout(), to_bytes(format(\"%z\", c == C::A))); }}\n"
-        ),
-        7 => format!(
-            "fn main() {{ let i = 0; while i < 3 {{ i = i + 1; }} write_all(stdout(), to_bytes(format(\"%i\", i))); }}\n"
-        ),
-        8 => format!(
-            "fn main() {{ let i = 0; while i < 3 {{ write_all(stdout(), to_bytes(format(\"%i\", i))); i = i + 1; }} }}\n"
-        ),
+        6 => "enum C { A, B }\nfn main() { let c = C::A; write_all(stdout(), to_bytes(format(\"%z\", c == C::A))); }\n".to_string(),
+        7 => "fn main() { let i = 0; while i < 3 { i = i + 1; } write_all(stdout(), to_bytes(format(\"%i\", i))); }\n".to_string(),
+        8 => "fn main() { let i = 0; while i < 3 { write_all(stdout(), to_bytes(format(\"%i\", i))); i = i + 1; } }\n".to_string(),
         9 => format!(
             "fn main() {{ write_all(stdout(), to_bytes(format(\"%s\", \"a\" + \"b\"))); write_all(stdout(), to_bytes(format(\"%i\", {a}))); }}\n"
         ),

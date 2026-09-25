@@ -57,7 +57,7 @@ pub struct ParEscapeHint {
 }
 
 impl ParEscapeHint {
-    #[allow(dead_code)]
+    #[allow(dead_code)] // unit test `unlocked_stdout_recursive_bag_is_named`
     pub fn primary_resource(&self) -> Option<&NamedEscape> {
         self.resources.first()
     }
@@ -184,8 +184,8 @@ pub fn analyze_par_escape_hints(ast: &Output<'_>) -> Vec<ParEscapeHint> {
         if hint.covering_lock {
             continue;
         }
-        if let Some(body) = bodies.get(hint.fn_name.as_str()) {
-            if let Some((_, resource)) = covering_lock_bag(body, &user_fns) {
+        if let Some(body) = bodies.get(hint.fn_name.as_str())
+            && let Some((_, resource)) = covering_lock_bag(body, &user_fns) {
                 hint.covering_lock = true;
                 if !hint
                     .resources
@@ -195,7 +195,6 @@ pub fn analyze_par_escape_hints(ast: &Output<'_>) -> Vec<ParEscapeHint> {
                     hint.resources.insert(0, resource);
                 }
             }
-        }
     }
 
     out.sort_by(|a, b| a.fn_name.cmp(&b.fn_name));
@@ -537,14 +536,13 @@ fn note_ffi_names(short: &str, args: Option<&[Output<'_>]>, out: &mut BTreeSet<N
         kind: EscapeKind::Ffi,
         name: short.to_string(),
     });
-    if let Some(name) = first_ident_arg(args) {
-        if name != short {
+    if let Some(name) = first_ident_arg(args)
+        && name != short {
             out.insert(NamedEscape {
                 kind: EscapeKind::Ffi,
                 name: name.to_string(),
             });
         }
-    }
 }
 
 fn is_format_like(short: &str) -> bool {
@@ -927,7 +925,10 @@ fn main() { return; }
             rec.resources
         );
         assert!(rec.message().contains("`stdout` (FD)"));
-        let _ = rec.primary_resource();
+        assert_eq!(
+            rec.primary_resource().map(|r| r.name.as_str()),
+            Some("stdout")
+        );
         assert!(hints.iter().all(|h| h.fn_name != "fib"));
     }
 

@@ -29,6 +29,10 @@ pub mod value_eq;
 pub mod vec_ops;
 mod vm;
 
+/// Host native `(heap, args) -> value`. Arity lives in the wiring column, so
+/// zero-arg clocks and three-arg vec helpers share this function type.
+pub type HostValueFn = fn(&mut memory::Heap, &[common::Value]) -> common::Value;
+
 #[cfg(any(test, feature = "debugger"))]
 pub use debug::{DebugController, StepMode, StopReason};
 pub use clock::CLOCK_WIRING;
@@ -48,7 +52,8 @@ pub use packed_la::{
     packed_matmul, packed_matrix_neg, packed_matrix_zip, packed_vec_arith,
 };
 pub use runtime_wire::{
-    VmHostSpec, wire_thread_program, wire_thread_program_with_maps, wire_vm_host,
+    VmHostSpec, WireThreadProgramWithMapsArgs, wire_thread_program, wire_thread_program_with_maps,
+    wire_vm_host,
 };
 pub use stream_attach::{AttachedIo, StreamVTable, stream_attach, stream_park};
 pub use thread::{

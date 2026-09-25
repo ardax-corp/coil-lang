@@ -130,7 +130,7 @@ fn stack_dce_once(ops: &mut Vec<IlOp>) -> bool {
 /// so a remaining Dup copy is no longer TOS and later pops (e.g. `CONST; CmpJmpf`)
 /// eat the local — classic shared-stack hazard after nested CALL returns
 /// (`tell == frame_base + 1`, store to a higher slot).
-pub(super) fn mem_fwd(ops: &mut Vec<IlOp>, entry_sp: i32) {
+pub(super) fn mem_fwd(ops: &mut [IlOp], entry_sp: i32) {
     let sp = crate::il::sp::analyze_at(ops, entry_sp);
     let mut i = 0;
     while i + 1 < ops.len() {
@@ -267,7 +267,7 @@ fn copy_prop_barrier(op: &IlOp) -> bool {
 /// The pass deliberately stops at labels, control flow, calls, unknown bytes,
 /// and memory operations. `dead_store_at` removes the now-unused original
 /// producer/store pair only when the shared cursor proof allows it.
-pub(super) fn copy_prop(ops: &mut Vec<IlOp>, entry_tell: u32) {
+pub(super) fn copy_prop(ops: &mut [IlOp], entry_tell: u32) {
     let cursor = crate::il::tell::analyze_il_at(ops, entry_tell);
     let mut bindings: HashMap<u32, CopyBinding> = HashMap::new();
     let mut i = 0;
@@ -446,12 +446,10 @@ fn try_mark_dead_store(
                     | Instruction::CastIntToBool
                     | Instruction::CastBoolToInt
                     | Instruction::NEGF
-            ) =>
+            ) && cursor.can_remove_one_value_store(store_i - 1, slot) =>
         {
-            if cursor.can_remove_one_value_store(store_i - 1, slot) {
-                remove.insert(store_i - 1);
-                remove.insert(store_i);
-            }
+            remove.insert(store_i - 1);
+            remove.insert(store_i);
         }
         _ => {}
     }

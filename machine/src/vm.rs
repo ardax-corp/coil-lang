@@ -361,15 +361,14 @@ fn pin_current_array_in(
     obj: Object,
 ) {
     let idx = slot as usize;
-    if let Some(pins) = frame_pins.last_mut() {
-        if pins.depth == frames_len {
+    if let Some(pins) = frame_pins.last_mut()
+        && pins.depth == frames_len {
             if pins.by_slot.len() <= idx {
                 pins.by_slot.resize(idx + 1, None);
             }
             pins.by_slot[idx] = Some(obj);
             return;
         }
-    }
     let mut by_slot = vec![None; idx + 1];
     by_slot[idx] = Some(obj);
     frame_pins.push(FramePins {
@@ -418,7 +417,7 @@ pub struct Machine<const S: usize> {
     output: Option<OutputSink>,
     natives: crate::ffi::Natives,
     libraries: std::collections::HashMap<String, std::sync::Arc<crate::ffi::Library>>,
-    userland_libraries: std::collections::HashMap<u64, std::sync::Arc<Object>, AddrHashBuilder>,
+    userland_libraries: std::collections::HashMap<u64, Object, AddrHashBuilder>,
     resume_stack: Vec<ResumeCtx>,
     /// Directory of the entry script (for relative `dload` paths).
     base_dir: Option<PathBuf>,
@@ -1189,8 +1188,7 @@ impl<const S: usize> Machine<S> {
         .map_err(|e| e.to_string())?;
         let (object, _gc) = self.heap.alloc_library(lib_arc.clone());
         let addr = object.addr();
-        self.userland_libraries
-            .insert(addr, std::sync::Arc::new(object));
+        self.userland_libraries.insert(addr, object);
         self.libraries
             .entry(path.to_string())
             .or_insert_with(|| lib_arc.clone());
@@ -1961,18 +1959,16 @@ impl<const S: usize> Machine<S> {
         signature: crate::ffi::FfiSignature,
     ) -> Result<usize, String> {
         let addr = library_value.raw() as u64;
-        let mut lib_obj_arc = self
+        let mut lib_obj = self
             .userland_libraries
             .get(&addr)
-            .cloned()
+            .copied()
             .ok_or_else(|| format!("not a loaded library: 0x{:x}", addr))?;
-        let lib_obj_mut = std::sync::Arc::make_mut(&mut lib_obj_arc);
-        if let crate::memory::Object::Library(gc) = lib_obj_mut {
+        if let crate::memory::Object::Library(gc) = &mut lib_obj {
             let obj_lib: &mut crate::memory::ObjLibrary = (**gc).as_mut();
             let id = crate::ffi::register_on_library(obj_lib, signature, &self.struct_layouts)
                 .map_err(|e| e.to_string())?;
-            self.userland_libraries
-                .insert(addr, std::sync::Arc::new(*lib_obj_mut));
+            self.userland_libraries.insert(addr, lib_obj);
             Ok(id)
         } else {
             Err("not a library object".to_string())
@@ -2037,16 +2033,15 @@ impl<const S: usize> Machine<S> {
         let sub_addr = sub.as_ptr() as u64;
         let mut current = self.heap.head_for_lookup();
         while let Some(reference) = current {
-            if let Object::Coroutine(gc) = reference {
-                if gc
+            if let Object::Coroutine(gc) = reference
+                && gc
                     .as_ref()
                     .yield_from
                     .as_ref()
                     .is_some_and(|d| d.as_ptr() as u64 == sub_addr)
                 {
-                    return Some(gc.clone());
+                    return Some(gc);
                 }
-            }
             current = reference.get_next();
         }
         None
@@ -2642,10 +2637,10 @@ impl<const S: usize> Machine<S> {
 
     fn finish_pending_ffi_invoke(&mut self, pending: PendingFfiInvoke) {
         self.frames.get_mut().set(pending.resume_sp);
-        let lib_obj = self.userland_libraries.get(&pending.lib_addr).cloned();
+        let lib_obj = self.userland_libraries.get(&pending.lib_addr).copied();
         let invoke_result = match lib_obj {
             Some(obj) => {
-                let l = match obj.as_ref() {
+                let l = match &obj {
                     crate::memory::Object::Library(gc) => gc,
                     _ => {
                         self.push_result_err(
@@ -2858,17 +2853,19 @@ impl<const S: usize> Machine<S> {
         macro_rules! then_hot_streak {
             () => {
                 if let Some(stop) = dispatch::consume_always_hot_streak(
-                    &mut self.stack,
-                    &mut sp,
-                    &mut ip,
-                    code,
-                    constants,
-                    &mut self.heap,
-                    &mut self.frames,
-                    &mut self.frame_pins,
-                    &mut self.dense_obj_addr,
-                    &mut self.dense_obj,
-                    stack_cap,
+                    dispatch::ConsumeAlwaysHotStreakArgs {
+                        stack: &mut self.stack,
+                        sp: &mut sp,
+                        ip: &mut ip,
+                        code,
+                        constants,
+                        heap: &mut self.heap,
+                        frames: &mut self.frames,
+                        frame_pins: &mut self.frame_pins,
+                        dense_obj_addr: &mut self.dense_obj_addr,
+                        dense_obj: &mut self.dense_obj,
+                        stack_cap,
+                    },
                 ) {
                     match stop {
                         dispatch::HotStop::Panic(msg) => {
@@ -2914,20 +2911,20 @@ impl<const S: usize> Machine<S> {
                     // mode can report `CALL` as hot while leaving `ip` and
                     // the operand stack untouched.
                     let ip_at_peek = ip;
-                    match dispatch::run_hot_streak(
-                        &mut self.stack,
-                        &mut sp,
-                        &mut ip,
+                    match dispatch::run_hot_streak(dispatch::RunHotStreakArgs {
+                        stack: &mut self.stack,
+                        sp: &mut sp,
+                        ip: &mut ip,
                         code,
                         constants,
-                        &mut self.heap,
-                        &mut self.frames,
-                        &mut self.frame_pins,
-                        &mut self.dense_obj_addr,
-                        &mut self.dense_obj,
+                        heap: &mut self.heap,
+                        frames: &mut self.frames,
+                        frame_pins: &mut self.frame_pins,
+                        dense_obj_addr: &mut self.dense_obj_addr,
+                        dense_obj: &mut self.dense_obj,
                         stack_cap,
-                        dispatch_mode,
-                    ) {
+                        mode: dispatch_mode,
+                    }) {
                         Some(dispatch::HotStop::Panic(msg)) => {
                             return self.runtime_panic(msg, ip.saturating_sub(1));
                         }
@@ -3264,17 +3261,17 @@ impl<const S: usize> Machine<S> {
                     then_hot_streak!();
                 }
                 Instruction::DenseIndex | Instruction::DenseIndexJmpf => {
-                    if dispatch::dense_index(
-                        &mut self.stack,
+                    if dispatch::dense_index(dispatch::DenseIndexArgs {
+                        stack: &mut self.stack,
                         sp,
                         opcode,
-                        &self.heap,
-                        self.frames.len(),
-                        &mut self.frame_pins,
-                        &mut self.dense_obj_addr,
-                        &mut self.dense_obj,
+                        heap: &self.heap,
+                        frames_len: self.frames.len(),
+                        frame_pins: &mut self.frame_pins,
+                        dense_obj_addr: &mut self.dense_obj_addr,
+                        dense_obj: &mut self.dense_obj,
                         stack_cap,
-                    )
+                    })
                     .is_err()
                     {
                         return self.runtime_panic("index out of bounds", ip.saturating_sub(1));
@@ -3298,17 +3295,17 @@ impl<const S: usize> Machine<S> {
                     then_hot_streak!();
                 }
                 Instruction::DenseStoreIndex => {
-                    match dispatch::dense_store_index(
-                        &mut self.stack,
+                    match dispatch::dense_store_index(dispatch::DenseStoreIndexArgs {
+                        stack: &mut self.stack,
                         sp,
                         opcode,
-                        &self.heap,
-                        self.frames.len(),
-                        &mut self.frame_pins,
-                        &mut self.dense_obj_addr,
-                        &mut self.dense_obj,
+                        heap: &self.heap,
+                        frames_len: self.frames.len(),
+                        frame_pins: &mut self.frame_pins,
+                        dense_obj_addr: &mut self.dense_obj_addr,
+                        dense_obj: &mut self.dense_obj,
                         stack_cap,
-                    ) {
+                    }) {
                         Ok(()) => {}
                         Err(dispatch::DenseFail::IndexOob) => {
                             return self.runtime_panic("index out of bounds", ip.saturating_sub(1));

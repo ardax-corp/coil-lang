@@ -98,9 +98,9 @@ pub fn zip_div_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
 pub fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
     let mut s = 0.0;
     for _ in 0..n {
-        s = s + a * x;
-        s = s + y;
-        x = x + dx;
+        s += a * x;
+        s += y;
+        x += dx;
     }
     s
 }
@@ -184,7 +184,7 @@ pub fn zip_i64_op(kind: u8, a: &[i64], b: &[i64], out: &mut [i64], byte_width: b
             14 => i64::from(x != 0 && y == 0),
             _ => 0,
         };
-        if byte_width && matches!(kind, 8 | 9 | 10 | 11 | 12) {
+        if byte_width && matches!(kind, 8..=12) {
             v &= 0xFF;
         }
         out[i] = v;

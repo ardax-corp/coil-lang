@@ -8203,7 +8203,7 @@ fn main() {
 #[test]
 fn s2b_maps_survive_archive_load_and_collect() {
     use common::{ARCHIVE_VERSION, ArchivedProgram, decode_archived_program};
-    use machine::wire_thread_program_with_maps;
+    use machine::{WireThreadProgramWithMapsArgs, wire_thread_program_with_maps};
     use rkyv::rancor::Error;
 
     let src = r#"
@@ -8256,16 +8256,16 @@ fn main() {
     machine.with_output(shared.clone());
     pipeline.wire_vm_ffi(&mut machine, None);
     pipeline.wire_host_natives(&mut machine);
-    wire_thread_program_with_maps(
-        &mut machine,
-        &loaded.bytecode,
-        &loaded.constants,
-        &loaded.strings,
-        loaded.static_slot_count,
-        loaded.debug_bundle(),
-        loaded.operand_stack_slots,
-        loaded.stack_maps.clone(),
-    );
+    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
+        machine: &mut machine,
+        bytecode: &loaded.bytecode,
+        constants: &loaded.constants,
+        strings: &loaded.strings,
+        static_slot_count: loaded.static_slot_count,
+        debug: loaded.debug_bundle(),
+        operand_stack_slots: loaded.operand_stack_slots,
+        stack_maps: loaded.stack_maps.clone(),
+    });
     machine.set_program_debug(loaded.debug_bundle());
     machine.run_raw(
         &loaded.bytecode,

@@ -178,6 +178,29 @@ struct Scan<'a> {
     out: LoopParSites,
 }
 
+struct FinishCountedArgs<'a> {
+    body: &'a Output<'a>,
+    index: String,
+    index_expr_ptr: usize,
+    begin: i64,
+    end: i64,
+    begin_local: Option<String>,
+    end_local: Option<String>,
+    end_bias: i64,
+    consts: &'a ConstLocals,
+    ints: &'a HashSet<String>,
+    implicit_step: bool,
+}
+
+struct LoopScan<'a> {
+    index: &'a str,
+    acc: &'a str,
+    consts: &'a ConstLocals,
+    ints: &'a HashSet<String>,
+    captures: &'a mut BTreeSet<(String, i64)>,
+    live: &'a mut BTreeSet<String>,
+}
+
 impl Scan<'_> {
     /// Statement list: each item may bind or invalidate a const local for the
     /// statements that follow it. `ints` is every name still known to be an int.
@@ -304,7 +327,7 @@ impl Scan<'_> {
         } else {
             (end_const, 0)
         };
-        self.finish_counted_site(
+        self.finish_counted_site(FinishCountedArgs {
             body,
             index,
             index_expr_ptr,
@@ -315,8 +338,8 @@ impl Scan<'_> {
             end_bias,
             consts,
             ints,
-            false,
-        )
+            implicit_step: false,
+        })
     }
 
     /// Match `for x in START..END` / `..=`, or `for x in r` when `r` is a
@@ -333,10 +356,10 @@ impl Scan<'_> {
         let binding = peel(binding);
         let index = ident_name(binding)?;
         let (begin, end, begin_local, end_local, end_bias) = counted_range(iterable, consts, ints)?;
-        self.finish_counted_site(
+        self.finish_counted_site(FinishCountedArgs {
             body,
-            index.to_string(),
-            std::ptr::from_ref(binding) as *const Output<'_> as usize,
+            index: index.to_string(),
+            index_expr_ptr: std::ptr::from_ref(binding) as *const Output<'_> as usize,
             begin,
             end,
             begin_local,
@@ -344,24 +367,24 @@ impl Scan<'_> {
             end_bias,
             consts,
             ints,
-            true,
-        )
+            implicit_step: true,
+        })
     }
 
-    fn finish_counted_site(
-        &self,
-        body: &Output<'_>,
-        index: String,
-        index_expr_ptr: usize,
-        begin: i64,
-        end: i64,
-        begin_local: Option<String>,
-        end_local: Option<String>,
-        end_bias: i64,
-        consts: &ConstLocals,
-        ints: &HashSet<String>,
-        implicit_step: bool,
-    ) -> Option<LoopParSite> {
+    fn finish_counted_site(&self, args: FinishCountedArgs<'_>) -> Option<LoopParSite> {
+        let FinishCountedArgs {
+            body,
+            index,
+            index_expr_ptr,
+            begin,
+            end,
+            begin_local,
+            end_local,
+            end_bias,
+            consts,
+            ints,
+            implicit_step,
+        } = args;
         let dynamic = begin_local.is_some() || end_local.is_some();
         let forms = classify_body(body, &index, true)?;
         let mut reduces: Vec<(&str, LoopReduceOp, &Output<'_>)> = Vec::new();
@@ -399,16 +422,15 @@ impl Scan<'_> {
         let mut locals = HashSet::new();
         let mut captures = BTreeSet::new();
         let mut live = BTreeSet::new();
-        if !self.forms_independent(
-            &forms,
-            &index,
+        let mut scan = LoopScan {
+            index: &index,
             acc,
-            &mut locals,
             consts,
             ints,
-            &mut captures,
-            &mut live,
-        ) {
+            captures: &mut captures,
+            live: &mut live,
+        };
+        if !self.forms_independent(&forms, &mut locals, &mut scan) {
             return None;
         }
         // The bound locals are worker arguments already (lo/hi), not body captures.
@@ -447,27 +469,24 @@ impl Scan<'_> {
     fn forms_independent(
         &self,
         forms: &[StmtForm<'_>],
-        index: &str,
-        acc: &str,
         locals: &mut HashSet<String>,
-        consts: &ConstLocals,
-        ints: &HashSet<String>,
-        captures: &mut BTreeSet<(String, i64)>,
-        live: &mut BTreeSet<String>,
+        scan: &mut LoopScan<'_>,
     ) -> bool {
+        let index = scan.index;
+        let acc = scan.acc;
         for form in forms {
             match form {
                 StmtForm::Local { name, init } => {
                     if *name == index
                         || *name == acc
-                        || !self.independent(init, index, acc, locals, consts, ints, captures, live)
+                        || !self.independent(init, locals, scan)
                     {
                         return false;
                     }
                     locals.insert((*name).to_string());
                 }
                 StmtForm::Reduce { expr, .. } => {
-                    if !self.independent(expr, index, acc, locals, consts, ints, captures, live) {
+                    if !self.independent(expr, locals, scan) {
                         return false;
                     }
                 }
@@ -476,14 +495,12 @@ impl Scan<'_> {
                     for arm in arms {
                         if let Some(cond) = arm.cond
                             && !self
-                                .independent(cond, index, acc, locals, consts, ints, captures, live)
+                                .independent(cond, locals, scan)
                         {
                             return false;
                         }
                         let mut inner = locals.clone();
-                        if !self.forms_independent(
-                            &arm.body, index, acc, &mut inner, consts, ints, captures, live,
-                        ) {
+                        if !self.forms_independent(&arm.body, &mut inner, scan) {
                             return false;
                         }
                     }
@@ -503,21 +520,16 @@ impl Scan<'_> {
     fn independent(
         &self,
         expr: &Output<'_>,
-        index: &str,
-        acc: &str,
         locals: &HashSet<String>,
-        consts: &ConstLocals,
-        ints: &HashSet<String>,
-        captures: &mut BTreeSet<(String, i64)>,
-        live: &mut BTreeSet<String>,
+        scan: &mut LoopScan<'_>,
     ) -> bool {
+        let index = scan.index;
+        let acc = scan.acc;
+        let consts = scan.consts;
+        let ints = scan.ints;
         let expr = peel(expr);
-        let both = |a: &Output<'_>,
-                    b: &Output<'_>,
-                    captures: &mut BTreeSet<(String, i64)>,
-                    live: &mut BTreeSet<String>| {
-            self.independent(a, index, acc, locals, consts, ints, captures, live)
-                && self.independent(b, index, acc, locals, consts, ints, captures, live)
+        let both = |a: &Output<'_>, b: &Output<'_>, scan: &mut LoopScan<'_>| {
+            self.independent(a, locals, scan) && self.independent(b, locals, scan)
         };
         match expr.1.as_ref() {
             Expression::Integer(_) => true,
@@ -530,11 +542,11 @@ impl Scan<'_> {
                 }
                 match consts.get(*n) {
                     Some(ConstVal::Int(k)) => {
-                        captures.insert(((*n).to_string(), *k));
+                        scan.captures.insert(((*n).to_string(), *k));
                         true
                     }
                     _ if ints.contains(*n) => {
-                        live.insert((*n).to_string());
+                        scan.live.insert((*n).to_string());
                         true
                     }
                     _ => false,
@@ -544,7 +556,7 @@ impl Scan<'_> {
             | Expression::Positive(a)
             | Expression::Not(a)
             | Expression::LogicalNot(a) => {
-                self.independent(a, index, acc, locals, consts, ints, captures, live)
+                self.independent(a, locals, scan)
             }
             Expression::Add(a, b)
             | Expression::Sub(a, b)
@@ -561,9 +573,9 @@ impl Scan<'_> {
             | Expression::Leq(a, b)
             | Expression::Geq(a, b)
             | Expression::And(a, b)
-            | Expression::Or(a, b) => both(a, b, captures, live),
+            | Expression::Or(a, b) => both(a, b, scan),
             Expression::Div(a, b) | Expression::Mod(a, b) => {
-                int_literal(b).is_some_and(|k| k != 0) && both(a, b, captures, live)
+                int_literal(b).is_some_and(|k| k != 0) && both(a, b, scan)
             }
             Expression::Call {
                 name,
@@ -575,7 +587,7 @@ impl Scan<'_> {
                 );
                 pure_callee
                     && args.iter().all(|a| {
-                        self.independent(a, index, acc, locals, consts, ints, captures, live)
+                        self.independent(a, locals, scan)
                     })
             }
             _ => false,
@@ -776,11 +788,13 @@ fn counted_bound(
 /// Integer range on a for-in iterable, half-open when both ends are const.
 ///
 /// Returns `(begin, end, begin local, end local, end bias)`.
+type CountedRange = (i64, i64, Option<String>, Option<String>, i64);
+
 fn counted_range(
     iterable: &Output<'_>,
     consts: &ConstLocals,
     ints: &HashSet<String>,
-) -> Option<(i64, i64, Option<String>, Option<String>, i64)> {
+) -> Option<CountedRange> {
     if let Some(ConstVal::Range { begin, end }) = const_val(iterable, consts) {
         return Some((begin, end, None, None, 0));
     }
@@ -1104,7 +1118,7 @@ mod tests {
         let pure = analyze_pure_fns(&ast);
         let mut sites: Vec<LoopParSite> =
             analyze_loop_par_sites(&ast, &pure).into_values().collect();
-        sites.sort_by(|a, b| a.begin.cmp(&b.begin));
+        sites.sort_by_key(|a| a.begin);
         sites
     }
 

@@ -24,9 +24,11 @@ use crate::vm::Machine;
 
 fn par_stats_enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| match std::env::var("COIL_PAR_STATS") {
-        Ok(v) if matches!(v.as_str(), "1" | "true" | "on" | "yes") => true,
-        _ => false,
+    *ON.get_or_init(|| {
+        matches!(
+            std::env::var("COIL_PAR_STATS"),
+            Ok(v) if matches!(v.as_str(), "1" | "true" | "on" | "yes")
+        )
     })
 }
 
@@ -195,7 +197,7 @@ impl Reactor {
         self.inflight.fetch_add(1, Ordering::SeqCst);
         match try_push_local(self, job) {
             Ok(()) => {}
-            Err(job) => self.injector.push(job),
+            Err(job) => self.injector.push(*job),
         }
         self.notify();
     }
@@ -326,7 +328,8 @@ fn reactor_id(reactor: &Reactor) -> *const Reactor {
 }
 
 /// Push onto this thread's local deque only when it belongs to `reactor`.
-fn try_push_local(reactor: &Reactor, job: Job) -> Result<(), Job> {
+/// The missed job is boxed so the `Err` variant stays small.
+fn try_push_local(reactor: &Reactor, job: Job) -> Result<(), Box<Job>> {
     let want = reactor_id(reactor);
     LOCAL_WORKER.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -335,7 +338,7 @@ fn try_push_local(reactor: &Reactor, job: Job) -> Result<(), Job> {
                 local.worker.push(job);
                 Ok(())
             }
-            _ => Err(job),
+            _ => Err(Box::new(job)),
         }
     })
 }
@@ -440,13 +443,12 @@ fn park_idle_worker(reactor: &Reactor) -> Option<Job> {
     if reactor.shutdown.load(Ordering::SeqCst) {
         return None;
     }
-    if reactor.inflight() > 0 {
-        if let Some(job) =
+    if reactor.inflight() > 0
+        && let Some(job) =
             with_owned_local_worker(reactor, |local_ref| reactor.find_job(local_ref)).flatten()
         {
             return Some(job);
         }
-    }
     reactor.idle_waits.fetch_add(1, Ordering::Relaxed);
     match reactor.sleep_cvar.wait(g) {
         Ok(guard) => drop(guard),

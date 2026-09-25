@@ -12,14 +12,16 @@ use super::gvn::gvn_cfg;
 use super::op::IlOp;
 
 /// CFG + per-block slot φ and per-op produced VNs.
-#[allow(dead_code)]
 #[derive(Clone, Debug)]
 pub struct SsaForm {
     /// Exclusive-end ranges of each basic block.
+    #[allow(dead_code)] // gvn unit test `build_ssa_records_phi_on_disagreeing_join`
     pub blocks: Vec<(usize, usize)>,
     /// Predecessors of each block.
+    #[allow(dead_code)] // gvn unit test `build_ssa_records_phi_on_disagreeing_join`
     pub preds: Vec<Vec<usize>>,
     /// Slot → VN on entry to each block (after φ).
+    #[allow(dead_code)] // gvn unit test `build_ssa_records_phi_on_disagreeing_join`
     pub slot_in: Vec<HashMap<u32, u32>>,
     /// VN produced by the op at this index, if it pushes a numbered value.
     pub produced: Vec<Option<u32>>,

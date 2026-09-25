@@ -347,8 +347,8 @@ fn rpo(func: &MirFunc) -> Vec<BlockId> {
     }
     dfs(func, func.entry, &mut seen, &mut post);
     post.reverse();
-    for i in 0..n {
-        if !seen[i] {
+    for (i, seen_i) in seen.iter().enumerate().take(n) {
+        if !seen_i {
             post.push(BlockId(i as u32));
         }
     }

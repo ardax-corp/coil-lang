@@ -104,11 +104,10 @@ impl DenseAbi {
         slot_ty: &HashMap<u32, MirTy>,
     ) -> Option<Self> {
         let mut abi = Self::from_func(func)?;
-        if abi.params.is_empty() {
-            if let Some(params) = live_in_params(ops, slot_ty) {
+        if abi.params.is_empty()
+            && let Some(params) = live_in_params(ops, slot_ty) {
                 abi.params = params;
             }
-        }
         Some(abi)
     }
 }

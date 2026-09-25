@@ -1,4 +1,8 @@
-use std::{collections::HashMap, ops::Range, path::PathBuf};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    path::{Path, PathBuf},
+};
 
 use parser::ast::{EnumConstructPayload, EnumVariantPayload, Expression, Output};
 
@@ -68,7 +72,7 @@ impl SymbolIndex {
         self.references.values().flatten()
     }
 
-    fn collect_definitions(&mut self, file: &PathBuf, source: &str, expression: &Output<'_>) {
+    fn collect_definitions(&mut self, file: &Path, source: &str, expression: &Output<'_>) {
         let Expression::Program(items) = expression.1.as_ref() else {
             return;
         };
@@ -95,7 +99,7 @@ impl SymbolIndex {
             let definition = SymbolDef {
                 name: name.to_owned(),
                 kind,
-                file: file.clone(),
+                file: file.to_path_buf(),
                 range,
                 name_range,
                 def_id: None,
@@ -418,13 +422,11 @@ impl SymbolIndex {
 
 /// Name span inside `item`, without a whole-file `source.find(name)`.
 fn name_range_in(source: &str, name: &str, item: &Range<usize>, prefer_last: bool) -> Range<usize> {
-    if let Some(r) = slice_offset_in_source(source, name) {
-        if r.start >= item.start && r.end <= item.end {
-            if !prefer_last {
+    if let Some(r) = slice_offset_in_source(source, name)
+        && r.start >= item.start && r.end <= item.end
+            && !prefer_last {
                 return r;
             }
-        }
-    }
     let Some(slice) = source.get(item.clone()) else {
         return item.start..item.start;
     };

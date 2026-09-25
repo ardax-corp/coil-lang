@@ -1,10 +1,12 @@
 //! AVX2 (+ optional FMA) kernels — 4-wide `f64` / `i64`.
 
-#![allow(clippy::missing_safety_doc)]
-
 #[cfg(target_arch = "x86_64")]
 use std::arch::x86_64::*;
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn dot_f64(a: &[f64], b: &[f64]) -> f64 {
     if is_x86_feature_detected!("fma") {
@@ -46,26 +48,46 @@ unsafe fn dot_f64_fma(a: &[f64], b: &[f64]) -> f64 {
     sum
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_add_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm256_add_pd(x, y), |x, y| x + y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_sub_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm256_sub_pd(x, y), |x, y| x - y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_mul_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm256_mul_pd(x, y), |x, y| x * y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_div_f64(a: &[f64], b: &[f64], out: &mut [f64]) {
     zip_binop_f64(a, b, out, |x, y| _mm256_div_pd(x, y), |x, y| x / y);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn scale_f64(a: &[f64], scalar: f64, out: &mut [f64]) {
     let n = a.len().min(out.len());
@@ -82,6 +104,10 @@ pub unsafe fn scale_f64(a: &[f64], scalar: f64, out: &mut [f64]) {
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_neg_f64(a: &[f64], out: &mut [f64]) {
     let n = a.len().min(out.len());
@@ -98,16 +124,28 @@ pub unsafe fn zip_neg_f64(a: &[f64], out: &mut [f64]) {
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_add_i64(a: &[i64], b: &[i64], out: &mut [i64]) {
     zip_binop_i64(a, b, out, |x, y| _mm256_add_epi64(x, y), i64::wrapping_add);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_sub_i64(a: &[i64], b: &[i64], out: &mut [i64]) {
     zip_binop_i64(a, b, out, |x, y| _mm256_sub_epi64(x, y), i64::wrapping_sub);
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_neg_i64(a: &[i64], out: &mut [i64]) {
     let n = a.len().min(out.len());
@@ -127,6 +165,10 @@ pub unsafe fn zip_neg_i64(a: &[i64], out: &mut [i64]) {
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn matmul_f64(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize, n: usize) {
     c.fill(0.0);
@@ -151,6 +193,10 @@ pub unsafe fn matmul_f64(a: &[f64], b: &[f64], c: &mut [f64], m: usize, k: usize
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn matmul_i64(a: &[i64], b: &[i64], c: &mut [i64], m: usize, k: usize, n: usize) {
     // AVX2 lacks a general `mullo` for 64-bit integers; keep scalar products.
@@ -263,6 +309,10 @@ unsafe fn hsum_pd(v: __m256d) -> f64 {
 }
 
 /// 4-wide `a*x` then left-fold `(s + ax) + y` (no FMA).
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> f64 {
     let mut s = 0.0;
@@ -278,26 +328,30 @@ pub unsafe fn axpy_reduce_f64(n: usize, a: f64, mut x: f64, dx: f64, y: f64) -> 
         _mm256_storeu_pd(ax.as_mut_ptr(), _mm256_mul_pd(va, vx));
         // set_pd is high-to-low: ax[0]=a*x0 … after storeu matches memory order of set_pd
         // `_mm256_set_pd(e3,e2,e1,e0)` → memory [e0,e1,e2,e3]
-        s = s + ax[0];
-        s = s + y;
-        s = s + ax[1];
-        s = s + y;
-        s = s + ax[2];
-        s = s + y;
-        s = s + ax[3];
-        s = s + y;
+        s += ax[0];
+        s += y;
+        s += ax[1];
+        s += y;
+        s += ax[2];
+        s += y;
+        s += ax[3];
+        s += y;
         x = x3 + dx;
         i += 4;
     }
     while i < n {
-        s = s + a * x;
-        s = s + y;
-        x = x + dx;
+        s += a * x;
+        s += y;
+        x += dx;
         i += 1;
     }
     s
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_i64_op(kind: u8, a: &[i64], b: &[i64], out: &mut [i64], byte_width: bool) {
     // Arithmetic `>>` has no AVX2 variable form (`srav_epi64` is AVX-512).
@@ -349,7 +403,7 @@ pub unsafe fn zip_i64_op(kind: u8, a: &[i64], b: &[i64], out: &mut [i64], byte_w
             }
             _ => zero,
         };
-        if byte_width && matches!(kind, 8 | 9 | 10 | 11) {
+        if byte_width && matches!(kind, 8..=11) {
             r = _mm256_and_si256(r, byte_mask);
         }
         _mm256_storeu_si256(out.as_mut_ptr().add(i) as *mut __m256i, r);
@@ -360,6 +414,10 @@ pub unsafe fn zip_i64_op(kind: u8, a: &[i64], b: &[i64], out: &mut [i64], byte_w
     }
 }
 
+/// # Safety
+///
+/// The current CPU must support this function's target feature.
+/// Every slice index this kernel reads or writes must be in range.
 #[target_feature(enable = "avx2")]
 pub unsafe fn zip_i64_not(a: &[i64], out: &mut [i64], byte_width: bool) {
     let n = a.len().min(out.len());

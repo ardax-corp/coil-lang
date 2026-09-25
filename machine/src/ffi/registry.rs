@@ -8,6 +8,9 @@ use crate::memory::{FfiType, Heap};
 
 use super::signature::{FfiError, FfiSignature};
 
+type HostClosure =
+    Arc<dyn Fn(&mut Heap, &[Value]) -> Result<Option<Value>, FfiError> + Send + Sync>;
+
 /// Discriminant for HostInvoke specials. Checked instead of `name().to_string()`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum HostOp {
@@ -31,7 +34,7 @@ pub struct HostClosureFn {
     /// When set, accept `min_args..=max_args` instead of exact `signature.arity()`.
     arity_range: Option<(usize, usize)>,
     host_op: HostOp,
-    func: Arc<dyn Fn(&mut Heap, &[Value]) -> Result<Option<Value>, FfiError> + Send + Sync>,
+    func: HostClosure,
 }
 
 impl HostClosureFn {

@@ -27,6 +27,9 @@ pub struct Message {
 }
 
 impl Message {
+    /// Built by the protocol unit test `request_roundtrip_preserves_arguments`.
+    /// The adapter answers requests; it does not send them.
+    #[allow(dead_code)]
     pub fn request(seq: i64, command: &str, arguments: Option<Value>) -> Self {
         Self {
             seq,

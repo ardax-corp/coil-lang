@@ -33,8 +33,7 @@ pub fn operand_slots_for_frames(max_frames: u32) -> u32 {
 pub fn operand_slots_for_frame_size(max_frames: u32, frame_slots: u32) -> u32 {
     let frame = frame_slots.max(1);
     let need = max_frames.saturating_mul(frame).saturating_add(frame);
-    need.max(DEFAULT_OPERAND_STACK_SLOTS)
-        .min(MAX_OPERAND_STACK_SLOTS)
+    need.clamp(DEFAULT_OPERAND_STACK_SLOTS, MAX_OPERAND_STACK_SLOTS)
 }
 
 /// Grow a typecheck-time stack bound when dense emit used a fatter frame.
@@ -53,7 +52,7 @@ pub fn rescale_operand_slots_for_dense_seek(current: u32, seek: u32) -> u32 {
 ///
 /// Recorded on [`StackBoundReport`]; frame sizing uses `operand_slots_needed` only.
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // per-fn rows are test/diagnostic; not wired into frames
+#[allow(dead_code)] // rows are read by this module's stack-bound unit tests; frames do not consult them
 pub struct FnStackBound {
     pub fn_name: String,
     /// Maximum simultaneous frames of this function (and its SCC peers).
@@ -314,7 +313,7 @@ fn measure_depth(n: i64, base: i64, step: MeasureStep) -> u32 {
             let mut depth = 1u32;
             let mut cur = n;
             while cur > base {
-                cur = cur / 2;
+                cur /= 2;
                 depth += 1;
                 if depth > 10_000 {
                     break;
@@ -341,14 +340,13 @@ fn parse_max_depth_attr(
         AttrArgs::KeyValues(kvs) => {
             let mut found = None;
             for (k, v) in kvs {
-                if *k == "n" || *k == "depth" {
-                    if let AttrLit::Int(i) = v
+                if (*k == "n" || *k == "depth")
+                    && let AttrLit::Int(i) = v
                         && *i > 0
                         && *i <= u32::MAX as i64
                     {
                         found = Some(*i as u32);
                     }
-                }
             }
             found
         }
@@ -791,7 +789,7 @@ fn propagate_const_args(ast: &Output<'_>, recursive: &HashSet<String>) -> FnCons
                 continue;
             }
             let mut slots = vec![None; arity];
-            for i in 0..arity {
+            for (i, slot) in slots.iter_mut().enumerate() {
                 let mut agreed: Option<Option<i64>> = None;
                 for site in sites {
                     let v = site.get(i).copied().flatten();
@@ -805,7 +803,7 @@ fn propagate_const_args(ast: &Output<'_>, recursive: &HashSet<String>) -> FnCons
                     }
                 }
                 if let Some(Some(c)) = agreed {
-                    slots[i] = Some(c);
+                    *slot = Some(c);
                 }
             }
             if slots.iter().any(|s| s.is_some()) {
@@ -875,7 +873,7 @@ fn gather_call_site_args(
 
 fn walk_gather_calls(
     ast: &Output<'_>,
-    inside: Option<&str>,
+    _inside: Option<&str>,
     wrapper_consts: &FnConstParams,
     env: &mut HashMap<String, ConstValue>,
     out: &mut HashMap<String, Vec<Vec<Option<i64>>>>,
@@ -883,12 +881,12 @@ fn walk_gather_calls(
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::If(items) => {
             for item in items {
-                walk_gather_calls(item, inside, wrapper_consts, env, out);
+                walk_gather_calls(item, _inside, wrapper_consts, env, out);
             }
         }
         Expression::Fragment(items) => {
             if let Some((name, init)) = let_const_binding(items) {
-                walk_gather_calls(init, inside, wrapper_consts, env, out);
+                walk_gather_calls(init, _inside, wrapper_consts, env, out);
                 match eval_expr(init, env) {
                     Some(v) => {
                         env.insert(name.to_string(), v);
@@ -899,7 +897,7 @@ fn walk_gather_calls(
                 }
             } else {
                 for item in items {
-                    walk_gather_calls(item, inside, wrapper_consts, env, out);
+                    walk_gather_calls(item, _inside, wrapper_consts, env, out);
                 }
             }
         }
@@ -911,25 +909,25 @@ fn walk_gather_calls(
         | Expression::Return(body)
         | Expression::ImplicitReturn(body)
         | Expression::Try(body) => {
-            walk_gather_calls(body, inside, wrapper_consts, env, out);
+            walk_gather_calls(body, _inside, wrapper_consts, env, out);
         }
         Expression::Branch(cond, body) => {
             if let Some(c) = cond {
-                walk_gather_calls(c, inside, wrapper_consts, env, out);
+                walk_gather_calls(c, _inside, wrapper_consts, env, out);
             }
-            walk_gather_calls(body, inside, wrapper_consts, env, out);
+            walk_gather_calls(body, _inside, wrapper_consts, env, out);
         }
         Expression::Assignment(lhs, rhs) => {
-            walk_gather_calls(rhs, inside, wrapper_consts, env, out);
+            walk_gather_calls(rhs, _inside, wrapper_consts, env, out);
             kill_binding(lhs, env);
         }
         Expression::CompoundAssign(lhs, _, rhs) => {
-            walk_gather_calls(lhs, inside, wrapper_consts, env, out);
-            walk_gather_calls(rhs, inside, wrapper_consts, env, out);
+            walk_gather_calls(lhs, _inside, wrapper_consts, env, out);
+            walk_gather_calls(rhs, _inside, wrapper_consts, env, out);
             kill_binding(lhs, env);
         }
         Expression::Adjust { target, .. } => {
-            walk_gather_calls(target, inside, wrapper_consts, env, out);
+            walk_gather_calls(target, _inside, wrapper_consts, env, out);
             kill_binding(target, env);
         }
         Expression::Add(a, b)
@@ -944,11 +942,11 @@ fn walk_gather_calls(
         | Expression::Leq(a, b)
         | Expression::Geq(a, b)
         | Expression::Coalesce(a, b) => {
-            walk_gather_calls(a, inside, wrapper_consts, env, out);
-            walk_gather_calls(b, inside, wrapper_consts, env, out);
+            walk_gather_calls(a, _inside, wrapper_consts, env, out);
+            walk_gather_calls(b, _inside, wrapper_consts, env, out);
         }
         Expression::Call { name, args } => {
-            walk_gather_calls(name, inside, wrapper_consts, env, out);
+            walk_gather_calls(name, _inside, wrapper_consts, env, out);
             let callee = match peel(name).1.as_ref() {
                 Expression::Identifier(n) => Some(*n),
                 _ => None,
@@ -956,7 +954,7 @@ fn walk_gather_calls(
             let mut slot_vals = Vec::new();
             if let Some(args) = args {
                 for a in args {
-                    walk_gather_calls(a, inside, wrapper_consts, env, out);
+                    walk_gather_calls(a, _inside, wrapper_consts, env, out);
                     slot_vals.push(eval_expr(a, env).and_then(|v| match v {
                         ConstValue::Int(i) => Some(i),
                         _ => None,
@@ -985,12 +983,12 @@ fn walk_gather_calls(
             walk_gather_calls(body, None, wrapper_consts, &mut inner, out);
         }
         Expression::Lambda { body, .. } | Expression::Defer { body, .. } => {
-            walk_gather_calls(body, inside, wrapper_consts, env, out);
+            walk_gather_calls(body, _inside, wrapper_consts, env, out);
         }
         Expression::Match { scrutinee, arms } => {
-            walk_gather_calls(scrutinee, inside, wrapper_consts, env, out);
+            walk_gather_calls(scrutinee, _inside, wrapper_consts, env, out);
             for arm in arms {
-                walk_gather_calls(&arm.body, inside, wrapper_consts, env, out);
+                walk_gather_calls(&arm.body, _inside, wrapper_consts, env, out);
             }
         }
         _ => {}
@@ -1031,8 +1029,7 @@ fn collect_rec_entry_sites(
         shapes,
         wrapper_consts,
         &mut env,
-        consts,
-        dynamic,
+        (consts, dynamic),
     );
 }
 
@@ -1043,9 +1040,9 @@ fn walk_entry_sites(
     shapes: &HashMap<String, RecMeasureShape>,
     wrapper_consts: &FnConstParams,
     env: &mut HashMap<String, ConstValue>,
-    consts: &mut HashMap<String, BTreeSet<i64>>,
-    dynamic: &mut HashSet<String>,
+    accum: (&mut HashMap<String, BTreeSet<i64>>, &mut HashSet<String>),
 ) {
+    let (consts, dynamic) = accum;
     match ast.1.as_ref() {
         Expression::Program(items) | Expression::Block(items) | Expression::If(items) => {
             for item in items {
@@ -1056,8 +1053,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
         }
@@ -1070,8 +1066,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
                 match eval_expr(init, env) {
                     Some(v) => {
@@ -1090,8 +1085,7 @@ fn walk_entry_sites(
                         shapes,
                         wrapper_consts,
                         env,
-                        consts,
-                        dynamic,
+                        (consts, dynamic),
                     );
                 }
             }
@@ -1122,8 +1116,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Add(a, b)
@@ -1153,8 +1146,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             walk_entry_sites(
                 b,
@@ -1163,8 +1155,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Assignment(lhs, rhs) => {
@@ -1175,8 +1166,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             kill_binding(lhs, env);
         }
@@ -1188,8 +1178,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             walk_entry_sites(
                 rhs,
@@ -1198,8 +1187,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             kill_binding(lhs, env);
         }
@@ -1211,8 +1199,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             kill_binding(target, env);
         }
@@ -1224,8 +1211,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             let callee = match peel(name).1.as_ref() {
                 Expression::Identifier(n) => Some(*n),
@@ -1240,8 +1226,7 @@ fn walk_entry_sites(
                         shapes,
                         wrapper_consts,
                         env,
-                        consts,
-                        dynamic,
+                        (consts, dynamic),
                     );
                 }
             }
@@ -1281,8 +1266,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
             walk_entry_sites(
@@ -1292,8 +1276,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Match { scrutinee, arms } => {
@@ -1304,8 +1287,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             for arm in arms {
                 walk_entry_sites(
@@ -1315,8 +1297,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
         }
@@ -1334,8 +1315,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
             walk_entry_sites(
@@ -1345,8 +1325,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
             walk_entry_sites(
                 body,
@@ -1355,8 +1334,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Function {
@@ -1376,8 +1354,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 &mut inner,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Lambda { body, .. } | Expression::Defer { body, .. } => {
@@ -1388,8 +1365,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::TestCase { body, .. } => {
@@ -1401,8 +1377,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 &mut inner,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         Expression::Implementation { methods, .. } => {
@@ -1414,8 +1389,7 @@ fn walk_entry_sites(
                     shapes,
                     wrapper_consts,
                     env,
-                    consts,
-                    dynamic,
+                    (consts, dynamic),
                 );
             }
         }
@@ -1429,8 +1403,7 @@ fn walk_entry_sites(
                 shapes,
                 wrapper_consts,
                 env,
-                consts,
-                dynamic,
+                (consts, dynamic),
             );
         }
         _ => {}

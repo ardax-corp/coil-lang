@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::process::exit;
 
 use parser::format_source;
-use reporting::{Message, ReportConfig, ReportFormat, SourceMap, create_sink};
+use reporting::{Message, ReportConfig, SourceMap, create_sink};
 
 struct FmtArgs {
     paths: Vec<PathBuf>,
@@ -86,10 +86,7 @@ fn collect_hy_files(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
 }
 
 fn emit_parse_error(path: &Path, src: &str, message: &Message) {
-    let config = ReportConfig {
-        format: ReportFormat::Pretty,
-        ..ReportConfig::default()
-    };
+    let config = ReportConfig::default();
     let mut sink = create_sink(&config, SourceMap::new(), Box::new(std::io::stderr()));
     let file_id = sink.register_source(path, src);
     sink.emit(reporting::Diagnostic::from_message(message, file_id));

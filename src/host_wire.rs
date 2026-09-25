@@ -5,7 +5,8 @@ use std::path::Path;
 use common::Byte;
 use compiler::Pipeline;
 use machine::{
-    DloadGate, Machine, VmHostSpec, wire_thread_program_with_maps, wire_vm_host,
+    DloadGate, Machine, VmHostSpec, WireThreadProgramWithMapsArgs, wire_thread_program_with_maps,
+    wire_vm_host,
 };
 
 /// Fail-closed dload integrity for the coil binary (compiler `machine` dep is optional).
@@ -56,14 +57,14 @@ pub fn wire_pipeline_threads<const N: usize>(
     constants: &[u64],
     strings: &[String],
 ) {
-    wire_thread_program_with_maps(
+    wire_thread_program_with_maps(WireThreadProgramWithMapsArgs {
         machine,
         bytecode,
         constants,
         strings,
-        pipeline.static_slot_count(),
-        pipeline.program_debug(),
-        pipeline.operand_stack_slots(),
-        pipeline.stack_maps().to_vec(),
-    );
+        static_slot_count: pipeline.static_slot_count(),
+        debug: pipeline.program_debug(),
+        operand_stack_slots: pipeline.operand_stack_slots(),
+        stack_maps: pipeline.stack_maps().to_vec(),
+    });
 }

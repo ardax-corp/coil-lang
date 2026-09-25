@@ -14,6 +14,44 @@ env:
 # `[[bench]]` treat argv after `--` as their own CLI and abort the suite.
 
 jobs:
+  # Default Clippy on the same feature sets and target filters as the test
+  # matrix. Criterion benches stay out (`--lib --tests --bins`).
+  clippy:
+    name: clippy (${{ matrix.features.id }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - id: default
+            flags: ""
+          - id: no-default
+            flags: "--no-default-features"
+          - id: dissect
+            flags: "--features dissect"
+          - id: debugger
+            flags: "--features debugger"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libffi-dev build-essential
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: clippy-${{ matrix.features.id }}
+
+      - name: Clippy (${{ matrix.features.id }})
+        run: cargo clippy --workspace --lib --tests --bins ${{ matrix.features.flags }} -- -D warnings
+
   test:
     name: test (${{ matrix.os }}, ${{ matrix.features.id }})
     runs-on: ${{ matrix.os }}

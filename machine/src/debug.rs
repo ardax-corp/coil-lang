@@ -20,7 +20,9 @@ pub enum StopReason {
 
 /// Single-step / finish bookkeeping.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub enum StepMode {
+    #[default]
     None,
     /// Run one insn then stop before the next (`armed` flips after the first check).
     Stepi {
@@ -53,11 +55,6 @@ pub struct DebugController {
     skip_bp_pc: Option<usize>,
 }
 
-impl Default for StepMode {
-    fn default() -> Self {
-        Self::None
-    }
-}
 
 impl DebugController {
     pub fn new() -> Self {
