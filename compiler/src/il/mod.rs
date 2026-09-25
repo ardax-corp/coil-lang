@@ -21,7 +21,7 @@ mod gvn_ssa;
 mod licm;
 mod strength;
 mod lower;
-mod module;
+pub(crate) mod module;
 mod op;
 pub(crate) mod opt;
 mod pure_call;
