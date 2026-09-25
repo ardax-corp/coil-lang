@@ -62,7 +62,7 @@ Stack IL: symbolic labels until `finalize_bytecode` → single `il::lower` after
 ## Verification checklist
 
 ```bash
-cargo check --workspace          # lint gate (clippy has known Gc exception)
+cargo clippy --workspace --lib --tests --bins -- -D warnings   # lint gate; Gc::payload_mut allows mut_from_ref
 cargo test --workspace --lib --tests --bins   # required; includes */tests/* (skip Criterion benches)
 # Bare optional stack:
 #   cargo test --workspace --lib --tests --bins --no-default-features
