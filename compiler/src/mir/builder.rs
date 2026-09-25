@@ -47,6 +47,9 @@ pub struct MirBuilder {
     finished: bool,
     /// I6: type non-W4 HostInvoke as Value-word edges (barriers).
     pub allow_effects: bool,
+    /// MIR→LIR: type non-W4 HostInvoke as Value-word edges without the
+    /// map-lift shortcuts `allow_effects` enables in lowering.
+    pub allow_host_edges: bool,
     /// S2b: fill roots without SSA verify.
     pub skip_verify: bool,
     /// Loc of the IL op currently being lowered (C3 sparse DebugLoc).
@@ -67,6 +70,7 @@ impl MirBuilder {
             subst: HashMap::new(),
             finished: false,
             allow_effects: false,
+            allow_host_edges: false,
             skip_verify: false,
             pending_loc: DebugLoc::unknown(),
             match_seek: None,
@@ -309,7 +313,7 @@ impl MirBuilder {
         if !super::host_allow::dense_host_layout_ok(layout) {
             return Err(MirError::msg(format!("host {native_id} layout {layout}")));
         }
-        let spec = if self.allow_effects {
+        let spec = if self.allow_effects || self.allow_host_edges {
             super::host_allow::host_edge_spec(native_id)
         } else {
             super::host_allow::host_spec(native_id)
@@ -325,7 +329,8 @@ impl MirBuilder {
         }
         let args: Vec<ValueId> = args.into_iter().map(|v| self.resolve(v)).collect();
         for (i, (&a, &ty)) in args.iter().zip(spec.args).enumerate() {
-            if self.resolve_ty(a) != ty {
+            let actual = self.resolve_ty(a);
+            if !super::host_allow::host_arg_ok(native_id, ty, actual) {
                 return Err(MirError::msg(format!(
                     "host {} arg {i} is {} vs {ty}",
                     spec.name,

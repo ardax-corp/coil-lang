@@ -78,6 +78,8 @@ pub struct LowerHints {
     pub allow_index: bool,
     /// I6: type HostInvoke (clocks / IO / GC / FFI / Q9 R2 bytes) as SSA edges.
     pub allow_effects: bool,
+    /// MIR→LIR: generic host word edges only (see `MirBuilder::allow_host_edges`).
+    pub allow_host_edges: bool,
     /// I7: insert [`super::inst::MirInst::Deopt`] at stop / leave edges.
     /// Production specialize leaves this off; emit skips the markers.
     pub allow_deopt: bool,
@@ -105,6 +107,7 @@ impl Default for LowerHints {
             allow_alloc: false,
             allow_index: false,
             allow_effects: false,
+            allow_host_edges: false,
             allow_deopt: false,
             allow_string: false,
             skip_verify: false,
@@ -172,6 +175,7 @@ pub fn try_lower_numeric(ops: &[IlOp], hints: &LowerHints) -> Result<MirFunc, Lo
     let mut label_block: HashMap<Label, BlockId> = HashMap::new();
     let mut b = MirBuilder::new(hints.name.clone());
     b.allow_effects = hints.allow_effects;
+    b.allow_host_edges = hints.allow_host_edges;
     b.skip_verify = hints.skip_verify;
     for i in 0..hints.param_count {
         let ty = hints.slot(i);

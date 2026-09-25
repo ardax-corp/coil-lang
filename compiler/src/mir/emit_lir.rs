@@ -267,6 +267,12 @@ impl EmitPlan {
                     tree[dest.index()] = false;
                     tree[hi.index()] = false;
                 }
+                // Host calls have effects: emit them in program order and
+                // keep the result in a slot, never as an inline operand.
+                if let MirInst::HostInvoke { dest, .. } = inst {
+                    need_slot[dest.index()] = true;
+                    tree[dest.index()] = false;
+                }
             }
         }
         for block in &func.blocks {
@@ -776,10 +782,29 @@ fn emit_stored(
                 loc,
             });
         }
-        MirInst::HostInvoke { .. } => {
-            return Err(LowerError::Refused(
-                "MIR→LIR leafs do not emit HostInvoke (dense W4)".into(),
-            ));
+        MirInst::HostInvoke {
+            dest,
+            native_id,
+            layout,
+            args,
+        } => {
+            // Same stack form as fuse-IL: native id, args, HostInvoke.
+            out.push(IlOp::Const {
+                imm: i32::from(*native_id),
+                loc,
+            });
+            for a in args {
+                emit_stack(out, *a, func, plan, regs, pool, loc)?;
+            }
+            out.push(IlOp::HostInvoke {
+                arity: args.len() as u32,
+                layout: *layout,
+                loc,
+            });
+            out.push(IlOp::StorePop {
+                slot: u32::from(regs[dest.index()]),
+                loc,
+            });
         }
         MirInst::Call {
             dest,

@@ -501,6 +501,7 @@ pub fn try_lower_abi_body_side(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     hints.allow_string = ops.iter().any(super::string_barrier::is_string_il);
+    hints.allow_host_edges = true;
     let mut func = match try_lower_numeric(ops, &hints) {
         Ok(f) => f,
         Err(e) => return refuse(format!("lower: {e}")),

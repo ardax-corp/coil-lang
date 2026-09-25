@@ -382,7 +382,7 @@ impl MirFunc {
                     return Err(format!("{dest} host arity"));
                 }
                 for (i, (a, ty)) in args.iter().zip(spec.args.iter()).enumerate() {
-                    if self.ty(*a) != *ty {
+                    if !super::host_allow::host_arg_ok(*native_id, *ty, self.ty(*a)) {
                         return Err(format!("{dest} host arg {i} type"));
                     }
                 }

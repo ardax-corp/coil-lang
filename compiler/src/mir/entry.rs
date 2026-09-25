@@ -28,8 +28,6 @@ pub enum LirRefuse {
     /// I6: user `CALL` / `TailCall` / other `Entry` (LIR reconstruct wall;
     /// Q7 one-word self-`CALL` is dense + cost, not this refuse).
     Call,
-    /// I6: HostInvoke (dense reconstructs; LIR emit does not).
-    Host,
     /// Escaping / heap-backed field ops (LIR reconstruct wall; D1 maps
     /// bind; D2 dense-native reconstruct is the keep path).
     HeapField,
@@ -95,7 +93,6 @@ fn hard_refuse(ops: &[IlOp], maps_ok: bool) -> Option<LirRefuse> {
                 ..
             } => return Some(LirRefuse::Alloc),
             IlOp::Entry { .. } | IlOp::PrologueJmp { .. } => return Some(LirRefuse::Call),
-            IlOp::HostInvoke { .. } => return Some(LirRefuse::Host),
             IlOp::GetField { .. } | IlOp::SetField { .. } | IlOp::LoadField { .. } => {
                 return Some(LirRefuse::HeapField);
             }
@@ -222,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn i8_call_and_host_stay_fuse_il() {
+    fn i8_one_word_call_is_a_wall_but_host_lifts() {
         let loc = loc();
         let call = [IlOp::Entry {
             kind: crate::il::EntryKind::Call,
@@ -237,7 +234,8 @@ mod tests {
             layout: 0,
             loc,
         }];
-        assert_eq!(lir_refuse(&host, &[]), Some(LirRefuse::Host));
+        // HostInvoke lifts; the MIR builder refuses untyped native ids.
+        assert_eq!(lir_refuse(&host, &[]), None);
     }
 
     #[test]

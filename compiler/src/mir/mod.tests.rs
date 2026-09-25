@@ -4138,7 +4138,11 @@ fn i6_clock_edge_visible_and_s3_dense_emits() {
     g.verify().unwrap();
     assert!(g.has_impure_host());
     assert!(emit_dense(&f, Some(Label(0)), &mut pool, false).is_ok());
-    assert!(emit_lir(&f, Some(Label(0)), &mut pool, false).is_err());
+    let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect("LIR emits HostInvoke");
+    assert!(
+        lir.iter().any(|op| matches!(op, IlOp::HostInvoke { arity: 0, .. })),
+        "LIR must reconstruct the clock HostInvoke"
+    );
 }
 
 #[test]
@@ -4406,9 +4410,13 @@ fn q9_r2_bytes_host_reconstructs_dense() {
             )),
             "{name} reconstructs HostInvoke layout {layout}"
         );
+        let lir = emit_lir(&f, Some(Label(0)), &mut pool, false).expect(name);
         assert!(
-            emit_lir(&f, Some(Label(0)), &mut pool, false).is_err(),
-            "{name} stays off LIR HostInvoke reconstruct"
+            lir.iter().any(|op| matches!(
+                op,
+                IlOp::HostInvoke { layout: l, .. } if *l == layout
+            )),
+            "{name} reconstructs HostInvoke layout {layout} on LIR"
         );
     }
 }
