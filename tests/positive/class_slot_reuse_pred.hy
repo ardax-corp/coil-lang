@@ -52,6 +52,10 @@ fn key_neq_then_zero(Slot slot, string key) -> int {
     return 1;
 }
 
+fn take(Slot slot) -> string {
+    return slot.key;
+}
+
 test("reuse predicate after field stores") {
     let slot = new Slot(0, "", 1, Option::None);
     slot.on = 1;
@@ -110,4 +114,13 @@ test("reuse predicate rejects empty slot") {
     let slot = new Slot(0, "", 1, Option::None);
     let key = "http://127.0.0.1:9";
     assert(can_reuse(slot, key) == 0)?;
+}
+
+test("take then arity-2 key_eq sees stored string") {
+    let slot = new Slot(0, "", 1, Option::None);
+    slot.on = 1;
+    slot.key = "http://127.0.0.1:9";
+    let key = "http://127.0.0.1:9";
+    assert(take(slot) == key)?;
+    assert(key_eq(slot, key) == 1)?;
 }
