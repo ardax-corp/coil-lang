@@ -89,7 +89,7 @@ const ALWAYS_HOT: [u64; 4] = {
 };
 
 #[inline(always)]
-fn is_always_hot_disc(disc: u8) -> bool {
+pub(super) fn is_always_hot_disc(disc: u8) -> bool {
     let i = disc as usize;
     (ALWAYS_HOT[i >> 6] >> (i & 63)) & 1 != 0
 }
@@ -1001,7 +1001,8 @@ pub(super) struct ConsumeAlwaysHotStreakArgs<'a, const S: usize> {
 /// After the giant match handles one always-hot opcode, keep going through
 /// `execute_dense` while the following words are still always-hot.
 ///
-/// `*ip` already points at the next instruction. Fib never calls this.
+/// `*ip` already points at the next instruction, which the caller has
+/// checked with [`is_always_hot_disc`]. Fib never calls this.
 /// Mandelbrot enters once and stays in the dense loop across the back edge.
 #[inline(never)]
 pub(super) fn consume_always_hot_streak<const S: usize>(

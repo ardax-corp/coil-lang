@@ -2798,7 +2798,14 @@ impl<const S: usize> Machine<S> {
 
         macro_rules! then_hot_streak {
             () => {
-                if let Some(msg) = dispatch::consume_always_hot_streak(
+                // Inline peek: non-dense code (tak, fib) must not pay the
+                // outlined streak call after every jump.
+                if ip < code_len
+                    && dispatch::is_always_hot_disc(
+                        // SAFETY: `ip < code_len` checked above.
+                        *unsafe { code.get_unchecked(ip) }.bytecode() as u8,
+                    )
+                    && let Some(msg) = dispatch::consume_always_hot_streak(
                     dispatch::ConsumeAlwaysHotStreakArgs {
                         stack: &mut self.stack,
                         sp: &mut sp,
