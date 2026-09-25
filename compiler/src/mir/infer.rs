@@ -998,9 +998,13 @@ pub(crate) fn has_alloc_inside_loop(ops: &[IlOp]) -> bool {
     })
 }
 
-/// Every Make* / InitTyped sits after the last back-edge (`return [sum]`).
-/// Those bodies stay fuse-IL so COI-87 invert+fuse remains observable.
-pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
+/// Every Make* / InitTyped sits after the last back-edge and that tail only
+/// shapes the result (`return [sum]`: no call / host / format work). Those
+/// bodies stay fuse-IL so COI-87 invert+fuse remains observable. A tail that
+/// does real work after the loop (formatted output, a discarded `Result`
+/// from a call) does not refuse the body: its hot loop may still take MIR.
+pub(crate) fn has_post_loop_alloc_return(ops: &[IlOp]) -> bool {
+    use crate::il::effects::{Effects, effects};
     if has_alloc_inside_loop(ops) {
         return false;
     }
@@ -1018,7 +1022,10 @@ pub(crate) fn has_alloc_only_after_loops(ops: &[IlOp]) -> bool {
             }
         }
     }
-    any
+    let tail_works = ops[last_back..]
+        .iter()
+        .any(|op| effects(op, None).any(Effects::CALL | Effects::HOST | Effects::FORMAT));
+    any && !tail_works
 }
 
 /// Heap GetField / SetField / LoadField (fuse-IL or residual dense).

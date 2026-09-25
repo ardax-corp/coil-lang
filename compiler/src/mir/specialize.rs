@@ -126,8 +126,8 @@ pub fn try_specialize_body_side(
     let select_cfg = has_sroa_select_cfg(ops);
     let has_alloc = ops.iter().any(refuses_alloc);
     let inloop_alloc = super::infer::has_alloc_inside_loop(ops);
-    if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
-        return refuse_dense("alloc only after loops");
+    if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
+        return refuse_dense("post-loop alloc return");
     }
     if has_alloc && !has_real_maps(ops, name, entry_sp, pool, &[]) {
         return refuse_dense("alloc without stack maps");
@@ -473,8 +473,8 @@ pub fn try_lower_abi_body_side(
     // S2d: mapped in-loop / preheader Make* may reconstruct; post-loop-only
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
-    if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
-        return refuse("alloc only after loops");
+    if has_alloc && super::infer::has_post_loop_alloc_return(ops) {
+        return refuse("post-loop alloc return");
     }
     let maps_ok =
         has_alloc && has_real_maps(ops, name, entry_sp, pool, unboxed_fields);

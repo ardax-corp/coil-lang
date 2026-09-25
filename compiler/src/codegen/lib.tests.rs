@@ -4513,7 +4513,7 @@ fn main() {
     let names: Vec<_> = pack_bc.iter().map(|b| b.bytecode().mnemonic()).collect();
     let makes = pack_bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert_eq!(makes, 1, "one box at call-arg; opcodes={names:?}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
@@ -4654,7 +4654,7 @@ fn main() {
     );
     let makes = pack_bc
         .iter()
-        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray))
+        .filter(|b| matches!(b.bytecode(), Instruction::MakeArray | Instruction::DenseMake))
         .count();
     assert_eq!(makes, 1, "one box at host; opcodes={names:?}");
     let mut vm = machine::Machine::<64>::with_operand_capacity(64);
