@@ -9620,6 +9620,15 @@ impl Compiler {
                 self.bytecode = boxed;
             }
             self.push_return_two_word();
+        } else if self.return_is_niche_result() {
+            // `[payload, Err tag]` → heap-heap `Result<T, E>` (`pointer | 1`).
+            // Boxing as `ObjEnum` would look like `Ok` (aligned pointer).
+            self.bytecode.push_pop();
+            Self::push_result_err_bit(&mut self.bytecode);
+            self.bytecode.push_return();
+        } else if self.return_is_unit_result_niche() {
+            self.bytecode.push_pop();
+            self.bytecode.push_return();
         } else {
             let mut boxed = std::mem::take(&mut self.bytecode);
             self.emit_box_pair_after_call(&mut boxed, inner_kind);
