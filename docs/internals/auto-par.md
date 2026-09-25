@@ -84,8 +84,14 @@ site's path guards, codegen emits **one** parameterized worker
 5. On `Err` (spawn or non-sendable join): sequential fallback of all arms + combine.
 
 Const call sites rewrite to an ordinary `CALL` of that worker (plus
-`PAR_SPEC_HOPS`, default **2**). Below-floor / dynamic / base-case args stay on
-the original sequential `f` (no hot-path runtime grain tax). Hops are depth on
+`PAR_SPEC_HOPS`, default **2**). Below-floor constant args stay on the
+original sequential `f`. A **unary** call whose argument is a local
+(`fib(n)`, not `fib(n - 1)`) compares that local with the cutoff — the
+smallest `n` in `0..=48` whose grain clears the floor — and calls the same
+worker when it does (`COIL_PAR_EXPR_WIDE`, default on). The check is one
+compare at that call. Calls inside the sequential function stay ordinary
+`CALL`s, because the worker is registered after that function is emitted.
+Hops are depth on
 the same function — not a constellation of frozen `__coil_par_f_a_b_…`
 clones, and not AlwaysPar every level down to the cutoff.
 
@@ -245,6 +251,7 @@ there is no 1 ms poll. Idle workers park on the same `sleep_cvar` until `notify`
 | `COIL_PAR_THRESHOLD` | Expression IPA grain floor (fork-tree nodes `W`). Default **10945**. |
 | `COIL_LOOP_GRAIN` | Counted-loop IPA trip-count floor. Default **20**. |
 | `COIL_PAR_LOOP_WIDE` | `0` / `false` / `off` / `no` keeps const unit-step loop IPA. Default on: dynamic int bounds, int captures, pure branches, constant stride, and up to 4 chunks. |
+| `COIL_PAR_EXPR_WIDE` | `0` / `false` / `off` / `no` keeps expression IPA on constant calls. Default on: unary `f(local)` enters the worker when the local clears the cutoff. |
 | `COIL_SHARED_HEAP` | Removed. Shared-heap spawn stays on. Debugger-attached runs and programs without stack maps still fall back to isolate `PortableValue` spawn. |
 | `COIL_PAR_STATS` | `1` / `true` / `on` / `yes` prints reactor steal/idle/join counters on shutdown (see [auto-par-branch-misses.md](auto-par-branch-misses.md)). |
 

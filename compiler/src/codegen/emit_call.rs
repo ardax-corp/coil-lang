@@ -792,6 +792,9 @@ impl Compiler {
                 if self.try_emit_par_specialized_call(&n, Some(arg_slice), &mut bytecode) {
                     return bytecode;
                 }
+                if self.try_emit_par_dynamic_call(&n, Some(arg_slice), &mut bytecode) {
+                    return bytecode;
+                }
 
                 if pair_kind.is_none()
                     && !is_generic_src

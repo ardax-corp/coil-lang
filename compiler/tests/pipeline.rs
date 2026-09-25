@@ -6777,6 +6777,32 @@ fn main() {
     assert_eq!(output, "1560,80");
 }
 
+/// `fib(n)` on a local enters the fork worker when `n` clears the cutoff.
+#[test]
+fn auto_par_dynamic_fib_matches_sequential() {
+    let src = r#"
+use io::{stdout, write};
+use string::{format, to_bytes};
+fn fib(int n) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+fn main() {
+    let n = 22;
+    write(stdout(), to_bytes(format("%i", fib(n))));
+}
+"#;
+    let mut pipeline = test_pipeline();
+    let (bytecode, constants) = pipeline
+        .compile_src(src)
+        .expect("dynamic fib should compile");
+    assert!(pipeline.function_offset("__coil_par_fib").is_some());
+    let output = run_bytecode(bytecode, constants, &pipeline, None);
+    assert_eq!(output, "17711");
+}
+
 /// C1 loop IPA emits `thread_spawn_shared` and skips `PortableValue` encode.
 #[test]
 fn auto_par_loop_uses_shared_heap_spawn() {

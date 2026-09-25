@@ -7684,6 +7684,64 @@ impl Compiler {
         true
     }
 
+    /// `f(k)` for a unary fork site: call the worker when `k` clears the cutoff.
+    ///
+    /// The worker has to already exist, so calls inside the sequential function
+    /// (compiled before the worker is registered) stay ordinary `CALL`s.
+    fn try_emit_par_dynamic_call(
+        &mut self,
+        fname: &str,
+        args: Option<&[Output<'_>]>,
+        bytecode: &mut CodeBuf,
+    ) -> bool {
+        if !crate::typechecking::par_expr_wide_enabled() {
+            return false;
+        }
+        let Some(args) = args else {
+            return false;
+        };
+        if args.len() != 1 {
+            return false;
+        }
+        if matches!(
+            unwrap_expr_output(&args[0]).1.as_ref(),
+            Expression::Integer(_)
+        ) {
+            return false;
+        }
+        let key = Self::par_shape_key(fname);
+        let Some(cutoff) = crate::typechecking::unary_dynamic_cutoff(&self.par_shapes, key) else {
+            return false;
+        };
+        let spec = crate::typechecking::par_worker_name(key);
+        let (Some(&worker), Some(&orig)) = (
+            self.functions.get(&spec),
+            self.functions
+                .get(fname)
+                .or_else(|| self.functions.get(key)),
+        ) else {
+            return false;
+        };
+
+        let mut arg_bc = self.do_compile(&args[0]);
+        bytecode.append(&mut arg_bc);
+        use crate::block_builder::{BlockBuilder, JumpKind};
+        let mut bb = BlockBuilder::new();
+        let use_worker = bb.fresh_label(bytecode.il_mut());
+        let done = bb.fresh_label(bytecode.il_mut());
+        bytecode.push(Byte::new(Instruction::DUPLICATE));
+        self.push_int_const_into(cutoff - 1, bytecode);
+        bytecode.push(Byte::new(Instruction::LE));
+        bb.emit_jump_to(use_worker, JumpKind::JumpIfFalse, bytecode.il_mut());
+        bytecode.push(Byte::new(Instruction::CALL).with_call_packed(1, orig as u32));
+        bb.emit_jump_to(done, JumpKind::Unconditional, bytecode.il_mut());
+        bb.bind_label(use_worker, bytecode.il_mut());
+        bytecode.push_const(crate::typechecking::PAR_SPEC_HOPS as i32);
+        bytecode.push(Byte::new(Instruction::CALL).with_call_packed(2, worker as u32));
+        bb.bind_label(done, bytecode.il_mut());
+        true
+    }
+
     /// Emit one parameterized `__coil_par_{fn}(args…, hop)` AlwaysPar worker.
     fn emit_par_specializations_for(&mut self, bare_name: &str, table_key: &str) {
         if !self.par_workers.contains(bare_name) {
