@@ -789,10 +789,10 @@ fn rename_identifier(
     new_name: &str,
 ) -> lsp_types::WorkspaceEdit {
     let locations = identifier_locations(state, uri, position, true);
-    // Key by the URI string. `Uri` is interior-mutable, so it is not a map key.
-    let mut changes: HashMap<String, Vec<TextEdit>> = HashMap::new();
+    // Group by URI text, then parse back into the `WorkspaceEdit` map.
+    let mut by_uri: HashMap<String, Vec<TextEdit>> = HashMap::new();
     for location in locations {
-        changes
+        by_uri
             .entry(location.uri.to_string())
             .or_default()
             .push(TextEdit {
@@ -800,17 +800,16 @@ fn rename_identifier(
                 new_text: new_name.to_owned(),
             });
     }
-    // `WorkspaceEdit.changes` is keyed by `lsp_types::Uri`, which is interior-mutable.
-    #[allow(clippy::mutable_key_type)]
-    let changes = changes
-        .into_iter()
-        .map(|(uri, edits)| {
-            let uri: Uri = uri.parse().expect("uri roundtrip");
-            (uri, edits)
-        })
-        .collect();
     lsp_types::WorkspaceEdit {
-        changes: Some(changes),
+        changes: Some(
+            by_uri
+                .into_iter()
+                .map(|(uri, edits)| {
+                    let uri: Uri = uri.parse().expect("uri roundtrip");
+                    (uri, edits)
+                })
+                .collect(),
+        ),
         document_changes: None,
         change_annotations: None,
     }

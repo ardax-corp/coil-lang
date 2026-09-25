@@ -17187,7 +17187,10 @@ impl Compiler {
     /// Called once after multi-file linking by the pipeline, or at the end
     /// of single-file [`compile`] so unit tests observe fused output.
     pub fn finalize_bytecode(&mut self) {
+        #[cfg(any(test, feature = "dissect"))]
         let _ = self.finalize_bytecode_inner(false);
+        #[cfg(not(any(test, feature = "dissect")))]
+        self.finalize_bytecode_inner(false);
     }
 
     /// Retain post-opt pre-fuse IL on the next [`Self::finalize_bytecode`].
@@ -17487,10 +17490,7 @@ impl Compiler {
         #[cfg(any(test, feature = "dissect"))]
         return il_snapshot;
         #[cfg(not(any(test, feature = "dissect")))]
-        {
-            debug_assert!(!capture_il);
-            ()
-        }
+        debug_assert!(!capture_il);
     }
 
     /// Post-lower function symbols sorted by entry PC (for dissect / debug).
