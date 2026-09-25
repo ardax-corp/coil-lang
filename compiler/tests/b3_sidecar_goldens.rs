@@ -33,12 +33,13 @@ const CORPUS: &[&str] = &[
 /// when cost ≤ fuse (fingerprint 400). B2 convoys recursive `fib` (same
 /// length; opcode mix changes).
 /// COI-388 X3 fuses `MakeEnum; RETURN` → `MakeEnumReturn` (shorter corpus).
+/// IlFunc spans for trait instance methods retarget `user_trait_dispatch.hy`.
 const EXPECTED: &[(&str, &str)] = &[
     ("arithmetic.hy", "53c04a3bd949039e_572"),
     ("functions.hy", "7d51114f1381cfe6_378"),
     ("loops.hy", "b8e88a433a519860_257"),
     ("option_pair.hy", "e9662ae6a46cd854_378"),
-    ("user_trait_dispatch.hy", "8efebd98b030b900_153"),
+    ("user_trait_dispatch.hy", "c82ac0d364215b73_151"),
 ];
 
 fn fingerprint(bc: &[Byte]) -> String {
