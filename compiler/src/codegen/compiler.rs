@@ -9828,7 +9828,7 @@ impl Compiler {
             return;
         };
 
-        self.bind_function_entry(qualified.clone());
+        let (code_start, _) = self.bind_function_entry(qualified.clone());
         if *is_coro {
             self.coroutine_fns.insert(qualified.clone());
         }
@@ -9875,6 +9875,7 @@ impl Compiler {
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
+        let entry_sp = self.context.variables.len() as u32;
         let body_op_start = self.bytecode.ops().len();
         let mut c = self.do_compile(body);
         self.bytecode.append(&mut c);
@@ -9883,6 +9884,13 @@ impl Compiler {
             self.emit_fallthrough_return(name, body.0);
         }
         self.emit_shared_try_fail_epilogue();
+
+        let body_end = self.bytecode.len();
+        self.record_fn_span(qualified.clone(), code_start, body_end);
+        let entry = self.fn_entry_labels.get(&qualified).copied();
+        self.bytecode
+            .record_func_with_sp(qualified.clone(), entry, code_start, body_end, entry_sp);
+        self.record_unboxed_class_fields();
 
         self.fn_defers = prev_fn_defers;
         self.compiling_result_mode = prev_result_mode;
