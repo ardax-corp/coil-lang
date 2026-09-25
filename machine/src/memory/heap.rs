@@ -340,6 +340,20 @@ impl Heap {
         self.gc_phase == GcPhase::Sweeping
     }
 
+    /// Mark `v` and everything it reaches when a cycle is open.
+    ///
+    /// Marking always drains before the mutator runs again (finalizers run
+    /// with an empty gray list), so the only way user code can reach an
+    /// unmarked object is a `Weak` upgrade before dead weaks are cleared.
+    /// Draining here restores the "no gray objects while the mutator runs"
+    /// invariant, which is why stores need no write barrier.
+    pub fn resurrect_during_mark(&mut self, v: Value) {
+        if unlikely(self.gc_phase == GcPhase::Marking) {
+            self.shade_value(v);
+            while !self.mark_quantum(usize::MAX) {}
+        }
+    }
+
     /// Shade `v` if a mark cycle is running (Yuasa SATB: log the overwritten pointer).
     #[inline]
     pub fn satb_shade_value(&mut self, v: Value) {
