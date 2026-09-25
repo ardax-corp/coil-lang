@@ -454,7 +454,7 @@ pub struct Machine<const S: usize> {
     nested_return: Option<Value>,
     /// Set when `execute` pauses before a native FFI call that may reenter the VM.
     pending_ffi: Option<PendingFfiInvoke>,
-    /// Set when `await_*` parks until fd readiness (CPU help-steals meanwhile).
+    /// Set when `await_*` parks until fd readiness (no CPU help-steal; COI-116).
     pending_io: Option<PendingIoWait>,
     /// Set when a language-level `panic` aborts the VM.
     panicked: bool,
@@ -2633,7 +2633,11 @@ impl<const S: usize> Machine<S> {
     fn finish_pending_io_wait(&mut self, pending: PendingIoWait) {
         self.frames.get_mut().set(pending.resume_sp);
         let req = pending.request;
-        let wait = crate::thread::host_io_wait(req.handle, req.interest, req.timeout);
+        // Same rule as `stream_park` (COI-116): do not help-steal `thread::spawn`
+        // jobs while parked. Nested peer serve loops wait for the next write
+        // on this stack and never return, so the outer `await_readable` cannot
+        // observe the response (HTTP/2 sequential reuse on one connection).
+        let wait = crate::thread::host_io_wait_no_help(req.handle, req.interest, req.timeout);
         let v = crate::host_enum::with_host_enum_layout(pending.layout, || {
             crate::io::as_result_unit(&mut self.heap, wait)
         });

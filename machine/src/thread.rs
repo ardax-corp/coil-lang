@@ -556,9 +556,10 @@ pub(crate) fn host_io_wait(
 
 /// Block on IO readiness without CPU help-steal.
 ///
-/// Package attach handshakes use this path (COI-116): `wait_fd_helping` can nest the peer
-/// `thread::spawn` job under the client's wait on a 1-worker reactor, so both
-/// sides park on the same OS stack and time out. Pool workers still run the peer.
+/// Package attach handshakes and `await_readable` park-resume use this path
+/// (COI-116): `wait_fd_helping` can nest the peer `thread::spawn` job under
+/// the client's wait on a 1-worker reactor, so both sides park on the same OS
+/// stack and never observe the next write. Pool workers still run the peer.
 pub(crate) fn host_io_wait_no_help(
     handle: crate::io_handle::WaitHandle,
     interest: crate::io_reactor::Interest,
