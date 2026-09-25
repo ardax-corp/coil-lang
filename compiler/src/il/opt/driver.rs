@@ -193,8 +193,8 @@ fn apply_instcombine(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'
     super::instcombine::instcombine(ops)
 }
 
-fn apply_local_cse(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
-    super::early_cse::early_cse(ops)
+fn apply_local_cse(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
+    super::early_cse::early_cse_with(ops, opts.pure_call_ctx.as_ref())
 }
 
 fn apply_cast_spill(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
@@ -212,7 +212,11 @@ fn apply_loop_bounds(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, _: &mut PassCt
     0
 }
 
-fn apply_strength_reduce(ops: &mut Vec<IlOp>, opts: &OptimizeOptions, ctx: &mut PassCtx<'_>) -> usize {
+fn apply_strength_reduce(
+    ops: &mut Vec<IlOp>,
+    opts: &OptimizeOptions,
+    ctx: &mut PassCtx<'_>,
+) -> usize {
     crate::il::strength::strength_reduce(ops, ctx.pool, opts.pure_call_ctx.as_ref())
 }
 
@@ -234,11 +238,7 @@ fn apply_ssa_gvn(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) 
     0
 }
 
-fn apply_escape_analysis(
-    ops: &mut Vec<IlOp>,
-    _: &OptimizeOptions,
-    _: &mut PassCtx<'_>,
-) -> usize {
+fn apply_escape_analysis(ops: &mut Vec<IlOp>, _: &OptimizeOptions, _: &mut PassCtx<'_>) -> usize {
     super::escape_analysis::escape_analysis(ops);
     0
 }

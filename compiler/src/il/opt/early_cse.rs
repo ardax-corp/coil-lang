@@ -2,18 +2,21 @@
 //!
 //! Hashes self-contained pure expressions. A later identical compute becomes
 //! `Load` of the slot that still holds the first result, or `Dup` when that
-//! result is still TOS. Effectful ops, unknown `Byte`, and calls are barriers.
-//! Does not CSE across blocks or speculate through stores / GC / host.
+//! result is still TOS. Effectful ops and unknown `Byte` are barriers. Impure
+//! calls are barriers; proven-pure `CALL` / `Entry` with the same args reuse
+//! the stored result. Does not CSE across blocks or speculate through stores /
+//! GC / host.
 
 use std::collections::HashMap;
 
 use common::Instruction;
 
 use crate::il::gvn::gvn_cfg;
-use crate::il::op::IlOp;
+use crate::il::op::{EntryKind, IlOp};
+use crate::il::pure_call::PureCallCtx;
 
 /// Intra-block CSE. Returns how many replacements fired.
-pub(crate) fn early_cse(ops: &mut Vec<IlOp>) -> usize {
+pub(crate) fn early_cse_with(ops: &mut Vec<IlOp>, purity: Option<&PureCallCtx>) -> usize {
     if ops.len() < 2 {
         return 0;
     }
@@ -21,7 +24,7 @@ pub(crate) fn early_cse(ops: &mut Vec<IlOp>) -> usize {
     let mut out = Vec::with_capacity(ops.len());
     let mut hits = 0usize;
     for (start, end) in ranges {
-        let (block, n) = cse_block(&ops[start..end]);
+        let (block, n) = cse_block(&ops[start..end], purity);
         hits += n;
         out.extend(block);
     }
@@ -36,15 +39,46 @@ enum Expr {
     Const(i32),
     ConstPool(u32),
     Load(u32),
-    BinSlotImm { op: u8, slot: u8, imm: i16 },
-    BinSlotSlot { op: u8, a: u8, b: u8 },
-    BinLoads { op: u16, a: u32, b: u32 },
-    BinLoadImm { op: u16, slot: u32, imm: i32 },
+    BinSlotImm {
+        op: u8,
+        slot: u8,
+        imm: i16,
+    },
+    BinSlotSlot {
+        op: u8,
+        a: u8,
+        b: u8,
+    },
+    BinLoads {
+        op: u16,
+        a: u32,
+        b: u32,
+    },
+    BinLoadImm {
+        op: u16,
+        slot: u32,
+        imm: i32,
+    },
     CastI2f(u32),
     ArrayLen(u32),
-    Index { arr: u32, idx: u32 },
-    IndexPin { pin: u32, idx: u32 },
-    LoadField { slot: u32, index: u32 },
+    Index {
+        arr: u32,
+        idx: u32,
+    },
+    IndexPin {
+        pin: u32,
+        idx: u32,
+    },
+    LoadField {
+        slot: u32,
+        index: u32,
+    },
+    /// Proven-pure one-word call. `args` unused slots are 0.
+    PureCall {
+        target: u32,
+        nargs: u8,
+        args: [u32; 8],
+    },
 }
 
 fn cse_binop(op: Instruction) -> bool {
@@ -136,7 +170,27 @@ fn is_store_index(op: &IlOp) -> bool {
     )
 }
 
-fn is_full_barrier(op: &IlOp) -> bool {
+fn is_pure_call_op(op: &IlOp, purity: Option<&PureCallCtx>) -> bool {
+    match op {
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            target,
+            ret_words,
+            ..
+        } => *ret_words == 1 && purity.is_some_and(|c| c.call_is_pure(*target)),
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::CALL => {
+            let (_, target) = byte.call_parts();
+            byte.call_ret_words() == 1
+                && purity.is_some_and(|c| c.call_offset_is_pure(target as u32))
+        }
+        _ => false,
+    }
+}
+
+fn is_full_barrier(op: &IlOp, purity: Option<&PureCallCtx>) -> bool {
+    if is_pure_call_op(op, purity) {
+        return false;
+    }
     matches!(
         op,
         IlOp::HostInvoke { .. }
@@ -171,7 +225,8 @@ fn is_full_barrier(op: &IlOp) -> bool {
     ) || (matches!(op, IlOp::Byte { .. })
         && !is_cast_i2f(op)
         && !is_array_len(op)
-        && !is_store_index(op))
+        && !is_store_index(op)
+        && !is_pure_call_op(op, purity))
 }
 
 fn depends_on(e: &Expr, slot: u32) -> bool {
@@ -185,6 +240,7 @@ fn depends_on(e: &Expr, slot: u32) -> bool {
         Expr::Index { arr, idx } => arr == slot || idx == slot,
         Expr::IndexPin { pin, idx } => pin == slot || idx == slot,
         Expr::LoadField { slot: s, .. } => s == slot,
+        Expr::PureCall { nargs, args, .. } => args[..nargs as usize].contains(&slot),
     }
 }
 
@@ -222,8 +278,7 @@ impl Avail {
     }
 
     fn kill_slot(&mut self, slot: u32) {
-        self.map
-            .retain(|e, s| *s != slot && !depends_on(e, slot));
+        self.map.retain(|e, s| *s != slot && !depends_on(e, slot));
         if self.tos.as_ref().is_some_and(|t| depends_on(t, slot)) {
             self.tos = None;
         }
@@ -242,7 +297,7 @@ impl Avail {
     }
 }
 
-fn cse_block(ops: &[IlOp]) -> (Vec<IlOp>, usize) {
+fn cse_block(ops: &[IlOp], purity: Option<&PureCallCtx>) -> (Vec<IlOp>, usize) {
     let mut out = Vec::with_capacity(ops.len());
     let mut hits = 0usize;
     let mut avail = Avail::new();
@@ -254,7 +309,7 @@ fn cse_block(ops: &[IlOp]) -> (Vec<IlOp>, usize) {
             continue;
         }
 
-        if let Some((consumed, rewrite, expr)) = try_reuse(ops, i, &avail) {
+        if let Some((consumed, rewrite, expr)) = try_reuse(ops, i, &avail, purity) {
             out.extend(rewrite);
             avail.tos = Some(expr);
             hits += 1;
@@ -282,21 +337,24 @@ fn cse_block(ops: &[IlOp]) -> (Vec<IlOp>, usize) {
             continue;
         }
 
-        if is_full_barrier(&ops[i]) {
+        if is_full_barrier(&ops[i], purity) {
             avail.clear();
             out.push(ops[i].clone());
             i += 1;
             continue;
         }
 
-        if matches!(&ops[i], IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. }) {
+        if matches!(
+            &ops[i],
+            IlOp::Jump { .. } | IlOp::Return { .. } | IlOp::Halt { .. }
+        ) {
             avail.clear();
             out.push(ops[i].clone());
             i += 1;
             continue;
         }
 
-        if let Some((consumed, expr)) = recognize(ops, i) {
+        if let Some((consumed, expr)) = recognize(ops, i, purity) {
             for k in 0..consumed {
                 out.push(ops[i + k].clone());
             }
@@ -312,20 +370,82 @@ fn cse_block(ops: &[IlOp]) -> (Vec<IlOp>, usize) {
     (out, hits)
 }
 
-fn try_reuse(ops: &[IlOp], i: usize, avail: &Avail) -> Option<(usize, Vec<IlOp>, Expr)> {
-    let (consumed, expr) = recognize(ops, i)?;
+fn try_reuse(
+    ops: &[IlOp],
+    i: usize,
+    avail: &Avail,
+    purity: Option<&PureCallCtx>,
+) -> Option<(usize, Vec<IlOp>, Expr)> {
+    let (consumed, expr) = recognize(ops, i, purity)?;
     let slot = avail.lookup(&expr)?;
     // Cheap immediates stay as themselves; only reuse stored *compute*.
-    if matches!(
-        expr,
-        Expr::Const(_) | Expr::ConstPool(_) | Expr::Load(_)
-    ) {
+    if matches!(expr, Expr::Const(_) | Expr::ConstPool(_) | Expr::Load(_)) {
         return None;
     }
     Some((consumed, vec![load_of(slot, ops[i].loc())], expr))
 }
 
-fn recognize(ops: &[IlOp], i: usize) -> Option<(usize, Expr)> {
+fn recognize_pure_call(
+    ops: &[IlOp],
+    i: usize,
+    purity: Option<&PureCallCtx>,
+) -> Option<(usize, Expr)> {
+    let purity = purity?;
+    let mut args = [0u32; 8];
+    let mut n = 0u8;
+    let mut j = i;
+    while j < ops.len() {
+        match ops[j] {
+            IlOp::Load { slot, .. } if (n as usize) < args.len() => {
+                args[n as usize] = slot;
+                n += 1;
+                j += 1;
+            }
+            _ => break,
+        }
+    }
+    if j >= ops.len() {
+        return None;
+    }
+    let (arity, target, ret_words) = match &ops[j] {
+        IlOp::Entry {
+            kind: EntryKind::Call,
+            arity,
+            target,
+            ret_words,
+            ..
+        } => {
+            if !purity.call_is_pure(*target) {
+                return None;
+            }
+            (*arity, target.0, *ret_words)
+        }
+        IlOp::Byte { byte, .. } if *byte.bytecode() == Instruction::CALL => {
+            let (arity, tgt) = byte.call_parts();
+            if !purity.call_offset_is_pure(tgt as u32) {
+                return None;
+            }
+            (arity as u32, tgt as u32, byte.call_ret_words())
+        }
+        _ => return None,
+    };
+    if ret_words != 1 || arity != n as u32 {
+        return None;
+    }
+    Some((
+        n as usize + 1,
+        Expr::PureCall {
+            target,
+            nargs: n,
+            args,
+        },
+    ))
+}
+
+fn recognize(ops: &[IlOp], i: usize, purity: Option<&PureCallCtx>) -> Option<(usize, Expr)> {
+    if let Some(hit) = recognize_pure_call(ops, i, purity) {
+        return Some(hit);
+    }
     match &ops[i] {
         IlOp::Const { imm, .. } => return Some((1, Expr::Const(*imm))),
         IlOp::ConstPool { idx, .. } => return Some((1, Expr::ConstPool(*idx))),
@@ -333,14 +453,11 @@ fn recognize(ops: &[IlOp], i: usize) -> Option<(usize, Expr)> {
             if i + 2 < ops.len()
                 && let IlOp::Load { slot: b, .. } = ops[i + 1]
             {
-                if matches!(&ops[i + 2], IlOp::Index { .. } | IlOp::IndexUnchecked { .. }) {
-                    return Some((
-                        3,
-                        Expr::Index {
-                            arr: *slot,
-                            idx: b,
-                        },
-                    ));
+                if matches!(
+                    &ops[i + 2],
+                    IlOp::Index { .. } | IlOp::IndexUnchecked { .. }
+                ) {
+                    return Some((3, Expr::Index { arr: *slot, idx: b }));
                 }
                 if let IlOp::Bin { op, .. } = ops[i + 2]
                     && cse_binop(op)
@@ -419,14 +536,11 @@ fn recognize(ops: &[IlOp], i: usize) -> Option<(usize, Expr)> {
     if i + 2 < ops.len()
         && let (IlOp::Load { slot: a, .. }, IlOp::Load { slot: b, .. }) = (&ops[i], &ops[i + 1])
     {
-        if matches!(&ops[i + 2], IlOp::Index { .. } | IlOp::IndexUnchecked { .. }) {
-            return Some((
-                3,
-                Expr::Index {
-                    arr: *a,
-                    idx: *b,
-                },
-            ));
+        if matches!(
+            &ops[i + 2],
+            IlOp::Index { .. } | IlOp::IndexUnchecked { .. }
+        ) {
+            return Some((3, Expr::Index { arr: *a, idx: *b }));
         }
         if let IlOp::Bin { op, .. } = ops[i + 2]
             && cse_binop(op)
@@ -545,7 +659,10 @@ mod tests {
                 b: 3,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 7, loc: loc() },
+            IlOp::StorePop {
+                slot: 7,
+                loc: loc(),
+            },
             IlOp::BinSlotSlot {
                 op: Instruction::MULF as u8,
                 a: 3,
@@ -557,7 +674,7 @@ mod tests {
                 ret_words: 1,
             },
         ];
-        assert!(early_cse(&mut ops) >= 1);
+        assert!(early_cse_with(&mut ops, None) >= 1);
         assert!(matches!(ops[2], IlOp::Load { slot: 7, .. }));
     }
 
@@ -570,7 +687,10 @@ mod tests {
                 b: 2,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 5, loc: loc() },
+            IlOp::StorePop {
+                slot: 5,
+                loc: loc(),
+            },
             IlOp::BinSlotSlot {
                 op: Instruction::ADDF as u8,
                 a: 2,
@@ -582,7 +702,7 @@ mod tests {
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(matches!(ops[2], IlOp::Load { slot: 5, .. }));
     }
 
@@ -595,9 +715,15 @@ mod tests {
                 b: 2,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 5, loc: loc() },
+            IlOp::StorePop {
+                slot: 5,
+                loc: loc(),
+            },
             IlOp::Const { imm: 0, loc: loc() },
-            IlOp::StorePop { slot: 1, loc: loc() },
+            IlOp::StorePop {
+                slot: 1,
+                loc: loc(),
+            },
             IlOp::BinSlotSlot {
                 op: Instruction::MUL as u8,
                 a: 1,
@@ -609,7 +735,7 @@ mod tests {
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(
             matches!(ops[4], IlOp::BinSlotSlot { .. }),
             "killed by store to operand slot"
@@ -625,7 +751,10 @@ mod tests {
                 imm: 2,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::StorePop {
+                slot: 3,
+                loc: loc(),
+            },
             IlOp::BinSlotImm {
                 op: Instruction::DIV as u8,
                 slot: 1,
@@ -637,7 +766,7 @@ mod tests {
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(matches!(ops[2], IlOp::BinSlotImm { .. }));
     }
 
@@ -650,7 +779,10 @@ mod tests {
                 imm: 1,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::StorePop {
+                slot: 3,
+                loc: loc(),
+            },
             IlOp::HostInvoke {
                 arity: 0,
                 layout: 0,
@@ -667,7 +799,7 @@ mod tests {
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(matches!(ops[3], IlOp::BinSlotImm { .. }));
     }
 
@@ -680,7 +812,10 @@ mod tests {
                 imm: 4,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::StorePop {
+                slot: 3,
+                loc: loc(),
+            },
             IlOp::Label(Label(1)),
             IlOp::BinSlotImm {
                 op: Instruction::ADD as u8,
@@ -693,7 +828,7 @@ mod tests {
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(
             matches!(ops[3], IlOp::BinSlotImm { .. }),
             "label starts a new block"
@@ -703,15 +838,30 @@ mod tests {
     #[test]
     fn stack_bin_of_loads_reused() {
         let mut ops = vec![
-            IlOp::Load { slot: 1, loc: loc() },
-            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::Load {
+                slot: 1,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 2,
+                loc: loc(),
+            },
             IlOp::Bin {
                 op: Instruction::MULF,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 8, loc: loc() },
-            IlOp::Load { slot: 1, loc: loc() },
-            IlOp::Load { slot: 2, loc: loc() },
+            IlOp::StorePop {
+                slot: 8,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 1,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 2,
+                loc: loc(),
+            },
             IlOp::Bin {
                 op: Instruction::MULF,
                 loc: loc(),
@@ -721,7 +871,7 @@ mod tests {
                 ret_words: 1,
             },
         ];
-        assert!(early_cse(&mut ops) >= 1);
+        assert!(early_cse_with(&mut ops, None) >= 1);
         assert!(matches!(ops[4], IlOp::Load { slot: 8, .. }));
         assert!(matches!(ops[5], IlOp::Return { .. }));
     }
@@ -729,17 +879,26 @@ mod tests {
     #[test]
     fn cast_i2f_reused_from_slot() {
         let mut ops = vec![
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::byte(Byte::new(Instruction::CastIntToFloat)),
-            IlOp::StorePop { slot: 4, loc: loc() },
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::StorePop {
+                slot: 4,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::byte(Byte::new(Instruction::CastIntToFloat)),
             IlOp::Return {
                 loc: loc(),
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(matches!(ops[3], IlOp::Load { slot: 4, .. }));
         assert_eq!(ops.len(), 5);
     }
@@ -747,38 +906,106 @@ mod tests {
     #[test]
     fn array_len_reused_until_push() {
         let mut ops = vec![
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::byte(Byte::new(Instruction::ArrayLen)),
-            IlOp::StorePop { slot: 2, loc: loc() },
-            IlOp::Load { slot: 0, loc: loc() },
+            IlOp::StorePop {
+                slot: 2,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
             IlOp::byte(Byte::new(Instruction::ArrayLen)),
             IlOp::Return {
                 loc: loc(),
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(matches!(ops[3], IlOp::Load { slot: 2, .. }));
     }
 
     #[test]
     fn index_killed_by_store_index() {
         let mut ops = vec![
-            IlOp::Load { slot: 0, loc: loc() },
-            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 1,
+                loc: loc(),
+            },
             IlOp::Index { loc: loc() },
-            IlOp::StorePop { slot: 3, loc: loc() },
+            IlOp::StorePop {
+                slot: 3,
+                loc: loc(),
+            },
             IlOp::byte(Byte::new(Instruction::StoreIndex)),
-            IlOp::Load { slot: 0, loc: loc() },
-            IlOp::Load { slot: 1, loc: loc() },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 1,
+                loc: loc(),
+            },
             IlOp::Index { loc: loc() },
             IlOp::Return {
                 loc: loc(),
                 ret_words: 1,
             },
         ];
-        early_cse(&mut ops);
+        early_cse_with(&mut ops, None);
         assert!(ops.iter().any(|op| matches!(op, IlOp::Index { .. })));
+    }
+
+    #[test]
+    fn pure_call_reused_from_slot() {
+        use crate::il::op::Label;
+        use crate::il::pure_call::PureCallCtx;
+        let mut ctx = PureCallCtx::default();
+        ctx.pure_fns.insert("sq".into());
+        ctx.label_callees.insert(9, "sq".into());
+        let mut ops = vec![
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
+            IlOp::Entry {
+                kind: EntryKind::Call,
+                arity: 1,
+                target: Label(9),
+                loc: loc(),
+                ret_words: 1,
+            },
+            IlOp::StorePop {
+                slot: 2,
+                loc: loc(),
+            },
+            IlOp::Load {
+                slot: 0,
+                loc: loc(),
+            },
+            IlOp::Entry {
+                kind: EntryKind::Call,
+                arity: 1,
+                target: Label(9),
+                loc: loc(),
+                ret_words: 1,
+            },
+            IlOp::Return {
+                loc: loc(),
+                ret_words: 1,
+            },
+        ];
+        assert!(early_cse_with(&mut ops, Some(&ctx)) >= 1);
+        assert!(matches!(ops[3], IlOp::Load { slot: 2, .. }));
+        assert_eq!(ops.len(), 5);
     }
 
     #[test]
@@ -790,7 +1017,10 @@ mod tests {
                 imm: 1,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::StorePop {
+                slot: 2,
+                loc: loc(),
+            },
             IlOp::BinSlotImm {
                 op: Instruction::ADD as u8,
                 slot: 0,
@@ -804,7 +1034,8 @@ mod tests {
         ];
         optimize(&mut ops, &isolated(), &mut Vec::new());
         assert!(
-            ops.iter().any(|op| matches!(op, IlOp::Load { slot: 2, .. })),
+            ops.iter()
+                .any(|op| matches!(op, IlOp::Load { slot: 2, .. })),
             "isolated local_cse should reuse stored add"
         );
     }
@@ -820,7 +1051,10 @@ mod tests {
                 imm: 1,
                 loc: loc(),
             },
-            IlOp::StorePop { slot: 2, loc: loc() },
+            IlOp::StorePop {
+                slot: 2,
+                loc: loc(),
+            },
             IlOp::BinSlotImm {
                 op: Instruction::ADD as u8,
                 slot: 0,

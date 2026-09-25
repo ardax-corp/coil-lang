@@ -32,3 +32,12 @@ test("commutative add reuse") {
     let x = a + b;
     assert(x + (b + a) == 84)?;
 }
+
+fn sq(int n) -> int {
+    return n * n;
+}
+
+test("pure call reuse") {
+    let a = 7;
+    assert(sq(a) + sq(a) == 98)?;
+}
