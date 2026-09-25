@@ -614,8 +614,8 @@ the `ssa_gvn` flag.
   (`Const`/`Load`/`Bin`/`BinSlot*`/`Index`/`LoadField`/`Dup`). Join sink
   requires agreeing pred tails and agreeing SP-in.
 - **Output:** Second identical producer → `Dup`; join-sunk redundant tail.
-  `Load; Dup` is re-expanded to `Load; Load` so fuse-select still sees both
-  binop operands (COI-82). No slot rename. Height preserved (`Dup` vs second
+  `Load; Dup` stays; fuse-select reads `Dup` as the second binop operand
+  (COI-82). No slot rename. Height preserved (`Dup` vs second
   `Const`/`Load` is the same +1).
 - **Refusals:** `StorePop`, calls, `HostInvoke`, `SetField`, `Make*`, box,
   residual effectful `Byte` — barriers. Does not replace convoy refuse rules.

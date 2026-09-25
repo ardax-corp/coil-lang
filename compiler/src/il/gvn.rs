@@ -1299,7 +1299,7 @@ mod tests {
     }
 
     #[test]
-    fn expands_dup_after_load_so_binop_can_fuse() {
+    fn load_dup_binop_stays_fusable() {
         // `x * x`: GVN leaves `Load; Dup; MUL`; fuse-select treats Dup as the
         // second operand of BinSlotSlot.
         let mut ops = vec![
@@ -1319,7 +1319,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_dup_after_load_leaves_const_dup_alone() {
+    fn const_dup_cse_is_kept() {
         let mut ops = vec![
             IlOp::Const { imm: 3, loc: loc() },
             IlOp::Const { imm: 3, loc: loc() },

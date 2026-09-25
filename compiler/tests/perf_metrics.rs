@@ -571,7 +571,7 @@ fn perf_mandelbrot_inverts_escape_into_const_jmpt() {
 
 #[test]
 fn perf_mandelbrot_squares_fuse_into_bin_slot_slot() {
-    // `zr * zr` / `zi * zi`: GVN's Dup is re-expanded so both operands fuse.
+    // `zr * zr` / `zi * zi`: GVN's `Load; Dup` still fuses as a slot/slot binop.
     let (bc, _, _, _, pipeline) = compile("examples/perf/mandelbrot.hy");
     let syms = pipeline.program_debug().fn_symbols;
     let (start, end) = fn_pc_range(&syms, "mandelbrot", bc.len());
@@ -1077,7 +1077,7 @@ fn perf_phase0_mandelbrot_shape_inventory() {
     //   loop_carried_phi_shuffle=0. MoveSlot still unproven.
 
     // Phase 4 fuse-feed / near-miss audit:
-    //   FCS≥2 / ConstJmpf≥1 / expand_dup squares intact; no promotion split.
+    //   FCS≥2 / ConstJmpf≥1 / Load;Dup squares intact; no promotion split.
     //   would_be_jmpt_after_invert=0 (escape inverted to BinSlotSlotConstJmpt).
     // cast_spill / FloatChainStore are retired; cr/ci float chains stay unfused.
     //   unary / pool-imm / packing_holes / BinSlot→branch miss = 0.

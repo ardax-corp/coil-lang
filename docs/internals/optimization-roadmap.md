@@ -97,7 +97,7 @@ titles can oversell.
 | Area | What landed | Ceiling (do not overshoot in docs or code) |
 |------|-------------|--------------------------------------------|
 | **Opt levels** | `-O0`…`-O3`, `-Os`, `-Og` via CLI / `Pipeline::set_opt_level` | `None ⊂ Basic ⊂ Standard ⊂ Aggressive`. `Size` drops unroll + return cloning; `Debug` = Basic only (no slot promote, escape, unroll, GVN). |
-| **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. Dup-CSE re-expanded before lower for fuse-select. |
+| **`cfg_gvn`** (`gvn.rs`) | Intra-block CSE + identical-tail join-sink when SP-in agrees | **No SSA slot rename** (COI-82). Effectful ops are barriers. `Load; Dup` stays; fuse-select reads `Dup` as the second operand. |
 | **`ssa_gvn`** (`gvn_ssa.rs`) | Virtual `Phi(block,slot)` VNs; redundant pure `Const`/`Load`+`Bin` → `Load` when value already in a slot | **Not rename.** `DIV`/`MOD`/`DIVF`/`MODF` excluded. Also runs inside per-body `cfg_gvn_with` when enabled. |
 | **`instcombine`** (`opt/instcombine.rs`, [#304](https://github.com/ardax-corp/coil-lang/pull/304)) | Local peeps: const-cond branches, known-tag EQ, pair-match payload identity (`POP` tag) | No new opcodes. Mid-body try-flatten peep **removed** (convoy risk). |
 | **try flatten** (codegen `emit_try_two_word_pair`, [#307](https://github.com/ardax-corp/coil-lang/pull/307)) | Two-slot Result/Option `?` shares a fail epilogue; `return e?` / `return Ok(e?)` forwards the pair | Not an IL pass. Hit: `examples/perf/result_try_churn.hy`. |
