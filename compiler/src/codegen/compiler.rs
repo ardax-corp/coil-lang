@@ -3370,8 +3370,13 @@ impl Compiler {
         self.context.stack_array_box.insert(name.to_string(), slot);
     }
 
-    /// Lift `arity` TOS args above every cached `[T; N]` box so a dense callee
-    /// whose frame base is `tell - arity` cannot Seek/write the identity slot.
+    /// Lift `arity` TOS args above every cached `[T; N]` / Q2 class box so a
+    /// dense callee whose frame base is `tell - arity` cannot Seek/write the
+    /// identity slot.
+    ///
+    /// Spill temps are allocated after the box slot, so `Seek(box+1)` would
+    /// land on the first spill. Reloading then overwrites that spill (arity ≥ 2
+    /// turned the second arg into a copy of the boxed object).
     fn park_args_above_stack_array_boxes(&mut self, bytecode: &mut CodeBuf, arity: u32) {
         if arity == 0
             || (self.context.stack_array_box.is_empty()
@@ -3379,14 +3384,13 @@ impl Compiler {
         {
             return;
         }
-        let Some(park) = self
+        let Some(box_hi) = self
             .context
             .stack_array_box
             .values()
             .chain(self.context.unboxed_class_box.values())
             .copied()
             .max()
-            .map(|s| s + 1)
         else {
             return;
         };
@@ -3396,7 +3400,8 @@ impl Compiler {
             bytecode.push_store_pop(tmp);
             spilled.push(tmp);
         }
-        bytecode.push_seek(park);
+        let spill_hi = spilled.iter().copied().max().unwrap_or(box_hi);
+        bytecode.push_seek(box_hi.max(spill_hi) + 1);
         for tmp in spilled.into_iter().rev() {
             bytecode.push_load(tmp);
         }
