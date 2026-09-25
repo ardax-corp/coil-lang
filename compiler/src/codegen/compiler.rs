@@ -1655,7 +1655,9 @@ impl Compiler {
         // Q1: stack-array args box to one heap object. Tiny-inline remaps
         // callee Index as if the arg were scalar slots and breaks `test()`.
         // Nested `observe(bounce(xs), …)` must not compile `xs` speculatively.
-        if arg_slice.iter().any(|a| self.expr_mentions_stack_array(a)) {
+        if arg_slice.iter().any(|a| {
+            self.expr_mentions_stack_array(a) || self.expr_mentions_unboxed_class(a)
+        }) {
             return false;
         }
         let mut temps = Vec::new();
@@ -2051,6 +2053,11 @@ impl Compiler {
         };
         // The guard reads some arguments ahead of the others and the false path
         // evaluates them again, so no argument may carry a side effect.
+        if flat.iter().any(|a| {
+            self.expr_mentions_stack_array(a) || self.expr_mentions_unboxed_class(a)
+        }) {
+            return false;
+        }
         if !flat.iter().all(Self::peel_arg_is_pure) {
             return false;
         }
@@ -3345,6 +3352,27 @@ impl Compiler {
         self.context.stack_array_box.get(name).copied()
     }
 
+    /// True when `expr` names a Q2 unboxed class local (including nested).
+    fn expr_mentions_unboxed_class(&self, expr: &Output<'_>) -> bool {
+        let node = unwrap_expr_output(expr);
+        match node.1.as_ref() {
+            Expression::NamedArg(_, v) | Expression::Group(v) | Expression::Expr(v) => {
+                self.expr_mentions_unboxed_class(v)
+            }
+            Expression::Identifier(name) => self.unboxed_class_info(name).is_some(),
+            Expression::Call { name, args } => {
+                self.expr_mentions_unboxed_class(name)
+                    || args.as_ref().is_some_and(|items| {
+                        items.iter().any(|a| self.expr_mentions_unboxed_class(a))
+                    })
+            }
+            Expression::Access(recv, _) | Expression::OptionalAccess(recv, _) => {
+                self.expr_mentions_unboxed_class(recv)
+            }
+            _ => false,
+        }
+    }
+
     /// True when `expr` names a multi-slot `[T; N]` local (including nested).
     fn expr_mentions_stack_array(&self, expr: &Output<'_>) -> bool {
         let node = unwrap_expr_output(expr);
@@ -3475,8 +3503,13 @@ impl Compiler {
         self.context.stack_array_box.insert(name.to_string(), slot);
     }
 
-    /// Lift `arity` TOS args above every cached `[T; N]` box so a dense callee
-    /// whose frame base is `tell - arity` cannot Seek/write the identity slot.
+    /// Lift `arity` TOS args above every cached `[T; N]` / Q2 class box so a
+    /// dense callee whose frame base is `tell - arity` cannot Seek/write the
+    /// identity slot.
+    ///
+    /// Spill temps are allocated after the box slot, so `Seek(box+1)` would
+    /// land on the first spill. Reloading then overwrites that spill (arity ≥ 2
+    /// turned the second arg into a copy of the boxed object).
     fn park_args_above_stack_array_boxes(&mut self, bytecode: &mut CodeBuf, arity: u32) {
         if arity == 0
             || (self.context.stack_array_box.is_empty()
@@ -3484,14 +3517,13 @@ impl Compiler {
         {
             return;
         }
-        let Some(park) = self
+        let Some(box_hi) = self
             .context
             .stack_array_box
             .values()
             .chain(self.context.unboxed_class_box.values())
             .copied()
             .max()
-            .map(|s| s + 1)
         else {
             return;
         };
@@ -3501,7 +3533,8 @@ impl Compiler {
             bytecode.push_store_pop(tmp);
             spilled.push(tmp);
         }
-        bytecode.push_seek(park);
+        let spill_hi = spilled.iter().copied().max().unwrap_or(box_hi);
+        bytecode.push_seek(box_hi.max(spill_hi) + 1);
         for tmp in spilled.into_iter().rev() {
             bytecode.push_load(tmp);
         }
@@ -4010,6 +4043,18 @@ impl Compiler {
 
         if !pack_rest && !box_generic && self.callee_has_unboxed_range_params(fn_name) {
             return self.emit_call_args_range_pairs(fn_name, &fixed, bytecode);
+        }
+
+        // Q1/Q2 box identity lives in a frame slot. Sequential pushes plus
+        // park-from-TOS reorder after an earlier CALL. Stage each arg to a
+        // temp (same as methods) then park above those temps.
+        if !pack_rest
+            && (!self.context.stack_array_box.is_empty()
+                || !self.context.unboxed_class_box.is_empty())
+        {
+            let n = self.emit_call_args_stage_all(&fixed, bytecode, box_generic);
+            self.park_args_above_stack_array_boxes(bytecode, n);
+            return n;
         }
 
         if !pack_rest && Self::should_reorder_pure_call_args(&fixed) {
@@ -12993,7 +13038,8 @@ impl Compiler {
     /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
     ///
     /// `CONST 0; EQ; JMPT` currently joins into `ConstReturnImm 0` and drops
-    /// the Some payload (`optional_text`). LogNot is the same zero test.
+    /// the Some payload (`optional_text`). LogNot is the same zero test;
+    /// dense `UNARY_NOT` must use that truthiness, not `as_bool`.
     fn push_niche_eq_zero(bytecode: &mut CodeBuf) {
         bytecode.push(Byte::new(Instruction::DUPLICATE));
         bytecode.push(Byte::new(Instruction::LogNot));

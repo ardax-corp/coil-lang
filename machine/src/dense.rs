@@ -94,7 +94,7 @@ pub fn eval_unary(kind: u8, src: Value) -> Value {
     match kind {
         dense::UNARY_NEG => Value::from(src.as_int().wrapping_neg()),
         dense::UNARY_FNEG => Value::from(-src.as_float()),
-        dense::UNARY_NOT => Value::from(!src.as_bool()),
+        dense::UNARY_NOT => Value::from(!(src.as_int() != 0)),
         _ => src,
     }
 }
@@ -116,5 +116,23 @@ pub fn eval_const(ty: u8, raw: u64) -> Value {
         dense::TY_F32 => Value::from(u64::from(raw as u32)),
         dense::TY_F64 | dense::TY_I64 => Value::from(raw),
         _ => Value::from(raw),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unary_not_matches_log_not_truthiness() {
+        // VM LogNot is `!(as_int() != 0)`. Dense UNARY_NOT used to use
+        // `as_bool` (`raw as u8 == 1`), so a heap pointer looked like None.
+        let ptr = Value::from(0x1000i64);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(0i64)).as_int(), 1);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(1i64)).as_int(), 0);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(42i64)).as_int(), 0);
+        assert_eq!(eval_unary(dense::UNARY_NOT, ptr).as_int(), 0);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(true)).as_int(), 0);
+        assert_eq!(eval_unary(dense::UNARY_NOT, Value::from(false)).as_int(), 1);
     }
 }

@@ -5141,6 +5141,51 @@ fn main() {
     assert!(!vm.panicked(), "Q2 identity edges");
 }
 
+/// Q2: field stores before the first free-fn escape must be visible on the boxed
+/// identity. Arity-2 park used to Seek onto the spill temps and clobber the
+/// string argument with a copy of the instance (`key_eq` then compared field vs object).
+#[test]
+fn named_class_string_field_visible_to_free_fn() {
+    let src = r#"
+class Slot {
+    pub on: int,
+    pub key: string,
+}
+fn take(Slot slot) -> string {
+    return slot.key;
+}
+fn key_eq(Slot slot, string key) -> int {
+    if slot.key == key {
+        return 1;
+    }
+    return 0;
+}
+fn main() {
+    let slot = new Slot(0, "");
+    slot.on = 1;
+    slot.key = "http://127.0.0.1:9";
+    let key = "http://127.0.0.1:9";
+    if take(slot) != key {
+        panic "take";
+    }
+    if key_eq(slot, key) != 1 {
+        panic "key_eq";
+    }
+}
+"#;
+    let mut pipeline = crate::Pipeline::new();
+    let (bc, constants) = pipeline.compile_src(src).expect("compile");
+    let mut vm = machine::Machine::<64>::with_operand_capacity(64);
+    pipeline.wire_host_natives(&mut vm);
+    vm.run_raw(
+        &bc,
+        &constants,
+        pipeline.strings(),
+        pipeline.static_slot_count(),
+    );
+    assert!(!vm.panicked(), "string field after Q2 stores must reach free fns");
+}
+
 /// S2h: unproven `xs[k]` load uses runtime 0<=k<N then slots; OOB arm is heap Index.
 #[test]
 fn stack_array_unproven_index_load_checksum() {
