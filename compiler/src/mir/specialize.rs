@@ -11,7 +11,7 @@ use super::abi::{DenseAbi, DenseCallMap};
 use super::deopt::DraftDeoptMap;
 use super::emit::emit_dense;
 use super::emit_lir::emit_lir;
-use super::entry::lir_eligible_with;
+use super::entry::lir_refuse_with;
 use super::gc::refuses_alloc;
 use super::infer::{infer_lir, infer_lir_across_alloc, infer_numeric_across_alloc, infer_numeric_with};
 use super::lower::{try_lower_numeric, LowerHints};
@@ -410,6 +410,27 @@ pub fn try_lower_abi_body_with(
     try_lower_abi_body_side(ops, name, entry_sp, pool, unboxed_fields, &mut BodySidecar::default())
 }
 
+thread_local! {
+    static LIR_REFUSAL: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Why the last [`try_lower_abi_body_side`] returned `None` (keep-rate census).
+pub fn take_lir_refusal() -> Option<String> {
+    LIR_REFUSAL.with(|c| c.borrow_mut().take())
+}
+
+/// Record a coarse refusal key (digits folded) and return `None`.
+fn refuse<T>(why: impl std::fmt::Display) -> Option<T> {
+    let key: String = why
+        .to_string()
+        .chars()
+        .map(|c| if c.is_ascii_digit() { '#' } else { c })
+        .take(60)
+        .collect();
+    LIR_REFUSAL.with(|c| *c.borrow_mut() = Some(key));
+    None
+}
+
 pub fn try_lower_abi_body_side(
     ops: &[IlOp],
     name: &str,
@@ -424,17 +445,21 @@ pub fn try_lower_abi_body_side(
     // `return [x]` stays fuse-IL so invert+fuse (COI-87) remains.
     let has_alloc = ops.iter().any(refuses_alloc);
     if has_alloc && super::infer::has_alloc_only_after_loops(ops) {
-        return None;
+        return refuse("alloc only after loops");
     }
     let maps_ok =
         has_alloc && has_real_maps(ops, name, entry_sp, pool, unboxed_fields);
-    if !lir_eligible_with(ops, unboxed_fields, maps_ok) {
-        return None;
+    if let Some(wall) = lir_refuse_with(ops, unboxed_fields, maps_ok) {
+        return refuse(format!("lir wall {wall:?}"));
     }
     let inferred = if has_alloc {
-        infer_lir_across_alloc(ops, pool.len(), entry_sp).ok()?
+        infer_lir_across_alloc(ops, pool.len(), entry_sp)
     } else {
-        infer_lir(ops, pool.len(), entry_sp).ok()?
+        infer_lir(ops, pool.len(), entry_sp)
+    };
+    let inferred = match inferred {
+        Ok(v) => v,
+        Err(e) => return refuse(format!("infer: {e}")),
     };
     let mut hints = LowerHints::new(name);
     hints.slot_ty = inferred.slot_ty;
@@ -447,7 +472,10 @@ pub fn try_lower_abi_body_side(
     hints.allow_alloc = has_alloc;
     hints.allow_index = true;
     hints.allow_string = ops.iter().any(super::string_barrier::is_string_il);
-    let mut func = try_lower_numeric(ops, &hints).ok()?;
+    let mut func = match try_lower_numeric(ops, &hints) {
+        Ok(f) => f,
+        Err(e) => return refuse(format!("lower: {e}")),
+    };
     if has_alloc {
         crate::mir::sroa(&mut func);
     } else {
@@ -461,19 +489,22 @@ pub fn try_lower_abi_body_side(
     let (remap, deopt) = super::emit_lir::lir_sidecars(&func);
     side.debug_slot_remap = remap;
     side.deopt = Some(deopt);
-    let out = emit_lir(&func, entry, pool, has_alloc).ok()?;
+    let out = match emit_lir(&func, entry, pool, has_alloc) {
+        Ok(o) => o,
+        Err(e) => return refuse(format!("emit: {e}")),
+    };
     if has_alloc {
         let before = ops.iter().filter(|o| refuses_alloc(o)).count();
         let after = out.iter().filter(|o| refuses_alloc(o)).count();
         if after < before {
-            return None;
+            return refuse("alloc sites dropped");
         }
     }
     if has_sroa_select_cfg(ops) && !select_reconstruct_ok(ops, &out) {
-        return None;
+        return refuse("select reconstruct");
     }
     if count_make_enum(&out) > count_make_enum(ops) {
-        return None;
+        return refuse("MakeEnum growth");
     }
     Some(out)
 }

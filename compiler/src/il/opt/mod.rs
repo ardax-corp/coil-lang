@@ -218,7 +218,7 @@ mod opt_level;
 mod stats;
 pub(crate) use branch_opt::{max_code_label, remap_label_space};
 pub use opt_level::OptLevel;
-pub(crate) use stats::note_function_inlined;
+pub(crate) use stats::{note_body_tiers, note_function_inlined, note_fuse_reason};
 pub use stats::{OptStats, begin_opt_stats, last_opt_stats};
 
 mod cfg;

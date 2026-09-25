@@ -85,8 +85,8 @@ pub use layout::MirLayout;
 pub use licm::licm;
 pub use lower::{LowerError, LowerHints, try_lower_numeric};
 pub use specialize::{
-    try_lower_abi_body, try_lower_abi_body_side, try_lower_abi_body_with, try_specialize_body,
-    try_specialize_body_side, BodySidecar,
+    take_lir_refusal, try_lower_abi_body, try_lower_abi_body_side, try_lower_abi_body_with,
+    try_specialize_body, try_specialize_body_side, BodySidecar,
 };
 pub use sroa::sroa;
 pub use strength::strength_reduce;

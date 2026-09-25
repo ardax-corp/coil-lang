@@ -2190,6 +2190,31 @@ fn main() { add(1, 2); }
     }
 
     #[test]
+    fn opt_stats_census_counts_every_body_tier() {
+        let src = r#"
+fn sum(int n) -> int {
+    let s = 0;
+    let i = 0;
+    while i < n {
+        s = s + i * 3;
+        i = i + 1;
+    }
+    return s;
+}
+fn main() { sum(10); }
+"#;
+        let mut pipeline = Pipeline::new();
+        pipeline.set_collect_opt_stats(true);
+        pipeline.compile_src(src).expect("compile");
+        let stats = crate::last_opt_stats();
+        let bodies = stats.bodies_dense + stats.bodies_lir + stats.bodies_fuse;
+        assert!(bodies >= 2, "main and sum are both counted; stats={stats:?}");
+        let reasons: usize = stats.fuse_reasons.iter().map(|r| r.applied).sum();
+        assert_eq!(reasons, stats.bodies_fuse, "every fuse-IL body has a reason");
+        assert!(stats.format_text().contains("bodies:"));
+    }
+
+    #[test]
     fn vec_scan_array_pin_entry_jumps_stay_in_function() {
         use common::Instruction;
 

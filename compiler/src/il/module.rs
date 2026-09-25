@@ -322,7 +322,9 @@ impl IlModule {
             }
             pending = next;
         }
-        for i in pending {
+        let dense_kept = self.funcs.len() - pending.len();
+        let mut lir_kept = 0usize;
+        for i in pending.iter().copied() {
             if !opts.mir_specialize {
                 break;
             }
@@ -347,8 +349,22 @@ impl IlModule {
                         side_deopts.push(deopt);
                     }
                     body.ops = lir;
+                    lir_kept += 1;
+                } else if opts.collect_stats {
+                    super::opt::note_fuse_reason("lir cost gate");
                 }
+            } else if opts.collect_stats {
+                let why = crate::mir::take_lir_refusal();
+                super::opt::note_fuse_reason(why.as_deref().unwrap_or("lir refused"));
             }
+        }
+        if opts.collect_stats {
+            let (dense, fuse) = if opts.mir_specialize {
+                (dense_kept, pending.len() - lir_kept)
+            } else {
+                (0, self.funcs.len())
+            };
+            super::opt::note_body_tiers(dense, lir_kept, fuse);
         }
         self.debug_slot_remaps.extend(side_remaps);
         self.deopt_map_drafts.extend(side_deopts);
