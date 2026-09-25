@@ -401,11 +401,9 @@ fn stream_read_into(
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        let olds: Vec<Value> = arr.elements[..n].to_vec();
         for (dst, src) in arr.elements[..n].iter_mut().zip(tmp[..n].iter()) {
             *dst = Value::from(*src as i64);
         }
-        heap.satb_shade_values(&olds);
         Ok(Some(n))
     } else {
         Ok(None)
@@ -518,15 +516,10 @@ pub fn stream_read_exact(
                 let Some(Object::Array(mut dst)) = heap.find_object_by_addr(buf_addr) else {
                     return Err(IoErrorTag::Other);
                 };
-                let mut olds = Vec::with_capacity(chunk.len());
-                {
-                    let elems = &mut dst.as_mut().elements;
-                    for (i, v) in chunk.into_iter().enumerate() {
-                        olds.push(elems[filled + i]);
-                        elems[filled + i] = v;
-                    }
+                let elems = &mut dst.as_mut().elements;
+                for (i, v) in chunk.into_iter().enumerate() {
+                    elems[filled + i] = v;
                 }
-                heap.satb_shade_values(&olds);
                 filled += n;
             }
             Err(IoErrorTag::WouldBlock) => {
@@ -1143,11 +1136,9 @@ pub fn udp_recv_from(heap: &mut Heap, stream: Value, buf: Value) -> Result<Value
             return Err(IoErrorTag::InvalidInput);
         };
         let arr: &mut ObjArray = arr_gc.as_mut();
-        let olds: Vec<Value> = arr.elements[..n].to_vec();
         for (dst, src) in arr.elements[..n].iter_mut().zip(tmp[..n].iter()) {
             *dst = Value::from(*src as i64);
         }
-        heap.satb_shade_values(&olds);
     }
 
     let host_str = match peer {

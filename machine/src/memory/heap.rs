@@ -1,8 +1,9 @@
 //! Mark-and-sweep heap: intrusive object list, string interning, and GC.
 //!
-//! Interpreter collections use incremental tricolor mark + Yuasa SATB and a
-//! lazy sweep cursor. Explicit `Heap::collect` / `gc::collect` still drain a
-//! cycle to completion. Objects do not move.
+//! Interpreter collections mark to completion at an alloc safepoint, then
+//! sweep lazily from a cursor. The mutator never runs with gray objects, so
+//! stores need no write barrier (see [`Heap::resurrect_during_mark`]).
+//! Explicit `Heap::collect` / `gc::collect` drain a cycle. Objects do not move.
 
 use std::alloc::Layout;
 use std::collections::HashMap;
@@ -16,12 +17,10 @@ use super::AddrHashBuilder;
 
 const GC_NEXT_THRESHOLD: usize = 1024 * 1024;
 const GC_GROWTH_FACTOR: usize = 2;
-/// Gray objects scanned at one alloc safepoint (work-based pacing adds more).
-pub const GC_MARK_QUANTUM: usize = 128;
 /// Unmarked objects considered at one alloc safepoint during lazy sweep.
 pub const GC_SWEEP_QUANTUM: usize = 128;
 
-/// Incremental collector phase. `Idle` means the last cycle finished.
+/// Collector phase. `Idle` means the last cycle finished.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum GcPhase {
     Idle,
@@ -224,7 +223,7 @@ impl Heap {
         self.head = Some(object);
         self.alloc_bytes += size;
         self.live_count += 1;
-        // SATB: mutator-allocated objects during mark are black (not gray).
+        // Objects allocated while a cycle is open (finalizers) are black.
         if self.gc_phase == GcPhase::Marking {
             let _ = content.mark();
         }
@@ -354,34 +353,10 @@ impl Heap {
         }
     }
 
-    /// Shade `v` if a mark cycle is running (Yuasa SATB: log the overwritten pointer).
-    #[inline]
-    pub fn satb_shade_value(&mut self, v: Value) {
-        if unlikely(self.gc_phase == GcPhase::Marking) {
-            self.shade_value(v);
-        }
-    }
-
-    /// Shade a replaced instance/enum member during mark.
-    #[inline]
-    pub fn satb_shade_member(&mut self, member: Member) {
-        if unlikely(self.gc_phase != GcPhase::Marking) {
-            return;
-        }
-        match member {
-            Member::Object(o) => self.shade_object(o),
-            Member::Value(v) => self.shade_value(v),
-        }
-    }
-
-    /// Shade overwritten / dropped slot values (clear, bulk IO fill).
-    #[inline]
-    pub fn satb_shade_values(&mut self, vals: &[Value]) {
-        if unlikely(self.gc_phase != GcPhase::Marking) {
-            return;
-        }
-        for &v in vals {
-            self.shade_value(v);
+    /// Mark a finalizable object (and later its graph) before its `drop` runs.
+    pub fn shade_for_finalizer(&mut self, obj: Object) {
+        if self.gc_phase == GcPhase::Marking {
+            self.shade_object(obj);
         }
     }
 
@@ -547,17 +522,13 @@ impl Heap {
         self.gc_phase == GcPhase::Idle && self.alloc_bytes > self.gc_next_threshold
     }
 
-    /// Gray / sweep objects to process at one safepoint (doubles under pressure).
+    /// Objects to sweep at one safepoint (doubles under pressure).
     #[inline]
-    pub fn gc_work_quantum(&self) -> usize {
-        let base = match self.gc_phase {
-            GcPhase::Sweeping => GC_SWEEP_QUANTUM,
-            GcPhase::Marking | GcPhase::Idle => GC_MARK_QUANTUM,
-        };
+    pub fn gc_sweep_quantum(&self) -> usize {
         if self.alloc_bytes > self.gc_next_threshold {
-            base.saturating_mul(2)
+            GC_SWEEP_QUANTUM.saturating_mul(2)
         } else {
-            base
+            GC_SWEEP_QUANTUM
         }
     }
 
@@ -765,16 +736,9 @@ impl Heap {
             return;
         };
         let n = gc.as_ref().elements.len().min(values.len());
-        let mut olds = Vec::with_capacity(n);
-        {
-            let arr = gc.as_mut();
-            for (i, &v) in values.iter().take(n).enumerate() {
-                olds.push(arr.elements[i]);
-                arr.elements[i] = Value::from(v);
-            }
-        }
-        for old in olds {
-            self.satb_shade_value(old);
+        let arr = gc.as_mut();
+        for (i, &v) in values.iter().take(n).enumerate() {
+            arr.elements[i] = Value::from(v);
         }
     }
 
@@ -3146,37 +3110,6 @@ mod tests {
         assert_eq!(heap.gc_phase(), GcPhase::Idle);
         assert!(heap.find_object_by_addr(keep.addr()).is_some());
         assert!(heap.find_object_by_addr(drop_me.addr()).is_none());
-    }
-
-    #[test]
-    fn satb_keeps_overwritten_pointer_this_cycle() {
-        let mut heap = Heap::default();
-        let (old, _) = heap.alloc(ObjString::from("old"), Object::String);
-        let (fresh, _) = heap.alloc(ObjString::from("fresh"), Object::String);
-        let inst = ObjInstance::with_slots(1, vec![Member::Object(old)]);
-        let (obj, mut gc) = heap.alloc(inst, Object::Instance);
-
-        heap.begin_mark(&[obj.addr()]);
-        // Overwrite before `obj` is scanned so only SATB keeps `old` gray.
-        heap.satb_shade_member(Member::Object(old));
-        gc.as_mut().set_slot(0, Member::Object(fresh));
-        while !heap.mark_quantum(64) {}
-        heap.clear_dead_weaks();
-        heap.begin_sweep();
-        heap.finish_sweep();
-
-        let live = live_object_addrs(&heap);
-        assert!(live.contains(&old.addr()), "SATB floating garbage this cycle");
-        assert!(live.contains(&fresh.addr()));
-        assert!(live.contains(&obj.addr()));
-
-        heap.collect(&[obj.addr()]);
-        let live = live_object_addrs(&heap);
-        assert!(
-            !live.contains(&old.addr()),
-            "overwritten pointer dies on the next cycle"
-        );
-        assert!(live.contains(&fresh.addr()));
     }
 
     #[test]

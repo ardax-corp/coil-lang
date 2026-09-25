@@ -1221,7 +1221,6 @@ impl<const S: usize> Machine<S> {
             }
 
             self.mark_from_vm_roots();
-            self.relocate_mapped_slots();
             let queue = self.queue_unmarked_finalizers();
             if !queue.is_empty() {
                 let mut gray = Vec::new();
@@ -1244,7 +1243,6 @@ impl<const S: usize> Machine<S> {
             self.heap.clear_dead_weaks();
             // SAFETY: all reachable objects were marked above; dead weaks cleared.
             unsafe { self.heap.sweep() };
-            self.relocate_mapped_slots();
             // Cache is not a GC root; unmarked interned literals are gone.
             self.invalidate_program_string_cache();
             if !self.gc_deferred {
@@ -1266,7 +1264,7 @@ impl<const S: usize> Machine<S> {
         self.heap.restore_gc_roots(roots);
     }
 
-    /// Incremental mark / SATB remark / lazy sweep at an alloc safepoint.
+    /// Mark to completion / lazy sweep at an alloc safepoint.
     #[inline(never)]
     fn gc_safepoint(&mut self) {
         if self.gc_in_progress {
@@ -1301,19 +1299,17 @@ impl<const S: usize> Machine<S> {
 
     #[inline(never)]
     fn gc_mark_slice(&mut self) {
-        // Drain mark at this safepoint so the mutator never runs while
-        // `GcPhase::Marking` (SATB is then only needed on host stores).
-        let n = self.heap.gc_work_quantum();
-        while !self.heap.mark_quantum(n) {}
+        // Drain mark at this safepoint: the mutator never runs with gray
+        // objects (finalizers below run after the drain), so stores need no
+        // write barrier. See `Heap::resurrect_during_mark`.
+        while !self.heap.mark_quantum(usize::MAX) {}
         self.gc_remark_vm_roots();
         while !self.heap.mark_quantum(usize::MAX) {}
-        self.relocate_mapped_slots();
         let queue = self.queue_unmarked_finalizers();
         if !queue.is_empty() {
             for (val, _) in &queue {
                 if let Some(obj) = Self::find_object_by_addr(&self.heap, val.raw() as u64) {
-                    self.heap
-                        .satb_shade_member(crate::memory::Member::Object(obj));
+                    self.heap.shade_for_finalizer(obj);
                 }
             }
             while !self.heap.mark_quantum(usize::MAX) {}
@@ -1339,9 +1335,8 @@ impl<const S: usize> Machine<S> {
     }
 
     fn gc_sweep_slice(&mut self) {
-        let n = self.heap.gc_work_quantum();
+        let n = self.heap.gc_sweep_quantum();
         if self.heap.sweep_quantum(n) {
-            self.relocate_mapped_slots();
             self.invalidate_program_string_cache();
         }
     }
@@ -1420,30 +1415,6 @@ impl<const S: usize> Machine<S> {
             };
             for &slot in map.slots_at(ip) {
                 visit(sp.saturating_add(slot as usize));
-            }
-        }
-    }
-
-    /// Rewrite mapped frame slots when a live object moved (identity today).
-    fn relocate_mapped_slots(&mut self) {
-        if self.stack_maps.is_empty() {
-            return;
-        }
-        let mut idxs = Vec::new();
-        self.for_each_mapped_slot_index(|i| idxs.push(i));
-        for idx in idxs {
-            if idx >= self.stack.capacity() {
-                continue;
-            }
-            let addr = self.stack[idx].heap_addr();
-            if addr == 0 {
-                continue;
-            }
-            if let Some(obj) = self.heap.find_object_by_addr(addr) {
-                let live = obj.addr();
-                if live != addr {
-                    self.stack[idx] = Value::from(live);
-                }
             }
         }
     }
