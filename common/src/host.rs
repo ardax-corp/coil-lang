@@ -706,6 +706,11 @@ pub const HOST_NATIVES: &[HostNative] = &[
         arity: 1,
         id: 137,
     },
+    HostNative {
+        name: "stream_fd",
+        arity: 1,
+        id: 138,
+    },
 ];
 
 /// First packed-LA HostInvoke (`packed_dot`).
@@ -740,6 +745,8 @@ pub const SIMD_AXPY_REDUCE_ID: u16 = 136;
 pub const SIMD_AXPY_REDUCE_NATIVE: &str = "simd_axpy_reduce";
 pub const THREAD_SPAWN_SHARED_ID: u16 = 137;
 pub const THREAD_SPAWN_SHARED_NATIVE: &str = "thread_spawn_shared";
+pub const STREAM_FD_ID: u16 = 138;
+pub const STREAM_FD_NATIVE: &str = "stream_fd";
 
 pub const STREAM_ATTACH_NATIVE: &str = "stream_attach";
 pub const STREAM_PARK_NATIVE: &str = "stream_park";
@@ -787,7 +794,7 @@ pub const GC_COLLECT_NATIVE: &str = "gc_collect";
 pub const GC_REGISTER_FINALIZER_NATIVE: &str = "gc_register_finalizer";
 
 const _: () = {
-    assert!(HOST_NATIVES.len() == 138);
+    assert!(HOST_NATIVES.len() == 139);
     assert!(HOST_NATIVES[119].id == STREAM_ATTACH_ID);
     assert!(HOST_NATIVES[120].id == STREAM_PARK_ID);
     assert!(HOST_NATIVES[121].id == CLOCK_WALL_NANOS_ID);
@@ -798,6 +805,7 @@ const _: () = {
     assert!(HOST_NATIVES[135].id == MATH_TANH_ID);
     assert!(HOST_NATIVES[136].id == SIMD_AXPY_REDUCE_ID);
     assert!(HOST_NATIVES[137].id == THREAD_SPAWN_SHARED_ID);
+    assert!(HOST_NATIVES[138].id == STREAM_FD_ID);
 };
 
 /// HostInvoke id for a standard native name.

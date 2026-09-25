@@ -88,6 +88,7 @@ pub fn build_standard_host_natives(
     // Append-only after math: MIR saxpy-reduce pack (compiler rewrite only).
     push_simd_axpy_reduce(&mut out, &mut register_id);
     push_thread_spawn_shared(&mut out, &mut register_id);
+    push_stream_fd(&mut out, &mut register_id);
     assert_eq!(
         out.len(),
         common::HOST_NATIVES.len(),
@@ -98,7 +99,7 @@ pub fn build_standard_host_natives(
 
 pub use common::{
     CLOCK_MONO_NANOS_NATIVE, CLOCK_SLEEP_MS_NATIVE, CLOCK_WALL_NANOS_NATIVE, STREAM_ATTACH_NATIVE,
-    STREAM_PARK_NATIVE,
+    STREAM_FD_NATIVE, STREAM_PARK_NATIVE,
 };
 
 fn push_stream_attach(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
@@ -223,6 +224,25 @@ fn push_stream_park(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnM
     out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
         let r = crate::stream_attach::stream_park(heap, args[0]);
         Ok(Some(as_result_unit(heap, r)))
+    })));
+}
+
+fn push_stream_fd(out: &mut Vec<Arc<dyn NativeFn>>, register_id: &mut impl FnMut(&str, usize)) {
+    use crate::io::{as_result_value, IoErrorTag};
+    let sig = FfiSignature::from_parts(
+        STREAM_FD_NATIVE.to_string(),
+        vec![FfiType::Int],
+        FfiType::Int,
+    )
+    .expect("stream_fd signature");
+    let id = out.len();
+    register_id(STREAM_FD_NATIVE, id);
+    out.push(Arc::new(HostClosureFn::new(sig, |heap, args| {
+        let r = match crate::io::stream_fd_i64(heap, args[0]) {
+            Some(fd) => Ok(Value::from(fd)),
+            None => Err(IoErrorTag::InvalidInput),
+        };
+        Ok(Some(as_result_value(heap, r)))
     })));
 }
 

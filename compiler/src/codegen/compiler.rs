@@ -8776,12 +8776,13 @@ impl Compiler {
         self.emit_range_to_vec_thunk("RangeInclusive::__float_to_vec".into(), true, true);
     }
 
-    /// Inherent `Stream::attach` / `Stream::park` bodies (HostInvoke thunks).
+    /// Inherent `Stream::attach` / `Stream::park` / `Stream::fd` bodies.
     fn emit_stream_method_thunks(&mut self) {
         let owner = crate::typechecking::ty::STREAM;
         let methods = self.context.methods.entry(owner.to_string()).or_default();
         methods.insert("attach".to_string(), format!("{owner}::attach"));
         methods.insert("park".to_string(), format!("{owner}::park"));
+        methods.insert("fd".to_string(), format!("{owner}::fd"));
 
         let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32]| {
             if compiler.functions.contains_key(&fqn) {
@@ -8810,6 +8811,12 @@ impl Compiler {
             self,
             format!("{owner}::park"),
             common::STREAM_PARK_NATIVE,
+            &[0],
+        );
+        emit_host(
+            self,
+            format!("{owner}::fd"),
+            common::STREAM_FD_NATIVE,
             &[0],
         );
     }

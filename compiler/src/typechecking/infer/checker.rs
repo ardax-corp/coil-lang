@@ -394,7 +394,7 @@ impl Checker {
         }
     }
 
-    /// Synthetic `Stream` inherent methods (`attach` / `park`).
+    /// Synthetic `Stream` inherent methods (`attach` / `park` / `fd`).
     ///
     /// Idempotent: same re-entry contract as [`Self::register_builtin_vec`].
     fn register_builtin_stream(&mut self) {
@@ -414,13 +414,15 @@ impl Checker {
         let stream = stream_ty();
         let io_err = Ty::Con(common::BUILTIN_IO_ERROR_ENUM.into());
         let res_stream = result_app_ty(stream.clone(), io_err.clone());
-        let res_unit = result_app_ty(unit_ty(), io_err);
+        let res_unit = result_app_ty(unit_ty(), io_err.clone());
+        let res_int = result_app_ty(int(), io_err);
 
         let attach_ty = fun(
             &[stream.clone(), int(), int(), int(), int(), int()],
             res_stream,
         );
-        let park_ty = fun(&[stream], res_unit);
+        let park_ty = fun(&[stream.clone()], res_unit);
+        let fd_ty = fun(&[stream], res_int);
         let attach_params = ["ptr", "read", "write", "shutdown", "free"];
 
         let fqn = format!("{STREAM}::attach");
@@ -463,6 +465,25 @@ impl Checker {
             .entry(STREAM.to_string())
             .or_default()
             .insert("park".to_string(), (Visibility::Public, scheme));
+
+        let fqn = format!("{STREAM}::fd");
+        let scheme = Scheme::mono(fd_ty);
+        self.fn_param_names.insert(fqn.clone(), Vec::new());
+        self.register_overload_candidate(
+            &fqn,
+            OverloadCandidate {
+                id: 0,
+                fixed_arity: 0,
+                is_rest: false,
+                scheme: scheme.clone(),
+                param_names: Vec::new(),
+            },
+            &dummy,
+        );
+        self.methods
+            .entry(STREAM.to_string())
+            .or_default()
+            .insert("fd".to_string(), (Visibility::Public, scheme));
     }
 
     /// Parameter names for builtins that support named arguments at call sites.
