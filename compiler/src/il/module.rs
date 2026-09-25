@@ -852,6 +852,61 @@ mod tests {
     }
 
     #[test]
+    fn to_flat_remaps_codeptr_when_callee_label_count_overlaps_old_target() {
+        let loc = loc();
+        let callee_entry = Label(2);
+        let mut m = IlModule::default();
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("decoy", Some(Label(0)), 0, 4),
+            ops: vec![
+                IlOp::Label(Label(0)),
+                IlOp::Label(Label(1)),
+                IlOp::Label(callee_entry),
+                IlOp::Return { loc, ret_words: 1},
+            ],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("callee", Some(callee_entry), 0, 2),
+            ops: vec![IlOp::Label(callee_entry), IlOp::Return { loc, ret_words: 1}],
+        });
+        m.funcs.push(IlFuncBody {
+            meta: IlFunc::new("caller", None, 0, 2),
+            ops: vec![
+                IlOp::Entry {
+                    kind: EntryKind::CodePtr,
+                    arity: 0,
+                    target: callee_entry,
+                    loc, ret_words: 1,},
+                IlOp::Return { loc, ret_words: 1},
+            ],
+        });
+        let (flat, _, _) = m.to_flat();
+        let callee_label = flat
+            .iter()
+            .filter_map(|op| match op {
+                IlOp::Label(Label(id)) | IlOp::JoinLabel(Label(id)) => Some(*id),
+                _ => None,
+            })
+            .nth(3)
+            .expect("callee entry is the fourth label (after decoy's three)");
+        let entry_target = flat
+            .iter()
+            .find_map(|op| match op {
+                IlOp::Entry {
+                    kind: EntryKind::CodePtr,
+                    target,
+                    ..
+                } => Some(target.0),
+                _ => None,
+            })
+            .expect("caller CodePtr");
+        assert_eq!(
+            entry_target, callee_label,
+            "CodePtr target {entry_target} must be the callee entry {callee_label}, not the decoy's reused id"
+        );
+    }
+
+    #[test]
     fn to_flat_remaps_call_when_entry_label_was_relabeled() {
         let loc = loc();
         let emit_entry = Label(10);

@@ -271,7 +271,7 @@ pub fn classify_host_name(name: &str) -> EffectFlags {
         return flags;
     }
     match short {
-        "attach" | "park" | "stream_attach" | "stream_park" => {
+        "attach" | "park" | "fd" | "stream_attach" | "stream_park" | "stream_fd" => {
             flags.insert(EffectFlags::ATTACH_PARK)
         }
         "spawn" | "join" | "detach" | "channel" | "send" | "recv" | "try_send" | "try_recv"

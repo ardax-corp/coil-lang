@@ -495,7 +495,20 @@ impl Compiler {
             return bytecode;
         }
 
-        if self.unbox_enum_context > 0 {
+        // Niche Option/Result keep one word even inside a two-slot Result
+        // CALL (`unbox_enum_context`): emitting `[payload, tag]` for
+        // `Option::None` in that CALL's arguments shifts the frame so
+        // `Stream.fd()` sees the host string (InvalidInput).
+        let niche_option = common::is_builtin_option_enum(enum_name)
+            && !self.force_heap_option
+            && (self
+                .codegen_expr_ty(ast)
+                .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+                || self.force_niche_option);
+        let niche_unit_result = self.should_niche_unit_result_construct(enum_name, ast);
+        let niche_result = self.should_niche_result_construct(enum_name, ast);
+
+        if self.unbox_enum_context > 0 && !niche_option && !niche_unit_result && !niche_result {
             match fields {
                 EnumConstructPayload::Unit if arity == 0 => {
                     bytecode.push_const(0);
@@ -8776,14 +8789,15 @@ impl Compiler {
         self.emit_range_to_vec_thunk("RangeInclusive::__float_to_vec".into(), true, true);
     }
 
-    /// Inherent `Stream::attach` / `Stream::park` bodies (HostInvoke thunks).
+    /// Inherent `Stream::attach` / `Stream::park` / `Stream::fd` bodies.
     fn emit_stream_method_thunks(&mut self) {
         let owner = crate::typechecking::ty::STREAM;
         let methods = self.context.methods.entry(owner.to_string()).or_default();
         methods.insert("attach".to_string(), format!("{owner}::attach"));
         methods.insert("park".to_string(), format!("{owner}::park"));
+        methods.insert("fd".to_string(), format!("{owner}::fd"));
 
-        let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32]| {
+        let emit_host = |compiler: &mut Self, fqn: String, native: &str, slots: &[u32], layout: u32| {
             if compiler.functions.contains_key(&fqn) {
                 return;
             }
@@ -8797,7 +8811,18 @@ impl Compiler {
             for &slot in slots {
                 compiler.bytecode.push_load(slot);
             }
-            compiler.bytecode.push_host_invoke(slots.len() as u32);
+            // `Result<Stream, E>` is heap-heap niche; `Result<(), E>` is
+            // unit/option niche. Boxed HostInvoke made `match` take Err.
+            if matches!(
+                layout,
+                common::HOST_ENUM_LAYOUT_OPTION_NICHE | common::HOST_ENUM_LAYOUT_RESULT_NICHE
+            ) {
+                compiler
+                    .bytecode
+                    .push_host_invoke_layout(slots.len() as u32, layout);
+            } else {
+                compiler.bytecode.push_host_invoke(slots.len() as u32);
+            }
             compiler.bytecode.push_return();
         };
         emit_host(
@@ -8805,12 +8830,21 @@ impl Compiler {
             format!("{owner}::attach"),
             common::STREAM_ATTACH_NATIVE,
             &[0, 1, 2, 3, 4, 5],
+            common::HOST_ENUM_LAYOUT_RESULT_NICHE,
         );
         emit_host(
             self,
             format!("{owner}::park"),
             common::STREAM_PARK_NATIVE,
             &[0],
+            common::HOST_ENUM_LAYOUT_OPTION_NICHE,
+        );
+        emit_host(
+            self,
+            format!("{owner}::fd"),
+            common::STREAM_FD_NATIVE,
+            &[0],
+            common::HOST_ENUM_LAYOUT_BOXED,
         );
     }
 
@@ -9074,6 +9108,16 @@ impl Compiler {
             || self.checker.gc_fn_in_scope(name).is_some()
             || self.string_builtin_for_call(name).is_some()
             || self.checker.ffi_fn_in_scope(name).is_some()
+            || Self::is_stream_host_method(name)
+    }
+
+    /// `Stream.fd` / `attach` / `park` are HostInvoke thunks, not two-slot CALLs.
+    fn is_stream_host_method(name: &str) -> bool {
+        let Some((owner, method)) = name.rsplit_once("::") else {
+            return false;
+        };
+        owner == crate::typechecking::ty::STREAM
+            && matches!(method, "fd" | "attach" | "park")
     }
 
     /// `true` when `callee` is a statically resolvable direct call (free
@@ -9106,16 +9150,20 @@ impl Compiler {
                     .receiver_type(recv)
                     .or_else(|| self.codegen_expr_ty(recv))
                     .and_then(|ty| Checker::class_name_of_ty(&ty).map(str::to_string))?;
-                if let Some(fqn) = self
+                let fqn = format!("{owner}::{method}");
+                if self.ident_is_host_native(method) || self.ident_is_host_native(&fqn) {
+                    return None;
+                }
+                if let Some(resolved) = self
                     .context
                     .methods
                     .get(&owner)
                     .and_then(|m| m.get(*method))
                     .cloned()
                 {
-                    return self.two_word_return_kind(&fqn);
+                    return self.two_word_return_kind(&resolved);
                 }
-                self.two_word_return_kind(&format!("{owner}::{method}"))
+                self.two_word_return_kind(&fqn)
             }
             Expression::Group(inner) | Expression::Expr(inner) => {
                 self.direct_call_two_word_kind(inner)
@@ -9613,6 +9661,15 @@ impl Compiler {
                 self.bytecode = boxed;
             }
             self.push_return_two_word();
+        } else if self.return_is_niche_result() {
+            // `[payload, Err tag]` → heap-heap `Result<T, E>` (`pointer | 1`).
+            // Boxing as `ObjEnum` would look like `Ok` (aligned pointer).
+            self.bytecode.push_pop();
+            Self::push_result_err_bit(&mut self.bytecode);
+            self.bytecode.push_return();
+        } else if self.return_is_unit_result_niche() {
+            self.bytecode.push_pop();
+            self.bytecode.push_return();
         } else {
             let mut boxed = std::mem::take(&mut self.bytecode);
             self.emit_box_pair_after_call(&mut boxed, inner_kind);
@@ -9812,7 +9869,7 @@ impl Compiler {
             return;
         };
 
-        self.bind_function_entry(qualified.clone());
+        let (code_start, _) = self.bind_function_entry(qualified.clone());
         if *is_coro {
             self.coroutine_fns.insert(qualified.clone());
         }
@@ -9859,6 +9916,7 @@ impl Compiler {
         for dict_idx in 0..dict_arity {
             self.context.variables.intern(format!("__dict{}", dict_idx));
         }
+        let entry_sp = self.context.variables.len() as u32;
         let body_op_start = self.bytecode.ops().len();
         let mut c = self.do_compile(body);
         self.bytecode.append(&mut c);
@@ -9867,6 +9925,13 @@ impl Compiler {
             self.emit_fallthrough_return(name, body.0);
         }
         self.emit_shared_try_fail_epilogue();
+
+        let body_end = self.bytecode.len();
+        self.record_fn_span(qualified.clone(), code_start, body_end);
+        let entry = self.fn_entry_labels.get(&qualified).copied();
+        self.bytecode
+            .record_func_with_sp(qualified.clone(), entry, code_start, body_end, entry_sp);
+        self.record_unboxed_class_fields();
 
         self.fn_defers = prev_fn_defers;
         self.compiling_result_mode = prev_result_mode;
@@ -15307,10 +15372,9 @@ impl Compiler {
                     }
                 }
             }
-            Expression::Integer(num) => bytecode.push(Byte::new_with_value(
-                Instruction::CONST,
-                Value::from(*num).raw() as _,
-            )),
+            Expression::Integer(num) => {
+                self.push_int_const_into(*num, &mut bytecode);
+            }
             Expression::Bool(state) => bytecode.push(Byte::new_with_value(
                 Instruction::CONST,
                 Value::from(*state).raw() as _,
