@@ -11841,3 +11841,24 @@ test("forward static method call from instance") {
         );
     }
 }
+
+/// Codegen must not depend on hash-set iteration order (finalizer registry).
+#[test]
+fn compile_is_deterministic_for_many_drop_classes() {
+    let mut src = String::new();
+    for i in 0..12 {
+        src.push_str(&format!(
+            "class C{i} {{ pub v: int, }}\nimpl C{i} {{ fn drop() {{ }} }}\n"
+        ));
+    }
+    src.push_str("fn main() {\n");
+    for i in 0..12 {
+        src.push_str(&format!("    let _c{i} = new C{i}({i});\n"));
+    }
+    src.push_str("}\n");
+    let compile = || test_pipeline().compile_src(&src).expect("drop classes compile");
+    let first = compile();
+    for _ in 0..4 {
+        assert_eq!(compile(), first, "bytecode differs between identical compiles");
+    }
+}

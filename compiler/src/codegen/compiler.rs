@@ -17200,7 +17200,9 @@ impl Compiler {
     /// moved to the pre-`main` prologue.
     fn emit_finalizer_registry(&mut self, insert_at: usize) -> Option<usize> {
         let native_id = self.native_id("gc_register_finalizer")?;
-        let owners: Vec<String> = self.checker.classes_with_drop().cloned().collect();
+        let mut owners: Vec<String> = self.checker.classes_with_drop().cloned().collect();
+        // Registry order must not follow hash-set iteration: archives stay reproducible.
+        owners.sort_by_key(|o| self.checker.class_type_id(o));
         if owners.is_empty() {
             return None;
         }
