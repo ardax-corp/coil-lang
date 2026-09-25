@@ -12908,7 +12908,8 @@ impl Compiler {
     /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
     ///
     /// `CONST 0; EQ; JMPT` currently joins into `ConstReturnImm 0` and drops
-    /// the Some payload (`optional_text`). LogNot is the same zero test.
+    /// the Some payload (`optional_text`). LogNot is the same zero test;
+    /// dense `UNARY_NOT` must use that truthiness, not `as_bool`.
     fn push_niche_eq_zero(bytecode: &mut CodeBuf) {
         bytecode.push(Byte::new(Instruction::DUPLICATE));
         bytecode.push(Byte::new(Instruction::LogNot));
