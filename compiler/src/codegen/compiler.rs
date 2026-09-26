@@ -11174,7 +11174,8 @@ impl Compiler {
         // Capture lhs's ID before recursing, `do_compile(lhs)`
         // advances `emit_idx` past lhs's entire subtree.
         let lhs_ty = self.codegen_expr_ty(lhs);
-        let lhs_id = self.checker.id_table().ids().get(self.emit_idx).copied();
+        let seq = self.checker.id_table().ids().get(self.emit_idx).copied();
+        let lhs_id = self.checker.id_table().walk_id(lhs, seq);
         if self.expr_is_stackable_direct_call(lhs) && self.expr_is_stackable_direct_call(rhs) {
             // Raise `expr_depth` for pure CALL siblings so temps pad above lhs (enables BinReturn / fib).
             let depth_on_entry = self.expr_depth;
@@ -12184,7 +12185,8 @@ impl Compiler {
         ) {
             return true;
         }
-        let Some(id) = self.checker.id_table().ids().get(self.emit_idx).copied() else {
+        let seq = self.checker.id_table().ids().get(self.emit_idx).copied();
+        let Some(id) = self.checker.id_table().walk_id(_node, seq) else {
             return false;
         };
         matches!(
@@ -14621,7 +14623,8 @@ impl Compiler {
         ast: &(SimpleSpan, Box<Expression<'compiler>>),
     ) -> CodeBuf {
         let mut bytecode = CodeBuf::new();
-        let self_id = self.next_emit_id();
+        let seq_id = self.next_emit_id();
+        let self_id = self.checker.id_table().walk_id(ast, seq_id);
         let (span, child) = ast;
 
         match child.borrow() {

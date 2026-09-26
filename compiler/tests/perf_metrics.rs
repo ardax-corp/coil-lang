@@ -616,6 +616,21 @@ fn perf_bool_guard_inverts_into_jmpt() {
     );
 }
 
+/// Pre-order NodeId drift typed `j + 1` from a neighbouring float node, so
+/// `times_at`'s int counter compiled as `CONST 1; ADDF`.
+#[test]
+fn perf_nbody_int_counter_is_not_float_add() {
+    let (bc, _, _, _, pipeline) = compile("examples/perf/nbody.hy");
+    let syms = pipeline.program_debug().fn_symbols;
+    let (start, end) = fn_pc_range(&syms, "times_at", bc.len());
+    let int_const_addf = bc[start..end].windows(2).any(|w| {
+        *w[0].bytecode() == Instruction::CONST
+            && w[0].operand_u32() & Byte::POOL_FLAG == 0
+            && *w[1].bytecode() == Instruction::ADDF
+    });
+    assert!(!int_const_addf, "times_at int counter must not compile as ADDF");
+}
+
 #[test]
 fn perf_mandelbrot_inverts_escape_into_const_jmpt() {
     // Escape `if mag > 4 { break }` inverts fused *Jmpf; JMP into *Jmpt (COI-87).

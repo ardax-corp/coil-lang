@@ -2100,8 +2100,9 @@ impl Checker {
         // Pull the next ID from the pre-walk's minting order. Both
         // `infer` and the pre-walk visit in pre-order, so the `n`-th
         // call here consumes the `n`-th ID.
-        let id = self.ids.ids()[self.next_id_idx];
+        let seq_id = self.ids.ids()[self.next_id_idx];
         self.next_id_idx += 1;
+        let id = self.ids.resolve_walk_id(expr, seq_id);
         self.maybe_attach_def_id(id, expr);
         self.node_ids_by_span.insert((expr.0.start, expr.0.end), id);
 

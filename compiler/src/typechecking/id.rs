@@ -27,6 +27,11 @@ pub struct IdTable {
     /// rebuild child vectors free and reuse addresses, so a lookup whose span
     /// differs is a stale hit on another node and yields `None`.
     by_expr_ptr: HashMap<usize, (NodeId, usize, usize)>,
+    /// Span of each minted id (index = id), to vet pre-order fallbacks.
+    spans: Vec<(usize, usize)>,
+    /// Next id for nodes the pre-walk never saw; outside the minted range so
+    /// it neither grows [`Self::len`] nor aliases a real node.
+    next_synthetic: u32,
 }
 
 impl IdTable {
@@ -41,10 +46,35 @@ impl IdTable {
     }
 
     pub fn record_output(&mut self, node: &Output<'_>, id: NodeId) {
+        let idx = id.0 as usize;
+        if self.spans.len() <= idx {
+            self.spans.resize(idx + 1, (usize::MAX, usize::MAX));
+        }
+        self.spans[idx] = (node.0.start, node.0.end);
         self.by_expr_ptr.insert(
             std::ptr::from_ref(node) as *const Output<'_> as usize,
             (id, node.0.start, node.0.end),
         );
+    }
+
+    /// Id for `node` in a pre-order walk: its recorded id, else the pre-order
+    /// `seq` id when that id was minted for the same span (a clone of that
+    /// node). `None` means `seq` belongs to a different node.
+    pub fn walk_id(&self, node: &Output<'_>, seq: Option<NodeId>) -> Option<NodeId> {
+        self.id_of_output(node).or_else(|| {
+            seq.filter(|s| self.spans.get(s.0 as usize) == Some(&(node.0.start, node.0.end)))
+        })
+    }
+
+    /// [`Self::walk_id`], minting a synthetic id instead of `None` so facts
+    /// about an unrecorded node never overwrite another node's.
+    pub fn resolve_walk_id(&mut self, node: &Output<'_>, seq: NodeId) -> NodeId {
+        if let Some(id) = self.walk_id(node, Some(seq)) {
+            return id;
+        }
+        let id = NodeId((1 << 31) + self.next_synthetic);
+        self.next_synthetic += 1;
+        id
     }
 
     pub fn id_of_output(&self, node: &Output<'_>) -> Option<NodeId> {
