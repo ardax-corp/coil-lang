@@ -1119,11 +1119,7 @@ impl Compiler {
                                         break;
                                     }
                                 }
-                                found.or_else(|| {
-                                    self.checker
-                                        .codegen_var_type(&identifier)
-                                        .map(|ty| apply_ty_prune(self.checker.subst(), ty))
-                                })
+                                found.or_else(|| self.current_param_ty(&identifier))
                             };
                             binder.and_then(|vt| Self::instantiate_polyfn_app_result(&vt, &arg_tys))
                         }

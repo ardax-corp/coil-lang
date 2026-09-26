@@ -10774,9 +10774,23 @@ impl Compiler {
                 return Some(apply_ty_prune(self.checker.subst(), ty));
             }
         }
-        self.checker
-            .codegen_var_type(local)
-            .map(|ty| apply_ty_prune(self.checker.subst(), ty))
+        self.current_param_ty(local)
+    }
+
+    /// Declared type of parameter `local` of the function being compiled.
+    /// Scoped to that function, unlike the checker's flat name map.
+    fn current_param_ty(&self, local: &str) -> Option<Ty> {
+        [
+            self.current_function_qualified.as_deref(),
+            self.current_function_table_key.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .find_map(|name| {
+            let names = self.checker.fn_param_names(name)?;
+            let i = names.iter().position(|n| n == local)?;
+            self.checker.fn_param_tys(name)?.get(i).cloned()
+        })
     }
 
     fn local_polyfn_call_needs_unbox(&self, local: &str, span: Option<(usize, usize)>) -> bool {
@@ -10796,11 +10810,7 @@ impl Compiler {
                     break;
                 }
             }
-            found.or_else(|| {
-                self.checker
-                    .codegen_var_type(local)
-                    .map(|ty| apply_ty_prune(self.checker.subst(), ty))
-            })
+            found.or_else(|| self.current_param_ty(local))
         };
         let var_ty = binder_ty.or_else(|| self.local_polyfn_var_ty(local, span));
         let Some(var_ty) = var_ty else {

@@ -989,10 +989,6 @@ impl Compiler {
                 // Per-arm types so Access on a reused binding name sees this arm's payload.
                 let mut arm_binding_tys = HashMap::new();
                 collect_pattern_binding_types(&self.checker, &arm.pattern.1, &mut arm_binding_tys);
-                if let Pattern::Binding { name } = &arm.pattern.1
-                    && let Some(ty) = self.checker.codegen_var_type(name) {
-                        arm_binding_tys.insert(name.to_string(), ty.clone());
-                    }
                 self.mono_codegen_var_types.push(arm_binding_tys);
 
                 // Skip body for identity bind (`Ok(x) => x`): payload already at slot.
