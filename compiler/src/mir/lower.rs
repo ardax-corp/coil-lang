@@ -1105,10 +1105,14 @@ fn lower_byte(
             }
             if hints.allow_heap_fields {
                 let n = byte.operand_u32();
+                // `Seek tmp+1` after boxing a class re-exposes the instance
+                // stored to `tmp` in this block; a staging `Seek` does not.
                 if tos.is_empty() && n > 0 {
-                    let slot = n - 1;
-                    if hints.slot_ty.get(&slot) == Some(&MirTy::HeapRef) {
-                        tos.push(b.use_local(LocalId(slot), MirTy::HeapRef)?);
+                    let slot = LocalId(n - 1);
+                    if let Some(v) = b.local_def_here(slot)
+                        && b.func().ty(v) == MirTy::HeapRef
+                    {
+                        tos.push(v);
                     }
                 }
             }

@@ -6137,3 +6137,44 @@ fn int_branch_cond_lowers_and_lir_branches_on_word() {
     });
     assert!(!has_ne, "LIR must branch on the word, not `!= 0`");
 }
+
+/// A staging `Seek` must not push a slot whose heap type comes from a later
+/// live range (only `Seek tmp+1` after an in-block store re-exposes it).
+#[test]
+fn staging_seek_does_not_push_recycled_heap_slot() {
+    let loc = loc();
+    let jump = |kind, target| IlOp::Jump {
+        kind,
+        target,
+        loc,
+        hint: Default::default(),
+    };
+    let ops = vec![
+        IlOp::Label(Label(0)),
+        IlOp::Label(Label(1)),
+        IlOp::Load { slot: 0, loc },
+        IlOp::Const { imm: 10, loc },
+        IlOp::Bin {
+            op: Instruction::LE,
+            loc,
+        },
+        jump(crate::il::IlJumpKind::JumpIfFalse, Label(2)),
+        IlOp::byte(Byte::new(Instruction::Seek).with_operand_u32(2)),
+        IlOp::Load { slot: 0, loc },
+        IlOp::Const { imm: 1, loc },
+        IlOp::Bin {
+            op: Instruction::ADD,
+            loc,
+        },
+        IlOp::StorePop { slot: 0, loc },
+        jump(crate::il::IlJumpKind::Unconditional, Label(1)),
+        IlOp::Label(Label(2)),
+        IlOp::Load { slot: 0, loc },
+        IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(1)),
+        IlOp::StorePop { slot: 1, loc },
+        IlOp::Load { slot: 1, loc },
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let draft = super::stackmap::try_build_draft(&ops, "stage", 1, &[], &[]);
+    assert!(draft.is_some_and(|d| !d.sites.is_empty()), "staging Seek must not unbalance");
+}

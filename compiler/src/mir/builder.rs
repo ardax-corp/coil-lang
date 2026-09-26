@@ -111,6 +111,13 @@ impl MirBuilder {
         Ok(self.read_variable(local, ty, b))
     }
 
+    /// `local`'s definition in the current block, without reading through
+    /// predecessors (no φ is inserted).
+    pub fn local_def_here(&self, local: LocalId) -> Option<ValueId> {
+        let b = self.current?;
+        self.current_def[b.index()].get(&local).copied()
+    }
+
     pub fn create_block(&mut self) -> BlockId {
         let id = BlockId(self.func.blocks.len() as u32);
         self.func.blocks.push(MirBlock::new(id));
