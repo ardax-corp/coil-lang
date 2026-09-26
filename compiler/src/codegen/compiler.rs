@@ -3529,12 +3529,16 @@ impl Compiler {
         else {
             return;
         };
+        // The args are still live operands: spill temps must sit above them.
+        let depth_on_entry = self.expr_depth;
+        self.expr_depth += arity;
         let mut spilled = Vec::with_capacity(arity as usize);
         for _ in 0..arity {
             let tmp = self.alloc_temp_slot();
             bytecode.push_store_pop(tmp);
             spilled.push(tmp);
         }
+        self.expr_depth = depth_on_entry;
         let spill_hi = spilled.iter().copied().max().unwrap_or(box_hi);
         bytecode.push_seek(box_hi.max(spill_hi) + 1);
         for tmp in spilled.into_iter().rev() {
