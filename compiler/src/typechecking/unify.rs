@@ -87,6 +87,13 @@ pub fn unify_with(subst: &Subst, t1: &Ty, t2: &Ty) -> Result<Subst, UnifyError> 
         // Same type constructor (e.g. `int` with `int`).
         (Ty::Con(a), Ty::Con(b)) if a == b => Ok(subst.clone()),
 
+        // `()` and `unit` are one type (a unit fn call vs a `()` arm).
+        (Ty::Con(u), Ty::Tuple(items)) | (Ty::Tuple(items), Ty::Con(u))
+            if u == crate::typechecking::ty::UNIT && items.is_empty() =>
+        {
+            Ok(subst.clone())
+        }
+
         // Existentials are nominal at the type level. Concrete-to-existential
         // conversion is a pack operation recorded by inference at value sites.
         (Ty::Existential { class: a }, Ty::Existential { class: b }) if a == b => Ok(subst.clone()),
