@@ -599,8 +599,16 @@ impl Compiler {
                             return bytecode;
                         }
                         if let Some(n) = self.static_len_of(&items[0]) {
-                            bytecode.append(&mut self.do_compile(&items[0]));
-                            bytecode.push_pop();
+                            // A bare local has no effects; emitting it would box a stack array.
+                            if matches!(
+                                unwrap_expr_output(&items[0]).1.as_ref(),
+                                Expression::Identifier(_)
+                            ) {
+                                self.discard_compile(&items[0]);
+                            } else {
+                                bytecode.append(&mut self.do_compile(&items[0]));
+                                bytecode.push_pop();
+                            }
                             self.emit_const_value(&ConstValue::Int(n as i64), &mut bytecode);
                             return bytecode;
                         }
