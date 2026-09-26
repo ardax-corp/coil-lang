@@ -540,7 +540,8 @@ impl Heap {
     /// Mid-cycle work is paced from the alloc safepoint, not a second start.
     #[inline]
     pub fn should_collect(&self) -> bool {
-        self.gc_phase == GcPhase::Idle && self.alloc_bytes > self.gc_next_threshold
+        self.gc_phase == GcPhase::Idle
+            && (cfg!(feature = "gc-stress") || self.alloc_bytes > self.gc_next_threshold)
     }
 
     /// Objects to sweep at one safepoint (doubles under pressure).
