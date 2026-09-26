@@ -3252,6 +3252,12 @@ impl Checker {
         range: Range<usize>,
     ) -> Ty {
         let target_ty = self.infer_mutable_lvalue(target, range.clone());
+        // Codegen picks `+=` lowering (string FORMAT vs int ADD) from the
+        // target's type. Record it at the target span so codegen does not
+        // fall back to a name-keyed lookup that another `s` may shadow.
+        self.codegen_types_by_span
+            .entry((target.0.start, target.0.end))
+            .or_insert_with(|| target_ty.clone());
         let val_ty = self.infer(value);
         let op_name = Self::compound_op_name(*op);
         let tp = apply_ty_prune(&self.subst, &target_ty);
