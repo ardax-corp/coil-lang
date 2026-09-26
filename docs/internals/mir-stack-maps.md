@@ -73,15 +73,25 @@ and relocate mapped slots on collect.
     count only when last written as a slot (store, dense register, match
     payload). `JumpIfMatch` payload arity comes from lowering
     (`Lowered::match_arities`).
-  A body is refused (no map, conservative) on any opcode the dataflow does
-  not model (SIMD, closures, coroutines, FFI), on control flow that enters
-  it anywhere but its entry, or when its arity is not fixed by direct
-  `CALL`s / plain `CodePtr`s (`main` is seeded from the prologue).
+  Entry state comes from the callers: direct `CALL` / `TailCall` arity,
+  the declared entry height (params, `self`, dictionaries) for bodies only
+  code pointers or the host reach (tests, finalizers, callbacks, thread
+  spawn), the `MakeCoro` arity for coroutine bodies (yields keep the words
+  below the cursor), and `0` for `main` from the prologue. Closure bodies
+  compiled inside a function (`CodePtr` fed to `MakeFn`) are analysed from
+  their own entry with `[captures..., params]` and merged. A body is
+  refused (no map, conservative) on an opcode the dataflow does not model
+  (`yield from`, FFI), on any other entry into its middle, or when its
+  entry height is unknown.
   The VM trusts a map only at a known PC: the top frame's safepoint PC, or a
-  return PC that follows a `CALL`. A frame that entered native code which
-  re-entered the VM (`call_function`) or holds a coroutine resume base stays
-  conservative. On `gc_churn`, `result_heap_churn` and `dict_count` every
-  frame at every collection is precise.
+  return PC that follows `CALL` / `CallIndirect`. A frame that entered
+  native code which re-entered the VM (`call_function`), or that a coroutine
+  segment starts above, stays conservative. Worker VMs share the maps by
+  `Arc`. The `gc-stress` feature collects at every allocation safepoint;
+  CI runs `coil test` with it.
+- **Collection budget.** After a sweep the next threshold is
+  `live × 4` when more than half the heap survived (a growing live set) and
+  `live × 2` otherwise, never below the initial 1 MB budget.
 
 ## Later (not this island)
 
