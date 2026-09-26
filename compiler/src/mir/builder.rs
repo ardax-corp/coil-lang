@@ -902,7 +902,11 @@ impl MirBuilder {
     pub fn ret(&mut self, value: Option<ValueId>) -> Result<(), MirError> {
         let lo = value.map(|v| self.resolve(v));
         if let Some(v) = lo {
-            let ty = self.func.ret_ty.unwrap_or_else(|| self.resolve_ty(v));
+            let v_ty = self.resolve_ty(v);
+            let ty = self.func.ret_ty.map_or(v_ty, |rt| {
+                // `Ok(p)` / `Err(p | 1)` returns join into the niche word.
+                if rt.is_heap_word() && v_ty.is_heap_word() { rt.join(v_ty) } else { rt }
+            });
             self.func.ret_ty = Some(ty);
             if ty.is_heap_word() {
                 self.func.ret_layout = ty.layout();

@@ -14,10 +14,10 @@ use super::layout::MirLayout;
 ///
 /// ```text
 ///                         Value (⊤)
-///          /        /       |        \         \
-///        I64      F64     Bool    HeapRef   NicheOpt / NicheRes
-///         |        |
-///        I32      F32
+///          /        /       |        \
+///        I64      F64     Bool   NicheOpt / NicheRes
+///         |        |                  \   /
+///        I32      F32                HeapRef
 ///                    \
 ///                  Bottom (⊥)
 /// ```
@@ -97,8 +97,9 @@ impl MirTy {
             (I32, I64) | (I64, I32) => I64,
             (F32, F64) | (F64, F32) => F64,
             (HeapRef, HeapRef) => HeapRef,
-            (NicheOpt, NicheOpt) => NicheOpt,
-            (NicheRes, NicheRes) => NicheRes,
+            // An aligned heap pointer is a valid `Some` / `Ok` niche word.
+            (NicheOpt, NicheOpt) | (HeapRef, NicheOpt) | (NicheOpt, HeapRef) => NicheOpt,
+            (NicheRes, NicheRes) | (HeapRef, NicheRes) | (NicheRes, HeapRef) => NicheRes,
             _ => Value,
         }
     }
@@ -121,6 +122,7 @@ impl MirTy {
         match (self, other) {
             (I32, I64) | (I64, I32) => I32,
             (F32, F64) | (F64, F32) => F32,
+            (HeapRef, NicheOpt | NicheRes) | (NicheOpt | NicheRes, HeapRef) => HeapRef,
             _ => Bottom,
         }
     }
@@ -250,8 +252,11 @@ mod tests {
         assert!(MirTy::I64.is_numeric());
         assert!(MirTy::NicheOpt.is_word_lane());
         assert!(MirTy::NicheRes.is_word_lane());
-        assert_eq!(MirTy::HeapRef.join(MirTy::NicheOpt), MirTy::Value);
-        assert_eq!(MirTy::HeapRef.meet(MirTy::NicheRes), MirTy::Bottom);
+        assert_eq!(MirTy::HeapRef.join(MirTy::NicheOpt), MirTy::NicheOpt);
+        assert_eq!(MirTy::HeapRef.join(MirTy::NicheRes), MirTy::NicheRes);
+        assert_eq!(MirTy::NicheOpt.join(MirTy::NicheRes), MirTy::Value);
+        assert_eq!(MirTy::HeapRef.meet(MirTy::NicheRes), MirTy::HeapRef);
+        assert!(MirTy::HeapRef.le(MirTy::NicheRes));
         assert!(MirTy::HeapRef.le(MirTy::Value));
         assert_eq!(MirTy::HeapRef.layout(), MirLayout::Word);
         assert_eq!(MirTy::NicheOpt.layout(), MirLayout::HeapNiche);
