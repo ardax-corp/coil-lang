@@ -54,6 +54,23 @@ and relocate mapped slots on collect.
 - The interpreter GC walks VM frames. Mapped slots are extra roots and are
   rewritten if a live object address changes. Unmapped alloc bodies stay
   fuse-IL + conservative stack scan. Cranelift (P5) stays parked.
+- **Precise frames** (archive **minor 21**). A
+  [`PreciseFrameMap`](../../common/src/stack_map.rs) says that anywhere in
+  a body only `heap_slots` of its frame can hold heap words; the GC roots
+  those and skips the rest of that frame. Frames without one keep the
+  conservative scan, so a stack whose frames are all precise is not scanned
+  at all. Codegen marks a top-level, non-generic, non-coroutine function
+  heap-free when every parameter and body expression has a numeric / `unit`
+  / `never` checker type and it has no closures (`fn_is_heap_free`);
+  [`bind_heap_free_frames`](../../compiler/src/mir/stackmap.rs) keeps it
+  only if its final bytecode (any tier) has no op that can leave a heap word
+  in the frame (allocs, `BoxValue`, `STRING`, closures, FFI, heap reads).
+  The VM trusts a map only at a known PC: the top frame's safepoint PC, or
+  a return PC that follows `CALL` / `CallIndirect`. A frame that entered
+  native code which re-entered the VM (`call_function`), or holds a
+  coroutine resume base, stays conservative. Heap-holding frames are not
+  precise yet: S2b maps cover IL slots at alloc sites, not operand
+  temporaries or call sites.
 
 ## Later (not this island)
 
