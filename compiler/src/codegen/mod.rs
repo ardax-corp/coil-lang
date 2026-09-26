@@ -846,6 +846,11 @@ pub struct Compiler {
     /// memory).
     expr_depth: u32,
 
+    /// First escapes (Q1/Q2 box-once) seen while compiling the current block
+    /// statement. `Some` inside a statement; the block re-emits it with the
+    /// boxes hoisted to its start so box slots never land on live operands.
+    escape_hoist: Option<Vec<String>>,
+
     /// Native call-stack depth of [`Compiler::do_compile`]'s recursion,
     /// guarded against a fixed limit, see the analogous `infer_depth` on
     /// the typechecker's `Checker`.
@@ -1056,6 +1061,7 @@ impl Default for Compiler {
             field_key_slots: HashMap::new(),
             pinned_array_slots: HashSet::new(),
             expr_depth: 0,
+            escape_hoist: None,
             codegen_depth: 0,
             loop_stack: Vec::new(),
             loop_bbs: Vec::new(),

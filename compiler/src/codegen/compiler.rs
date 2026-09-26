@@ -787,7 +787,9 @@ impl Compiler {
         let dbg_len = self.debug_locs.len();
         let boxes = self.context.stack_array_box.clone();
         let class_boxes = self.context.unboxed_class_box.clone();
+        let hoist = self.escape_hoist.take();
         let _ = self.do_compile(ast);
+        self.escape_hoist = hoist;
         self.bytecode.truncate(bc_len);
         self.debug_locs.truncate(dbg_len);
         self.context.stack_array_box = boxes;
@@ -3498,11 +3500,75 @@ impl Compiler {
             bytecode.push_load(slot);
             return;
         }
+        if let Some(req) = &mut self.escape_hoist {
+            req.push(name.to_string());
+        }
         self.emit_box_stack_array(bytecode, base, n);
         let slot = self.alloc_temp_slot();
         bytecode.push(Byte::new(Instruction::DUPLICATE));
         bytecode.push_store_pop(slot);
         self.context.stack_array_box.insert(name.to_string(), slot);
+    }
+
+    /// Box a stack array or unboxed class into its Q1/Q2 slot at a block
+    /// statement start (no live operands), so later escapes just `LOAD`.
+    fn emit_hoisted_escape_box(&mut self, name: &str) {
+        let mut bc = CodeBuf::new();
+        if let Some((base, n)) = self.stack_array_info(name) {
+            if self.context.stack_array_box.contains_key(name) {
+                return;
+            }
+            self.emit_box_stack_array(&mut bc, base, n);
+            let slot = self.alloc_temp_slot();
+            bc.push_store_pop(slot);
+            self.context.stack_array_box.insert(name.to_string(), slot);
+        } else if let Some((base, nfields)) = self.unboxed_class_info(name) {
+            if self.context.unboxed_class_box.contains_key(name) {
+                return;
+            }
+            let cname = self.unboxed_class_type_name(name).unwrap_or(name).to_string();
+            self.emit_box_unboxed_class(&mut bc, &cname, base, nfields);
+            let slot = self.alloc_temp_slot();
+            bc.push_store_pop(slot);
+            self.context.unboxed_class_box.insert(name.to_string(), slot);
+        }
+        self.bytecode.append(&mut bc);
+    }
+
+    /// Compile one block statement. A first escape inside it rolls the
+    /// statement back, boxes the escaping locals up front, and re-emits.
+    fn compile_block_stmt(&mut self, child: &Output<'_>) {
+        // Only locals already in scope can escape; skip the snapshot otherwise.
+        if self.context.stack_array_locals.is_empty()
+            && self.context.unboxed_class_locals.is_empty()
+        {
+            let outer = self.escape_hoist.take();
+            let mut bc = self.do_compile(child);
+            self.bytecode.append(&mut bc);
+            self.escape_hoist = outer;
+            return;
+        }
+        let outer = self.escape_hoist.replace(Vec::new());
+        let bc_len = self.bytecode.len();
+        let dbg_len = self.debug_locs.len();
+        let msg_len = self.messages.len();
+        let ctx = self.context.clone();
+        let pinned = self.pinned_array_slots.clone();
+        let mut bc = self.do_compile(child);
+        let req = self.escape_hoist.take().unwrap_or_default();
+        if !req.is_empty() {
+            self.bytecode.truncate(bc_len);
+            self.debug_locs.truncate(dbg_len);
+            self.messages.truncate(msg_len);
+            self.context = ctx;
+            self.pinned_array_slots = pinned;
+            for name in &req {
+                self.emit_hoisted_escape_box(name);
+            }
+            bc = self.do_compile(child);
+        }
+        self.bytecode.append(&mut bc);
+        self.escape_hoist = outer;
     }
 
     /// Lift `arity` TOS args above every cached `[T; N]` / Q2 class box so a
@@ -4881,6 +4947,9 @@ impl Compiler {
         if let Some(&slot) = self.context.unboxed_class_box.get(name) {
             bytecode.push_load(slot);
             return;
+        }
+        if let Some(req) = &mut self.escape_hoist {
+            req.push(name.to_string());
         }
         self.emit_box_unboxed_class(bytecode, class_name, base, nfields);
         let slot = self.alloc_temp_slot();
@@ -14880,8 +14949,7 @@ impl Compiler {
                 self.context = ctx;
                 // Append each child to self.bytecode (Print/control-flow emit in-place).
                 for child in children {
-                    let mut bc = self.do_compile(child);
-                    self.bytecode.append(&mut bc);
+                    self.compile_block_stmt(child);
                 }
 
                 self.context = *self.context.get_prev().clone().unwrap();
