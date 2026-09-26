@@ -5611,12 +5611,7 @@ impl Compiler {
                 return Some(apply_ty_prune(self.checker.subst(), ty));
             }
         }
-        if let Some(ty) = self.sidecar_ty_of(node) {
-            return Some(ty);
-        }
-        self.checker
-            .codegen_var_type(name)
-            .map(|t| apply_ty_prune(self.checker.subst(), t))
+        self.sidecar_ty_of(node)
     }
 
     fn discard_statement_value(bytecode: &mut CodeBuf) {
