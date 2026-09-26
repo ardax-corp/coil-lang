@@ -1704,7 +1704,8 @@
         vm.precise_frames = vec![PreciseFrameMap {
             entry_pc: 2,
             end_pc: 5,
-            heap_slots: vec![],
+            any_pc: Some(vec![]),
+            at_pc: vec![],
         }];
         let roots = |vm: &Machine<8>| {
             let mut roots = Vec::new();

@@ -845,7 +845,8 @@ mod tests {
         let precise = vec![PreciseFrameMap {
             entry_pc: 4,
             end_pc: 20,
-            heap_slots: vec![1],
+            any_pc: None,
+            at_pc: vec![crate::stack_map::SlotMap { pc: 8, slots: vec![1] }],
         }];
         let program = ArchivedProgram {
             version: ARCHIVE_VERSION,

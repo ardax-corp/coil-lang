@@ -17660,10 +17660,13 @@ impl Compiler {
             self.bytecode.as_slice(),
             &entries,
         );
-        self.precise_frames = crate::mir::bind_heap_free_frames(
+        self.precise_frames = super::precise_frames::bind_precise_frames(
             &self.precise_frame_fns,
             self.bytecode.as_slice(),
+            &self.constants,
+            &lowered.match_arities,
             &entries,
+            self.prologue_jmp_target(),
         );
 
         let dense_seek = self

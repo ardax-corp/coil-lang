@@ -1413,55 +1413,59 @@ impl<const S: usize> Machine<S> {
     /// Operand-stack roots, frame by frame: a frame with a trusted precise map
     /// roots only its heap slots; every other stack word is scanned.
     fn collect_stack_roots(&self, roots: &mut Vec<u64>) {
-        let stack = self.stack.as_slice();
-        let mut scan = |words: &[Value]| {
-            for v in words {
-                let addr = v.heap_addr();
-                if addr != 0 && self.heap.find_object_by_addr(addr).is_some() {
-                    roots.push(addr);
-                }
+        let heap = &self.heap;
+        let mut root = |v: Value| {
+            let addr = v.heap_addr();
+            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
+                roots.push(addr);
             }
         };
+        let stack = self.stack.as_slice();
         let n = self.frames.len();
         if self.precise_frames.is_empty() || n == 0 {
-            scan(stack);
+            stack.iter().copied().for_each(&mut root);
             return;
         }
         let top = stack.len();
-        scan(&stack[..self.frames[0].get().min(top)]);
+        stack[..self.frames[0].get().min(top)].iter().copied().for_each(&mut root);
         for i in 0..n {
             let lo = self.frames[i].get();
             let hi = if i + 1 < n { self.frames[i + 1].get() } else { top };
             if lo > hi || hi > top {
                 // Unexpected frame layout: everything from here up is scanned.
-                scan(&stack[lo.min(top)..]);
+                stack[lo.min(top)..].iter().copied().for_each(&mut root);
                 return;
             }
-            match self.trusted_precise_map(i, lo, hi) {
-                Some(map) => {
-                    let heap_words: Vec<Value> = map
-                        .heap_slots
-                        .iter()
-                        .map(|&s| lo + usize::from(s))
-                        .filter(|&idx| idx < hi)
-                        .map(|idx| stack[idx])
-                        .collect();
-                    scan(&heap_words);
+            match self.trusted_precise_slots(i, lo, hi) {
+                Some(slots) => {
+                    // The top frame's stored locals may sit above the cursor.
+                    let limit = if i + 1 == n { self.stack.capacity() } else { hi };
+                    for &s in slots {
+                        let idx = lo + usize::from(s);
+                        if idx < limit {
+                            root(self.stack[idx]);
+                        }
+                    }
                 }
-                None => scan(&stack[lo..hi]),
+                None => stack[lo..hi].iter().copied().for_each(&mut root),
             }
         }
     }
 
-    /// Precise map for frame `i` (stack region `[lo, hi)`) when its PC is
-    /// known: the top frame's safepoint PC, or a return address that follows
-    /// a `CALL`. Frames holding a coroutine segment or that re-entered the VM
-    /// through native code (stale return PC) stay conservative.
-    fn trusted_precise_map(&self, i: usize, lo: usize, hi: usize) -> Option<&common::PreciseFrameMap> {
-        if self.resume_stack.iter().any(|c| c.base_sp >= lo && c.base_sp <= hi) {
+    /// Heap slots of frame `i` (stack region `[lo, hi)`) from its precise
+    /// map, when its PC is known: the top frame's safepoint PC, or a return
+    /// address that follows a `CALL`. Frames holding a coroutine segment or
+    /// that re-entered the VM through native code (stale return PC) stay
+    /// conservative.
+    fn trusted_precise_slots(&self, i: usize, lo: usize, hi: usize) -> Option<&[u16]> {
+        if !self.resume_stack.is_empty()
+            && self.resume_stack.iter().any(|c| c.base_sp >= lo && c.base_sp <= hi)
+        {
             return None;
         }
-        if self.nested_frame_depths.iter().any(|&d| d >= 2 && d - 2 == i) {
+        if !self.nested_frame_depths.is_empty()
+            && self.nested_frame_depths.iter().any(|&d| d >= 2 && d - 2 == i)
+        {
             return None;
         }
         // PCs are one past the op; look up the op itself so a body's last op
@@ -1470,12 +1474,13 @@ impl<const S: usize> Machine<S> {
             self.gc_top_ip?.checked_sub(1)?
         } else {
             let call_pc = self.frames[i].tell().checked_sub(1)?;
-            if !matches!(self.instruction_at(call_pc)?, Instruction::CALL | Instruction::CallIndirect) {
+            if !matches!(self.instruction_at(call_pc)?, Instruction::CALL) {
                 return None;
             }
             call_pc
         };
-        common::precise_map_for_pc(&self.precise_frames, u32::try_from(pc).ok()?)
+        let pc = u32::try_from(pc).ok()?;
+        common::precise_map_for_pc(&self.precise_frames, pc)?.slots_at_pc(pc)
     }
 
     fn instruction_at(&self, pc: usize) -> Option<Instruction> {

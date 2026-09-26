@@ -74,7 +74,7 @@ pub use emit_lir::emit_lir;
 pub use entry::{lir_eligible, lir_refuse, LirRefuse};
 pub use func::{MirBlock, MirFunc};
 pub use deopt::DraftDeoptMap;
-pub use stackmap::{bind_drafts, bind_heap_free_frames, try_build_draft, DraftFrameMap};
+pub use stackmap::{bind_drafts, is_alloc_opcode, try_build_draft, DraftFrameMap};
 pub use inst::{
     BlockId, LocalId, MirAllocKind, MirBinOp, MirCastKind, MirCmpOp, MirConst, MirDeoptKind,
     MirGcKind, MirInst, MirUnaryOp, Terminator, ValueId,
