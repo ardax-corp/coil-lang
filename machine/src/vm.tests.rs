@@ -3082,6 +3082,30 @@
         Byte::new(Instruction::MakeCoro).with_call_packed(arity, target)
     }
 
+    /// Coroutines nothing references are collected; only running ones and
+    /// those reachable through references are roots.
+    #[test]
+    fn unreachable_coroutines_are_collected() {
+        let mut vm = Machine::<8>::default();
+        let mut code = Vec::new();
+        for _ in 0..200 {
+            code.push(make_coro(0, 0));
+            code.push(Byte::new(Instruction::POP));
+        }
+        code.push(make_coro(0, 0));
+        code.push(Byte::new(Instruction::HALT));
+        vm.run(&code);
+        assert!(!vm.panicked());
+        vm.gc_collect();
+        let live = vm.heap().live_object_count();
+        assert!(live <= 4, "dropped coroutines stayed live: {live}");
+        let kept = vm.pop().raw() as u64;
+        assert!(
+            matches!(vm.heap().find_object_by_addr(kept), Some(Object::Coroutine(_))),
+            "the coroutine still on the stack must survive"
+        );
+    }
+
     /// Create → resume → yield returns the yielded value to the resumer.
     #[test]
     fn coroutine_resume_yields_value() {

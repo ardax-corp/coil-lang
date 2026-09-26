@@ -1392,12 +1392,6 @@ impl<const S: usize> Machine<S> {
         for ctx in &self.resume_stack {
             roots.push(ctx.coro.as_ptr() as u64);
         }
-        for obj in self.heap.into_iter() {
-            if let Object::Coroutine(gc) = obj {
-                roots.push(gc.as_ptr() as u64);
-                Self::root_coroutine_saved_stack(&self.heap, gc.as_ref(), &mut roots);
-            }
-        }
         for pins in &self.frame_pins {
             for obj in pins.by_slot.iter().flatten() {
                 roots.push(obj.addr());
@@ -1722,22 +1716,6 @@ impl<const S: usize> Machine<S> {
             }
         }
         mask
-    }
-
-    fn root_coroutine_saved_stack(heap: &Heap, coro: &ObjCoroutine, roots: &mut Vec<u64>) {
-        let mask = coro.saved_live_mask;
-        for (i, v) in coro.saved_stack.iter().enumerate() {
-            if mask != 0 && i < 64 && mask & (1u64 << i) == 0 {
-                continue;
-            }
-            let addr = v.heap_addr();
-            if addr != 0 && heap.find_object_by_addr(addr).is_some() {
-                roots.push(addr);
-            }
-        }
-        if let Some(delegate) = &coro.yield_from {
-            roots.push(delegate.as_ptr() as u64);
-        }
     }
 
     /// Intern `data`, push the GC pointer, then maybe collect.
