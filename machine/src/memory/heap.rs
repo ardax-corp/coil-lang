@@ -226,6 +226,10 @@ impl Heap {
         // Objects allocated while a cycle is open (finalizers) are black.
         if self.gc_phase == GcPhase::Marking {
             let _ = content.mark();
+        } else if self.gc_phase == GcPhase::Sweeping && self.gc_sweep_prev.is_none() {
+            // `head == cursor` here; unlinking the cursor must patch this
+            // object's `next`, not overwrite `head` (which would drop it).
+            self.gc_sweep_prev = Some(object);
         }
         crate::vm::note_heap_alloc();
         debug_assert!(
@@ -3150,5 +3154,22 @@ mod tests {
         for addr in dead {
             assert!(heap.find_object_by_addr(addr).is_none());
         }
+    }
+
+    /// Allocs between sweep quanta prepend to `head`; freeing the old dead
+    /// head must not unlink them (leaked bytes tripped the Drop assert).
+    #[test]
+    fn alloc_during_sweep_stays_linked() {
+        let mut heap = Heap::default();
+        let (keep, _) = heap.alloc(ObjString::from("keep"), Object::String);
+        let (_dead, _) = heap.alloc(ObjString::from("dead"), Object::String);
+        heap.mark_from_roots(&[keep.addr()]);
+        heap.begin_sweep();
+        let (baby, _) = heap.alloc(ObjString::from("baby"), Object::String);
+        while !heap.sweep_quantum(1) {}
+        assert!(heap.find_object_by_addr(baby.addr()).is_some());
+        assert!((&heap).into_iter().any(|o| o.addr() == baby.addr()));
+        assert!((&heap).into_iter().any(|o| o.addr() == keep.addr()));
+        assert_eq!((&heap).into_iter().count(), 2);
     }
 }
