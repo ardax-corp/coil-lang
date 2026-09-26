@@ -15,7 +15,7 @@ impl Compiler {
         if self.try_compile_frame_local_match(scrutinee, arms) {
             return CodeBuf::new();
         }
-        if self.expr_is_niche_option(scrutinee) {
+        if self.expr_layout(scrutinee).is_niche_option() {
             if self.try_compile_niche_option_match(scrutinee, arms) {
                 return CodeBuf::new();
             }
@@ -28,7 +28,7 @@ impl Compiler {
             self.force_heap_option = previous;
             return result;
         }
-        if self.expr_is_unit_result_niche(scrutinee) {
+        if self.expr_layout(scrutinee).is_niche_unit_result() {
             if self.try_compile_unit_result_niche_match(scrutinee, arms) {
                 return CodeBuf::new();
             }
@@ -38,7 +38,7 @@ impl Compiler {
             self.force_heap_result = previous;
             return result;
         }
-        if self.expr_is_niche_result(scrutinee) {
+        if self.expr_layout(scrutinee).is_niche_result() {
             if self.try_compile_niche_result_match(scrutinee, arms) {
                 return CodeBuf::new();
             }
@@ -341,7 +341,7 @@ impl Compiler {
         scrutinee: &Output<'compiler>,
         arms: &[&MatchArm<'compiler>],
     ) -> bool {
-        if arms.len() != 2 || !self.expr_is_niche_option(scrutinee) {
+        if arms.len() != 2 || !self.expr_layout(scrutinee).is_niche_option() {
             return false;
         }
 
@@ -448,7 +448,7 @@ impl Compiler {
         scrutinee: &Output<'compiler>,
         arms: &[&MatchArm<'compiler>],
     ) -> bool {
-        if arms.len() != 2 || !self.expr_is_unit_result_niche(scrutinee) {
+        if arms.len() != 2 || !self.expr_layout(scrutinee).is_niche_unit_result() {
             return false;
         }
 
@@ -552,7 +552,7 @@ impl Compiler {
         scrutinee: &Output<'compiler>,
         arms: &[&MatchArm<'compiler>],
     ) -> bool {
-        if arms.len() != 2 || !self.expr_is_niche_result(scrutinee) {
+        if arms.len() != 2 || !self.expr_layout(scrutinee).is_niche_result() {
             return false;
         }
 
@@ -716,19 +716,19 @@ impl Compiler {
             let mut scrutinee_bc = self.do_compile(scrutinee);
             self.bytecode.append(&mut scrutinee_bc);
             if self.force_heap_option
-                && self.expr_is_niche_option(scrutinee)
+                && self.expr_layout(scrutinee).is_niche_option()
                 && !Self::is_option_construct(scrutinee)
             {
                 Self::emit_niche_option_to_boxed(&mut self.bytecode);
             }
             if self.force_heap_result
-                && self.expr_is_unit_result_niche(scrutinee)
+                && self.expr_layout(scrutinee).is_niche_unit_result()
                 && !Self::is_result_construct(scrutinee)
             {
                 Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
             }
             if self.force_heap_result
-                && self.expr_is_niche_result(scrutinee)
+                && self.expr_layout(scrutinee).is_niche_result()
                 && !Self::is_result_construct(scrutinee)
             {
                 Self::emit_niche_result_to_boxed(&mut self.bytecode);

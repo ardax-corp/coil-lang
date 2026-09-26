@@ -1,4 +1,5 @@
 use super::*;
+use crate::typechecking::value_layout::ValueLayout;
 use crate::typechecking::{CStructDef, ForInCounted, ForInInfo, ForInKind};
 use reporting::{ErrorCode, Message};
 
@@ -508,9 +509,7 @@ impl Compiler {
         // `Stream.fd()` sees the host string (InvalidInput).
         let niche_option = common::is_builtin_option_enum(enum_name)
             && !self.force_heap_option
-            && (self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+            && (self.expr_layout(ast).is_niche_option()
                 || self.force_niche_option);
         let niche_unit_result = self.should_niche_unit_result_construct(enum_name, ast);
         let niche_result = self.should_niche_result_construct(enum_name, ast);
@@ -552,9 +551,7 @@ impl Compiler {
 
         if common::is_builtin_option_enum(enum_name)
             && !self.force_heap_option
-            && self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+            && self.expr_layout(ast).is_niche_option()
             || (common::is_builtin_option_enum(enum_name)
                 && !self.force_heap_option
                 && self.force_niche_option)
@@ -995,8 +992,8 @@ impl Compiler {
         }
         let would_wrap = self.compiling_two_word_enum.is_none()
             && self.compiling_result_mode
-            && !self.return_is_niche_result()
-            && !self.return_is_unit_result_niche();
+            && !self.return_layout().is_niche_result()
+            && !self.return_layout().is_niche_unit_result();
         !would_wrap
     }
 
@@ -6914,12 +6911,14 @@ impl Compiler {
 
         // The VM always boxes; `?` / match expect the niche shape for heap payloads.
         let ty = self.typed_sidecar.ty_at_span(span.start, span.end).cloned();
-        if let Some(ty) = ty {
-            if self.niche_unit_result_err_ty(&ty).is_some() {
+        match ty.map(|ty| self.value_layout(&ty)) {
+            Some(ValueLayout::NicheUnitResult) => {
                 Self::emit_boxed_result_to_niche(&mut self.bytecode, true);
-            } else if self.niche_result_ok_err_ty(&ty).is_some() {
+            }
+            Some(ValueLayout::NicheResult) => {
                 Self::emit_boxed_result_to_niche(&mut self.bytecode, false);
             }
+            _ => {}
         }
     }
 
@@ -7414,13 +7413,13 @@ impl Compiler {
             {
                 let mut arg_bc = self.do_compile(arg);
                 self.bytecode.append(&mut arg_bc);
-                if self.expr_is_niche_option(arg) {
+                if self.expr_layout(arg).is_niche_option() {
                     Self::emit_niche_option_to_boxed(&mut self.bytecode);
                 }
-                if self.expr_is_unit_result_niche(arg) {
+                if self.expr_layout(arg).is_niche_unit_result() {
                     Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
                 }
-                if self.expr_is_niche_result(arg) {
+                if self.expr_layout(arg).is_niche_result() {
                     Self::emit_niche_result_to_boxed(&mut self.bytecode);
                 }
                 // Box using the lookup head so enum Constructs get Enum tag.
@@ -7501,14 +7500,17 @@ impl Compiler {
             Ty::Record { fields } => self.emit_record_show_for_stack_value(&fields),
             other => {
                 let lookup_ty = Self::show_lookup_ty_for_instance(&other);
-                if self.niche_option_inner_ty(&other).is_some() {
-                    Self::emit_niche_option_to_boxed(&mut self.bytecode);
-                }
-                if self.niche_unit_result_err_ty(&other).is_some() {
-                    Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
-                }
-                if self.niche_result_ok_err_ty(&other).is_some() {
-                    Self::emit_niche_result_to_boxed(&mut self.bytecode);
+                match self.value_layout(&other) {
+                    ValueLayout::NicheOption => {
+                        Self::emit_niche_option_to_boxed(&mut self.bytecode);
+                    }
+                    ValueLayout::NicheUnitResult => {
+                        Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
+                    }
+                    ValueLayout::NicheResult => {
+                        Self::emit_niche_result_to_boxed(&mut self.bytecode);
+                    }
+                    ValueLayout::Boxed => {}
                 }
                 if let Some(instance) = self
                     .checker
@@ -9124,10 +9126,10 @@ impl Compiler {
             // fold any bytes returned in the local vec (non-host subexprs).
             let mut arg_bc = self.do_compile(arg);
             self.bytecode.append(&mut arg_bc);
-            if self.expr_is_unit_result_niche(arg) {
+            if self.expr_layout(arg).is_niche_unit_result() {
                 Self::emit_unit_result_niche_to_boxed(&mut self.bytecode);
             }
-            if self.expr_is_niche_result(arg) {
+            if self.expr_layout(arg).is_niche_result() {
                 Self::emit_niche_result_to_boxed(&mut self.bytecode);
             }
             let slot = self.alloc_temp_slot();
@@ -9145,7 +9147,7 @@ impl Compiler {
         }
         let arity = args.len();
         let layout = result
-            .map(|e| self.host_enum_layout_for_expr(e))
+            .map(|e| self.expr_layout(e).host_enum_layout())
             .unwrap_or(common::HOST_ENUM_LAYOUT_BOXED);
         if matches!(
             layout,
@@ -10313,9 +10315,9 @@ impl Compiler {
         if !common::is_poly_builtin_enum(enum_name) {
             return false;
         }
-        if self.expr_is_niche_option(inner)
-            || self.expr_is_unit_result_niche(inner)
-            || self.expr_is_niche_result(inner)
+        if self.expr_layout(inner).is_niche_option()
+            || self.expr_layout(inner).is_niche_unit_result()
+            || self.expr_layout(inner).is_niche_result()
         {
             return false;
         }
@@ -10384,13 +10386,13 @@ impl Compiler {
                 self.bytecode = boxed;
             }
             self.push_return_two_word();
-        } else if self.return_is_niche_result() {
+        } else if self.return_layout().is_niche_result() {
             // `[payload, Err tag]` → heap-heap `Result<T, E>` (`pointer | 1`).
             // Boxing as `ObjEnum` would look like `Ok` (aligned pointer).
             self.bytecode.push_pop();
             Self::push_result_err_bit(&mut self.bytecode);
             self.bytecode.push_return();
-        } else if self.return_is_unit_result_niche() {
+        } else if self.return_layout().is_niche_unit_result() {
             self.bytecode.push_pop();
             self.bytecode.push_return();
         } else {
@@ -10431,21 +10433,6 @@ impl Compiler {
             self.checker
                 .def_id_of(name)
                 .and_then(|id| self.checker.fn_return_ty(&self.fqn_of_def(id)))
-        }
-    }
-
-    /// Host-edge Option/Result layout from this invoke's HM type only.
-    ///
-    /// Do not OR in `force_niche_option`: that flag is an outer match
-    /// scrutinee context and would stamp OptionNiche on a nested boxed
-    /// host Option (e.g. `Vec<int>::pop` inside a niche match).
-    fn host_enum_layout_for_expr(&self, expr: &Output) -> u32 {
-        if self.expr_is_niche_option(expr) || self.expr_is_unit_result_niche(expr) {
-            common::HOST_ENUM_LAYOUT_OPTION_NICHE
-        } else if self.expr_is_niche_result(expr) {
-            common::HOST_ENUM_LAYOUT_RESULT_NICHE
-        } else {
-            common::HOST_ENUM_LAYOUT_BOXED
         }
     }
 
@@ -11853,7 +11840,7 @@ impl Compiler {
             .checker
             .tag_for(common::BUILTIN_OPTION_ENUM, "None")
             .unwrap_or(0);
-        let niche_next = item_ty.is_some_and(|ty| Self::niche_heap_only_ty(ty, &self.checker));
+        let niche_next = item_ty.is_some_and(|ty| crate::typechecking::value_layout::niche_heap_only(&self.checker, ty));
         // Trait FQNs miss `env` lookup; pin `Option<Item>` so CALL is two-slot
         // even if a prior one-word cache landed first.
         if let Some(item) = item_ty {
@@ -13014,32 +13001,6 @@ impl Compiler {
         }
     }
 
-    /// Return the payload type when `Option<T>` can use `0` as `None`.
-    ///
-    /// Only ground heap values qualify: immediates and nested/generic Option
-    /// stay boxed `ObjEnum`.
-    fn niche_option_inner_ty(&self, ty: &Ty) -> Option<Ty> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{is_option_ty, option_inner, strip_readonly};
-
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let ty = strip_readonly(&ty);
-        if !is_option_ty(ty) {
-            return None;
-        }
-        let inner = option_inner(ty)?;
-        if Self::niche_heap_only_ty(&inner, &self.checker) {
-            Some(inner)
-        } else {
-            None
-        }
-    }
-
-    fn expr_is_niche_option(&self, expr: &Output) -> bool {
-        self.codegen_expr_ty(expr)
-            .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
-    }
-
     fn is_option_construct(expr: &Output) -> bool {
         match expr.1.as_ref() {
             Expression::Construct { enum_name, .. } => common::is_builtin_option_enum(enum_name),
@@ -13056,160 +13017,38 @@ impl Compiler {
         }
     }
 
-    /// `(T, E)` when both Result payloads are ground heap objects.
+    /// Layout of a value of type `ty` (the shared [`value_layout`] query).
     ///
-    /// `Ok` is the aligned pointer; `Err` is `pointer | 1`. Mixed immediates
-    /// (`Result<int, _>`, `Result<_, int>`, `Result<int, int>`) stay `ObjEnum`.
-    fn ty_is_unit(ty: &Ty) -> bool {
-        use crate::typechecking::ty::{UNIT, strip_readonly};
-        matches!(strip_readonly(ty), Ty::Con(name) if name == UNIT)
+    /// [`value_layout`]: crate::typechecking::value_layout::value_layout
+    fn value_layout(&self, ty: &Ty) -> ValueLayout {
+        crate::typechecking::value_layout::value_layout(&self.checker, ty)
     }
 
-    /// `E` when `Result<(), E>` can use Option-shaped `Ok = 0` / `Err = pointer`.
-    fn niche_unit_result_err_ty(&self, ty: &Ty) -> Option<Ty> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{result_ok_err, strip_readonly};
-
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let ty = strip_readonly(&ty);
-        let (ok, err) = result_ok_err(ty)?;
-        if Self::ty_is_unit(&ok) && Self::niche_heap_only_ty(&err, &self.checker) {
-            Some(err)
-        } else {
-            None
-        }
-    }
-
-    fn expr_is_unit_result_niche(&self, expr: &Output) -> bool {
+    /// Layout of `expr`'s value; untyped expressions are boxed.
+    fn expr_layout(&self, expr: &Output) -> ValueLayout {
         self.codegen_expr_ty(expr)
-            .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
+            .map_or(ValueLayout::Boxed, |ty| self.value_layout(&ty))
     }
 
-    fn return_is_unit_result_niche(&self) -> bool {
+    /// Layout of the function being compiled's return value.
+    fn return_layout(&self) -> ValueLayout {
         self.compiling_fn_return_ty()
-            .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
+            .map_or(ValueLayout::Boxed, |ty| self.value_layout(&ty))
     }
 
     fn should_niche_unit_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
         common::is_builtin_result_enum(enum_name)
             && !self.force_heap_result
-            && (self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
-                || (self.force_niche_result
-                    && self
-                        .compiling_fn_return_ty()
-                        .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())))
-    }
-
-    fn niche_result_ok_err_ty(&self, ty: &Ty) -> Option<(Ty, Ty)> {
-        use crate::typechecking::subst::apply_ty_prune;
-        use crate::typechecking::ty::{result_ok_err, strip_readonly};
-
-        let ty = apply_ty_prune(self.checker.subst(), ty);
-        let ty = strip_readonly(&ty);
-        let (ok, err) = result_ok_err(ty)?;
-        if Self::niche_heap_only_ty(&ok, &self.checker)
-            && Self::niche_heap_only_ty(&err, &self.checker)
-        {
-            Some((ok, err))
-        } else {
-            None
-        }
-    }
-
-    fn expr_is_niche_result(&self, expr: &Output) -> bool {
-        self.codegen_expr_ty(expr)
-            .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
-    }
-
-    fn return_is_niche_result(&self) -> bool {
-        self.compiling_fn_return_ty()
-            .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
+            && (self.expr_layout(ast).is_niche_unit_result()
+                || (self.force_niche_result && self.return_layout().is_niche_unit_result()))
     }
 
     fn should_niche_result_construct(&self, enum_name: &str, ast: &Output<'_>) -> bool {
+        let layout = self.expr_layout(ast);
         common::is_builtin_result_enum(enum_name)
             && !self.force_heap_result
-            && !self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_unit_result_err_ty(&ty).is_some())
-            && (self
-                .codegen_expr_ty(ast)
-                .is_some_and(|ty| self.niche_result_ok_err_ty(&ty).is_some())
-                || self.force_niche_result)
-    }
-
-    /// True when `T` is a ground heap object, so `Option<T>` can use address `0` as `None`.
-    fn niche_heap_only_ty(ty: &Ty, checker: &Checker) -> bool {
-        use crate::typechecking::ty::strip_readonly;
-        let ty = strip_readonly(ty);
-        match ty {
-            Ty::Constructor { owner, .. } => Self::niche_heap_only_ty(owner, checker),
-            Ty::Con(name) => {
-                if name == "string" || checker.is_class(name) {
-                    true
-                } else if common::is_builtin_io_error_enum(name)
-                    || common::is_builtin_thread_error_enum(name)
-                    || common::is_builtin_env_error_enum(name)
-                {
-                    // Virtual unit-error enums stay heap even if this file
-                    // never imported the tags (per-file `check_program` reset).
-                    true
-                } else if common::is_builtin_option_enum(name)
-                    || common::is_builtin_result_enum(name)
-                    || checker.is_scalar_enum(name)
-                {
-                    false
-                } else {
-                    // Unit / closed user enums are heap `ObjEnum` (IoError, …).
-                    checker.enum_variants(name).is_some_and(|vars| {
-                        !vars.is_empty()
-                            && vars
-                                .iter()
-                                .all(|(_, _, payload)| payload.iter().all(Self::ty_is_closed))
-                    })
-                }
-            }
-            Ty::App(head, args) => {
-                let Ty::Con(name) = head.as_ref() else {
-                    return false;
-                };
-                if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) {
-                    return false;
-                }
-                checker.is_class(name) && args.iter().all(Self::ty_is_closed)
-            }
-            Ty::Sum { name, .. }
-                if common::is_builtin_option_enum(name) || common::is_builtin_result_enum(name) =>
-            {
-                false
-            }
-            Ty::List(inner) => Self::ty_is_closed(inner),
-            Ty::Tuple(items) => items.iter().all(Self::ty_is_closed),
-            Ty::Record { fields } => fields.iter().all(|(_, field)| Self::ty_is_closed(field)),
-            Ty::Sum { variants, .. } => variants
-                .iter()
-                .all(|(_, payload)| payload.field_types().into_iter().all(Self::ty_is_closed)),
-            _ => false,
-        }
-    }
-
-    fn ty_is_closed(ty: &Ty) -> bool {
-        use crate::typechecking::ty::strip_readonly;
-        match strip_readonly(ty) {
-            Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-            Ty::List(inner) | Ty::Constructor { owner: inner, .. } => Self::ty_is_closed(inner),
-            Ty::App(_, args) => args.iter().all(Self::ty_is_closed),
-            Ty::Tuple(items) => items.iter().all(Self::ty_is_closed),
-            Ty::Record { fields } => fields.iter().all(|(_, field)| Self::ty_is_closed(field)),
-            Ty::Array { element, .. } => Self::ty_is_closed(element),
-            Ty::Sum { variants, .. } => variants
-                .iter()
-                .all(|(_, payload)| payload.field_types().into_iter().all(Self::ty_is_closed)),
-            Ty::Con(_) | Ty::Never => true,
-            Ty::Readonly(_) => unreachable!("stripped"),
-        }
+            && !layout.is_niche_unit_result()
+            && (layout.is_niche_result() || self.force_niche_result)
     }
 
     /// `DUP; LogNot`, TOS becomes “is None” for a pointer-niche Option (`0`).
@@ -13311,7 +13150,7 @@ impl Compiler {
     }
 
     fn wrap_result_ok_on_stack(&mut self) {
-        if self.return_is_niche_result() || self.return_is_unit_result_niche() {
+        if self.return_layout().is_niche_result() || self.return_layout().is_niche_unit_result() {
             return;
         }
         Self::emit_ok_or_some_wrap(&mut self.bytecode, false);
@@ -13323,10 +13162,10 @@ impl Compiler {
     }
 
     fn wrap_result_err_on_stack(&mut self) {
-        if self.return_is_unit_result_niche() {
+        if self.return_layout().is_niche_unit_result() {
             return;
         }
-        if self.return_is_niche_result() {
+        if self.return_layout().is_niche_result() {
             Self::push_result_err_bit(&mut self.bytecode);
         } else {
             Self::emit_result_err(&mut self.bytecode);
@@ -15247,7 +15086,7 @@ impl Compiler {
                     // enum, do not Ok-wrap again (COI-113). Nested Result Ok
                     // payloads still wrap.
                     if !self.skip_result_ok_wrap_for_return(expr)
-                        && !self.return_is_niche_result() && !self.return_is_unit_result_niche() {
+                        && !self.return_layout().is_niche_result() && !self.return_layout().is_niche_unit_result() {
                             Self::emit_ok_or_some_wrap(&mut bytecode, false);
                         }
                 }
@@ -16903,9 +16742,9 @@ impl Compiler {
                 let is_option = self.expr_is_option(inner);
                 let success_tag: u32 = if is_option { 1 } else { 0 }; // Some=1, Ok=0
 
-                if !self.expr_is_niche_option(inner)
-                    && !self.expr_is_unit_result_niche(inner)
-                    && !self.expr_is_niche_result(inner)
+                if !self.expr_layout(inner).is_niche_option()
+                    && !self.expr_layout(inner).is_niche_unit_result()
+                    && !self.expr_layout(inner).is_niche_result()
                     && let Some(inner_kind) = self.expr_two_word_pair_kind(inner)
                 {
                     self.unbox_enum_context += 1;
@@ -16921,7 +16760,7 @@ impl Compiler {
 
                 let mut bb = BlockBuilder::new();
                 let success = bb.fresh_label(self.bytecode.il_mut());
-                if self.expr_is_niche_option(inner) {
+                if self.expr_layout(inner).is_niche_option() {
                     Self::push_niche_eq_zero(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -16940,7 +16779,7 @@ impl Compiler {
                         self.bytecode.push_return();
                     }
                     bb.bind_label(success, self.bytecode.il_mut());
-                } else if self.expr_is_unit_result_niche(inner) {
+                } else if self.expr_layout(inner).is_niche_unit_result() {
                     Self::push_niche_eq_zero(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -16952,8 +16791,8 @@ impl Compiler {
                         self.bytecode.push_const(1);
                         self.push_return_two_word();
                     } else {
-                        if !self.return_is_unit_result_niche() {
-                            if self.return_is_niche_result() {
+                        if !self.return_layout().is_niche_unit_result() {
+                            if self.return_layout().is_niche_result() {
                                 Self::push_result_err_bit(&mut self.bytecode);
                             } else {
                                 Self::emit_result_err(&mut self.bytecode);
@@ -16962,7 +16801,7 @@ impl Compiler {
                         self.bytecode.push_return();
                     }
                     bb.bind_label(success, self.bytecode.il_mut());
-                } else if self.expr_is_niche_result(inner) {
+                } else if self.expr_layout(inner).is_niche_result() {
                     Self::push_result_is_err(&mut self.bytecode);
                     bb.emit_jump_to_hinted(
                         success,
@@ -16977,7 +16816,7 @@ impl Compiler {
                         self.bytecode.push_const(1);
                         self.push_return_two_word();
                     } else {
-                        if !self.return_is_niche_result() {
+                        if !self.return_layout().is_niche_result() {
                             Self::emit_niche_result_to_boxed(&mut self.bytecode);
                         }
                         self.bytecode.push_return();
@@ -17043,9 +16882,9 @@ impl Compiler {
                 // `a ?? b` → Ok/Some payload, else evaluate b.
                 let is_option = self.expr_is_option(lhs);
                 let success_tag: u32 = if is_option { 1 } else { 0 };
-                let niche_lhs = self.expr_is_niche_option(lhs);
-                let unit_result_lhs = self.expr_is_unit_result_niche(lhs);
-                let niche_result_lhs = self.expr_is_niche_result(lhs);
+                let niche_lhs = self.expr_layout(lhs).is_niche_option();
+                let unit_result_lhs = self.expr_layout(lhs).is_niche_unit_result();
+                let niche_result_lhs = self.expr_layout(lhs).is_niche_result();
 
                 // `lhs` always compiles to its ordinary (boxed / niche)
                 // representation, a two-word call auto-boxes unless
@@ -17122,10 +16961,8 @@ impl Compiler {
             }
             Expression::OptionalAccess(receiver, field) => {
                 // `opt?.field` → None if opt is None, else Some(opt.field).
-                if self.expr_is_niche_option(receiver)
-                    && self
-                        .codegen_expr_ty(ast)
-                        .is_some_and(|ty| self.niche_option_inner_ty(&ty).is_some())
+                if self.expr_layout(receiver).is_niche_option()
+                    && self.expr_layout(ast).is_niche_option()
                 {
                     let mut recv_bc = self.do_compile(receiver);
                     self.bytecode.append(&mut recv_bc);
@@ -17177,7 +17014,7 @@ impl Compiler {
                     return bytecode;
                 }
 
-                let receiver_is_niche = self.expr_is_niche_option(receiver);
+                let receiver_is_niche = self.expr_layout(receiver).is_niche_option();
                 let previous_force = self.force_heap_option;
                 if receiver_is_niche {
                     self.force_heap_option = true;

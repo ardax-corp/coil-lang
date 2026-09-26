@@ -11,6 +11,7 @@
 //! tuples keep the boxed ABI.
 
 use super::infer::Checker;
+use super::value_layout::ty_is_closed;
 use super::ty::{
     BOOL, BYTE, FLOAT, INT, Ty, is_option_ty, is_result_ty, option_inner, range_app, result_ok_err,
     strip_readonly,
@@ -150,25 +151,6 @@ fn enum_name(ty: &Ty) -> Option<&str> {
         },
         Ty::Constructor { owner, .. } => enum_name(owner),
         _ => None,
-    }
-}
-
-/// No unresolved type variables anywhere in `ty` (excludes unbounded generic
-/// instantiations — those keep the boxed ABI, matching `CallIndirect`/PolyFn).
-fn ty_is_closed(ty: &Ty) -> bool {
-    let ty = strip_readonly(ty);
-    match ty {
-        Ty::Var(_) | Ty::Fun(_, _) | Ty::Existential { .. } | Ty::Forall { .. } => false,
-        Ty::List(inner) | Ty::Constructor { owner: inner, .. } => ty_is_closed(inner),
-        Ty::App(_, args) => args.iter().all(ty_is_closed),
-        Ty::Tuple(items) => items.iter().all(ty_is_closed),
-        Ty::Record { fields } => fields.iter().all(|(_, f)| ty_is_closed(f)),
-        Ty::Array { element, .. } => ty_is_closed(element),
-        Ty::Sum { variants, .. } => variants
-            .iter()
-            .all(|(_, p)| p.field_types().into_iter().all(ty_is_closed)),
-        Ty::Con(_) | Ty::Never => true,
-        Ty::Readonly(_) => unreachable!("stripped"),
     }
 }
 

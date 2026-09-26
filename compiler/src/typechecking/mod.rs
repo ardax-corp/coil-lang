@@ -22,6 +22,7 @@ pub mod pretty;
 pub mod purity;
 pub mod resolve;
 pub mod return_layout;
+pub mod value_layout;
 pub mod stack_bound;
 pub mod subst;
 pub mod ty;
