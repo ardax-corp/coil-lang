@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use parser::ast::{
-    EnumConstructPayload, EnumVariantPayload, Expression, Output, Pattern, PatternPayload,
+    EnumConstructPayload, EnumVariantPayload, Output, Pattern, PatternPayload,
 };
 
 /// Stable identifier for an AST node (minted in pre-walk visit order).
@@ -23,9 +23,10 @@ impl NodeId {
 #[derive(Debug, Default, Clone)]
 pub struct IdTable {
     ids: Vec<NodeId>,
-    /// Heap pointer of each node's `Expression` → minted id (stable for the
-    /// AST lifetime). Lets emit look up sidecar facts without source spans.
-    by_expr_ptr: HashMap<usize, NodeId>,
+    /// Address of each node's `Output` → (minted id, span). Parents that
+    /// rebuild child vectors free and reuse addresses, so a lookup whose span
+    /// differs is a stale hit on another node and yields `None`.
+    by_expr_ptr: HashMap<usize, (NodeId, usize, usize)>,
 }
 
 impl IdTable {
@@ -40,20 +41,18 @@ impl IdTable {
     }
 
     pub fn record_output(&mut self, node: &Output<'_>, id: NodeId) {
-        self.by_expr_ptr
-            .insert(std::ptr::from_ref(node) as *const Output<'_> as usize, id);
-    }
-
-    pub fn id_of_ptr(&self, ptr: usize) -> Option<NodeId> {
-        self.by_expr_ptr.get(&ptr).copied()
-    }
-
-    pub fn id_of_expr(&self, expr: &Expression<'_>) -> Option<NodeId> {
-        self.id_of_ptr(std::ptr::from_ref(expr) as usize)
+        self.by_expr_ptr.insert(
+            std::ptr::from_ref(node) as *const Output<'_> as usize,
+            (id, node.0.start, node.0.end),
+        );
     }
 
     pub fn id_of_output(&self, node: &Output<'_>) -> Option<NodeId> {
-        self.id_of_ptr(std::ptr::from_ref(node) as *const Output<'_> as usize)
+        let ptr = std::ptr::from_ref(node) as *const Output<'_> as usize;
+        match self.by_expr_ptr.get(&ptr) {
+            Some(&(id, start, end)) if start == node.0.start && end == node.0.end => Some(id),
+            _ => None,
+        }
     }
 
     pub fn len(&self) -> usize {
