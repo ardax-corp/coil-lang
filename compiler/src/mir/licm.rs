@@ -277,7 +277,7 @@ fn values_defined_in(func: &MirFunc, blocks: &HashSet<BlockId>) -> HashSet<Value
             continue;
         }
         for inst in &b.insts {
-            out.insert(inst.dest());
+            out.extend(inst.dests());
         }
     }
     out
@@ -529,6 +529,41 @@ mod tests {
         f.verify().unwrap();
         let lp = loop_blocks(&f);
         assert_eq!(count_bin_in(&f, &lp, MirBinOp::Mul), 1);
+    }
+
+    /// A two-slot call's tag word is defined in the loop; a test on it must
+    /// not be hoisted (it read a stale tag and looped forever).
+    #[test]
+    fn does_not_hoist_use_of_two_slot_call_hi_word() {
+        let mut b = MirBuilder::new("hi");
+        b.allow_effects = true;
+        let n = b.add_param(MirTy::I64).unwrap();
+        let header = b.create_block();
+        let exit = b.create_block();
+        b.jump(header).unwrap();
+        b.switch_to_block(header);
+        let abi = crate::mir::abi::DenseAbi {
+            params: vec![MirTy::I64],
+            ret: MirTy::I64,
+            ret_hi: Some(MirTy::I64),
+        };
+        let (_, tag) = b.ins_call(crate::il::Label(9), vec![n], &abi).unwrap();
+        let zero = b.ins_const(MirConst::I64(0)).unwrap();
+        let some = b.ins_cmp(MirCmpOp::Ne, tag.unwrap(), zero).unwrap();
+        b.branch(some, header, exit).unwrap();
+        b.switch_to_block(exit);
+        b.set_ret_ty(MirTy::I64);
+        b.ret(Some(n)).unwrap();
+        let mut f = b.finish().unwrap();
+        licm(&mut f);
+        f.verify().unwrap();
+        let header_cmps = f
+            .block(header)
+            .insts
+            .iter()
+            .filter(|i| matches!(i, MirInst::Cmp { .. }))
+            .count();
+        assert_eq!(header_cmps, 1, "tag test must stay in the loop");
     }
 
     fn count_host_in(func: &MirFunc, blocks: &HashSet<BlockId>, id: u16) -> usize {
