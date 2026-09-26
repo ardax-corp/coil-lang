@@ -44,10 +44,10 @@ rungs are **not** in this table — see ladders below and
 | Two-slot helper `CALL` / `RETURN` | **B3** eligible | Cost gate; LIR reconstructs width-2 `CALL`; dense may keep |
 | Niche / two-slot match | **Q8** dense register `Br` | Cost gate vs LIR / fuse |
 | `STRING` / `PRINT` / `FORMAT` / `STRINGIFY` | **Q9** R1 MIR→LIR; **R3** maps `FORMAT` / `STRINGIFY` | Cost gate; dense infer still refuses |
-| `from_bytes` / `to_bytes` | **Q9** R2 I6 dense HostInvoke | Cost gate; box at the host edge; LIR still cannot reconstruct HostInvoke |
+| `from_bytes` / `to_bytes` | **Q9** R2 I6 dense HostInvoke | Cost gate; box at the host edge; LIR reconstructs HostInvoke word edges |
 | Compare-only (no float/i64/i32 arith) | I8 LIR or fuse-IL | Cost gate |
 
-Post-loop-only `return [x]` stays fuse-IL so invert+fuse (COI-87) stays
+Post-loop-only `return [x]` (a tail with no call / host / format work) stays fuse-IL so invert+fuse (COI-87) stays
 observable. Boxed LOAD/STORE heap residuals lose the cost gate
 ([s2d-inloop-make-tax.md](s2d-inloop-make-tax.md)).
 
