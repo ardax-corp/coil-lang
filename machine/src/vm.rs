@@ -1454,7 +1454,7 @@ impl<const S: usize> Machine<S> {
 
     /// Heap slots of frame `i` (stack region `[lo, hi)`) from its precise
     /// map, when its PC is known: the top frame's safepoint PC, or a return
-    /// address that follows a `CALL`. Frames holding a coroutine segment or
+    /// address that follows a `CALL` / `CallIndirect`. Frames holding a coroutine segment or
     /// that re-entered the VM through native code (stale return PC) stay
     /// conservative.
     fn trusted_precise_slots(&self, i: usize, lo: usize, hi: usize) -> Option<&[u16]> {
@@ -1474,7 +1474,10 @@ impl<const S: usize> Machine<S> {
             self.gc_top_ip?.checked_sub(1)?
         } else {
             let call_pc = self.frames[i].tell().checked_sub(1)?;
-            if !matches!(self.instruction_at(call_pc)?, Instruction::CALL) {
+            if !matches!(
+                self.instruction_at(call_pc)?,
+                Instruction::CALL | Instruction::CallIndirect
+            ) {
                 return None;
             }
             call_pc

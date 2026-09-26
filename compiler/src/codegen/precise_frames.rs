@@ -568,6 +568,20 @@ fn transfer(
                 st.push(true)?;
             }
         }
+        // Pops the target, dictionaries and args; the callee frame starts at
+        // their base. A partial application instead pushes a new function
+        // there and hits a safepoint, so the record covers the base word too.
+        CallIndirect => {
+            let packed = b.operand_u32();
+            let words = 1 + (packed & 0xFFFF) as usize + ((packed >> 16) & 0xFFFF) as usize;
+            st.pop_n(words)?;
+            step.record = Some(st.heap_slots(st.hi + 1, true));
+            st.clobber_from(st.lo);
+            st.push(true)?;
+            // The callee's return width is not encoded: one or two words.
+            st.write(st.hi, true, false)?;
+            st.hi += 1;
+        }
         HostInvoke => {
             let arity = (b.operand_u32() & 0xFFFF) as usize;
             st.pop_n(arity + 1)?;
@@ -648,6 +662,9 @@ fn transfer(
         }
         DenseIndex | DenseFieldLoad => st.set(b.dense_abc_parts().1, true)?,
         DenseStoreIndex | DenseFieldStore => {}
+        // SIMD lanes live in VM vector registers; only a reduce writes a slot.
+        VLoad | VStore | VBin | VMove | VFma => {}
+        VReduce => st.set(b.dense_abc_parts().1, false)?,
         DensePush => {
             let (arity, base) = b.dense_move_parts();
             for i in 0..arity {
@@ -786,7 +803,7 @@ mod tests {
         let maps = bind(&[
             load(0),
             op(Instruction::MakeArray).with_operand_u32(1),
-            op(Instruction::VLoad),
+            op(Instruction::FfiInvoke),
             op(Instruction::RETURN),
         ]);
         assert!(maps.is_empty());
