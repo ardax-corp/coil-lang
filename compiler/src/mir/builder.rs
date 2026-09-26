@@ -118,6 +118,20 @@ impl MirBuilder {
         self.current_def[b.index()].get(&local).copied()
     }
 
+    /// Field ops need a heapref object. Map lifts (`skip_verify`) only encode
+    /// liveness, so a niche word already tested on this path is accepted.
+    fn field_object_ok(&self, object: ValueId) -> bool {
+        let ty = self.resolve_ty(object);
+        ty == MirTy::HeapRef || (self.skip_verify && ty.is_heap_word())
+    }
+
+    fn is_const_one(&self, v: ValueId) -> bool {
+        let v = self.resolve(v);
+        self.func.blocks.iter().flat_map(|b| b.insts.iter()).any(|i| {
+            matches!(i, MirInst::Const { dest, c: MirConst::I64(1) | MirConst::I32(1) } if *dest == v)
+        })
+    }
+
     pub fn create_block(&mut self) -> BlockId {
         let id = BlockId(self.func.blocks.len() as u32);
         self.func.blocks.push(MirBlock::new(id));
@@ -189,6 +203,10 @@ impl MirBuilder {
         let dest_ty = if heap_bit {
             match op {
                 MirBinOp::BitOr => MirTy::NicheRes,
+                // `word & 1` reads the niche Result tag; other masks untag.
+                MirBinOp::BitAnd if self.is_const_one(lhs) || self.is_const_one(rhs) => {
+                    MirTy::I64
+                }
                 MirBinOp::BitAnd => MirTy::HeapRef,
                 _ => {
                     if lt.is_heap_word() {
@@ -545,7 +563,7 @@ impl MirBuilder {
         index: u32,
         dest_ty: MirTy,
     ) -> Result<ValueId, MirError> {
-        if self.resolve_ty(object) != MirTy::HeapRef {
+        if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
                 "HeapFieldLoad object {}",
                 self.resolve_ty(object)
@@ -576,7 +594,7 @@ impl MirBuilder {
         name: Option<ValueId>,
         index: Option<u32>,
     ) -> Result<ValueId, MirError> {
-        if self.resolve_ty(object) != MirTy::HeapRef {
+        if !self.field_object_ok(object) {
             return Err(MirError::msg(format!(
                 "HeapFieldStore object {}",
                 self.resolve_ty(object)

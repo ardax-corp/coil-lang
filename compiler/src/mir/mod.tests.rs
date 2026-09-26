@@ -6212,3 +6212,51 @@ fn staging_seek_does_not_push_recycled_heap_slot() {
     let draft = super::stackmap::try_build_draft(&ops, "stage", 1, &[], &[]);
     assert!(draft.is_some_and(|d| !d.sites.is_empty()), "staging Seek must not unbalance");
 }
+
+/// `match f(i)` on a heap-heap niche Result: the CALL word is `niche_res`,
+/// `word & 1` is the tag, and each arm loads a field from its payload.
+#[test]
+fn niche_result_match_with_field_loads_maps() {
+    let loc = loc();
+    let jump = |kind, target| IlOp::Jump {
+        kind,
+        target,
+        loc,
+        hint: Default::default(),
+    };
+    let bin = |op| IlOp::Bin { op, loc };
+    let ops = vec![
+        IlOp::Label(Label(0)),
+        IlOp::Load { slot: 0, loc },
+        IlOp::Entry {
+            kind: crate::il::EntryKind::Call,
+            arity: 1,
+            target: Label(9),
+            loc,
+            ret_words: 1,
+        },
+        IlOp::Dup { loc },
+        IlOp::Const { imm: 1, loc },
+        bin(Instruction::BITAND),
+        jump(crate::il::IlJumpKind::JumpIfTrue, Label(1)),
+        IlOp::StorePop { slot: 1, loc },
+        IlOp::Load { slot: 1, loc },
+        IlOp::LoadField { index: 0, loc },
+        jump(crate::il::IlJumpKind::Unconditional, Label(2)),
+        IlOp::Label(Label(1)),
+        IlOp::Const { imm: 1, loc },
+        bin(Instruction::XOR),
+        IlOp::StorePop { slot: 2, loc },
+        IlOp::Load { slot: 2, loc },
+        IlOp::LoadField { index: 0, loc },
+        IlOp::Label(Label(2)),
+        IlOp::StorePop { slot: 3, loc },
+        IlOp::Load { slot: 3, loc },
+        IlOp::byte(Byte::new(Instruction::MakeArray).with_operand_u32(1)),
+        IlOp::StorePop { slot: 1, loc },
+        IlOp::Load { slot: 1, loc },
+        IlOp::Return { loc, ret_words: 1 },
+    ];
+    let draft = super::stackmap::try_build_draft(&ops, "niche_match", 1, &[], &[]);
+    assert!(draft.is_some_and(|d| !d.sites.is_empty()), "niche Result match must map");
+}

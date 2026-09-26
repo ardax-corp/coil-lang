@@ -845,7 +845,7 @@ fn lower_op(
             let (dest_ty, dest_hi_ty) = if super::abi::is_multi_word_ret(*ret_words) {
                 two_slot_call_tys(hints, rest)
             } else {
-                (use_result_ty(hints, next, MirTy::I64), None)
+                (call_result_ty(hints, next, rest), None)
             };
             let abi = if let Some(abi) = hints.calls.get(&target.0) {
                 if abi.params.len() != n {
@@ -1408,6 +1408,9 @@ fn slot_use_ty(slot: u32, ops: &[IlOp]) -> Option<MirTy> {
                 if let Some(ty) = next.and_then(binop_ty) {
                     return Some(ty);
                 }
+                if matches!(next, Some(IlOp::LoadField { .. })) {
+                    return Some(MirTy::HeapRef);
+                }
                 if next.is_some_and(is_push)
                     && let Some(ty) = ops.get(i + 2).and_then(binop_ty)
                 {
@@ -1418,6 +1421,30 @@ fn slot_use_ty(slot: u32, ops: &[IlOp]) -> Option<MirTy> {
         }
     }
     None
+}
+
+/// One-word CALL result type: the niche test idiom that follows it, else
+/// what the stored slot's live range demands, else [`use_result_ty`].
+fn call_result_ty(hints: &LowerHints, next: Option<&IlOp>, rest: &[IlOp]) -> MirTy {
+    let mut ops = rest
+        .iter()
+        .filter(|op| !matches!(op, IlOp::Label(_) | IlOp::JoinLabel(_)));
+    match (ops.next(), ops.next(), ops.next()) {
+        (Some(IlOp::Dup { .. }), Some(IlOp::Const { imm: 1, .. }), Some(IlOp::Bin { op, .. }))
+            if *op == Instruction::BITAND =>
+        {
+            MirTy::NicheRes
+        }
+        (Some(IlOp::Dup { .. }), Some(IlOp::LogNot { .. }), _) => MirTy::NicheOpt,
+        (Some(IlOp::StorePop { slot, .. }), _, _) => {
+            let after = rest
+                .iter()
+                .position(|op| matches!(op, IlOp::StorePop { .. }))
+                .map_or(rest.len(), |i| i + 1);
+            slot_use_ty(*slot, &rest[after..]).unwrap_or_else(|| hints.slot(*slot))
+        }
+        _ => use_result_ty(hints, next, MirTy::I64),
+    }
 }
 
 fn use_result_ty(hints: &LowerHints, next: Option<&IlOp>, default: MirTy) -> MirTy {
