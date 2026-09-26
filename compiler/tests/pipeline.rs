@@ -8197,8 +8197,8 @@ fn main() {
     assert_eq!(out, "42");
 }
 
-/// Heap-free functions get an empty precise frame map; a function holding
-/// an object does not, and the program still runs under collections.
+/// Heap-free functions get an empty any-PC map; a function holding an object
+/// gets per-PC maps that list it, and the program still runs under collections.
 #[test]
 fn heap_free_functions_get_precise_frame_maps() {
     let src = r#"
@@ -8229,12 +8229,19 @@ fn main() {
     let holds = pipeline.function_offset("holds").expect("holds") as u32;
     let precise = pipeline.precise_frames();
     assert!(
-        precise.iter().any(|m| m.entry_pc == fib && m.heap_slots.is_empty()),
-        "fib must be precise: {precise:?}"
+        precise
+            .iter()
+            .any(|m| m.entry_pc == fib && m.any_pc.as_deref() == Some(&[][..])),
+        "fib must be heap-free: {precise:?}"
     );
+    let holds_map = precise
+        .iter()
+        .find(|m| m.entry_pc == holds)
+        .expect("holds gets per-PC maps");
+    assert!(holds_map.any_pc.is_none(), "holds keeps a heap object: {holds_map:?}");
     assert!(
-        !precise.iter().any(|m| m.entry_pc == holds),
-        "holds keeps a heap object: {precise:?}"
+        holds_map.at_pc.iter().any(|s| !s.slots.is_empty()),
+        "the fresh object is listed at its safepoint: {holds_map:?}"
     );
     let out = run_bytecode(bytecode, constants, &pipeline, None);
     assert_eq!(out, "58");
