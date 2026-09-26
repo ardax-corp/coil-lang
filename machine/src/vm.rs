@@ -512,7 +512,7 @@ pub struct Machine<const S: usize> {
     /// S2b maps: live heap IL slots at alloc safepoints.
     stack_maps: Vec<common::FrameStackMap>,
     /// Complete frame maps (sorted by entry); see [`common::PreciseFrameMap`].
-    precise_frames: Vec<common::PreciseFrameMap>,
+    precise_frames: Arc<Vec<common::PreciseFrameMap>>,
     /// PC past the op that entered the current GC safepoint, while one runs.
     /// `None` keeps the top frame on the conservative scan.
     gc_top_ip: Option<usize>,
@@ -590,7 +590,7 @@ impl<const S: usize> Machine<S> {
             reactor,
             io_reactor: crate::io_reactor::IoReactor::new(),
             stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
+            precise_frames: Arc::default(),
             gc_top_ip: None,
             gc_ip: 0,
             vregs: [[0u64; common::simd::LANES]; common::simd::NREGS],
@@ -1905,7 +1905,7 @@ impl<const S: usize> Machine<S> {
 
     pub fn set_thread_program(&mut self, program: std::sync::Arc<crate::thread::ThreadProgram>) {
         self.stack_maps = program.stack_maps.clone();
-        self.precise_frames = program.precise_frames.clone();
+        self.precise_frames = Arc::clone(&program.precise_frames);
         self.thread_program = Some(program);
     }
 
@@ -1919,7 +1919,7 @@ impl<const S: usize> Machine<S> {
     }
 
     /// Attach complete frame maps. Empty keeps every frame conservative.
-    pub fn set_precise_frames(&mut self, maps: Vec<common::PreciseFrameMap>) {
+    pub fn set_precise_frames(&mut self, maps: Arc<Vec<common::PreciseFrameMap>>) {
         self.precise_frames = maps;
     }
 
@@ -2014,7 +2014,7 @@ impl<const S: usize> Machine<S> {
             debug: self.program_debug.clone(),
             operand_stack_slots: self.stack.capacity() as u32,
             stack_maps: self.stack_maps.clone(),
-            precise_frames: self.precise_frames.clone(),
+            precise_frames: Arc::clone(&self.precise_frames),
         }));
     }
 

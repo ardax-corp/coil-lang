@@ -1701,12 +1701,12 @@
         for obj in [main_obj, f_obj, g_obj] {
             vm.stack.push(Value::from(obj.addr()));
         }
-        vm.precise_frames = vec![PreciseFrameMap {
+        vm.precise_frames = Arc::new(vec![PreciseFrameMap {
             entry_pc: 2,
             end_pc: 5,
             any_pc: Some(vec![]),
             at_pc: vec![],
-        }];
+        }]);
         let roots = |vm: &Machine<8>| {
             let mut roots = Vec::new();
             vm.collect_stack_roots(&mut roots);
@@ -1725,7 +1725,7 @@
         );
         vm.nested_frame_depths.clear();
 
-        vm.precise_frames.clear();
+        vm.precise_frames = Arc::default();
         assert!(roots(&vm).contains(&f_obj.addr()), "no maps: every frame scanned");
     }
 

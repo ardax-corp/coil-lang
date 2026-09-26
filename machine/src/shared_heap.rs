@@ -99,7 +99,7 @@ mod tests {
             debug: common::ProgramDebug::default(),
             operand_stack_slots: 8,
             stack_maps: Vec::new(),
-            precise_frames: Vec::new(),
+            precise_frames: Arc::default(),
         };
         assert!(!program_has_real_maps(&p));
     }
