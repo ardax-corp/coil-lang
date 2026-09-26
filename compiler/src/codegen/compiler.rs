@@ -16271,15 +16271,21 @@ impl Compiler {
                 // Prefer this node's sidecar (pointer / span) over `emit_idx`.
                 // If `self_id` drifted onto a parent `[byte; N]`, ignore a
                 // non-matching type so the string node's span/NodeId can still coerce.
+                // A span typed `string` wins: NodeId facts can alias another
+                // node (pre-order id drift) and would turn "r" into `[byte; 1]`.
+                let span_says_string = self
+                    .typed_sidecar
+                    .ty_at_span(span.start, span.end)
+                    .is_some_and(|ty| matches!(ty, Ty::Con(n) if n == "string"));
                 let span_ty = self
                     .node_id_of(ast)
                     .and_then(|id| self.sidecar_ty(id))
-                    .filter(is_byte_or_bytes)
+                    .filter(|ty| !span_says_string && is_byte_or_bytes(ty))
                     .or_else(|| self.sidecar_ty_of(ast).filter(is_byte_or_bytes))
                     .or_else(|| {
                         self_id
                             .and_then(|id| self.sidecar_ty(id))
-                            .filter(is_byte_or_bytes)
+                            .filter(|ty| !span_says_string && is_byte_or_bytes(ty))
                     });
                 // Single-byte string literals typed as `byte` emit CONST.
                 let as_byte = span_ty
