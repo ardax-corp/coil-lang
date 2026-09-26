@@ -323,7 +323,7 @@ fn analyze_body(
     let mut states: HashMap<usize, FrameState> = HashMap::new();
     let mut work = vec![entry];
     // Parameters are live words of unknown kind.
-    let arity = entry_arity(bytecode, constants, entry, seed)?;
+    let (arity, coroutine) = entry_arity(bytecode, constants, entry, seed)?;
     states.insert(
         entry,
         FrameState {
@@ -342,7 +342,7 @@ fn analyze_body(
         }
         let mut st = states.get(&pc)?.clone();
         let b = bytecode.get(pc)?;
-        let step = transfer(b, bytecode.get(pc + 1), constants, match_arities, &mut st, pc, end)?;
+        let step = transfer(b, bytecode.get(pc + 1), receives_send(bytecode, pc + 1), coroutine, constants, match_arities, &mut st, pc, end)?;
         if let Some(slots) = step.record.clone() {
             recorded.insert(pc, slots);
         }
@@ -375,7 +375,7 @@ fn analyze_body(
     pcs.sort_unstable();
     for pc in pcs {
         let mut st = states.get(&pc)?.clone();
-        let step = transfer(&bytecode[pc], bytecode.get(pc + 1), constants, match_arities, &mut st, pc, end)?;
+        let step = transfer(&bytecode[pc], bytecode.get(pc + 1), receives_send(bytecode, pc + 1), coroutine, constants, match_arities, &mut st, pc, end)?;
         out.push(SlotMap {
             pc: pc as u32,
             slots: step.record?,
@@ -392,22 +392,24 @@ struct EntrySeed {
     declared: Option<usize>,
 }
 
-/// Words on the frame when the body at `entry` starts: its callers' `CALL`
-/// / `TailCall` arity, `0` for `main` entered from the prologue, or the
-/// declared entry height when no bytecode references the body (only the host
-/// calls it: tests, finalizers, callbacks). Bodies entered any other way
-/// (jump, closure code pointer, coroutine) or with differing arities are
-/// refused.
+/// Words on the frame when the body at `entry` starts, and whether it runs
+/// as a coroutine: its callers' `CALL` / `TailCall` arity, the `MakeCoro`
+/// arity (plus the send word the first resume pushes before a store), `0` for
+/// `main` entered from the prologue, or the declared entry height when no
+/// bytecode references the body (only the host calls it: tests, finalizers,
+/// callbacks). Bodies entered any other way (jump, closure code pointer) or
+/// with differing arities are refused.
 fn entry_arity(
     bytecode: &[Byte],
     constants: &[u64],
     entry: usize,
     seed: &EntrySeed,
-) -> Option<usize> {
+) -> Option<(usize, bool)> {
     if entry == seed.prologue_entry && entered_by_prologue_only(bytecode, constants, entry) {
-        return Some(0);
+        return Some((0, false));
     }
     let mut referenced = false;
+    let mut coro_arity = None;
     let mut arity = None;
     for b in bytecode {
         let inst = *b.bytecode();
@@ -430,17 +432,31 @@ fn entry_arity(
         if matches!(inst, Instruction::CodePtr) {
             continue;
         }
-        if !matches!(inst, Instruction::CALL | Instruction::TailCall) {
-            return None;
-        }
+        let slot = match inst {
+            Instruction::CALL | Instruction::TailCall => &mut arity,
+            Instruction::MakeCoro => &mut coro_arity,
+            _ => return None,
+        };
         let a = b.call_parts().0;
-        match arity {
-            None => arity = Some(a),
+        match *slot {
+            None => *slot = Some(a),
             Some(prev) if prev == a => {}
             Some(_) => return None,
         }
     }
-    if referenced { arity } else { seed.declared }
+    match (arity, coro_arity) {
+        (Some(_), Some(_)) => None,
+        (None, Some(a)) => Some((a + usize::from(receives_send(bytecode, entry)), true)),
+        (a, None) if referenced => a.map(|a| (a, false)),
+        _ => seed.declared.map(|a| (a, false)),
+    }
+}
+
+/// A resume pushes the sent value when the op it resumes at stores it.
+fn receives_send(bytecode: &[Byte], pc: usize) -> bool {
+    bytecode
+        .get(pc)
+        .is_some_and(|b| matches!(*b.bytecode(), Instruction::STORE | Instruction::StorePop))
 }
 
 /// `main` shape: `CALL 0 target=0` at PC 0 opens a fresh frame at base 0,
@@ -474,6 +490,8 @@ struct Step {
 fn transfer(
     b: &Byte,
     tail_word: Option<&Byte>,
+    next_receives: bool,
+    coroutine: bool,
     constants: &[u64],
     match_arities: &HashMap<u32, u32>,
     st: &mut FrameState,
@@ -581,6 +599,35 @@ fn transfer(
             // The callee's return width is not encoded: one or two words.
             st.write(st.hi, true, false)?;
             st.hi += 1;
+        }
+        // Suspends: the frame's words below the cursor are saved and restored
+        // on resume; anything above is gone. Outside a coroutine the value
+        // would stay on the stack, so only `MakeCoro` bodies model it.
+        YieldCoro => {
+            if !coroutine || st.lo != st.hi {
+                return None;
+            }
+            st.pop()?;
+            st.clobber_from(st.lo);
+            if next_receives {
+                st.push(true)?;
+            }
+        }
+        // Runs another coroutine above the cursor; its yield / return value
+        // lands at the base.
+        ResumeCoro => {
+            st.pop_n(1 + (b.operand_u32() & 1) as usize)?;
+            st.clobber_from(st.lo);
+            st.push(true)?;
+        }
+        DoneCoro => {
+            st.pop()?;
+            st.push(false)?;
+        }
+        MakeCoro => {
+            st.pop_n(b.call_parts().0)?;
+            st.push(true)?;
+            step.record = Some(st.heap_slots(st.hi, true));
         }
         HostInvoke => {
             let arity = (b.operand_u32() & 0xFFFF) as usize;
@@ -844,6 +891,36 @@ mod tests {
             u32::MAX,
         );
         assert!(maps.is_empty());
+    }
+
+    #[test]
+    fn coroutine_body_keeps_words_across_a_yield() {
+        // `[0] MakeCoro 0 → 2; [1] HALT; [2..] body`.
+        let mut code = vec![
+            op(Instruction::MakeCoro).with_call_packed(0, 2),
+            op(Instruction::HALT),
+        ];
+        code.extend_from_slice(&[
+            op(Instruction::InitTyped),
+            store(0),
+            konst(1),
+            op(Instruction::YieldCoro),
+            store(1),
+            op(Instruction::InitTyped),
+            op(Instruction::RETURN),
+        ]);
+        let entries = vec![("co".to_string(), 2)];
+        let maps = bind_precise_frames(
+            &HashSet::new(),
+            &code,
+            &[],
+            &HashMap::new(),
+            &entries,
+            &HashMap::new(),
+            u32::MAX,
+        );
+        // After resume: saved local 0, the sent value in slot 1, a new object.
+        assert_eq!(slots_at(&maps, 7), Some(vec![0, 1, 2]));
     }
 
     #[test]

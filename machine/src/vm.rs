@@ -1458,8 +1458,10 @@ impl<const S: usize> Machine<S> {
     /// that re-entered the VM through native code (stale return PC) stay
     /// conservative.
     fn trusted_precise_slots(&self, i: usize, lo: usize, hi: usize) -> Option<&[u16]> {
+        // A coroutine segment starting above this frame's base belongs to
+        // frames this map does not describe.
         if !self.resume_stack.is_empty()
-            && self.resume_stack.iter().any(|c| c.base_sp >= lo && c.base_sp <= hi)
+            && self.resume_stack.iter().any(|c| c.base_sp > lo && c.base_sp <= hi)
         {
             return None;
         }
