@@ -1920,6 +1920,31 @@
         );
     }
 
+    /// `BoxValue` must push before the GC safepoint (same rule as `MakeEnum`):
+    /// a swept box made `UnboxValue` pass its stale address through.
+    #[test]
+    fn box_value_survives_gc_triggered_at_alloc() {
+        let mut vm = Machine::<16>::default();
+        vm.heap_mut().set_gc_threshold_for_test(0);
+        let buf = Arc::new(Mutex::new(Vec::<u8>::new()));
+        vm.with_output(TestOutputBuf(Arc::clone(&buf)));
+        // Immediate payload so `BoxValue` is the first alloc (GC fires there).
+        let bytecode = vec![
+            Byte::new(Instruction::CONST).with_const_inline(42),
+            Byte::new(Instruction::BoxValue).with_operand_u32(1),
+            Byte::new(Instruction::UnboxValue).with_operand_u32(1),
+            Byte::new(Instruction::STRINGIFY),
+            Byte::new(Instruction::PRINT),
+            Byte::new(Instruction::HALT),
+        ];
+
+        vm.run_with_pool(&bytecode, &[], &[], 0);
+        assert!(!vm.panicked());
+        let _ = vm.restore_output();
+        let s = String::from_utf8(take_test_output(buf)).expect("utf-8");
+        assert_eq!(s, "42");
+    }
+
     #[test]
     fn jump_if_match_does_not_treat_tagged_err_as_enum() {
         let mut vm = Machine::<16>::default();

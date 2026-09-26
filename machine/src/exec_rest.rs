@@ -1571,8 +1571,9 @@ impl<const S: usize> Machine<S> {
                     };
                     let boxed = ObjBoxed { tag, payload };
                     let (object, _) = self.heap.alloc(boxed, Object::Boxed);
-                    self.maybe_gc_after_alloc(ip);
+                    // Root before GC: an unpushed fresh box would be swept.
                     self.stack.push(Value::from(object.addr()));
+                    self.maybe_gc_after_alloc(ip);
                 }
                 Instruction::UnboxValue => {
                     let expected_tag = (opcode.operand_u32() & 0xFFFF) as u16;
