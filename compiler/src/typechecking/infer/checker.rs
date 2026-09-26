@@ -12957,6 +12957,10 @@ impl Checker {
                 ..
             } = child.1.as_ref()
             {
+                // A file's own `fn diff` shadows the prelude `diff`.
+                if matches!(self.scope_bindings.get(*name), Some(BuiltinExport::Fn { .. })) {
+                    self.scope_bindings.remove(*name);
+                }
                 self.stub_free_function_signature(
                     name,
                     type_params,
