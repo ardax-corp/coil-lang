@@ -3552,11 +3552,13 @@ impl Compiler {
         let bc_len = self.bytecode.len();
         let dbg_len = self.debug_locs.len();
         let msg_len = self.messages.len();
+        let emit_idx = self.emit_idx;
         let ctx = self.context.clone();
         let pinned = self.pinned_array_slots.clone();
         let mut bc = self.do_compile(child);
         let req = self.escape_hoist.take().unwrap_or_default();
         if !req.is_empty() {
+            self.emit_idx = emit_idx;
             self.bytecode.truncate(bc_len);
             self.debug_locs.truncate(dbg_len);
             self.messages.truncate(msg_len);
