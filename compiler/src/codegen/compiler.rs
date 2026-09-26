@@ -6766,10 +6766,14 @@ impl Compiler {
             }
         };
 
+        // Live operands raise `expr_depth` so escape-box temps land above them.
+        let depth_on_entry = self.expr_depth;
         let mut lib_bc = self.do_compile(lib);
         self.bytecode.append(&mut lib_bc);
+        self.expr_depth += 1;
         let mut fn_bc = self.do_compile(fn_id);
         self.bytecode.append(&mut fn_bc);
+        self.expr_depth += 1;
 
         for elem in &tuple_elements {
             if let Expression::Identifier(name) = elem.1.as_ref()
@@ -6777,11 +6781,13 @@ impl Compiler {
             {
                 self.bytecode
                     .push(Byte::new(Instruction::CodePtr).with_operand_u32(offset as u32));
-                continue;
+            } else {
+                let mut bc = self.do_compile(elem);
+                self.bytecode.append(&mut bc);
             }
-            let mut bc = self.do_compile(elem);
-            self.bytecode.append(&mut bc);
+            self.expr_depth += 1;
         }
+        self.expr_depth = depth_on_entry;
         let arity = tuple_elements.len() as u32;
         self.bytecode.push_make_tuple(arity);
 
@@ -6799,6 +6805,7 @@ impl Compiler {
 
         self.bytecode
             .push(Byte::new(Instruction::FfiInvoke).with_operand_u32(operand));
+
     }
 
     /// Unwrap a `Result` on top of the stack: on `Ok`, leave the payload;
